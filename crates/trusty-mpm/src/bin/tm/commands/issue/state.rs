@@ -160,10 +160,11 @@ impl<'a> StateMachine<'a> {
     /// the two need not be related (#8696). This is the one place that
     /// matching lives, shared by [`Self::resolve_current_state`] and the epic
     /// tracker's State cell, so the two cannot disagree.
-    /// What: the states, in declared order, whose `label.name` is exactly one
-    /// of `issue_labels`; a label-less state never matches. No fallback — the
-    /// caller decides what an empty result means.
+    /// What: the states, in declared order, whose `label.name` is one of
+    /// `issue_labels` under [`same_label_name`]; a label-less state never
+    /// matches. No fallback — the caller decides what an empty result means.
     /// Test: `sm_resolve_one`, `sm_resolve_many`, `sm_resolve_none`,
+    /// `sm_resolve_matches_a_label_in_any_case_8703`,
     /// `state_cell_resolves_a_label_whose_name_lacks_the_prefix`.
     pub(crate) fn labelled_states(&self, issue_labels: &[String]) -> Vec<&'a str> {
         self.model
@@ -172,7 +173,7 @@ impl<'a> StateMachine<'a> {
             .filter(|s| {
                 s.label
                     .as_ref()
-                    .is_some_and(|lbl| issue_labels.iter().any(|l| l == &lbl.name))
+                    .is_some_and(|lbl| issue_labels.iter().any(|l| same_label_name(l, &lbl.name)))
             })
             .map(|s| s.name.as_str())
             .collect()
@@ -229,6 +230,20 @@ impl<'a> StateMachine<'a> {
             literal => Some(AssigneeTarget::Login(literal.to_string())),
         }
     }
+}
+
+/// Whether two GitHub label names name the same label.
+///
+/// Why (#8703): GitHub label names are case-insensitive — a repo cannot hold
+/// both `status:coded` and `Status:Coded` — so an exact compare left an issue
+/// labelled `Status:In-Progress` in no state at all.
+/// What: equality after Unicode lowercasing both sides, without allocating.
+/// Test: `sm_resolve_matches_a_label_in_any_case_8703`,
+/// `validate_rejects_two_states_sharing_a_label_name_8703`.
+pub(crate) fn same_label_name(a: &str, b: &str) -> bool {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// The outcome of resolving an issue's current state from its labels.
@@ -322,6 +337,20 @@ mod tests {
         let m = model();
         let sm = StateMachine::new(&m);
         let labels = vec!["unicorn".to_string(), "unicorn:approved".to_string()];
+        assert_eq!(
+            sm.resolve_current_state(&labels, true),
+            CurrentState::One("approved")
+        );
+    }
+
+    /// FAILS BEFORE #8703: the compare was exact, so a label GitHub treats as
+    /// the same label resolved to no state.
+    /// Test: itself.
+    #[test]
+    fn sm_resolve_matches_a_label_in_any_case_8703() {
+        let m = model();
+        let sm = StateMachine::new(&m);
+        let labels = vec!["Unicorn:APPROVED".to_string()];
         assert_eq!(
             sm.resolve_current_state(&labels, true),
             CurrentState::One("approved")

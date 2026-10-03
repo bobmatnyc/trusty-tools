@@ -2836,6 +2836,8 @@ fn merge_args() -> PrMergeArgs {
         auto: false,
         no_delete_branch: false,
         no_cleanup: false,
+        allow_failing: Vec::new(),
+        allow_no_checks: false,
         repo: None,
     }
 }
@@ -2999,6 +3001,9 @@ fn merge_view_json(body: &str, patch: serde_json::Value) -> String {
         "mergeStateStatus": "CLEAN",
         "mergeable": "MERGEABLE",
         "headRefName": "feat/6808-x",
+        // #8614: a passing check, so the checks gate lets a clean PR through.
+        "statusCheckRollup": [{"__typename": "CheckRun", "name": "CI gate",
+            "status": "COMPLETED", "conclusion": "SUCCESS"}],
     });
     let obj = v.as_object_mut().expect("object");
     for (k, val) in patch.as_object().expect("patch is an object") {
@@ -3063,6 +3068,8 @@ fn merge_argv_honours_auto_and_no_delete_branch() {
         auto: true,
         no_delete_branch: true,
         no_cleanup: false,
+        allow_failing: Vec::new(),
+        allow_no_checks: false,
         repo: Some("o/r".to_string()),
     };
     assert_eq!(merge::run(&gh, &args).expect("runs"), super::EXIT_OK);
@@ -3232,6 +3239,8 @@ fn pr_7945_no_delete_branch_never_downgrades_a_failure() {
         auto: false,
         no_delete_branch: true,
         no_cleanup: false,
+        allow_failing: Vec::new(),
+        allow_no_checks: false,
         repo: None,
     };
     let err = merge::run(&gh, &args).expect_err("no delete was asked for, so none can have failed");

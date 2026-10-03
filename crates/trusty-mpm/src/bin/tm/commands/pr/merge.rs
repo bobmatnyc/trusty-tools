@@ -12,10 +12,12 @@
 //!
 //! What: [`run`] reads the PR once
 //! (`gh pr view <n> --json
-//! number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName`),
+//! number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName,
+//! state,statusCheckRollup,baseRefName`),
 //! re-validates the body with [`body::validate`] — reporting the nine-field
 //! gaps and refusing only on a missing attribution footer, which is the half
-//! that belongs to the commit message this command writes (#7868) — and either
+//! that belongs to the commit message this command writes (#7868) — applies
+//! the #8614 checks gate ([`check_gate`]), and either
 //! refuses with one line and no `gh pr merge` call, or merges
 //! with `--squash --delete-branch --subject "<title> (#<n>)" --body-file <tmp>`
 //! where the temp file holds that validated body. The refusal itself is
@@ -30,7 +32,9 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::body;
-use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv};
+use super::check_gate::{self, CheckGate};
+use super::rollup::RollupEntry;
+use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrMergeArgs;
 
 /// The label that holds a PR out of a merge, lowercase.
@@ -94,6 +98,12 @@ pub(crate) struct MergeView {
     /// field (every pre-#7945 fixture) still parses and refuses nothing.
     #[serde(default)]
     pub(crate) state: String,
+    /// `statusCheckRollup`: every check on the head commit (#8614).
+    #[serde(default, rename = "statusCheckRollup")]
+    pub(crate) rollup: Vec<RollupEntry>,
+    /// The base branch whose protection names the required checks (#8614).
+    #[serde(default, rename = "baseRefName")]
+    pub(crate) base_ref_name: String,
 }
 
 /// What [`decide`] concluded.
@@ -258,9 +268,11 @@ fn pr_view<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<MergeView>
     push_repo(&mut a, args);
     a.push("--json".to_string());
     // #7945: `state` joins the set so `decide` can refuse a PR that is not OPEN.
+    // #8614: `statusCheckRollup` feeds the checks gate; `baseRefName` names
+    // the branch whose protection lists the required checks.
     a.push(
         "number,title,body,isDraft,labels,reviewDecision,mergeStateStatus,mergeable,headRefName,\
-         state"
+         state,statusCheckRollup,baseRefName"
             .to_string(),
     );
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
@@ -390,7 +402,19 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// now reads MERGED. That exit code is what gates the post-merge cleanup
 /// (`tm pr cleanup`), which is precisely what reclaims the worktree that
 /// blocked the delete. Every other failure keeps the error.
+///
+/// #8614: a PR [`decide`] lets through still meets [`check_gate::refusal`];
+/// the base branch's required checks are read only when
+/// [`check_gate::needs_required`] says the answer depends on them, and a
+/// waived check heads the commit body. A failed or unparseable read, or a
+/// view with no `baseRefName`, is an error and nothing merges.
 /// Test: `merge_refuses_without_calling_gh_merge`,
+/// `run_auto_refuses_while_a_non_required_check_runs`,
+/// `run_refuses_while_a_non_required_check_runs_without_auto`,
+/// `run_refuses_without_a_base_ref_name`,
+/// `run_refuses_a_failing_check_without_auto`,
+/// `run_auto_arms_when_only_required_checks_run`,
+/// `run_allow_failing_merges_over_a_waived_check`,
 /// `merge_argv_carries_squash_delete_and_body_file`,
 /// `pr_7945_a_worktree_held_branch_does_not_fail_a_landed_merge`,
 /// `pr_7945_a_merge_that_did_not_land_still_fails`,
@@ -417,57 +441,87 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
         }
     }
 
-    match decide(&view, &report.merge_failures()) {
-        Decision::Refuse(reason) => {
-            eprintln!(
-                "tm pr merge: refusing to merge #{} — {reason}; `gh pr merge` was not called",
+    if let Decision::Refuse(reason) = decide(&view, &report.merge_failures()) {
+        return Ok(refuse(args.pr, &reason));
+    }
+
+    // #8614: the checks gate, after every other hold signal passed.
+    let required =
+        if check_gate::needs_required(&view.rollup, &args.allow_failing, args.allow_no_checks) {
+            let base = view.base_ref_name.trim();
+            anyhow::ensure!(
+                !base.is_empty(),
+                "`gh pr view {}` reported no baseRefName; cannot read its required checks",
                 args.pr
             );
-            Ok(EXIT_BLOCKED)
-        }
-        Decision::Merge => {
-            // #6808: the temp file must outlive the `gh` call, so bind it.
-            let mut tmp = tempfile::NamedTempFile::new()
-                .context("cannot create the temp file holding the squash commit body")?;
-            tmp.write_all(view.body.as_bytes())
-                .and_then(|()| tmp.flush())
-                .context("cannot write the squash commit body to its temp file")?;
-
-            let a = plan(args, &view, tmp.path());
-            let out = gh.run(&a)?;
-            if !out.success {
-                // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch
-                // AFTER the API merge lands, and that delete fails when a
-                // worktree holds it. Three conditions, all required: a delete
-                // was asked for, the failure is that delete, and the PR — OPEN
-                // when this run started — now reads MERGED.
-                let cleanup_shaped =
-                    !args.no_delete_branch && is_branch_delete_failure(&out.stderr);
-                let landed = cleanup_shaped
-                    .then(|| merged_after_failure(gh, args))
-                    .flatten();
-                let Some(landed) = landed else {
-                    anyhow::bail!("`gh pr merge {}` failed: {}", args.pr, out.stderr.trim());
-                };
-                let report = cleanup_deferred_report(
-                    args.pr,
-                    &view.head_ref_name,
-                    &landed.commit_suffix(),
-                    &out.stderr,
-                );
-                eprintln!("tm pr merge: warning — {report}");
-                println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
-                return Ok(EXIT_OK);
-            }
-            if args.auto {
-                println!(
-                    "auto-merge armed on #{} ({}) — GitHub applies the supplied subject and body when it fires",
-                    args.pr, view.head_ref_name
-                );
-            } else {
-                println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
-            }
-            Ok(EXIT_OK)
-        }
+            let slug = repo_slug(gh, args.repo.as_deref())?;
+            check_gate::read_required(gh, &slug, base)?
+        } else {
+            None
+        };
+    let gate = CheckGate {
+        auto: args.auto,
+        allow_failing: &args.allow_failing,
+        allow_no_checks: args.allow_no_checks,
+        required: required.as_deref(),
+    };
+    if let Some(reason) = check_gate::refusal(&view.rollup, &gate, args.pr) {
+        return Ok(refuse(args.pr, &reason));
     }
+    let waived = check_gate::waived(&view.rollup, &gate);
+    if !waived.is_empty() {
+        eprintln!(
+            "tm pr merge: #{}: merging over waived check(s) (--allow-failing): {}",
+            args.pr,
+            waived.join(", ")
+        );
+    }
+
+    // #6808: the temp file must outlive the `gh` call, so bind it.
+    let mut tmp = tempfile::NamedTempFile::new()
+        .context("cannot create the temp file holding the squash commit body")?;
+    tmp.write_all(check_gate::commit_body(&view.body, &waived).as_bytes())
+        .and_then(|()| tmp.flush())
+        .context("cannot write the squash commit body to its temp file")?;
+
+    let a = plan(args, &view, tmp.path());
+    let out = gh.run(&a)?;
+    if !out.success {
+        // #7945: `gh pr merge --delete-branch` deletes the LOCAL branch AFTER
+        // the API merge lands, and that delete fails when a worktree holds it.
+        // Three conditions, all required: a delete was asked for, the failure
+        // is that delete, and the PR — OPEN when this run started — now reads
+        // MERGED.
+        let cleanup_shaped = !args.no_delete_branch && is_branch_delete_failure(&out.stderr);
+        let landed = cleanup_shaped
+            .then(|| merged_after_failure(gh, args))
+            .flatten();
+        let Some(landed) = landed else {
+            anyhow::bail!("`gh pr merge {}` failed: {}", args.pr, out.stderr.trim());
+        };
+        let report = cleanup_deferred_report(
+            args.pr,
+            &view.head_ref_name,
+            &landed.commit_suffix(),
+            &out.stderr,
+        );
+        eprintln!("tm pr merge: warning — {report}");
+        println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
+        return Ok(EXIT_OK);
+    }
+    if args.auto {
+        println!(
+            "auto-merge armed on #{} ({}) — GitHub applies the supplied subject and body when it fires",
+            args.pr, view.head_ref_name
+        );
+    } else {
+        println!("squash-merged #{} ({})", args.pr, view.head_ref_name);
+    }
+    Ok(EXIT_OK)
+}
+
+/// Print a refusal and return [`EXIT_BLOCKED`]; `gh pr merge` is never called.
+fn refuse(pr: u64, reason: &str) -> i32 {
+    eprintln!("tm pr merge: refusing to merge #{pr} — {reason}; `gh pr merge` was not called");
+    EXIT_BLOCKED
 }

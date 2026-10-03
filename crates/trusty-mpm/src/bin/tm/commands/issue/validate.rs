@@ -6,13 +6,14 @@
 //! message and keeps the checks testable in isolation.
 //! What: [`validate_model`] runs every load-time rule — known version, unique
 //! state names, transition refs resolve, 6-hex colors, generic terminal-edge
-//! check, at most one label-less state per `gh_state`, and `bot` strategy
-//! requires an identity.
+//! check, at most one label-less state per `gh_state`, `bot` strategy
+//! requires an identity, and label names are unique case-insensitively.
 //! Test: the `validate_*` tests in this file cover each rejection path.
 
 use std::collections::BTreeSet;
 
 use super::config::{GhState, SUPPORTED_VERSION, StateModel};
+use super::state::same_label_name;
 
 /// Structured validation failures for the issue state model.
 ///
@@ -83,6 +84,25 @@ pub(crate) enum ModelError {
         /// The shared `open`/`closed` flag.
         gh_state: &'static str,
     },
+
+    /// Two labelled states name one GitHub label (#8703).
+    ///
+    /// GitHub compares label names case-insensitively, so `status:coded` and
+    /// `Status:Coded` are one label, and an issue carrying it would resolve to
+    /// both states.
+    #[error(
+        "states `{first}` and `{second}` share the label `{label}` (label names \
+         compare case-insensitively, as on GitHub); each labelled state needs its \
+         own label"
+    )]
+    DuplicateLabelName {
+        /// The label name as the second state spells it.
+        label: String,
+        /// The first state declaring the label.
+        first: String,
+        /// The second (conflicting) one.
+        second: String,
+    },
 }
 
 /// Whether `s` is exactly six hexadecimal digits (no `#`).
@@ -102,8 +122,9 @@ fn is_six_hex(s: &str) -> bool {
 /// preserved as the source.
 /// What: checks version, non-empty + unique states, transition ref integrity,
 /// 6-hex colors (states + extra labels), terminal states have no outbound edge,
-/// at most one label-less state per `gh_state`, and (for the `bot` strategy) an
-/// identity is present.
+/// at most one label-less state per `gh_state`, (for the `bot` strategy) an
+/// identity is present, and no two labelled states share a label name in any
+/// case (#8703).
 /// Test: `validate_default_ok` and the `validate_rejects_*` tests.
 pub(crate) fn validate_model(model: &StateModel) -> anyhow::Result<()> {
     validate_model_inner(model).map_err(|e| anyhow::anyhow!(e))
@@ -218,6 +239,26 @@ fn validate_model_inner(model: &StateModel) -> Result<(), ModelError> {
         && model.assignee_model.identity_example.is_none()
     {
         return Err(ModelError::BotStrategyMissingIdentity);
+    }
+
+    // 8. #8703: no two labelled states share a label name, compared the way
+    //    GitHub compares them, so label → state resolution is unambiguous.
+    let labelled: Vec<(&str, &str)> = model
+        .states
+        .iter()
+        .filter_map(|s| s.label.as_ref().map(|l| (s.name.as_str(), l.name.as_str())))
+        .collect();
+    for (i, (second, label)) in labelled.iter().enumerate() {
+        if let Some((first, _)) = labelled[..i]
+            .iter()
+            .find(|(_, earlier)| same_label_name(earlier, label))
+        {
+            return Err(ModelError::DuplicateLabelName {
+                label: (*label).to_string(),
+                first: (*first).to_string(),
+                second: (*second).to_string(),
+            });
+        }
     }
 
     Ok(())
@@ -373,6 +414,40 @@ assignee_model: { strategy: unchanged, per_state: {} }
                 second: "also-open".to_string(),
                 gh_state: "open",
             })
+        );
+    }
+
+    /// FAILS BEFORE #8703: no rule compared label names, so two states on one
+    /// GitHub label loaded and made label → state resolution ambiguous.
+    /// Test: itself.
+    #[test]
+    fn validate_rejects_two_states_sharing_a_label_name_8703() {
+        let yaml = r#"
+version: 1
+label_config: { base: x, approved: x:a, blast_prefix: "b:", status_prefix: "x:" }
+states:
+  - { name: open, order: 0 }
+  - { name: coded, order: 1, label: { name: "status:coded", color: "0e8a16" } }
+  - { name: shipped, order: 2, label: { name: "Status:Coded", color: "0e8a16" } }
+transitions:
+  - { from: open, to: coded, trigger: human_label }
+  - { from: coded, to: shipped, trigger: human_label }
+assignee_model: { strategy: unchanged, per_state: {} }
+"#;
+        let m: StateModel = serde_yaml::from_str(yaml).expect("synthetic parses");
+        let err = validate_model_inner(&m).unwrap_err();
+        assert_eq!(
+            err,
+            ModelError::DuplicateLabelName {
+                label: "Status:Coded".to_string(),
+                first: "coded".to_string(),
+                second: "shipped".to_string(),
+            }
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("`coded`") && message.contains("`shipped`"),
+            "the error must name both states: {message}"
         );
     }
 
