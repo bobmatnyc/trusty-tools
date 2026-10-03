@@ -479,7 +479,7 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
 /// relation was misread as unpushed work when the tip was an ancestor.
 /// What: appends [`tip_relation::note`] to `line`, then pushes a separate
 /// WARNING line when the tip carries commits the merged head does not.
-/// Test: `cleanup_8603_a_kept_tree_on_an_ancestor_says_nothing_is_unpushed`,
+/// Test: `cleanup_8603_a_kept_tree_on_an_ancestor_says_every_commit_is_in_the_merge`,
 /// `cleanup_8603_a_kept_tree_ahead_of_the_head_warns_separately`.
 fn push_kept<T: Git>(
     git: &T,

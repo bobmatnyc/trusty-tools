@@ -489,7 +489,7 @@ futures-util = { workspace = true, optional = true }
 # `user` (#5784): `getpwuid` for the current uid, the signal that tells a
 # scratch `$HOME` from the operator's real one — see `core::host_state_gate`.
 # `fs` (#8528): `statvfs`, so the worktree disk gate reads the figure `df` does.
-nix ={ version = "0.29", features = ["fs", "signal", "user"] }
+nix = { version = "0.29", features = ["fs", "signal", "user"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]

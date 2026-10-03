@@ -107,8 +107,11 @@ fn parse_group_by(group_by: Option<&str>) -> Result<GroupBy, String> {
 /// #8985: a fleet too large for the clamp is answered from the last complete
 /// pass, which an unbudgeted background pass keeps current — see
 /// [`crate::daemon::disk_survey_cache`]. The response's `freshness`,
-/// `age_seconds` and `background_pass` say which answer it is.
-/// Test: `crate::disk::survey_tests`, `disk_survey_cache_tests`, and
+/// `age_seconds` and `background_pass` say which answer it is. Only a
+/// budgeted call is answered from the cache; an omitted budget always runs
+/// live.
+/// Test: `crate::disk::survey_tests`, `disk_survey_cache_tests`,
+/// `an_omitted_budget_always_runs_a_live_survey`, and
 /// `dispatch_disk_survey_tool` for the dispatch wiring.
 pub async fn disk_survey(
     state: &Arc<DaemonState>,
@@ -125,7 +128,14 @@ pub async fn disk_survey(
         group_by: group_by.map(str::to_string),
     };
     let cache = state.disk_survey_cache();
-    let mut value = match cache.plan(&key, Instant::now()) {
+    // #8985 review: an omitted budget asks for a live, unbounded survey, so it
+    // never consults the cache. Its complete pass is still stored, and clears
+    // the key's budget bit, through `after_live`.
+    let plan = match budget_seconds {
+        Some(_) => cache.plan(&key, Instant::now()),
+        None => Plan::Live,
+    };
+    let mut value = match plan {
         Plan::Serve { survey, refresh } => {
             if refresh {
                 spawn_background_pass(state, key, group);
@@ -133,9 +143,10 @@ pub async fn disk_survey(
             survey
         }
         Plan::Live => {
-            let deadline = budget_seconds.map(|s| Instant::now() + Duration::from_secs(s));
+            let started = Instant::now();
+            let deadline = budget_seconds.map(|s| started + Duration::from_secs(s));
             let live = survey_pass(state, project, deadline, group).await?;
-            let (answer, refresh) = cache.after_live(&key, live, Instant::now());
+            let (answer, refresh) = cache.after_live(&key, live, started, Instant::now());
             if refresh {
                 spawn_background_pass(state, key, group);
             }
@@ -157,19 +168,44 @@ pub async fn disk_survey(
 /// Why: the caller holds the refresh slot [`DiskSurveyCache::plan`] or
 /// [`DiskSurveyCache::after_live`] gave it, and must hand it back whatever the
 /// pass does — [`DiskSurveyCache::after_background`] always frees it.
-/// Test: `a_failed_background_pass_frees_the_slot_and_keeps_the_old_pass`.
+/// Test: `a_budgeted_call_is_answered_from_the_background_pass`.
 ///
 /// [`DiskSurveyCache::plan`]: crate::daemon::disk_survey_cache::DiskSurveyCache::plan
 /// [`DiskSurveyCache::after_live`]: crate::daemon::disk_survey_cache::DiskSurveyCache::after_live
 /// [`DiskSurveyCache::after_background`]: crate::daemon::disk_survey_cache::DiskSurveyCache::after_background
 fn spawn_background_pass(state: &Arc<DaemonState>, key: SurveyKey, group: GroupBy) {
+    let pass_state = Arc::clone(state);
+    let project = key.project.clone();
+    let pass = async move { survey_pass(&pass_state, project.as_deref(), None, group).await };
+    drop(settle_in_background(state, key, pass));
+}
+
+/// Run `pass` in the background and hand its result, and the refresh slot,
+/// back to the cache (#8985).
+///
+/// What: `pass` runs in its own task, so a panic arrives here as a join
+/// error and is recorded as a failed pass — the slot is freed either way.
+/// The returned handle lets a test wait for the hand-back.
+/// Test: `a_failed_or_panicking_background_pass_hands_the_slot_back`.
+fn settle_in_background<F>(
+    state: &Arc<DaemonState>,
+    key: SurveyKey,
+    pass: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = Result<Value, String>> + Send + 'static,
+{
     let state = Arc::clone(state);
     tokio::spawn(async move {
-        let result = survey_pass(&state, key.project.as_deref(), None, group).await;
+        let started = Instant::now();
+        // #8985 review: a panic inside `pass` must not strand the slot.
+        let result = tokio::spawn(pass)
+            .await
+            .unwrap_or_else(|e| Err(format!("disk_survey: background pass panicked: {e}")));
         state
             .disk_survey_cache()
-            .after_background(&key, result, Instant::now());
-    });
+            .after_background(&key, result, started);
+    })
 }
 
 /// One survey pass under `deadline`, serialized (#6927, #8985).
@@ -343,6 +379,10 @@ fn gh_budget(until: Option<Instant>) -> Duration {
             .min(GH_TIMEOUT),
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_disk_cache_tests.rs"]
+mod mcp_disk_cache_tests;
 
 #[cfg(test)]
 mod tests {

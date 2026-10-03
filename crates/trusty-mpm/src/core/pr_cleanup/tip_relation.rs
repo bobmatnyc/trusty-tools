@@ -6,7 +6,7 @@
 //! What: [`relation`] asks git and returns one of four answers; [`note`]
 //! renders the three quiet ones as a suffix for the kept line, and
 //! [`unpushed_warning`] renders the loud one as its own line.
-//! Test: `cleanup_8603_a_kept_tree_on_an_ancestor_says_nothing_is_unpushed`,
+//! Test: `cleanup_8603_a_kept_tree_on_an_ancestor_says_every_commit_is_in_the_merge`,
 //! `cleanup_8603_a_kept_tree_ahead_of_the_head_warns_separately`,
 //! `cleanup_8603_an_unreadable_relation_is_stated_as_unknown`.
 
@@ -18,7 +18,7 @@ use super::{CleanupRequest, owned, short};
 pub(super) enum TipRelation {
     /// The tip IS the merged head.
     IsHead,
-    /// The tip is an ancestor of the merged head: nothing on it is unpushed.
+    /// The tip is an ancestor of the merged head: every commit on it is in the merge.
     Ancestor,
     /// The tip carries `n` commits the merged head does not contain.
     Ahead(u64),
@@ -75,7 +75,7 @@ pub(super) fn note(rel: &TipRelation, tip: &str, head: &str) -> String {
     match rel {
         TipRelation::IsHead => format!("; its tip {tip} is the merged head"),
         TipRelation::Ancestor => format!(
-            "; its tip {tip} is an ancestor of the merged head {head} — nothing on it is unpushed"
+            "; its tip {tip} is an ancestor of the merged head {head} — every commit on it is in the merge"
         ),
         TipRelation::Ahead(n) => {
             format!("; its tip {tip} has {n} commit(s) the merged head {head} does not contain")

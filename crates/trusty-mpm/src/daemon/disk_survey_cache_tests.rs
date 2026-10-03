@@ -33,13 +33,13 @@ fn a_truncated_live_pass_starts_one_background_pass() {
     let t0 = Instant::now();
     assert_eq!(cache.plan(&key(), t0), Plan::Live);
 
-    let (first, refresh) = cache.after_live(&key(), survey(true, None), t0);
+    let (first, refresh) = cache.after_live(&key(), survey(true, None), t0, t0);
     assert!(refresh, "the truncated pass must start a background pass");
     assert_eq!(first["freshness"], "partial", "{first}");
     assert_eq!(first["background_pass"], "running", "{first}");
 
     // A second truncated call while the pass runs starts no second pass.
-    let (_, again) = cache.after_live(&key(), survey(true, None), t0);
+    let (_, again) = cache.after_live(&key(), survey(true, None), t0, t0);
     assert!(!again, "one background pass at a time");
 
     let landed = t0 + Duration::from_secs(300);
@@ -62,11 +62,11 @@ fn a_truncated_live_pass_starts_one_background_pass() {
 fn a_truncated_live_pass_answers_with_the_last_complete_pass() {
     let cache = DiskSurveyCache::default();
     let t0 = Instant::now();
-    let (live, _) = cache.after_live(&key(), survey(false, Some(7)), t0);
+    let (live, _) = cache.after_live(&key(), survey(false, Some(7)), t0, t0);
     assert_eq!(live["freshness"], "live", "{live}");
 
     let t1 = t0 + Duration::from_secs(90);
-    let (answer, refresh) = cache.after_live(&key(), survey(true, None), t1);
+    let (answer, refresh) = cache.after_live(&key(), survey(true, None), t1, t1);
     assert!(refresh);
     assert_eq!(answer["freshness"], "cached", "{answer}");
     assert_eq!(answer["age_seconds"], 90, "{answer}");
@@ -79,7 +79,7 @@ fn a_truncated_live_pass_answers_with_the_last_complete_pass() {
 fn a_complete_live_pass_is_answered_live_and_cached() {
     let cache = DiskSurveyCache::default();
     let t0 = Instant::now();
-    let (answer, refresh) = cache.after_live(&key(), survey(false, Some(1)), t0);
+    let (answer, refresh) = cache.after_live(&key(), survey(false, Some(1)), t0, t0);
     assert!(!refresh);
     assert_eq!(answer["freshness"], "live");
     assert_eq!(answer["age_seconds"], 0);
@@ -97,7 +97,7 @@ fn a_complete_live_pass_is_answered_live_and_cached() {
 fn a_key_known_to_exceed_the_budget_is_served_from_the_cache() {
     let cache = DiskSurveyCache::default();
     let t0 = Instant::now();
-    cache.after_live(&key(), survey(true, None), t0);
+    cache.after_live(&key(), survey(true, None), t0, t0);
     cache.after_background(&key(), Ok(survey(false, Some(2))), t0);
 
     let stale = t0 + REFRESH_AFTER;
@@ -117,7 +117,7 @@ fn a_key_known_to_exceed_the_budget_is_served_from_the_cache() {
 fn a_fresh_cached_pass_starts_no_refresh() {
     let cache = DiskSurveyCache::default();
     let t0 = Instant::now();
-    cache.after_live(&key(), survey(true, None), t0);
+    cache.after_live(&key(), survey(true, None), t0, t0);
     cache.after_background(&key(), Ok(survey(false, Some(2))), t0);
     let Plan::Serve { refresh, survey } = cache.plan(&key(), t0 + Duration::from_secs(5)) else {
         panic!("served from the cache");
@@ -132,12 +132,12 @@ fn a_fresh_cached_pass_starts_no_refresh() {
 fn a_failed_background_pass_frees_the_slot_and_keeps_the_old_pass() {
     let cache = DiskSurveyCache::default();
     let t0 = Instant::now();
-    cache.after_live(&key(), survey(false, Some(9)), t0);
-    let (_, refresh) = cache.after_live(&key(), survey(true, None), t0);
+    cache.after_live(&key(), survey(false, Some(9)), t0, t0);
+    let (_, refresh) = cache.after_live(&key(), survey(true, None), t0, t0);
     assert!(refresh);
     cache.after_background(&key(), Err("the pass panicked".into()), t0);
 
-    let (answer, refresh) = cache.after_live(&key(), survey(true, None), t0);
+    let (answer, refresh) = cache.after_live(&key(), survey(true, None), t0, t0);
     assert!(refresh, "the failed pass handed the slot back");
     assert_eq!(answer["root"]["bytes"], 9, "{answer}");
 
@@ -149,4 +149,96 @@ fn a_failed_background_pass_frees_the_slot_and_keeps_the_old_pass() {
         survey["root"]["bytes"], 9,
         "a partial background pass replaces nothing"
     );
+}
+
+fn project_key(project: &str) -> SurveyKey {
+    SurveyKey {
+        project: Some(project.to_string()),
+        group_by: None,
+    }
+}
+
+/// #8985 review: `background_pass: running` describes THIS key. A pass
+/// refreshing another key is not reported as running for this one, and this
+/// key's truncated pass, which could not take the slot, says `idle`.
+#[test]
+fn another_keys_background_pass_is_not_reported_as_running() {
+    let cache = DiskSurveyCache::default();
+    let t0 = Instant::now();
+    let (_, took) = cache.after_live(&project_key("a"), survey(true, None), t0, t0);
+    assert!(took, "key a holds the slot");
+
+    let (live, _) = cache.after_live(&key(), survey(false, Some(1)), t0, t0);
+    assert_eq!(live["background_pass"], "idle", "{live}");
+    let (partial, refresh) = cache.after_live(&key(), survey(true, None), t0, t0);
+    assert!(!refresh, "the slot belongs to key a");
+    assert_eq!(partial["background_pass"], "idle", "{partial}");
+
+    let (own, _) = cache.after_live(&project_key("a"), survey(true, None), t0, t0);
+    assert_eq!(own["background_pass"], "running", "{own}");
+}
+
+/// #8985 review: a background pass that STARTED before a live pass, and lands
+/// after it, does not overwrite the live pass. `age_seconds` counts from the
+/// served pass's start.
+#[test]
+fn an_older_background_pass_never_overwrites_a_newer_live_pass() {
+    let cache = DiskSurveyCache::default();
+    let t0 = Instant::now();
+    let (_, took) = cache.after_live(&key(), survey(true, None), t0, t0);
+    assert!(took);
+    let background_started = t0;
+
+    let live_started = t0 + Duration::from_secs(5);
+    cache.after_live(&key(), survey(false, Some(20)), live_started, live_started);
+    // Mark the key as exceeding the budget again, so `plan` serves the cache.
+    cache.after_live(&key(), survey(true, None), live_started, live_started);
+    cache.after_background(&key(), Ok(survey(false, Some(10))), background_started);
+
+    let at = live_started + Duration::from_secs(7);
+    let Plan::Serve { survey, .. } = cache.plan(&key(), at) else {
+        panic!("served from the cache");
+    };
+    assert_eq!(
+        survey["root"]["bytes"], 20,
+        "the later-started pass stays: {survey}"
+    );
+    assert_eq!(survey["age_seconds"], 7, "{survey}");
+}
+
+/// #8985 review: the map holds at most [`MAX_KEYS`] keys. A new key evicts
+/// the entry whose complete pass started earliest, never the one being
+/// refreshed.
+#[test]
+fn the_cache_holds_at_most_max_keys_and_evicts_the_oldest_pass() {
+    let cache = DiskSurveyCache::default();
+    let t0 = Instant::now();
+    // Key 0 holds the refresh slot and has the oldest pass of all.
+    cache.after_live(&project_key("p0"), survey(false, Some(0)), t0, t0);
+    let (_, took) = cache.after_live(&project_key("p0"), survey(true, None), t0, t0);
+    assert!(took);
+    for i in 1..MAX_KEYS {
+        let at = t0 + Duration::from_secs(u64::try_from(i).expect("small index"));
+        cache.after_live(
+            &project_key(&format!("p{i}")),
+            survey(false, Some(1)),
+            at,
+            at,
+        );
+    }
+    assert_eq!(cache.inner.lock().entries.len(), MAX_KEYS);
+
+    let late = t0 + Duration::from_secs(1000);
+    cache.after_live(&project_key("new"), survey(false, Some(1)), late, late);
+    let inner = cache.inner.lock();
+    assert_eq!(inner.entries.len(), MAX_KEYS, "the cap holds");
+    assert!(
+        inner.entries.contains_key(&project_key("p0")),
+        "the refreshing key stays"
+    );
+    assert!(
+        !inner.entries.contains_key(&project_key("p1")),
+        "the oldest non-refreshing pass is evicted"
+    );
+    assert!(inner.entries.contains_key(&project_key("new")));
 }

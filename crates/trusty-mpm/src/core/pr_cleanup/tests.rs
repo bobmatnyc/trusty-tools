@@ -2859,18 +2859,18 @@ async fn kept_report(git: &Scripted) -> String {
 }
 
 /// 🔴 REGRESSION (#8603): a tree kept with its tip an ANCESTOR of the merged
-/// head says nothing on it is unpushed.
+/// head says every commit on it is in the merge.
 ///
 /// Fails on origin/main: the kept line named neither the relation nor the
 /// merged head, and a downstream agent read the tip as unpushed work.
 #[tokio::test]
-async fn cleanup_8603_a_kept_tree_on_an_ancestor_says_nothing_is_unpushed() {
+async fn cleanup_8603_a_kept_tree_on_an_ancestor_says_every_commit_is_in_the_merge() {
     let git = git_kept_tip(&[("git merge-base --is-ancestor", Some(""))]);
     let rendered = kept_report(&git).await;
     assert!(
         rendered.contains(
-            "its tip 55555555 is an ancestor of the merged head abc1234d — nothing on it is \
-             unpushed"
+            "its tip 55555555 is an ancestor of the merged head abc1234d — every commit on it \
+             is in the merge"
         ),
         "{rendered}"
     );
@@ -2906,7 +2906,7 @@ async fn cleanup_8603_a_kept_tree_ahead_of_the_head_warns_separately() {
 }
 
 /// #8603 error arm: a relation git cannot answer is stated as unknown, never
-/// guessed as "nothing unpushed".
+/// guessed as "every commit is in the merge".
 #[tokio::test]
 async fn cleanup_8603_an_unreadable_relation_is_stated_as_unknown() {
     let git = git_kept_tip(&[]).on_fail("git merge-base --is-ancestor", "fatal: bad object");
@@ -2919,7 +2919,7 @@ async fn cleanup_8603_an_unreadable_relation_is_stated_as_unknown() {
         "{rendered}"
     );
     assert!(
-        !rendered.contains("nothing on it is unpushed"),
+        !rendered.contains("every commit on it is in the merge"),
         "{rendered}"
     );
 }
