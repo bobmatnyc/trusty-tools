@@ -25,12 +25,14 @@
 //! | verb | 0 | 1 | 2 | 3 |
 //! |---|---|---|---|---|
 //! | `open` | PR created (or `--dry-run` printed the argv) | — | a pre-flight check failed; `gh` was never called | the PR EXISTS; some metadata could not be applied (#7869) |
-//! | `merge` | squash-merged, or auto-merge armed | a hold signal or a missing attribution footer refused it; `gh pr merge` was never called | usage or `gh` error | — |
+//! | `merge` | squash-merged, or auto-merge armed | a hold signal, a failing check, a check `--auto` would not wait for (#8614), or a missing attribution footer refused it; `gh pr merge` was never called | usage or `gh` error | — |
 //! | `queue-check` | every listed PR is mergeable | at least one is blocked | usage or `gh` error | — |
 //!
 //! Test: the sibling `tests.rs`; `cli_parses_pr_*` in `tests.rs`.
 
 pub(crate) mod body;
+// #8614: the failing/running checks gate `tm pr merge` applies.
+pub(crate) mod check_gate;
 pub(crate) mod cleanup;
 pub(crate) mod merge;
 pub(crate) mod metadata;

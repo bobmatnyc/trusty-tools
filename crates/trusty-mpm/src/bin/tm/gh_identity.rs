@@ -40,22 +40,6 @@ use trusty_mpm::project::record::repo_url_matches;
 // library's own test suite but kept reachable here for any future CLI need).
 pub(crate) use trusty_mpm::core::gh_identity::clone_url;
 
-/// Resolve an optional [`trusty_mpm::core::trusty_tools_config::GithubConfig`]
-/// into a [`GhEnv`], surfacing the typed [`GhIdentityError`] as `anyhow` for
-/// binary call sites.
-///
-/// Why: production call sites use `anyhow::Result`; folding the typed error
-/// into `anyhow` here keeps those sites a one-liner.
-/// What: delegates to [`trusty_mpm::core::gh_identity::resolve_gh_env`].
-/// Test: covered transitively by `resolve_project_aware_*` and the library's
-/// own `resolve_*` tests.
-fn resolve_gh_env_anyhow(
-    config: Option<&trusty_mpm::core::trusty_tools_config::GithubConfig>,
-) -> anyhow::Result<GhEnv> {
-    trusty_mpm::core::gh_identity::resolve_gh_env(config)
-        .map_err(|e: GhIdentityError| anyhow::anyhow!(e))
-}
-
 /// Resolve the [`GhEnv`] for `origin_url` against a loaded [`TrustyToolsConfig`]
 /// (#2184) — the pure, hermetically-testable core of [`load_gh_env`].
 ///
@@ -66,8 +50,10 @@ fn resolve_gh_env_anyhow(
 /// `config.projects` entry with its own `github:` binding, that binding wins
 /// outright; otherwise falls back to the global `config.github`; with no
 /// match (or no `origin_url`) resolution is purely global — matching
-/// pre-#2184 behaviour exactly.
+/// pre-#2184 behaviour exactly. #8383: the global fallback keeps the caller's
+/// inherited `GH_TOKEN`; only a project binding clears it.
 /// Test: `resolve_project_aware_project_binding_wins`,
+/// `resolve_project_aware_unbound_repo_keeps_the_shell_token_8383`,
 /// `resolve_project_aware_falls_back_to_global`,
 /// `resolve_project_aware_no_origin_uses_global`,
 /// `resolve_project_aware_enforces_paired_account`,
@@ -100,7 +86,9 @@ pub(crate) fn resolve_project_aware(
         )?;
     }
 
-    resolve_gh_env_anyhow(selected)
+    // #8383: only a project's own binding clears the caller's token.
+    trusty_mpm::core::gh_identity::resolve_tiered_gh_env(project_github, config.github.as_ref())
+        .map_err(|e: GhIdentityError| anyhow::anyhow!(e))
 }
 
 /// Convenience wrapper: load trusty-mpm config, detect the active project from
@@ -275,6 +263,37 @@ mod tests {
         assert_eq!(
             env.vars(),
             &[("GH_CONFIG_DIR".to_string(), "/cfg/global".to_string())]
+        );
+    }
+
+    /// FAILS BEFORE #8383: an origin no project binds fell back to the global
+    /// `config_dir` AND removed the shell's `GH_TOKEN`, so `tm issue
+    /// seed-labels` asked GitHub as an account that could not see the repo
+    /// while `gh -R` from the same shell, using the token, could.
+    /// Test: itself.
+    #[test]
+    fn resolve_project_aware_unbound_repo_keeps_the_shell_token_8383() {
+        let config = cfg_of(
+            Some(gh("/cfg/global")),
+            vec![project(
+                "https://github.com/acme/widget",
+                Some(gh("/cfg/project")),
+            )],
+        );
+        let unbound = resolve_project_aware(&config, Some("https://github.com/hotstats/reporting"))
+            .expect("ok");
+        assert_eq!(
+            unbound.vars(),
+            &[("GH_CONFIG_DIR".to_string(), "/cfg/global".to_string())]
+        );
+        assert!(unbound.unset_vars().is_empty(), "{unbound:?}");
+
+        // #6668 still holds for a bound repo: its binding beats the shell token.
+        let bound =
+            resolve_project_aware(&config, Some("https://github.com/acme/widget")).expect("ok");
+        assert!(
+            bound.unset_vars().iter().any(|k| k == "GH_TOKEN"),
+            "{bound:?}"
         );
     }
 

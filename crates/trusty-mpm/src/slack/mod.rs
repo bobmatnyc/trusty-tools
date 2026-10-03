@@ -33,7 +33,6 @@ pub mod formatter;
 pub mod lifecycle;
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use futures_util::{SinkExt, StreamExt};
@@ -261,47 +260,20 @@ pub fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
     }
 }
 
-/// Resolve a secret the same way the Telegram adapter and LLM overseer do:
-/// `.env.local`, then `.env`, then the process environment.
+/// Resolve a Slack token the same way the Telegram adapter and LLM overseer do.
 ///
-/// Why: operators store Slack tokens in `.env.local` (gitignored) exactly as they
-/// store `TELEGRAM_BOT_TOKEN` / `OPENROUTER_API_KEY`; the Slack adapter must honour
-/// the same resolution order so one dotenv file configures the whole tool.
-/// What: returns the first non-empty value found for `var_name`, or `None`.
-/// Test: `resolve_token_reads_dotenv`, `resolve_token_missing_is_none`.
+/// Why (#8568): this still walked `.env.local`, then `.env`, then
+/// `std::env::var` by hand after the other readers moved to the shared
+/// resolver. A Slack token could therefore live only in a plaintext file, never
+/// in the `0600` store or the Keychain, and a stale committed `.env` beat an
+/// explicit `export`.
+/// What: delegates to [`crate::secret_source::resolve_secret`] — process env,
+/// then `.env.local`, then the bounded credential store. `None` on every
+/// failure, logged at ERROR by name and kind there. Plain `.env` is not read
+/// (owner ruling 88).
+/// Test: `resolve_token_ignores_a_token_only_in_plain_dotenv_8568`.
 pub fn resolve_token(var_name: &str) -> Option<String> {
-    for file in [".env.local", ".env"] {
-        if let Some(value) = read_dotenv_key(Path::new(file), var_name) {
-            return Some(value);
-        }
-    }
-    std::env::var(var_name).ok().filter(|v| !v.is_empty())
-}
-
-/// Read a single `KEY=value` pair from a dotenv-style file.
-///
-/// Why: pulling the parse out keeps [`resolve_token`] testable against a temp
-/// file (mirrors the Telegram adapter's `read_dotenv_key`).
-/// What: returns the trimmed, unquoted value for `var_name`, or `None` if the
-/// file is absent or the key is not present / empty.
-/// Test: `resolve_token_reads_dotenv`.
-fn read_dotenv_key(path: &Path, var_name: &str) -> Option<String> {
-    let contents = std::fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=')
-            && key.trim() == var_name
-        {
-            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    crate::secret_source::resolve_secret(var_name)
 }
 
 /// Parse a raw Socket-Mode WebSocket text frame into a [`SlackEvent`].

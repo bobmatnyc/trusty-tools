@@ -198,7 +198,8 @@ fn desired_labels(
 /// `ops_seed_absent_block_matches_builtin_output`,
 /// `ops_seed_only_scopes_to_one_family_7983`,
 /// `ops_seed_only_matches_a_single_label_by_name_7983`,
-/// `ops_seed_only_rejects_a_filter_that_matches_nothing_7983`.
+/// `ops_seed_only_rejects_a_filter_that_matches_nothing_7983`,
+/// `ops_seed_treats_a_differently_cased_label_as_present_8703`.
 pub(crate) fn seed_labels<S: TicketSystem>(
     sys: &S,
     model: &StateModel,
@@ -215,8 +216,6 @@ pub(crate) fn seed_labels<S: TicketSystem>(
     let desired = apply_only_filters(desired_labels(model, ticketing, session_name), only)?;
 
     let existing = sys.list_repo_labels()?;
-    let existing_names: std::collections::BTreeSet<&str> =
-        existing.iter().map(|l| l.name.as_str()).collect();
 
     let mut report = SeedReport {
         dry_run,
@@ -224,7 +223,12 @@ pub(crate) fn seed_labels<S: TicketSystem>(
         ..Default::default()
     };
     for label in desired {
-        if existing_names.contains(label.name.as_str()) {
+        // #8703: GitHub label names are case-insensitive; creating one that
+        // exists in another case fails with "already exists".
+        if existing
+            .iter()
+            .any(|e| super::state::same_label_name(&e.name, &label.name))
+        {
             report.already_present.push(label.name.clone());
             continue;
         }

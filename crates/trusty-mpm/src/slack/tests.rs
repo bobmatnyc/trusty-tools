@@ -2,9 +2,10 @@
 //!
 //! Why: the adapter's correctness-critical pieces — Socket-Mode envelope parsing,
 //! the bot-message guard (no reply loops), the rolling-history cap, the action
-//! footer, and dotenv token resolution — are all pure and must be tested without
-//! a live Slack socket or the daemon (the live WebSocket loop is deferred to a
-//! real Slack app; see the PR body).
+//! footer, and token resolution — must be tested without a live Slack socket or
+//! the daemon (the live WebSocket loop is deferred to a real Slack app; see the
+//! PR body). Token resolution reads the process cwd, so its test runs in a
+//! child process.
 //! What: covers `parse_envelope`, `ack_frame`, `record_chat_turn`,
 //! `action_footer`, and `resolve_token`.
 //! Test: this IS the test module.
@@ -375,28 +376,109 @@ fn action_footer_absent_when_empty() {
     assert_eq!(action_footer(Some(&empty)), None);
 }
 
-#[test]
-fn resolve_token_reads_dotenv() {
-    use std::io::Write;
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join(".env.local");
-    let mut f = std::fs::File::create(&path).expect("create dotenv");
-    writeln!(f, "# a comment").unwrap();
-    writeln!(f, "SLACK_BOT_TOKEN=\"xoxb-secret\"").unwrap();
-    drop(f);
+/// The variable the #8568 child resolves.
+///
+/// Why: an UNREGISTERED name has no credential-store tier, so the child never
+/// reaches a real Keychain or `0600` store; the dotenv tiers under test are the
+/// same for a registered name.
+const CHILD_VAR_8568: &str = "TM_TEST_SLACK_TOKEN_8568";
+/// The synthetic token every #8568 fixture file holds.
+const CHILD_VALUE_8568: &str = "xoxb-synthetic-8568";
+/// Set on the child only; its presence makes the test act as the child.
+const CHILD_MARKER_8568: &str = "TM_TEST_SLACK_RESOLVE_CHILD_8568";
+/// The line the child prints, followed by its outcome word.
+const CHILD_OUTCOME_8568: &str = "SLACK_8568_OUTCOME=";
 
-    // read_dotenv_key is the testable core (resolve_token reads from the cwd).
-    assert_eq!(
-        read_dotenv_key(&path, "SLACK_BOT_TOKEN").as_deref(),
-        Some("xoxb-secret")
+/// Re-run the #8568 test as a child in `cwd` and return its outcome word.
+///
+/// Why: `resolve_token` reads dotenv files relative to the process cwd and
+/// loads `.env.local` once per process, so the cwd, `HOME` and the environment
+/// go on a child — never on this process, where they would leak into every
+/// parallel test. `env_clear` plus a fixed allowlist keeps the host's own
+/// tokens and dotenv files out.
+fn resolve_in_child_8568(cwd: &std::path::Path, home: &std::path::Path) -> String {
+    let module = module_path!();
+    let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+    let name = format!("{module}::resolve_token_ignores_a_token_only_in_plain_dotenv_8568");
+    let out = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+        .args([
+            name.as_str(),
+            "--exact",
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .current_dir(cwd)
+        .env_clear()
+        .env("HOME", home)
+        .env(CHILD_MARKER_8568, "1")
+        .output()
+        .expect("re-run this test as a child process");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let outcome = stdout
+        .lines()
+        // libtest prints the test name on the same line, ahead of the outcome.
+        .find_map(|l| l.split_once(CHILD_OUTCOME_8568).map(|(_, word)| word))
+        .map(str::trim)
+        .map(str::to_string);
+    assert!(
+        out.status.success() && outcome.is_some(),
+        "the child must have run the resolver; stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(read_dotenv_key(&path, "MISSING"), None);
+    outcome.unwrap_or_default()
 }
 
+/// A fresh repo-root directory (its `.git` bounds the `.env.local` walk)
+/// holding `file` with the synthetic token, plus an empty `HOME`.
+fn dotenv_fixture_8568(file: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(repo.join(".git")).expect("repo root");
+    std::fs::create_dir_all(&home).expect("home");
+    let body = format!("# a comment\n{CHILD_VAR_8568}=\"{CHILD_VALUE_8568}\"\n");
+    std::fs::write(repo.join(file), body).expect("dotenv fixture");
+    (dir, repo)
+}
+
+/// FAILS BEFORE #8568: `resolve_token` read plain `.env`, which owner ruling 88
+/// drops as a Slack token source. A token only there must stay unresolved,
+/// while the same token in `.env.local` — the supported dotenv tier — resolves.
+/// Test: itself.
+#[test]
+fn resolve_token_ignores_a_token_only_in_plain_dotenv_8568() {
+    if std::env::var_os(CHILD_MARKER_8568).is_some() {
+        let word = match resolve_token(CHILD_VAR_8568) {
+            Some(v) if v == CHILD_VALUE_8568 => "fixture",
+            Some(_) => "other",
+            None => "absent",
+        };
+        println!("{CHILD_OUTCOME_8568}{word}");
+        return;
+    }
+
+    let (dir, repo) = dotenv_fixture_8568(".env");
+    assert_eq!(
+        resolve_in_child_8568(&repo, &dir.path().join("home")),
+        "absent",
+        "a token only in plain `.env` must not be used"
+    );
+
+    let (dir, repo) = dotenv_fixture_8568(".env.local");
+    assert_eq!(
+        resolve_in_child_8568(&repo, &dir.path().join("home")),
+        "fixture",
+        "a token in `.env.local` must resolve"
+    );
+}
+
+/// Why: the missing case is the one an operator hits first, and it must not
+/// panic or produce an empty-string "token".
+/// Test: itself.
 #[test]
 fn resolve_token_missing_is_none() {
-    let missing = std::path::Path::new("/nonexistent/.env.local");
-    assert_eq!(read_dotenv_key(missing, "SLACK_BOT_TOKEN"), None);
+    assert!(resolve_token("TM_TEST_SLACK_TOKEN_ABSENT_8568").is_none());
 }
 
 #[test]
