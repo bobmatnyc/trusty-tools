@@ -329,6 +329,7 @@ export function laneBadge(key, status) {
  * has arrived, so a panel that has not loaded shows `Unknown` rather than a
  * green it has not earned. `faults` lists every failed lane, carrying the
  * daemon's own failure string when it sent one, plus any vector-coverage fault.
+ * A held index (`status: "held"`, #9059) reads `Held`, whatever its lanes say.
  *
  * @param {object|null|undefined} status  A `GET /indexes/{id}/status` body
  * @returns {{ tone: string, label: string, healthy: boolean|null, faults: Array }}
@@ -356,6 +357,11 @@ export function indexHealth(status) {
       label: `Semantic lane ${coverage.label.toLowerCase()}`,
       detail: coverage.detail
     });
+  }
+  // #9059: a held index ingests nothing, so it is never "Healthy". The reason
+  // renders in `HeldIndexBanner`, not as a lane fault.
+  if (status.status === 'held') {
+    return { tone: 'danger', label: 'Held', healthy: false, faults };
   }
   return faults.length === 0
     ? { tone: 'success', label: 'Healthy', healthy: true, faults }
