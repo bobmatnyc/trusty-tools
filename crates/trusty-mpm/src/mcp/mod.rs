@@ -316,7 +316,7 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       worktrees in-process (the same engine `tm session prune-worktrees`
     ///       uses, called directly rather than looped back over HTTP). Returns
     ///       `{ snapshot_path, timestamp, pruned_worktrees }`. Never touches
-    ///       tmux — window realignment on resume stays a PM-side bash step.
+    ///       tmux (#8408: resume no longer realigns to the recorded window).
     ///
     /// #6888: `session_id` is optional. Omitted, the daemon derives it from the
     ///        caller's own identity — the same derivation

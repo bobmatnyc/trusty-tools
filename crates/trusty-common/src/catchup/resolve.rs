@@ -8,8 +8,10 @@
 //! it.
 //! What: [`resolve_snapshot_for_caller`] tries the exact `session_id` first and,
 //! only on a miss, the newest paused snapshot in the same project whose recorded
-//! `tmux_window` carries the caller's window id. [`ResolutionPath`] names which
-//! of the two answered so a caller never reads a fallback as an exact match.
+//! `tmux_window` carries the caller's window id, then (#8408) the newest one
+//! recorded in the caller's tmux session, because a relaunch recreates the
+//! window. [`ResolutionPath`] names which route answered so a caller never
+//! reads a fallback as an exact match.
 //! [`redact_sessions_not_owned_by`] applies the same ownership test to the
 //! digest, so the response cannot hand out the material for a claim the caller
 //! could not otherwise make (#5386).
@@ -34,6 +36,9 @@ pub enum ResolutionPath {
     SessionId,
     /// The caller runs in the tmux window that wrote this snapshot.
     TmuxWindow,
+    /// The caller runs in the named tmux session that wrote this snapshot, in a
+    /// window created since — every relaunch recreates the window (#8408).
+    TmuxSession,
 }
 
 impl ResolutionPath {
@@ -42,6 +47,7 @@ impl ResolutionPath {
         match self {
             ResolutionPath::SessionId => "session_id",
             ResolutionPath::TmuxWindow => "tmux_window",
+            ResolutionPath::TmuxSession => "tmux_session",
         }
     }
 }
@@ -78,16 +84,27 @@ impl ResolvedSnapshot {
 /// bounded risk — the project-path scope below is the second gate, since the
 /// scan only ever reads `project_dir`'s own store. There is deliberately no
 /// liveness check on the recorded window.
+///
+/// #8408: a relaunch recreates the window, so the window id changes too
+/// (`@258` to `@262` within two minutes, live). The tmux SESSION name is what
+/// a relaunch keeps, so it is a third route, reached only when the window
+/// route misses. It carries the same bounded reuse risk as a window id, under
+/// the same project-path scope. A digits-only name is tmux's own default
+/// numbering, not an identity, and never matches.
 /// What: (1) the exact `session_id` match via
 /// [`latest_trusty_mpm_snapshot`](crate::catchup::session_finder::latest_trusty_mpm_snapshot),
 /// which always wins; (2) failing that, the newest paused snapshot under
 /// `project_dir` whose `## Tmux Window` section carries the caller's window id;
-/// (3) otherwise `None`. A snapshot with no recorded window, or with a window
-/// field that does not parse, never matches.
+/// (3) failing that, the newest one recorded in the caller's tmux session name
+/// ([`session_name_of`]); (4) otherwise `None`. A snapshot with no recorded
+/// window, or with a window field that does not parse, never matches.
 /// Test: `exact_session_id_match_wins_over_window_match`,
 /// `window_fallback_resolves_when_session_id_never_paused`,
 /// `window_fallback_is_scoped_to_the_project_dir`,
-/// `malformed_window_fields_never_match`.
+/// `malformed_window_fields_never_match`,
+/// `a_relaunched_window_resolves_through_its_tmux_session`,
+/// `a_window_match_outranks_a_session_match`,
+/// `a_numbered_tmux_session_never_matches`.
 pub fn resolve_snapshot_for_caller(
     project_dir: &Path,
     session_id: Option<&str>,
@@ -101,21 +118,30 @@ pub fn resolve_snapshot_for_caller(
     // #5272: this is NOT the "latest overall" fallback that issue removed. That
     // one answered an unidentified caller with an arbitrary session's file; this
     // one requires the caller to be in the window that wrote the snapshot.
-    let caller_window = window_id_of(tmux_window?)?;
-    newest_snapshot_in_window(project_dir, caller_window)
-        .map(|path| ResolvedSnapshot::new(path, ResolutionPath::TmuxWindow))
+    let tmux_window = tmux_window?;
+    let caller_window = window_id_of(tmux_window)?;
+    if let Some(path) =
+        newest_snapshot_where(project_dir, |w| window_id_of(w) == Some(caller_window))
+    {
+        return Some(ResolvedSnapshot::new(path, ResolutionPath::TmuxWindow));
+    }
+    // #8408: the relaunched window has a new id; its tmux session kept the name.
+    let caller_session = session_name_of(tmux_window)?;
+    newest_snapshot_where(project_dir, |w| session_name_of(w) == Some(caller_session))
+        .map(|path| ResolvedSnapshot::new(path, ResolutionPath::TmuxSession))
 }
 
-/// The newest paused snapshot under `project_dir` recorded against `window_id`.
+/// The newest paused snapshot under `project_dir` whose recorded window field
+/// satisfies `matches`.
 ///
 /// Why: [`find_paused_sessions`] already sorts newest-first and already scopes
 /// itself to one project's store, so "newest in this window, in this project" is
 /// the first match over that list.
 /// What: skips the legacy claude-mpm arm (it records no window) and every
-/// snapshot whose window field is absent or unparseable.
+/// snapshot whose window field is absent.
 /// Test: `window_fallback_resolves_when_session_id_never_paused`,
 /// `snapshot_without_a_recorded_window_is_skipped`.
-fn newest_snapshot_in_window(project_dir: &Path, window_id: &str) -> Option<PathBuf> {
+fn newest_snapshot_where(project_dir: &Path, matches: impl Fn(&str) -> bool) -> Option<PathBuf> {
     find_paused_sessions(project_dir)
         .ok()?
         .into_iter()
@@ -124,9 +150,31 @@ fn newest_snapshot_in_window(project_dir: &Path, window_id: &str) -> Option<Path
                 path,
                 tmux_window: Some(w),
                 ..
-            } if window_id_of(&w) == Some(window_id) => Some(path),
+            } if matches(&w) => Some(path),
             _ => None,
         })
+}
+
+/// Extract the tmux session name from a `session_name:window_index:window_id`
+/// field (#8408).
+///
+/// Why: a relaunch recreates the window, so the window id the caller holds
+/// afterwards never matches the one its last pause recorded. The session name
+/// survives the relaunch.
+/// What: everything before the last two components, accepted only when the
+/// last is a window id ([`window_id_of`]), the middle is a window index (ASCII
+/// digits), and the name is non-empty and not digits-only — tmux numbers
+/// unnamed sessions `0`, `1`, … and reuses those numbers, so a number names no
+/// one. A name may contain `:` itself.
+/// Test: `session_name_of_reads_everything_before_index_and_id`,
+/// `a_numbered_tmux_session_never_matches`.
+pub fn session_name_of(field: &str) -> Option<&str> {
+    let field = field.trim();
+    window_id_of(field)?;
+    let mut parts = field.rsplitn(3, ':');
+    let (_id, index, name) = (parts.next()?, parts.next()?, parts.next()?);
+    let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (is_number(index) && !name.is_empty() && !is_number(name)).then_some(name)
 }
 
 /// Extract the stable window id from a `session_name:window_index:window_id`
@@ -134,8 +182,9 @@ fn newest_snapshot_in_window(project_dir: &Path, window_id: &str) -> Option<Path
 ///
 /// Why: matching on `session_name:window_index` would be wrong — session names
 /// get renamed and window indexes renumber when a window is closed. The `@N`
-/// window id is stable for the window's lifetime, so it is the only component
-/// worth comparing.
+/// window id is stable for the window's lifetime, so it is the component the
+/// window route compares. The session name is only a later route, for a window
+/// that no longer exists (#8408, [`session_name_of`]).
 /// What: the last `:`-delimited component, accepted only when it looks like a
 /// tmux window id — a leading `@` followed by at least one character. Taking
 /// the LAST component rather than requiring exactly three is what lets a tmux
@@ -228,9 +277,10 @@ pub fn redact_sessions_not_owned_by(
         })
         .unwrap_or_default();
     let caller_window = caller.tmux_window.and_then(window_id_of);
+    let caller_session = caller.tmux_window.and_then(session_name_of);
 
     for s in sessions.iter_mut() {
-        if !is_owned_by(s, &owned_paths, caller_window) {
+        if !is_owned_by(s, &owned_paths, caller_window, caller_session) {
             withhold(s);
         }
     }
@@ -238,16 +288,19 @@ pub fn redact_sessions_not_owned_by(
 
 /// Whether one digest entry is attributable to the caller.
 ///
-/// Why: the two ownership routes have to agree with
+/// Why: the ownership routes have to agree with
 /// [`resolve_snapshot_for_caller`], or a caller could resolve a snapshot whose
 /// own digest entry it is not allowed to read.
 /// What: true when the entry's `source_file` is one of the caller's attributed
-/// snapshots, or its recorded window id equals the caller's.
-/// Test: `owner_sees_every_field`, `window_owner_sees_every_field`.
+/// snapshots, its recorded window id equals the caller's, or (#8408) its
+/// recorded tmux session name equals the caller's.
+/// Test: `owner_sees_every_field`, `window_owner_sees_every_field`,
+/// `a_relaunched_window_resolves_through_its_tmux_session`.
 fn is_owned_by(
     session: &PausedSessionJson,
     owned_paths: &[PathBuf],
     caller_window: Option<&str>,
+    caller_session: Option<&str>,
 ) -> bool {
     if let Some(file) = session.source_file.as_deref() {
         let path = canonical(Path::new(file));
@@ -255,13 +308,10 @@ fn is_owned_by(
             return true;
         }
     }
-    match (
-        session.tmux_window.as_deref().and_then(window_id_of),
-        caller_window,
-    ) {
-        (Some(recorded), Some(mine)) => recorded == mine,
-        _ => false,
-    }
+    let recorded = session.tmux_window.as_deref();
+    let same = |a: Option<&str>, b: Option<&str>| matches!((a, b), (Some(x), Some(y)) if x == y);
+    same(recorded.and_then(window_id_of), caller_window)
+        || same(recorded.and_then(session_name_of), caller_session)
 }
 
 /// Strip a digest entry down to what a non-owning caller may see.
@@ -557,6 +607,96 @@ mod tests {
     fn window_fallback_reports_its_resolution_path() {
         assert_eq!(ResolutionPath::SessionId.as_str(), "session_id");
         assert_eq!(ResolutionPath::TmuxWindow.as_str(), "tmux_window");
+        assert_eq!(ResolutionPath::TmuxSession.as_str(), "tmux_session");
+    }
+
+    /// Why (#8408): a session name may itself contain `:`, and only a field
+    /// that also names a window index and a window id is a tmux window field.
+    /// What: the name is everything before the last two components; any other
+    /// shape yields `None`.
+    /// Test: itself.
+    #[test]
+    fn session_name_of_reads_everything_before_index_and_id() {
+        assert_eq!(session_name_of("tm-apex:0:@263"), Some("tm-apex"));
+        assert_eq!(session_name_of(" my:proj:2:@7 "), Some("my:proj"));
+        for bad in [
+            "",
+            "@7",
+            "0:@7",
+            ":0:@7",
+            "tm-apex:x:@7",
+            "tm-apex:0:7",
+            "a:b:c:d",
+        ] {
+            assert_eq!(session_name_of(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    /// Why (#8408): every relaunch recreates the window, so the caller's window
+    /// id is new (`@258` to `@262`, live) and the window route resolves
+    /// nothing. The tmux session name is what the relaunch kept.
+    /// What: a caller in the same named session, in a new window and with no
+    /// session id, resolves the newest snapshot that session paused, reports
+    /// `tmux_session`, and owns that snapshot's digest entry.
+    /// Test: itself.
+    #[test]
+    fn a_relaunched_window_resolves_through_its_tmux_session() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mine = pause(tmp.path(), "tmux-window-258", Some("tm-supervisor:0:@258"));
+        pause(tmp.path(), "someone-else", Some("tm-other:0:@300"));
+
+        let got = resolve_snapshot_for_caller(tmp.path(), None, Some("tm-supervisor:0:@262"))
+            .expect("a relaunched window must resolve its session's own snapshot");
+        assert_eq!(got.path, mine);
+        assert_eq!(got.via, ResolutionPath::TmuxSession);
+
+        let mut sessions = vec![entry(&mine, Some("tm-supervisor:0:@258"))];
+        redact_sessions_not_owned_by(
+            tmp.path(),
+            &CallerIdentity::new(Some("tmux-window-262"), Some("tm-supervisor:0:@262")),
+            &mut sessions,
+        );
+        assert!(
+            sessions[0].owned,
+            "the resolved snapshot's entry must be readable"
+        );
+    }
+
+    /// Why (#8408): the session route is a later fallback, so it must never
+    /// displace a window that still exists.
+    /// What: with a window match and a newer same-session match, the window's
+    /// snapshot wins and the route says `tmux_window`.
+    /// Test: itself.
+    #[test]
+    fn a_window_match_outranks_a_session_match() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let by_window = pause(tmp.path(), "a", Some("tm-apex:0:@263"));
+        pause(tmp.path(), "b", Some("tm-apex:1:@270"));
+
+        let got = resolve_snapshot_for_caller(tmp.path(), None, Some("tm-apex:0:@263")).unwrap();
+        assert_eq!(got.path, by_window);
+        assert_eq!(got.via, ResolutionPath::TmuxWindow);
+    }
+
+    /// Why (#8408): tmux names an unnamed session `0`, `1`, … and reuses the
+    /// numbers, so two unrelated sessions share them over time.
+    /// What: a digits-only session name neither resolves a snapshot nor makes
+    /// a caller its owner.
+    /// Test: itself.
+    #[test]
+    fn a_numbered_tmux_session_never_matches() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let theirs = pause(tmp.path(), "writer", Some("0:0:@5"));
+        assert_eq!(session_name_of("0:0:@5"), None);
+        assert!(resolve_snapshot_for_caller(tmp.path(), None, Some("0:0:@9")).is_none());
+
+        let mut sessions = vec![entry(&theirs, Some("0:0:@5"))];
+        redact_sessions_not_owned_by(
+            tmp.path(),
+            &CallerIdentity::new(None, Some("0:0:@9")),
+            &mut sessions,
+        );
+        assert!(!sessions[0].owned);
     }
 
     /// Why: #5272's rule is unchanged — an id that owns a snapshot gets that

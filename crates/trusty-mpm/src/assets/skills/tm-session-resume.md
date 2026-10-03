@@ -83,7 +83,7 @@ mcp__trusty-mpm__session_context_catchup(
 
 `project_dir` is **required** — the MCP transport forwards no cwd, so pass the
 current project's absolute path explicitly. Pass `tmux_window` whenever `$TMUX`
-is set; capture it in the same bash step you would use for realignment:
+is set; capture it with:
 
 ```bash
 [ -n "$TMUX" ] && tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
@@ -107,7 +107,7 @@ The tool returns:
   "page_bytes": 47812,
   "truncation_notice": "<what was withheld and how to get it, or null>",
   "resolved_snapshot": "<path or null>",
-  "resolved_via": "session_id" | "tmux_window" | null,
+  "resolved_via": "session_id" | "tmux_window" | "tmux_session" | null,
   "undatable_sessions_dropped": 0,
   "watermark_advanced": false,
   "session_refs": {
@@ -133,9 +133,11 @@ stale.
 > **Omit `session_id`; the tool resolves your own pause automatically** — it
 > derives the id your pause was filed under, tries that first, then
 > `tmux_window` only when it owns nothing (no "latest overall" fallback,
-> #5272). `resolved_via` names the match; a window match is a claim, not a
-> guarantee — window ids are reused after a kill/recreate. `null` means
-> neither matched; pick from `sessions[]` deliberately. Never invent a
+> #5272): its window id, then — because a relaunch recreates the window with a
+> new id — its tmux session name (#8408). `resolved_via` names the match; a
+> window or session match is a claim, not a guarantee — window ids and
+> session names are reused after a kill/recreate. `null` means
+> nothing matched; pick from `sessions[]` deliberately. Never invent a
 > `session_id`, or resumes report "no snapshot resolved" again (#6888).
 > Ownership also gates `sessions[].owned`: an unowned entry keeps only
 > `format`/`paused_at`/`summary` (#5272, #5386) — report it as "another
@@ -199,31 +201,13 @@ same paged payload `session_context_catchup` returns.
 Never load the markdown digest whole into context; page the `--json` form
 instead.
 
-## Re-aligning the Tmux Window
+## No Tmux Window Re-alignment
 
-If the resumed session's `tmux_window` field is non-null (recorded at pause
-time as `session_name:window_index:window_id`, e.g. `main:2:@7`), realign to
-the originating window so resumed work lands where it left off. This is a PM
-bash step — only the PM's own shell has tmux client access, the MCP tool
-never touches tmux. Parse the string on `:` and target the `window_id` (the
-third field, e.g. `@7`) — an immutable id, so it can never match another
-session's window the way a bare `session:index` target can (#8443):
-
-```bash
-# tmux_window field value: main:2:@7
-if [ -n "$TMUX" ]; then
-  # inside tmux → select the recorded window (idempotent no-op if already there)
-  tmux select-window -t '@7'   # <window_id> from the field
-else
-  # not inside tmux → just report it; do not attempt to attach
-  echo "Recorded tmux window: main:2:@7 (start tmux to re-align)"
-fi
-```
-
-This step is a **no-op** when `tmux_window` is `null` (older snapshots or
-sessions paused outside tmux). `tmux select-window` is safe and idempotent —
-if you are already on that window it does nothing. Never force-create windows or
-attach sessions here; only align within the current tmux client.
+Do not select, create or attach the snapshot's recorded tmux window (#8408).
+A relaunch recreates the window, so its recorded `window_id` names a window
+that no longer exists. When `resolved_via` is `tmux_window`, you are already
+in that window. The recorded `tmux_window` is evidence of where the pause ran,
+not a target.
 
 ## Session Store Location
 
@@ -235,7 +219,8 @@ attach sessions here; only align within the current tmux client.
 
 Resolution order for `resolved_snapshot`: the newest `pause` snapshot recorded
 for the `session_id` you passed → the newest snapshot this project paused from
-your `tmux_window`'s `@id` → null. Resume reads
+your `tmux_window`'s `@id` → the newest one paused from your tmux session name
+(not a digits-only name) → null. Resume reads
 existing snapshots only — it never creates snapshot files. It MAY append a
 `resume` line to `sessions-log.jsonl` for audit, but snapshots are kept after
 resume so you can resume more than once.

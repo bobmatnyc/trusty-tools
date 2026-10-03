@@ -77,7 +77,8 @@ fn derive_caller_session_id(tmux_window: Option<&str>) -> Option<String> {
 /// prevent.
 /// What: the seven original response keys, unchanged in meaning, plus six
 /// additive paging keys. `resolved_via` names which lookup produced
-/// `resolved_snapshot` (`session_id`, `tmux_window`, or `null` alongside a null
+/// `resolved_snapshot` (`session_id`, `tmux_window`, `tmux_session` since
+/// #8408, or `null` alongside a null
 /// snapshot), so a caller can tell an exact match from the window fallback
 /// instead of reading both as ownership. `watermark_advanced` is always `false`
 /// by construction — no path in this module calls `save_catchup_state`.
@@ -229,6 +230,7 @@ struct HydrationReceipt {
 /// `session_context_catchup_returns_expected_shape`,
 /// `session_context_catchup_never_resolves_another_sessions_snapshot`,
 /// `session_context_catchup_resolves_by_tmux_window_after_a_relaunch`,
+/// `session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes`,
 /// `session_context_catchup_withholds_a_non_owners_handles`,
 /// `session_context_catchup_digest_agrees_with_the_window_fallback`,
 /// `catchup_derives_a_missing_session_id_from_the_callers_window`.
@@ -1185,6 +1187,42 @@ mod tests {
             );
             assert!(malformed["resolved_via"].is_null());
         }
+    }
+
+    /// Why (#8408): a relaunch recreates the tmux window, so its id changes
+    /// (supervisor `@258` to `@262`, live) and a catch-up called with only
+    /// `tmux_window` resolved nothing — resume needed an explicit session id.
+    /// What: a pause filed with no session id from `@258`, then a catch-up with
+    /// no session id from `@262` in the same named tmux session, resolves that
+    /// pause and reports `resolved_via: "tmux_session"`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn session_context_catchup_resolves_by_tmux_session_after_the_window_id_changes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap();
+        let state = DaemonState::shared();
+
+        let paused = session_context_pause(
+            &state,
+            dir,
+            None,
+            "Before the relaunch.",
+            vec![],
+            vec![],
+            vec![],
+            Some("tm-supervisor:0:@258"),
+            false,
+        )
+        .await
+        .unwrap();
+        let snapshot = paused["snapshot_path"].as_str().unwrap().to_string();
+
+        let relaunched =
+            session_context_catchup(dir, None, Some("tm-supervisor:0:@262"), false, true, 0)
+                .await
+                .unwrap();
+        assert_eq!(relaunched["resolved_snapshot"], snapshot, "{relaunched}");
+        assert_eq!(relaunched["resolved_via"], "tmux_session");
     }
 
     /// The `summary` of every session on a response, in page order.
