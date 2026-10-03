@@ -2,7 +2,7 @@
 # Regenerate with: bash scripts/check_context_budget.sh --update
 # Growing TOTAL past 5%, or one file past 10%, fails the gate until
 # the growth is recorded here in the same PR.
-CLAUDE.md	12565
+CLAUDE.md	13051
 crates/trusty-mpm/src/assets/instructions/sections/README.md	13464
 crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md	1804
 crates/trusty-mpm/src/assets/instructions/sections/agent-routing.md	649
@@ -19,10 +19,10 @@ crates/trusty-mpm/src/assets/instructions/sections/non-overridable-rules.md	3734
 crates/trusty-mpm/src/assets/instructions/sections/phases.md	465
 crates/trusty-mpm/src/assets/instructions/sections/pm-allowlist.md	1113
 crates/trusty-mpm/src/assets/instructions/sections/prompt-self-improvement.md	264
-crates/trusty-mpm/src/assets/instructions/sections/qa-gate.md	300
+crates/trusty-mpm/src/assets/instructions/sections/qa-gate.md	548
 crates/trusty-mpm/src/assets/instructions/sections/search.md	202
 crates/trusty-mpm/src/assets/instructions/sections/subagent-re-engagement.md	339
 crates/trusty-mpm/src/assets/instructions/sections/tickets-prs-releases.md	674
 crates/trusty-mpm/src/assets/instructions/sections/workflow.md	4704
 crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md	7984
-TOTAL	60343
+TOTAL	61077

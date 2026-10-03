@@ -9,7 +9,8 @@
 //! `MockInferenceServer`-backed adapter so no live provider key or network is ever
 //! required. Resolution mirrors the commons conventions: a model slug plus the
 //! two-stage [`trusty_common::inference::Configurator`]/`provider_for` credential
-//! ladder over [`default_store`], with a documented configurable default model.
+//! ladder over [`crate::secret_source::credential_store`], with a documented
+//! configurable default model.
 //! What: [`ManagerInference`] owns either a production credential-backed
 //! [`Configurator`] + [`KeyStore`] (built once at provision) or a fixed injected
 //! adapter (tests / future hot-swap); [`ManagerInference::resolve`] hands back the
@@ -23,7 +24,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use trusty_common::credentials::{KeyStore, default_store};
+use trusty_common::credentials::KeyStore;
 use trusty_common::inference::{
     Configurator, InferenceAdapter, InferenceError, register_default_factories,
 };
@@ -189,7 +190,8 @@ impl ManagerInference {
     /// the model is the documented env-configurable slug. Built once at daemon
     /// startup alongside the portfolio palace.
     /// What: registers all default provider factories into a fresh
-    /// [`Configurator`], resolves the secure [`default_store`], and records the
+    /// [`Configurator`], resolves [`crate::secret_source::credential_store`]
+    /// (empty under `tm daemon --sandbox`, #9121), and records the
     /// env-resolved model.
     /// Test: `resolve_reports_no_provider_when_unconfigured` (built via provision).
     pub fn provision() -> Self {
@@ -200,7 +202,8 @@ impl ManagerInference {
                 model: resolve_manager_model(),
                 source: Source::Credentialed {
                     configurator,
-                    store: default_store(),
+                    // #9121: the latched store, never `default_store()` directly.
+                    store: crate::secret_source::credential_store(),
                 },
             }),
         }

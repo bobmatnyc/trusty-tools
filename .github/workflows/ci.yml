@@ -273,6 +273,11 @@ jobs:
           bash scripts/rustdoc-links-scope-selftest.sh
           bash scripts/check_rustdoc_links_selftest.sh
 
+      # #9121: the live-check sandbox launcher must forward no inherited
+      # variable. Its selftest drives a stub `tm`, so it needs no build.
+      - name: Sandbox-daemon launcher selftest (#9121)
+        run: bash scripts/sandbox_daemon_selftest.sh
+
       # #7424: the startup-context size gate. It is a STEP of this existing job
       # rather than a job of its own — promoting a new required context wedges
       # every open PR that predates it (#5962), and this job already runs on

@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use trusty_common::credentials::{KeyStore, default_store};
+use trusty_common::credentials::KeyStore;
 use trusty_common::inference::{
     ChatMessage, ChatRequest, Configurator, InferenceAdapter, InferenceError,
     register_default_factories,
@@ -99,7 +99,8 @@ impl OpenRouterClassifier {
     /// and the supervisor one more; both want "whatever provider this operator has
     /// configured", resolved per call so a key added after startup takes effect.
     /// What: registers the default provider factories into a fresh [`Configurator`],
-    /// resolves [`default_store`], and reads the model from [`CLASSIFIER_MODEL_ENV`]
+    /// resolves [`crate::secret_source::credential_store`] (empty under
+    /// `tm daemon --sandbox`, #9121), and reads the model from [`CLASSIFIER_MODEL_ENV`]
     /// (default [`DEFAULT_CLASSIFIER_MODEL`]). Performs NO network or credential
     /// lookup itself — construction cannot fail.
     /// Test: `model_defaults_when_env_unset`, `model_reads_env_override`.
@@ -112,7 +113,8 @@ impl OpenRouterClassifier {
             model: resolve_classifier_model(),
             source: Source::Credentialed {
                 configurator,
-                store: default_store(),
+                // #9121: the latched store, never `default_store()` directly.
+                store: crate::secret_source::credential_store(),
             },
         }
     }

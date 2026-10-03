@@ -1790,6 +1790,9 @@ async fn report_bug_rate_limit_guard_blocks_correctly() {
 ///      `EnvFileTokenProvider`, making the GitHub App path unreachable.
 /// What: verifies PAT env → resolved; verifies App env vars set but PEM
 ///       absent → graceful None; verifies nothing set → None.
+///       #9123: `$HOME` and the token file are pinned to a tempdir for the
+///       whole test, so the real `~/.config/trusty-mpm/bugreport-token` is
+///       never read, and every assertion redacts the resolved value.
 /// Test: this function.
 #[test]
 #[serial]
@@ -1798,57 +1801,48 @@ fn resolve_token_full_chain_coverage() {
         APP_ID_ENV_VAR, APP_INSTALL_ID_ENV_VAR, APP_KEY_FILE_ENV_VAR, TOKEN_ENV_VAR,
         TOKEN_FILE_ENV_VAR, resolve_token,
     };
+    use crate::secret_source::test_env::{EnvVarGuard, assert_secret_eq};
+
+    let scratch = crate::test_support::hermetic_temp_dir();
+    let _home = EnvVarGuard::set("HOME", scratch.path());
+    let _file = EnvVarGuard::set(TOKEN_FILE_ENV_VAR, scratch.path().join("no-token-here"));
+    let _app_id = EnvVarGuard::unset(APP_ID_ENV_VAR);
+    let _install = EnvVarGuard::unset(APP_INSTALL_ID_ENV_VAR);
+    let _key_file = EnvVarGuard::unset(APP_KEY_FILE_ENV_VAR);
 
     // 1. PAT env var present → should be resolved.
     let sentinel = "ghp_http_test_fix1_resolve"; // pragma: allowlist secret
-    unsafe { std::env::set_var(TOKEN_ENV_VAR, sentinel) };
+    let pat = EnvVarGuard::set(TOKEN_ENV_VAR, sentinel);
     let tok = resolve_token();
-    unsafe { std::env::remove_var(TOKEN_ENV_VAR) };
-    assert_eq!(
+    drop(pat);
+    assert_secret_eq(
         tok.as_deref(),
         Some(sentinel),
-        "resolve_token must return PAT from env: {tok:?}"
+        "resolve_token must return PAT from env",
     );
 
     // 2. App env vars set but PEM absent → App provider fails gracefully → None.
-    unsafe {
-        std::env::remove_var(TOKEN_ENV_VAR);
-        std::env::remove_var(TOKEN_FILE_ENV_VAR);
-        std::env::set_var(APP_ID_ENV_VAR, "99999");
-        std::env::set_var(APP_INSTALL_ID_ENV_VAR, "88888");
-        std::env::set_var(
-            APP_KEY_FILE_ENV_VAR,
-            "/tmp/trusty-test-nonexistent-fix1.pem",
-        );
-    }
+    let _pat_absent = EnvVarGuard::unset(TOKEN_ENV_VAR);
+    let app = (
+        EnvVarGuard::set(APP_ID_ENV_VAR, "99999"),
+        EnvVarGuard::set(APP_INSTALL_ID_ENV_VAR, "88888"),
+        EnvVarGuard::set(APP_KEY_FILE_ENV_VAR, scratch.path().join("absent.pem")),
+    );
     let app_tok = resolve_token();
-    unsafe {
-        std::env::remove_var(APP_ID_ENV_VAR);
-        std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
-        std::env::remove_var(APP_KEY_FILE_ENV_VAR);
-    }
+    drop(app);
     // App provider tries to read PEM → fails → returns None gracefully.
-    assert!(
-        app_tok.is_none(),
-        "resolve_token must return None when App PEM is absent: {app_tok:?}"
+    assert_secret_eq(
+        app_tok.as_deref(),
+        None,
+        "resolve_token must return None when App PEM is absent",
     );
 
     // 3. Nothing configured → None.
-    unsafe {
-        std::env::remove_var(TOKEN_ENV_VAR);
-        std::env::remove_var(APP_ID_ENV_VAR);
-        std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
-        std::env::remove_var(APP_KEY_FILE_ENV_VAR);
-        std::env::set_var(
-            TOKEN_FILE_ENV_VAR,
-            "/tmp/trusty-test-nonexistent-token-fix1",
-        );
-    }
     let none_tok = resolve_token();
-    unsafe { std::env::remove_var(TOKEN_FILE_ENV_VAR) };
-    assert!(
-        none_tok.is_none(),
-        "resolve_token must return None when nothing configured: {none_tok:?}"
+    assert_secret_eq(
+        none_tok.as_deref(),
+        None,
+        "resolve_token must return None when nothing configured",
     );
 }
 

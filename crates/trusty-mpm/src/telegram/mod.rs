@@ -145,7 +145,7 @@ pub struct BotOptions {
 /// failure, which is the existing "the bot does not start" signal; the failure
 /// is logged at ERROR by name and kind there, and nothing here retries or falls
 /// back to the retired `.env` read.
-/// Test: `resolve_token_reads_the_process_environment`,
+/// Test: `resolve_secret_reads_the_bot_token_from_the_process_environment`,
 /// `resolve_token_missing_is_none`,
 /// `resolve_token_is_none_when_the_credential_is_unresolvable`.
 pub fn resolve_token(var_name: &str) -> Option<String> {

@@ -517,10 +517,16 @@ fn parse_iso8601_to_unix(s: &str) -> anyhow::Result<i64> {
 ///   1. PAT/token-file via `EnvFileTokenProvider`
 ///   2. GitHub App via `GithubAppTokenProvider` (if App env vars are all set)
 ///
-/// Returns `None` if all sources are absent.
+/// Returns `None` if all sources are absent, and always under
+/// `tm daemon --sandbox` (#9121), without reading any source.
 ///
-/// Test: `tests::resolution_order_*`.
+/// Test: `tests::resolution_order_*`; the sandbox arm,
+/// `tests/sandbox_latch_9121.rs`.
 pub fn resolve_token() -> Option<String> {
+    // #9121: a sandboxed daemon reads no bug-report credential file or env var.
+    if crate::secret_source::sandboxed() {
+        return None;
+    }
     // 1. PAT / token file.
     if let Some(tok) = EnvFileTokenProvider.token() {
         return Some(tok);
