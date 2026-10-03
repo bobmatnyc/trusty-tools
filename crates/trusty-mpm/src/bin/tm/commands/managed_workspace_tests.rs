@@ -67,6 +67,7 @@ fn empty_disk() -> DiskGate {
     DiskGate::Pinned(Some(MeasuredMount {
         mount_point: "/fixture-mount".to_string(),
         usage_pct: 0.0,
+        bytes: None,
     }))
 }
 
@@ -81,6 +82,7 @@ fn full_disk() -> DiskGate {
     DiskGate::Pinned(Some(MeasuredMount {
         mount_point: "/fixture-mount".to_string(),
         usage_pct: 100.0,
+        bytes: None,
     }))
 }
 
