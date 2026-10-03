@@ -31,8 +31,8 @@
 //! **The one credential door (#9121).** Every daemon read of `.env.local`, the
 //! credential store or the Keychain goes through this file: [`resolve_secret`],
 //! [`resolve_bounded_gated`] and [`credential_store`], all behind the sandbox
-//! latch. `secret_source_tests.rs`'s source scan fails on a direct read
-//! anywhere else in the crate.
+//! latch. The source scan in `secret_source_scan_tests.rs` fails on a direct
+//! read anywhere else in the crate.
 //!
 //! Test: `secret_source_tests.rs`.
 //!

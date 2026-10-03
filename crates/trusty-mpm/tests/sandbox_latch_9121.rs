@@ -189,6 +189,8 @@ fn inference_is_provisioned_over_the_empty_store() {
     let _manager_model = EnvVarGuard::set("TRUSTY_MANAGER_MODEL", "openai/gpt-4o-mini");
     let _llm_model = EnvVarGuard::set("TRUSTY_LLM_MODEL", "openai/gpt-4o-mini");
     enter_sandbox();
+    // #9121: a broken gate panics here, before provision() can reach the Keychain.
+    let _gate = credential_store_or(|| panic!("real store built under the latch"));
 
     let (resolved, manager_log) = logged(|| {
         trusty_mpm::daemon::manager::inference::ManagerInference::provision()

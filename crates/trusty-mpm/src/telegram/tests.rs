@@ -13,13 +13,15 @@ use super::*;
 /// Why (#8236 item 5): the bot token now comes from the shipped resolver, whose
 /// first tier is the process environment. The hand-rolled `.env`/`.env.local`
 /// scanner this replaced is gone.
-/// What (#9121): the same resolution against an empty `MemoryKeyStore`, so a
-/// missing variable answers `None` instead of reaching the operator's real
-/// store, `#[serial]` with a restoring guard, and a redacting assertion.
+/// What (#9121): `resolve_token` is a one-line delegate to `resolve_secret`,
+/// so this drives `resolve_secret_with` — the same resolution against an empty
+/// `MemoryKeyStore`, so a missing variable answers `None` instead of reaching
+/// the operator's real store — `#[serial]` with a restoring guard, and a
+/// redacting assertion.
 /// Test: this test.
 #[test]
 #[serial_test::serial]
-fn resolve_token_reads_the_process_environment() {
+fn resolve_secret_reads_the_bot_token_from_the_process_environment() {
     use crate::secret_source::test_env::{EnvVarGuard, assert_secret_eq};
     use trusty_common::credentials::MemoryKeyStore;
 

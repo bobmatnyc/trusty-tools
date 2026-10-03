@@ -9,8 +9,10 @@ Security
   is unset, or when `$HOME` is the account's real home as the password
   database records it. A sandbox daemon never starts the Telegram bot and
   never reads `.env.local`, the credential store or the Keychain through any
-  path: credential resolution, the manager and activity-classifier inference
+  in-process path: credential resolution, the manager and activity-classifier inference
   stores, the `/activity` key-presence probe, the bug-report token and the
-  `credential_reach` doctor row all answer "absent". `scripts/sandbox_daemon.sh`
+  `credential_reach` doctor row all answer "absent". A `claude` or `gh` child
+  the daemon spawns is out of scope and reads its own credentials (#2246).
+  `scripts/sandbox_daemon.sh`
   starts one under `env -i`, forwarding only allowlisted names; a hand-built
   sandbox daemon is no longer sanctioned.

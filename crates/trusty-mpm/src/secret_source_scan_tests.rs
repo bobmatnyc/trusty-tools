@@ -5,30 +5,39 @@
 //! probed `resolve_env_var_bounded` directly — both reached the per-user
 //! Keychain from a sandboxed daemon. A new direct read is one line anywhere in
 //! the crate; this scan fails CI on it.
-//! What: every production `.rs` file under `src/` is read with comments and
-//! inline test modules removed. A file naming a credential-reading API must
-//! be in [`ALLOWED`] for that API, with its reason. A file constructing a
-//! `Configurator` must take the store from `secret_source::credential_store()`.
-//! A stale allowlist entry fails too, so the list only shrinks.
+//! What: every production `.rs` file under `src/` is lexed, with comments
+//! removed string-aware and each `#[cfg(test)]` module cut out — a `mod x;`
+//! declaration alone, an inline `mod x { … }` exactly to its closing brace —
+//! so all other code in the file is scanned. A file naming a credential-reading
+//! API, as an identifier and so at its import site too, must be in [`ALLOWED`]
+//! for that API, with its reason. A file naming `Configurator` must be a
+//! [`CONFIGURATOR_SITES`] entry taking its store from
+//! `secret_source::credential_store()`. A stale entry in either list fails
+//! too, so the lists only shrink.
 //! Test: `no_credential_read_bypasses_secret_source`,
-//! `the_scan_flags_a_direct_read`.
+//! `the_scan_flags_a_direct_read`,
+//! `the_scan_reads_past_test_modules_aliases_and_urls`.
 
 use std::path::{Path, PathBuf};
 
-/// APIs that read `.env.local`, the credential store or the Keychain.
+/// APIs that read `.env.local`, the credential store or the Keychain. Each
+/// matches where an identifier starts, so `default_store` also catches its
+/// import, a `use … as` alias and `default_store_with`, never `my_default_store`.
 const CREDENTIAL_READS: &[&str] = &[
-    "default_store(",
+    "default_store",
     "KeyringStore",
     "FileKeyStore",
     "resolve_env_var_bounded",
-    "load_env_local_once",
-    "resolve_key(",
-    "resolve_key_with(",
     "resolve_provider_bounded",
+    "store_get_bounded",
+    "load_env_local_once",
+    "load_env_from_path",
+    "env_local_value",
+    "read_var_from_env_local",
+    "resolve_key",
     "resolved_secret_values",
-    "credentials::resolve(",
-    "credentials::resolve_client",
-    "dotenvy::",
+    "credentials::resolve",
+    "dotenvy",
     "read_dotenv_key",
     "\"/usr/bin/security\"",
 ];
@@ -43,13 +52,13 @@ const ALLOWED: &[(&str, &str, &str)] = &[
     ),
     (
         "daemon/doctor_launchd_secrets_repair.rs",
-        "default_store(",
+        "default_store",
         "`tm doctor --fix` CLI only; imports a plist credential INTO the store, \
          where an empty sandbox store would drop it",
     ),
     (
         "daemon/doctor_launchd_secrets_scoped.rs",
-        "default_store(",
+        "default_store",
         "`tm doctor --fix-launchd-secrets` CLI only; same write path as above",
     ),
     (
@@ -70,6 +79,9 @@ const CONFIGURATOR_SITES: &[&str] = &["activity/classifier.rs", "daemon/manager/
 /// One finding: `(file, API or rule)`.
 type Finding = (String, String);
 
+/// One source char and whether it is code (`true`) or inside a literal.
+type Lexed = (char, bool);
+
 /// Whether `rel` is a test file by the line-cap script's own rules.
 fn is_test_file(rel: &str) -> bool {
     let base = rel.rsplit('/').next().unwrap_or(rel);
@@ -82,27 +94,223 @@ fn is_test_file(rel: &str) -> bool {
         || rel.starts_with("tests/")
 }
 
-/// `text` without `//` comments and without a trailing inline test module.
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `code` names `api` where an identifier starts (#9121).
+fn names(code: &str, api: &str) -> bool {
+    let bounded = api.chars().next().is_some_and(is_ident);
+    code.match_indices(api)
+        .any(|(at, _)| !bounded || !code[..at].chars().next_back().is_some_and(is_ident))
+}
+
+/// Whether `code` names `word` as a whole identifier.
+fn names_word(code: &str, word: &str) -> bool {
+    code.match_indices(word).any(|(at, _)| {
+        !code[..at].chars().next_back().is_some_and(is_ident)
+            && !code[at + word.len()..].chars().next().is_some_and(is_ident)
+    })
+}
+
+/// `text` as scanned: comments removed and every `#[cfg(test)]` module cut
+/// out — the declaration alone, or an inline body to its closing brace. Code
+/// after a test module stays (#9121).
 fn code_only(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim() == "#[cfg(test)]" && opens_test_module(&lines[i + 1..]) {
-            break;
+    let lexed = lex(text);
+    let mut out = String::with_capacity(lexed.len());
+    let mut i = 0;
+    while i < lexed.len() {
+        if let Some(end) = test_module_end(&lexed, i) {
+            i = end;
+            continue;
         }
-        let code = line.find("//").map_or(*line, |at| &line[..at]);
-        out.push_str(code);
-        out.push('\n');
+        out.push(lexed[i].0);
+        i += 1;
     }
     out
 }
 
-/// Whether the lines after a `#[cfg(test)]` declare a module.
-fn opens_test_module(rest: &[&str]) -> bool {
-    rest.iter()
-        .map(|l| l.trim())
-        .find(|l| !l.starts_with("#["))
-        .is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub(crate) mod "))
+/// `text` without comments, each char tagged code or literal, so a `//` or a
+/// brace inside a string or char literal is never read as syntax (#9121).
+fn lex(text: &str) -> Vec<Lexed> {
+    let s: Vec<char> = text.chars().collect();
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let next = s.get(i + 1).copied();
+        let end = match (s[i], next) {
+            ('/', Some('/')) => {
+                let end = s[i..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(s.len(), |n| i + n);
+                i = end;
+                continue;
+            }
+            ('/', Some('*')) => {
+                i = block_comment_end(&s, i);
+                out.push((' ', true));
+                continue;
+            }
+            ('"', _) => Some(string_end(&s, i + 1, 0)),
+            ('r', _) => raw_string_start(&s, i).map(|(hashes, body)| string_end(&s, body, hashes)),
+            ('\'', _) => char_literal_end(&s, i),
+            _ => None,
+        };
+        match end {
+            Some(end) => {
+                out.extend(s[i..end].iter().map(|&c| (c, false)));
+                i = end;
+            }
+            None => {
+                out.push((s[i], true));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The index past the `*/` closing the (nestable) block comment at `at`.
+fn block_comment_end(s: &[char], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = at;
+    while i + 1 < s.len() {
+        match (s[i], s[i + 1]) {
+            ('/', '*') => depth += 1,
+            ('*', '/') => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 2;
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    s.len()
+}
+
+/// The index past the quote closing a string whose body starts at `body`.
+/// `hashes` is the raw-string `#` count; a raw string has no escapes.
+fn string_end(s: &[char], body: usize, hashes: usize) -> usize {
+    let mut i = body;
+    while i < s.len() {
+        if hashes == 0 && s[i] == '\\' {
+            i += 2;
+            continue;
+        }
+        if s[i] == '"' && (1..=hashes).all(|n| s.get(i + n) == Some(&'#')) {
+            return i + 1 + hashes;
+        }
+        i += 1;
+    }
+    s.len()
+}
+
+/// For a raw string `r#"…"#` (or `br"…"`) at `at`: its `#` count and the index
+/// where its body starts. A raw identifier like `r#type` is not one.
+fn raw_string_start(s: &[char], at: usize) -> Option<(usize, usize)> {
+    let before = at.checked_sub(1).map(|p| s[p]);
+    let prefixed = match before {
+        Some('b') => !at.checked_sub(2).is_some_and(|p| is_ident(s[p])),
+        Some(c) => !is_ident(c),
+        None => true,
+    };
+    if !prefixed {
+        return None;
+    }
+    let hashes = s[at + 1..].iter().take_while(|&&c| c == '#').count();
+    (s.get(at + 1 + hashes) == Some(&'"')).then_some((hashes, at + 2 + hashes))
+}
+
+/// The index past a char literal at `at`, or `None` for a lifetime.
+fn char_literal_end(s: &[char], at: usize) -> Option<usize> {
+    if s.get(at + 1) == Some(&'\\') {
+        let close = s.iter().skip(at + 3).take(10).position(|&c| c == '\'')?;
+        return Some(at + 3 + close + 1);
+    }
+    (s.get(at + 1).is_some_and(|&c| c != '\'') && s.get(at + 2) == Some(&'\'')).then_some(at + 3)
+}
+
+/// When a `#[cfg(test)]` module starts at `at`, the index just past it: past
+/// the `;` of a declaration, or past the brace closing an inline body.
+fn test_module_end(src: &[Lexed], at: usize) -> Option<usize> {
+    let mut i = eat(src, at, "#[cfg(test)]")?;
+    loop {
+        i = skip_ws(src, i);
+        if eat(src, i, "#[").is_none() {
+            break;
+        }
+        i = matching(src, i + 1, '[', ']')?;
+    }
+    if let Some(after) = eat(src, i, "pub") {
+        i = skip_ws(src, after);
+        if eat(src, i, "(").is_some() {
+            i = skip_ws(src, matching(src, i, '(', ')')?);
+        }
+    }
+    let after_mod = eat(src, i, "mod")?;
+    let name = skip_ws(src, after_mod);
+    if name == after_mod {
+        return None;
+    }
+    i = name;
+    while src.get(i).is_some_and(|&(c, code)| code && is_ident(c)) {
+        i += 1;
+    }
+    if i == name {
+        return None;
+    }
+    i = skip_ws(src, i);
+    match src.get(i) {
+        Some((';', true)) => Some(i + 1),
+        Some(('{', true)) => matching(src, i, '{', '}'),
+        _ => None,
+    }
+}
+
+/// `at + needle.len()` when the code at `at` spells `needle`.
+fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
+    let mut i = at;
+    for want in needle.chars() {
+        match src.get(i) {
+            Some(&(c, true)) if c == want => i += 1,
+            _ => return None,
+        }
+    }
+    Some(i)
+}
+
+fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
+    while src
+        .get(i)
+        .is_some_and(|&(c, code)| code && c.is_whitespace())
+    {
+        i += 1;
+    }
+    i
+}
+
+/// The index past the `close` balancing the `open` at `at`. Literal chars
+/// never count, so a `"}"` inside a test module cannot end it early.
+fn matching(src: &[Lexed], at: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &(c, code)) in src.iter().enumerate().skip(at) {
+        if code && c == open {
+            depth += 1;
+        } else if code && c == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+    }
+    None
 }
 
 /// Every finding in one file's production code.
@@ -110,7 +318,7 @@ fn scan_file(rel: &str, text: &str) -> Vec<Finding> {
     let code = code_only(text);
     let mut out: Vec<Finding> = CREDENTIAL_READS
         .iter()
-        .filter(|api| code.contains(**api))
+        .filter(|api| names(&code, api))
         .filter(|api| {
             !ALLOWED
                 .iter()
@@ -118,7 +326,8 @@ fn scan_file(rel: &str, text: &str) -> Vec<Finding> {
         })
         .map(|api| (rel.to_string(), (*api).to_string()))
         .collect();
-    if code.contains("Configurator::new()")
+    // #9121: the bare type name, so an aliased import is caught too.
+    if names_word(&code, "Configurator")
         && !(CONFIGURATOR_SITES.contains(&rel)
             && code.contains("secret_source::credential_store()"))
     {
@@ -182,19 +391,25 @@ fn no_credential_read_bypasses_secret_source() {
             .join("\n  ")
     );
 
-    let stale: Vec<&str> = ALLOWED
+    let code_of = |file: &str| {
+        sources
+            .iter()
+            .find(|(rel, _)| rel == file)
+            .map(|(_, text)| code_only(text))
+    };
+    let mut stale: Vec<&str> = ALLOWED
         .iter()
-        .filter(|(file, api, _)| {
-            *api != "*"
-                && !sources
-                    .iter()
-                    .any(|(rel, text)| rel == file && code_only(text).contains(*api))
-        })
+        .filter(|(file, api, _)| *api != "*" && !code_of(file).is_some_and(|c| names(&c, api)))
         .map(|(file, _, _)| *file)
         .collect();
+    stale.extend(
+        CONFIGURATOR_SITES
+            .iter()
+            .filter(|file| !code_of(file).is_some_and(|c| names_word(&c, "Configurator"))),
+    );
     assert!(
         stale.is_empty(),
-        "these ALLOWED entries no longer match; delete them: {stale:?}"
+        "these allowlist entries no longer match; delete them: {stale:?}"
     );
 }
 
@@ -207,15 +422,42 @@ fn the_scan_flags_a_direct_read() {
     let direct = "fn f() { let s = default_store(); }\n";
     assert_eq!(
         scan_file("daemon/new_route.rs", direct),
-        vec![("daemon/new_route.rs".into(), "default_store(".into())]
+        vec![("daemon/new_route.rs".into(), "default_store".into())]
     );
 
     let other_store = "let c = Configurator::new(); c.build(m, &MemoryKeyStore::new());\n";
     assert_eq!(scan_file("activity/classifier.rs", other_store).len(), 1);
 
-    let commented = "// default_store() is not called here\n";
+    let commented = "// default_store() is not called here\n/* nor default_store() */\n";
     assert!(scan_file("daemon/new_route.rs", commented).is_empty());
 
     let test_module = "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn g() { default_store(); }\n}\n";
     assert!(scan_file("daemon/new_route.rs", test_module).is_empty());
+
+    let declared = "#[cfg(test)]\n#[path = \"x_tests.rs\"]\npub(crate) mod tests;\nfn f() {}\n";
+    assert_eq!(code_only(declared).trim(), "fn f() {}");
+
+    let near_miss = "fn my_default_store() {}\n";
+    assert!(scan_file("daemon/new_route.rs", near_miss).is_empty());
+}
+
+/// Why (#9121): blind spots of the first scan — code after a `mod tests;`
+/// declaration, an aliased import, a URL literal whose `//` hid the rest of
+/// its line, and a brace inside an inline test module's string — each let a
+/// direct read through.
+/// Test: this test.
+#[test]
+fn the_scan_reads_past_test_modules_aliases_and_urls() {
+    let missed: Vec<&str> = [
+        "#[cfg(test)]\nmod tests;\nfn f() { default_store(); }",
+        "use trusty_common::credentials::default_store as ds;\nfn f() { ds(); }",
+        "fn f() { let u = \"https://x\"; default_store(); }",
+        "#[cfg(test)]\nmod tests {\n    fn g() { let b = \"}\"; let c = '}'; }\n}\nfn f() { default_store(); }",
+        "fn f() { let u = r#\"a \" // b\"#; default_store(); }",
+        "use trusty_common::inference::Configurator as C;\nfn f() { C::new(); }",
+    ]
+    .into_iter()
+    .filter(|fixture| scan_file("daemon/new_route.rs", fixture).is_empty())
+    .collect();
+    assert!(missed.is_empty(), "not flagged: {missed:#?}");
 }
