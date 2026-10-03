@@ -435,6 +435,12 @@ async fn a_release_catch_up_returns_while_a_delete_is_queued() {
         !h.indexer.read().await.is_write_quarantined(),
         "the re-open runs under the PATCH's permit"
     );
+    // Read before the DELETE, which drops the index's progress entry.
+    let progress = state
+        .reindex_progress
+        .get(&h.id)
+        .map(|p| Arc::clone(&p))
+        .expect("progress entry");
 
     drop(permit);
     drop(teardown);
@@ -446,11 +452,6 @@ async fn a_release_catch_up_returns_while_a_delete_is_queued() {
         .expect("the delete succeeds");
     assert_eq!(body["removed"], true, "{body}");
     // The spawned catch-up must end before the sandbox, and TRUSTY_DATA_DIR, go.
-    let progress = state
-        .reindex_progress
-        .get(&h.id)
-        .map(|p| Arc::clone(&p))
-        .expect("progress entry");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     while progress.status.load() == ReindexStatus::Running {
         assert!(
