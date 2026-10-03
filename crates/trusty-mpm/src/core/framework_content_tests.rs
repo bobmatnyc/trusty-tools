@@ -120,7 +120,7 @@ fn require_instruction_names_an_absent_file() {
 
 /// The repository's PM instruction package with one section id this binary
 /// does not know, as a newer content release could ship it.
-fn package_with_an_unknown_section() -> String {
+pub(crate) fn package_with_an_unknown_section() -> String {
     let mut package: serde_json::Value =
         serde_json::from_str(repo_content().required("pm-instruction-package.json"))
             .expect("the repository package is JSON");
@@ -133,7 +133,7 @@ fn package_with_an_unknown_section() -> String {
 
 /// A trusted checkout at `root` carrying the repository's required
 /// instructions and one skill, with `package` as the PM instruction package.
-fn fake_checkout_with_package(root: &Path, package: &str) {
+pub(crate) fn fake_checkout_with_package(root: &Path, package: &str) {
     let content = repo_content();
     let mut files: Vec<(String, String)> = REQUIRED_INSTRUCTIONS
         .iter()

@@ -11,9 +11,12 @@
 //! bundle that fails verification is FAIL, or WARN when a dev checkout still
 //! serves. The message carries the source (`dev`/`bundle`/`none`), the tag,
 //! the sha256 and the binary version. Read-only.
+//! A source whose PM package this binary cannot parse is FAIL (#9012).
 //! Test: `doctor_content_tests.rs`.
 
 use std::path::Path;
+
+use trusty_agents_common::agent_content::AgentContentError;
 
 use crate::content::status::{ContentStatus, content_status};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
@@ -35,7 +38,33 @@ pub(crate) fn check_content(project_dir: Option<&Path>, cache_dir: Option<&Path>
             "no home directory resolves, so the content cache cannot be located",
         );
     };
-    grade(&content_status(cache_dir, project_dir))
+    let row = grade(&content_status(cache_dir, project_dir));
+    if row.status == CheckStatus::Fail {
+        return row;
+    }
+    match unusable_package(project_dir) {
+        Some(message) => DoctorCheck::new(CHECK_NAME, CheckStatus::Fail, message),
+        None => row,
+    }
+}
+
+/// The refusal message when the content a launch of `project_dir` resolves has
+/// a PM package this binary cannot parse (#9012), else `None`.
+///
+/// Why: bundle integrity alone grades a verified bundle Ok while every launch
+/// is refused with `AgentContentError::Invalid`.
+/// What: loads the content through the launch path's resolver. Only `Invalid`
+/// counts; a missing or unreadable source is already graded by [`grade`].
+/// Test: `content_row_fails_when_the_pm_package_does_not_parse`.
+fn unusable_package(project_dir: Option<&Path>) -> Option<String> {
+    let loaded = match project_dir {
+        Some(dir) => crate::core::content_source::framework_content_for(dir),
+        None => crate::core::content_source::framework_content(),
+    };
+    match loaded {
+        Err(err @ AgentContentError::Invalid { .. }) => Some(err.to_string()),
+        _ => None,
+    }
 }
 
 /// The row for `status`. Nothing installed and no checkout is WARN: since

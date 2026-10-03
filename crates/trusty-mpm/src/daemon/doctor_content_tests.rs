@@ -71,3 +71,20 @@ fn content_row_fails_on_a_tampered_bundle() {
     assert_eq!(row.status, CheckStatus::Fail);
     assert!(row.message.contains("UNHEALTHY"), "{}", row.message);
 }
+
+/// #9012: a verified-or-serving source whose PM package this binary cannot
+/// parse is FAIL, naming the remedy, not OK.
+#[test]
+fn content_row_fails_when_the_pm_package_does_not_parse() {
+    use crate::core::framework_content::tests::{
+        fake_checkout_with_package, package_with_an_unknown_section,
+    };
+    let checkout = tempfile::tempdir().unwrap();
+    fake_checkout_with_package(checkout.path(), &package_with_an_unknown_section());
+    let project = checkout.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let row = check_content(Some(&project), Some(cache.path()));
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("tm content update"), "{}", row.message);
+}

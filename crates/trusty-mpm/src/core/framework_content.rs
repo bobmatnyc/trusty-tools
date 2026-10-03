@@ -223,4 +223,4 @@ impl FrameworkContent {
 
 #[cfg(test)]
 #[path = "framework_content_tests.rs"]
-mod tests;
+pub(crate) mod tests;
