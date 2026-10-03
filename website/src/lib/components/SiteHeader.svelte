@@ -1,12 +1,12 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import ThemeToggle from './ThemeToggle.svelte';
-	import { GITHUB_URL, NAV_LINKS } from '$lib/site';
+	import { currentNavHref, GITHUB_URL, NAV_LINKS } from '$lib/site';
 
 	// `aria-current="page"` is the only nav-state carrier a screen reader gets;
 	// the rust underline below is the visual half of the same signal.
-	const isCurrent = (href: string) =>
-		href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
+	const current = $derived(currentNavHref(page.url.pathname));
+	const isCurrent = (href: string) => href === current;
 </script>
 
 <header

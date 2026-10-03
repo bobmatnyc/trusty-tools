@@ -1,8 +1,9 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CRATE_GROUPS, FLAGSHIPS, INSTALL_OPTIONS } from './site';
+import { parseManifest, routeToHref } from './docs/manifest';
+import { CRATE_GROUPS, FLAGSHIPS, INSTALL_OPTIONS, NAV_LINKS } from './site';
 
 /**
  * Why: three landing-page claims are grounded in files OUTSIDE `website/` — the
@@ -11,8 +12,10 @@ import { CRATE_GROUPS, FLAGSHIPS, INSTALL_OPTIONS } from './site';
  * lands under `crates/**`, which the `unit` project does not run for, so these
  * belong to the CORPUS job (#8272). The MSRV and installer-source cases stay in
  * `site.test.ts`: root `Cargo.toml` and the two `crates/trusty-installer`
- * sources are exact unit triggers.
- * What: existence checks against the real checkout, and one `crates/` listing.
+ * sources are exact unit triggers. A `/docs` nav link rests on
+ * `docs/public-manifest.tsv` in the same way.
+ * What: existence checks against the real checkout, one `crates/` listing, and
+ * one manifest parse.
  * Test: this file.
  */
 
@@ -57,6 +60,20 @@ describe('landing-page content', () => {
 		expect(named.length).toBeGreaterThan(10);
 		for (const name of named) {
 			expect(onDisk, `crates/${name}`).toContain(name);
+		}
+	});
+});
+
+describe('top navigation is grounded in the published docs', () => {
+	it('every /docs nav link is a page docs/public-manifest.tsv publishes', () => {
+		const manifest = parseManifest(
+			readFileSync(path.join(REPO_ROOT, 'docs/public-manifest.tsv'), 'utf8')
+		);
+		const published = new Set(manifest.pages.map((p) => routeToHref(p.route)));
+		const docLinks = NAV_LINKS.filter((l) => l.href.startsWith('/docs'));
+		expect(docLinks.map((l) => l.href)).toContain('/docs/roadmap');
+		for (const { href } of docLinks) {
+			expect(published, href).toContain(href);
 		}
 	});
 });
