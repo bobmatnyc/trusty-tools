@@ -476,6 +476,9 @@ async fn parity_sessions_output_agrees_across_transports() {
     )
     .await;
     assert_eq!(body["lines"], json!(7), "the argument must reach the body");
+    // #8407: the input-box state is on the wire, and a session with no live
+    // pane reports it unknown (`null`), never `empty`.
+    assert_eq!(body.get("input_box"), Some(&Value::Null), "{body}");
     assert_same("mpm.sessions.output", body, result, &[]);
 }
 

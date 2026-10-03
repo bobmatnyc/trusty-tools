@@ -20,6 +20,8 @@ pub mod builder_slot_routes;
 pub mod bus;
 /// Response-size bound for the `session_context_catchup` digest (#5557).
 pub mod catchup_bounds;
+/// The `session_context_catchup` response body and its `resolved_note` (#8408).
+pub mod catchup_payload;
 /// Whether the repo has moved past the snapshot a resume would act on (#7501).
 pub mod catchup_superseded;
 pub mod claude_config;

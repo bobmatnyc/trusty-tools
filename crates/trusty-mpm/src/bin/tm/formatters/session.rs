@@ -83,6 +83,22 @@ pub(crate) fn print_compression_stats(body: &serde_json::Value) {
     println!("\n[summarized: {original} \u{2192} {compressed} bytes ({reduction}% reduction)]");
 }
 
+/// The `[input box: …]` note for a `GET /sessions/{id}/output` body (#8407).
+///
+/// Why: a plain pane capture shows Claude Code's dim next-prompt suggestion
+/// exactly like a typed draft; the daemon classifies the box so a reader never
+/// has to parse escape codes.
+/// What: `[input box: empty|suggestion|typed]` from the body's `input_box`, or
+/// `[input box: unknown]` when it is `null` or absent (an older daemon).
+/// Test: `input_box_note_names_the_state`.
+pub(crate) fn input_box_note(body: &serde_json::Value) -> String {
+    let state = body
+        .get("input_box")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    format!("[input box: {state}]")
+}
+
 /// Render a "`<Label>: N deployed, M skipped, K unchanged`" summary line.
 ///
 /// Why (#1917): `session start` prints matching three-way deploy summaries

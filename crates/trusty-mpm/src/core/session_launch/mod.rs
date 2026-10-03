@@ -569,26 +569,29 @@ impl PrepError {
 /// the managed constructors relocate every `.claude/` path on it onto the
 /// workspace); `hook_exe` is the stable binary the project-tier hooks writer
 /// should bake, `None` meaning "resolve the running one"; `memory_reachable`
-/// pins whether trusty-memory answered, `None` meaning "probe the host".
+/// pins whether trusty-memory answered, `None` meaning "probe the host";
+/// `palace_registry` (#8311) is the trusty-memory registry the palace alias is
+/// written to, `None` meaning "the one the trusty-memory daemon reads".
 /// Test: `repair_closes_gaps_on_incomplete_workspace`,
 /// `prepare_session_disables_auto_memory_when_trusty_memory_is_reachable`,
-/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`, plus
+/// `prepare_session_restores_auto_memory_when_trusty_memory_is_down`,
+/// `session_prep_writes_the_palace_alias_under_the_named_registry`, plus
 /// every `prepare_session_*` test.
 #[derive(Clone, Copy, Default)]
 pub(super) struct HostInputs<'a> {
     pub(super) home: Option<&'a Path>,
     pub(super) hook_exe: Option<&'a Path>,
     pub(super) memory_reachable: Option<bool>,
+    pub(super) palace_registry: Option<&'a Path>,
 }
 
 impl<'a> HostInputs<'a> {
-    /// The production shape: a real home, the running binary for hooks, and a
-    /// live reachability probe.
+    /// The production shape: a real home, the running binary for hooks, a
+    /// live reachability probe, and the daemon's own palace registry.
     pub(super) fn with_home(home: Option<&'a Path>) -> Self {
         Self {
             home,
-            hook_exe: None,
-            memory_reachable: None,
+            ..Self::default()
         }
     }
 }
@@ -1069,7 +1072,8 @@ pub(super) fn prepare_session_inner(
     // and this call carries the standalone `prepare_session` path. Best-effort
     // and side-effect-only; never fails the launch.
     if plan.inject_trusty_memory {
-        maybe_register_palace_alias(project_dir, repo_url);
+        // #8311: an injected registry is the only one written.
+        maybe_register_palace_alias(project_dir, repo_url, host.palace_registry);
     }
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`

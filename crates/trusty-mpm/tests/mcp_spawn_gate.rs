@@ -31,10 +31,44 @@ use trusty_mpm::daemon::managed_routes::{SpawnParams, spawn_managed};
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::project::Project;
 
-// #6671: `spawn_managed` reaches `DaemonState::project_registry()`, which seeds
-// from the config file under `$HOME`, so an isolated framework root alone still
-// admits the developer's registered projects.
-use crate::common;
+/// A scratch `$HOME` for one test, restored when the guard drops (#6671, #6127).
+///
+/// Why: `spawn_managed` reaches `DaemonState::project_registry()`, which seeds
+/// from the config file under `$HOME`, so an isolated framework root alone
+/// still admits the developer's registered projects (#6671). This used to call
+/// `common::scratch_home()`, which repoints `$HOME` for the rest of the
+/// process. This module shares the `env_serial` process with the live-tmux
+/// pane test, whose #5784 gate then refused tmux (#6127).
+/// What: sets `$HOME` to a fresh temp dir; `Drop` restores the prior value (or
+/// its absence) before the directory is removed. Panic-safe.
+/// Test: `spawned_tm_home_isolation::no_env_serial_module_keeps_a_process_wide_scratch_home`.
+struct ScratchHome {
+    prev: Option<std::ffi::OsString>,
+    _dir: TempDir,
+}
+
+impl ScratchHome {
+    fn set() -> Self {
+        let dir = TempDir::new().expect("scratch $HOME");
+        let prev = std::env::var_os("HOME");
+        // SAFETY: `env_serial` runs one test at a time (#8345), and every test
+        // here is also `#[serial]`.
+        unsafe { std::env::set_var("HOME", dir.path()) };
+        Self { prev, _dir: dir }
+    }
+}
+
+impl Drop for ScratchHome {
+    fn drop(&mut self) {
+        // SAFETY: see `set`. Runs before `_dir` is removed.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+}
 
 /// Env var the daemon reads to force-enable MCP spawning (mirrors
 /// `daemon::managed_routes::mcp_spawn_gate::ALLOW_MCP_SPAWN_ENV`, duplicated
@@ -112,7 +146,7 @@ fn base_params(repo_url: &str, mcp_initiated: bool) -> SpawnParams {
 async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
     let _env = EnvGuard::unset();
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -151,7 +185,7 @@ async fn mcp_initiated_spawn_rejected_by_default_creates_nothing() {
 async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
     let _env = EnvGuard::set("1");
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -202,7 +236,7 @@ async fn mcp_initiated_spawn_rejected_for_unregistered_repo_when_enabled() {
 async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
     let _env = EnvGuard::set("1");
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -266,7 +300,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
 async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning() {
     let _env = EnvGuard::set("1");
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -332,7 +366,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
 async fn mcp_initiated_spawn_rejects_a_same_basename_directory_outside_the_project() {
     let _env = EnvGuard::set("1");
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,
@@ -394,7 +428,7 @@ async fn mcp_initiated_spawn_rejects_a_same_basename_directory_outside_the_proje
 async fn cli_origin_spawn_bypasses_mcp_gate_even_when_disabled() {
     let _env = EnvGuard::unset();
 
-    common::scratch_home(); // #6671
+    let _home = ScratchHome::set(); // #6671, #6127
     let root = TempDir::new().expect("root tempdir");
     let state = std::sync::Arc::new(
         DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await,

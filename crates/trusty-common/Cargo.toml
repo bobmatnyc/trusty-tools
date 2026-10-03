@@ -135,7 +135,13 @@ name = "trusty-common"
 # the `symgraph::server` module plus `symgraph-server` feature are removed
 # (#8926). Listed under `### Breaking` in CHANGELOG.md; 0.52.8 was never
 # published, so 0.53.0 follows 0.52.7 on crates.io.
-version = "0.53.2"
+# 0.53.3 (Refs #8408): patch — 0.53.2 is taken by PR #9122. Additive only:
+# `catchup::resolve::{session_name_of, resolve_snapshot_for_identity,
+# CallerIdentity::with_tmux_session_created}`, the `tmux_session_created`
+# field on the `#[non_exhaustive]` `CallerIdentity`, and the
+# `ResolutionPath::TmuxSession` variant on the `#[non_exhaustive]` enum. No
+# public item was removed or changed shape.
+version = "0.53.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

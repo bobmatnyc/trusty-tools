@@ -184,6 +184,7 @@ pub fn prepare_session_for_repair_under(
             home,
             hook_exe,
             memory_reachable,
+            palace_registry: None,
         },
     )
 }
@@ -419,6 +420,7 @@ pub fn prepare_session_with_memory_reachable(
             home,
             hook_exe: None,
             memory_reachable: Some(memory_reachable),
+            palace_registry: None,
         },
     )
 }

@@ -39,12 +39,19 @@ use trusty_common::palace_resolve::git_remote_origin;
 /// ([`trusty_common::repo_slug_from_git_remote`]) names, and — when they differ,
 /// the owner-repo palace is missing on disk, and the bare palace exists — calls
 /// [`trusty_common::palace_alias::PalaceAliasStore::register_alias`] in the
-/// trusty-memory registry dir ([`trusty_common::palace_alias::default_palace_registry_dir`]).
+/// trusty-memory registry dir: `registry_dir` when the caller names one (#8311),
+/// else [`trusty_common::palace_alias::default_palace_registry_dir`].
 /// Never returns a value or errors; failures are logged and ignored.
 /// Test: `creates_alias_for_split_brain`, `noop_when_owner_repo_exists`,
 /// `noop_when_no_bare_palace`, `noop_when_override_set`,
-/// `noop_when_project_is_pinned`.
-pub(crate) fn maybe_register_palace_alias(project_path: &Path, git_remote: Option<&str>) {
+/// `noop_when_project_is_pinned`, `a_named_registry_dir_is_the_only_one_written`,
+/// `noop_when_the_default_registry_dir_cannot_resolve`,
+/// `session_prep_writes_the_palace_alias_under_the_named_registry`.
+pub(crate) fn maybe_register_palace_alias(
+    project_path: &Path,
+    git_remote: Option<&str>,
+    registry_dir: Option<&Path>,
+) {
     // An explicit operator override means the palace name was chosen
     // deliberately — do not second-guess it with an alias.
     if trusty_common::palace_override_from_env().is_some() {
@@ -83,7 +90,13 @@ pub(crate) fn maybe_register_palace_alias(project_path: &Path, git_remote: Optio
         return;
     }
 
-    let registry_dir = match trusty_common::palace_alias::default_palace_registry_dir() {
+    // #8311: a named registry is the only one touched — the default resolver
+    // would also create the real trusty-memory data dir.
+    let resolved = match registry_dir {
+        Some(dir) => Ok(dir.to_path_buf()),
+        None => trusty_common::palace_alias::default_palace_registry_dir(),
+    };
+    let registry_dir = match resolved {
         Ok(dir) => dir,
         Err(e) => {
             tracing::debug!(
@@ -198,7 +211,7 @@ mod tests {
         let reg = registry_dir(data.path());
         make_palace(&reg, BARE); // bare exists, owner-repo does not.
 
-        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE));
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), None);
 
         assert_eq!(
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO)
@@ -223,7 +236,7 @@ mod tests {
         make_palace(&reg, BARE);
         make_palace(&reg, OWNER_REPO); // owner-repo already present.
 
-        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE));
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), None);
 
         assert_eq!(
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
@@ -245,7 +258,7 @@ mod tests {
         let reg = registry_dir(data.path());
         std::fs::create_dir_all(&reg).unwrap(); // registry dir exists, no palaces.
 
-        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE));
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), None);
 
         assert_eq!(
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
@@ -283,7 +296,7 @@ mod tests {
         let reg = registry_dir(data.path());
         make_palace(&reg, BARE); // the genuine split-brain: bare present, owner-repo absent.
 
-        maybe_register_palace_alias(project.path(), Some(REMOTE));
+        maybe_register_palace_alias(project.path(), Some(REMOTE), None);
 
         assert_eq!(
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
@@ -305,12 +318,65 @@ mod tests {
         let reg = registry_dir(data.path());
         make_palace(&reg, BARE); // split-brain present...
 
-        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE));
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), None);
 
         assert_eq!(
             PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap(),
             None,
             "an operator override must suppress alias registration"
+        );
+    }
+
+    /// Why (#8311): a caller that names a registry dir is isolating the write;
+    /// falling back to the default resolver would register the alias in the
+    /// real trusty-memory registry, which succeeds silently.
+    /// What: with a split-brain in BOTH the named dir and the ambient one
+    /// (`TRUSTY_DATA_DIR_OVERRIDE`), only the named dir gains the alias.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn a_named_registry_dir_is_the_only_one_written() {
+        let ambient = tempdir().unwrap();
+        let named = tempdir().unwrap();
+        let _override = EnvGuard::clear("TRUSTY_MEMORY_PALACE");
+        let _data = EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", ambient.path());
+        let ambient_reg = registry_dir(ambient.path());
+        make_palace(&ambient_reg, BARE);
+        make_palace(named.path(), BARE);
+
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), Some(named.path()));
+
+        assert_eq!(
+            PalaceAliasStore::resolve_alias(named.path(), OWNER_REPO)
+                .unwrap()
+                .as_deref(),
+            Some(BARE),
+            "the named registry must receive the alias"
+        );
+        assert_eq!(
+            PalaceAliasStore::resolve_alias(&ambient_reg, OWNER_REPO).unwrap(),
+            None,
+            "the ambient registry must be untouched when a registry dir is named"
+        );
+    }
+
+    /// Why: the error arm of the registry-dir resolution — a registry the
+    /// default resolver refuses must skip registration, never write elsewhere.
+    /// What: a relative `TRUSTY_DATA_DIR_OVERRIDE` makes the resolver fail; the
+    /// call returns without panicking and writes no alias file in the cwd.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn noop_when_the_default_registry_dir_cannot_resolve() {
+        let _override = EnvGuard::clear("TRUSTY_MEMORY_PALACE");
+        let _data = EnvGuard::set("TRUSTY_DATA_DIR_OVERRIDE", Path::new("relative-data"));
+        assert!(trusty_common::palace_alias::default_palace_registry_dir().is_err());
+
+        maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE), None);
+
+        assert!(
+            !Path::new("relative-data").exists(),
+            "a refused registry dir must not be created relative to the cwd"
         );
     }
 }

@@ -310,6 +310,10 @@ pub struct OutputResponse {
     pub compressed_bytes: usize,
     /// Applied compression level label, or `null` when uncompressed.
     pub compress_level: Option<String>,
+    /// #8407: the pane's input box — `empty`, `suggestion` (Claude Code's dim
+    /// next-prompt text) or `typed` — or `null` when it could not be read.
+    #[serde(default)]
+    pub input_box: Option<crate::core::input_box::InputBox>,
 }
 
 /// Response of `GET /projects`.

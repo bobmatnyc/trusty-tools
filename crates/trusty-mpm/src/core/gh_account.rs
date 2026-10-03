@@ -361,20 +361,20 @@ pub enum GhAuthProbe {
 /// Why: the seam lets the timeout arm — the one that produced the false
 /// "not authenticated" — be tested hermetically, with no live `gh` and no
 /// network.
-/// What: runs `run` on a bounded thread; `Some(text)` is parsed via
-/// [`parse_gh_account_status_from_auth_status`], `None` means `gh` could not be
-/// executed, and an elapsed bound yields [`GhAuthProbe::Inconclusive`].
+/// What: runs `run` on a bounded thread and classifies its result with
+/// [`crate::core::gh_login_probe::classify_auth_status`]; `Err` means `gh`
+/// could not be executed, and an elapsed bound yields
+/// [`GhAuthProbe::Inconclusive`].
 /// Test: `doctor_probe_tolerates_token_auth_latency`,
 /// `probe_beyond_bound_is_inconclusive`, `probe_missing_gh_is_inconclusive`.
 pub fn probe_gh_auth_with<F>(timeout: Duration, run: F) -> GhAuthProbe
 where
-    F: FnOnce() -> Option<String> + Send + 'static,
+    F: FnOnce() -> Result<trusty_common::gh::GhOutput, String> + Send + 'static,
 {
+    // #9091: one classifier for every `gh auth status` run, which keeps
+    // "could not run gh" apart from "gh reports no logged-in account".
     run_bounded(timeout, move || {
-        Some(match run() {
-            Some(text) => GhAuthProbe::Answered(parse_gh_account_status_from_auth_status(&text)),
-            None => GhAuthProbe::Inconclusive("`gh` could not be run (is it on PATH?)".to_string()),
-        })
+        Some(crate::core::gh_login_probe::classify_auth_status(run()))
     })
     .unwrap_or_else(|| {
         GhAuthProbe::Inconclusive(format!(
@@ -388,15 +388,14 @@ where
 /// Why: the single entry point every caller that needs an authoritative,
 /// all-auth-modes answer uses — `hosts.yml` alone cannot see env-token auth.
 /// What: delegates to [`probe_gh_auth_with`] with a runner that returns
-/// `gh auth status`'s stdout+stderr, or `None` when the spawn itself fails.
+/// `gh auth status`'s full output, or the spawn failure's reason.
 /// Test: covered via [`probe_gh_auth_with`]'s fake-runner tests.
 pub fn probe_gh_auth(timeout: Duration) -> GhAuthProbe {
     probe_gh_auth_with(timeout, || {
         // #5475: single `gh` entry point.
-        let out = trusty_common::gh::GhCommand::new(["auth", "status"])
+        trusty_common::gh::GhCommand::new(["auth", "status"])
             .output_blocking()
-            .ok()?;
-        Some(out.combined())
+            .map_err(|e| e.to_string())
     })
 }
 
@@ -1062,6 +1061,11 @@ github.com
   - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
 ";
 
+    /// A successful `gh auth status` run: gh writes a logged-in report to stdout.
+    fn gh_stdout(text: &str) -> trusty_common::gh::GhOutput {
+        trusty_common::gh::GhOutput::from_parts("auth status", Some(0), text, "")
+    }
+
     /// Single-account `gh auth status` output.
     const SINGLE_AUTH_STATUS: &str = "\
 github.com
@@ -1262,7 +1266,7 @@ github.com
     fn doctor_probe_tolerates_token_auth_latency() {
         let probe = probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || {
             std::thread::sleep(Duration::from_millis(400));
-            Some(TOKEN_AUTH_STATUS.to_string())
+            Ok(gh_stdout(TOKEN_AUTH_STATUS))
         });
         let GhAuthProbe::Answered(status) = probe else {
             panic!("token-auth probe must answer under GH_DOCTOR_TIMEOUT, got {probe:?}");
@@ -1277,7 +1281,7 @@ github.com
     fn probe_beyond_bound_is_inconclusive() {
         let probe = probe_gh_auth_with(Duration::from_millis(50), || {
             std::thread::sleep(Duration::from_millis(500));
-            Some(TOKEN_AUTH_STATUS.to_string())
+            Ok(gh_stdout(TOKEN_AUTH_STATUS))
         });
         match probe {
             GhAuthProbe::Inconclusive(reason) => assert!(reason.contains("did not answer")),
@@ -1290,8 +1294,8 @@ github.com
     /// Test: itself.
     #[test]
     fn probe_missing_gh_is_inconclusive() {
-        match probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || None) {
-            GhAuthProbe::Inconclusive(reason) => assert!(reason.contains("could not be run")),
+        match probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || Err("no such file".to_string())) {
+            GhAuthProbe::Inconclusive(reason) => assert!(reason.contains("could not run gh")),
             other => panic!("expected Inconclusive, got {other:?}"),
         }
     }
@@ -1300,7 +1304,7 @@ github.com
     /// Test: itself.
     #[test]
     fn probe_answered_parses_accounts() {
-        let probe = probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || Some(MULTI_AUTH_STATUS.to_string()));
+        let probe = probe_gh_auth_with(GH_DOCTOR_TIMEOUT, || Ok(gh_stdout(MULTI_AUTH_STATUS)));
         assert_eq!(
             probe,
             GhAuthProbe::Answered(parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS))

@@ -145,7 +145,9 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
 /// Why: `project_dir` is required (the stdio bridge forwards no cwd); the
 /// other four fields are all optional with documented defaults.
 /// What: requires `project_dir`; reads the optional `session_id`,
-/// `tmux_window`, `all_projects` (default false), `full` (default false), and
+/// `tmux_window`, `tmux_session_created` (#8408: an integer, or the digit
+/// string `tmux display-message` prints; anything else is absent),
+/// `all_projects` (default false), `full` (default false), and
 /// `sessions_offset` (default 0). A negative or non-integer `sessions_offset`
 /// reads as 0 rather than erroring — the first page is always the right answer
 /// to an unparseable one, and it is what an omitted value means (#5557).
@@ -160,6 +162,10 @@ async fn session_context_catchup<B: OrchestratorBackend>(
     let project_dir = required_str(args, "project_dir")?;
     let session_id = args.get("session_id").and_then(Value::as_str);
     let tmux_window = args.get("tmux_window").and_then(Value::as_str);
+    let tmux_session_created = args.get("tmux_session_created").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    });
     let all_projects = args
         .get("all_projects")
         .and_then(Value::as_bool)
@@ -174,6 +180,7 @@ async fn session_context_catchup<B: OrchestratorBackend>(
             &project_dir,
             session_id,
             tmux_window,
+            tmux_session_created,
             all_projects,
             full,
             sessions_offset,

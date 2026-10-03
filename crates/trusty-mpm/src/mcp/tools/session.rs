@@ -338,8 +338,12 @@ pub(super) fn session_tools() -> Vec<Value> {
              overall\" fallback. When that id owns nothing — a relaunch mints a \
              new session id inside the same window — passing `tmux_window` \
              resolves the newest snapshot THIS WINDOW paused in this project \
-             instead. `resolved_via` says which answered (`session_id`, \
-             `tmux_window`, or null), so do not read a window match as an exact \
+             instead; failing that, the newest one THIS NAMED TMUX SESSION \
+             paused since it was created, because a relaunch recreates the \
+             window (#8408) — pass `tmux_session_created`, without which that \
+             route resolves nothing. \
+             `resolved_via` says which answered (`session_id`, `tmux_window`, \
+             `tmux_session`, or null), so do not read a window match as an exact \
              one. `resolved_snapshot_superseded` is true when this checkout's \
              HEAD has moved past the commit the snapshot recorded: its \
              `in_progress` and `next_steps` may already be done, so read \
@@ -363,8 +367,9 @@ pub(super) fn session_tools() -> Vec<Value> {
              never will, so report it rather than reading five refs as five \
              restorable sessions. A hydration failure never fails the catch-up. \
              Each entry in `sessions` carries `owned`: true when the \
-             session is attributable to you (your `session_id` paused it, or \
-             you are in the window that did). A session you do not own is \
+             session is attributable to you (your `session_id` paused it, you \
+             are in the window that did, or it is the one snapshot resolved for \
+             you by tmux session name). A session you do not own is \
              listed with `format`, `paused_at` and `summary` only — its \
              `source_file`, `tmux_window`, `in_progress`, `next_steps` and \
              `git_context` are withheld, so the digest cannot hand you the \
@@ -395,7 +400,11 @@ pub(super) fn session_tools() -> Vec<Value> {
                     },
                     "tmux_window": {
                         "type": "string",
-                        "description": "The CALLER's own `session_name:window_index:window_id` from `tmux display-message`, e.g. `tm-dogfood:0:@230`. Used only when `session_id` resolved nothing: matches the `window_id` (`@230`) component against snapshots this project paused, newest first. Session names and window indexes are not matched — they get renamed and renumbered."
+                        "description": "The CALLER's own `session_name:window_index:window_id` from `tmux display-message`, e.g. `tm-dogfood:0:@230`. Used only when `session_id` resolved nothing: matches the `window_id` (`@230`) component against snapshots this project paused, newest first. When no window matches — a relaunch recreates the window with a new id — the session name (`tm-dogfood`) is matched instead (#8408), only together with `tmux_session_created`; a digits-only session name never matches. Window indexes are never matched."
+                    },
+                    "tmux_session_created": {
+                        "type": "integer",
+                        "description": "The CALLER's tmux session creation time, `tmux display-message -p '#{session_created}'` (Unix seconds). trusty-mpm names every tmux session `tm-<folder>`, so a later session reuses the name; the session-name route matches only snapshots paused after this time, and resolves nothing without it (#8408)."
                     },
                     "all_projects": {
                         "type": "boolean",
@@ -458,8 +467,7 @@ pub(super) fn session_tools() -> Vec<Value> {
              unless `prune_worktrees` is set to `false`. That prune NEVER removes a \
              worktree holding uncommitted or unpushed work (#4091) — any such \
              worktree is returned in `skipped_dirty_worktrees` with a reason and \
-             file/commit counts for you to relay to the user. Does NOT touch tmux — \
-             window realignment on resume stays a PM-side `tmux select-window` step.",
+             file/commit counts for you to relay to the user. Does NOT touch tmux.",
             json!({
                 "type": "object",
                 "properties": {

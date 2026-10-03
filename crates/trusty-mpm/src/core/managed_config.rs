@@ -246,7 +246,8 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     // that injector; this function is the choke point every spawn, resume and
     // in-place relaunch already reaches, so the healing keeps running. Best-effort
     // and side-effect-only — it never returns an error and never blocks a launch.
-    crate::core::session_launch::maybe_register_palace_alias(project_dir, None);
+    // #8311: `None` is the registry the trusty-memory daemon reads.
+    crate::core::session_launch::maybe_register_palace_alias(project_dir, None, None);
 
     // Phase 2: guarantee the COMPLETE roster from the resolved (submodule-aware)
     // framework source, matching `session_launch::prepare_session`. Refreshing

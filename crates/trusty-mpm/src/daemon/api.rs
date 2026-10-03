@@ -1042,8 +1042,10 @@ pub struct OutputQuery {
 /// without sending it a command.
 /// What: resolves the session (`404` if missing), captures the last `?lines=N`
 /// pane lines (default 50), optionally compresses it at `?compress=`, and
-/// returns `{ output, lines, original_bytes, compressed_bytes, compress_level }`.
-/// tmux being unavailable yields an empty `output` rather than an error.
+/// returns `{ output, lines, original_bytes, compressed_bytes, compress_level,
+/// input_box }`. `input_box` (#8407) is `empty`, `suggestion` or `typed`, or
+/// `null` when the box could not be read. tmux being unavailable yields an
+/// empty `output` rather than an error.
 /// Test: `get_output_returns_output_shape`, `output_unknown_session_is_404`.
 #[utoipa::path(
     get,

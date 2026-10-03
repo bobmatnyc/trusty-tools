@@ -122,6 +122,9 @@ pub(crate) enum SessionAction {
         summarize: bool,
     },
     /// Capture the current output of a session's tmux pane.
+    ///
+    /// Also prints `[input box: empty|suggestion|typed|unknown]` on stderr, so
+    /// a dim next-prompt suggestion is never read as a typed draft (#8407).
     Output {
         /// Session id or friendly name.
         id_or_name: String,
