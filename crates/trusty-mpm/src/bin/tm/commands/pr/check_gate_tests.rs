@@ -4,8 +4,8 @@
 //! "the merge was refused", so each refusal, each waiver and each pass is
 //! pinned — the pure half against rollup JSON, the `run` half against a fake
 //! `gh` that records every call, with no network.
-//! What: [`parse_required`], [`refusal`], [`waived`], [`commit_body`] and
-//! `merge::run` end to end.
+//! What: [`parse_required`], [`parse_ruleset_required`], [`refusal`],
+//! [`waived`], [`commit_body`] and `merge::run` end to end.
 //! Test: this file IS the test module.
 
 use std::cell::RefCell;
@@ -94,6 +94,7 @@ fn allow_failing_waives_only_a_named_non_required_check() {
     let gate = CheckGate {
         auto: false,
         allow_failing: &allow,
+        allow_no_checks: false,
         required: Some(&required),
     };
     let reason = refusal(&checks, &gate, 1).expect("a required red is never waived");
@@ -119,6 +120,7 @@ fn auto_refuses_while_a_non_required_check_runs() {
     let gate = CheckGate {
         auto: true,
         allow_failing: &[],
+        allow_no_checks: false,
         required: Some(&required),
     };
     let reason = refusal(&checks, &gate, 676).expect("refused");
@@ -127,12 +129,78 @@ fn auto_refuses_while_a_non_required_check_runs() {
         !reason.contains("CI gate"),
         "auto-merge waits on it: {reason}"
     );
-    // Without `--auto` GitHub decides on the running checks.
+    // FAILS BEFORE the #8614 fix round: without `--auto`, `gh pr merge` merges
+    // an UNSTABLE PR at once, so a running non-required check is no safer.
     let direct = CheckGate {
         auto: false,
         ..gate
     };
-    assert_eq!(refusal(&checks, &direct, 676), None);
+    let reason = refusal(&checks, &direct, 676).expect("refused without --auto too");
+    assert!(reason.contains("travel-live"), "{reason}");
+    assert!(!reason.contains("CI gate"), "gh blocks on it: {reason}");
+}
+
+/// A rules payload: one `required_status_checks` rule requiring `names`, plus
+/// a parameterless rule the reader must skip.
+fn ruleset(names: &[&str]) -> String {
+    serde_json::json!([
+        {"type": "deletion", "ruleset_id": 1},
+        {"type": "required_status_checks", "ruleset_id": 2, "parameters": {
+            "strict_required_status_checks_policy": false,
+            "required_status_checks": names.iter()
+                .map(|n| serde_json::json!({"context": n, "integration_id": 15368}))
+                .collect::<Vec<_>>()}}
+    ])
+    .to_string()
+}
+
+#[test]
+fn ruleset_payload_lists_the_required_checks() {
+    assert_eq!(
+        parse_ruleset_required(&ruleset(&["scaffold", "lint"])).expect("parses"),
+        vec!["scaffold".to_string(), "lint".to_string()]
+    );
+    // `gh api --paginate` prints one array per page, back to back.
+    let paged = format!(
+        "{}{}",
+        ruleset(&["scaffold"]),
+        ruleset(&["lint", "scaffold"])
+    );
+    assert_eq!(
+        parse_ruleset_required(&paged).expect("parses"),
+        vec!["scaffold".to_string(), "lint".to_string()]
+    );
+    assert_eq!(
+        parse_ruleset_required("[]").expect("parses"),
+        Vec::<String>::new()
+    );
+    assert!(parse_ruleset_required("").is_err(), "empty fails closed");
+    assert!(parse_ruleset_required("<html>").is_err());
+}
+
+#[test]
+fn no_registered_check_refuses_unless_one_is_required_or_allowed() {
+    let none = rollup(&[]);
+    let ci = vec!["CI gate".to_string()];
+    for required in [None, Some(&[][..])] {
+        let gate = CheckGate {
+            required,
+            ..CheckGate::default()
+        };
+        let reason = refusal(&none, &gate, 7).expect("refused");
+        assert!(reason.contains("--allow-no-checks"), "{reason}");
+        let allowed = CheckGate {
+            allow_no_checks: true,
+            ..gate
+        };
+        assert_eq!(refusal(&none, &allowed, 7), None);
+    }
+    // GitHub holds the merge for a required check that has not registered.
+    let gate = CheckGate {
+        required: Some(&ci),
+        ..CheckGate::default()
+    };
+    assert_eq!(refusal(&none, &gate, 7), None);
 }
 
 #[test]
@@ -148,35 +216,71 @@ fn a_waiver_heads_the_commit_body() {
 
 // ── `merge::run` end to end ──────────────────────────────────────────────
 
-/// A fake `gh`: the first route whose needle the joined argv contains
-/// answers; every call is recorded.
+/// A fake `gh`: the most recently registered route whose needle the joined
+/// argv contains answers; every call is recorded, and the `--body-file` of a
+/// `pr merge` call is read back while the file still exists.
 struct FakeGh {
-    /// (needle, stdout) pairs, all successful.
-    routes: Vec<(String, String)>,
+    /// (needle, answer), newest first.
+    routes: Vec<(String, GhRun)>,
     /// Every argv run, in order.
     seen: RefCell<Vec<String>>,
+    /// The contents of the `pr merge --body-file` file, once merged.
+    merge_body: RefCell<Option<String>>,
+}
+
+/// `gh pr view` for PR 42 on base `main` with `rollup` as its checks.
+fn view(rollup: &[serde_json::Value]) -> serde_json::Value {
+    serde_json::json!({"number": 42, "title": "fix: x",
+        "body": ATTRIBUTION_FOOTER, "state": "OPEN", "headRefName": "fix/x",
+        "baseRefName": "main", "statusCheckRollup": rollup})
 }
 
 impl FakeGh {
     fn new(view_rollup: &[serde_json::Value]) -> Self {
-        let view = serde_json::json!({"number": 42, "title": "fix: x",
-            "body": ATTRIBUTION_FOOTER, "state": "OPEN", "headRefName": "fix/x",
-            "baseRefName": "main", "statusCheckRollup": view_rollup});
-        Self {
-            routes: vec![
-                ("pr view".to_string(), view.to_string()),
-                ("pr merge".to_string(), String::new()),
-            ],
-            seen: RefCell::new(Vec::new()),
-        }
+        Self::from_view(&view(view_rollup))
     }
 
-    fn with_branch(mut self, payload: &str) -> Self {
-        self.routes.push((
-            "api repos/o/r/branches/main".to_string(),
-            payload.to_string(),
-        ));
+    /// A fake answering `pr view` with `view`, `pr merge` with success, and
+    /// the rules read with no rules.
+    fn from_view(view: &serde_json::Value) -> Self {
+        let gh = Self {
+            routes: Vec::new(),
+            seen: RefCell::new(Vec::new()),
+            merge_body: RefCell::new(None),
+        };
+        gh.route("pr view", true, &view.to_string())
+            .route("pr merge", true, "")
+            .route("api --paginate repos/o/r/rules/branches/main", true, "[]")
+    }
+
+    /// Register a route that wins over every earlier one with a matching
+    /// needle; a failing route answers on stderr.
+    fn route(mut self, needle: &str, success: bool, out: &str) -> Self {
+        let (stdout, stderr) = if success { (out, "") } else { ("", out) };
+        self.routes.insert(
+            0,
+            (
+                needle.to_string(),
+                GhRun {
+                    success,
+                    stdout: stdout.to_string(),
+                    stderr: stderr.to_string(),
+                },
+            ),
+        );
         self
+    }
+
+    fn with_branch(self, payload: &str) -> Self {
+        self.route("api repos/o/r/branches/main", true, payload)
+    }
+
+    fn with_rules(self, payload: &str) -> Self {
+        self.route(
+            "api --paginate repos/o/r/rules/branches/main",
+            true,
+            payload,
+        )
     }
 
     fn called(&self, needle: &str) -> bool {
@@ -188,16 +292,20 @@ impl GhRunner for FakeGh {
     fn run(&self, args: &[String]) -> anyhow::Result<GhRun> {
         let joined = args.join(" ");
         self.seen.borrow_mut().push(joined.clone());
-        let (_, stdout) = self
+        if joined.starts_with("pr merge") {
+            let path = args
+                .iter()
+                .position(|a| a == "--body-file")
+                .and_then(|i| args.get(i + 1))
+                .ok_or_else(|| anyhow::anyhow!("pr merge without --body-file: {joined}"))?;
+            *self.merge_body.borrow_mut() = Some(std::fs::read_to_string(path)?);
+        }
+        let (_, run) = self
             .routes
             .iter()
             .find(|(needle, _)| joined.contains(needle.as_str()))
             .ok_or_else(|| anyhow::anyhow!("unexpected gh call: {joined}"))?;
-        Ok(GhRun {
-            success: true,
-            stdout: stdout.clone(),
-            stderr: String::new(),
-        })
+        Ok(run.clone())
     }
 }
 
@@ -225,6 +333,8 @@ fn cli_parses_pr_merge_allow_failing_8614() {
     ]);
     assert_eq!(waived.allow_failing, vec!["travel-live", "scaffold"]);
     assert!(args(&[]).allow_failing.is_empty(), "no waiver by default");
+    assert!(args(&["--allow-no-checks"]).allow_no_checks);
+    assert!(!args(&[]).allow_no_checks, "checks required by default");
 }
 
 /// FAILS BEFORE #8614: `--auto` armed while a check auto-merge does not wait
@@ -233,6 +343,17 @@ fn cli_parses_pr_merge_allow_failing_8614() {
 fn run_auto_refuses_while_a_non_required_check_runs() {
     let gh = FakeGh::new(&[passed("CI gate"), running("travel-live")]).with_branch(UNPROTECTED);
     let code = merge::run(&gh, &args(&["--auto"])).expect("runs");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// FAILS BEFORE the #8614 fix round: a direct merge (no `--auto`) of an
+/// UNSTABLE PR went through while a non-required check was still running.
+#[test]
+fn run_refuses_while_a_non_required_check_runs_without_auto() {
+    let gh = FakeGh::new(&[running("CI gate"), running("travel-live")])
+        .with_branch(&protected(&["CI gate"]));
+    let code = merge::run(&gh, &args(&[])).expect("runs");
     assert_eq!(code, EXIT_BLOCKED);
     assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
 }
@@ -254,6 +375,7 @@ fn run_auto_arms_when_only_required_checks_run() {
     let code = merge::run(&gh, &args(&["--auto"])).expect("runs");
     assert_eq!(code, EXIT_OK);
     assert!(gh.called("api repos/o/r/branches/main"));
+    assert!(gh.called("api --paginate repos/o/r/rules/branches/main"));
     assert!(gh.called("pr merge 42"));
 }
 
@@ -263,6 +385,92 @@ fn run_allow_failing_merges_over_a_waived_check() {
         FakeGh::new(&[passed("CI gate"), failed("scaffold")]).with_branch(&protected(&["CI gate"]));
     let code = merge::run(&gh, &args(&["--allow-failing", "scaffold"])).expect("runs");
     assert_eq!(code, EXIT_OK);
+    assert!(gh.called("pr merge 42"));
+    let body = gh.merge_body.borrow().clone().expect("--body-file read");
+    assert!(body.starts_with("Merged over waived check(s)"), "{body}");
+    assert!(body.contains("scaffold"), "{body}");
+}
+
+/// A check a repository ruleset requires is never waived, even when branch
+/// protection requires nothing.
+#[test]
+fn run_never_waives_a_ruleset_required_check() {
+    let gh = FakeGh::new(&[passed("CI gate"), failed("scaffold")])
+        .with_branch(UNPROTECTED)
+        .with_rules(&ruleset(&["scaffold"]));
+    let code = merge::run(&gh, &args(&["--allow-failing", "scaffold"])).expect("runs");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// The failure arms of the required-list read: each one fails closed. The
+/// waiver plus a failed check is what makes the read happen.
+#[test]
+fn run_refuses_when_the_branch_read_fails() {
+    let cases = [
+        FakeGh::new(&[failed("scaffold")]).route(
+            "api repos/o/r/branches/main",
+            false,
+            "HTTP 404: Branch not found",
+        ),
+        FakeGh::new(&[failed("scaffold")]).with_branch("<html>not json</html>"),
+        FakeGh::new(&[failed("scaffold")])
+            .with_branch(UNPROTECTED)
+            .route(
+                "api --paginate repos/o/r/rules/branches/main",
+                false,
+                "HTTP 403: Resource not accessible",
+            ),
+    ];
+    for gh in cases {
+        let outcome = merge::run(&gh, &args(&["--allow-failing", "scaffold"]));
+        assert!(
+            outcome.as_ref().is_err() || outcome.as_ref().is_ok_and(|c| *c == EXIT_BLOCKED),
+            "{outcome:?}"
+        );
+        assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+    }
+}
+
+#[test]
+fn run_refuses_when_the_ruleset_read_fails() {
+    let gh = FakeGh::new(&[running("travel-live")])
+        .with_branch(UNPROTECTED)
+        .with_rules("not json");
+    let err = merge::run(&gh, &args(&[])).expect_err("an unreadable ruleset fails closed");
+    assert!(format!("{err:#}").contains("rules payload"), "{err:#}");
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// The `ensure!` on an empty `baseRefName`: nothing to read, nothing merges.
+#[test]
+fn run_refuses_without_a_base_ref_name() {
+    let mut v = view(&[failed("scaffold")]);
+    v["baseRefName"] = serde_json::json!("");
+    let gh = FakeGh::from_view(&v);
+    let err = merge::run(&gh, &args(&["--allow-failing", "scaffold"])).expect_err("refused");
+    assert!(format!("{err:#}").contains("baseRefName"), "{err:#}");
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// No check has registered and the base requires none: a merge now is
+/// unchecked.
+#[test]
+fn run_refuses_when_no_check_has_registered() {
+    let gh = FakeGh::new(&[]).with_branch(UNPROTECTED);
+    let code = merge::run(&gh, &args(&[])).expect("runs");
+    assert_eq!(code, EXIT_BLOCKED);
+    assert!(gh.called("api repos/o/r/branches/main"));
+    assert!(!gh.called("pr merge"), "{:?}", gh.seen.borrow());
+}
+
+/// `--allow-no-checks` is the named override for a repo with no CI.
+#[test]
+fn run_allow_no_checks_merges_a_pr_without_checks() {
+    let gh = FakeGh::new(&[]);
+    let code = merge::run(&gh, &args(&["--allow-no-checks"])).expect("runs");
+    assert_eq!(code, EXIT_OK);
+    assert!(!gh.called("branches/"), "{:?}", gh.seen.borrow());
     assert!(gh.called("pr merge 42"));
 }
 

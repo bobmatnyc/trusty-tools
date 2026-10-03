@@ -26,6 +26,7 @@ fn merge_args(no_cleanup: bool, no_delete_branch: bool, auto: bool) -> PrMergeAr
         no_delete_branch,
         no_cleanup,
         allow_failing: Vec::new(),
+        allow_no_checks: false,
         repo: None,
     }
 }

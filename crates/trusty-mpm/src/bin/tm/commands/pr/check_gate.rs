@@ -1,17 +1,20 @@
 //! The checks gate `tm pr merge` applies before it calls `gh pr merge` (#8614).
 //!
 //! Why: a version-control agent merged a PR whose failing checks it had itself
-//! found branch-caused, because the base branch required none of them. Two
-//! holes let that through: `tm pr merge` never read the checks, and GitHub's
-//! auto-merge waits only on REQUIRED checks, so a non-required check still
-//! running when `--auto` arms can fail afterwards and the PR merges anyway.
-//! What: [`refusal`] refuses while any check has settled non-passing, and,
-//! under `--auto`, while any check auto-merge would not wait for is still
-//! running. `--allow-failing <check>` waives one named check the PM has
-//! judged, and never a required one. The required list comes from the base
-//! branch's `.protection` on `repos/{o}/{r}/branches/{b}` ([`read_required`]),
-//! which answers for an unprotected branch too — the protection endpoint
-//! returns 404 there.
+//! found branch-caused, because the base branch required none of them. GitHub
+//! holds a merge only on REQUIRED checks: a direct `gh pr merge` lands an
+//! UNSTABLE PR at once, and `--auto` fires as soon as the required ones pass.
+//! Either way a non-required check that is still running can fail after the
+//! merge. The gate blocks the merge whatever branch protection declares.
+//! What: [`refusal`] refuses, with or without `--auto`, while any check has
+//! settled non-passing, while no check has registered and none is required,
+//! and while a check GitHub would not wait for is still running.
+//! `--allow-failing <check>` waives one named check the PM has judged, and
+//! never a required one; `--allow-no-checks` lets a repo with no CI merge.
+//! The required list ([`read_required`]) is the base branch's `.protection`
+//! on `repos/{o}/{r}/branches/{b}` — which answers for an unprotected branch
+//! too, where the protection endpoint returns 404 — plus every
+//! `required_status_checks` rule on `repos/{o}/{r}/rules/branches/{b}`.
 //! Test: `check_gate_tests.rs`.
 
 use serde::Deserialize;
@@ -53,7 +56,7 @@ struct RequiredChecks {
     checks: Vec<RequiredCheck>,
 }
 
-/// One entry of `required_status_checks.checks`.
+/// One required check, as branch protection and rulesets both shape it.
 #[derive(Debug, Deserialize)]
 struct RequiredCheck {
     /// The check name.
@@ -61,10 +64,38 @@ struct RequiredCheck {
     context: String,
 }
 
+/// One active rule `GET repos/{o}/{r}/rules/branches/{b}` returns.
+#[derive(Debug, Deserialize)]
+struct Rule {
+    /// The rule type; only `required_status_checks` names checks.
+    #[serde(default, rename = "type")]
+    kind: String,
+    /// The rule's parameters, absent for parameterless rules.
+    #[serde(default)]
+    parameters: Option<RuleParameters>,
+}
+
+/// The parameters of a `required_status_checks` rule.
+#[derive(Debug, Deserialize)]
+struct RuleParameters {
+    /// The checks the rule requires.
+    #[serde(default)]
+    required_status_checks: Vec<RequiredCheck>,
+}
+
+/// Append the trimmed `name` to `names` unless it is empty or already there.
+fn push_unique(names: &mut Vec<String>, name: &str) {
+    let name = name.trim();
+    if !name.is_empty() && !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+}
+
 /// The required check names a branch payload declares.
 ///
 /// Why: an unprotected branch, and protection with enforcement `off`, require
-/// nothing — so auto-merge waits on nothing and every running check counts.
+/// nothing — so GitHub holds the merge on nothing and every running check
+/// counts.
 /// What: `Some(names)` — `contexts` and `checks[].context`, deduplicated —
 /// when protection is enabled and enforced; `Some(empty)` when it is not;
 /// `None` when the payload carries no `protection` at all.
@@ -94,40 +125,93 @@ pub(crate) fn parse_required(json: &str) -> anyhow::Result<Option<Vec<String>>> 
     let mut names: Vec<String> = Vec::new();
     for name in rsc
         .contexts
-        .into_iter()
-        .chain(rsc.checks.into_iter().map(|c| c.context))
+        .iter()
+        .chain(rsc.checks.iter().map(|c| &c.context))
     {
-        let name = name.trim().to_string();
-        if !name.is_empty() && !names.contains(&name) {
-            names.push(name);
-        }
+        push_unique(&mut names, name);
     }
     Ok(Some(names))
 }
 
-/// Read the required check names on `base` from the branch endpoint.
+/// The check names the active rulesets on a branch require.
+///
+/// Why: a repository ruleset can require a check that branch protection does
+/// not list, and `--allow-failing` must never waive it.
+/// What: every `required_status_checks` rule's
+/// `parameters.required_status_checks[].context`, deduplicated. The payload
+/// may be several JSON arrays back to back — `gh api --paginate` prints one
+/// per page.
 ///
 /// # Errors
 ///
-/// `gh api` fails (an unknown branch or repo) or its payload is not JSON.
+/// The payload is empty or not a sequence of JSON arrays of rules.
 ///
-/// Test: `run_auto_arms_when_only_required_checks_run`.
+/// Test: `ruleset_payload_lists_the_required_checks`.
+pub(crate) fn parse_ruleset_required(json: &str) -> anyhow::Result<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    let mut pages = 0usize;
+    for page in serde_json::Deserializer::from_str(json).into_iter::<Vec<Rule>>() {
+        let page = page.map_err(|e| anyhow::anyhow!("cannot parse the rules payload: {e}"))?;
+        pages += 1;
+        for rule in page.iter().filter(|r| r.kind == "required_status_checks") {
+            for check in rule
+                .parameters
+                .iter()
+                .flat_map(|p| &p.required_status_checks)
+            {
+                push_unique(&mut names, &check.context);
+            }
+        }
+    }
+    anyhow::ensure!(pages > 0, "the rules payload is empty");
+    Ok(names)
+}
+
+/// Read the required check names on `base`: branch protection plus rulesets.
+///
+/// What: an unknown protection list stays unknown (`None`) whatever the
+/// rulesets add, since an unknown list waives nothing.
+///
+/// # Errors
+///
+/// Either `gh api` read fails (an unknown branch or repo, no access) or its
+/// payload does not parse — the merge is then refused rather than judged on
+/// half the requirements.
+///
+/// Test: `run_auto_arms_when_only_required_checks_run`,
+/// `run_never_waives_a_ruleset_required_check`,
+/// `run_refuses_when_the_ruleset_read_fails`,
+/// `run_refuses_when_the_branch_read_fails`.
 pub(crate) fn read_required<R: GhRunner>(
     gh: &R,
     slug: &str,
     base: &str,
 ) -> anyhow::Result<Option<Vec<String>>> {
     let a = argv(&["api", &format!("repos/{slug}/branches/{base}")]);
-    parse_required(&gh.run(&a)?.stdout_ok(&a)?)
+    let branch = parse_required(&gh.run(&a)?.stdout_ok(&a)?)?;
+    let r = argv(&[
+        "api",
+        "--paginate",
+        &format!("repos/{slug}/rules/branches/{base}"),
+    ]);
+    let ruleset = parse_ruleset_required(&gh.run(&r)?.stdout_ok(&r)?)?;
+    Ok(branch.map(|mut names| {
+        for name in &ruleset {
+            push_unique(&mut names, name);
+        }
+        names
+    }))
 }
 
 /// What the gate judges the checks against.
 #[derive(Debug, Default)]
 pub(crate) struct CheckGate<'a> {
-    /// `--auto`: the merge arms now and fires later.
+    /// `--auto`: the merge arms now and fires later. Named in the re-run hint.
     pub(crate) auto: bool,
     /// `--allow-failing` check names, matched exactly.
     pub(crate) allow_failing: &'a [String],
+    /// `--allow-no-checks`: a PR with no registered check may merge.
+    pub(crate) allow_no_checks: bool,
     /// The base branch's required check names; `None` when unknown.
     pub(crate) required: Option<&'a [String]>,
 }
@@ -153,27 +237,39 @@ impl CheckGate<'_> {
 
 /// Does the gate's answer depend on the required list?
 ///
-/// Why: the read is one more `gh` call, so it runs only when a running check
-/// meets `--auto` or a failing check meets `--allow-failing`.
-/// What: exactly those two conditions. A wrong `false` fails closed: an
-/// unknown list waives nothing and lets no running check through.
+/// Why: the reads are two more `gh` calls, so they run only when a check is
+/// running, a failing check meets `--allow-failing`, or no check has
+/// registered and `--allow-no-checks` was not passed.
+/// What: exactly those three conditions. A wrong `false` fails closed: an
+/// unknown list waives nothing, lets no running check through, and lets no
+/// PR without checks through.
 /// Test: `run_auto_arms_when_only_required_checks_run`,
-/// `run_without_running_or_waived_checks_reads_no_protection`.
-pub(crate) fn needs_required(rollup: &[RollupEntry], auto: bool, allow_failing: &[String]) -> bool {
+/// `run_without_running_or_waived_checks_reads_no_protection`,
+/// `run_allow_no_checks_merges_a_pr_without_checks`.
+pub(crate) fn needs_required(
+    rollup: &[RollupEntry],
+    allow_failing: &[String],
+    allow_no_checks: bool,
+) -> bool {
     let checks = deciding_per_check(rollup);
-    (auto && checks.iter().any(|e| e.is_unfinished()))
+    (checks.is_empty() && !allow_no_checks)
+        || checks.iter().any(|e| e.is_unfinished())
         || (!allow_failing.is_empty() && checks.iter().any(|e| e.failed()))
 }
 
 /// The one-line refusal for these checks, or `None` when they let the merge
 /// through.
 ///
-/// What: refuses while a deciding run has failed and is not waived; then,
-/// under `--auto`, while a deciding run is unfinished and is neither required
-/// (auto-merge waits for those) nor waived.
+/// What: with or without `--auto`, refuses while a deciding run has failed
+/// and is not waived; then while no check has registered, unless a check is
+/// required (GitHub holds the merge for it) or `--allow-no-checks` was
+/// passed; then while a deciding run is unfinished and is neither required
+/// nor waived. A running required check is left to GitHub: a direct merge is
+/// BLOCKED on it and auto-merge waits for it.
 /// Test: `a_failing_check_refuses_with_or_without_auto`,
 /// `allow_failing_waives_only_a_named_non_required_check`,
-/// `auto_refuses_while_a_non_required_check_runs`.
+/// `auto_refuses_while_a_non_required_check_runs`,
+/// `no_registered_check_refuses_unless_one_is_required_or_allowed`.
 pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> Option<String> {
     let checks = deciding_per_check(rollup);
     let failing: Vec<String> = checks
@@ -190,8 +286,16 @@ pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> 
             failing.join(", ")
         ));
     }
-    if !gate.auto {
-        return None;
+    let rerun = format!("tm pr merge {pr}{}", if gate.auto { " --auto" } else { "" });
+    if checks.is_empty() {
+        let none_required = gate.required.is_none_or(<[String]>::is_empty);
+        return (none_required && !gate.allow_no_checks).then(|| {
+            format!(
+                "no checks have registered yet and the base branch requires none — a merge \
+                 now would land unchecked (#8614); re-run `{rerun}` once CI registers, or \
+                 pass `--allow-no-checks` for a repo with no CI"
+            )
+        });
     }
     let running: Vec<String> = checks
         .iter()
@@ -200,9 +304,9 @@ pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> 
         .collect();
     (!running.is_empty()).then(|| {
         format!(
-            "{} check(s) still running that auto-merge would not wait for: {} — it waits only \
-             on required checks, so a later failure would still merge (#8614); re-run \
-             `tm pr merge {pr} --auto` once they settle",
+            "{} check(s) still running that GitHub would not hold the merge for: {} — only \
+             required checks hold it, so a later failure would still merge (#8614); re-run \
+             `{rerun}` once they settle",
             running.len(),
             running.join(", ")
         )
@@ -213,11 +317,12 @@ pub(crate) fn refusal(rollup: &[RollupEntry], gate: &CheckGate<'_>, pr: u64) -> 
 ///
 /// Why: a waived check is a merge decision a reviewer must be able to see
 /// afterwards, so [`commit_body`] records it in the landing commit.
-/// Test: `allow_failing_waives_only_a_named_non_required_check`.
+/// Test: `allow_failing_waives_only_a_named_non_required_check`,
+/// `run_allow_failing_merges_over_a_waived_check`.
 pub(crate) fn waived(rollup: &[RollupEntry], gate: &CheckGate<'_>) -> Vec<String> {
     deciding_per_check(rollup)
         .into_iter()
-        .filter(|e| (e.failed() || (gate.auto && e.is_unfinished())) && gate.waives(e))
+        .filter(|e| (e.failed() || e.is_unfinished()) && gate.waives(e))
         .map(RollupEntry::display_label)
         .collect()
 }

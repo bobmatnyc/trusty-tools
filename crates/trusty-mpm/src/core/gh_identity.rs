@@ -337,8 +337,10 @@ pub fn select_github_config<'a>(
 /// the repository, while `gh -R` from the same shell, using the token, could.
 /// What: a `project` binding resolves exactly as [`resolve_gh_env`] does,
 /// clearing the inherited identity. With no `project` binding, the `global`
-/// one sets its vars but removes nothing, so an inherited token still decides,
-/// as it does for the operator's own `gh`.
+/// one sets its vars but removes nothing. A global `config_dir` or `host`
+/// therefore leaves an inherited token deciding, as it does for the
+/// operator's own `gh`; a global `token_env` binding with no `config_dir`
+/// still sets `GH_TOKEN` and so overrides the shell token — explicit config wins.
 /// Test: `an_unbound_repo_keeps_the_callers_token_8383`,
 /// `a_project_binding_still_clears_the_callers_token_8383`.
 pub fn resolve_tiered_gh_env(

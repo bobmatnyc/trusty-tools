@@ -406,9 +406,12 @@ fn merged_after_failure<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> Option<Merge
 /// #8614: a PR [`decide`] lets through still meets [`check_gate::refusal`];
 /// the base branch's required checks are read only when
 /// [`check_gate::needs_required`] says the answer depends on them, and a
-/// waived check heads the commit body.
+/// waived check heads the commit body. A failed or unparseable read, or a
+/// view with no `baseRefName`, is an error and nothing merges.
 /// Test: `merge_refuses_without_calling_gh_merge`,
 /// `run_auto_refuses_while_a_non_required_check_runs`,
+/// `run_refuses_while_a_non_required_check_runs_without_auto`,
+/// `run_refuses_without_a_base_ref_name`,
 /// `run_refuses_a_failing_check_without_auto`,
 /// `run_auto_arms_when_only_required_checks_run`,
 /// `run_allow_failing_merges_over_a_waived_check`,
@@ -443,21 +446,23 @@ pub(crate) fn run<R: GhRunner>(gh: &R, args: &PrMergeArgs) -> anyhow::Result<i32
     }
 
     // #8614: the checks gate, after every other hold signal passed.
-    let required = if check_gate::needs_required(&view.rollup, args.auto, &args.allow_failing) {
-        let base = view.base_ref_name.trim();
-        anyhow::ensure!(
-            !base.is_empty(),
-            "`gh pr view {}` reported no baseRefName; cannot read its required checks",
-            args.pr
-        );
-        let slug = repo_slug(gh, args.repo.as_deref())?;
-        check_gate::read_required(gh, &slug, base)?
-    } else {
-        None
-    };
+    let required =
+        if check_gate::needs_required(&view.rollup, &args.allow_failing, args.allow_no_checks) {
+            let base = view.base_ref_name.trim();
+            anyhow::ensure!(
+                !base.is_empty(),
+                "`gh pr view {}` reported no baseRefName; cannot read its required checks",
+                args.pr
+            );
+            let slug = repo_slug(gh, args.repo.as_deref())?;
+            check_gate::read_required(gh, &slug, base)?
+        } else {
+            None
+        };
     let gate = CheckGate {
         auto: args.auto,
         allow_failing: &args.allow_failing,
+        allow_no_checks: args.allow_no_checks,
         required: required.as_deref(),
     };
     if let Some(reason) = check_gate::refusal(&view.rollup, &gate, args.pr) {
