@@ -500,6 +500,55 @@ async fn spawn_child_reports_a_missing_binary() {
     );
 }
 
+/// Why (#8103): `tctl status` starts trusty-analyze on demand, and the detached
+/// child inherited tctl's stderr, so the server's startup WARN and serving
+/// banner landed on the operator's terminal. A spec that names a log file must
+/// send the child's stderr there, owner-only.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn a_detached_child_with_a_stderr_log_writes_there_not_to_the_caller() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let log = tmp.path().join("child.stderr.log");
+    let spec = SpawnSpec::new("/bin/sh")
+        .arg("-c")
+        .arg("echo startup-banner-8103 >&2")
+        .stderr_to(&log);
+    let mut spawned = super::child::spawn_child("test-service", "k", &spec, true)
+        .await
+        .expect("spawn");
+    let _ = spawned.child.wait().await;
+    let text = std::fs::read_to_string(&log).expect("the log file holds the child's stderr");
+    assert!(text.contains("startup-banner-8103"), "{text:?}");
+    let mode = std::fs::metadata(&log).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the log is owner-only");
+}
+
+/// Fail-Open Check (#8103): a log file that cannot be opened is a spawn error
+/// naming the path, raised before any child exists — never a silent fallback
+/// to the caller's terminal.
+/// Test: this test itself.
+#[serial_test::serial]
+#[tokio::test]
+async fn an_unopenable_stderr_log_fails_the_spawn_before_any_child() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let blocker = tmp.path().join("a-file");
+    std::fs::write(&blocker, b"not a directory").expect("seed file");
+    let marker = tmp.path().join("ran");
+    let spec = SpawnSpec::new("/usr/bin/touch")
+        .arg(&marker)
+        .stderr_to(blocker.join("child.log"));
+    let err = super::child::spawn_child("test-service", "k", &spec, true)
+        .await
+        .expect_err("an unopenable log fails the spawn");
+    assert!(
+        matches!(err, SupervisorError::StderrLog { ref path, .. } if path.ends_with("child.log")),
+        "expected StderrLog, got {err:?}"
+    );
+    assert!(!marker.exists(), "no child ran");
+}
+
 /// Why (#8783): a detached child is meant to outlive its caller, so it must
 /// lead its own session, out of reach of a group kill aimed at the caller. A
 /// supervised child is the control: it stays in the caller's session.

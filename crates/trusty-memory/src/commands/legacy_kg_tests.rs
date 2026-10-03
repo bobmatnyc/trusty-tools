@@ -918,3 +918,103 @@ fn copy_stable_retries_once_then_refuses_a_changing_kg_db() {
     .expect_err("a file changing on both attempts must refuse");
     assert!(err.to_string().contains("changed during both"), "{err:#}");
 }
+
+/// Content of a live drawer the near-duplicate tests index with a vector.
+const INDEXED_LIVE: &str = "the staging database snapshots nightly at two in the morning UTC";
+
+/// Why (#8729): an apply imported rows that repeated each other and the live
+/// palace, then the dream dedup pass merged them away about 300 s later. The
+/// guard holds back what dream dedup would merge — a verbatim repeat inside
+/// the batch and a near-duplicate of an indexed live drawer — and reports it.
+/// Test: itself.
+#[tokio::test]
+async fn apply_holds_back_drawers_dream_dedup_would_merge() {
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    let (_root, palace) = fixture();
+    let live_id = {
+        let handle = PalaceHandle::open(&palace).expect("open");
+        handle
+            .remember(
+                INDEXED_LIVE.into(),
+                trusty_common::memory_core::palace::RoomType::General,
+                vec![],
+                0.5,
+            )
+            .await
+            .expect("index a live drawer")
+    };
+    let (repeat, near) = (Uuid::new_v4(), Uuid::new_v4());
+    let conn = Connection::open(palace.data_dir.join(LEGACY_KG_FILE)).expect("open kg.db");
+    let near_text = format!("{INDEXED_LIVE}.");
+    for (id, content) in [
+        (
+            repeat,
+            "the deploy key rotates every ninety days per the ops runbook",
+        ),
+        (near, near_text.as_str()),
+    ] {
+        conn.execute(
+            "INSERT INTO drawers (id, room_id, content, created_at) \
+             VALUES (?1, ?2, ?3, '2026-04-05T09:00:00Z')",
+            [id.to_string().as_str(), ROOM, content],
+        )
+        .expect("insert legacy row");
+    }
+    drop(conn);
+
+    let r = apply_report(&palace, data_root(&palace), true, false, false)
+        .await
+        .expect("apply");
+    assert_eq!(r.imported, 2, "two distinct drawers: {}", r.render());
+    let held = r.near_duplicates.clone().expect("the screen ran");
+    let a = Uuid::parse_str(MISSING_A).expect("id");
+    let got: Vec<(Uuid, Uuid)> = held.iter().map(|n| (n.id, n.of)).collect();
+    assert!(
+        got.contains(&(repeat, a)) || got.contains(&(a, repeat)),
+        "one copy of the verbatim repeat held back: {held:?}"
+    );
+    assert!(
+        got.contains(&(near, live_id)),
+        "near-duplicate held back: {held:?}"
+    );
+    assert_eq!(held.len(), 2, "{held:?}");
+    assert!(r.render().contains("near_duplicates=2"), "{}", r.render());
+
+    let ids = KgStoreRedb::open(&palace.data_dir.join("kg.redb"))
+        .expect("reopen kg.redb")
+        .load_drawer_ids()
+        .expect("ids");
+    assert!(
+        ids.contains(&a) != ids.contains(&repeat),
+        "exactly one copy of the repeat is imported"
+    );
+    assert!(!ids.contains(&near), "the near-duplicate is not written");
+}
+
+/// An embedder that always fails.
+struct FailingEmbedder;
+
+#[async_trait::async_trait]
+impl trusty_common::memory_core::embed::Embedder for FailingEmbedder {
+    async fn embed_batch(&self, _texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        anyhow::bail!("embedder down")
+    }
+
+    fn dimension(&self) -> usize {
+        384
+    }
+}
+
+/// Fail-Open Check (#8729): a screen that cannot embed is an error, never an
+/// empty "nothing held back" — `import_legacy` writes nothing on that error.
+/// Test: itself.
+#[tokio::test]
+async fn a_failing_embedder_fails_the_near_duplicate_screen() {
+    let (_root, palace) = fixture();
+    let handle = PalaceHandle::open(&palace).expect("open");
+    let drawers = vec![Drawer::new(Uuid::new_v4(), "a legacy drawer to screen")];
+    let err = dedup::screen_near_duplicates(&handle, drawers, &FailingEmbedder, 0.95)
+        .await
+        .expect_err("an embed failure fails the screen");
+    assert!(format!("{err:#}").contains("embedder down"), "{err:#}");
+}

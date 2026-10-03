@@ -61,6 +61,20 @@ pub enum SupervisorError {
         source: std::io::Error,
     },
 
+    /// The stderr log a detached spec named could not be opened (#8103).
+    #[error("open stderr log {path} for {service} instance {key}: {source}")]
+    StderrLog {
+        /// Service label.
+        service: String,
+        /// Instance key.
+        key: String,
+        /// Log file that could not be opened.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// `Command::spawn` failed.
     #[error("spawn {program} for {service} instance {key}: {source}")]
     Spawn {

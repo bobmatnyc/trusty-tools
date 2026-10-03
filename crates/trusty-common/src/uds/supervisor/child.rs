@@ -141,8 +141,14 @@ impl SpawnedChild {
 /// `eprintln!` turns into a panic. Capturing a detached child's stderr would
 /// kill the server detached mode exists to keep alive.
 ///
+/// #8103: a detached spec with [`SpawnSpec::stderr_to`] appends the child's
+/// stderr to that file instead; a file that cannot be opened fails the spawn
+/// with [`SupervisorError::StderrLog`] before any child exists.
+///
 /// Test: `spawn_child_creates_requested_directories`,
 /// `spawn_child_reports_a_missing_binary`,
+/// `a_detached_child_with_a_stderr_log_writes_there_not_to_the_caller`,
+/// `an_unopenable_stderr_log_fails_the_spawn_before_any_child`,
 /// `detached_children_are_not_retained_in_the_population`,
 /// `a_child_that_exits_before_binding_reports_its_status_and_stderr`,
 /// `only_a_detached_child_leads_its_own_session`.
@@ -165,18 +171,30 @@ pub(super) async fn spawn_child(
         }
     }
 
+    // #6600: piped for a supervised child so its stderr is quotable,
+    // inherited for a detached one so it survives this process. #8103: a
+    // detached spec may name a log file instead, which survives it too and
+    // keeps the child's startup lines off the caller's terminal.
+    let stderr = match (&spec.stderr_log, detached) {
+        (_, false) => Stdio::piped(),
+        (None, true) => Stdio::inherit(),
+        (Some(path), true) => {
+            Stdio::from(
+                open_stderr_log(path).map_err(|source| SupervisorError::StderrLog {
+                    service: service.to_string(),
+                    key: key.to_string(),
+                    path: path.clone(),
+                    source,
+                })?,
+            )
+        }
+    };
     let mut command = Command::new(&spec.program);
     command
         .args(&spec.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        // #6600: piped for a supervised child so its stderr is quotable,
-        // inherited for a detached one so it survives this process.
-        .stderr(if detached {
-            Stdio::inherit()
-        } else {
-            Stdio::piped()
-        })
+        .stderr(stderr)
         .kill_on_drop(!detached);
     if detached {
         // #8783: out of the caller's process group, so a group kill or Ctrl-C
@@ -204,6 +222,16 @@ pub(super) async fn spawn_child(
         stderr,
         relay,
     })
+}
+
+/// Open `path` for appending, creating it owner-only (`0600`) when absent.
+fn open_stderr_log(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
 }
 
 /// Copy a captured child's stderr to this process's stderr, keeping the tail.

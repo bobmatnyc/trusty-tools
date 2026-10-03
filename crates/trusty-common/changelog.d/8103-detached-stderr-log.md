@@ -1,0 +1,2 @@
+Added
+- `SpawnSpec::stderr_to(path)` appends a detached child's stderr to an owner-only log file instead of inheriting the caller's. A file that cannot be opened fails the spawn with the new `SupervisorError::StderrLog` before any child starts. `OnDemandAnalyze::quiet()` uses it to send a probe-started analyze server's stderr to `trusty-analyze.stderr.log` beside its socket; `analyze_stderr_log` names that path (#8103).

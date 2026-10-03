@@ -1,0 +1,2 @@
+Fixed
+- `trusty-memory stop` now asks the `com.trusty.memory` LaunchAgent for its pid first and stops a running unit by label (`launchctl kill SIGTERM`), waiting the shared termination grace for it to drain. It no longer reports "No daemon running" while launchd runs a daemon the process-table scan missed. The unit stays loaded; `service stop` still unloads it. A failed `launchctl kill`, a daemon still alive after the grace, or a unit launchd cannot report on fails the stop (#8750).

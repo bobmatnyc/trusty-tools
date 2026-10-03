@@ -10,7 +10,8 @@
 //! `trusty-memory serve` process (not the per-session stdio bridges, not CLI
 //! calls, not `cargo run`), sends SIGTERM, polls up to five seconds for them
 //! to exit, and SIGKILLs stragglers. Mirrors the `trusty-search stop` flow so
-//! the two daemons share a stop UX.
+//! the two daemons share a stop UX. A daemon launchd supervises is stopped
+//! through its label first ([`launchd::stop_with_unit`], #8750).
 //! Test: `daemon_pids_in_returns_only_daemon_mode_serve_processes`,
 //! `find_daemon_pids_finds_a_live_serve_foreground_process`,
 //! `stop_terminates_the_daemon_and_spares_a_stdio_bridge`.
@@ -28,13 +29,22 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Exits non-zero ("No daemon running") when nothing matches so
 /// shell-scripted callers can distinguish "I stopped it" from "nothing to
 /// stop", and non-zero when a daemon is still alive after SIGKILL.
-/// What: [`stop_daemons_in`] over [`list_processes`]; on a clean stop, removes
-/// the stale address file.
-/// Test: `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
+/// What: [`launchd::stop_with_unit`] over [`list_processes`] and the real
+/// `com.trusty.memory` unit, whose daemon gets the shared termination grace
+/// (#8750); on a clean stop, removes the stale address file.
+/// Test: `stop_terminates_a_launchd_daemon_the_process_table_misses`,
+/// `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
 /// `stop_reports_no_daemon_when_only_bridges_run`,
 /// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
 pub async fn handle_stop() -> Result<()> {
-    stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
+    // #8750: launchd first, by label, so a supervised daemon is never missed.
+    launchd::stop_with_unit(
+        &list_processes(),
+        std::process::id(),
+        TERM_GRACE,
+        &launchd::UserLaunchAgent,
+        trusty_common::shutdown::termination_grace(),
+    )?;
     cleanup_addr_file();
     Ok(())
 }
@@ -293,6 +303,9 @@ fn pid_alive(pid: u32) -> bool {
 fn pid_alive(_pid: u32) -> bool {
     true
 }
+
+#[path = "stop_launchd.rs"]
+pub(crate) mod launchd;
 
 #[cfg(test)]
 #[path = "stop_tests.rs"]

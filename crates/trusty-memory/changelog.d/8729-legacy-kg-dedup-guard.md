@@ -1,0 +1,2 @@
+Fixed
+- `palace legacy-kg --apply` holds back every legacy drawer the dream dedup pass would merge: a verbatim repeat inside the import, or a drawer scoring at least the dream threshold (0.95 cosine) against a live drawer or one already kept. The report lists each held-back drawer with the drawer it duplicates and the score. A screen that cannot embed fails the apply before any write. With `--no-embed` or `--include-content-duplicates` the screen does not run, and the report says the dream pass may merge the imported drawers (#8729).

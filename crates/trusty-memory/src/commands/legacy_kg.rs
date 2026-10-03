@@ -39,8 +39,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::{Connection, OpenFlags};
+use trusty_common::memory_core::dream::DreamConfig;
 use trusty_common::memory_core::palace::{Drawer, Palace};
-use trusty_common::memory_core::retrieval::VectorBackfillOptions;
+use trusty_common::memory_core::retrieval::{shared_embedder, VectorBackfillOptions};
 use trusty_common::memory_core::store::{OpenIntent, INCOMPATIBLE_SUFFIX};
 use trusty_common::memory_core::{memory_content_hash, ContentHash, MaintenanceLease};
 use uuid::Uuid;
@@ -49,6 +50,8 @@ use super::maintenance_gate::open_purging_under_lease;
 
 use super::store_snapshot::{with_store_copy, SCRATCH_PREFIX};
 
+#[path = "legacy_kg_dedup.rs"]
+pub mod dedup;
 #[path = "legacy_kg_guard.rs"]
 pub mod guard;
 use guard::{backup_stores, probe_stores, screen_drawers, Backup, CopyFn, Rejected};
@@ -355,6 +358,9 @@ pub struct LegacyReport {
     pub include_content_duplicates: bool,
     /// Drawers this run wrote to `kg.redb`. Always 0 on a dry run.
     pub imported: usize,
+    /// Apply only: drawers held back because dream dedup would merge them
+    /// (#8729); `None` when the screen did not run.
+    pub near_duplicates: Option<Vec<dedup::NearDuplicate>>,
     /// `(repaired, still_missing)` from the vector backfill, when it ran.
     pub vectors: Option<(usize, usize)>,
     /// The embed error after a committed import. The caller prints the report
@@ -396,6 +402,7 @@ impl LegacyReport {
                      already holds under another id; {fate})\n"
                 ));
             }
+            out.push_str(&dedup::render(self));
             out.push_str(&guard::render_guards(
                 self.dry_run,
                 self.allow_short,
@@ -518,7 +525,10 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// [`LegacyReport::rejected`]), and skips missing drawers whose content a
 /// `kg.redb` drawer already holds under another id unless
 /// `include_content_duplicates` is set; the skipped
-/// count lands in [`LegacyReport::content_duplicates`]. Upserts the rest in
+/// count lands in [`LegacyReport::content_duplicates`]. With `embed` and
+/// without `include_content_duplicates`, holds back the drawers the dream
+/// dedup pass would merge ([`dedup::screen_near_duplicates`], #8729) and lists
+/// them in [`LegacyReport::near_duplicates`]. Upserts the rest in
 /// one redb transaction, puts them in the in-memory table (replacing an
 /// L1-only entry for the same id), and — unless `embed` is false — runs the
 /// palace's own missing-vector backfill. An embed failure after the commit
@@ -531,7 +541,8 @@ fn merge_imported(in_memory: &mut Vec<Drawer>, imported: Vec<Drawer>) {
 /// `credential_row_is_rejected_in_dry_run_and_apply`,
 /// `short_secret_row_is_rejected_even_with_allow_short`,
 /// `apply_error_after_backup_names_the_kept_backup`,
-/// `import_under_a_lease_held_elsewhere_deletes_no_expired_row`.
+/// `import_under_a_lease_held_elsewhere_deletes_no_expired_row`,
+/// `apply_holds_back_drawers_dream_dedup_would_merge`.
 pub async fn apply_report(
     palace: &Palace,
     data_root: &Path,
@@ -609,6 +620,18 @@ async fn import_legacy(
     // #8434: a content duplicate is already present under another id.
     if report.include_content_duplicates {
         to_import.extend(duplicates);
+    } else if embed && !to_import.is_empty() {
+        // #8729: the dream dedup guard — never import what dream dedup merges.
+        let embedder = shared_embedder()
+            .await
+            .map_err(|e| e.context("acquire the embedder for the near-duplicate screen"))?;
+        let threshold = DreamConfig::default().dedup_threshold;
+        let (kept, held) =
+            dedup::screen_near_duplicates(&handle, to_import, embedder.as_ref(), threshold)
+                .await
+                .context("near-duplicate screen failed; nothing was imported")?;
+        to_import = kept;
+        report.near_duplicates = Some(held);
     }
     if !to_import.is_empty() {
         handle
