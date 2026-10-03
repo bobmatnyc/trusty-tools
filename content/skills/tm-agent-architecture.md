@@ -2,7 +2,8 @@
 name: tm-agent-architecture
 description: Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [agents, architecture, compose-chain, build-pipeline]
 effort: medium

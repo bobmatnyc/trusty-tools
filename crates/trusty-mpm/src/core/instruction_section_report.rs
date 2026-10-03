@@ -227,11 +227,16 @@ pub fn render_section_report(
 /// are machine-global, so a deploy between the two scans can flag the roster
 /// NOT FOUND — a false alarm, never a false pass.
 /// Test: `instructions_reports_section_status_and_project_style`.
-pub fn section_report_for(project_dir: &Path, prompt: &str) -> String {
+pub fn section_report_for(
+    content: &crate::core::framework_content::FrameworkContent,
+    project_dir: &Path,
+    prompt: &str,
+) -> String {
     let roster = crate::core::delegation_authority::deployed_roster_section(project_dir);
-    match crate::core::bundled_pm_package::bundled_fallback_package() {
+    // #9012: the package comes from the caller's content.
+    match crate::core::bundled_pm_package::bundled_fallback_package(content) {
         Ok(package) => render_section_report(
-            &section_statuses(package, project_dir, roster.is_some()),
+            &section_statuses(&package, project_dir, roster.is_some()),
             prompt,
             roster.as_deref(),
         ),

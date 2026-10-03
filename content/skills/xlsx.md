@@ -2,7 +2,8 @@
 name: xlsx
 description: "Working with Excel files programmatically."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

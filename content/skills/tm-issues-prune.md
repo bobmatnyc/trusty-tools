@@ -2,7 +2,8 @@
 name: tm-issues-prune
 description: Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred)
 user-invocable: true
-version: "1.2.0"
+metadata:
+  version: "1.2.0"
 category: pm-workflow
 tags: [tickets, github, backlog, pm-required, triage, prioritization]
 effort: medium

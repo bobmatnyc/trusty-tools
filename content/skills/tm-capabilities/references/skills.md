@@ -1,6 +1,6 @@
 # Skill Catalog Reference
 
-Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to `bundle::ALL` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
+Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
 57 bundled skills.
 

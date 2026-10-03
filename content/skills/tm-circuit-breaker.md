@@ -2,7 +2,8 @@
 name: tm-circuit-breaker
 description: Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-framework
 tags: [circuit-breaker, enforcement, pm-required, validation]
 effort: high

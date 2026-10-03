@@ -23,7 +23,7 @@ Maintain skill health, detect project technology stacks, recommend relevant skil
 Skills are Markdown documents that provide reusable, invokable knowledge to agents. Unlike agents (which are identities), skills are **capabilities** that any agent can load on demand.
 
 ### Where Skills Live
-- Bundled: `crates/trusty-mpm/src/assets/skills/`
+- Bundled: `content/skills/`
 - Installed to: `~/.trusty-mpm/framework/skills/` via `trusty-mpm install`
 - Currently the bundled `/tm-*` skill portfolio (circuit breaker enforcement,
   verification protocols, tool usage, git file tracking, ADR discipline,
@@ -169,7 +169,7 @@ follow, not renamed by this rule.
 
 ## Adding a New Skill
 
-1. Create `crates/trusty-mpm/src/assets/skills/<name>.md`
+1. Create `content/skills/<name>.md`
 2. Add a `pub const` in `core/bundle.rs` with `include_str!`
 3. Add a `BundledArtifact` entry to `ALL` with `InstallPolicy::Overwrite` — skills are framework-owned, so they must track upgrades; `InstallPolicy::SeedOnce` is reserved for a genuinely user-owned artifact that should be written once and never clobbered (`--force` resets it back to the shipped default)
 4. Update the count assertion in `bundle_tests.rs`

@@ -245,9 +245,12 @@ fn install_without_content_fails_naming_tm_content_install() {
     let cache = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(home.path());
-    let err = install_to_resolving(&paths, false, || {
-        agent_roster_in(cache.path(), DevOverride::Off)
-    })
+    let err = install_to_resolving(
+        &paths,
+        false,
+        || agent_roster_in(cache.path(), DevOverride::Off),
+        || trusty_mpm::core::content_source::framework_content_in(cache.path(), DevOverride::Off),
+    )
     .expect_err("no content installed");
     assert!(err.to_string().contains("tm content install"), "{err}");
     assert!(

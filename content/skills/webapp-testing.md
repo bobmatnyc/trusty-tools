@@ -2,7 +2,8 @@
 name: webapp-testing
 description: "Comprehensive web application testing patterns with Playwright selectors, wait strategies, and best practices"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

@@ -2,7 +2,8 @@
 name: tm-slack
 description: Deliver messages, canvases, and files to the user via Slack — routes through the native slack-mcp connector, not claude.ai's hosted Slack connector; canvas creation alone is never delivery
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [slack, delivery, canvas, messaging, pm-required]
 effort: medium

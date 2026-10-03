@@ -2,7 +2,8 @@
 name: brainstorming
 description: "Interactive idea refinement using Socratic method to develop fully-formed designs"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

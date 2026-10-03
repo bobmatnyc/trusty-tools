@@ -2,7 +2,8 @@
 name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
-version: "1.1.0"
+metadata:
+  version: "1.1.0"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high

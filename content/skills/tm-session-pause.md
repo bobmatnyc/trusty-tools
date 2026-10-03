@@ -2,7 +2,8 @@
 name: tm-session-pause
 description: Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [session, pause, worktree, context, pm-recommended]
 effort: medium

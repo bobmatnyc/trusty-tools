@@ -1,9 +1,9 @@
-//! Doctor probe: this binary's EMBEDDED skill assets against the repo they
-//! were compiled from (issue #8482).
+//! Doctor probe: the skill assets tm DEPLOYS against the merged repo
+//! (issue #8482; retargeted by #9012).
 //!
-//! Why: bundled skill assets are `include_str!`-embedded at compile time
-//! (`core::bundle_tm_skills`), so an installed binary ships the asset text as
-//! of its build and the deploy path faithfully writes that text. On 2026-09-23
+//! Why: until #9012 bundled skill assets were `include_str!`-embedded at
+//! compile time, so an installed binary shipped the asset text as of its build
+//! and the deploy path faithfully wrote that text. On 2026-09-23
 //! `/Users/mac/.cargo/bin/tm` was built at 07:26:46Z; a fix to
 //! `tm-epic/references/manual-procedure.md` merged at 16:32Z; for nine hours
 //! the daemon kept deploying the pre-fix text, and at 22:06:01Z it REVERTED six
@@ -18,18 +18,23 @@
 //! said "the binary is NOT stale" while it lagged the source tree by nine hours;
 //! #8482 narrowed that sentence to what it actually checked and pointed it here.
 //!
+//! #9012 moved the skills to runtime content, so the binary no longer carries
+//! them; the same lag now lives in the content tm reads — a checkout's working
+//! tree behind `origin/main`, or an installed content bundle older than it.
+//! The row compares THAT against the merged tree.
+//!
 //! What: [`check_bundled_asset_lag`] resolves the project's `origin` remote
 //! through the same derivation `doctor_rust_build_env::gather` uses
 //! (`trusty_common::github_path::derive_github_path`) and SKIPS unless it is
 //! `bobmatnyc/trusty-tools` — the comparison is meaningless anywhere else. In
-//! this repo it hashes every `skills/*` entry of [`bundle::ALL`] with the same
-//! `<rel_path>\0<contents>\n` construction [`skill_bundle_stamp`] folds over,
-//! reads the same paths out of `origin/main`, and Warns when any key differs.
-//! READ-ONLY: it never fetches, writes, installs, or deploys.
+//! this repo it hashes every skill of the content tm resolves for the project
+//! with the same `<rel_path>\0<contents>\n` construction [`skill_bundle_stamp`]
+//! folds over, reads the same paths out of `origin/main`, and Warns when any
+//! key differs. READ-ONLY: it never fetches, writes, installs, or deploys.
 //!
 //! Fail-closed (the Fail-Open Check): every arm that could not read the source
 //! — no `origin/main`, no git, not a repo, an empty asset tree, a non-UTF-8
-//! blob — reports [`CheckStatus::Unknown`], which ranks above `Warn` and never
+//! blob, no instructional content — reports [`CheckStatus::Unknown`], which ranks above `Warn` and never
 //! renders as healthy. A staleness detector that passes when it cannot read the
 //! source is worse than no detector, because it converts "unknown" into "fine".
 //!
@@ -44,8 +49,8 @@ use trusty_common::github_path::GithubPath;
 
 use crate::core::agent_manifest::checksum;
 use crate::core::build_identity::build_id;
-use crate::core::bundle;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
+use crate::core::framework_content::{ContentSource, FrameworkContent};
 
 /// Name of this check as it appears in `tm doctor` output.
 const CHECK_NAME: &str = "bundled_asset_lag";
@@ -59,9 +64,9 @@ const REPO_NAME: &str = "trusty-tools";
 /// whether the binary lags what MERGED, not what the operator has checked out.
 const REF: &str = "origin/main";
 
-/// Repo-relative directory holding the assets `bundle::ALL`'s `skills/*` entries
-/// embed. A bundle key `<k>` is the repo path `<ASSET_DIR>/<k>`.
-const ASSET_DIR: &str = "crates/trusty-mpm/src/assets/skills";
+/// Repo-relative directory holding the skill assets (#9012: moved out of the
+/// crate). A bundle key `<k>` is the repo path `<ASSET_DIR>/<k>`.
+const ASSET_DIR: &str = "content/skills";
 
 /// How many lagging keys the message names before summarising the rest.
 const MAX_NAMED: usize = 5;
@@ -86,11 +91,11 @@ enum RepoAssets {
     Unreadable(String),
 }
 
-/// Compare this binary's embedded skill assets against `origin/main`.
+/// Compare the skill assets tm deploys against `origin/main`.
 ///
-/// Why: see the module doc — this is the only row that can see a binary whose
-/// embedded assets lag the repo, because it is the only one whose reference
-/// point is not the binary itself.
+/// Why: see the module doc — this is the only row that can see deployed skill
+/// text lagging the repo, because it is the only one whose reference point is
+/// the merged tree rather than the deploy source itself.
 /// What: derives the project's `owner/repo` with
 /// [`trusty_common::github_path::derive_github_path`] (the derivation
 /// `doctor_rust_build_env::gather` already uses) and hands it, plus a lazy
@@ -100,8 +105,18 @@ enum RepoAssets {
 pub(super) fn check_bundled_asset_lag(project_dir: Option<&Path>) -> DoctorCheck {
     let identity = project_dir.and_then(trusty_common::github_path::derive_github_path);
     report(identity.as_ref(), &|| match project_dir {
-        Some(dir) => read_repo_assets(dir),
-        None => RepoAssets::Unreadable("no project directory was supplied".to_string()),
+        Some(dir) => match crate::core::content_source::framework_content_for(dir) {
+            // #9012: the deployed side is the content tm resolves for `dir`.
+            Ok(content) => (read_repo_assets(dir), Some(content)),
+            Err(err) => (
+                RepoAssets::Unreadable(format!("no instructional content resolves: {err}")),
+                None,
+            ),
+        },
+        None => (
+            RepoAssets::Unreadable("no project directory was supplied".to_string()),
+            None,
+        ),
     })
 }
 
@@ -115,7 +130,10 @@ pub(super) fn check_bundled_asset_lag(project_dir: Option<&Path>) -> DoctorCheck
 /// unreadable source tree and [`compare`]'s verdict for a readable one.
 /// Test: `lag_skips_without_the_trusty_tools_remote`,
 /// `lag_skips_without_any_remote`, `lag_is_unknown_when_the_source_is_unreadable`.
-fn report(identity: Option<&GithubPath>, repo: &dyn Fn() -> RepoAssets) -> DoctorCheck {
+fn report(
+    identity: Option<&GithubPath>,
+    repo: &dyn Fn() -> (RepoAssets, Option<FrameworkContent>),
+) -> DoctorCheck {
     let applies = identity.is_some_and(|id| id.owner == REPO_OWNER && id.repo == REPO_NAME);
     if !applies {
         let seen = identity.map_or_else(
@@ -126,29 +144,38 @@ fn report(identity: Option<&GithubPath>, repo: &dyn Fn() -> RepoAssets) -> Docto
             CHECK_NAME,
             CheckStatus::Ok,
             format!(
-                "not applicable — {seen}, and this binary's embedded assets can only be \
-                 compared against the `{REPO_OWNER}/{REPO_NAME}` source tree they were \
-                 compiled from (issue #8482)"
+                "not applicable — {seen}, and the deployed skill assets can only be \
+                 compared against the `{REPO_OWNER}/{REPO_NAME}` source tree they come \
+                 from (issue #8482)"
             ),
         );
     }
 
     match repo() {
-        RepoAssets::Unreadable(why) => DoctorCheck::new(
-            CHECK_NAME,
-            CheckStatus::Unknown,
-            format!(
-                "the `{REPO_NAME}` source tree could not be read, so whether this binary's \
-                 embedded assets lag it is UNKNOWN — {why}. Reported as unknown rather than \
-                 clean deliberately: a staleness detector that passes when it cannot read \
-                 the source converts \"unknown\" into \"fine\" (issue #8482)"
-            ),
-        ),
-        RepoAssets::Read {
-            hashes,
-            newest_commit,
-        } => compare(&hashes, newest_commit.as_deref()),
+        (
+            RepoAssets::Read {
+                hashes,
+                newest_commit,
+            },
+            Some(content),
+        ) => compare(&hashes, newest_commit.as_deref(), &content),
+        (RepoAssets::Unreadable(why), _) => unknown(&why),
+        (RepoAssets::Read { .. }, None) => unknown("no instructional content resolves"),
     }
+}
+
+/// The fail-closed verdict: the comparison could not be made.
+fn unknown(why: &str) -> DoctorCheck {
+    DoctorCheck::new(
+        CHECK_NAME,
+        CheckStatus::Unknown,
+        format!(
+            "the `{REPO_NAME}` source tree or the deployed skills could not be read, so \
+             whether the deployed skill assets lag it is UNKNOWN — {why}. Reported as \
+             unknown rather than clean deliberately: a staleness detector that passes when \
+             it cannot read the source converts \"unknown\" into \"fine\" (issue #8482)"
+        ),
+    )
 }
 
 /// Grade the embedded bundle against the repo hashes.
@@ -162,8 +189,12 @@ fn report(identity: Option<&GithubPath>, repo: &dyn Fn() -> RepoAssets) -> Docto
 /// Test: `lag_warns_and_names_the_one_differing_asset`,
 /// `lag_warns_for_an_asset_the_binary_does_not_embed`,
 /// `lag_passes_when_every_asset_matches`.
-fn compare(repo: &BTreeMap<String, String>, newest_commit: Option<&str>) -> DoctorCheck {
-    let bundled = bundled_key_stamps();
+fn compare(
+    repo: &BTreeMap<String, String>,
+    newest_commit: Option<&str>,
+    content: &FrameworkContent,
+) -> DoctorCheck {
+    let bundled = bundled_key_stamps(content);
     let mut lagging: Vec<&str> = Vec::new();
     for (key, stamp) in &bundled {
         if repo.get(key) != Some(stamp) {
@@ -183,9 +214,10 @@ fn compare(repo: &BTreeMap<String, String>, newest_commit: Option<&str>) -> Doct
             CHECK_NAME,
             CheckStatus::Ok,
             format!(
-                "all {} embedded skill assets match `{REF}` — this binary (built {built}) \
-                 deploys the merged text (issue #8482)",
-                bundled.len()
+                "all {} deployed skill assets ({}) match `{REF}` — tm (built {built}) deploys \
+                 the merged text (issue #8482)",
+                bundled.len(),
+                content.origin()
             ),
         );
     }
@@ -198,27 +230,32 @@ fn compare(repo: &BTreeMap<String, String>, newest_commit: Option<&str>) -> Doct
         format!(" (+{rest} more)")
     };
     let merged = newest_commit.unwrap_or("unknown");
+    // #9012: the remedy depends on where the deployed skills come from.
+    let remedy = match content.source() {
+        ContentSource::DevCheckout { .. } => {
+            "fast-forward this checkout (`git merge --ff-only origin/main`) — tm reads the \
+             skills from its working tree"
+        }
+        _ => "`tm content update` to install the content release carrying the merged text",
+    };
     DoctorCheck::new(
         CHECK_NAME,
         CheckStatus::Warn,
         format!(
-            "{} embedded skill asset(s) differ from `{REF}`: {}{more}. This binary was built \
-             {built}; the newest commit touching `{ASSET_DIR}` is {merged}. Every deploy from \
-             this binary writes the OLDER text, and `skill_staleness` cannot see it — it \
-             compares deployed files against these same embedded assets (#4604). Remedy: \
-             `cargo install --path <clean-checkout>/crates/trusty-mpm --locked` from a \
-             checkout whose `git status --porcelain` is empty — never `cp` a release binary \
-             on macOS, the next exec is SIGKILL'd as an invalid signature — then `tm \
-             restart`, then redeploy, which happens automatically on the next managed spawn \
-             or explicitly via `tm reinstall` or `tm doctor --fix-skills` (issue #8482)",
+            "{} deployed skill asset(s) from {} differ from `{REF}`: {}{more}. tm was built \
+             {built}; the newest commit touching `{ASSET_DIR}` is {merged}. Every deploy \
+             writes the OLDER text, and `skill_staleness` cannot see it — it compares \
+             deployed files against this same source (#4604). Remedy: {remedy}, then \
+             redeploy, which happens automatically on the next managed spawn or explicitly \
+             via `tm reinstall` or `tm doctor --fix-skills` (issue #8482)",
             lagging.len(),
+            content.origin(),
             named.join(", "),
         ),
     )
 }
 
-/// Hash every `skills/*` entry of [`bundle::ALL`], keyed by its path under
-/// [`ASSET_DIR`].
+/// Hash every skill file of `content`, keyed by its path under [`ASSET_DIR`].
 ///
 /// Why: [`skill_bundle_stamp`](crate::core::skill_source::skill_bundle_stamp)
 /// folds the whole table into ONE digest, which answers "did anything change"
@@ -227,13 +264,12 @@ fn compare(repo: &BTreeMap<String, String>, newest_commit: Option<&str>) -> Doct
 /// the Warn can name them.
 /// What: `<key> → checksum("skills/<key>\0<contents>\n")`.
 /// Test: `bundled_key_stamps_covers_every_skill_entry`.
-fn bundled_key_stamps() -> BTreeMap<String, String> {
-    bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-        .filter_map(|a| {
-            let key = a.rel_path.strip_prefix("skills/")?;
-            Some((key.to_string(), asset_stamp(a.rel_path, a.contents)))
+fn bundled_key_stamps(content: &FrameworkContent) -> BTreeMap<String, String> {
+    content
+        .skills()
+        .filter_map(|(rel_path, contents)| {
+            let key = rel_path.strip_prefix("skills/")?;
+            Some((key.to_string(), asset_stamp(rel_path, contents)))
         })
         .collect()
 }

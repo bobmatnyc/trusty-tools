@@ -2,7 +2,8 @@
 name: web-performance-optimization
 description: "Optimize web performance using Core Web Vitals, modern patterns (View Transitions, Speculation Rules), and framework-specific techniques"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

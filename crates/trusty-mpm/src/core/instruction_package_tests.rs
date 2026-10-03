@@ -4,6 +4,7 @@
 //! 500-SLOC cap enforced by `scripts/check_line_cap.sh`.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,7 @@ fn fixture_without_split_sections() -> InstructionPackage {
             text(SectionId::NonOverridableRules, "RULES"),
             text(SectionId::FrameworkGuaranteedConventions, "CONVENTIONS"),
         ],
+        sources: Default::default(),
     }
 }
 
@@ -121,8 +123,17 @@ fn inputs() -> CompositionInputs {
 }
 
 /// The schema's own `examples[0]`, as raw JSON.
+/// `package` with its `file` bodies bound to the checkout's section files
+/// (#9012: the sources are runtime content, never serialized).
+fn with_sources(mut package: InstructionPackage) -> InstructionPackage {
+    package.sources = crate::core::instruction_pipeline::package_sources(rc());
+    package
+}
+
 fn schema_example() -> String {
-    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(rc().required("instruction-package.schema.json"))
+            .expect("schema is JSON");
     schema["examples"][0].to_string()
 }
 
@@ -141,7 +152,9 @@ fn wire(value: &impl serde::Serialize) -> String {
 
 /// Read a `$defs/<name>/enum` list out of the schema document.
 fn schema_enum(name: &str) -> Vec<String> {
-    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(rc().required("instruction-package.schema.json"))
+            .expect("schema is JSON");
     schema["$defs"][name]["enum"]
         .as_array()
         .unwrap_or_else(|| panic!("$defs/{name}/enum is an array"))
@@ -154,7 +167,9 @@ fn schema_enum(name: &str) -> Vec<String> {
 fn schema_document_is_valid_json_and_versioned() {
     // Why: the schema is the artifact external tooling consumes; a malformed or
     // mis-versioned document is a silent interop break.
-    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(rc().required("instruction-package.schema.json"))
+            .expect("schema is JSON");
     assert_eq!(
         schema["$schema"], "https://json-schema.org/draft/2020-12/schema",
         "schema must declare draft 2020-12"
@@ -207,7 +222,9 @@ fn schema_body_kinds_match_rust_variants() {
     // body kinds must agree. A `file` variant in Rust with no schema branch, or
     // the reverse, is a package that validates in one place and fails in the
     // other.
-    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(rc().required("instruction-package.schema.json"))
+            .expect("schema is JSON");
     let kinds: Vec<String> = schema["$defs"]["body"]["oneOf"]
         .as_array()
         .expect("body is a oneOf")
@@ -254,8 +271,10 @@ fn file_body_resolves_through_the_bundled_table() {
     // rather than a second content channel.
     // #8533: a comment-free source; `identity.md` now carries authoring
     // comments the compose-time fold removes.
-    let source = crate::core::instruction_pipeline::SECTION_PM_ALLOWLIST;
+    let source = rc().required("sections/pm-allowlist.md");
     let mut package = fixture();
+    // #9012: `file` bodies resolve through the package's content sources.
+    package.sources = crate::core::instruction_pipeline::package_sources(rc());
     package.blocks[8] = InstructionBlock {
         section: SectionId::Identity,
         body: BlockBody::File {
@@ -297,7 +316,7 @@ fn unknown_file_source_is_a_named_validation_error() {
 #[test]
 fn a_file_block_may_not_be_optional() {
     // Same rule as a text block: only a generator's output may be dropped.
-    let mut package = fixture();
+    let mut package = with_sources(fixture());
     package.blocks[8].body = BlockBody::File {
         path: "sections/identity.md".to_string(),
     };
@@ -360,12 +379,14 @@ fn schema_example_deserializes_validates_and_round_trips() {
     // committed schema, and the round trip must be lossless — tooling that
     // rewrites a package must not churn unrelated bytes.
     let raw = schema_example();
-    let pkg = InstructionPackage::from_json(&raw).expect("schema example deserializes");
+    let pkg =
+        with_sources(InstructionPackage::from_json(&raw).expect("schema example deserializes"));
     pkg.validate()
         .expect("schema example is structurally valid");
 
     let reserialized = pkg.to_json().expect("serializes");
-    let again = InstructionPackage::from_json(&reserialized).expect("re-deserializes");
+    let again =
+        with_sources(InstructionPackage::from_json(&reserialized).expect("re-deserializes"));
     assert_eq!(pkg, again, "round trip must be lossless");
     assert_eq!(
         reserialized,
@@ -452,7 +473,9 @@ fn schema_document_closes_every_object() {
     // without `additionalProperties: false` cannot reintroduce the drift where a
     // package validates strictly in trusty-mpm but loosely in an editor (or the
     // reverse — which is how the #4223 HIGH shipped).
-    let schema: serde_json::Value = serde_json::from_str(SCHEMA_JSON).expect("schema is JSON");
+    let schema: serde_json::Value =
+        serde_json::from_str(rc().required("instruction-package.schema.json"))
+            .expect("schema is JSON");
 
     /// Walk every subschema, collecting object-typed ones that stay open.
     fn walk(node: &serde_json::Value, path: String, open: &mut Vec<String>) {
@@ -1055,7 +1078,9 @@ fn valid_package_with_non_contiguous_blocks_still_round_trips() {
     // NON-ADJACENT BLOCK POSITIONS, which is what lets `memory`/`search` be
     // lifted out of the middle of PM_INSTRUCTIONS.md without moving a byte.
     let raw = schema_example();
-    let pkg = InstructionPackage::from_json(&raw).expect("valid package must still deserialize");
+    let pkg = with_sources(
+        InstructionPackage::from_json(&raw).expect("valid package must still deserialize"),
+    );
     pkg.validate().expect("valid package must still validate");
 
     // The example genuinely exercises non-contiguity, so this test cannot pass
@@ -1078,8 +1103,10 @@ fn valid_package_with_non_contiguous_blocks_still_round_trips() {
 
     // Round trip is lossless and byte-stable through compose.
     let composed = pkg.compose(&inputs()).expect("composes");
-    let again = InstructionPackage::from_json(&pkg.to_json().expect("serializes"))
-        .expect("re-deserializes");
+    let again = with_sources(
+        InstructionPackage::from_json(&pkg.to_json().expect("serializes"))
+            .expect("re-deserializes"),
+    );
     assert_eq!(pkg, again, "round trip must be lossless");
     assert_eq!(
         composed,
@@ -1215,7 +1242,7 @@ fn base_pm_floor_block_order_is_valid() {
 #[test]
 fn schema_example_composes_deterministically() {
     // The committed example is not just parseable — it composes.
-    let pkg = InstructionPackage::from_json(&schema_example()).expect("deserializes");
+    let pkg = with_sources(InstructionPackage::from_json(&schema_example()).expect("deserializes"));
     let out = pkg.compose(&inputs()).expect("composes");
     assert!(out.contains("ROSTER"), "roster reaches the output: {out}");
     assert_eq!(out, pkg.compose(&inputs()).expect("composes"));

@@ -2,7 +2,8 @@
 name: tm-session-resume
 description: Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context
 user-invocable: true
-version: "1.1.0"
+metadata:
+  version: "1.1.0"
 category: pm-workflow
 tags: [session, resume, context, pm-recommended]
 effort: medium

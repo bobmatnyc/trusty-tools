@@ -512,6 +512,7 @@ fn compose_session_instructions_display_matches_live_prompt() {
             .expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        crate::commands::install::test_content_ref(),
         project,
         Some(roster),
     );
@@ -556,6 +557,7 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
             .expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        crate::commands::install::test_content_ref(),
         project,
         Some(roster),
     );

@@ -2,7 +2,8 @@
 name: model-context-builder
 description: "MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: medium
 ---

@@ -2,7 +2,8 @@
 name: tm
 description: trusty-mpm orchestration model overview — agents, skills, delegation
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-reference
 tags: [overview, orchestration, framework]
 effort: low

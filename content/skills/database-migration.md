@@ -2,7 +2,8 @@
 name: database-migration
 description: "Safe patterns for evolving database schemas in production with decision trees and troubleshooting guidance."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

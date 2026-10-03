@@ -2,7 +2,8 @@
 name: tm-git-file-tracking
 description: Protocol for tracking files immediately after agent creation, before marking work complete
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [git, file-tracking, workflow, pm-required]
 effort: medium

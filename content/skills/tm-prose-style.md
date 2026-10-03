@@ -2,7 +2,8 @@
 name: tm-prose-style
 description: Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them.
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [prose, style, writing, communication, pm-recommended]
 effort: low

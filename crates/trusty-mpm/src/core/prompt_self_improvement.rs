@@ -50,8 +50,8 @@ pub const FEEDBACK_HEADING: &str = "## Prompt feedback";
 /// A reader of the prompt never needed that distinction; a reader of this file
 /// does.
 /// Test: `the_addendum_names_the_extraction_heading`, `the_addendum_is_short`.
-const PM_ADDENDUM: &str =
-    include_str!("../assets/instructions/sections/prompt-self-improvement.md");
+// #9012: the addendum is runtime content, read from the caller's content.
+const PM_ADDENDUM_PATH: &str = "sections/prompt-self-improvement.md";
 
 /// The PM addendum, separator included, ready to concatenate onto a prompt.
 ///
@@ -59,11 +59,11 @@ const PM_ADDENDUM: &str =
 /// then the asset, so the appended block reads as one more section rather than
 /// running into the previous one.
 /// Test: `pm_addendum_is_separated_from_the_prompt_it_follows`.
-pub fn pm_addendum() -> String {
+pub fn pm_addendum(content: &crate::core::framework_content::FrameworkContent) -> String {
     format!(
         "{}{}",
         crate::core::instruction_pipeline::SECTION_SEPARATOR,
-        PM_ADDENDUM.trim_end()
+        content.required(PM_ADDENDUM_PATH).trim_end()
     )
 }
 
@@ -86,9 +86,13 @@ pub fn pm_addendum() -> String {
 /// [`pm_addendum`].
 /// Test: `pm_prompt_is_unchanged_when_the_flag_is_off`,
 /// `pm_prompt_carries_the_addendum_when_the_flag_is_on`.
-pub fn append_to_pm_prompt(project_dir: &Path, prompt: String) -> String {
+pub fn append_to_pm_prompt(
+    content: &crate::core::framework_content::FrameworkContent,
+    project_dir: &Path,
+    prompt: String,
+) -> String {
     if enabled_for(project_dir) {
-        format!("{prompt}{}", pm_addendum())
+        format!("{prompt}{}", pm_addendum(content))
     } else {
         prompt
     }

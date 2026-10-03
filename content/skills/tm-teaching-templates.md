@@ -2,7 +2,8 @@
 name: tm-teaching-templates
 description: Progressive-disclosure teaching templates for onboarding users to trusty-mpm concepts
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [teaching, onboarding, progressive-disclosure]
 effort: medium

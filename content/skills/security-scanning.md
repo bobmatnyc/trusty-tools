@@ -2,7 +2,8 @@
 name: security-scanning
 description: "CI security scanning: secrets, deps, SAST, triage, expiring exceptions"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: medium
 ---

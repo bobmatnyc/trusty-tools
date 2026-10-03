@@ -276,15 +276,21 @@ fn render_docs(out: &mut String) {
          only some of them travel with the installed binary.\n\n",
     );
 
-    out.push_str("### Ships in the published crate\n\n");
-    let crate_docs = crate_doc_files();
-    if crate_docs.is_empty() {
-        out.push_str("- (none found under `crates/trusty-mpm/docs/`)\n");
+    // #9012: the bundled docs moved into the instructional content.
+    out.push_str("### Ships with the instructional content\n\n");
+    out.push_str(
+        "`tm install` writes these into `~/.trusty-mpm/framework/docs/` from the \
+         content `tm content install` pinned (or from a checkout's `content/`).\n\n",
+    );
+    let content_docs = crate_doc_files();
+    if content_docs.is_empty() {
+        out.push_str("- (none found under `content/instructions/docs/`)\n");
     } else {
-        for name in &crate_docs {
-            let _ = writeln!(out, "- `crates/trusty-mpm/docs/{name}`");
+        for name in &content_docs {
+            let _ = writeln!(out, "- `content/instructions/docs/{name}`");
         }
     }
+    out.push_str("\n### Ships in the published crate\n\n");
     out.push_str("- `crates/trusty-mpm/README.md`, `crates/trusty-mpm/CHANGELOG.md`\n\n");
 
     out.push_str("### Repo-only — NOT in the published crate\n\n");
@@ -361,15 +367,15 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Every `.md` file under `crates/trusty-mpm/docs/`, sorted.
+/// Every `.md` file under `content/instructions/docs/` (#9012), sorted.
 ///
-/// Why: this is the set that actually ships in the published crate, so it is
-/// read from disk rather than listed by hand — adding or removing a crate doc
-/// changes the generated skill and is caught by the drift gate.
+/// Why: this is the set `tm install` deploys from content, so it is read from
+/// disk rather than listed by hand — adding or removing a bundled doc changes
+/// the generated skill and is caught by the drift gate.
 /// What: sorted file names; an unreadable directory yields an empty list.
 /// Test: `framework_render_lists_crate_docs`.
 fn crate_doc_files() -> Vec<String> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    let dir = repo_root().join("content/instructions/docs");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -431,7 +437,7 @@ mod tests {
         let docs = crate_doc_files();
         assert!(
             !docs.is_empty(),
-            "crates/trusty-mpm/docs/ should hold the crate-shipped docs"
+            "content/instructions/docs/ should hold the bundled docs"
         );
         let rendered = render();
         for name in docs {

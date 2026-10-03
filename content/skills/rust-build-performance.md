@@ -2,7 +2,8 @@
 name: rust-build-performance
 description: "Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs."
 user-invocable: false
-version: "1.1.0"
+metadata:
+  version: "1.1.0"
 category: agent-reference
 effort: low
 ---

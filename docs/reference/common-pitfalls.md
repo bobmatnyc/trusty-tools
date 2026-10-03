@@ -121,7 +121,7 @@ and issue #2222. On a mismatched host, `trusty-embedderd`'s startup now fails
 fast with an explicit glibc-version error instead of hanging for up to
 `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s).
 
-🟡 **Editing `crates/trusty-mpm/src/assets/instructions/sections/*.md` without
+🟡 **Editing `content/instructions/sections/*.md` without
 a golden refresh first (#6937)** — three snapshot tests fail before any real
 gate runs otherwise. Run `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`,
 then read the diff of the three

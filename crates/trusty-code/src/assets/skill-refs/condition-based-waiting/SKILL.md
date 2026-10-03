@@ -2,7 +2,8 @@
 name: condition-based-waiting
 description: "Replace arbitrary timeouts with condition polling for reliable async tests"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

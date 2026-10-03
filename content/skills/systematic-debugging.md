@@ -2,7 +2,8 @@
 name: systematic-debugging
 description: "Step-by-step debugging workflow: reproduce the bug, isolate the failing component, trace to root cause, apply a targeted fix, and verify the fix resolves the issue without regressions. Use when you encounter a bug, error, exception, crash, or unexpected behavior that needs troubleshooting."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

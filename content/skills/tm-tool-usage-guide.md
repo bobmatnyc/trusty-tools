@@ -2,7 +2,8 @@
 name: tm-tool-usage-guide
 description: Detailed tool usage patterns and examples for the trusty-mpm PM agent
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-reference
 tags: [tools, mcp, delegation, pm-required]
 effort: medium

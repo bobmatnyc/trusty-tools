@@ -2,7 +2,8 @@
 name: software-patterns
 description: "Compare tradeoffs and recommend architectural patterns — dependency injection, service-oriented architecture, repository, domain events, circuit breaker, and anti-corruption layer. Use when choosing between design patterns, planning microservices boundaries, evaluating system design alternatives, or asking 'which pattern should I use' for a specific coupling or resilience problem."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

@@ -2,7 +2,8 @@
 name: root-cause-tracing
 description: "Systematically trace bugs backward through call stack to find original trigger"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

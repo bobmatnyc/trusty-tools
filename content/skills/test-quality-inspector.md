@@ -2,7 +2,8 @@
 name: test-quality-inspector
 description: "Test quality inspection framework for reviewing test coverage, identifying gaps, and ensuring comprehensive validation"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: medium
 ---

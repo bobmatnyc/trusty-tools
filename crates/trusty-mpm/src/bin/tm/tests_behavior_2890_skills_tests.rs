@@ -27,9 +27,7 @@
 //! constants.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::{CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING};
-
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn code_critic_skills_land_in_deployed_dot_claude_skills() {
@@ -38,7 +36,7 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including the two new skill files) under the framework root.
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -81,7 +79,7 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
     );
     assert_eq!(
         std::fs::read_to_string(&code_review_standards_deployed).unwrap(),
-        CODE_REVIEW_STANDARDS,
+        crate::commands::install::test_skill("skills/code-review-standards.md"),
     );
 
     let contract_driven_testing_deployed = paths
@@ -95,6 +93,6 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
     );
     assert_eq!(
         std::fs::read_to_string(&contract_driven_testing_deployed).unwrap(),
-        CONTRACT_DRIVEN_TESTING,
+        crate::commands::install::test_skill("skills/contract-driven-testing.md"),
     );
 }

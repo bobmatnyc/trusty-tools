@@ -2,7 +2,8 @@
 name: tm-init
 description: Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [init, setup, scaffolding, claude-md, pm-recommended]
 effort: medium

@@ -283,8 +283,8 @@ pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
     }
 }
 
-/// Install the checkout's agent roster and harness docs into `home` as a
-/// verified content bundle (#9011).
+/// Install the checkout's instructional content into `home` as a verified
+/// content bundle (#9011, #9012).
 ///
 /// Why: since #9011 a spawned `tm` reads its agents from instructional
 /// content — a checkout above its cwd, else the bundle pinned under
@@ -292,10 +292,11 @@ pub fn assert_pm_guard_refusals_prefixed(stdout: &str) {
 /// checkout (the ADR-0048 rule would otherwise rewrite its dispatch) has
 /// neither, and pm-guard refuses every dispatch it cannot classify (owner
 /// ruling 09(a)). This stages what `tm content install` would have.
-/// What: a gzip tar of `content/agents/*.md` and the four harness docs under
-/// the bundle paths the packager uses, plus `bundle-manifest.toml`, written as
-/// `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its sha256.
-/// Idempotent per `home`.
+/// What: a gzip tar of every file under `content/{agents,skills,instructions}`
+/// (#9012: skills, PM sections, output styles and SM instructions are content
+/// too) under the bundle paths the packager uses, plus `bundle-manifest.toml`,
+/// written as `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its
+/// sha256. Idempotent per `home`.
 pub fn stage_repo_content(home: &Path) {
     use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
     use trusty_common::integrity::Sha256Digest;
@@ -310,23 +311,23 @@ pub fn stage_repo_content(home: &Path) {
         "bundle-manifest.toml".to_string(),
         format!("tag = \"{TAG}\"\nschema_major = 1\n").into_bytes(),
     )];
-    for (dest, rel) in [
-        ("agents", "content/agents"),
-        (
-            "instructions/harness_understanding",
-            "content/instructions/harness_understanding",
-        ),
-    ] {
-        for entry in std::fs::read_dir(repo.join(rel))
-            .expect("content dir")
-            .flatten()
-        {
+    // #9012: every class, recursively; dot-files never reach a bundle.
+    fn walk(dir: &Path, key: &str, out: &mut Vec<(String, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).expect("content dir").flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".md") {
-                let bytes = std::fs::read(entry.path()).expect("content file");
-                entries.push((format!("{dest}/{name}"), bytes));
+            if name.starts_with('.') {
+                continue;
+            }
+            let child = format!("{key}/{name}");
+            if entry.path().is_dir() {
+                walk(&entry.path(), &child, out);
+            } else {
+                out.push((child, std::fs::read(entry.path()).expect("content file")));
             }
         }
+    }
+    for class in ["agents", "skills", "instructions"] {
+        walk(&repo.join("content").join(class), class, &mut entries);
     }
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut tar = tar::Builder::new(gz);

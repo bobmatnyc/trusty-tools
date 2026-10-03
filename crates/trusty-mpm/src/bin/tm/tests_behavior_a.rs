@@ -16,7 +16,7 @@ use crate::cli::{
     Cli, CliCompressionLevel, Command, OptimizerAction, OverseerAction, SessionAction,
 };
 use crate::commands::install::{
-    deploy_report_lines, install_to_with, test_roster, write_project_hooks_for_dir,
+    deploy_report_lines, install_to_with, test_content, test_roster, write_project_hooks_for_dir,
 };
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
@@ -274,15 +274,32 @@ fn install_writes_all_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
     let roster = test_roster();
-    let report = install_to_with(&paths, false, &roster).unwrap();
+    let content = test_content();
+    let report = install_to_with(&paths, false, &roster, &content).unwrap();
+    // #9012: hooks + the content's skills + the two bundled docs + the roster.
     assert_eq!(
         report.len(),
-        trusty_mpm::core::bundle::ALL.len() + roster.len()
+        trusty_mpm::core::bundle::ALL.len() + content.skills().count() + 2 + roster.len()
     );
     // #9011: the agents come from content, written beside the bundle.
     for (name, body) in roster.iter() {
         let written = std::fs::read_to_string(paths.framework.join("agents").join(name)).unwrap();
         assert_eq!(written, body, "agents/{name}");
+    }
+    // #9012: so do the skills and the bundled docs.
+    for (rel_path, body) in content.skills() {
+        let written = std::fs::read_to_string(paths.framework.join(rel_path)).unwrap();
+        assert_eq!(written, body, "{rel_path}");
+    }
+    for doc in [
+        "WHAT-IS-TRUSTY-MPM.md",
+        "ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+    ] {
+        let written = std::fs::read_to_string(paths.framework.join("docs").join(doc)).unwrap();
+        assert_eq!(
+            Some(written.as_str()),
+            content.instruction(&format!("docs/{doc}"))
+        );
     }
     for artifact in trusty_mpm::core::bundle::ALL {
         let dest = paths.framework.join(artifact.rel_path);
@@ -304,7 +321,7 @@ fn install_then_deploy_composes_agents() {
     // produce composed, inheritance-flattened files in `.claude/agents/`.
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     let result = trusty_mpm::core::agent_deployer::deploy_agents(
         &paths.agent_source_dir(),

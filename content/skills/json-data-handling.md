@@ -2,7 +2,8 @@
 name: json-data-handling
 description: "Working effectively with JSON data structures."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

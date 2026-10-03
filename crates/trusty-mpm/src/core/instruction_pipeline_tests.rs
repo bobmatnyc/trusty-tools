@@ -6,6 +6,7 @@
 //! exactly as it did inline; nothing about the assertions changed in the move.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -789,19 +790,19 @@ fn pm_instructions_is_the_pm_body_sections() {
     // which is the split-brain this asserts against.
     // #8533: Identity opens the prompt and `core` was split into nine
     // sections, so the body is every section before the stack profile.
-    let body = pm_instructions();
-    let projected = crate::core::bundled_pm_package::authored_run(&PM_BODY_SECTIONS)
+    let body = pm_instructions(rc());
+    let projected = crate::core::bundled_pm_package::authored_run(rc(), &PM_BODY_SECTIONS)
         .expect("the manifest is readable");
     assert_eq!(body, format!("{projected}\n"));
     assert!(
-        body.starts_with(SECTION_IDENTITY.trim()),
+        body.starts_with(rc().required("sections/identity.md").trim()),
         "Identity opens the body"
     );
 
     // Every section source is still delivered in full, in order, and the
     // manifest-authored rules ride along.
     for id in PM_BODY_SECTIONS {
-        let expected = fallback_source(id).expect("every PM-body section has a source");
+        let expected = fallback_source(rc(), id).expect("every PM-body section has a source");
         assert!(body.contains(expected.trim()), "{id:?} went missing");
     }
     // #8361: autonomy is its own section now. On the legacy path it lives
@@ -831,19 +832,20 @@ fn base_pm_is_its_three_tail_sections() {
     // other non-overridable rules and so now precedes the conventions.
     //
     // #4573 added `enforcement` (Prohibitions + Circuit Breakers) as the second
-    // floor section. Asserting it HERE — over `base_pm()`, the string every
+    // floor section. Asserting it HERE — over `base_pm(rc())`, the string every
     // legacy branch appends, including the `PM_INSTRUCTIONS_DEPLOYED.md` full
     // replacement — is what proves the tier change alone did not leave the
     // legacy paths without the authority tables.
     // #8533: Identity moved to the top of the prompt, out of this tail.
-    let floor = base_pm();
+    let floor = base_pm(rc());
     assert_eq!(
         floor,
         format!(
             "{}\n\n{}\n\n{}\n",
-            SECTION_ENFORCEMENT.trim(),
-            SECTION_NON_OVERRIDABLE_RULES.trim(),
-            SECTION_FRAMEWORK_CONVENTIONS.trim()
+            rc().required("sections/enforcement.md").trim(),
+            rc().required("sections/non-overridable-rules.md").trim(),
+            rc().required("sections/framework-guaranteed-conventions.md")
+                .trim()
         )
     );
 
@@ -866,12 +868,14 @@ fn workflow_section_carries_the_opportunistic_fix_rule() {
     // Every consumer must therefore read the section through the manifest —
     // otherwise a project with no override and a project on the legacy path
     // would receive different workflows.
-    let section = workflow_section();
-    assert!(section.starts_with(WORKFLOW.trim()));
+    let section = workflow_section(rc());
+    assert!(section.starts_with(rc().required("sections/workflow.md").trim()));
     assert!(section.contains("## Opportunistic Fixes"));
     assert!(section.contains("noted on the CURRENT issue"));
     assert!(
-        !WORKFLOW.contains("## Opportunistic Fixes"),
+        !rc()
+            .required("sections/workflow.md")
+            .contains("## Opportunistic Fixes"),
         "the rule is manifest-authored; finding it in workflow.md means it was \
          duplicated"
     );
@@ -882,8 +886,8 @@ fn delegation_doctrine_carries_the_precedence_note() {
     // #4318 moved the roster-precedence note out of a Rust literal and into the
     // manifest. The doctrine string every composer uses must still be the asset
     // followed by that note, in that order.
-    let doctrine = delegation_doctrine();
-    assert!(doctrine.starts_with(AGENT_DELEGATION.trim()));
+    let doctrine = delegation_doctrine(rc());
+    assert!(doctrine.starts_with(rc().required("sections/agent-delegation.md").trim()));
     assert!(doctrine.ends_with("do not retry the same agent."));
     // #8533: the note is now the pinned agent-selection block.
     assert!(doctrine.contains("**Agent selection.**"));
@@ -899,7 +903,7 @@ fn the_installed_prompt_carries_the_manifest_authored_rules() {
     // it has to project the manifest rather than concatenate the constants. A
     // manifest-authored rule missing here is a rule half the launch paths never
     // see.
-    let prompt = assemble_system_prompt();
+    let prompt = assemble_system_prompt(rc());
     for marker in ["### Clickable References", "## Opportunistic Fixes"] {
         assert!(
             prompt.contains(marker),
@@ -912,7 +916,7 @@ fn the_installed_prompt_carries_the_manifest_authored_rules() {
 fn assemble_system_prompt_contains_all_sections() {
     // Why: the assembled prompt is the contract `claude` receives; every
     // bundled section must be present and joined with the `---` rule.
-    let prompt = assemble_system_prompt();
+    let prompt = assemble_system_prompt(rc());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("## Prohibitions (CANONICAL"));
     assert!(prompt.contains("# PM Workflow Configuration"));
@@ -1213,8 +1217,11 @@ fn a_bare_compiled_write_records_no_savings_row() {
     let dest = compiled_prompt_path(&project, "sess-7514");
     // Above the #7491 floor and below the source set, so the producer WOULD
     // have recorded a row: what is asserted is that it is never asked to.
-    let plausible =
-        "x".repeat(crate::core::savings_instructions::min_plausible_compiled_bytes() + 137);
+    let plausible = "x".repeat(
+        crate::core::savings_instructions::min_plausible_compiled_bytes(
+            crate::core::savings_instructions::SectionBytes::of(rc()),
+        ) + 137,
+    );
 
     write_compiled_prompt_to(&dest, &plausible).expect("write succeeds");
 
@@ -1257,10 +1264,14 @@ fn a_recording_compiled_write_reaches_the_named_framework_root() {
     fn no_roster(_: &Path) -> usize {
         0
     }
-    let sources = crate::core::savings_instructions::source_bytes_with(project.path(), no_roster);
+    let sources = crate::core::savings_instructions::source_bytes_with(
+        project.path(),
+        crate::core::savings_instructions::SectionBytes::of(rc()),
+        no_roster,
+    );
     let bulky = "x".repeat(sources + 1);
 
-    write_compiled_prompt_recording_in_with(root.path(), &dest, &bulky, no_roster)
+    write_compiled_prompt_recording_in_with(rc(), root.path(), &dest, &bulky, no_roster)
         .expect("write succeeds");
 
     assert_eq!(fs::read_to_string(&dest).unwrap(), bulky);
@@ -1281,10 +1292,10 @@ fn compiled_prompt_write_is_the_full_assembled_prompt_never_a_stub() {
     // asserts it is neither empty nor the historical stub.
     let tmp = TempDir::new().unwrap();
     let dest = compiled_prompt_path(tmp.path(), "s");
-    write_compiled_prompt_to(&dest, &assemble_system_prompt()).expect("write succeeds");
+    write_compiled_prompt_to(&dest, &assemble_system_prompt(rc())).expect("write succeeds");
 
     let on_disk = fs::read_to_string(&dest).unwrap();
-    assert_eq!(on_disk, assemble_system_prompt());
+    assert_eq!(on_disk, assemble_system_prompt(rc()));
     assert!(!on_disk.trim().is_empty());
     assert!(
         !on_disk.trim().eq("# trusty-mpm Framework Instructions\n\nThis Claude Code instance is managed by trusty-mpm.\nDaemon endpoint: ${TRUSTY_MPM_URL:-http://localhost:7799}"),
@@ -1316,7 +1327,7 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
     // this test asserts that block survived the dedup, not just that the
     // heading sentinel is de-duplicated.
     const SENTINEL: &str = "PRIMARY DIRECTIVE";
-    let assembled = assemble_system_prompt();
+    let assembled = assemble_system_prompt(rc());
     assert_eq!(
         assembled.matches(SENTINEL).count(),
         0,
@@ -1345,7 +1356,7 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
     // prompt nor a PRIMARY DIRECTIVE.
     for style in crate::core::bundle::pm_output_styles() {
         let combined =
-            assembled.matches(SENTINEL).count() + style.content.matches(SENTINEL).count();
+            assembled.matches(SENTINEL).count() + style.content(rc()).matches(SENTINEL).count();
         assert_eq!(
             combined, 1,
             "{}: PRIMARY DIRECTIVE sentinel must appear exactly once across \
@@ -1360,12 +1371,12 @@ fn primary_directive_mandate_not_duplicated_across_channels() {
         // in a tm-provisioned workspace is never left with zero
         // enforcement.
         assert!(
-            style.content.contains("do this yourself"),
+            style.content(rc()).contains("do this yourself"),
             "{}: must carry its own self-contained override-phrase list",
             style.id
         );
         assert!(
-            style.content.contains("Minimum prohibitions"),
+            style.content(rc()).contains("Minimum prohibitions"),
             "{}: must carry its own self-contained prohibition summary",
             style.id
         );
@@ -1468,7 +1479,7 @@ fn the_composed_prompt_names_only_the_agents_the_harness_cannot_publish() {
     )
     .expect("write copyeditor");
 
-    let prompt = crate::core::instruction_overrides::resolve_pm_prompt(&tiers.project());
+    let prompt = crate::core::instruction_overrides::resolve_pm_prompt(rc(), &tiers.project());
 
     assert!(
         prompt.contains("## Delegation Authority"),

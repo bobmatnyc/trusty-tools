@@ -2,7 +2,8 @@
 name: tm-ticketing
 description: The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, attribution, and the project-root TICKETING.md that overrides these defaults
 user-invocable: true
-version: "2.1.0"
+metadata:
+  version: "2.1.0"
 category: pm-workflow
 tags: [tickets, issues, promotion-gate, deduplication, labels, pm-required]
 effort: medium

@@ -2,7 +2,8 @@
 name: requesting-code-review
 description: "Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: medium
 ---

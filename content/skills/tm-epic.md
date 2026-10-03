@@ -2,7 +2,8 @@
 name: tm-epic
 description: Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the five tracker-update triggers, and the tm issue epic verbs that maintain the tracker.
 user-invocable: true
-version: "0.1.0"
+metadata:
+  version: "0.1.0"
 category: pm-workflow
 tags: [tickets, github, epic, phases, tracker, pm-required]
 effort: medium

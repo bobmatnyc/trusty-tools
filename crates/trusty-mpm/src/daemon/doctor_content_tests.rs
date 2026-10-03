@@ -47,8 +47,7 @@ fn content_row_is_ok_for_a_verified_bundle() {
 }
 
 /// After ADR-0064 PHASE_1 nothing else serves, so nothing installed is WARN.
-/// #9011 dropped the embedded agents, so this is the live arm: it reads the
-/// real `BUILTIN_CONTENT_EMBEDDED` through `check_content`.
+/// #9012 dropped the last embedded content, so this is the only arm.
 #[test]
 fn content_row_warns_when_nothing_is_installed_after_phase_1() {
     let cache = tempfile::tempdir().unwrap();

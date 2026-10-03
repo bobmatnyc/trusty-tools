@@ -2,7 +2,8 @@
 name: documentation-style
 description: "SLD-grounded per-artifact-type documentation style guide: the four-axis Why/What/Test + Spec-References inline model, plus focused conventions for specs, READMEs, files, classes, methods/functions, and block comments. Use when writing or reviewing any documentation artifact."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 tags: [documentation, sld, spec-linked-documentation, style-guide, agent-reference]
 effort: medium

@@ -55,10 +55,15 @@ The `<project>` here is the checkout that OWNS the project — the main checkout
 
 This catalog answers layout and tier questions. Design rationale, behaviour contracts, and operational procedure live in documents — but only some of them travel with the installed binary.
 
+### Ships with the instructional content
+
+`tm install` writes these into `~/.trusty-mpm/framework/docs/` from the content `tm content install` pinned (or from a checkout's `content/`).
+
+- `content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
+- `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`
+
 ### Ships in the published crate
 
-- `crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
-- `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`
 - `crates/trusty-mpm/README.md`, `crates/trusty-mpm/CHANGELOG.md`
 
 ### Repo-only — NOT in the published crate

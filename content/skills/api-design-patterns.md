@@ -2,7 +2,8 @@
 name: api-design-patterns
 description: "Comprehensive API design patterns covering REST, GraphQL, gRPC, versioning, authentication, and modern API best practices"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

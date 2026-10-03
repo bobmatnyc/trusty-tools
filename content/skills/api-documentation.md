@@ -2,7 +2,8 @@
 name: api-documentation
 description: "Best practices for documenting APIs and code interfaces, eliminating redundant documentation guidance per agent."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

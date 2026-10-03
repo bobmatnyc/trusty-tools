@@ -2,7 +2,8 @@
 name: internal-comms
 description: "Framework for writing concise 3P (Progress, Plans, Problems) team updates for executives and stakeholders"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

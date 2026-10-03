@@ -2,7 +2,8 @@
 name: tm-cli-operations
 description: Operate the tm / trusty-mpm CLI — set up and manage MCP servers, drive session lifecycle, and run health diagnostics
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-reference
 tags: [cli, mcp, sessions, services, doctor, auth, operations, pm-recommended]
 effort: medium

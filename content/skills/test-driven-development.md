@@ -2,7 +2,8 @@
 name: test-driven-development
 description: "Comprehensive TDD patterns and practices for all programming languages, eliminating redundant testing guidance per agent."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

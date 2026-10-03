@@ -17,6 +17,9 @@ use std::path::Path;
 pub use trusty_agents_common::agent_content::{AgentContentError, AgentRoster, DevOverride};
 use trusty_agents_common::agent_content::{resolve_content, resolve_content_in};
 use trusty_agents_common::harness_doc::HarnessDoc;
+use trusty_common::content::find_dev_checkout;
+
+pub use crate::core::framework_content::FrameworkContent;
 
 /// `DetectFrom(cwd)`, or `Off` when the cwd cannot be read.
 pub fn dev_override() -> DevOverride {
@@ -69,6 +72,42 @@ pub fn harness_doc() -> Result<HarnessDoc, AgentContentError> {
     HarnessDoc::load(&resolve_content(dev_override())?)
 }
 
+/// trusty-mpm's skills and instructions, resolved like [`agent_roster`] (#9012).
+pub fn framework_content() -> Result<FrameworkContent, AgentContentError> {
+    FrameworkContent::load(&resolve_content(dev_override())?)
+}
+
+/// [`framework_content`] against an explicit cache directory and override.
+pub fn framework_content_in(
+    cache_dir: &Path,
+    dev: DevOverride,
+) -> Result<FrameworkContent, AgentContentError> {
+    FrameworkContent::load(&resolve_content_in(cache_dir, dev)?)
+}
+
+/// The content for work on `dir` — a project being launched (#9012).
+///
+/// Why: a daemon-spawned launch runs with the daemon's cwd, which says nothing
+/// about the project; a launch of a trusty-tools checkout must read that
+/// checkout's content, as `tm launch` run inside it does.
+/// What: the trusted checkout enclosing `dir`, else the one enclosing this
+/// process's cwd (the rule [`agent_roster`] applies), else the installed
+/// bundle. A checkout that is found is the source; a failure reading it is
+/// returned, never answered by another source.
+/// Test: `framework_content_resolves_from_the_named_dir`.
+pub fn framework_content_for(dir: &Path) -> Result<FrameworkContent, AgentContentError> {
+    let checkout = find_dev_checkout(dir).or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|cwd| find_dev_checkout(&cwd))
+    });
+    let content = match checkout {
+        Some(root) => resolve_content(DevOverride::At(root))?,
+        None => resolve_content(DevOverride::Off)?,
+    };
+    FrameworkContent::load(&content)
+}
+
 /// Test helpers: the repository's own content, through `DevOverride::At`, so
 /// no test depends on the cwd, HOME or an installed bundle.
 #[cfg(test)]
@@ -100,6 +139,29 @@ pub(crate) mod test_support {
         HarnessDoc::load(&checkout_content(&repo_root()).expect("repo content"))
             .expect("repo harness docs")
     }
+
+    /// The checkout's skills and instructions (#9012).
+    pub(crate) fn repo_content() -> super::FrameworkContent {
+        super::FrameworkContent::load(&checkout_content(&repo_root()).expect("repo content"))
+            .expect("repo framework content")
+    }
+
+    /// [`repo_content`], loaded once per test binary: the prompt tests compose
+    /// hundreds of prompts, and each load reads ~200 files.
+    pub(crate) fn rc() -> &'static super::FrameworkContent {
+        static CONTENT: std::sync::OnceLock<super::FrameworkContent> = std::sync::OnceLock::new();
+        CONTENT.get_or_init(repo_content)
+    }
+
+    /// The checkout's bundled PM instruction package, parsed once (#9012).
+    pub(crate) fn rc_package() -> &'static crate::core::instruction_package::InstructionPackage {
+        static PACKAGE: std::sync::OnceLock<crate::core::instruction_package::InstructionPackage> =
+            std::sync::OnceLock::new();
+        PACKAGE.get_or_init(|| {
+            crate::core::bundled_pm_package::bundled_fallback_package(rc())
+                .expect("the repository's PM instruction package parses and validates")
+        })
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +186,18 @@ mod tests {
         let roster = agent_roster_for_query(&test_support::repo_root().join("crates/trusty-mpm"))
             .expect("checkout roster from the query cwd");
         assert_eq!(roster.len(), test_support::repo_roster().len());
+    }
+
+    /// #9012: a project inside the checkout reads the checkout's content even
+    /// with an empty cache.
+    #[test]
+    fn framework_content_resolves_from_the_named_dir() {
+        let content = framework_content_for(&test_support::repo_root().join("crates/trusty-mpm"))
+            .expect("checkout content from the named dir");
+        assert!(content.skill("skills/tm.md").is_some());
+        let cache = tempfile::tempdir().expect("tempdir");
+        let err = framework_content_in(cache.path(), DevOverride::Off).expect_err("nothing");
+        assert!(err.is_not_installed(), "got {err:?}");
     }
 
     /// From inside the checkout the dev override serves the working tree.

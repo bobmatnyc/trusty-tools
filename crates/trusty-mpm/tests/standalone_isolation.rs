@@ -34,6 +34,15 @@ use trusty_mpm::core::{
     },
 };
 
+/// The checkout's skills and instructions (#9012: runtime content).
+fn repo_content() -> trusty_mpm::core::framework_content::FrameworkContent {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    trusty_mpm::core::framework_content::FrameworkContent::load(
+        &trusty_agents_common::agent_content::checkout_content(&root).expect("repo content"),
+    )
+    .expect("repo framework content")
+}
+
 /// An absolute, installed-looking `tm` path this file pins for every hook write.
 ///
 /// Why (#7244): the hooks writer refuses a build-artifact binary, and this test
@@ -695,7 +704,8 @@ fn output_styles_deploy_to_config_dir_not_home() {
         );
         let content = std::fs::read_to_string(&target).expect("read deployed style");
         assert_eq!(
-            content, style.content,
+            content,
+            style.content(&repo_content()),
             "deployed output style {} content must match bundled constant",
             style.file_name
         );

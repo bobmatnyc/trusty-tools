@@ -56,6 +56,7 @@ use crate::core::bundled_pm_package::bundled_fallback_package;
 use crate::core::claude_md_sections::{
     HOST_FILES, SUPPORTED_VERSION, contains_marker_line, locate_blocks, section_token,
 };
+use crate::core::framework_content::FrameworkContent;
 use crate::core::instruction_package::{CustomizationTier, OverrideTier, SectionId};
 
 /// Where the composed PM system prompt is written, as named in a project's
@@ -168,7 +169,7 @@ pub enum WriteRejection {
     },
     /// The bundled package could not be loaded, so no tier could be consulted.
     #[error("bundled instruction package unavailable ({0}); refusing to write")]
-    PackageUnavailable(&'static str),
+    PackageUnavailable(String),
     /// Reading or writing the host failed.
     #[error("{0}")]
     Io(String),
@@ -194,8 +195,12 @@ fn host_path(project_dir: &Path) -> PathBuf {
 /// otherwise a rejection, logged at `warn` because a declined customization the
 /// author never hears about is the #381 failure mode.
 /// Test: `core_is_declined_and_logged`, `every_other_section_is_writable`.
-fn section_is_writable(section: SectionId) -> Result<(), WriteRejection> {
-    let package = bundled_fallback_package().map_err(WriteRejection::PackageUnavailable)?;
+fn section_is_writable(
+    content: &FrameworkContent,
+    section: SectionId,
+) -> Result<(), WriteRejection> {
+    // #9012: the package is read from the caller's content, not compiled in.
+    let package = bundled_fallback_package(content).map_err(WriteRejection::PackageUnavailable)?;
     let declared = package
         .section(section)
         .ok_or(WriteRejection::UnknownSection { section })?;
@@ -407,11 +412,12 @@ fn persist(
 /// `preserves_surrounding_content_byte_for_byte`,
 /// `an_unclosed_marker_blocks_the_write`.
 pub fn write_section_override(
+    content: &FrameworkContent,
     project_dir: &Path,
     section: SectionId,
     body: &str,
 ) -> Result<WriteOutcome, WriteRejection> {
-    section_is_writable(section)?;
+    section_is_writable(content, section)?;
     if body.trim().is_empty() {
         return Err(WriteRejection::EmptyBody { section });
     }

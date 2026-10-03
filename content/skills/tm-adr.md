@@ -2,7 +2,8 @@
 name: tm-adr
 description: Architecture Decision Records (ADRs) — formal first-class documentation artifact for significant, hard-to-reverse architectural decisions with consistency vetting
 user-invocable: true
-version: "2.0.0"
+metadata:
+  version: "2.0.0"
 category: documentation
 tags: [documentation, architecture, adr, governance]
 effort: medium

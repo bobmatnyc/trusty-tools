@@ -2,7 +2,8 @@
 name: rust-delivery-workflow
 description: "Rust delivery process under agent dispatch: commit before the gate chain, match the local toolchain to CI's clippy pin, cap concurrent cargo builds, keep gate output to a verdict, and batch installs before live verification. Use when planning or running the gates for a Rust change, not when a build feels slow."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

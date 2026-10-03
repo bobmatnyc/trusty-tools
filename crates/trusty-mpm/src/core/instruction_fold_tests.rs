@@ -9,7 +9,15 @@
 //! Test: this file IS the suite.
 
 use super::*;
-use crate::core::instruction_pipeline::SECTION_SOURCES;
+use crate::core::content_source::test_support::rc;
+
+/// The canonical section sources, read from the checkout's content (#9012).
+fn section_sources() -> Vec<(&'static str, &'static str)> {
+    crate::core::instruction_pipeline::SECTION_FILES
+        .iter()
+        .map(|path| (*path, rc().required(path)))
+        .collect()
+}
 
 #[test]
 fn authoring_comments_are_not_delivered() {
@@ -254,7 +262,7 @@ fn table_padding_is_stripped() {
 fn no_table_row_is_lost() {
     // The brief's hard constraint: P1-P11 and every circuit-breaker row must
     // survive the fold. Row COUNT is the mechanical form of that guarantee.
-    for (path, body) in SECTION_SOURCES {
+    for (path, body) in section_sources() {
         let rows = |text: &str| {
             text.lines()
                 .filter(|l| l.trim_start().starts_with('|'))
@@ -271,11 +279,7 @@ fn no_table_row_is_lost() {
 #[test]
 fn every_prohibition_and_circuit_breaker_row_survives() {
     // Named rather than counted: a row renamed away is as bad as one deleted.
-    let enforcement = SECTION_SOURCES
-        .iter()
-        .find(|(path, _)| *path == "sections/enforcement.md")
-        .map(|(_, body)| *body)
-        .expect("enforcement section is bundled");
+    let enforcement = rc().required("sections/enforcement.md");
     let folded = fold_delivered_prompt(enforcement);
 
     for n in 1..=11 {
@@ -296,7 +300,7 @@ fn every_prohibition_and_circuit_breaker_row_survives() {
 fn every_skill_pointer_survives() {
     // Progressive disclosure is the corpus's whole design: a dropped pointer
     // silently removes the PM's access to a skill's contents.
-    for (path, body) in SECTION_SOURCES {
+    for (path, body) in section_sources() {
         let pointers = |text: &str| text.matches("Skill(skill=").count();
         assert_eq!(
             pointers(&fold_delivered_prompt(body)),
@@ -328,7 +332,7 @@ fn an_indented_table_row_keeps_its_indentation() {
 
 #[test]
 fn the_fold_is_idempotent() {
-    for (path, body) in SECTION_SOURCES {
+    for (path, body) in section_sources() {
         let once = fold_delivered_prompt(body);
         assert_eq!(
             fold_delivered_prompt(&once),
@@ -340,7 +344,7 @@ fn the_fold_is_idempotent() {
 
 #[test]
 fn the_fold_never_grows_a_section() {
-    for (path, body) in SECTION_SOURCES {
+    for (path, body) in section_sources() {
         assert!(
             fold_delivered_prompt(body).len() <= body.len(),
             "{path} grew under the fold"
@@ -351,8 +355,8 @@ fn the_fold_never_grows_a_section() {
 /// #7616: the corpus-level claim. Before the fold existed this was 0 B.
 #[test]
 fn the_bundled_corpus_actually_shrinks() {
-    let authored: usize = SECTION_SOURCES.iter().map(|(_, body)| body.len()).sum();
-    let folded: usize = SECTION_SOURCES
+    let authored: usize = section_sources().iter().map(|(_, body)| body.len()).sum();
+    let folded: usize = section_sources()
         .iter()
         .map(|(_, body)| fold_delivered_prompt(body).len())
         .sum();

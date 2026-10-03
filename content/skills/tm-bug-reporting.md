@@ -2,7 +2,8 @@
 name: tm-bug-reporting
 description: Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [bug-reporting, github, issues, pm-required]
 effort: medium

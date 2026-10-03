@@ -2,7 +2,8 @@
 name: tm-capabilities
 description: Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill.
 user-invocable: false
-version: "1.1.0"
+metadata:
+  version: "1.1.0"
 category: pm-reference
 tags: [reference, generated, cli, mcp, agents, skills, doctor, framework]
 effort: low

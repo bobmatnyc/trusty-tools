@@ -2,7 +2,8 @@
 name: tm-secrets
 description: Where a trusty credential lives today — the 0600 file store and Keychain behind trusty-common, the two tm doctor rows that check them, and the rules for handling a secret value. The tm secrets CLI does not ship yet.
 user-invocable: true
-version: "1.2.0"
+metadata:
+  version: "1.2.0"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium

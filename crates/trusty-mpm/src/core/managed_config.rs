@@ -253,7 +253,14 @@ pub fn ensure_managed_config_dir_with_root_and_exe(
     // the bundled skill source first removes the dependency on a prior manual
     // `tm install` (#1917); non-fatal so a refresh failure falls back to
     // whatever is already on disk rather than blocking the spawn.
-    if let Err(err) = crate::core::skill_source::ensure_skill_source_fresh(fw) {
+    // #9012: the skills are runtime content; with none the refresh is skipped.
+    let refreshed = crate::core::content_source::framework_content_for(project_dir)
+        .map_err(|err| err.to_string())
+        .and_then(|content| {
+            crate::core::skill_source::ensure_skill_source_fresh(fw, &content)
+                .map_err(|err| err.to_string())
+        });
+    if let Err(err) = refreshed {
         tracing::warn!("managed config dir: skill source refresh failed (non-fatal): {err}");
     }
 

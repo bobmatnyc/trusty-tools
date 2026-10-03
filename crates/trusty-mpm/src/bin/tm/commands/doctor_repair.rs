@@ -276,11 +276,17 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // all. This is it.
         // #7423: and the managed `$CLAUDE_CONFIG_DIR` tier beside it — the copy
         // a tm-launched session actually reads, which this repair never touched.
-        steps.extend(repair_output_style(
-            &home,
-            trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
-            mode,
-        ));
+        // #9012: the style bodies are runtime content; with none the repair is
+        // skipped with the remedy rather than writing nothing silently.
+        match trusty_mpm::core::content_source::framework_content() {
+            Ok(content) => steps.extend(repair_output_style(
+                &content,
+                &home,
+                trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
+                mode,
+            )),
+            Err(err) => eprintln!("  output styles not repaired: {err}"),
+        }
         steps.extend(refuse_legacy_sources(&home));
         // A `.mcp.json` above the workspace configures every session started
         // beneath it. This quarantines ONLY the ones the provenance ledger

@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::core::claude_md_sections::{REASON_DUPLICATE, scan_project};
+use crate::core::content_source::test_support::rc;
 
 /// A project root with no `CLAUDE.md` yet.
 fn project() -> TempDir {
@@ -48,7 +49,7 @@ fn start_marker_count(dir: &Path, section: SectionId) -> usize {
 #[test]
 fn writes_a_new_block_a_reader_accepts() {
     let dir = project();
-    let outcome = write_section_override(dir.path(), SectionId::Workflow, "CUSTOM WORKFLOW")
+    let outcome = write_section_override(rc(), dir.path(), SectionId::Workflow, "CUSTOM WORKFLOW")
         .expect("write accepted");
     assert_eq!(outcome, WriteOutcome::Created);
 
@@ -74,7 +75,7 @@ fn writes_a_new_block_a_reader_accepts() {
 #[test]
 fn written_block_declares_the_readers_supported_version() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Memory, "BODY").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Memory, "BODY").expect("write accepted");
 
     let text = read(dir.path());
     assert!(
@@ -92,7 +93,7 @@ fn written_block_declares_the_readers_supported_version() {
 #[test]
 fn writes_target_the_readers_only_host() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Search, "BODY").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Search, "BODY").expect("write accepted");
 
     assert!(host(dir.path()).is_file(), "CLAUDE.md must exist");
     assert_eq!(
@@ -107,7 +108,7 @@ fn writes_target_the_readers_only_host() {
 fn round_trips_through_the_reader() {
     let dir = project();
     let body = "# Heading\n\n- bullet one\n- bullet two\n\nTrailing paragraph.";
-    write_section_override(dir.path(), SectionId::Enforcement, body).expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Enforcement, body).expect("write accepted");
 
     let scanned = scan_project(dir.path());
     assert_eq!(scanned.overrides[0].body, body);
@@ -119,8 +120,8 @@ fn creates_the_host_when_absent() {
     let dir = project();
     assert!(!host(dir.path()).exists(), "premise: no CLAUDE.md yet");
 
-    let outcome =
-        write_section_override(dir.path(), SectionId::Identity, "ID").expect("write accepted");
+    let outcome = write_section_override(rc(), dir.path(), SectionId::Identity, "ID")
+        .expect("write accepted");
     assert_eq!(outcome, WriteOutcome::Created);
     assert!(host(dir.path()).is_file());
 }
@@ -133,8 +134,8 @@ fn creates_the_host_when_absent() {
 #[test]
 fn applying_twice_leaves_exactly_one_block() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Workflow, "ONCE").expect("first write");
-    write_section_override(dir.path(), SectionId::Workflow, "ONCE").expect("second write");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "ONCE").expect("first write");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "ONCE").expect("second write");
 
     assert_eq!(
         start_marker_count(dir.path(), SectionId::Workflow),
@@ -158,11 +159,11 @@ fn applying_twice_leaves_exactly_one_block() {
 #[test]
 fn applying_the_same_override_twice_reports_unchanged() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Memory, "SAME").expect("first write");
+    write_section_override(rc(), dir.path(), SectionId::Memory, "SAME").expect("first write");
     let after_first = read(dir.path());
 
     let outcome =
-        write_section_override(dir.path(), SectionId::Memory, "SAME").expect("second write");
+        write_section_override(rc(), dir.path(), SectionId::Memory, "SAME").expect("second write");
     assert_eq!(outcome, WriteOutcome::Unchanged);
     assert_eq!(read(dir.path()), after_first, "bytes must not move");
 }
@@ -172,9 +173,10 @@ fn applying_the_same_override_twice_reports_unchanged() {
 #[test]
 fn replacing_updates_the_body_in_place() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Workflow, "OLD VALUE").expect("first write");
-    let outcome =
-        write_section_override(dir.path(), SectionId::Workflow, "NEW VALUE").expect("second write");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "OLD VALUE")
+        .expect("first write");
+    let outcome = write_section_override(rc(), dir.path(), SectionId::Workflow, "NEW VALUE")
+        .expect("second write");
     assert_eq!(outcome, WriteOutcome::Replaced);
 
     let scanned = scan_project(dir.path());
@@ -217,7 +219,8 @@ fn replacing_collapses_duplicate_blocks_to_one() {
         "fixture must actually contain a duplicate the reader reports"
     );
 
-    write_section_override(dir.path(), SectionId::Workflow, "MERGED").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "MERGED")
+        .expect("write accepted");
 
     assert_eq!(
         start_marker_count(dir.path(), SectionId::Workflow),
@@ -249,7 +252,7 @@ fn core_is_declined_and_logged() {
     seed(dir.path(), "project prose\n");
     let before = read(dir.path());
 
-    let err = write_section_override(dir.path(), SectionId::Core, "TAKE OVER")
+    let err = write_section_override(rc(), dir.path(), SectionId::Core, "TAKE OVER")
         .expect_err("CORE must be refused");
     assert!(
         matches!(
@@ -277,7 +280,8 @@ fn every_other_section_is_writable() {
     let mut written = 0usize;
 
     for section in SectionId::CANONICAL {
-        let result = write_section_override(dir.path(), section, &format!("BODY {section:?}"));
+        let result =
+            write_section_override(rc(), dir.path(), section, &format!("BODY {section:?}"));
         if section == SectionId::Core {
             assert!(result.is_err(), "CORE must be refused");
             continue;
@@ -325,7 +329,7 @@ fn preserves_surrounding_content_byte_for_byte() {
         ),
     );
 
-    write_section_override(dir.path(), SectionId::Workflow, "NEW").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "NEW").expect("write accepted");
 
     let text = read(dir.path());
     assert!(
@@ -350,7 +354,7 @@ fn preserves_crlf_line_endings() {
         ),
     );
 
-    write_section_override(dir.path(), SectionId::Memory, "NEW").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Memory, "NEW").expect("write accepted");
 
     let text = read(dir.path());
     assert!(text.starts_with("alpha\r\nbeta\r\n"), "got:\n{text:?}");
@@ -365,7 +369,7 @@ fn appends_after_existing_prose() {
     seed(dir.path(), "# Existing\n\nSome rules.\n");
 
     let outcome =
-        write_section_override(dir.path(), SectionId::Search, "SEARCH RULES").expect("write");
+        write_section_override(rc(), dir.path(), SectionId::Search, "SEARCH RULES").expect("write");
     assert_eq!(outcome, WriteOutcome::Inserted);
 
     let text = read(dir.path());
@@ -380,7 +384,7 @@ fn appends_newline_when_existing_file_lacks_trailing_newline() {
     let dir = project();
     seed(dir.path(), "no trailing newline");
 
-    write_section_override(dir.path(), SectionId::Search, "BODY").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Search, "BODY").expect("write accepted");
 
     let text = read(dir.path());
     assert!(
@@ -400,7 +404,7 @@ fn appends_newline_when_existing_file_lacks_trailing_newline() {
 fn empty_body_is_refused() {
     let dir = project();
     for body in ["", "   ", "\n\t\n"] {
-        let err = write_section_override(dir.path(), SectionId::Workflow, body)
+        let err = write_section_override(rc(), dir.path(), SectionId::Workflow, body)
             .expect_err("empty body must be refused");
         assert!(matches!(err, WriteRejection::EmptyBody { .. }), "{err:?}");
     }
@@ -420,7 +424,7 @@ fn body_containing_a_marker_line_is_refused() {
     let before = read(dir.path());
 
     let hostile = "legit line\n<!-- TRUSTY-MPM: MEMORY START v=1 -->\nsmuggled\n";
-    let err = write_section_override(dir.path(), SectionId::Workflow, hostile)
+    let err = write_section_override(rc(), dir.path(), SectionId::Workflow, hostile)
         .expect_err("a marker line in the body must be refused");
     assert!(
         matches!(err, WriteRejection::BodyContainsMarker { .. }),
@@ -438,7 +442,7 @@ fn body_mentioning_the_marker_in_prose_is_written() {
     let dir = project();
     let body = "Use `<!-- TRUSTY-MPM: WORKFLOW START v=1 -->` to open a block.";
 
-    write_section_override(dir.path(), SectionId::Workflow, body)
+    write_section_override(rc(), dir.path(), SectionId::Workflow, body)
         .expect("prose mentioning a marker must be writable");
 
     let scanned = scan_project(dir.path());
@@ -458,7 +462,7 @@ fn an_unclosed_marker_blocks_the_write() {
     );
     let before = read(dir.path());
 
-    let err = write_section_override(dir.path(), SectionId::Workflow, "NEW")
+    let err = write_section_override(rc(), dir.path(), SectionId::Workflow, "NEW")
         .expect_err("an unclosed marker must block the write");
     assert!(
         matches!(err, WriteRejection::HostMalformed { .. }),
@@ -475,7 +479,7 @@ fn unreadable_host_is_reported_not_clobbered() {
     let dir = project();
     std::fs::create_dir(host(dir.path())).expect("directory at the host path");
 
-    let err = write_section_override(dir.path(), SectionId::Workflow, "BODY")
+    let err = write_section_override(rc(), dir.path(), SectionId::Workflow, "BODY")
         .expect_err("an unreadable host must be reported");
     assert!(matches!(err, WriteRejection::Io(_)), "{err:?}");
     assert!(
@@ -521,7 +525,7 @@ fn refusals_leave_the_file_byte_identical() {
         seed(dir.path(), &seeded);
         let before = read(dir.path());
 
-        write_section_override(dir.path(), section, &body)
+        write_section_override(rc(), dir.path(), section, &body)
             .expect_err(&format!("{label} must be refused"));
 
         assert_eq!(read(dir.path()), before, "{label} must not alter the file");
@@ -630,9 +634,9 @@ fn an_unpaired_pointer_marker_does_not_consume_the_file() {
 #[test]
 fn pointer_and_section_block_coexist() {
     let dir = project();
-    write_section_override(dir.path(), SectionId::Workflow, "WF").expect("section write");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "WF").expect("section write");
     ensure_compiled_pointer(dir.path()).expect("pointer write");
-    write_section_override(dir.path(), SectionId::Workflow, "WF2").expect("section rewrite");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "WF2").expect("section rewrite");
 
     let scanned = scan_project(dir.path());
     assert_eq!(scanned.overrides.len(), 1, "{:?}", scanned.diagnostics);
@@ -658,7 +662,7 @@ fn matches_the_hosts_crlf_line_endings() {
     let dir = project();
     seed(dir.path(), "# Project\r\n\r\nExisting prose.\r\n");
 
-    write_section_override(dir.path(), SectionId::Workflow, "line one\nline two")
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "line one\nline two")
         .expect("write accepted");
 
     let text = read(dir.path());
@@ -681,7 +685,7 @@ fn a_mixed_ending_host_takes_the_dominant_ending() {
     // One LF line, three CRLF lines: CRLF dominates.
     seed(dir.path(), "lf-line\r\na\r\nb\r\nc\n");
 
-    write_section_override(dir.path(), SectionId::Memory, "BODY").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Memory, "BODY").expect("write accepted");
 
     let text = read(dir.path());
     let appended = &text[text.find("TRUSTY-MPM").expect("marker present")..];
@@ -710,7 +714,7 @@ fn replacing_a_trailing_block_preserves_a_missing_final_newline() {
         "premise: the fixture has no final newline"
     );
 
-    write_section_override(dir.path(), SectionId::Workflow, "NEW").expect("write accepted");
+    write_section_override(rc(), dir.path(), SectionId::Workflow, "NEW").expect("write accepted");
 
     let text = read(dir.path());
     assert!(

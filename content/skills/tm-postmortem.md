@@ -2,7 +2,8 @@
 name: tm-postmortem
 description: Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline
 user-invocable: true
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: pm-workflow
 tags: [postmortem, analysis, errors, pm-recommended]
 effort: medium

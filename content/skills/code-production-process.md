@@ -2,7 +2,8 @@
 name: code-production-process
 description: "Six-stage quality-gate pipeline for any code implementation task"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

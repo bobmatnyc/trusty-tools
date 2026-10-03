@@ -31,6 +31,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::core::delegation_authority::resolve_roster_reporting;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::instruction_package::SectionId;
 
 /// Separator placed between merged instruction sections.
@@ -46,12 +47,13 @@ pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 // Bundled system-prompt assembly
 //
 // Why: trusty-mpm must own its own PM instructions rather than reading from a
-// `~/.claude-mpm/` install at runtime. The section assets below are embedded at
-// compile time and assembled into a single `INSTRUCTIONS.md` that is passed to
-// `claude --append-system-prompt-file` on every session launch.
+// `~/.claude-mpm/` install at runtime. The section files are instructional
+// content (#9012, ADR-0064): read from the loaded `FrameworkContent` and
+// assembled into the prompt passed to `claude --append-system-prompt-file` on
+// every session launch.
 //
 // SOURCE OF TRUTH (#4183): one markdown file per [`SectionId`], under
-// `assets/instructions/sections/`. The four monolithic assets this crate used to
+// `content/instructions/sections/`. The four monolithic assets this crate used to
 // embed (`PM_INSTRUCTIONS.md`, `WORKFLOW.md`, `AGENT_DELEGATION.md`,
 // `BASE_PM.md`) are gone; `pm_instructions()` and `base_pm()` reconstitute the
 // two that spanned several sections so the legacy override assembly keeps its
@@ -61,8 +63,8 @@ pub(crate) const SECTION_SEPARATOR: &str = "\n\n---\n\n";
 // meaningful rather than a check of two copies of the same paste.
 // ---------------------------------------------------------------------------
 
-// #8533: the section constants and `SECTION_SOURCES` live in a child module
-// (SLOC cap); re-exported so every existing path keeps resolving.
+// #8533: the section table lives in a child module (SLOC cap); re-exported so
+// every existing path keeps resolving. #9012: it reads content, not constants.
 #[path = "instruction_section_sources.rs"]
 mod section_sources;
 pub(crate) use section_sources::*;
@@ -87,36 +89,34 @@ pub(crate) use section_sources::*;
 /// roster-absent prompt.
 /// Test: `pm_instructions_is_the_pm_body_sections`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
-pub(crate) fn pm_instructions() -> &'static str {
-    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        // #8533: Identity opens the prompt and `core` was split into nine
-        // sections, so the PM body is every section before the stack profile.
-        let run = manifest_run(&PM_BODY_SECTIONS).unwrap_or_else(|| {
-            PM_BODY_SECTIONS
-                .iter()
-                .filter_map(|id| fallback_source(*id))
-                .map(str::trim)
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        });
-        format!("{run}\n")
+pub(crate) fn pm_instructions(content: &FrameworkContent) -> String {
+    // #8533: Identity opens the prompt and `core` was split into nine
+    // sections, so the PM body is every section before the stack profile.
+    let run = manifest_run(content, &PM_BODY_SECTIONS).unwrap_or_else(|| {
+        PM_BODY_SECTIONS
+            .iter()
+            .filter_map(|id| fallback_source(content, *id))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("\n\n")
     });
-    &JOINED
+    format!("{run}\n")
 }
 
 /// Project a run of sections out of the bundled manifest.
 ///
 /// Why: since #4318 the manifest may author a rule inline rather than in a
-/// section file, so rebuilding these strings from the `include_str!` constants
+/// section file, so rebuilding these strings from the raw section files
 /// would deliver that rule to package-composed sessions and silently withhold it
 /// from the legacy assembly and from [`assemble_system_prompt`]. Projecting the
-/// manifest keeps one source of truth for the *content*, while the constants stay
-/// as the retained fallback for the case where the manifest itself is unreadable.
+/// manifest keeps one source of truth for the *content*, while the raw section
+/// files stay as the fallback for the case where the manifest is unreadable.
 /// What: [`crate::core::bundled_pm_package::authored_run`], or `None` when the
 /// manifest failed to parse or validate.
 /// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
-fn manifest_run(sections: &[SectionId]) -> Option<String> {
-    crate::core::bundled_pm_package::authored_run(sections).filter(|run| !run.trim().is_empty())
+fn manifest_run(content: &FrameworkContent, sections: &[SectionId]) -> Option<String> {
+    crate::core::bundled_pm_package::authored_run(content, sections)
+        .filter(|run| !run.trim().is_empty())
 }
 
 /// The bundled workflow section, as authored in the manifest.
@@ -126,14 +126,12 @@ fn manifest_run(sections: &[SectionId]) -> Option<String> {
 /// must therefore ask the manifest, not the constant, or a project with a
 /// `WORKFLOW.md` override would be the only one to notice the difference.
 /// What: the authored workflow blocks joined as declared, trimmed; the raw
-/// `WORKFLOW` constant when the manifest is unreadable.
+/// `sections/workflow.md` file when the manifest is unreadable.
 /// Test: `workflow_section_carries_the_opportunistic_fix_rule`,
 /// `assemble_system_prompt_contains_all_sections`.
-pub(crate) fn workflow_section() -> &'static str {
-    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        manifest_run(&[SectionId::Workflow]).unwrap_or_else(|| WORKFLOW.trim().to_string())
-    });
-    &JOINED
+pub(crate) fn workflow_section(content: &FrameworkContent) -> String {
+    manifest_run(content, &[SectionId::Workflow])
+        .unwrap_or_else(|| content.required("sections/workflow.md").trim().to_string())
 }
 
 /// The bundled delegation doctrine plus the roster-precedence note.
@@ -146,12 +144,15 @@ pub(crate) fn workflow_section() -> &'static str {
 /// manifest is unreadable, which is the pre-#4069 shape.
 /// Test: `bundled_delegation_appends_deployed_roster`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`.
-pub(crate) fn delegation_doctrine() -> &'static str {
-    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        manifest_run(&[SectionId::AgentDelegation])
-            .unwrap_or_else(|| AGENT_DELEGATION.trim().to_string())
-    });
-    &JOINED
+pub(crate) fn delegation_doctrine(content: &FrameworkContent) -> String {
+    manifest_run(content, &[SectionId::AgentDelegation])
+        .unwrap_or_else(|| agent_delegation(content).trim().to_string())
+}
+
+/// The raw `sections/agent-delegation.md` doctrine — the roster-free body the
+/// override resolver uses when no `AGENT_DELEGATION.md` override is present.
+pub(crate) fn agent_delegation(content: &FrameworkContent) -> &str {
+    content.required("sections/agent-delegation.md")
 }
 
 /// The prompt tail, rebuilt from its three sections.
@@ -177,43 +178,45 @@ pub(crate) fn delegation_doctrine() -> &'static str {
 /// conventions. Position only — not one word of either block changed, and both
 /// remain inside the floor, so nothing about what is overridable moved.
 /// Test: `base_pm_is_its_three_tail_sections`, `floor_carries_the_tool_priority_mandate`.
-pub(crate) fn base_pm() -> &'static str {
-    static JOINED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        // #8533: Identity moved to the top of the prompt, out of this tail.
-        let run = manifest_run(&[
+pub(crate) fn base_pm(content: &FrameworkContent) -> String {
+    // #8533: Identity moved to the top of the prompt, out of this tail.
+    let run = manifest_run(
+        content,
+        &[
             SectionId::Enforcement,
             SectionId::NonOverridableRules,
             SectionId::FrameworkGuaranteedConventions,
-        ])
-        .unwrap_or_else(|| {
-            format!(
-                "{}\n\n{}\n\n{}",
-                SECTION_ENFORCEMENT.trim(),
-                SECTION_NON_OVERRIDABLE_RULES.trim(),
-                SECTION_FRAMEWORK_CONVENTIONS.trim()
-            )
-        });
-        format!("{run}\n")
+        ],
+    )
+    .unwrap_or_else(|| {
+        format!(
+            "{}\n\n{}\n\n{}",
+            content.required("sections/enforcement.md").trim(),
+            content.required("sections/non-overridable-rules.md").trim(),
+            content
+                .required("sections/framework-guaranteed-conventions.md")
+                .trim()
+        )
     });
-    &JOINED
+    format!("{run}\n")
 }
 
-/// Assemble the full system prompt from bundled source components.
+/// Assemble the full system prompt from the content's section sources.
 ///
 /// Why: a launched `claude` session must receive identical, version-controlled
-/// PM instructions every time; embedding the sources and joining them here
-/// removes any dependency on an external `~/.claude-mpm/` install.
+/// PM instructions every time; joining the verified content source's sections
+/// here removes any dependency on an external `~/.claude-mpm/` install.
 /// What: concatenates the bundled sections in the fixed order
 /// PM body → WORKFLOW → AGENT_DELEGATION → floor, separated by a `---` rule. The
 /// floor comes last as the non-overridable framework floor; it carries the
 /// Trusty MCP tool-priority block.
 /// Test: `assemble_system_prompt_contains_all_sections`.
-pub fn assemble_system_prompt() -> String {
+pub fn assemble_system_prompt(content: &FrameworkContent) -> String {
     [
-        pm_instructions(),
-        workflow_section(),
-        AGENT_DELEGATION,
-        base_pm(),
+        pm_instructions(content).as_str(),
+        workflow_section(content).as_str(),
+        agent_delegation(content),
+        base_pm(content).as_str(),
     ]
     .join(SECTION_SEPARATOR)
 }
@@ -332,6 +335,7 @@ pub fn write_compiled_prompt_to(dest: &std::path::Path, prompt: &str) -> std::io
 /// `a_recording_compiled_write_reaches_the_named_framework_root` exercises
 /// directly.
 pub(crate) fn write_compiled_prompt_recording_in(
+    content: &FrameworkContent,
     framework_root: &std::path::Path,
     dest: &std::path::Path,
     prompt: &str,
@@ -340,6 +344,7 @@ pub(crate) fn write_compiled_prompt_recording_in(
     // resolver, so this production entry point's observable behavior is
     // unchanged.
     write_compiled_prompt_recording_in_with(
+        content,
         framework_root,
         dest,
         prompt,
@@ -359,6 +364,7 @@ pub(crate) fn write_compiled_prompt_recording_in(
 /// with `roster_source` threaded through.
 /// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
 pub(crate) fn write_compiled_prompt_recording_in_with(
+    content: &FrameworkContent,
     framework_root: &std::path::Path,
     dest: &std::path::Path,
     prompt: &str,
@@ -367,6 +373,7 @@ pub(crate) fn write_compiled_prompt_recording_in_with(
     write_compiled_prompt_to(dest, prompt)?;
     crate::core::savings_instructions::record_instruction_compression_in_with(
         framework_root,
+        crate::core::savings_instructions::SectionBytes::of(content),
         dest,
         prompt,
         roster_source,
@@ -434,14 +441,31 @@ pub fn refresh_compiled_prompt_in(
     project_dir: &std::path::Path,
     session_id: &str,
 ) -> Result<(), String> {
+    // #9012: the sections are runtime content; with none the launch is refused
+    // with the remedy, never handed a prompt missing them.
+    let content = crate::core::content_source::framework_content_for(project_dir)
+        .map_err(|err| format!("cannot compose the PM instructions: {err}"))?;
+    refresh_compiled_prompt_with(&content, framework_root, project_dir, session_id)
+}
+
+/// [`refresh_compiled_prompt_in`] with the content already loaded (#9012).
+///
+/// Test: `refresh_compiled_prompt_writes_the_project_local_file`.
+pub fn refresh_compiled_prompt_with(
+    content: &FrameworkContent,
+    framework_root: &std::path::Path,
+    project_dir: &std::path::Path,
+    session_id: &str,
+) -> Result<(), String> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
+        content,
         project_dir,
         None,
         native,
     );
     let dest = compiled_prompt_path(project_dir, session_id);
-    write_compiled_prompt_recording_in(framework_root, &dest, &prompt)
+    write_compiled_prompt_recording_in(content, framework_root, &dest, &prompt)
         .map_err(|source| instructions_failure_message(&dest, &source))
 }
 

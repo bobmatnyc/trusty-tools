@@ -15,7 +15,6 @@
 
 use std::path::Path;
 
-use crate::content::BUILTIN_CONTENT_EMBEDDED;
 use crate::content::status::{ContentStatus, content_status};
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 
@@ -36,14 +35,12 @@ pub(crate) fn check_content(project_dir: Option<&Path>, cache_dir: Option<&Path>
             "no home directory resolves, so the content cache cannot be located",
         );
     };
-    grade(
-        &content_status(cache_dir, project_dir),
-        BUILTIN_CONTENT_EMBEDDED,
-    )
+    grade(&content_status(cache_dir, project_dir))
 }
 
-/// The row for `status`; `builtin_embedded` is [`BUILTIN_CONTENT_EMBEDDED`].
-fn grade(status: &ContentStatus, builtin_embedded: bool) -> DoctorCheck {
+/// The row for `status`. Nothing installed and no checkout is WARN: since
+/// #9012 the binary compiles in no instructional content.
+fn grade(status: &ContentStatus) -> DoctorCheck {
     let message = status.lines().join("; ");
     let grade = if status.installed.is_ok() {
         CheckStatus::Ok
@@ -51,8 +48,6 @@ fn grade(status: &ContentStatus, builtin_embedded: bool) -> DoctorCheck {
         if status.serves() {
             // A dev checkout serves.
             CheckStatus::Ok
-        } else if let Some(info) = status.builtin_info(builtin_embedded) {
-            return DoctorCheck::new(CHECK_NAME, CheckStatus::Ok, format!("{info}; {message}"));
         } else {
             CheckStatus::Warn
         }

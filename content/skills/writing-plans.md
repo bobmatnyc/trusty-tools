@@ -2,7 +2,8 @@
 name: writing-plans
 description: "Create detailed implementation plans with bite-sized tasks for engineers with zero codebase context"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: medium
 ---

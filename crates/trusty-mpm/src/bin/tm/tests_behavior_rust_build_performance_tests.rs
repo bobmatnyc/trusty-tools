@@ -19,9 +19,7 @@
 //! than in a second near-identical file.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::{RUST_BUILD_PERFORMANCE, RUST_DELIVERY_WORKFLOW};
-
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
@@ -30,7 +28,7 @@ fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including rust-build-performance) under the framework root.
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -57,7 +55,7 @@ fn rust_build_performance_lands_in_deployed_dot_claude_skills() {
     let skill_dir = paths.claude_skills_dir().join("rust-build-performance");
     assert_eq!(
         std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
-        RUST_BUILD_PERFORMANCE,
+        crate::commands::install::test_skill("skills/rust-build-performance.md"),
     );
 }
 
@@ -70,7 +68,7 @@ fn rust_delivery_workflow_lands_in_deployed_dot_claude_skills() {
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
 
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     let result = trusty_mpm::core::skill_tiers::deploy_all_skill_tiers(
         &paths.skill_source_dir(),
@@ -92,6 +90,6 @@ fn rust_delivery_workflow_lands_in_deployed_dot_claude_skills() {
     let skill_dir = paths.claude_skills_dir().join("rust-delivery-workflow");
     assert_eq!(
         std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
-        RUST_DELIVERY_WORKFLOW,
+        crate::commands::install::test_skill("skills/rust-delivery-workflow.md"),
     );
 }

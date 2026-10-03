@@ -78,7 +78,7 @@ exact wording):
 2. **Then consult this doc** — read it from
    `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md` (deployed by
    `tm install`), or, inside the trusty-tools repo itself, from
-   `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` via `trusty-search` or a
+   `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` via `trusty-search` or a
    direct file read.
 3. **Never shell-probe for identity** — `pip3 show`, `pip show`,
    `which claude-mpm`, or grepping `site-packages`/`dist-info` interrogate the
@@ -111,7 +111,7 @@ kg_assert(
   palace: "<any palace, e.g. trusty-tools or session-manager>",
   subject: "trusty-mpm",
   predicate: "is_fact",
-  object: "trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm project; see crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md or ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md",
+  object: "trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm project; see content/instructions/docs/WHAT-IS-TRUSTY-MPM.md or ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md",
   provenance: "DOC-28 self-awareness seed"
 )
 ```

@@ -444,7 +444,7 @@ fn backup_root_follows_the_remediation_convention() {
 /// literal fixtures the other tests use.
 #[test]
 fn embedded_reference_is_usable_as_a_repair_source() {
-    let reference = skill_reference(None);
+    let reference = skill_reference(None, Some(crate::core::content_source::test_support::rc()));
     assert!(
         reference.assets.contains_key("tm-workflow"),
         "the binary must embed tm-workflow for --fix-skills to repair it"

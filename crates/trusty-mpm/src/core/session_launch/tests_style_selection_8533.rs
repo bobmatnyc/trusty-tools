@@ -11,6 +11,7 @@
 
 use super::tests::EnvVarGuard;
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::tempdir;
 
 #[test]
@@ -119,7 +120,7 @@ fn a_bare_claude_launch_loads_the_project_prose_then_the_floor() {
         .find("Speak as the fixture voice.")
         .expect("the project prose");
     let floor = file
-        .find(&crate::core::output_style::style_floor())
+        .find(&crate::core::output_style::style_floor(rc()))
         .expect("the floor");
     assert!(prose < floor, "the floor follows the prose: {file}");
 

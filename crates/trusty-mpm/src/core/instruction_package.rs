@@ -12,8 +12,8 @@
 //! with one JSON package; this module is the schema half of that work (#4184).
 //!
 //! What: the [`InstructionPackage`] type and its JSON schema
-//! (`assets/instructions/instruction-package.schema.json`, embedded as
-//! [`SCHEMA_JSON`]). A package has two arrays:
+//! (`content/instructions/instruction-package.schema.json`, runtime content
+//! since #9012). A package has two arrays:
 //!
 //! * `sections` — the closed ten-member taxonomy (six content sections plus
 //!   the four floor sections: three absorbed from BASE_PM, plus the
@@ -68,9 +68,9 @@
 //! v2 exists because #4318 made the bundled package an *authored JSON artifact*
 //! rather than a Rust literal, and inlining every section's prose would have
 //! turned `sections/core.md` into a single 23 KB JSON line. A `file` body names a
-//! bundled markdown source instead; resolution goes through the compile-time
-//! [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the build
-//! stays hermetic and a renamed section is a compile error. The bump is mandatory
+//! markdown source instead; it resolves through the package's
+//! [`InstructionPackage::sources`], which #9012 fills from runtime content, and
+//! a name with no source is [`ValidationError::UnknownFileSource`]. The bump is mandatory
 //! under the policy above: a v1 build reading a v2 manifest would reject the
 //! unknown `kind`, which is the correct loud failure.
 //!
@@ -83,7 +83,7 @@
 //!
 //! Test: `instruction_package_tests.rs`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -96,15 +96,14 @@ use serde::{Deserialize, Serialize};
 /// Test: `rejects_unsupported_schema_version`.
 pub const SCHEMA_VERSION: u32 = 2;
 
-/// The JSON Schema document describing this format, embedded at compile time.
+/// Where the JSON Schema document describing this format lives, relative to
+/// the content bundle's `instructions/` (#9012: runtime content, no longer
+/// compiled in).
 ///
-/// Why: the schema is the artifact other tools (editors, validators, the
-/// forthcoming `tm` authoring commands) consume; embedding it keeps it from
-/// drifting away from the Rust types silently.
-/// What: the raw contents of `assets/instructions/instruction-package.schema.json`.
+/// Why: the schema is the artifact other tools (editors, validators) consume;
+/// the tests read it back so it cannot drift from the Rust types silently.
 /// Test: `schema_enums_match_rust_enums`, `schema_example_deserializes_validates_and_round_trips`.
-pub const SCHEMA_JSON: &str =
-    include_str!("../assets/instructions/instruction-package.schema.json");
+pub const SCHEMA_PATH: &str = "instruction-package.schema.json";
 
 /// The closed instruction section taxonomy.
 ///
@@ -357,18 +356,17 @@ impl Join {
 ///
 /// Why: separating authored text from host-supplied generated content lets
 /// validation insist that generated content is actually consumed.
-/// What: `Text` carries markdown authored in the package; `File` names a bundled
-/// markdown source resolved through the compile-time
-/// [`crate::core::instruction_pipeline::SECTION_SOURCES`] table; `Generated`
-/// names the generator that supplies it.
+/// What: `Text` carries markdown authored in the package; `File` names a
+/// markdown source resolved through [`InstructionPackage::sources`] (#9012:
+/// runtime content); `Generated` names the generator that supplies it.
 ///
 /// `File` is the schema-v2 addition (#4318). It exists because the two obvious
 /// alternatives are both bad: inlining `sections/core.md` verbatim turns 23 KB of
 /// reviewable prose into one unreadable JSON line and moves the floor text out of
-/// the files `scripts/check_instruction_floor.sh` pins byte-exactly, while resolving the path
-/// on the filesystem at launch would make the delivered system prompt depend on
-/// what happens to be on disk. Resolving through `include_str!` keeps the prose in
-/// markdown, keeps the build hermetic, and makes a renamed section a compile error.
+/// the files `scripts/check_instruction_floor.sh` pins byte-exactly. Since #9012
+/// the sources come from the one verified content source the package itself was
+/// read from, so a renamed section is a named validation error, never a silent
+/// drop.
 /// `Text` remains fully expressible, and is how a rule authored *in the manifest*
 /// — rather than in a section file — is carried.
 ///
@@ -393,10 +391,10 @@ pub enum BlockBody {
     },
     /// Markdown read from a bundled section source, named by path.
     File {
-        /// Path relative to `assets/instructions/`, e.g. `sections/core.md`.
-        /// Must be a key of
-        /// [`crate::core::instruction_pipeline::SECTION_SOURCES`]; anything else
-        /// is [`ValidationError::UnknownFileSource`]. Trimmed before emission.
+        /// Path relative to the content bundle's `instructions/`, e.g.
+        /// `sections/core.md`. Must be a key of [`InstructionPackage::sources`];
+        /// anything else is [`ValidationError::UnknownFileSource`]. Trimmed
+        /// before emission.
         path: String,
     },
     /// Markdown supplied at composition time by a named generator.
@@ -418,14 +416,17 @@ impl BlockBody {
     /// non-overridable.
     /// What: `None` for [`BlockBody::Generated`]; `Some(Ok(markdown))` for an
     /// authored body; `Some(Err(path))` for a `File` body naming a source that is
-    /// not in the bundled table.
+    /// not a key of `sources` (#9012: the package's runtime-content sources).
     /// Test: `file_body_resolves_through_the_bundled_table`,
     /// `unknown_file_source_is_rejected`.
-    pub fn authored(&self) -> Option<Result<&str, &str>> {
+    pub fn authored<'a>(
+        &'a self,
+        sources: &'a BTreeMap<String, String>,
+    ) -> Option<Result<&'a str, &'a str>> {
         match self {
             BlockBody::Text { text } => Some(Ok(text.as_str())),
             BlockBody::File { path } => {
-                Some(crate::core::instruction_pipeline::section_source(path).ok_or(path.as_str()))
+                Some(sources.get(path).map(String::as_str).ok_or(path.as_str()))
             }
             BlockBody::Generated { .. } => None,
         }
@@ -531,6 +532,11 @@ pub struct InstructionPackage {
     pub sections: Vec<InstructionSection>,
     /// The ordered composition stream. Output order is exactly this order.
     pub blocks: Vec<InstructionBlock>,
+    /// The markdown a `file` body names, keyed by path relative to the content
+    /// bundle's `instructions/` (#9012). Never serialized: the loader fills it
+    /// from the same content source the package was read from.
+    #[serde(skip)]
+    pub sources: BTreeMap<String, String>,
 }
 
 /// A structural defect in a package.
@@ -804,7 +810,7 @@ impl InstructionPackage {
         }
 
         for (index, block) in self.blocks.iter().enumerate() {
-            let Some(authored) = block.body.authored() else {
+            let Some(authored) = block.body.authored(&self.sources) else {
                 // #8533: pinning is meaningful only for authored text.
                 if block.pinned {
                     return Err(ValidationError::PinnedGeneratedBlock {
@@ -959,11 +965,13 @@ impl InstructionPackage {
 
         for (index, block) in self.blocks.iter().enumerate() {
             let resolved: Option<&str> = match &block.body {
-                BlockBody::Text { .. } | BlockBody::File { .. } => match block.body.authored() {
-                    Some(Ok(body)) => Some(body),
-                    // `validate` above rejects an unresolvable `file` path.
-                    _ => unreachable!("validate rejects unknown file sources"),
-                },
+                BlockBody::Text { .. } | BlockBody::File { .. } => {
+                    match block.body.authored(&self.sources) {
+                        Some(Ok(body)) => Some(body),
+                        // `validate` above rejects an unresolvable `file` path.
+                        _ => unreachable!("validate rejects unknown file sources"),
+                    }
+                }
                 BlockBody::Generated { generator } => match generator {
                     Generator::AgentRoster => Some(inputs.agent_roster.as_str()),
                     Generator::StackProfile => inputs.stack_profile.as_deref(),
@@ -1045,7 +1053,7 @@ impl InstructionPackage {
             if !sections.contains(&block.section) {
                 continue;
             }
-            let Some(Ok(body)) = block.body.authored() else {
+            let Some(Ok(body)) = block.body.authored(&self.sources) else {
                 continue;
             };
             let body = body.trim();

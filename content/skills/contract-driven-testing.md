@@ -2,7 +2,8 @@
 name: contract-driven-testing
 description: Derive a three-level test pyramid directly from a function's Code Contracts (preconditions, postconditions, invariants) — contract-targeted unit tests, property-based tests, precondition-violation tests, plus the no-contracts fallback and the contract review checklist. Loaded by the code-critic agent.
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 tags: [contracts, testing, property-based-testing, code-critic]
 effort: low

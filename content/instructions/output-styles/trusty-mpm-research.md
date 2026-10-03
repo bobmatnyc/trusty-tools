@@ -97,7 +97,7 @@ identity:
    `memory_recall` before answering. The active palace carries an `is_fact` triple identifying
    this framework (see docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then consult the canonical doc.** Read `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md`
-   (or, inside the trusty-tools repo itself, `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` via
+   (or, inside the trusty-tools repo itself, `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` via
    `trusty-search`/direct read) for the authoritative description and the claude-mpm
    disambiguation.
 3. **Never shell-probe for identity.** `pip3 show`, `pip show`, `which claude-mpm`, or grepping

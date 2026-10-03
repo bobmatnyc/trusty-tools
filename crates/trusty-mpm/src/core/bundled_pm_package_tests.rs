@@ -7,7 +7,7 @@
 //!   sourcing swap changes the delivered prompt deliberately — but on the
 //!   mechanism: whatever the sections say, the packaged path and the legacy
 //!   override assembly must say it identically, or a project with a
-//!   `WORKFLOW.md` override starts receiving different instructions from a
+//!   `rc().required("sections/workflow.md").md` override starts receiving different instructions from a
 //!   project without one.
 //! * the tier tests hold the SCHEMA to the CONTENT: a section declared
 //!   `project` must be one the floor actually advertises an override file for,
@@ -18,6 +18,7 @@
 //! byte-equality-against-the-old-prompt gate.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_overrides::{
     FILE_AGENT_DELEGATION, FILE_INSTRUCTIONS, FILE_MEMORY, FILE_WORKFLOW, OVERRIDE_DIR_NAME,
     PromptSource, assemble_sections, delegation_with_roster, resolve_pm_prompt_with_roster,
@@ -27,11 +28,7 @@ use crate::core::instruction_package::{
     BlockBody, CustomizationTier, Generator, InstructionBlock, OverrideTier, SCHEMA_VERSION,
     ValidationError,
 };
-use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_CORE, SECTION_ENFORCEMENT, SECTION_FRAMEWORK_CONVENTIONS,
-    SECTION_IDENTITY, SECTION_MEMORY, SECTION_NON_OVERRIDABLE_RULES, SECTION_SEARCH,
-    SECTION_SOURCES, WORKFLOW, section_source, workflow_section,
-};
+use crate::core::instruction_pipeline::{SECTION_FILES, section_source, workflow_section};
 use crate::core::stack_profile::stack_profile_section;
 use std::fs;
 use std::path::Path;
@@ -45,14 +42,14 @@ use tempfile::TempDir;
 /// `bundled_manifest_parses_and_validates` is the test that gives the unwrap its
 /// licence.
 fn package_ref() -> &'static InstructionPackage {
-    bundled_fallback_package().expect("the bundled manifest parses and validates")
+    crate::core::content_source::test_support::rc_package()
 }
 
 /// The authored markdown a block carries, or `None` for a generated block.
 fn authored(block: &InstructionBlock) -> Option<&str> {
     block
         .body
-        .authored()
+        .authored(&package_ref().sources)
         .map(|body| body.expect("source resolves"))
 }
 
@@ -68,7 +65,7 @@ fn compose_bundled_fallback(
     roster: &str,
     addendum: Option<&str>,
 ) -> Result<String, CompositionError> {
-    compose_bundled_fallback_with_overrides(stack, roster, addendum, &[]).0
+    compose_bundled_fallback_with_overrides(rc(), stack, roster, addendum, &[]).0
 }
 
 /// A fixed, deterministic roster — the composition-time input the byte-equality
@@ -96,10 +93,11 @@ const FIXED_ADDENDUM: &str = "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK";
 /// oracle cannot rot into a private reimplementation of what it is checking.
 fn legacy_bundled_fallback(stack: &str, roster: &str, addendum: Option<&str>) -> String {
     assemble_sections(
+        rc(),
         stack.to_string(),
         None,
-        workflow_section().to_string(),
-        delegation_with_roster(Some(roster)),
+        workflow_section(rc()).to_string(),
+        delegation_with_roster(rc(), Some(roster)),
         addendum.map(str::to_string),
     )
 }
@@ -174,8 +172,10 @@ fn bundled_manifest_parses_and_validates() {
     // `resolve_pm_prompt` is unreachable rather than routine (#4318): the shipped
     // JSON manifest must parse, validate, and compose. A manifest that fails any of
     // the three is a red CI run, never a shipped prompt.
-    let package = InstructionPackage::from_json(PM_PACKAGE_JSON)
+    let mut package = InstructionPackage::from_json(rc().required("pm-instruction-package.json"))
         .expect("the shipped manifest is valid schema-v2 JSON");
+    // #9012: `file` bodies resolve through the same content source.
+    package.sources = crate::core::instruction_pipeline::package_sources(rc());
     assert_eq!(package.validate(), Ok(()));
     assert_eq!(package.schema_version, SCHEMA_VERSION);
     assert_eq!(&package, package_ref());
@@ -194,20 +194,20 @@ fn manifest_prose_lives_in_markdown_not_in_the_json() {
     // DOES carry are short authored rules, not lifted section bodies.
     // #8533 split `core.md` into ten small files, so the yardstick is the
     // whole body of section prose the manifest references by path.
-    let prose: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let prose: usize = SECTION_FILES
         .iter()
-        .map(|(_, body)| body.len())
+        .map(|path| rc().required(path).len())
         .sum();
     assert!(
-        PM_PACKAGE_JSON.len() < prose,
+        rc().required("pm-instruction-package.json").len() < prose,
         "the manifest ({} bytes) must be smaller than the section prose ({} bytes) — \
          prose belongs in markdown",
-        PM_PACKAGE_JSON.len(),
+        rc().required("pm-instruction-package.json").len(),
         prose
     );
-    for (path, _) in SECTION_SOURCES {
+    for path in SECTION_FILES {
         assert!(
-            PM_PACKAGE_JSON.contains(path),
+            rc().required("pm-instruction-package.json").contains(path),
             "{path} must be referenced by a `file` body"
         );
     }
@@ -226,14 +226,18 @@ fn manifest_prose_lives_in_markdown_not_in_the_json() {
 
 #[test]
 fn every_section_source_resolves() {
-    // The `file` body table is the only thing standing between a renamed section
-    // and an empty block, so assert both directions: every table key resolves, and
-    // a path outside the table does not.
-    for (path, body) in SECTION_SOURCES {
-        assert_eq!(section_source(path), Some(body), "{path} must resolve");
-        assert!(!body.trim().is_empty(), "{path} must not be blank");
+    // The `file` body sources are the only thing standing between a renamed
+    // section and an empty block, so assert both directions: every canonical
+    // section resolves from content (#9012), and a path content lacks does not.
+    for path in SECTION_FILES {
+        let body = section_source(rc(), path);
+        assert!(body.is_some(), "{path} must resolve");
+        assert!(
+            !body.unwrap_or_default().trim().is_empty(),
+            "{path} must not be blank"
+        );
     }
-    assert_eq!(section_source("sections/does-not-exist.md"), None);
+    assert_eq!(section_source(rc(), "sections/does-not-exist.md"), None);
 }
 
 #[test]
@@ -297,7 +301,10 @@ fn package_round_trips_through_json() {
     // what #4183's authoring work will edit.
     let package = package_ref();
     let json = package.to_json().expect("serialize");
-    let parsed = InstructionPackage::from_json(&json).expect("deserialize");
+    let mut parsed = InstructionPackage::from_json(&json).expect("deserialize");
+    // #9012: the sources are bound at load, never serialized.
+    assert!(parsed.sources.is_empty(), "sources must not be serialized");
+    parsed.sources = package.sources.clone();
     assert_eq!(&parsed, package);
 
     let inputs = CompositionInputs {
@@ -352,7 +359,7 @@ fn the_former_floor_sections_are_still_the_block_tail() {
 //   * `addendum.as_deref()` → `None`, silently dropping every project's
 //     `.trusty-mpm/INSTRUCTIONS.md` from the delivered prompt;
 //   * deleting the `workflow_override.is_none() && memory_override.is_none()`
-//     filter, silently discarding a `WORKFLOW.md` / `MEMORY.md` override.
+//     filter, silently discarding a `rc().required("sections/workflow.md").md` / `MEMORY.md` override.
 //
 // Both survived because the composed branch requires a roster, and no
 // `resolve_pm_prompt` test deployed an agent — so on a clean CI runner every one
@@ -404,7 +411,7 @@ fn resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed() {
     // delivered string cannot reveal which one ran. This is the positive
     // statement that the composed path is the one under test.
     let tmp = project_with_roster();
-    let (_, source) = resolve_pm_prompt_with_source(tmp.path());
+    let (_, source) = resolve_pm_prompt_with_source(rc(), tmp.path());
     assert_eq!(
         source,
         PromptSource::Package,
@@ -422,7 +429,7 @@ fn resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed() {
 /// what the gate is for. No `$HOME` scoping, hence no `HOME_LOCK` serialisation.
 fn assert_entry_point_gate(project: &Path, addendum: Option<&str>) {
     let (composed, source) =
-        resolve_pm_prompt_with_roster(project, || Some(FIXED_ROSTER.to_string()));
+        resolve_pm_prompt_with_roster(rc(), project, || Some(FIXED_ROSTER.to_string()));
     assert_eq!(
         source,
         PromptSource::Package,
@@ -459,7 +466,7 @@ fn a_retired_instructions_file_cannot_feed_the_project_addendum() {
     );
 
     let (composed, _) =
-        resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert!(
         !composed.contains("ALWAYS_RUN_MAKE_CHECK"),
         "a retired INSTRUCTIONS.md must not feed the project addendum"
@@ -476,10 +483,12 @@ fn gate_is_deterministic_across_repeated_runs() {
     // is stable under repetition, and that the composed prompt for a fixed
     // (project, roster) pair is a pure function of its inputs.
     let tmp = TempDir::new().expect("tempdir");
-    let first = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    let first =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
     for _ in 0..32 {
         assert_entry_point_gate(tmp.path(), None);
-        let again = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+        let again =
+            resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
         assert_byte_identical(&first, &again);
     }
 }
@@ -503,10 +512,11 @@ fn the_roster_alone_selects_the_composer() {
     // With a roster the packaged composer runs; without one the string assembly
     // does. Nothing else participates in the decision.
     let tmp = TempDir::new().expect("tempdir");
-    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let (_, source) =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_eq!(source, PromptSource::Package);
 
-    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (_, source) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
     assert_eq!(source, PromptSource::Legacy);
 }
 
@@ -519,7 +529,7 @@ fn no_retired_file_can_divert_the_composer() {
         let tmp = TempDir::new().expect("tempdir");
         write_override(tmp.path(), name, "# Retired\n\nX\n");
         let (_, source) =
-            resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+            resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
         assert_eq!(
             source,
             PromptSource::Package,
@@ -531,7 +541,8 @@ fn no_retired_file_can_divert_the_composer() {
     for name in crate::core::instruction_overrides::LEGACY_OVERRIDE_FILES {
         write_override(all.path(), name, "# Retired\n\nX\n");
     }
-    let (_, source) = resolve_pm_prompt_with_roster(all.path(), || Some(FIXED_ROSTER.to_string()));
+    let (_, source) =
+        resolve_pm_prompt_with_roster(rc(), all.path(), || Some(FIXED_ROSTER.to_string()));
     assert_eq!(source, PromptSource::Package);
 }
 
@@ -546,7 +557,7 @@ fn the_roster_source_is_consulted_exactly_once() {
     let scans = Cell::new(0usize);
 
     let plain = TempDir::new().expect("tempdir");
-    let _ = resolve_pm_prompt_with_roster(plain.path(), || {
+    let _ = resolve_pm_prompt_with_roster(rc(), plain.path(), || {
         scans.set(scans.get() + 1);
         Some(FIXED_ROSTER.to_string())
     });
@@ -559,7 +570,7 @@ fn the_roster_source_is_consulted_exactly_once() {
         FILE_AGENT_DELEGATION,
         "# Custom Routing\n\nX\n",
     );
-    let _ = resolve_pm_prompt_with_roster(retired.path(), || {
+    let _ = resolve_pm_prompt_with_roster(rc(), retired.path(), || {
         scans.set(scans.get() + 1);
         Some(FIXED_ROSTER.to_string())
     });
@@ -581,7 +592,7 @@ fn a_changed_roster_changes_the_resolved_prompt() {
     // argument, so nothing here reaches the logging wrapper any more; a test
     // still named for that wrapper would claim coverage it does not have. The
     // wrapper's byte-equality is now structural instead of asserted:
-    // `resolve_pm_prompt` is `resolve_pm_prompt_with_source(dir).0` plus one
+    // `resolve_pm_prompt` is `resolve_pm_prompt_with_source(rc(), dir).0` plus one
     // `info!`, with no transformation between. Asserting it would require a
     // second live tier scan, which is the flake itself — the one thing #4766
     // rules out.
@@ -592,7 +603,8 @@ fn a_changed_roster_changes_the_resolved_prompt() {
     // prompt at all.
     let tmp = TempDir::new().expect("tempdir");
 
-    let fixed = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
+    let fixed =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string())).0;
     let divergent_roster = "## Delegation Authority\n\n\
          ### ticketing\n\nHandles ticketing work. Model: opus.";
     assert_ne!(
@@ -600,7 +612,7 @@ fn a_changed_roster_changes_the_resolved_prompt() {
         "the two rosters must differ"
     );
     let divergent =
-        resolve_pm_prompt_with_roster(tmp.path(), || Some(divergent_roster.to_string())).0;
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(divergent_roster.to_string())).0;
 
     assert_ne!(
         fixed, divergent,
@@ -697,20 +709,26 @@ fn every_authored_block_is_exactly_its_section_source() {
     // file. Any such block fails here even though the composed bytes may be fine.
     let package = package_ref();
     let expected: Vec<(SectionId, &str)> = vec![
-        (SectionId::Core, SECTION_CORE),
-        (SectionId::Memory, SECTION_MEMORY),
-        (SectionId::Search, SECTION_SEARCH),
-        (SectionId::Workflow, WORKFLOW),
-        (SectionId::AgentDelegation, AGENT_DELEGATION),
-        (SectionId::Identity, SECTION_IDENTITY),
-        (SectionId::Enforcement, SECTION_ENFORCEMENT),
+        (SectionId::Core, rc().required("sections/core.md")),
+        (SectionId::Memory, rc().required("sections/memory.md")),
+        (SectionId::Search, rc().required("sections/search.md")),
+        (SectionId::Workflow, rc().required("sections/workflow.md")),
+        (
+            SectionId::AgentDelegation,
+            rc().required("sections/agent-delegation.md"),
+        ),
+        (SectionId::Identity, rc().required("sections/identity.md")),
+        (
+            SectionId::Enforcement,
+            rc().required("sections/enforcement.md"),
+        ),
         (
             SectionId::NonOverridableRules,
-            SECTION_NON_OVERRIDABLE_RULES,
+            rc().required("sections/non-overridable-rules.md"),
         ),
         (
             SectionId::FrameworkGuaranteedConventions,
-            SECTION_FRAMEWORK_CONVENTIONS,
+            rc().required("sections/framework-guaranteed-conventions.md"),
         ),
     ];
 
@@ -915,7 +933,7 @@ fn the_delivered_prompt_names_no_repo_specific_doc_gate_script() {
 
     // No `CLAUDE.md` written: the string assembly receives only framework text.
     let tmp = TempDir::new().expect("tempdir");
-    let assembled = resolve_pm_prompt_with_roster(tmp.path(), || None).0;
+    let assembled = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None).0;
 
     for (composer, prompt) in [("packaged", &packaged), ("assembly", &assembled)] {
         for gate in REPO_SPECIFIC_GATES {
