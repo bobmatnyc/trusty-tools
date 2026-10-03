@@ -332,6 +332,14 @@ describe('indexHealth', () => {
     expect(indexHealth(HEALTHY)).toMatchObject({ healthy: true, label: 'Healthy', faults: [] });
   });
 
+  it('calls a held index held even when every lane is ready (#9059)', () => {
+    expect(indexHealth({ ...HEALTHY, status: 'held' })).toMatchObject({
+      healthy: false,
+      label: 'Held',
+      tone: 'danger'
+    });
+  });
+
   it('reports a failed lane with the daemon own failure string', () => {
     const health = indexHealth({
       ...HEALTHY,
