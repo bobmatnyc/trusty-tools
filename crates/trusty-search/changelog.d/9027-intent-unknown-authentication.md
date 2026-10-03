@@ -1,0 +1,2 @@
+Fixed
+- A one-word query such as `authentication` now reports intent `Keyword` instead of `Unknown` on `/search` and per-index search. `Keyword` keeps the balanced routing `Unknown` gave the query (alpha 0.6, beta 0.4, the same KG edge kinds, entity exact-match boost and doc handling), so ranking does not change. Identifier-shaped words keep their `Definition` routing, and a bare repo domain term still upgrades to `Definition` (#9027).
