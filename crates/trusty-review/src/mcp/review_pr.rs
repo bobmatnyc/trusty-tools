@@ -52,6 +52,7 @@ pub(crate) async fn resolve_pr_index(
         InvocationSurface::Interactive,
         owner,
         repo,
+        crate::pipeline::pr_index::IndexPin::Prefer,
     )
     .await
 }

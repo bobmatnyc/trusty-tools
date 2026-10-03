@@ -7,5 +7,6 @@ Fixed
   and the index id. An unreadable index registry is an error on these
   surfaces unless search is opted out (`TRUSTY_REVIEW_REQUIRE_SEARCH=false`),
   which runs a degraded diff-only review. A drain delivery whose index cannot
-  be resolved is kept and retried. `run` still honours `TRUSTY_SEARCH_INDEX`
-  and `--source-root` when either is set.
+  be resolved is kept and retried. The unattended surfaces treat a configured
+  `TRUSTY_SEARCH_INDEX` as a hint only, so they never review against another
+  repo's index.

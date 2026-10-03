@@ -35,7 +35,8 @@ use crate::{
     llm::LlmProvider,
     models::ReviewResult,
     pipeline::{
-        DiffSource, ReviewDeps, ReviewInput, TriggerDecision, pr_index::resolve_pr_index,
+        DiffSource, ReviewDeps, ReviewInput, TriggerDecision,
+        pr_index::{IndexPin, resolve_pr_index},
         run_review,
     },
     service::inference_probe::{InferenceProbe, InferenceStatus},
@@ -748,12 +749,21 @@ async fn review_scope(
         return Ok((state.config.clone(), deps));
     };
     let surface = InvocationSurface::default();
-    let index = resolve_pr_index(state.search.as_ref(), &state.config, surface, owner, repo)
-        .await
-        .map_err(|e| match &e {
-            RepoIndexError::Registry { .. } => RpcError::internal(e.to_string()),
-            _ => RpcError::invalid_params(e.to_string()),
-        })?;
+    // #8651: unattended — the server's index is a hint, never a pin.
+    let pin = IndexPin::Prefer;
+    let index = resolve_pr_index(
+        state.search.as_ref(),
+        &state.config,
+        surface,
+        owner,
+        repo,
+        pin,
+    )
+    .await
+    .map_err(|e| match &e {
+        RepoIndexError::Registry { .. } => RpcError::internal(e.to_string()),
+        _ => RpcError::invalid_params(e.to_string()),
+    })?;
     Ok(index.apply(&state.config, deps))
 }
 

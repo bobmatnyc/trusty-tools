@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-use super::{PrIndex, resolve_pr_index};
+use super::{IndexPin, PrIndex, resolve_pr_index};
 
 /// Search fake: a healthy daemon whose registry reports each index's
 /// `repo_identity`, or fails to list at all when `indexes` is `None`. Each
@@ -157,6 +157,7 @@ async fn hosted_surface_requires_search_for_an_unreadable_registry() {
         InvocationSurface::Hosted,
         "acme",
         "widget",
+        IndexPin::Prefer,
     )
     .await
     .expect_err("Hosted must not degrade past an unreadable registry by default");
@@ -175,6 +176,7 @@ async fn hosted_surface_degrades_when_the_operator_opts_out_of_search() {
         InvocationSurface::Hosted,
         "acme",
         "widget",
+        IndexPin::Prefer,
     )
     .await
     .expect("an explicit opt-out degrades");
@@ -190,10 +192,104 @@ async fn hosted_surface_degrades_when_the_operator_opts_out_of_search() {
         InvocationSurface::Hosted,
         "bobmatnyc",
         "trusty-tools",
+        IndexPin::Prefer,
     )
     .await;
     assert_eq!(
         index.ok(),
         Some(PrIndex::Resolved("trusty-tools-4e2cf878".into()))
     );
+}
+
+/// The unattended surfaces (webhook drain, service `review`, MCP `review_pr`)
+/// pass `IndexPin::Prefer`: an explicit, ambient `TRUSTY_SEARCH_INDEX` naming
+/// another repo's index is never inherited (#8651).
+#[tokio::test]
+async fn prefer_never_inherits_a_foreign_explicit_index() {
+    let mut config = startup_config(None);
+    config.search_index_explicit = true; // "main" is recorded for someone/scratch.
+    let index = resolve_pr_index(
+        &Registry::new(Some(two_repo_registry())),
+        &config,
+        InvocationSurface::Hosted,
+        "bobmatnyc",
+        "trusty-tools",
+        IndexPin::Prefer,
+    )
+    .await;
+    assert_eq!(
+        index.ok(),
+        Some(PrIndex::Resolved("trusty-tools-4e2cf878".into()))
+    );
+}
+
+/// An operator pin is used only when it is recorded for the PR's repo; a
+/// foreign, unregistered, or unverifiable pin is refused, naming both repos
+/// where there are two (#8651). A legacy index with no recorded identity is
+/// used for `--source-root` only, or when it carries the bare repo name.
+#[tokio::test]
+async fn operator_pin_is_used_only_for_its_own_repo() {
+    use crate::config::repo_index::PinOrigin::{Env, SourceRoot};
+    let mut indexes = two_repo_registry();
+    indexes.push(entry("cto", "/src/cto", None));
+    indexes.push(entry("trusty-tools", "/src/tt-legacy", None));
+    indexes.push(entry(
+        "garbled",
+        "/src/garbled",
+        Some("ssh://not@an-identity"),
+    ));
+    let registry = Registry::new(Some(indexes));
+    let config = startup_config(None);
+    let tt = ("bobmatnyc", "trusty-tools");
+    for (pin, origin, want) in [
+        ("trusty-tools-4e2cf878", Env, Ok("trusty-tools-4e2cf878")),
+        (
+            "main",
+            Env,
+            Err(["someone/scratch", "bobmatnyc/trusty-tools"]),
+        ),
+        (
+            "main",
+            SourceRoot,
+            Err(["someone/scratch", "--source-root"]),
+        ),
+        (
+            "absent",
+            Env,
+            Err(["not a registered index", "TRUSTY_SEARCH_INDEX"]),
+        ),
+        (
+            "cto",
+            Env,
+            Err(["no recorded repo_identity", "Unset TRUSTY_SEARCH_INDEX"]),
+        ),
+        ("cto", SourceRoot, Ok("cto")),
+        ("trusty-tools", Env, Ok("trusty-tools")),
+        (
+            "garbled",
+            SourceRoot,
+            Err(["unreadable", "bobmatnyc/trusty-tools"]),
+        ),
+    ] {
+        let got = resolve_pr_index(
+            &registry,
+            &config,
+            InvocationSurface::Hosted,
+            tt.0,
+            tt.1,
+            IndexPin::Require(pin, origin),
+        )
+        .await;
+        match (got, want) {
+            (Ok(index), Ok(id)) => assert_eq!(index, PrIndex::Resolved(id.into()), "{pin}"),
+            (Err(e), Err(needles)) => {
+                let msg = e.to_string();
+                assert!(
+                    needles.iter().all(|n| msg.contains(n)),
+                    "{pin}/{origin}: {msg}"
+                );
+            }
+            (got, want) => panic!("{pin}/{origin}: got {got:?}, want {want:?}"),
+        }
+    }
 }

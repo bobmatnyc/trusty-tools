@@ -89,6 +89,38 @@ pub fn consume_context_preamble(raw_diff: String, caller: &mut CallerContext) ->
     rest.to_string()
 }
 
+/// Bound each caller-context field to `max` characters, marking any cut (#8654).
+///
+/// Why: `review_diff`'s `context` and `run`'s PR-context flags were copied
+/// into the reviewer and verifier prompts whole, so one field could crowd the
+/// diff out of the context window. A silent cut would hide that text was lost.
+/// What: keeps the first `max` characters of each field and appends a marker
+/// naming how many characters were omitted; a field within `max` is untouched.
+/// `run_review` calls it with [`MAX_CALLER_CONTEXT_CHARS`] before the context
+/// reaches either prompt.
+/// Test: `caller_context_fields_are_capped_with_a_visible_marker`,
+/// `oversized_pr_description_is_truncated_visibly_in_the_prompt`.
+///
+/// [`MAX_CALLER_CONTEXT_CHARS`]: crate::config::constants::MAX_CALLER_CONTEXT_CHARS
+pub fn cap_caller_context(caller: &mut CallerContext, max: usize) {
+    let fields = [
+        &mut caller.pr_description,
+        &mut caller.pr_discussion,
+        &mut caller.referenced_code,
+    ];
+    for text in fields.into_iter().flatten() {
+        let Some((cut, _)) = text.char_indices().nth(max) else {
+            continue;
+        };
+        let omitted = text[cut..].chars().count();
+        text.truncate(cut);
+        text.push_str(&format!(
+            "\n[... truncated: {omitted} more characters omitted; caller context is capped \
+             at {max} characters per field (#8654) ...]"
+        ));
+    }
+}
+
 #[cfg(test)]
 #[path = "caller_preamble_tests.rs"]
 mod tests;

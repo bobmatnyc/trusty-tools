@@ -55,7 +55,7 @@ use trusty_common::webhook_relay::{DeliveryProcessor, Disposition, ProcessFailur
 use crate::config::{InvocationSurface, ReviewConfig};
 use crate::integrations::github::RunMode;
 use crate::models::ReviewResult;
-use crate::pipeline::pr_index::resolve_pr_index;
+use crate::pipeline::pr_index::{IndexPin, resolve_pr_index};
 use crate::pipeline::{
     DiffSource, ReviewDeps, ReviewInput, classify_review_request, enforce_verifier_liveness,
     run_review,
@@ -313,6 +313,8 @@ where
         InvocationSurface::Hosted,
         &target.owner,
         &target.repo,
+        // #8651: unattended — the startup index is a hint, never a pin.
+        IndexPin::Prefer,
     )
     .await?;
     let (config, deps) = index.apply(base, deps);

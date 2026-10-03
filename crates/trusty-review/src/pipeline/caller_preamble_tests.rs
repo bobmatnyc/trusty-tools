@@ -6,7 +6,7 @@
 //! What: pure calls to `split_context_preamble` / `consume_context_preamble`.
 //! Test: this module IS the tests.
 
-use super::{consume_context_preamble, split_context_preamble};
+use super::{cap_caller_context, consume_context_preamble, split_context_preamble};
 use crate::pipeline::runner::CallerContext;
 
 const DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n\
@@ -73,4 +73,25 @@ fn preamble_is_appended_after_a_caller_supplied_description() {
         caller.pr_description.as_deref(),
         Some("from the flag\n\nfrom the diff")
     );
+}
+
+/// Each field is cut at `max` characters (not bytes — the multi-byte `é`
+/// never splits) with a marker naming what was omitted; a field within the
+/// cap, and an absent one, are untouched.
+#[test]
+fn caller_context_fields_are_capped_with_a_visible_marker() {
+    let mut caller = CallerContext {
+        pr_description: Some("ééééé-tail".into()),
+        pr_discussion: Some("short".into()),
+        referenced_code: None,
+    };
+    cap_caller_context(&mut caller, 5);
+    let desc = caller.pr_description.as_deref().unwrap_or_default();
+    assert!(
+        desc.starts_with("ééééé\n[... truncated: 5 more characters"),
+        "{desc}"
+    );
+    assert!(!desc.contains("-tail"), "{desc}");
+    assert_eq!(caller.pr_discussion.as_deref(), Some("short"));
+    assert_eq!(caller.referenced_code, None);
 }

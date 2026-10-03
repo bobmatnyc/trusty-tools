@@ -7,9 +7,10 @@
 //! wrong one. #8649 fixed `review_pr` alone; #8651 moved the resolution here so
 //! the other three surfaces share it.
 //! What: [`resolve_pr_index`] maps `owner/repo` through
-//! [`resolve_repo_index`](crate::config::repo_index) and applies the calling
-//! surface's `require_search` contract to an unreadable registry. [`PrIndex`]
-//! turns the outcome into the per-review config and deps.
+//! [`resolve_repo_index`](crate::config::repo_index), or verifies an operator
+//! pin ([`IndexPin::Require`]), and applies the calling surface's
+//! `require_search` contract to an unreadable registry. [`PrIndex`] turns the
+//! outcome into the per-review config and deps.
 //! Test: `pr_index_tests.rs`, plus each surface's own regression test.
 
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use tracing::warn;
 use crate::{
     config::{
         InvocationSurface, ReviewConfig,
-        repo_index::{RepoIndexError, resolve_repo_index},
+        repo_index::{PinOrigin, RepoIndexError, resolve_pinned_index, resolve_repo_index},
     },
     integrations::{NullAnalyzeClient, NullSearchClient, search_client::SearchClient},
     pipeline::ReviewDeps,
@@ -70,6 +71,24 @@ impl PrIndex {
     }
 }
 
+/// How the configured index takes part in a PR review's index choice (#8651).
+///
+/// Why: a server's startup index is only a hint, but an operator pin must be
+/// honoured exactly or refused — never silently swapped for another index.
+/// What: `Prefer` treats `config.search_index` as a hint used only when it is
+/// recorded for the repo (#8649); every unattended surface passes it.
+/// `Require` is an operator pin checked by `check_pin`: used when recorded for
+/// the repo, refused when foreign or unverifiable.
+/// Test: `prefer_never_inherits_a_foreign_explicit_index`,
+/// `operator_pin_is_used_only_for_its_own_repo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexPin<'a> {
+    /// `config.search_index` is a hint, ignored when it belongs to another repo.
+    Prefer,
+    /// An operator pin and where it came from.
+    Require(&'a str, PinOrigin),
+}
+
 /// Resolve the index a review of `owner/repo` uses on `surface`, or the degrade.
 ///
 /// Why: an unreadable registry is a search outage, so it follows the surface's
@@ -77,9 +96,10 @@ impl PrIndex {
 /// default, while the hosted webhook bot and a CLI GitHub-PR run require
 /// search by default (REV-011). An unregistered repo is a configuration fault
 /// and never degrades (#6687).
-/// What: `resolve_repo_index` against `search`, with `config.search_index` as
-/// the pin (used only when it belongs to the repo). `RepoIndexError::Registry`
-/// becomes [`PrIndex::DiffOnly`] (logged at `warn`) when
+/// What: under [`IndexPin::Prefer`], `resolve_repo_index` against `search`
+/// with `config.search_index` as a hint; under [`IndexPin::Require`],
+/// `resolve_pinned_index`. `RepoIndexError::Registry` becomes
+/// [`PrIndex::DiffOnly`] (logged at `warn`) when
 /// `effective_require_search(surface)` is false; every other error, and
 /// `Registry` when search is required, is returned.
 ///
@@ -90,16 +110,25 @@ impl PrIndex {
 ///
 /// Test: `hosted_surface_requires_search_for_an_unreadable_registry`,
 /// `hosted_surface_degrades_when_the_operator_opts_out_of_search`,
-/// `registry_failure_is_an_error_when_search_is_required`.
+/// `registry_failure_is_an_error_when_search_is_required`,
+/// `operator_pin_is_used_only_for_its_own_repo`.
 pub async fn resolve_pr_index(
     search: &dyn SearchClient,
     config: &ReviewConfig,
     surface: InvocationSurface,
     owner: &str,
     repo: &str,
+    pin: IndexPin<'_>,
 ) -> Result<PrIndex, RepoIndexError> {
-    let pinned = Some(config.search_index.as_str());
-    match resolve_repo_index(search, owner, repo, pinned).await {
+    let resolved = match pin {
+        IndexPin::Prefer => {
+            resolve_repo_index(search, owner, repo, Some(config.search_index.as_str())).await
+        }
+        IndexPin::Require(index, origin) => {
+            resolve_pinned_index(search, owner, repo, index, origin).await
+        }
+    };
+    match resolved {
         Ok(index) => Ok(PrIndex::Resolved(index)),
         Err(e @ RepoIndexError::Registry { .. })
             if !config.context.effective_require_search(surface) =>
