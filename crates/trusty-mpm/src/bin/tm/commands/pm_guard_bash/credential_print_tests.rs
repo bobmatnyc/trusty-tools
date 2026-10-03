@@ -1660,3 +1660,23 @@ fn allows_the_new_wrapper_neighbours_8735() {
         ],
     );
 }
+
+/// 🔴 REGRESSION (#8931 critic round): `$((cmd) )` and `$(( (cmd) ) )` are
+/// command substitutions that open with a subshell — the shell reads `$((` as
+/// arithmetic only when the inner `(` closes right before the outer `)`. Each
+/// row was allowed on 1cae0877eb, which left the body in place as arithmetic.
+#[test]
+fn denies_a_subshell_substitution_shaped_like_arithmetic_8931() {
+    check(
+        true,
+        &[
+            "X=$((gcloud auth print-access-token) ) >/dev/null; echo $X",
+            "X=$((  (gcloud auth print-access-token) ) ) >/dev/null; echo $X",
+            "X=$((gcloud auth print-access-token); ) >/dev/null; echo $X",
+        ],
+    );
+    check(
+        false,
+        &["X=$((1+2)); echo $X", "X=$(( (1+2) * 3 )); echo $X"],
+    );
+}

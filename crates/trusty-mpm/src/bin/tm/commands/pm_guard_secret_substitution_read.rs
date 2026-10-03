@@ -142,7 +142,7 @@ fn segment_read(masked: &str, subs: &[Masked]) -> Option<String> {
 /// or `None` when one has no fixed output.
 fn resolve_word(word: &str, subs: &[Masked]) -> Option<String> {
     let mut text = word.to_string();
-    for (n, (_, body)) in subs.iter().enumerate().rev() {
+    for (n, (shown, body)) in subs.iter().enumerate().rev() {
         let mark = placeholder(n);
         if !text.contains(&mark) {
             continue;
@@ -150,18 +150,18 @@ fn resolve_word(word: &str, subs: &[Masked]) -> Option<String> {
         let Substitution::Closed(body) = body else {
             return None;
         };
-        text = text.replace(&mark, &fixed_output(body)?);
+        text = text.replace(&mark, &fixed_output(shown, body)?);
     }
     Some(text)
 }
 
 /// The output of a substitution body when it is fixed by the text alone.
-fn fixed_output(body: &str) -> Option<String> {
-    let body = body.trim();
-    // `$((…))` arithmetic: a number.
-    if body.starts_with('(') && body.ends_with(')') {
+/// `shown` is the substitution as written, opener included.
+fn fixed_output(shown: &str, body: &str) -> Option<String> {
+    if is_arithmetic(shown, body) {
         return Some("0".to_string());
     }
+    let body = body.trim();
     if body.contains(['$', '`', '\\']) {
         return None;
     }
@@ -185,6 +185,62 @@ fn fixed_output(body: &str) -> Option<String> {
         }
         _ => name_free(body).then(|| "x".to_string()),
     }
+}
+
+/// Whether `shown` is `$((…))` arithmetic, whose output is a number.
+///
+/// Why: a command substitution that opens with a subshell, `$( (cmd) )`, has
+/// the same trimmed body as arithmetic, and resolving it to a number let a
+/// computed-filename read through (#8931 critic round).
+/// What: true only when the opener is `$((`, the body's leading `(` closes at
+/// its last byte (bash reads `$((cmd) )` as a command substitution), and the
+/// inner text is arithmetic alone: names, numbers, `$name`, spaces and
+/// operators, with no two operands side by side as a command's words are.
+/// Anything else is not arithmetic, so it fails closed.
+/// Test: `denies_a_subshell_substitution_shaped_like_arithmetic_8931`,
+/// `resolves_genuine_arithmetic_8931`.
+fn is_arithmetic(shown: &str, body: &str) -> bool {
+    let Some(inner) = shown
+        .starts_with("$((")
+        .then(|| body.strip_prefix('(')?.strip_suffix(')'))
+        .flatten()
+    else {
+        return false;
+    };
+    let bytes = inner.as_bytes();
+    let (mut depth, mut operand, mut spaced) = (0usize, false, false);
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
+                let name_follows = bytes
+                    .get(i + 1)
+                    .is_some_and(|n| n.is_ascii_alphanumeric() || *n == b'_');
+                if spaced || (b == b'$' && !name_follows) {
+                    return false;
+                }
+                operand = true;
+            }
+            b' ' | b'\t' => {
+                spaced |= operand;
+                operand = false;
+            }
+            b'(' | b')' | b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'~' | b'^' | b'?'
+            | b':' | b',' => {
+                if b == b'(' {
+                    depth += 1;
+                } else if b == b')' {
+                    // The leading `(` closed early: a subshell, not arithmetic.
+                    let Some(d) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = d;
+                }
+                (operand, spaced) = (false, false);
+            }
+            _ => return false,
+        }
+    }
+    depth == 0
 }
 
 /// Whether every program `body` runs prints no file name the command chose.

@@ -88,3 +88,36 @@ fn allows_a_substitution_outside_a_file_operand_8931() {
         assert_eq!(eval(command), None, "`{command}` must allow");
     }
 }
+
+/// 🔴 REGRESSION (#8931 critic round): a command substitution whose body
+/// opens with a subshell — `$( (…) )`, `$((…) )`, nested `$( ( (…) ) )`, or a
+/// backtick around a subshell — has the same trimmed body shape as
+/// arithmetic, but it runs a command. Each row allowed on 1cae0877eb, which
+/// resolved the body to a constant.
+#[test]
+fn denies_a_subshell_substitution_shaped_like_arithmetic_8931() {
+    for command in [
+        "cat $( (echo .env) )",
+        "cat $( (ls -a | grep env) )",
+        "cat $((ls -a | grep env) )",
+        "cat $( ( (ls -a | grep env) ) )",
+        "cat `(ls -a | grep env)`",
+        // Fail closed: two words side by side are a command, not arithmetic.
+        "cat $(((ls  env)))",
+    ] {
+        assert!(eval(command).is_some(), "`{command}` must deny");
+    }
+}
+
+/// #8931 critic round, no over-deny: genuine arithmetic still resolves to a
+/// number, spaced or nested.
+#[test]
+fn resolves_genuine_arithmetic_8931() {
+    for command in [
+        "head -n $((N+1)) notes.txt",
+        "head -n $(( $N * 2 )) notes.txt",
+        "tail -n $(( (3+1)*2 )) log.txt",
+    ] {
+        assert_eq!(eval(command), None, "`{command}` must allow");
+    }
+}
