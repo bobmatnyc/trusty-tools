@@ -20,7 +20,7 @@ use super::architect_pane_env::{
     ENV_RESET, RELATIVE_SOCKET, SERVER_ENV, assigns_dynamic_name, moves_server_env, resets_env,
 };
 use super::architect_pane_reach::{
-    dynamic_name, names_tmux, opaque_route, with_dynamics, without_data_bodies,
+    dynamic_name, names_tmux, opaque_route, runner_texts, with_dynamics, without_data_bodies,
 };
 use super::architect_pane_verbs::{DENY_VERBS, Resolved, Verb, resolve};
 use super::floor_d4::{program_positions, segments};
@@ -187,7 +187,8 @@ pub(super) fn tmux_hits(command: &str) -> Vec<Hit> {
 /// prose with an apostrophe that mentions tmux is not refused.
 pub(super) fn may_run_tmux(text: &str, depth: usize) -> bool {
     let words = || text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'));
-    words().any(|w| w == "tmux")
+    // #9053: APFS runs `TMUX` as tmux, so the name matches in any case.
+    words().any(|w| w.eq_ignore_ascii_case("tmux"))
         && (depth == 0 || words().any(|w| DENY_VERBS.iter().any(|v| v.name == w || v.alias == w)))
 }
 
@@ -258,6 +259,12 @@ fn shell(command: &str, depth: usize, out: &mut Scan) {
             // #9001 critic r2: `xargs`, `find -exec … +`, `| sh`, `bash <<<`.
             if let Some(why) = opaque_route(&texts, pos, seg.piped, command) {
                 out.hits.push(Hit::named(why, &texts[pos]));
+            }
+            // #9053: `watch tmux …`, `script -q f tmux …` run their operands.
+            if depth < MAX_DEPTH {
+                for text in runner_texts(&texts, pos) {
+                    shell(&text, depth + 1, out);
+                }
             }
             // APFS is case-insensitive: `TMUX send-keys …` runs tmux.
             if base.eq_ignore_ascii_case("tmux") {
