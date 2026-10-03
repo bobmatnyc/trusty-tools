@@ -102,6 +102,7 @@ fn empty_disk() -> trusty_mpm::core::disk_usage_guard::DiskGate {
         trusty_mpm::core::disk_usage_guard::MeasuredMount {
             mount_point: "/fixture-mount".to_string(),
             usage_pct: 0.0,
+            bytes: None,
         },
     ))
 }
