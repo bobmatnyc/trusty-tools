@@ -24,7 +24,12 @@ fn resolve_token_reads_the_process_environment() {
     unsafe {
         std::env::remove_var("TELEGRAM_BOT_TOKEN");
     }
-    assert_eq!(value.as_deref(), Some("123:SYNTHETIC-NOT-A-TOKEN"));
+    // #9121: never print the resolved value — when a racing test removes the
+    // variable, the resolver falls through to the operator's real store.
+    assert!(
+        value.as_deref() == Some("123:SYNTHETIC-NOT-A-TOKEN"),
+        "resolve_token did not return the process-environment value"
+    );
 }
 
 /// Why (#8236 item 7): an unresolvable credential leaves the bot DISABLED —

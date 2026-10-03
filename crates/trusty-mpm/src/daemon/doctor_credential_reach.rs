@@ -119,11 +119,33 @@ pub fn verdict_for(var: &str, outcome: &Result<String, SecretResolveError>) -> R
 pub(crate) fn check_credential_reach() -> DoctorCheck {
     // Runs on the blocking pool — see `check_credential_reach_async`, the only
     // caller on an async path. Nothing here may be awaited.
+    check_credential_reach_with(crate::secret_source::sandboxed(), resolve_env_var_bounded)
+}
+
+/// [`check_credential_reach`] with the sandbox state and the resolver injected.
+///
+/// Why (#9121): this probe walks `.env.local` and the Keychain, so a sandboxed
+/// daemon answering `GET /api/v1/doctor` would read the operator's store.
+/// What: `sandbox` → an `Ok` row saying no tier was consulted; `resolve` is
+/// never called. Otherwise one verdict per [`DAEMON_PROVIDERS`] entry.
+/// Test: `a_sandboxed_row_consults_no_credential_tier`,
+/// `an_unsandboxed_row_consults_every_daemon_credential`.
+pub(crate) fn check_credential_reach_with(
+    sandbox: bool,
+    resolve: impl Fn(&str) -> Result<String, SecretResolveError>,
+) -> DoctorCheck {
+    if sandbox {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Ok,
+            "sandbox mode (#9121): no credential tier is consulted",
+        );
+    }
     let verdicts: Vec<ReachVerdict> = DAEMON_PROVIDERS
         .iter()
         .map(|provider| {
             let var = env_var_for(provider).unwrap_or(provider);
-            verdict_for(var, &resolve_env_var_bounded(var))
+            verdict_for(var, &resolve(var))
         })
         .collect();
     build_row(&verdicts)

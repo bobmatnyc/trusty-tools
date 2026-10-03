@@ -321,3 +321,91 @@ fn an_unregistered_variable_reads_only_the_process_environment() {
         "an unregistered name must never reach the credential store"
     );
 }
+
+/// A store that holds a value for every provider, counting its reads.
+struct HoldingStore {
+    /// How many reads reached the store.
+    calls: Arc<AtomicUsize>,
+}
+
+impl KeyStore for HoldingStore {
+    fn get(&self, _provider: &str) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Some("from-the-store-9121".to_string())
+    }
+    fn set(&self, _provider: &str, _value: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn unset(&self, _provider: &str) -> Result<(), KeyStoreError> {
+        Ok(())
+    }
+    fn list(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// The registered credential the two sandbox tests read.
+///
+/// Why: no other test in this crate touches it. A variable a non-`#[serial]`
+/// test also mutates (`TELEGRAM_BOT_TOKEN` is one) races the guard below and
+/// can send that test to the operator's real store.
+const SANDBOX_TEST_VAR: &str = "FIREWORKS_API_KEY";
+
+/// Why (#9121): a sandbox daemon with its own `$HOME` still reached the
+/// operator's bot token, because the Keychain is per-user. In sandbox mode the
+/// store must not be read at all — not read and then discarded.
+/// What: a store holding a value; the gated read answers `None`, the store saw
+/// zero reads, and the WARN names the variable without the value. No assertion
+/// message prints a resolved value.
+/// Test: this test.
+#[test]
+#[serial]
+fn sandbox_mode_never_consults_the_store() {
+    let _env = EnvVarGuard::unset(SANDBOX_TEST_VAR);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(HoldingStore {
+        calls: Arc::clone(&calls),
+    });
+
+    let (resolved, lines) = capture(|| {
+        resolve_gated(true, SANDBOX_TEST_VAR, || {
+            resolve_secret_with(SANDBOX_TEST_VAR, store, Duration::from_millis(500))
+        })
+    });
+
+    assert!(resolved.is_none(), "a sandbox must resolve no credential");
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the store was read");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("WARN") && l.contains(SANDBOX_TEST_VAR)),
+        "the skip must be logged by name: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("from-the-store")),
+        "no value may be logged: {lines:?}"
+    );
+}
+
+/// Why: the sandbox test above passes trivially if the fake store were never
+/// wired in. This is the same read with the gate open: the store IS consulted.
+/// Test: this test.
+#[test]
+#[serial]
+fn outside_sandbox_mode_the_store_is_consulted() {
+    let _env = EnvVarGuard::unset(SANDBOX_TEST_VAR);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(HoldingStore {
+        calls: Arc::clone(&calls),
+    });
+
+    let resolved = resolve_gated(false, SANDBOX_TEST_VAR, || {
+        resolve_secret_with(SANDBOX_TEST_VAR, store, Duration::from_millis(500))
+    });
+
+    assert!(
+        resolved.as_deref() == Some("from-the-store-9121"),
+        "the open gate did not return the store's value"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

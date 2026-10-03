@@ -34,6 +34,7 @@
 
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -65,11 +66,58 @@ use trusty_common::credentials::{
 /// `an_unregistered_variable_reads_only_the_process_environment`.
 #[must_use]
 pub fn resolve_secret(var: &str) -> Option<String> {
-    if !is_registered_credential_env_var(var) {
-        load_env_local_once();
-        return process_env_only(var);
+    // #9121: a sandboxed daemon reads no tier — not `.env.local`, not the store.
+    resolve_gated(sandboxed(), var, || {
+        if !is_registered_credential_env_var(var) {
+            load_env_local_once();
+            return process_env_only(var);
+        }
+        report(resolve_env_var_bounded(var))
+    })
+}
+
+/// The process-wide sandbox latch (#9121). One-way: nothing clears it.
+static SANDBOX: AtomicBool = AtomicBool::new(false);
+
+/// Put this process in sandbox mode: every later [`resolve_secret`] is `None`.
+///
+/// Why (#9121): a live-check daemon started with its own `$HOME` still reached
+/// the operator's credentials, because the Keychain is per-user, not per-HOME.
+/// What: sets the private `SANDBOX` latch. There is no way back; a sandbox
+/// that could be left would be one bug away from reading the store.
+/// Test: `sandbox_mode_never_consults_the_store`; the call site is
+/// `tm daemon --sandbox` (`commands::daemon_sandbox::enter`).
+pub fn enter_sandbox() {
+    SANDBOX.store(true, Ordering::SeqCst);
+}
+
+/// True once [`enter_sandbox`] has run in this process.
+#[must_use]
+pub fn sandboxed() -> bool {
+    SANDBOX.load(Ordering::SeqCst)
+}
+
+/// Run `resolve` only outside sandbox mode.
+///
+/// Why: the gate is a parameter so a test can prove the tiers are skipped
+/// without setting the process-wide latch under its parallel siblings.
+/// What: `sandbox` → a WARN naming the variable, then `None`; `resolve` is never
+/// called. Otherwise `resolve()`.
+/// Test: `sandbox_mode_never_consults_the_store`,
+/// `outside_sandbox_mode_the_store_is_consulted`.
+fn resolve_gated(
+    sandbox: bool,
+    var: &str,
+    resolve: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if sandbox {
+        tracing::warn!(
+            credential = var,
+            "sandbox mode (#9121): no credential tier is consulted — the dependent feature stays DISABLED"
+        );
+        return None;
     }
-    report(resolve_env_var_bounded(var))
+    resolve()
 }
 
 /// Hermetic core of [`resolve_secret`]: the same arms against an injected store.

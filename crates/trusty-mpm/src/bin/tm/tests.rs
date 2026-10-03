@@ -1700,12 +1700,24 @@ fn cli_parses_daemon_defaults() {
             tailscale,
             mcp,
             force,
+            sandbox,
         } => {
             assert_eq!(addr.to_string(), "127.0.0.1:7880");
             assert!(!tailscale);
             assert!(!mcp);
             assert!(!force);
+            assert!(!sandbox);
         }
+        other => panic!("expected Daemon, got {other:?}"),
+    }
+}
+
+/// #9121: `tm daemon --sandbox` must parse.
+#[test]
+fn cli_parses_daemon_sandbox() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--sandbox"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Daemon { sandbox, .. } => assert!(sandbox),
         other => panic!("expected Daemon, got {other:?}"),
     }
 }

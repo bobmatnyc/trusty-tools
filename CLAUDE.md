@@ -40,6 +40,9 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   override it EXCEPT with the builder slot the hook grants, and never point a
   gate at a worktree-local `target/` — that is a cold build of the whole
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
+- 🔴 **A live check needing an isolated daemon starts it with
+  `scripts/sandbox_daemon.sh` only (#9121)** — a hand-built `tm daemon`
+  inherits bot tokens and reaches the per-user Keychain.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
