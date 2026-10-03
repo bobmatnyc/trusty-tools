@@ -256,10 +256,11 @@ fn restart_over_default_daemon(args: &[&str], rec: &Recorder) -> anyhow::Result<
 #[test]
 fn a_unit_without_program_arguments_signals_nothing() {
     let rec = Recorder::new(vec![daemon(30, PLATFORM_DEFAULT)]);
-    let err = restart_over_default_daemon(&[], &rec).expect_err("no ProgramArguments fails");
-    assert!(err.to_string().contains("ProgramArguments"), "{err}");
+    let result = restart_over_default_daemon(&[], &rec);
     assert!(rec.signals.borrow().is_empty(), "{:?}", rec.signals);
     assert!(rec.steps.borrow().is_empty(), "{:?}", rec.steps);
+    let err = result.expect_err("no ProgramArguments fails");
+    assert!(err.to_string().contains("ProgramArguments"), "{err}");
 }
 
 /// MEDIUM (#8686 review): a dangling or empty `--data-dir` aborts the restart
@@ -272,14 +273,15 @@ fn a_dangling_data_dir_signals_nothing() {
         &["trusty-search", "start", "--data-dir="][..],
     ] {
         let rec = Recorder::new(vec![daemon(30, PLATFORM_DEFAULT)]);
-        let err = restart_over_default_daemon(args, &rec).expect_err("a dangling flag fails");
-        assert!(err.to_string().contains("`--data-dir`"), "{args:?}: {err}");
+        let result = restart_over_default_daemon(args, &rec);
         assert!(
             rec.signals.borrow().is_empty(),
             "{args:?}: {:?}",
             rec.signals
         );
         assert!(rec.steps.borrow().is_empty(), "{args:?}: {:?}", rec.steps);
+        let err = result.expect_err("a dangling flag fails");
+        assert!(err.to_string().contains("`--data-dir`"), "{args:?}: {err}");
     }
 }
 
