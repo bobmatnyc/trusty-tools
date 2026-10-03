@@ -288,11 +288,11 @@
 //! runs (`bash <file>`, `python3 <file>`, `./<file>`) never appears in this
 //! rule's text. `pm_guard_secret_script` runs this rule, and the other
 //! credential rules, over the script's body, and refuses a body it cannot read
-//! in full (unreadable, symlinked, over its 256 KiB bound, not UTF-8) or a
-//! script it cannot resolve (a computed path, a missing file). The accepted
-//! trades — a script an earlier stage of the same command writes, and scripts
-//! a script sources dynamically — are pinned in `DOCUMENTED_RESIDUALS` and in
-//! that module's tests.
+//! in full (unreadable, over its 256 KiB bound, not UTF-8) or a script it
+//! cannot resolve (a computed path, a missing file, a chain past its depth
+//! bound — at any nesting depth, #9037). The accepted trade — a script an
+//! earlier stage of the same command writes — is pinned in
+//! `DOCUMENTED_RESIDUALS` and in that module's tests.
 //!
 //! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
 //! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
@@ -2230,10 +2230,10 @@ mod tests {
         // #8879, owner ruling 268: this rule reads command TEXT only. A script
         // the command runs is judged by its body in `pm_guard_secret_script`,
         // which fails CLOSED on a body it cannot read in full and on a script
-        // it cannot resolve. Its accepted trades: a script an earlier stage of
-        // the same command writes (that stage's text is judged here), and a
-        // script a script runs or sources dynamically (`source "$LIB/x.sh"`).
-        // Pinned with real files in `the_documented_residuals_allow`.
+        // it cannot resolve, at any nesting depth (#9037). Its accepted trade:
+        // a script an earlier stage of the same command writes (that stage's
+        // text is judged here). Pinned with real files in
+        // `the_documented_residuals_allow`.
         "printf 'echo hi' > ./s.sh; bash ./s.sh",
     ];
 
