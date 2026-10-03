@@ -15,18 +15,20 @@ on:
 # The PAT does all the work; the job needs no GITHUB_TOKEN scopes.
 permissions: {}
 
-concurrency:
-  group: epic-to-master-project-${{ github.event.issue.number }}
-  cancel-in-progress: false
-
 jobs:
   add-to-project:
     name: Add epic to project 45
     # Non-epic events skip here, before a runner is allocated. For `labeled`
     # the added label must be `epic`; other actions need the label on the issue.
+    # This `if:` is the only epic filter, so the add step never no-ops green.
     if: >-
       contains(github.event.issue.labels.*.name, 'epic') &&
       (github.event.action != 'labeled' || github.event.label.name == 'epic')
+    # Job-level, so skipped non-epic runs never enter the group and evict a
+    # pending epic run.
+    concurrency:
+      group: epic-to-master-project-${{ github.event.issue.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,4 +47,3 @@ jobs:
         with:
           project-url: https://github.com/users/bobmatnyc/projects/45
           github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
-          labeled: epic
