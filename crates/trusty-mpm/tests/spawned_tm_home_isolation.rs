@@ -746,8 +746,9 @@ const SERIAL_TARGET: &str = "tests/env_serial.rs";
 /// once any `env_serial` test called it, that test failed with "tmux access
 /// refused" whenever it ran later in the same process.
 /// What: every module `tests/env_serial.rs` mounts, other than `common`, is
-/// read comment-free and must not name `common::scratch_home`. A scoped guard
-/// that restores `$HOME` is the replacement (`mcp_spawn_gate::ScratchHome`).
+/// read comment-free and must not call `common::scratch_home` — by path, or
+/// bare after a `use` ([`calls_common_scratch_home`]). A scoped guard that
+/// restores `$HOME` is the replacement (`mcp_spawn_gate::ScratchHome`).
 /// Test: this function IS the test.
 #[test]
 fn no_env_serial_module_keeps_a_process_wide_scratch_home() {
@@ -766,7 +767,7 @@ fn no_env_serial_module_keeps_a_process_wide_scratch_home() {
         }
         scanned += 1;
         let code = code_only(&std::fs::read_to_string(&path).expect("read source"));
-        if code.contains("common::scratch_home") {
+        if calls_common_scratch_home(&code) {
             leakers.push(rel.display().to_string());
         }
     }
@@ -782,4 +783,51 @@ fn no_env_serial_module_keeps_a_process_wide_scratch_home() {
          `$HOME` instead:\n  {}",
         leakers.join("\n  ")
     );
+}
+
+/// Whether comment-free `code` calls `common::scratch_home` (#6127).
+///
+/// Why: `use crate::common::{scratch_home, ..}` followed by a bare
+/// `scratch_home()` call never spells `common::scratch_home`, so a path-only
+/// match let that form through.
+/// What: true on the `common::scratch_home` path, or on a `scratch_home(` call
+/// not preceded by an identifier character, unless the module defines its own
+/// `fn scratch_home(` — that name is then the module's helper, not common's.
+/// Test: `the_scratch_home_scan_flags_a_bare_call`.
+fn calls_common_scratch_home(code: &str) -> bool {
+    if code.contains("common::scratch_home") {
+        return true;
+    }
+    if code.contains("fn scratch_home(") {
+        return false;
+    }
+    code.match_indices("scratch_home(").any(|(at, _)| {
+        code[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+    })
+}
+
+/// The #6127 scan catches every call form of `common::scratch_home`.
+///
+/// Why: a ratchet that misses a call form stays green while the leak returns.
+/// What: the path form and the bare form after a `use` are flagged; a longer
+/// identifier and a module's own helper of that name are not.
+/// Test: this function IS the test.
+#[test]
+fn the_scratch_home_scan_flags_a_bare_call() {
+    assert!(calls_common_scratch_home(
+        "fn t() { common::scratch_home(); }"
+    ));
+    assert!(calls_common_scratch_home(
+        "use crate::common::{scratch_home, tm_bin};\nfn t() { scratch_home(); }"
+    ));
+    assert!(!calls_common_scratch_home("fn t() { my_scratch_home(); }"));
+    assert!(!calls_common_scratch_home(
+        "fn t() { scratch_home_and_project(); }"
+    ));
+    assert!(!calls_common_scratch_home(
+        "fn scratch_home() -> TempDir { todo!() }\nfn t() { scratch_home(); }"
+    ));
 }
