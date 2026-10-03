@@ -161,6 +161,33 @@ fn an_answer_clears_the_strikes() {
     );
 }
 
+/// 🔴 #8301: a call the survey deadline cut short neither counts toward the
+/// suspension nor clears the strikes already counted.
+///
+/// Why: up to four `gh` calls can be cut in the one candidate a deadline
+/// interrupts. Counted, they suspend polling for every later survey; read as an
+/// answer, they erase the evidence of a real hang.
+#[test]
+fn a_deadline_cut_call_neither_counts_nor_clears_a_strike() {
+    let mut state = GateState::default();
+    let root = Path::new("/tmp/root");
+    let cut = || -> Result<String, GhFailure> { Err(GhFailure::cut_short("deadline")) };
+    note_outcome(&mut state.roots, root, &timeout());
+    note_outcome(&mut state.roots, root, &timeout());
+    for _ in 0..TIMEOUT_STRIKES {
+        note_outcome(&mut state.roots, root, &cut());
+    }
+    assert!(
+        take_suspension(&mut state, root, Instant::now()).is_none(),
+        "cut-short calls must not reach the threshold"
+    );
+    note_outcome(&mut state.roots, root, &timeout());
+    assert!(
+        take_suspension(&mut state, root, Instant::now()).is_some(),
+        "the two real timeouts must still count: the cut calls cleared nothing"
+    );
+}
+
 /// An expired suspension lets the next call through rather than latching.
 #[test]
 fn an_expired_suspension_lets_the_next_call_through() {

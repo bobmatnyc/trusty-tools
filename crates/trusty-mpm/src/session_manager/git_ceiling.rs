@@ -20,7 +20,7 @@ use std::io;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use crate::core::bounded_proc::{BoundedError, run_bounded_with_input};
+use crate::core::bounded_proc::{BoundedError, clamp_to_deadline, run_bounded_with_input};
 
 /// The default ceiling on one sweep git call (#8306).
 ///
@@ -80,7 +80,9 @@ pub(crate) fn is_timed_out(error: &str) -> bool {
 }
 
 fn run(cmd: Command, input: Option<Vec<u8>>) -> io::Result<Output> {
-    let ceiling = git_ceiling();
+    // #8301: a survey deadline can cut the call shorter than the ceiling; the
+    // timeout line then names the budget the call really had.
+    let ceiling = clamp_to_deadline(git_ceiling()).unwrap_or(Duration::ZERO);
     let described = describe(&cmd);
     match run_bounded_with_input(cmd, input, ceiling) {
         Ok(out) => Ok(Output {
