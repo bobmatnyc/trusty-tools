@@ -85,6 +85,8 @@ mod read_only_programs;
 mod read_only_scratchpad;
 mod secret_file_copy;
 mod sed_awk;
+// #9127: `( … )`, `{ …; }` and reserved words peeled off for the git-verb walker.
+mod shell_groups;
 mod shell_lex;
 // #8756: one substitution scanner for the forbidden-verb and secret rules.
 mod substitutions;

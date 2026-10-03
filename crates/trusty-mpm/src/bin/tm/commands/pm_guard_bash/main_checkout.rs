@@ -139,9 +139,9 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
 
+use super::shell_groups::{self, Step};
 use super::{
-    PathEnv, git_dash_c_override, operator_checkouts, resolve_target_path, split_shell_segments,
-    unresolved_target,
+    PathEnv, git_dash_c_override, operator_checkouts, resolve_target_path, unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
@@ -320,9 +320,15 @@ pub(crate) enum CommitVerdict {
 /// index and moves no ref, so it creates none of the shared-HEAD hazard these
 /// rules exist for (ADR-0049 decision 4). It is still refused when CHAINED to a
 /// commit, which is a statement about the index read above, not about `git add`.
+/// Grouping (#9127): a commit inside `( … )`, `{ …; }` or behind a reserved
+/// word is judged on its own command, and grouping that does not parse refuses
+/// any command carrying `git commit`.
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
 /// `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`,
-/// `command_is_a_lone_commit_*`, `commit_allows_a_scratchpad_clone_only` (#8485).
+/// `command_is_a_lone_commit_*`, `commit_allows_a_scratchpad_clone_only` (#8485),
+/// `commit_in_a_subshell_or_brace_group_must_deny`,
+/// `commit_in_an_unbalanced_group_is_refused`,
+/// `grouped_commits_outside_a_main_checkout_and_grouped_reads_stay_allowed`.
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
@@ -341,6 +347,12 @@ fn evaluate_main_checkout_commit_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<CommitVerdict> {
+    // #9127: fail closed — grouping that does not parse cannot be placed.
+    if !shell_groups::grouped_steps(command).parsed && shell_groups::mentions_git_commit(command) {
+        return Some(CommitVerdict::Deny(
+            shell_groups::UNPARSED_GROUP_COMMIT_REASON.to_string(),
+        ));
+    }
     // `main_checkout_root` rather than `is_main_checkout` for the reason #5769
     // gave the HEAD-move rule: `cd crates/foo && git commit` resolves a
     // subdirectory that shares the checkout's HEAD, and the writer query has to
@@ -435,7 +447,11 @@ fn every_commit_lands_in_a_scratchpad_clone(command: &str, cwd: &Path, env: &Pat
 /// `command_is_a_lone_commit_rejects_anything_that_can_restage`.
 fn command_is_a_lone_commit(command: &str) -> bool {
     let mut commits = 0;
-    for segment in split_shell_segments(command) {
+    // #9127: the same peeled segments the walker reads.
+    for step in shell_groups::grouped_steps(command).steps {
+        let Step::Command(segment) = step else {
+            continue;
+        };
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
@@ -934,10 +950,12 @@ fn unresolved_directory_deny_reason(
 /// rather than hardcoded so the destructive-verb rule and the commit rule share
 /// one walker: `cd` tracking, `git -C` resolution, and segment splitting are
 /// the parts a second copy would drift on, and they are identical for both.
-/// What: walks the composition segments (reusing [`split_shell_segments`], so
-/// `true && git reset --hard` is classified on its second segment), tracks the
-/// effective working directory across `cd` segments and a leading `git -C`,
-/// and returns the first segment whose `(verb, argv-tail)` satisfies `matches`.
+/// What: walks the composition segments ([`shell_groups::grouped_steps`], so
+/// `true && git reset --hard` is classified on its second segment and
+/// `(git reset --hard)` on its command, #9127), tracks the effective working
+/// directory across `cd` segments and a leading `git -C` — restoring it when a
+/// subshell or a wrapper's child shell ends — and returns the first segment
+/// whose `(verb, argv-tail)` satisfies `matches`.
 /// `None` when no segment qualifies — including a segment `shlex` cannot split,
 /// which yields no argv to classify.
 /// Test: `destructive_target_dir_*`, `commit_target_dir_*`.
@@ -987,7 +1005,20 @@ pub(super) fn git_verb_targets_with_tail(
 ) -> Vec<(String, PathBuf, Vec<String>)> {
     let mut found = Vec::new();
     let mut effective_cwd = cwd.to_path_buf();
-    for segment in split_shell_segments(command) {
+    // #9127: grouping peeled off, and a subshell's `cd` scoped to it.
+    let mut outer_cwds = Vec::new();
+    for step in shell_groups::grouped_steps(command).steps {
+        let segment = match step {
+            Step::Enter => {
+                outer_cwds.push(effective_cwd.clone());
+                continue;
+            }
+            Step::Leave => {
+                effective_cwd = outer_cwds.pop().unwrap_or(effective_cwd);
+                continue;
+            }
+            Step::Command(segment) => segment,
+        };
         let trimmed = segment.trim();
         if trimmed.is_empty() {
             continue;
@@ -1659,32 +1690,205 @@ mod tests {
         }
     }
 
-    /// Probe (B3 round 3): a main-checkout commit wrapped in a subshell or a
-    /// brace group must still reach the commit rule, not lex as `(git` or `{`.
-    /// Ignored because all four forms are allowed today, on this branch and in
-    /// the released 1.7.10; the fix belongs to pm-guard batch B1. Tracked in
-    /// #9127.
+    /// The commands in `commands` that the commit rule, run from `cwd`, does
+    /// not deny.
+    fn commits_not_denied(commands: &[String], cwd: &Path) -> Vec<String> {
+        commands
+            .iter()
+            .filter(|command| {
+                !matches!(
+                    evaluate_main_checkout_commit_command(command, cwd),
+                    Some(CommitVerdict::Deny(_))
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 🔴 REGRESSION (#9127): a main-checkout commit wrapped in a subshell or a
+    /// brace group lexed as `(git` or `{`, so the commit rule never saw it.
+    /// All four forms were allowed on origin/main and in the released 1.7.10.
     #[test]
-    #[ignore = "pre-existing bypass, see issue #9127: subshell/brace-group commit skips the commit rule"]
     fn commit_in_a_subshell_or_brace_group_must_deny() {
         let main = main_checkout_dir();
         let elsewhere = tempfile::tempdir().expect("tempdir");
         let real = main.path().display();
-        let missed: Vec<String> = [
-            format!("(git -C {real} commit -a -m x)"),
-            format!("( git -C {real} commit -a -m x)"),
-            format!("( git -C {real} commit -a -m x )"),
-            format!("{{ git -C {real} commit -a -m x; }}"),
-        ]
-        .into_iter()
-        .filter(|command| {
-            !matches!(
-                evaluate_main_checkout_commit_command(command, elsewhere.path()),
-                Some(CommitVerdict::Deny(_))
-            )
-        })
-        .collect();
+        let missed = commits_not_denied(
+            &[
+                format!("(git -C {real} commit -a -m x)"),
+                format!("( git -C {real} commit -a -m x)"),
+                format!("( git -C {real} commit -a -m x )"),
+                format!("{{ git -C {real} commit -a -m x; }}"),
+            ],
+            elsewhere.path(),
+        );
         assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+    }
+
+    /// 🔴 REGRESSION (#9127): nesting, a `cd` inside the subshell, a trailing
+    /// operator or redirect, and a commit after a separator inside the group.
+    #[test]
+    fn commit_in_a_nested_or_chained_group_must_deny() {
+        let main = main_checkout_dir();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("( ( git -C {real} commit -a -m x ) )"),
+                format!("((git -C {real} commit -a -m x))"),
+                format!("( {{ git -C {real} commit -a -m x; }} )"),
+                format!("{{ git -C {real} commit -a -m x; }} && echo done"),
+                format!("{{ git -C {real} commit -a -m x; }} > /dev/null 2>&1"),
+                format!("(git -C {real} commit -a -m x) || true"),
+                format!("(cd {real} && git commit -a -m x)"),
+                format!("(cd {real}; git commit -a -m x)"),
+                format!("(true && git -C {real} commit -a -m x)"),
+                format!("(false || git -C {real} commit -a -m x)"),
+                format!("{{ true; git -C {real} commit -a -m x; }}"),
+            ],
+            elsewhere.path(),
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+    }
+
+    /// 🔴 REGRESSION (#9127): a reserved word in command position hid the
+    /// program word the same way a `(` did, and so did a group handed to a
+    /// `sh -c`/`bash -c` wrapper, whose string the guard already descends into.
+    #[test]
+    fn commit_behind_a_reserved_word_or_in_a_wrapped_group_must_deny() {
+        let main = main_checkout_dir();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("if true; then git -C {real} commit -a -m x; fi"),
+                format!("! git -C {real} commit -a -m x"),
+                format!("while true; do git -C {real} commit -a -m x; break; done"),
+                format!("bash -c '(git -C {real} commit -a -m x)'"),
+                format!("sh -c '{{ git -C {real} commit -a -m x; }}'"),
+            ],
+            elsewhere.path(),
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+    }
+
+    /// 🔴 REGRESSION (#9127): a `cd` inside a subshell or a `sh -c` string does
+    /// not move the caller's directory. Read as if it did, `sh -c 'cd <wt>'`
+    /// cleared a commit that runs in the main checkout.
+    #[test]
+    fn a_cd_inside_a_subshell_or_wrapper_does_not_leak() {
+        let main = main_checkout_dir();
+        let wt = main.path().join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let wt = wt.display();
+        let missed = commits_not_denied(
+            &[
+                format!("sh -c 'cd {wt}' && git commit -a -m x"),
+                format!("(cd {wt}) && git commit -a -m x"),
+                format!("(cd {wt} && git commit --allow-empty -m a); git commit -a -m b"),
+            ],
+            main.path(),
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+
+        let env = PathEnv::from_process();
+        let is_commit = |verb: &str, _: &[String]| verb == "commit";
+        let targets: Vec<PathBuf> = git_verb_targets_with_tail(
+            "(cd /wt && git commit -m a); git commit -m b",
+            Path::new("/repo"),
+            &env,
+            is_commit,
+        )
+        .into_iter()
+        .map(|(_, target, _)| target)
+        .collect();
+        assert_eq!(targets, [PathBuf::from("/wt"), PathBuf::from("/repo")]);
+    }
+
+    /// 🔴 REGRESSION (#9127): a group the guard cannot parse is refused when it
+    /// carries a `git commit`, from any directory, since the guard cannot say
+    /// where the commit lands. Bash rejects most of these too, so the deny
+    /// costs nothing; a function body is the shape bash does run.
+    #[test]
+    fn commit_in_an_unbalanced_group_is_refused() {
+        let main = main_checkout_dir();
+        let wt = main.path().join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("(git -C {real} commit -a -m x"),
+                format!("{{ git -C {real} commit -a -m x"),
+                format!("f() {{ git -C {real} commit -a -m x; }}; f"),
+                "(git commit -m x".to_string(),
+            ],
+            &wt,
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        // An unbalanced group with no commit in it is not this rule's business.
+        assert!(evaluate_main_checkout_commit_command("(git status", &wt).is_none());
+    }
+
+    /// The other half of #9127: grouping must not cost a commit that was
+    /// allowed — in a linked worktree, in a scratchpad clone, or with a
+    /// here-document or quoted message carrying an unbalanced `)` — and a read
+    /// in a group stays a read.
+    #[test]
+    fn grouped_commits_outside_a_main_checkout_and_grouped_reads_stay_allowed() {
+        let main = main_checkout_dir();
+        let wt = main.path().join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(wt.join("crates")).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join("red-proof");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone .git");
+        let heredoc = "git commit -F- <<'EOF'\nfix: x\n\n1) one\n2) two\nEOF";
+        for (command, cwd) in [
+            ("(git commit -m x)", wt.as_path()),
+            ("( ( git commit -m x ) )", wt.as_path()),
+            ("{ git commit -m x; }", wt.as_path()),
+            ("{ git commit -m x; } > /dev/null", wt.as_path()),
+            ("(cd crates && git commit -m x)", wt.as_path()),
+            (heredoc, wt.as_path()),
+            ("git commit -m 'fix: case a) and b)'", wt.as_path()),
+            ("git commit -m \"fix(x): y\"", wt.as_path()),
+            ("(git commit -m x)", clone.as_path()),
+            ("{ git commit -m x; }", clone.as_path()),
+            (heredoc, clone.as_path()),
+            ("(git status)", main.path()),
+            ("{ git log; }", main.path()),
+            ("( git log --oneline -5 ) | head", main.path()),
+        ] {
+            assert!(
+                evaluate_main_checkout_commit_command(command, cwd).is_none(),
+                "`{command}` in {} must stay allowed",
+                cwd.display()
+            );
+        }
+        let spelled = format!("(git -C {} commit -m x)", wt.display());
+        assert!(evaluate_main_checkout_commit_command(&spelled, main.path()).is_none());
+    }
+
+    /// #9127: the destructive rule reads the same walker, so a grouped
+    /// `reset --hard` is refused too, and a grouped read is not.
+    #[test]
+    fn destructive_sees_inside_a_subshell_or_brace_group() {
+        let checkout = main_checkout_dir();
+        for command in [
+            "(git reset --hard)",
+            "{ git checkout -- .; }",
+            "if true; then git clean -fdx; fi",
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(command, checkout.path()).is_some(),
+                "must deny: {command}"
+            );
+        }
+        assert!(
+            evaluate_main_checkout_destructive_command("(git status)", checkout.path()).is_none()
+        );
     }
 
     #[test]
