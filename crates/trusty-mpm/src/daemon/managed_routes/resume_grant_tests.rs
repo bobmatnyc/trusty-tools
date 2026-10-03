@@ -54,6 +54,19 @@ impl ManagedTmuxDriver for GrantAtLaunchDriver {
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
     }
+
+    /// #9101: the pane names its session, so the resume spawn proves it is
+    /// the record's own and reaches the launch line.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(crate::test_support::self_describing_pane(name))
+    }
+
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        Ok(crate::test_support::self_describing_identity(pane_id))
+    }
 }
 
 /// An isolated daemon whose tmux driver is a [`GrantAtLaunchDriver`] for
@@ -148,7 +161,9 @@ async fn an_auto_relaunch_holds_its_grant_through_the_launch_line_8983() {
         &ws.display().to_string(),
     );
     record.claude_session_id = Some(session.0.to_string());
-    record.pane_id = Some("%3".into());
+    // #9101: a pane the gate can prove is this record's, on the fake server.
+    record.pane_id = Some(crate::test_support::self_describing_pane("tmpm-grant"));
+    record.tmux_server = Some(crate::test_support::FAKE_PANE_SERVER.into());
 
     let got = tokio::time::timeout(
         std::time::Duration::from_secs(60),

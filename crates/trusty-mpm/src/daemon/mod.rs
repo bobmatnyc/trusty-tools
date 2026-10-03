@@ -61,7 +61,7 @@ mod doctor_content;
 pub mod error;
 pub mod idle_nudge;
 pub mod idle_reaper;
-// #8942: the shutdown legacy-registry reap's kill loop.
+// #8942, #9101: the shutdown legacy-registry pass, which kills nothing.
 mod legacy_reap;
 pub mod llm_overseer;
 pub mod lock;
@@ -388,13 +388,13 @@ pub async fn serve_with_shutdown(
         // Signal all background loops to stop before we walk the session list.
         cancel.cancel();
         // Graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
-        // This is the single authority for SM-tracked sessions; the legacy-registry
-        // reap that follows (`reap_all_live_sessions`) is intentionally scoped to
-        // the DaemonState legacy registry only — it does NOT re-iterate SM sessions
-        // so there is no double-kill (see `reap_all_live_sessions` doc comment).
+        // This is the single authority for SM-tracked sessions, and #9101 it
+        // stops only the ones it proves it owns. The legacy-registry pass
+        // that follows (`reap_all_live_sessions`) kills nothing: a legacy
+        // entry is a bare tmux name, which proves no ownership.
         let mgr = reaper_state.session_manager().await;
         mgr.shutdown().await;
-        // Reap remaining legacy-registry sessions not covered by mgr.shutdown().
+        // Report the legacy-registry sessions, left running.
         reap_all_live_sessions(reaper_state).await;
     })
     .await;
@@ -418,48 +418,29 @@ pub async fn serve_with_shutdown(
 // signal is now awaited once, through the shared entry point, and fanned out to
 // both listeners; see `serve_http`'s drain token.
 
-/// Kill every live tmux session in the LEGACY DaemonState registry on shutdown.
+/// Report the LEGACY DaemonState registry's sessions on shutdown, killing none.
 ///
 /// Why: on graceful shutdown no session may be left fire-and-forget (#1452,
-/// #1455). `SessionManager::shutdown` (called before this in the shutdown
-/// sequence) is the single authority for SM-tracked sessions; this function
-/// covers only the LEGACY `DaemonState` registry so there is no double-kill.
-/// What: discovers tmux once (a no-op early-return if tmux is unavailable —
-/// nothing to kill), then collects the `tmux_name` of every entry in the legacy
-/// [`DaemonState`] registry only (NOT the `SessionManager` store — that was
-/// already handled by `mgr.shutdown()`), and issues a best-effort `kill_session`
-/// for each. One kill failing (the session may already be gone) never aborts the
-/// rest — every name is attempted. Idempotent: re-running it after a clean sweep
-/// simply finds nothing live. Logs a one-line summary at info level to stderr.
-///
-/// Host-state gate (#6348 review round 2): this was the one tmux path in this
-/// module with NO gate — not even the `$HOME`-only one — so a daemon isolated by
-/// its framework root reached the operator's real tmux server here and issued
-/// `kill_session` for every name in its own registry. It asks
-/// [`host_state_refusal`] first, and a refusal returns before a driver exists.
-/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op);
+/// #1455), and `SessionManager::shutdown`, run first, stops every managed
+/// session it proves it owns. A legacy registry entry records only a tmux
+/// name, which proves nothing: boot discovery adds ANY claude pane, and a
+/// restarted tmux server hands the name to an unrelated session. #9101: the
+/// daemon kills only sessions it proves it owns, so this pass kills none.
+/// What: collects the `tmux_name` of every legacy registry entry (NOT the
+/// `SessionManager` store) and logs each as left running through
+/// [`legacy_reap::skip_legacy_names`]. It never runs tmux, so it needs no
+/// host-state gate (#6348) and never mutates the registry.
+/// Test: `reap_all_live_sessions_is_safe_when_empty`;
 /// `reap_all_live_sessions_refuses_on_a_scratch_framework_root`;
-/// `reap_all_live_sessions_never_kills_a_sidecar_named_session` (#8942).
+/// `the_shutdown_legacy_pass_kills_no_legacy_session` (#9101).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
-    if let Some(reason) = host_state_refusal(&state) {
-        tracing::warn!("graceful shutdown: legacy session reap skipped — {reason}");
-        return;
-    }
-    let Ok(driver) = tmux::TmuxDriver::discover() else {
-        info!("graceful shutdown: tmux unavailable; no sessions to reap");
-        return;
-    };
-
-    // Legacy DaemonState registry only — SM sessions were handled by mgr.shutdown().
     let names: std::collections::HashSet<String> = state
         .list_sessions()
         .into_iter()
         .map(|s| s.tmux_name)
         .collect();
-
-    // #8942: the kill floor inside `kill_session` spares the Architect's names.
-    let reaped = legacy_reap::reap_legacy_names(&driver, names);
-    info!("graceful shutdown: reaped {reaped} legacy session(s)");
+    let skipped = legacy_reap::skip_legacy_names(names);
+    info!("graceful shutdown: left {skipped} legacy session(s) running (#9101)");
 }
 
 /// Spawn the idle auto-stop background loop if `idle_auto_stop.enabled = true`.
@@ -1123,8 +1104,8 @@ mod shutdown_reaper_tests {
     /// scratch daemon's shutdown could kill a live operator session that merely
     /// shared a name.
     /// What: registers one session on a scratch-rooted state and runs the reap,
-    /// asserting it returns without panicking and leaves the registry intact —
-    /// the refusal returns before a driver is ever discovered.
+    /// asserting it returns without panicking and leaves the registry intact.
+    /// #9101: the pass now kills nothing on any root.
     /// Test: this is the test.
     #[tokio::test]
     async fn reap_all_live_sessions_refuses_on_a_scratch_framework_root() {

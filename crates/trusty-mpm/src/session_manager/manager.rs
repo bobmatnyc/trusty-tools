@@ -418,15 +418,14 @@ impl SessionManager {
     /// `inject`/`observe`: a session-scoped `send_line` lands in whichever
     /// pane tmux currently considers active, not necessarily the pane the
     /// pending decision was raised in.
-    /// What: looks up the record, [`Self::ensure_pane_alive`]-gates the
-    /// recorded `pane_id`, sends the answer text via `send_line_to_pane` when
-    /// `pane_id` is known (falling back to the session-scoped `send_line` for
-    /// a legacy record with no captured pane), clears the pending fields, and
-    /// persists.
+    /// What: looks up the record, proves its pane with [`Self::owned_pane`]
+    /// (#9101: a record with no pane id or no matching tmux server is
+    /// refused), sends the answer text via `send_line_to_pane`, clears the
+    /// pending fields, and persists.
     /// Test: `manager_answer_decision` in tests;
     /// `answer_decision_targets_pane_when_pane_id_known`,
     /// `answer_decision_refuses_when_stored_pane_gone`,
-    /// `answer_decision_legacy_record_without_pane_id_falls_back_to_session_target`
+    /// `answer_decision_refuses_a_legacy_record_without_pane_id`
     /// in `pane_scoped_tests.rs`.
     pub async fn answer_decision(
         &self,
@@ -434,12 +433,10 @@ impl SessionManager {
         answer: &str,
     ) -> Result<(), ManagedError> {
         let mut record = self.get(id).await?;
-        self.ensure_pane_alive(id, &record)?;
-        match record.pane_id.as_deref() {
-            Some(p) => self.tmux.send_line_to_pane(&record.tmux_name, p, answer),
-            None => self.tmux.send_line(&record.tmux_name, answer),
-        }
-        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        let pane = self.owned_pane(id, &record)?;
+        self.tmux
+            .send_line_to_pane(&record.tmux_name, &pane, answer)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         record.pending_decision = None;
         record.proposed_default = None;
         record.last_activity_at = Some(Utc::now());
@@ -580,17 +577,13 @@ impl SessionManager {
     /// Stopped/Decommissioned guard as [`send_input`](Self::send_input) so input
     /// is never sent to a dead pane.
     /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
-    /// [`Self::ensure_pane_alive`]-gates the record's recorded `pane_id`
-    /// (issue #2468 — the same sibling-window hijack risk #2467 fixed for
-    /// resume/restart: typing into "the session" lands in whichever pane
-    /// tmux considers active, possibly an unrelated sibling shell) before
-    /// dispatching: [`Submit::Enter`] → `send_line`/`send_line_to_pane`
-    /// (literal + Enter), [`Submit::NoSubmit`] →
-    /// `send_keys_literal`/`send_keys_literal_to_pane` (literal only),
-    /// [`Submit::Interrupt`] → `send_interrupt`/`send_interrupt_to_pane`
-    /// (Ctrl-C) — the pane-scoped variant is used whenever `record.pane_id`
-    /// is known, the session-scoped one otherwise (legacy record, matching
-    /// #2467's fallback). Bumps `last_activity_at` ONLY for
+    /// proves the record's pane with [`Self::owned_pane`] (issue #2468's
+    /// sibling-window hijack; #9101: a pane id from before a tmux server
+    /// restart, or a record with no pane id, is refused) before dispatching
+    /// to that pane: [`Submit::Enter`] → `send_line_to_pane` (literal +
+    /// Enter), [`Submit::NoSubmit`] → `send_keys_literal_to_pane` (literal
+    /// only), [`Submit::Interrupt`] → `send_interrupt_to_pane` (Ctrl-C).
+    /// Bumps `last_activity_at` ONLY for
     /// `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is a STOP signal, not
     /// forward progress, so treating it as activity would mislead the
     /// idle/orphan-GC reconciliation into believing a stalled session is
@@ -600,14 +593,26 @@ impl SessionManager {
     /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs;
     /// `inject_targets_pane_when_pane_id_known`,
     /// `inject_refuses_when_stored_pane_gone`,
-    /// `inject_legacy_record_without_pane_id_falls_back_to_session_target`
-    /// in `pane_scoped_tests.rs`.
+    /// `inject_refuses_a_legacy_record_without_pane_id`
+    /// in `pane_scoped_tests.rs`;
+    /// `a_stale_record_after_a_server_restart_never_sends_keys`.
     pub async fn inject(
         &self,
         id: &ManagedSessionId,
         text: &str,
         submit: Submit,
     ) -> Result<(), ManagedError> {
+        self.inject_into_owned(id, text, submit).await.map(drop)
+    }
+
+    /// [`Self::inject`], answering the session name and the pane the gate
+    /// proved, so a caller reads back the same pane (#9101).
+    pub(super) async fn inject_into_owned(
+        &self,
+        id: &ManagedSessionId,
+        text: &str,
+        submit: Submit,
+    ) -> Result<(String, String), ManagedError> {
         let mut record = self.get(id).await?;
         if matches!(
             record.state,
@@ -618,26 +623,21 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
-        self.ensure_pane_alive(id, &record)?;
-        let pane_id = record.pane_id.clone();
-        let result = match (submit, pane_id.as_deref()) {
-            (Submit::Enter, Some(p)) => self.tmux.send_line_to_pane(&record.tmux_name, p, text),
-            (Submit::Enter, None) => self.tmux.send_line(&record.tmux_name, text),
-            (Submit::NoSubmit, Some(p)) => {
-                self.tmux
-                    .send_keys_literal_to_pane(&record.tmux_name, p, text)
-            }
-            (Submit::NoSubmit, None) => self.tmux.send_keys_literal(&record.tmux_name, text),
-            (Submit::Interrupt, Some(p)) => self.tmux.send_interrupt_to_pane(&record.tmux_name, p),
-            (Submit::Interrupt, None) => self.tmux.send_interrupt(&record.tmux_name),
+        let pane = self.owned_pane(id, &record)?;
+        let name = record.tmux_name.as_str();
+        let result = match submit {
+            Submit::Enter => self.tmux.send_line_to_pane(name, &pane, text),
+            Submit::NoSubmit => self.tmux.send_keys_literal_to_pane(name, &pane, text),
+            Submit::Interrupt => self.tmux.send_interrupt_to_pane(name, &pane),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         // Interrupt is a STOP signal, not activity — do not bump last_activity_at.
         if matches!(submit, Submit::Enter | Submit::NoSubmit) {
             record.last_activity_at = Some(Utc::now());
         }
+        let name = record.tmux_name.clone();
         self.store.write().await.upsert(record).await?;
-        Ok(())
+        Ok((name, pane))
     }
 
     /// Observe a session's raw surface — LLM-FREE (#1461).
@@ -646,30 +646,28 @@ impl SessionManager {
     /// actually showing (pane + liveness + any pending escalation) WITHOUT an LLM
     /// key. This bundles the three reads the managed activity route already does
     /// into one manager helper so `SessionControl::observe` is a thin mapping.
-    /// [`Self::ensure_pane_alive`]-gates the recorded `pane_id` first (issue
-    /// #2468, same sibling-window hijack risk #2467 fixed for resume/restart):
-    /// capturing "the session" without this check could silently read a
-    /// sibling window's pane instead of the one this record actually owns.
-    /// What: captures the last `lines` pane rows via the pane-scoped
-    /// `capture_pane` when `record.pane_id` is known (session-scoped `capture`
-    /// otherwise — legacy record, matching #2467's fallback), probes
-    /// `runtime_active` via `session_exists`, and reads the record's
-    /// `pending_decision` / `proposed_default`. Never calls the LLM.
+    /// It proves the record's pane with [`Self::owned_pane`] first (issue
+    /// #2468's sibling-window hijack; #9101: a pane id from before a tmux
+    /// server restart names another session's pane).
+    /// What: captures the last `lines` rows of the proven pane via
+    /// `capture_pane`, probes `runtime_active` via `session_exists`, and reads
+    /// the record's `pending_decision` / `proposed_default`. Never calls the
+    /// LLM.
     /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`,
     /// `observe_captures_pane_scoped_when_pane_id_known`,
-    /// `observe_refuses_when_stored_pane_gone` in `pane_scoped_tests.rs`.
+    /// `observe_refuses_when_stored_pane_gone` in `pane_scoped_tests.rs`;
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
     pub async fn observe(
         &self,
         id: &ManagedSessionId,
         lines: usize,
     ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
         let record = self.get(id).await?;
-        self.ensure_pane_alive(id, &record)?;
-        let raw_pane = match record.pane_id.as_deref() {
-            Some(p) => self.tmux.capture_pane(&record.tmux_name, p, lines),
-            None => self.tmux.capture(&record.tmux_name, lines),
-        }
-        .unwrap_or_default();
+        let pane = self.owned_pane(id, &record)?;
+        let raw_pane = self
+            .tmux
+            .capture_pane(&record.tmux_name, &pane, lines)
+            .unwrap_or_default();
         let runtime_active = self.tmux.session_exists(&record.tmux_name);
         Ok(crate::core::sm::control::RawObservation {
             raw_pane,
@@ -677,51 +675,6 @@ impl SessionManager {
             pending_decision: record.pending_decision,
             proposed_default: record.proposed_default,
         })
-    }
-
-    /// Confirm the record's recorded `pane_id` (when known) is still alive,
-    /// refusing loudly rather than letting a caller fall through to a
-    /// session-scoped tmux target that could resolve to an unrelated pane
-    /// (sibling-window hijack, follow-up to #2456/#2467, issue #2468).
-    ///
-    /// Why: `resume`, `inject`/`send_input`, and `observe` all address a
-    /// session's tmux pane, and all three share the SAME hole — a tmux
-    /// session stays "alive" as long as ANY pane/window in it is open, so
-    /// [`ManagedTmuxDriver::session_exists`] cannot tell "the recorded pane
-    /// survived" apart from "an unrelated sibling window is keeping the
-    /// session alive". #2467 closed this for the resume/restart respawn
-    /// path only; #2468 centralises the same check here so `inject` and
-    /// `observe` share it instead of duplicating (and risking drifting)
-    /// the logic.
-    /// What: a no-op (`Ok(())`) when `record.pane_id` is `None` — a legacy
-    /// record (pre-#2453) has no stronger signal than `session_exists`, so
-    /// it keeps the prior session-scoped behavior exactly as #2467
-    /// established — or when [`ManagedTmuxDriver::pane_exists`] confirms the
-    /// pane is present. Returns `Err(ManagedError::PaneGone(id, pane_id))`
-    /// when the pane is confirmed gone.
-    /// Test: `resume_refuses_when_stored_pane_gone_but_session_alive`
-    /// (`resume_reattach_tests.rs`); `inject_refuses_when_stored_pane_gone`,
-    /// `observe_refuses_when_stored_pane_gone`,
-    /// `inject_legacy_record_without_pane_id_falls_back_to_session_target`
-    /// (`pane_scoped_tests.rs`).
-    fn ensure_pane_alive(
-        &self,
-        id: &ManagedSessionId,
-        record: &SessionRecord,
-    ) -> Result<(), ManagedError> {
-        if let Some(pane_id) = record.pane_id.as_deref()
-            && !self.tmux.pane_exists(&record.tmux_name, pane_id)
-        {
-            warn!(
-                id = %id,
-                name = %record.tmux_name,
-                pane_id = %pane_id,
-                "recorded pane is gone but the tmux session is still alive (sibling window) \
-                 — refusing to operate on an unrelated active pane"
-            );
-            return Err(ManagedError::PaneGone(id.to_string(), pane_id.to_string()));
-        }
-        Ok(())
     }
 
     /// Mark a runtime-exited session `Stopped` WITHOUT killing its tmux pane (#2023 A).
@@ -768,8 +721,12 @@ impl SessionManager {
     /// does (best-effort — the pane usually still exists, it is just an idle
     /// shell), sets `state = Stopped`, and persists. Deliberately never calls
     /// [`Self::graceful_terminate_runtime`] or `kill_session` — the tmux
-    /// session and its pane are left exactly as they are.
-    /// Test: `stop_runtime_exited_transitions_active_to_stopped` (in
+    /// session and its pane are left exactly as they are. #9101: the snapshot
+    /// and the `TM_MANAGED_SESSION_ID` publish run only on a pane
+    /// [`Self::owned_pane`] proves.
+    /// Test: `a_stale_record_after_a_server_restart_never_publishes_its_id_on_reap`,
+    /// `an_unreadable_pane_identity_reaps_the_record_without_reading_the_pane`,
+    /// `stop_runtime_exited_transitions_active_to_stopped` (in
     /// `daemon::runtime_reap`) asserts the record becomes `Stopped`;
     /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
     /// `kill_session` is never invoked on the fake driver;
@@ -833,7 +790,13 @@ impl SessionManager {
                 ),
             ));
         }
-        super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        // #9101: the scrollback read and the id publish below reach the pane
+        // only when it is proven this record's; the Stopped transition is
+        // record-only and runs either way.
+        let owned = self.owned_pane(id, &record).ok();
+        if let Some(pane) = owned.as_deref() {
+            super::snapshot::capture_into_pane(&mut record, &*self.tmux, Some(pane)).await;
+        }
         // #2453 review finding 1 (round 3 — round 2's re-derive-on-every-call
         // approach was proven UNSOUND): `get_pane_id` shells out to `tmux
         // display-message -t <SESSION_NAME> -p '#{pane_id}'`, which is
@@ -858,11 +821,11 @@ impl SessionManager {
         // matter — no earlier capture exists to protect), but a
         // known-good id, once captured at spawn/adopt time, is NEVER
         // re-derived here again.
-        // #9004: a known pane id with no server stays serverless; only a
-        // fresh capture may pair a pane with the server it was read on.
+        // #9101: backfill the pane id only. A by-name read reaches whatever
+        // session holds the name now, so it never pairs the pane with a
+        // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
-            (record.pane_id, record.tmux_server) =
-                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
+            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
         }
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
@@ -888,10 +851,14 @@ impl SessionManager {
         // pre-#2157 build, or whose set-environment call failed at spawn), so a
         // LATER bare `tm` run inside this pane can still resolve the id via
         // `tmux show-environment` even though the process-env export never
-        // landed. Best-effort — never fails the reap.
-        if let Err(e) =
-            self.tmux
-                .set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
+        // landed. Best-effort — never fails the reap. #9101: never into a
+        // session whose pane is not proven this record's.
+        if owned.is_some()
+            && let Err(e) = self.tmux.set_environment(
+                &record.tmux_name,
+                "TM_MANAGED_SESSION_ID",
+                &id.to_string(),
+            )
         {
             warn!(
                 id = %id,
@@ -928,22 +895,24 @@ impl SessionManager {
     /// types the resume command straight into the record's OWN recorded
     /// `pane_id` (sibling-window hijack fix, follow-up to #2456) rather than a
     /// session-scoped target that tmux could resolve to any other pane. Before
-    /// trusting that reuse, when `record.pane_id` is known this branch
-    /// additionally confirms via [`ManagedTmuxDriver::pane_exists`] that the
-    /// SPECIFIC recorded pane — not just some pane in the session — is still
-    /// there: `session_exists` alone cannot tell "the recorded pane survived"
+    /// trusting that reuse, [`Self::owned_pane`] confirms that the SPECIFIC
+    /// recorded pane — not just some pane in the session — is still there, on
+    /// the tmux server the record captured it on (#9101: a record with no
+    /// pane id or server identity, or from before a server restart, refuses
+    /// and adopts nothing): `session_exists` alone cannot tell "the recorded pane survived"
     /// apart from "a sibling window opened after it was closed is keeping the
     /// session alive". A confirmed-gone recorded pane fails loudly with
     /// [`ManagedError::PaneGone`] rather than either (a) silently respawning
     /// into the unrelated active sibling, or (b) killing the whole session
     /// (which would destroy the sibling too) to recreate it. If the whole
-    /// session is gone: a best-effort `kill_session` guard followed by
+    /// session is gone: the kill-floor gate (no kill by name, #9101), then
     /// [`resume_workdir::create_and_verify_pane`], which creates the fresh
     /// session AND verifies (#2250) the pane actually landed at the resolved
     /// workdir — tmux `-c <dir>` can exit 0 while silently falling back to
     /// `$HOME`, which this catches and fails loudly on rather than typing the
     /// resume command into a mis-rooted pane; the freshly created pane's id is
-    /// then captured to refresh the stale `pane_id`. Either way (reuse or
+    /// then captured with its tmux server to refresh the stale `pane_id`, so
+    /// the resumed record is ownable again (#9004). Either way (reuse or
     /// recreate) the record is marked `Active` and persisted.
     /// Test: `manager_resume_respawns_in_existing_workspace` (`tests.rs`) —
     /// asserts a new `create_session` call is issued when no pane survives (the
@@ -957,6 +926,8 @@ impl SessionManager {
     /// `resume_refuses_when_stored_pane_gone_but_session_alive` — asserts a
     /// confirmed-gone recorded pane refuses with `PaneGone` and never falls
     /// through to a session-scoped reuse or a session-wide kill/recreate;
+    /// `a_stale_record_after_a_server_restart_is_never_adopted_by_resume`,
+    /// `a_resume_that_recreates_the_pane_makes_the_record_ownable` (#9101);
     /// `liveness_tests.rs`'s `resume_refuses_when_the_tmux_probe_fails` —
     /// asserts an unobservable probe refuses instead of killing the pane
     /// (#5859); `generation_increments_across_resume` in
@@ -1031,9 +1002,11 @@ impl SessionManager {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
             // nothing about whether it is the SPECIFIC pane this record is
-            // bound to. `ensure_pane_alive` confirms that before trusting the
-            // reuse (see its doc for the legacy-record fallback).
-            self.ensure_pane_alive(id, &record)?;
+            // bound to. #9101: `owned_pane` also proves the pane is on the
+            // server the record captured it on, so a stale record never adopts
+            // a restarted server's pane; an `Owned` record's server already
+            // matches, so there is nothing to re-capture here.
+            self.owned_pane(id, &record)?;
             info!(
                 id = %id,
                 name = %record.tmux_name,
@@ -1041,13 +1014,12 @@ impl SessionManager {
                 "managed session resumed: re-attached to live pane (#2148, no recreate)"
             );
         } else {
-            // Best-effort guard: clear any stale entry the driver may still report
-            // before creating the replacement session. #8942: a name the floor
-            // cannot clear refuses the whole resume, never only the kill.
+            // #8942: a name the floor cannot clear refuses the whole resume.
+            // #9101: no kill by name here. The probe just proved no session
+            // carries the name, so a kill could only reach one that took the
+            // name since. The create below is exclusive, so such a session
+            // fails it instead of being attached to.
             self.kill_gate(&record.tmux_name, "SessionManager::resume")?;
-            if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
-                warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
-            }
 
             // Create a fresh tmux session rooted at the EXISTING workspace, then
             // verify tmux didn't silently fall back to $HOME (#2250). No
@@ -1191,30 +1163,27 @@ impl SessionManager {
     /// but steals the active-pane slot). That silently fed wrong-pane content to
     /// every one of those consumers and could misclassify a busy session as idle
     /// (issue #2515). This shares the exact pane-scoping [`Self::observe`] uses.
-    /// What: [`Self::ensure_pane_alive`]-gates the recorded `pane_id` first
-    /// (refusing with `ManagedError::PaneGone` rather than reading a sibling
-    /// pane when the recorded pane is confirmed gone but the session lives on),
-    /// then captures the last `lines` rows via the pane-scoped `capture_pane`
-    /// when `record.pane_id` is known, or the session-scoped `capture` otherwise
-    /// (a legacy pre-#2453 record with no captured pane_id — same fallback
-    /// #2467/#2468 established). Every consumer already degrades a capture error
-    /// to empty/no-verdict, so a `PaneGone` refusal fails closed, never louder.
+    /// What: proves the record's pane with [`Self::owned_pane`] first
+    /// (`PaneGone` for a pane confirmed gone while the session lives on;
+    /// #9101: `InvalidState` for a record with no pane id, or whose pane is
+    /// not on the server it captured it on), then captures the last `lines`
+    /// rows of that pane via `capture_pane`. Every consumer already degrades a
+    /// capture error to empty/no-verdict, so a refusal fails closed.
     /// Test: `capture_pane_targets_recorded_pane_when_pane_id_known`,
     /// `capture_pane_refuses_when_stored_pane_gone`,
-    /// `capture_pane_legacy_record_falls_back_to_session_capture` in
-    /// `pane_scoped_tests.rs`.
+    /// `capture_pane_refuses_a_legacy_record_without_pane_id` in
+    /// `pane_scoped_tests.rs`;
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
         lines: usize,
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
-        self.ensure_pane_alive(id, &record)?;
-        match record.pane_id.as_deref() {
-            Some(pane_id) => self.tmux.capture_pane(&record.tmux_name, pane_id, lines),
-            None => self.tmux.capture(&record.tmux_name, lines),
-        }
-        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+        let pane = self.owned_pane(id, &record)?;
+        self.tmux
+            .capture_pane(&record.tmux_name, &pane, lines)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
     /// Capture the recorded harness pane for the LIVE managed session whose tmux
@@ -1232,16 +1201,17 @@ impl SessionManager {
     /// match can hit a stale tombstone — same guard as
     /// `daemon::api::claude_config_routes::select_restart_pane_id`, #2514),
     /// preferring the most recently created on the narrow provisioning-race
-    /// overlap. With a tracked `pane_id` it captures pane-scoped, returning `None`
-    /// (no verdict — fail closed) when [`ManagedTmuxDriver::pane_exists`] reports
-    /// the recorded pane gone rather than reading a sibling. A legacy record
-    /// (no `pane_id`) or an unmanaged/legacy tmux name with no live record falls
-    /// back to the session-scoped `capture`, exactly as before #2515. `None` on
-    /// any capture error or empty output so the caller skips the poll.
+    /// overlap. A record's pane is captured only when [`Self::owned_pane`]
+    /// proves it (#9101); any refusal is `None` (no verdict — fail closed),
+    /// including a record with no `pane_id`. A tmux name with no live record
+    /// has no identity to check and falls back to the session-scoped
+    /// `capture`, exactly as before #2515. `None` on any capture error or
+    /// empty output so the caller skips the poll.
     /// Test: `capture_pane_by_tmux_name_targets_recorded_pane`,
     /// `capture_pane_by_tmux_name_refuses_when_pane_gone`,
-    /// `capture_pane_by_tmux_name_legacy_falls_back_to_session` in
-    /// `pane_scoped_tests.rs`.
+    /// `capture_pane_by_tmux_name_without_a_record_falls_back_to_session` in
+    /// `pane_scoped_tests.rs`;
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
     pub async fn capture_pane_by_tmux_name(&self, tmux_name: &str, lines: usize) -> Option<String> {
         let record = self
             .list()
@@ -1250,18 +1220,10 @@ impl SessionManager {
             .filter(|r| r.tmux_name == tmux_name)
             .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
             .max_by_key(|r| r.created_at);
-        let text = match record.as_ref().and_then(|r| r.pane_id.as_deref()) {
-            Some(pane_id) => {
-                if !self.tmux.pane_exists(tmux_name, pane_id) {
-                    warn!(
-                        name = %tmux_name,
-                        pane_id = %pane_id,
-                        "idle-reaper capture: recorded pane is gone but the tmux session is \
-                         still alive (sibling window) — refusing to read an unrelated pane"
-                    );
-                    return None;
-                }
-                self.tmux.capture_pane(tmux_name, pane_id, lines).ok()?
+        let text = match record {
+            Some(record) => {
+                let pane = self.owned_pane(&record.id, &record).ok()?;
+                self.tmux.capture_pane(tmux_name, &pane, lines).ok()?
             }
             None => self.tmux.capture(tmux_name, lines).ok()?,
         };

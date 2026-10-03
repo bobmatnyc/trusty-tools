@@ -92,7 +92,28 @@ impl ManagedTmuxDriver for FakeTmux {
             .cloned()
             .collect())
     }
+
+    /// #9101: a pane id naming its session, so a seeded or resumed record
+    /// can prove it owns its pane (see [`fake_pane`]).
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(fake_pane(name))
+    }
+
+    /// #9101: the pane [`fake_pane`] minted, on server [`FAKE_SERVER`].
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        Ok(crate::test_support::self_describing_identity(pane_id))
+    }
+
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
+    }
 }
+
+// #9101: the shared self-describing fake pane and its one server.
+use crate::test_support::{FAKE_PANE_SERVER as FAKE_SERVER, self_describing_pane as fake_pane};
 
 /// A stub LLM classifier that never touches the network.
 ///
@@ -189,9 +210,13 @@ async fn seed_sessions(
     let mut store = mgr.store.write().await;
     for i in 0..n {
         let id = ManagedSessionId::new();
+        let tmux_name = format!("tmpm-fleet-{i}");
         let rec = SessionRecord {
             id,
-            tmux_name: format!("tmpm-fleet-{i}"),
+            // #9101: bound to the fake's pane for this name, on its server.
+            pane_id: Some(fake_pane(&tmux_name)),
+            tmux_server: Some(FAKE_SERVER.into()),
+            tmux_name,
             cwd: ws.path().to_path_buf(),
             task: format!("fleet task {i}"),
             state: state.clone(),
@@ -211,8 +236,6 @@ async fn seed_sessions(
             scrollback_path: None,
             last_cwd: None,
             deliverable_id: None,
-            pane_id: None,
-            tmux_server: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -1657,6 +1680,18 @@ impl ManagedTmuxDriver for BlockingCaptureTmux {
             .expect("lock")
             .recv_timeout(std::time::Duration::from_secs(20));
         self.inner.capture(name, lines)
+    }
+
+    /// #9101: the classifier reads the record's pane, so that read blocks.
+    fn capture_pane(&self, name: &str, _pane: &str, lines: usize) -> Result<String, ManagedError> {
+        self.capture(name, lines)
+    }
+
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        self.inner.pane_identity(pane_id)
     }
 
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {

@@ -120,17 +120,27 @@ async fn shutdown_skips_a_supervisor_session() {
         SessionKind::Ordinary,
     )
     .await;
+    // #9101: shutdown stops only a session that owns its pane.
+    crate::session_manager::tests::bind_pane(&mgr, &arch).await;
+    crate::session_manager::tests::bind_pane(&mgr, &work).await;
     mgr.shutdown().await;
-    let stopped: Vec<String> = fake
-        .graceful_stop_calls
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(n, _)| n.clone())
-        .collect();
+    // #9101: the kill is by session id, so the signalled pane names the session.
     let name = |id: ManagedSessionId| format!("tmpm-seed-{id}");
-    assert_eq!(stopped, vec![name(work)], "shutdown reached {stopped:?}");
-    assert!(!stopped.contains(&name(arch)));
+    let signalled: Vec<String> = (fake.pane_interrupt_calls.lock().unwrap().iter())
+        .map(|(session, _)| session.clone())
+        .collect();
+    assert_eq!(
+        signalled,
+        vec![name(work)],
+        "shutdown reached {signalled:?}"
+    );
+    assert!(!signalled.contains(&name(arch)));
+    let stopped: Vec<String> = fake.kill_calls.lock().unwrap().clone();
+    assert_eq!(
+        stopped,
+        vec![crate::session_manager::tests::FAKE_SESSION_ID.to_string()],
+        "one kill, by id: {stopped:?}"
+    );
 }
 
 /// `--state all --include-active` never selects the Architect: a dry run does

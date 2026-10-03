@@ -48,7 +48,8 @@ impl RuntimeRelauncher for DaemonRelauncher {
     /// What: resolves the workspace the same way the record does
     /// (`workspace_path` → `cwd`), resolves the pinned `gh` identity, builds the
     /// adapter for the record's OWN runtime kind, calls `spawn_resume` into the
-    /// record's OWN pane, and then runs the post-send verification. Every
+    /// record's OWN pane once [`spawn_resume_into_owned_pane`] proves it
+    /// (#9101), and then runs the post-send verification. Every
     /// failure is an `Err(message)` — never a warning beside a record left
     /// `Active`, which is the defect this exists to close.
     /// Test: `a_dropped_daemon_state_fails_the_relaunch` in
@@ -74,22 +75,14 @@ impl RuntimeRelauncher for DaemonRelauncher {
             state.framework_root(),
         );
         // #8983: the resumed claude may rebind its session id; a failed
-        // launch revokes the grant.
+        // launch, or a refused pane (#9101), revokes the grant.
         let granted = state.grant_resume_of(record);
-        adapter
-            .spawn_resume(
-                &record.tmux_name,
-                record.pane_id.as_deref(),
-                &workspace,
-                &record.task,
-                record.claude_session_id.as_deref(),
-                &record.id.to_string(),
-                &gh_env,
-            )
-            .map_err(|e| {
+        spawn_resume_into_owned_pane(&mgr, adapter.as_ref(), record, &workspace, &gh_env).map_err(
+            |e| {
                 state.revoke_resume_grant(granted);
                 format!("runtime adapter spawn_resume failed: {e}")
-            })?;
+            },
+        )?;
         // The SAME verification the interactive resume runs: a record becomes
         // `Active` only behind a runtime this actually saw.
         match super::launch_verify::record_resume_outcome(&mgr, tmux.as_ref(), record, &workspace)
@@ -99,6 +92,41 @@ impl RuntimeRelauncher for DaemonRelauncher {
             None => Ok(()),
         }
     }
+}
+
+/// `spawn_resume` into `record`'s pane, once the pane is proven the record's
+/// on the live tmux server (#9101).
+///
+/// Why: both resume paths, the operator's `resume_managed` and the automatic
+/// [`DaemonRelauncher`], type the launch command into `record.pane_id`. Each
+/// runs `SessionManager::resume_inner` first, which proves or recreates the
+/// pane, but work runs between the two (a git fetch, a prompt refresh), and a
+/// recreated pane whose capture failed carries no pane id at all.
+/// What: `SessionManager::owned_pane`, then `spawn_resume` with the proven
+/// pane id. The refusal is the `Err`, and no keys are sent.
+/// Test: `a_stale_record_after_a_server_restart_never_gets_a_resume_spawn`,
+/// `an_unreadable_pane_identity_refuses_the_resume_spawn`.
+pub(crate) fn spawn_resume_into_owned_pane(
+    mgr: &crate::session_manager::SessionManager,
+    adapter: &dyn crate::runtime::RuntimeAdapter,
+    record: &SessionRecord,
+    workspace: &std::path::Path,
+    gh_env: &[(String, String)],
+) -> Result<(), String> {
+    let pane_id = mgr
+        .owned_pane(&record.id, record)
+        .map_err(|e| e.to_string())?;
+    adapter
+        .spawn_resume(
+            &record.tmux_name,
+            Some(&pane_id),
+            workspace,
+            &record.task,
+            record.claude_session_id.as_deref(),
+            &record.id.to_string(),
+            gh_env,
+        )
+        .map_err(|e| e.to_string())
 }
 
 /// Install [`DaemonRelauncher`] on this daemon's session manager.

@@ -1215,18 +1215,16 @@ pub async fn resume_managed(
     // to implement this; TcodeAdapter's default delegates to plain spawn.
     // Sibling-window hijack fix (follow-up to #2456): pass the record's OWN
     // `record.pane_id` through so the adapter targets that SPECIFIC pane
-    // (`SessionManager::resume`, just above, already confirmed it — or a
-    // freshly recreated one — still exists) instead of a session-scoped
-    // target that tmux could resolve to an unrelated active sibling pane.
+    // instead of a session-scoped target that tmux could resolve to an
+    // unrelated active sibling pane. #9101: the helper proves the pane is
+    // the record's on the live server again, since the self-heal above ran.
     let gh_env = resolve_gh_env(state, &workspace).await;
     let granted = state.grant_resume_of(&record); // #8983: before the launch line
-    if let Err(e) = adapter.spawn_resume(
-        &record.tmux_name,
-        record.pane_id.as_deref(),
+    if let Err(e) = super::auto_relaunch::spawn_resume_into_owned_pane(
+        &mgr,
+        adapter.as_ref(),
+        &record,
         &workspace,
-        &record.task,
-        record.claude_session_id.as_deref(),
-        &record.id.to_string(),
         &gh_env,
     ) {
         warn!(

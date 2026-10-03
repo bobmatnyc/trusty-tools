@@ -821,6 +821,7 @@ pub(crate) async fn try_inplace_relaunch(
             // `record.pane_id` was just refreshed by the SessionEnd-hook-
             // triggered `mark_runtime_exited_stopped` moments before this
             // fetch resolved "stopped", so this adds no friction there.
+            // #9101: the server half of the proof is the daemon's reactivate.
             let current_pane_id = super::tmux_attach::current_tmux_pane_id();
             if !super::guided::pane_identity_confirmed(
                 current_pane_id.as_deref(),

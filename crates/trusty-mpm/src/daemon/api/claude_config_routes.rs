@@ -555,16 +555,49 @@ pub struct RestartRequest {
 /// `None` when no live record matches (unmanaged/legacy session name) or the
 /// surviving record never captured a `pane_id`; the session-scoped restart
 /// fallback then applies exactly as before #2468.
+/// #9101: returns the record, not its pane id, so the caller can prove the
+/// pane is the record's on the live server before typing into it.
 /// Test: `select_restart_pane_id_skips_decommissioned_record`,
 /// `select_restart_pane_id_prefers_most_recent_when_multiple_live_match`,
 /// `select_restart_pane_id_none_when_no_match`.
-fn select_restart_pane_id(records: &[SessionRecord], tmux_session: &str) -> Option<String> {
+fn select_restart_record<'a>(
+    records: &'a [SessionRecord],
+    tmux_session: &str,
+) -> Option<&'a SessionRecord> {
     records
         .iter()
         .filter(|r| r.tmux_name == tmux_session)
         .filter(|r| !matches!(r.state, ManagedSessionState::Decommissioned))
         .max_by_key(|r| r.created_at)
-        .and_then(|r| r.pane_id.clone())
+}
+
+/// The pane the restart types into for `tmux_session` (#9101).
+///
+/// What: `Ok(None)` when no live managed record carries the name (an
+/// unmanaged session, restarted session-scoped as before #2468). For a
+/// managed record, `SessionManager::owned_pane`'s pane, or its refusal as
+/// [`DaemonError::SessionNotActive`] (409): a record with no pane id, a pane
+/// on another tmux server, or an identity that cannot be read never gets a
+/// restart.
+/// Test: `a_stale_record_after_a_server_restart_never_gets_a_claude_restart`,
+/// `an_unreadable_pane_identity_refuses_the_claude_restart`.
+async fn restart_pane_for(
+    state: &Arc<DaemonState>,
+    tmux_session: &str,
+) -> Result<Option<String>, DaemonError> {
+    let mgr = state.session_manager().await;
+    let records = mgr.list().await;
+    let Some(record) = select_restart_record(&records, tmux_session) else {
+        return Ok(None);
+    };
+    mgr.owned_pane(&record.id, record).map(Some).map_err(|e| {
+        tracing::warn!("restart in {tmux_session} refused: {e}");
+        // #9101: a 409, as the reactivate route answers an unproven pane.
+        DaemonError::SessionNotActive {
+            id: tmux_session.to_owned(),
+            status: format!("restart refused: {e}"),
+        }
+    })
 }
 
 /// `POST /claude-config/restart` — restart Claude Code in a tmux session.
@@ -577,17 +610,19 @@ fn select_restart_pane_id(records: &[SessionRecord], tmux_session: &str) -> Opti
 /// same sibling-window hijack risk #2467 fixed for resume/restart respawn
 /// (issue #2468).
 /// What: looks up `body.tmux_session` against the managed-session store via
-/// [`select_restart_pane_id`], which excludes decommissioned (tombstone)
+/// [`select_restart_record`], which excludes decommissioned (tombstone)
 /// records and prefers the most recently created live match — a recycled
 /// `tmux_name` can otherwise resolve to a stale decommissioned record (#2514
 /// review). `None` (unmanaged/legacy session, or no matching live record)
-/// falls back to the session-scoped restart exactly as before #2468. Then
-/// calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent, or a
-/// confirmed-gone recorded pane, both surface as `500`.
+/// falls back to the session-scoped restart exactly as before #2468. #9101:
+/// a matched record's pane must pass [`restart_pane_for`]'s ownership gate.
+/// Then calls `ClaudeCodeRestarter::restart_in_session`. tmux being absent
+/// or a confirmed-gone recorded pane surface as `500`; an unproven pane is
+/// `409`.
 /// Test: `restart_claude_code_handles_missing_tmux`;
 /// `ClaudeCodeRestarter::restart_target`'s pane/session decision is
 /// unit-tested directly in `daemon::claude_config::restarter`;
-/// [`select_restart_pane_id`]'s own unit tests cover the stale-record fix.
+/// [`select_restart_record`]'s own unit tests cover the stale-record fix.
 #[utoipa::path(
     post,
     path = "/claude-config/restart",
@@ -595,6 +630,7 @@ fn select_restart_pane_id(records: &[SessionRecord], tmux_session: &str) -> Opti
     request_body = RestartRequest,
     responses(
         (status = 200, description = "Restart command sent"),
+        (status = 409, description = "the recorded pane is not proven the record's own"),
         (status = 500, description = "tmux unavailable or restart failed"),
     )
 )]
@@ -615,8 +651,8 @@ pub async fn restart_claude_code(
 ///
 /// [`DaemonError::InvalidRequest`] (HTTP 400) for an empty `tmux_session`
 /// (#8443: it used to render `=:`, which tmux resolves to the current
-/// session). [`DaemonError::Internal`] when tmux is absent or the recorded
-/// pane is confirmed gone (HTTP 500).
+/// session). [`DaemonError::Internal`] when tmux is absent, or the recorded
+/// pane is confirmed gone or not proven the record's (#9101) (HTTP 500).
 ///
 /// Test: `restart_claude_code_handles_missing_tmux`,
 /// `restart_route_rejects_an_empty_tmux_session`.
@@ -626,8 +662,7 @@ pub async fn restart_claude_code_op(
 ) -> Result<RestartResponse, DaemonError> {
     crate::core::tmux::check_session_name(&body.tmux_session)
         .map_err(|e| DaemonError::InvalidRequest(e.to_string()))?;
-    let records = state.session_manager().await.list().await;
-    let pane_id = select_restart_pane_id(&records, &body.tmux_session);
+    let pane_id = restart_pane_for(state, &body.tmux_session).await?;
     crate::daemon::claude_config::ClaudeCodeRestarter::restart_in_session(
         &body.tmux_session,
         pane_id.as_deref(),
@@ -668,7 +703,7 @@ mod restart_pane_selection_tests {
 
     /// Builds a minimal, otherwise-default [`SessionRecord`] for the pure
     /// selection-fn tests below — only `tmux_name`, `state`, `pane_id`, and
-    /// `created_at` matter to [`select_restart_pane_id`].
+    /// `created_at` matter to [`select_restart_record`].
     fn make_record(
         tmux_name: &str,
         state: ManagedSessionState,
@@ -727,7 +762,7 @@ mod restart_pane_selection_tests {
         let records = vec![stale, live];
 
         assert_eq!(
-            select_restart_pane_id(&records, "tmpm-proj-1"),
+            select_restart_record(&records, "tmpm-proj-1").and_then(|r| r.pane_id.clone()),
             Some("%new".to_string())
         );
     }
@@ -750,7 +785,7 @@ mod restart_pane_selection_tests {
         let records = vec![older, newer];
 
         assert_eq!(
-            select_restart_pane_id(&records, "tmpm-proj-1"),
+            select_restart_record(&records, "tmpm-proj-1").and_then(|r| r.pane_id.clone()),
             Some("%newer".to_string())
         );
     }
@@ -765,6 +800,6 @@ mod restart_pane_selection_tests {
             now,
         )];
 
-        assert_eq!(select_restart_pane_id(&records, "tmpm-proj-1"), None);
+        assert!(select_restart_record(&records, "tmpm-proj-1").is_none());
     }
 }

@@ -31,6 +31,8 @@ mod json_file_tests;
 pub mod manager;
 pub mod naming;
 mod numbering;
+// #9101: the ownership gate every pane operation runs first.
+mod pane_gate;
 pub mod pane_identity;
 pub mod prune;
 pub mod reactivate;
@@ -230,6 +232,9 @@ mod delete_tests;
 
 #[cfg(test)]
 mod rename_tests;
+
+#[cfg(test)]
+mod rename_race_tests;
 
 #[cfg(test)]
 mod liveness_tests;

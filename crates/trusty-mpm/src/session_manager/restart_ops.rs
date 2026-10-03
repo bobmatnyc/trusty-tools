@@ -5,18 +5,13 @@
 //! while keeping related lifecycle logic co-located in the `session_manager`
 //! module tree.
 //! What: `impl SessionManager { shutdown }` — gracefully stops every live
-//! (non-terminal) managed session. For each session it resolves the live
-//! `claude` PID (a single quick `find_claude_pid_in_tmux` probe), waits 2 s
-//! asynchronously so the claude process can flush state, then calls
-//! `graceful_stop(name, pid)` ONCE — SIGTERM when the PID is known (#1595 PR B),
-//! else a single Ctrl-C fallback. There is exactly one signal per session: the
-//! earlier double-Ctrl-C (a pre-signal loop *plus* `graceful_stop`'s own
-//! fallback interrupt) is gone. The 2 s wait is done with `tokio::time::sleep` —
-//! never a blocking `std::thread::sleep` — so it does not starve the Tokio
-//! thread pool.
-//! Test: `shutdown_calls_graceful_stop_for_active_sessions` (integration test
-//! in session_manager/tests.rs), `fake_driver_graceful_stop_with_pid`,
-//! `fake_driver_graceful_stop_without_pid`, `default_graceful_stop_sends_sigterm`.
+//! (non-terminal) managed session the manager proves it owns (#9101). Each
+//! owned pane gets ONE signal — SIGTERM when its `claude` PID is known
+//! (#1595 PR B), else a single Ctrl-C to that pane — then one shared 2 s
+//! `tokio::time::sleep` grace window (never a blocking `std::thread::sleep`),
+//! then a kill by `$N` session id after a second ownership check.
+//! Test: `shutdown_stops_an_owned_active_session` (session_manager/tests.rs),
+//! `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`.
 
 use std::time::Duration;
 
@@ -39,33 +34,32 @@ const SIGTERM_GRACE_SECS: u64 = 2;
 const SIGTERM_GRACE_SECS: u64 = 0;
 
 impl SessionManager {
-    /// Gracefully stop all live managed sessions on daemon shutdown.
+    /// Gracefully stop every live managed session this manager owns, on
+    /// daemon shutdown.
     ///
     /// Why: the graceful-shutdown path in `daemon/mod.rs` needs to give every
     /// running session a chance to persist its state before the process exits.
-    /// `kill_session` is abrupt; `shutdown` separates signal from kill: it
-    /// resolves each session's live `claude` PID, awaits a [`SIGTERM_GRACE_SECS`]
-    /// async grace window so the processes can flush state, then calls
-    /// `graceful_stop(name, pid)` ONCE per session. `graceful_stop` sends SIGTERM
-    /// when the PID is known (#1595 PR B) and falls back to a single Ctrl-C only
-    /// when it is not — so each session receives exactly ONE termination signal.
-    /// The previous implementation pre-signalled every session with Ctrl-C *and*
-    /// then let `graceful_stop(None)` send another, double-interrupting the pane;
-    /// that pre-signal loop is removed. Using `tokio::time::sleep` (never
-    /// `std::thread::sleep`) keeps the Tokio thread pool free; the one-sleep-for-
-    /// all approach bounds total shutdown time at O(1).
-    /// What: collects all Active/Provisioning records; resolves each session's
-    /// PID via a single [`crate::core::process::find_claude_pid_in_tmux`] probe
-    /// (one attempt — at shutdown we do not retry); awaits the grace window once;
-    /// calls `graceful_stop(name, pid)` per session, failing open. Logs a summary.
-    /// #8942: live protected-kind records, and names the kill floor refuses,
-    /// are left out.
-    /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs;
-    /// `shutdown_skips_a_supervisor_session`.
+    /// #9101: it used to signal and kill each record's session by NAME, so a
+    /// stale record after a tmux server restart took down whichever session
+    /// now carried the name. It now acts only on a session proven to hold the
+    /// record's own pane on the record's own server, the proof
+    /// [`Self::graceful_terminate_runtime`] uses.
+    /// What: collects all Active/Provisioning records, minus the #8942
+    /// protected kinds and names the kill floor refuses. Each is classified by
+    /// [`runtime_identity::runtime_ownership`]; anything but `Owned` is
+    /// skipped and logged at `warn`, with no signal and no kill. Each owned
+    /// pane gets `signal_terminate_pane` (SIGTERM to its `claude` PID, else
+    /// one Ctrl-C to that pane); then one [`SIGTERM_GRACE_SECS`] async grace
+    /// window for all; then a second ownership check and `kill_session_id` on
+    /// the `$N` id it read. A session gone by then counts as stopped. Fails
+    /// open per session; logs a summary.
+    /// Test: `shutdown_stops_an_owned_active_session` in tests.rs;
+    /// `shutdown_skips_a_supervisor_session`;
+    /// `a_stale_record_after_a_server_restart_is_never_killed_by_shutdown`,
+    /// `shutdown_skips_a_record_whose_pane_identity_is_unreadable`.
     pub async fn shutdown(&self) {
         let records = self.list().await;
         // Only stop sessions that have a live runtime: Active and Provisioning.
-        // Stopped, Errored, and Decommissioned sessions have no running process.
         // #8942: the Architect's sessions are left out, and so is any name the
         // floor cannot clear.
         let live: Vec<_> = records
@@ -80,44 +74,48 @@ impl SessionManager {
                         .is_ok()
             })
             .collect();
-
-        if live.is_empty() {
-            info!("shutdown: no live managed sessions to stop");
+        // #9101: signal only a pane proven to be the record's own;
+        // `owned_pane` logs every other verdict.
+        let mut owned: Vec<&SessionRecord> = Vec::new();
+        for record in &live {
+            let (ownership, liveness_known) = self.classify_runtime(record);
+            if let Ok((pane_id, _)) =
+                owned_pane(record, "shutdown", ownership, liveness_known, false)
+            {
+                let name = record.tmux_name.as_str();
+                let pid = crate::core::process::find_claude_pid_in_pane(name, &pane_id);
+                self.tmux.signal_terminate_pane(name, &pane_id, pid);
+                owned.push(record);
+            }
+        }
+        if owned.is_empty() {
+            info!("shutdown: no owned live managed sessions to stop");
             return;
         }
-
-        // Resolve each session's live `claude` PID up front (a single quick probe
-        // per session — no retry budget at shutdown). A known PID lets
-        // `graceful_stop` send SIGTERM directly instead of a tmux Ctrl-C.
-        let pids: Vec<Option<u32>> = live
-            .iter()
-            .map(|r| {
-                crate::core::process::find_claude_pid_in_tmux(
-                    &r.tmux_name,
-                    1,
-                    Duration::from_millis(0),
-                )
-            })
-            .collect();
 
         // Single async grace window for ALL sessions — bounds shutdown at O(1)
         // and lets the claude processes flush state before the kill.
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
 
-        // Exactly one signal + kill per session via `graceful_stop`: SIGTERM when
-        // the PID is known, else a single Ctrl-C fallback (no double interrupt).
         let mut stopped = 0usize;
-        for (record, pid) in live.iter().zip(pids) {
-            match self.tmux.graceful_stop(&record.tmux_name, pid) {
-                Ok(()) => {
+        for record in owned {
+            // #9101: the grace window is long enough for the name to change
+            // hands; kill the `$N` session the re-check proves, never the name.
+            let (ownership, liveness_known) = self.classify_runtime(record);
+            let session_id = match owned_pane(record, "shutdown", ownership, liveness_known, true) {
+                Ok((_, session_id)) => session_id,
+                Err(RuntimeTeardown::Absent) => {
                     stopped += 1;
+                    continue;
                 }
-                Err(e) => {
-                    warn!(
-                        name = %record.tmux_name,
-                        "shutdown: graceful_stop failed (may already be gone): {e}"
-                    );
-                }
+                Err(_) => continue,
+            };
+            match self.tmux.kill_session_id(&record.tmux_name, &session_id) {
+                Ok(()) => stopped += 1,
+                Err(e) => warn!(
+                    name = %record.tmux_name, session_id = %session_id,
+                    "shutdown: kill by session id failed (may already be gone): {e}"
+                ),
             }
         }
         info!("shutdown: gracefully stopped {stopped} live managed session(s)");
