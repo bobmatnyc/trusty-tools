@@ -734,3 +734,52 @@ fn the_env_mutator_scan_fires_on_every_call_form() {
          on a comment or a longer identifier; sample:\n{sample}"
     );
 }
+
+/// The one-test-at-a-time target the #6127 scan reads.
+const SERIAL_TARGET: &str = "tests/env_serial.rs";
+
+/// No `env_serial` module leaves a process-wide scratch `$HOME` behind (#6127).
+///
+/// Why: `common::scratch_home` repoints `$HOME` once per process and never
+/// restores it. `env_serial` also runs the live-tmux pane test, whose #5784
+/// host-state gate refuses tmux while `$HOME` is not this user's real home. So
+/// once any `env_serial` test called it, that test failed with "tmux access
+/// refused" whenever it ran later in the same process.
+/// What: every module `tests/env_serial.rs` mounts, other than `common`, is
+/// read comment-free and must not name `common::scratch_home`. A scoped guard
+/// that restores `$HOME` is the replacement (`mcp_spawn_gate::ScratchHome`).
+/// Test: this function IS the test.
+#[test]
+fn no_env_serial_module_keeps_a_process_wide_scratch_home() {
+    let root = tests_root();
+    let serial_root = Path::new(env!("CARGO_MANIFEST_DIR")).join(SERIAL_TARGET);
+    let mounted = mounted_modules(&std::fs::read_to_string(&serial_root).expect("read root"));
+    let mut scanned = 0;
+    let mut leakers = Vec::new();
+    for path in test_sources() {
+        let rel = path.strip_prefix(&root).expect("under tests/");
+        let module = rel.components().next().expect("first component");
+        let module = Path::new(module.as_os_str()).with_extension("");
+        let module = module.to_string_lossy();
+        if module == "common" || !mounted.iter().any(|m| *m == module) {
+            continue;
+        }
+        scanned += 1;
+        let code = code_only(&std::fs::read_to_string(&path).expect("read source"));
+        if code.contains("common::scratch_home") {
+            leakers.push(rel.display().to_string());
+        }
+    }
+    assert!(
+        scanned + 1 >= mounted.len(),
+        "the scan read {scanned} files for {} `env_serial` modules",
+        mounted.len()
+    );
+    assert!(
+        leakers.is_empty(),
+        "these `env_serial` modules repoint `$HOME` for the whole process, which makes \
+         the live-tmux test's #5784 gate refuse tmux (#6127). Use a guard that restores \
+         `$HOME` instead:\n  {}",
+        leakers.join("\n  ")
+    );
+}
