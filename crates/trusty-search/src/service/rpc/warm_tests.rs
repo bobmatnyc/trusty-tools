@@ -98,13 +98,18 @@ async fn warm_over_the_socket_matches_the_http_body() {
     .result
     .expect("a null-params start is the default start");
     assert_eq!(started["joined"], serde_json::json!(false), "{started}");
-    for _ in 0..200 {
-        if crate::service::server::warm_status_report(&state)["run"]["running"]
-            == serde_json::json!(false)
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
+    // #9027: a yield-capped wait fell through silently while the run was still
+    // going on another worker, so the HTTP and socket reads saw different
+    // states. Wait on wall-clock time and fail loudly instead.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while crate::service::server::warm_status_report(&state)["run"]["running"]
+        != serde_json::json!(false)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the warm run did not finish within 10 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let (_, over_http) = http(&http_router, "GET", "/warm/status", "").await;
     let over_socket = rpc(&rpc_router, warm::METHOD_WARM_STATUS, serde_json::json!({}))
