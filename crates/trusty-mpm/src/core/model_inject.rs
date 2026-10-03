@@ -51,18 +51,40 @@ pub struct PromptFileError {
 ///
 /// Why (#8286): the PM launch paths refuse on a write failure, and their tests
 /// need a real failing write without touching the process-global `TMPDIR`.
-/// What: writes `prompt` to `<dir>/trusty-mpm-system-prompt-<uuid>.txt`;
+/// What: writes `prompt` to a new `<dir>/trusty-mpm-system-prompt-<uuid>.txt`
+/// through [`write_new_private`] (mode 0600, never an existing file);
 /// `Err` carries that path and the I/O error.
-/// Test: `write_prompt_file_in_names_the_path_and_the_cause`.
+/// Test: `write_prompt_file_in_names_the_path_and_the_cause`,
+/// `write_prompt_file_in_creates_an_owner_only_file`.
 pub fn write_prompt_file_in(dir: &Path, prompt: &str) -> Result<PathBuf, PromptFileError> {
     let path = dir.join(format!(
         "trusty-mpm-system-prompt-{}.txt",
         uuid::Uuid::new_v4()
     ));
-    match std::fs::write(&path, prompt) {
+    match write_new_private(&path, prompt) {
         Ok(()) => Ok(path),
         Err(cause) => Err(PromptFileError { path, cause }),
     }
+}
+
+/// Create `path` owner-only and write `text`, refusing a file already there.
+///
+/// Why (#8286): the prompt file sits in a shared temp dir. `create_new` stops
+/// a planted file or symlink at that name from receiving the prompt, and mode
+/// 0600 keeps other local users from reading it.
+/// What: `O_CREAT|O_EXCL` open, mode 0600 on unix, then one write.
+/// Test: `write_new_private_refuses_an_existing_file`,
+/// `write_prompt_file_in_creates_an_owner_only_file`.
+fn write_new_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(text.as_bytes())
 }
 
 /// [`write_prompt_file_in`] for a PM launch that refuses on failure (#8286).
@@ -1350,6 +1372,28 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains(&*err.path.to_string_lossy()), "{text}");
         assert!(text.contains(&err.cause.to_string()), "{text}");
+    }
+
+    /// #8286: the prompt file in a shared temp dir is readable by its owner only.
+    #[cfg(unix)]
+    #[test]
+    fn write_prompt_file_in_creates_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_prompt_file_in(tmp.path(), "secret prompt").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the prompt file must be owner-only: {mode:o}");
+    }
+
+    /// #8286: a file already at the prompt path is refused, never overwritten.
+    #[test]
+    fn write_new_private_refuses_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("planted.txt");
+        std::fs::write(&planted, "planted").unwrap();
+        let err = write_new_private(&planted, "prompt").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&planted).unwrap(), "planted");
     }
 
     #[test]

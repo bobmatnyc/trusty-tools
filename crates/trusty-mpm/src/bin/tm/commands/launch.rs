@@ -301,7 +301,36 @@ pub(crate) async fn launch(
         eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
     }
 
-    // 9. Register the session with the daemon. The tmux name is derived from
+    // 9. (#4752) The former regeneration of
+    //     `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` is gone. Its
+    //     result was assigned and then immediately discarded (`let _ =
+    //     instructions_path`), so it only ever wrote a file no launch read —
+    //     and that path is now retired: `tm install` deletes a stale copy and
+    //     the compiled prompt is per-project. The prompt this session actually
+    //     receives is built below and written by `prepare_isolated_session`.
+
+    // Resolve the PM model (config > frontmatter > default).
+    // #5207: `load_effective_default` folds the project's committed
+    // `.trusty-mpm.toml` and the previously-orphaned `config.yaml`
+    // `default_model` into the same chain, so both actually reach a launch
+    // instead of being written and ignored. It resolves the framework root
+    // internally: the #4203 guard forbids this file from naming the framework
+    // paths' default constructor at all, and matches on source text, so even a
+    // comment spelling that symbol out would trip it.
+    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
+    // #8453: one profile resolution for the prompt, the stamp and the model; a
+    // supervisor launches on the Opus tier alias.
+    let cli = trusty_mpm::core::session_launch::cli_launch(&managed_path, Some(&origin_url));
+    let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
+
+    // Build the `--append-system-prompt` text from the managed clone (where the
+    // framework was deployed at session prep). Style is not supported in managed
+    // mode so we always pass `None` here.
+    // #8286: a PM launch never proceeds without its prompt; refuse on a failed
+    // write BEFORE `POST /sessions`, so a refusal leaves no session record.
+    let prompt_path = launch_prompt_file(&std::env::temp_dir(), &cli.prompt, &managed_path)?;
+
+    // 10. Register the session with the daemon. The tmux name is derived from
     //    the LIVE project folder so the human-readable name reflects the repo.
     //    `project`/`project_path` are the MANAGED clone path; `source_id` links
     //    this session back to its GitHub identity for future reconnects.
@@ -343,33 +372,6 @@ pub(crate) async fn launch(
         }
     };
 
-    // 10. (#4752) The former regeneration of
-    //     `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` is gone. Its
-    //     result was assigned and then immediately discarded (`let _ =
-    //     instructions_path`), so it only ever wrote a file no launch read —
-    //     and that path is now retired: `tm install` deletes a stale copy and
-    //     the compiled prompt is per-project. The prompt this session actually
-    //     receives is built below and written by `prepare_isolated_session`.
-
-    // Resolve the PM model (config > frontmatter > default).
-    // #5207: `load_effective_default` folds the project's committed
-    // `.trusty-mpm.toml` and the previously-orphaned `config.yaml`
-    // `default_model` into the same chain, so both actually reach a launch
-    // instead of being written and ignored. It resolves the framework root
-    // internally: the #4203 guard forbids this file from naming the framework
-    // paths' default constructor at all, and matches on source text, so even a
-    // comment spelling that symbol out would trip it.
-    let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
-    // #8453: one profile resolution for the prompt, the stamp and the model; a
-    // supervisor launches on the Opus tier alias.
-    let cli = trusty_mpm::core::session_launch::cli_launch(&managed_path, Some(&origin_url));
-    let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
-
-    // Build the `--append-system-prompt` text from the managed clone (where the
-    // framework was deployed at session prep). Style is not supported in managed
-    // mode so we always pass `None` here.
-    // #8286: a PM launch never proceeds without its prompt; refuse on a failed write.
-    let prompt_path = launch_prompt_file(&std::env::temp_dir(), &cli.prompt, &managed_path)?;
     // #2997: `tm launch` also creates a detached tmux session and types the
     // `claude` line into it via send-keys, so the pane's `claude` is forked by
     // the shared tmux server just like the daemon path — wrap it in the
@@ -705,7 +707,8 @@ pub(crate) async fn connect(
 /// What: [`trusty_mpm::core::model_inject::write_prompt_file_in`] under `dir`
 /// (production: the process temp dir); `Err` names the file, the I/O cause
 /// and `project`.
-/// Test: `connect_prompt_file_refuses_when_the_prompt_file_cannot_be_written`.
+/// Test: `connect_prompt_file_refuses_when_the_prompt_file_cannot_be_written`;
+/// `connect_refuses_an_unwritable_prompt_before_registering` pins the call-site order.
 fn connect_prompt_file(
     dir: &std::path::Path,
     prompt: &str,
@@ -721,7 +724,8 @@ fn connect_prompt_file(
 /// What: [`trusty_mpm::core::model_inject::write_pm_prompt_file_in`] under
 /// `dir` (production: the process temp dir); `Err` names the file, the I/O
 /// cause and `project`.
-/// Test: `launch_prompt_file_refuses_when_the_prompt_file_cannot_be_written`.
+/// Test: `launch_prompt_file_refuses_when_the_prompt_file_cannot_be_written`;
+/// `launch_refuses_an_unwritable_prompt_before_registering` pins the call-site order.
 fn launch_prompt_file(
     dir: &std::path::Path,
     prompt: &str,

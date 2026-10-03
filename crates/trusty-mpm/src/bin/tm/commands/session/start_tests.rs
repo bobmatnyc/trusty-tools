@@ -241,7 +241,7 @@ async fn session_start_in_place_proceeds_with_a_warning_on_an_unreadable_config(
         trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
     );
     let spec = tracing::subscriber::with_default(subscriber, || {
-        super::inplace_session_spec(target.path(), &state, std::path::Path::new("/probe/p.txt"))
+        super::inplace_session_spec(target.path(), &state, &probe_prompt("/probe/p.txt"))
     });
     let line = crate::test_support::spec_text(&spec);
     let tmux_option = trusty_mpm::core::trusty_tools_config::resolve_tmux_options(
@@ -626,7 +626,7 @@ fn inplace_session_spec_follows_the_configured_renderer() {
         let spec = super::inplace_session_spec(
             std::path::Path::new("/w"),
             root.path(),
-            std::path::Path::new("/probe/p.txt"),
+            &probe_prompt("/probe/p.txt"),
         );
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
@@ -635,6 +635,16 @@ fn inplace_session_spec_follows_the_configured_renderer() {
 }
 
 // ── #8286: the in-place launch carries the PM prompt file ──────────────────
+
+/// An in-place prompt naming `file`, stamped for the PM profile.
+fn probe_prompt(file: &str) -> super::InplacePrompt {
+    super::InplacePrompt {
+        file: std::path::PathBuf::from(file),
+        stamp: trusty_mpm::core::session_profile::launch_env(
+            trusty_mpm::core::session_profile::SessionProfile::Pm,
+        ),
+    }
+}
 
 /// The in-place spec hands `claude` the PM prompt file it was given.
 ///
@@ -649,7 +659,7 @@ fn inplace_session_spec_carries_the_prompt_file() {
     let spec = super::inplace_session_spec(
         std::path::Path::new("/w"),
         root.path(),
-        std::path::Path::new("/probe/pm-prompt.txt"),
+        &probe_prompt("/probe/pm-prompt.txt"),
     );
     assert_eq!(
         spec.args,
@@ -671,8 +681,9 @@ fn inplace_session_spec_carries_the_prompt_file() {
 fn inplace_prompt_file_returns_the_written_prompt_file() {
     let project = tempfile::TempDir::new().expect("tmp project");
     let dir = tempfile::TempDir::new().expect("tmp prompt dir");
-    let file = super::inplace_prompt_file(project.path(), false, dir.path())
+    let prompt = super::inplace_prompt_file(project.path(), dir.path())
         .expect("a written prompt file is returned");
+    let file = prompt.file;
 
     assert!(file.starts_with(dir.path()), "{}", file.display());
     let written = std::fs::read_to_string(&file).expect("read the prompt file");
@@ -696,7 +707,7 @@ fn inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written() {
     let tmp = tempfile::TempDir::new().expect("tmp dir");
     let not_a_dir = tmp.path().join("not-a-dir");
     std::fs::write(&not_a_dir, "").expect("plant a file where the prompt dir goes");
-    let err = super::inplace_prompt_file(project.path(), false, &not_a_dir)
+    let err = super::inplace_prompt_file(project.path(), &not_a_dir)
         .expect_err("a failed prompt write must refuse the launch")
         .to_string();
     assert!(
@@ -704,5 +715,47 @@ fn inplace_prompt_file_refuses_when_the_prompt_file_cannot_be_written() {
             && err.contains("os error")
             && err.contains("refusing to launch"),
         "the error must name the file, the cause and the refusal: {err}"
+    );
+}
+
+/// #8286: the in-place spec carries the stamp of the profile its prompt was
+/// composed for (#8453). FAILS BEFORE THIS CHANGE: the in-place spec assigned
+/// no `TRUSTY_MPM_SESSION_PROFILE`, so a supervisor prompt ran unstamped.
+#[test]
+fn inplace_session_spec_carries_the_profile_stamp() {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let mut prompt = probe_prompt("/probe/p.txt");
+    prompt.stamp = trusty_mpm::core::session_profile::launch_env(
+        trusty_mpm::core::session_profile::SessionProfile::Supervisor,
+    );
+    let spec = super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt);
+    assert!(
+        spec.env_set.contains(&prompt.stamp),
+        "the in-place spec must assign {:?}: {:?}",
+        prompt.stamp,
+        spec.env_set
+    );
+}
+
+/// #8286: the in-place prompt and its stamp come from one profile resolution.
+#[test]
+fn inplace_prompt_file_stamps_the_profile_it_composed_for() {
+    let project = tempfile::TempDir::new().expect("tmp project");
+    let dir = tempfile::TempDir::new().expect("tmp prompt dir");
+    let prompt = super::inplace_prompt_file(project.path(), dir.path()).expect("written");
+    let cli = trusty_mpm::core::session_launch::cli_launch(project.path(), None);
+    assert_eq!(
+        prompt.stamp,
+        trusty_mpm::core::session_profile::launch_env(cli.profile)
+    );
+}
+
+/// #8286: the manual fallback hint starts Claude Code with the prompt file.
+#[test]
+fn manual_launch_hint_names_the_prompt_file() {
+    let hint = super::manual_launch_hint("tm-x", "/w", std::path::Path::new("/t/p.txt"));
+    assert!(
+        hint.contains("`claude --append-system-prompt-file '/t/p.txt'`") && hint.contains("/w"),
+        "{hint}"
     );
 }
