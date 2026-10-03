@@ -6,12 +6,14 @@
 //! against the wrong index, and the context gate then reported the resulting
 //! unknown index as a generic `infra_unavailable` skip.
 //!
-//! What: [`resolve_repo_index`] maps `owner/repo` to an index id through the
+//! What: `resolve_repo_index` maps `owner/repo` to an index id through the
 //! `repo_identity` trusty-search records for each index (DOC-37). The session's
 //! pinned index wins when it belongs to the repo. With no identity match, an
 //! index whose id is the bare repo name and that has no recorded identity is
 //! used, with a warning. Anything else is a [`RepoIndexError`] naming the repo
-//! and the index id it looked up — never a default index.
+//! and the index id it looked up — never a default index. An operator pin
+//! (`TRUSTY_SEARCH_INDEX`, `--source-root`) goes through `check_pin` instead:
+//! it is used only when recorded for the repo, and refused otherwise (#8651).
 //!
 //! Test: `src/mcp/tools_pr_index_tests.rs` (it drives this module through the
 //! `review_pr` tool's per-call config as well as directly).
@@ -71,6 +73,180 @@ pub enum RepoIndexError {
         /// Why the looked-up id did not qualify.
         detail: String,
     },
+    /// #8651: an operator-pinned index is recorded for another repository.
+    #[error(
+        "{origin} pins trusty-search index {pin:?}, which is recorded for {pin_repo}, not \
+         {repo}; refusing to review {repo} against another repository's index. {}",
+        .origin.remedy(.repo)
+    )]
+    ForeignPin {
+        /// Canonical `owner/repo` under review.
+        repo: String,
+        /// The pinned index id.
+        pin: String,
+        /// The canonical repository the pinned index is recorded for.
+        pin_repo: String,
+        /// Where the pin came from.
+        origin: PinOrigin,
+    },
+    /// #8651: an operator-pinned index cannot be shown to belong to the repository.
+    #[error(
+        "{origin} pins trusty-search index {pin:?}, which cannot be verified to belong to \
+         {repo}: {detail}. {}",
+        .origin.remedy(.repo)
+    )]
+    UnverifiedPin {
+        /// Canonical `owner/repo` under review.
+        repo: String,
+        /// The pinned index id.
+        pin: String,
+        /// Why the pin could not be verified.
+        detail: String,
+        /// Where the pin came from.
+        origin: PinOrigin,
+    },
+}
+
+/// Where an operator pin on a GitHub-PR review came from (#8651).
+///
+/// Why: `TRUSTY_SEARCH_INDEX` is often ambient (set globally for every
+/// session), so it cannot be trusted the way a per-run `--source-root` is.
+/// What: `Env` refuses an index with no recorded identity unless its id is the
+/// bare repo name; `SourceRoot` lets such a legacy index through with a warning.
+/// Test: `operator_pin_is_used_only_for_its_own_repo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinOrigin {
+    /// The `TRUSTY_SEARCH_INDEX` environment variable.
+    Env,
+    /// The index `--source-root` mapped to.
+    SourceRoot,
+}
+
+impl std::fmt::Display for PinOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PinOrigin::Env => "TRUSTY_SEARCH_INDEX",
+            PinOrigin::SourceRoot => "--source-root",
+        })
+    }
+}
+
+impl PinOrigin {
+    /// The operator action that clears a refused pin.
+    fn remedy(self, repo: &str) -> String {
+        match self {
+            PinOrigin::Env => format!(
+                "Unset TRUSTY_SEARCH_INDEX (an ambient value pins every run) or set it to an \
+                 index of {repo}"
+            ),
+            PinOrigin::SourceRoot => format!("Point --source-root at a checkout of {repo}"),
+        }
+    }
+}
+
+/// Validate `owner`/`repo` and return `(canonical owner/repo, bare repo name)`.
+fn repo_key(owner: &str, repo: &str) -> Result<(String, String), RepoIndexError> {
+    let invalid = || RepoIndexError::InvalidRepo {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    };
+    let (owner_t, repo_t) = (owner.trim(), repo.trim());
+    if owner_t.is_empty() || repo_t.is_empty() || owner_t.contains('/') || repo_t.contains('/') {
+        return Err(invalid());
+    }
+    let gp = parse_owner_repo(&format!("{owner_t}/{repo_t}")).ok_or_else(invalid)?;
+    // #8649: `UNKNOWN_OWNER` is also what an owner-less local index's identity
+    // canonicalises to; a real GitHub owner literally named that would
+    // otherwise collide with — and silently resolve to — that unrelated index.
+    if gp.owner == UNKNOWN_OWNER {
+        return Err(invalid());
+    }
+    Ok((RepoIdentity::GitHub(gp).canonical(), repo_t.to_string()))
+}
+
+/// Verify an operator pin against `owner/repo` and return it (#8651).
+///
+/// Why: an explicit pin used to bypass per-repo resolution, so an ambient
+/// `TRUSTY_SEARCH_INDEX` reviewed every PR against one unrelated index.
+/// What: lists every index once and hands the pin's entry to [`check_pin`].
+///
+/// # Errors
+///
+/// [`RepoIndexError::InvalidRepo`], [`RepoIndexError::Registry`] when the list
+/// cannot be read, and [`RepoIndexError::ForeignPin`] /
+/// [`RepoIndexError::UnverifiedPin`] from [`check_pin`].
+///
+/// Test: `operator_pin_is_used_only_for_its_own_repo`.
+pub(crate) async fn resolve_pinned_index(
+    client: &dyn SearchClient,
+    owner: &str,
+    repo: &str,
+    pin: &str,
+    origin: PinOrigin,
+) -> Result<String, RepoIndexError> {
+    let (repo_key, repo_name) = repo_key(owner, repo)?;
+    let indexes =
+        client
+            .list_index_identities(None)
+            .await
+            .map_err(|source| RepoIndexError::Registry {
+                repo: repo_key.clone(),
+                index_id: pin.to_string(),
+                source,
+            })?;
+    check_pin(&indexes, &repo_key, &repo_name, pin, origin)
+}
+
+/// The pin when its recorded identity is `repo_key`, else why it is refused.
+///
+/// Why: kept pure so every refusal rule is testable without a client.
+/// What: a matching identity is used. A foreign identity is
+/// [`RepoIndexError::ForeignPin`]. An unregistered pin or an unreadable
+/// identity is [`RepoIndexError::UnverifiedPin`]. A pin with no recorded
+/// identity is used with a warning for [`PinOrigin::SourceRoot`], or for
+/// [`PinOrigin::Env`] when its id is the bare repo name (the same rule as
+/// [`select_repo_index`]'s name fallback); otherwise it is refused.
+/// Test: `operator_pin_is_used_only_for_its_own_repo`.
+pub(crate) fn check_pin(
+    indexes: &[IndexIdentity],
+    repo_key: &str,
+    repo_name: &str,
+    pin: &str,
+    origin: PinOrigin,
+) -> Result<String, RepoIndexError> {
+    let unverified = |detail: String| RepoIndexError::UnverifiedPin {
+        repo: repo_key.to_string(),
+        pin: pin.to_string(),
+        detail,
+        origin,
+    };
+    let Some(entry) = indexes.iter().find(|i| i.id == pin) else {
+        return Err(unverified("it is not a registered index".into()));
+    };
+    let Some(raw) = entry.repo_identity.as_deref() else {
+        if origin == PinOrigin::SourceRoot || pin == repo_name {
+            warn!(
+                index = %pin,
+                repo = %repo_key,
+                "{origin} index {pin:?} has no recorded repo_identity, so it cannot be verified \
+                 to belong to {repo_key}; using it (#8651)"
+            );
+            return Ok(pin.to_string());
+        }
+        return Err(unverified("it has no recorded repo_identity".into()));
+    };
+    match canonical_identity(entry) {
+        Some(key) if key == repo_key => Ok(pin.to_string()),
+        Some(pin_repo) => Err(RepoIndexError::ForeignPin {
+            repo: repo_key.to_string(),
+            pin: pin.to_string(),
+            pin_repo,
+            origin,
+        }),
+        None => Err(unverified(format!(
+            "its recorded repo_identity {raw:?} is unreadable"
+        ))),
+    }
 }
 
 /// Resolve the trusty-search index serving `owner/repo`.
@@ -105,23 +281,7 @@ pub(crate) async fn resolve_repo_index(
     repo: &str,
     pinned: Option<&str>,
 ) -> Result<String, RepoIndexError> {
-    let invalid = || RepoIndexError::InvalidRepo {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-    };
-    let (owner_t, repo_t) = (owner.trim(), repo.trim());
-    if owner_t.is_empty() || repo_t.is_empty() || owner_t.contains('/') || repo_t.contains('/') {
-        return Err(invalid());
-    }
-    let gp = parse_owner_repo(&format!("{owner_t}/{repo_t}")).ok_or_else(invalid)?;
-    // #8649: `UNKNOWN_OWNER` is also what an owner-less local index's identity
-    // canonicalises to; a real GitHub owner literally named that would
-    // otherwise collide with — and silently resolve to — that unrelated index.
-    if gp.owner == UNKNOWN_OWNER {
-        return Err(invalid());
-    }
-    let repo_key = RepoIdentity::GitHub(gp).canonical();
-    let index_id = repo_t.to_string();
+    let (repo_key, index_id) = repo_key(owner, repo)?;
     let registry = |source| RepoIndexError::Registry {
         repo: repo_key.clone(),
         index_id: index_id.clone(),

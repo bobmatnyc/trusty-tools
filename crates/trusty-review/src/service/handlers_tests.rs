@@ -1360,3 +1360,92 @@ async fn a_failed_run_is_not_an_empty_success() {
         "the error must be IN the JSON, not only on stderr"
     );
 }
+
+// ── #8651: per-request index resolution ─────────────────────────────────────
+
+use crate::integrations::search_client::IndexIdentity;
+use crate::pipeline::pr_index::tests::{Registry, startup_config, two_repo_registry};
+
+/// A state whose startup index is `"main"`, over a registry fake (`None`
+/// models an unreadable registry), on the Hosted default `require_search`.
+fn scoped_state(indexes: Option<Vec<IndexIdentity>>) -> AppState {
+    AppState::new(
+        startup_config(None),
+        Arc::new(FakeLlm),
+        Arc::new(Registry::new(indexes)),
+        None,
+    )
+}
+
+fn scoped_deps(state: &AppState) -> crate::pipeline::ReviewDeps {
+    crate::pipeline::ReviewDeps {
+        llm: Arc::clone(&state.llm),
+        verifier: None,
+        search: Arc::clone(&state.search),
+        analyze: None,
+        dedup: None,
+    }
+}
+
+fn pr_source(owner: &str, repo: &str) -> crate::pipeline::DiffSource {
+    crate::pipeline::DiffSource::Github {
+        owner: owner.into(),
+        repo: repo.into(),
+        pr: 7,
+        token: String::new(),
+    }
+}
+
+/// Two repos, neither indexed as `"main"`, each review under their own index
+/// through ONE daemon state; a local diff keeps the startup config (#8651).
+#[tokio::test]
+async fn review_handler_resolves_each_repo_to_its_own_index() {
+    let state = scoped_state(Some(two_repo_registry()));
+    for (owner, repo, want) in [
+        (
+            "duettoresearch",
+            "code-intelligence",
+            "code-intelligence-9f1c2e3a",
+        ),
+        ("bobmatnyc", "trusty-tools", "trusty-tools-4e2cf878"),
+    ] {
+        let (config, _) = super::review_scope(&state, &pr_source(owner, repo), scoped_deps(&state))
+            .await
+            .unwrap_or_else(|e| panic!("{owner}/{repo}: {}", e.message));
+        assert_eq!(config.search_index, want, "{owner}/{repo}");
+    }
+    let local = crate::pipeline::DiffSource::Stdin;
+    let (config, _) = super::review_scope(&state, &local, scoped_deps(&state))
+        .await
+        .unwrap_or_else(|e| panic!("local: {}", e.message));
+    assert_eq!(config.search_index, "main", "a local diff names no repo");
+    assert_eq!(
+        state.config.search_index, "main",
+        "startup config untouched"
+    );
+}
+
+/// Fail-open check: `handle_review` refuses a PR whose index cannot be
+/// resolved — before any GitHub call — instead of reviewing against the
+/// startup index: an unreadable registry under the Hosted default is an
+/// internal error, an unindexed repo an invalid-params refusal naming it.
+#[tokio::test]
+async fn review_handler_refuses_an_unresolvable_index() {
+    let req = |repo: &str| ReviewRequest {
+        owner: Some("acme".into()),
+        repo: Some(repo.into()),
+        pr: Some(7),
+        ..Default::default()
+    };
+    let err = handle_review(&scoped_state(None), req("widget"))
+        .await
+        .expect_err("an unreadable registry must not review on Hosted");
+    assert_eq!(err.code, trusty_common::uds::server::CODE_INTERNAL_ERROR);
+    assert!(err.message.contains("acme/widget"), "{}", err.message);
+
+    let err = handle_review(&scoped_state(Some(two_repo_registry())), req("unindexed"))
+        .await
+        .expect_err("an unindexed repo must not fall back to \"main\"");
+    assert_eq!(err.code, trusty_common::uds::server::CODE_INVALID_PARAMS);
+    assert!(err.message.contains("acme/unindexed"), "{}", err.message);
+}

@@ -108,7 +108,7 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     // ── --source-root (issue #2994) ────────────────────────────────────────
     // Resolved BEFORE the CWD/env auto-derive below, once for the whole
     // compare run — see `resolve_source_root_arg`'s doc comment for the exact
-    // precedence rule (TRUSTY_SEARCH_INDEX always wins).
+    // precedence rule (--source-root beats TRUSTY_SEARCH_INDEX, #8651).
     let source_root_notice = resolve_source_root_arg(
         &mut config,
         &search_for_resolve,

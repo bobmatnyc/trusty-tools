@@ -28,6 +28,9 @@ pub mod absence_claim;
 // Why: keeps the raw structured reviewer payload out of `review_body`, which
 // consumers read (and post) as the human-readable review (#4999).
 pub(crate) mod body_render;
+// #8654: folds a `# Context:` diff preamble into the caller context instead of
+// letting the diff parser discard it as an unattributable section.
+pub mod caller_preamble;
 pub mod citation_check;
 // #8905: checks each finding's cited line holds the code it describes.
 pub mod citation_gate;
@@ -58,6 +61,9 @@ pub mod mapreduce;
 pub mod output;
 pub mod parser;
 pub mod post;
+// #8651: the per-repo trusty-search index every GitHub-PR surface reviews
+// against, and each surface's degrade contract for an unreadable registry.
+pub mod pr_index;
 pub mod prompt;
 pub mod runner;
 // Why: the map-reduce branch of `run_review` (split → map → reduce → fold) is

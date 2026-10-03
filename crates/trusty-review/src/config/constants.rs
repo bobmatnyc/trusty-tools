@@ -95,6 +95,16 @@ pub const DEDUP_STALE_SECS: u64 = 7200; // 2 hours.
 /// as their final safety net.  Closes: #624.
 pub const MAX_DIFF_CHARS: usize = 160_000;
 
+/// Maximum characters of each caller-context field (PR description, PR
+/// discussion, referenced code) the reviewer and verifier receive.
+///
+/// Why: #8654 — `review_diff`'s `context` and `run`'s PR-context flags were
+/// unbounded, so one field could crowd the diff out of the context window.
+/// What: 64 K chars (≈16 K tokens) per field; all three plus a full
+/// `MAX_DIFF_CHARS` diff stay well under the 200 K-token window. Applied once
+/// in `run_review` by `cap_caller_context`, which marks every truncation.
+pub const MAX_CALLER_CONTEXT_CHARS: usize = 64_000;
+
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
 

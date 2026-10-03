@@ -27,13 +27,15 @@ use super::runner_helpers::{
 use crate::store::{ClaimOutcome, DedupError};
 use crate::{
     config::{
-        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode,
+        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath,
+        constants::MAX_CALLER_CONTEXT_CHARS, select_review_mode,
     },
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
+        caller_preamble::{cap_caller_context, consume_context_preamble},
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{
             DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers, load_diff,
@@ -185,7 +187,7 @@ pub struct ReviewDeps {
 /// `run_review_empty_head_sha_fails_closed_before_posting`.
 pub async fn run_review(
     config: &ReviewConfig,
-    input: ReviewInput,
+    mut input: ReviewInput,
     deps: ReviewDeps,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
@@ -398,6 +400,8 @@ pub async fn run_review(
             return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
         }
     };
+    // #8654: a `# Context:` preamble is caller context, never an unparsed section.
+    let raw_diff = consume_context_preamble(raw_diff, &mut input.caller_context);
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
     let max = crate::config::constants::MAX_DIFF_CHARS;
     // #1660: render ONCE, bounded to `max`, for the actual prompt/served text
@@ -554,6 +558,8 @@ pub async fn run_review(
     // are the sole source of PR description / discussion / referenced code (no
     // GitHub fetch happened).  Cloned because the verifier also needs the
     // description + discussion as author rationale below.
+    // #8654: one per-field cap, marked, before either prompt sees the text.
+    cap_caller_context(&mut input.caller_context, MAX_CALLER_CONTEXT_CHARS);
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
