@@ -235,6 +235,11 @@ async fn relocate_is_refused_while_a_reindex_is_in_flight() {
 /// create at root B completes within a bounded time; a create at root A and a
 /// claim under the same id stay parked until the claim is released, and the
 /// root-A create then completes.
+/// #9049: the bound is a hang guard, not a latency budget. The claim on root A
+/// is held until the explicit `drop(held)`, so a root-B create that wrongly
+/// waited on it, or a root-A waiter that release failed to wake, never
+/// completes at all; a full `post_create` under a loaded host can take far
+/// longer than the 5 s this used to allow.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
@@ -243,7 +248,8 @@ async fn unrelated_roots_register_concurrently() {
     let state = mock_state().await;
     let (_a_dir, root_a) = clean_repo("claim-a-8499-", None);
     let (_b_dir, root_b) = clean_repo("claim-b-8499-", None);
-    let bound = std::time::Duration::from_secs(5);
+    // #9049: hang guard only; see the doc comment.
+    let bound = std::time::Duration::from_secs(120);
     let held = super::create_layout::claim_registration("claim-hold-8499", &root_a).await;
 
     let (status, body) =

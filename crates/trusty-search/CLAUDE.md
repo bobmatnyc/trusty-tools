@@ -478,6 +478,12 @@ Per-index stats.
     `vectors_unavailable_reason` says which state produced it:
     `no_vector_store` (BM25-only / `skip_vector` — healthy) or
     `count_unreadable` (a store is attached but its count errored — a fault).
+  - `migration_waiting` (#8659): `null` unless a schema-migration chain is
+    queued behind this index's permit (a reindex, deferred-embed pass or
+    relocate holds it). Then `{pending, waiting_since_unix_ms, waited_secs,
+    holder}`: the migrations still to run, when the wait began, and the
+    holder's label (`null` when it registered none). The daemon also logs
+    the wait at INFO when it starts, every 60 s, and when the permit arrives.
   - `stuck_mid_walk` (#5336): the per-index form of `/health`'s
     `indexes_stuck_mid_walk`. `true` when this index's walk started and nothing
     is driving it any more, so `status: "indexing"` and
@@ -821,8 +827,12 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
 - **Response 409** `index_write_quarantined` (#8105): the index's durable
   corpus failed to open, so a reindex could persist nothing. Nothing is
   queued. The body carries `index_id`, `failure_kind`, `queued: false`,
-  `retryable: false`, and a `message` naming the quarantine. Restart the
-  daemon to clear it: a successful corpus open lifts the quarantine.
+  `retryable`, and a `message` naming the quarantine. A successful corpus
+  open lifts the quarantine. For a transient kind (`contention`,
+  `open_timeout`) the daemon re-attempts the open on each reindex request and
+  every 30 s in the background (#8085, #8958), so `retryable` is `true` and a
+  reindex requested after the other opener releases the file proceeds. Any
+  other kind answers `retryable: false`; restart the daemon.
 - **Response 409** `reindex_already_running` (#8889): a reindex of this index
   is already running. Nothing is queued and the running job's progress entry
   is untouched. The body carries `index_id`, `running` (`run_id`, `origin`,

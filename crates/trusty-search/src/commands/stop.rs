@@ -226,7 +226,7 @@ pub(crate) fn find_daemon_pids() -> Vec<u32> {
 }
 
 #[cfg(unix)]
-fn send_signal(pid: u32, sig: &str) -> std::io::Result<()> {
+pub(crate) fn send_signal(pid: u32, sig: &str) -> std::io::Result<()> {
     let status = std::process::Command::new("kill")
         .arg(format!("-{sig}"))
         .arg(pid.to_string())
@@ -240,7 +240,7 @@ fn send_signal(pid: u32, sig: &str) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn send_signal(_pid: u32, _sig: &str) -> std::io::Result<()> {
+pub(crate) fn send_signal(_pid: u32, _sig: &str) -> std::io::Result<()> {
     Err(std::io::Error::other(
         "signals unsupported on this platform",
     ))

@@ -117,6 +117,9 @@ mod tests_8499;
 // #8499 round 2: store placement, registration claims, relocate vs reindex.
 #[cfg(test)]
 mod registration_8499_tests;
+// #8777: a created index is stamped at the current schema version.
+#[cfg(test)]
+mod tests_schema_stamp_8777;
 // #8499 round 3: enclosing work tree, busy store, relocate under the claim.
 #[cfg(test)]
 mod work_tree_8499_tests;
@@ -315,6 +318,8 @@ pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 pub(crate) use reindex_handlers::reindex_report;
+#[cfg(test)]
+pub(crate) use reindex_handlers::start_release_catch_up;
 pub(crate) use search::{delete_index_report, DeleteIndexParams};
 
 // #6285 slice 5.5: the four routes with a named consumer that no earlier slice

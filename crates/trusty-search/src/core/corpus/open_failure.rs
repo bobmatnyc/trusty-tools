@@ -152,18 +152,23 @@ impl CorpusOpenFailure {
     /// `format_incompatible_keeps_the_rebuild_instruction`.
     pub fn stage_reason(self) -> &'static str {
         match self {
+            // #8085: "self-heals" holds because `service::corpus_reopen`
+            // re-attempts the open every 30 s and on each reindex request.
             Self::OpenTimeout => {
                 "durable corpus open TIMED OUT — an opener is still running (issue #3659). \
                  This is TRANSIENT and self-heals: the on-disk corpus was never read and is \
-                 presumed INTACT. Retry shortly, or restart the daemon once warm-boot \
-                 contention subsides. DO NOT reindex and DO NOT run `--force`: rebuilding \
-                 here destroys healthy data (issue #4333)"
+                 presumed INTACT, and the daemon re-attempts the open every 30 s and on each \
+                 reindex request, lifting the write quarantine on success (issue #8085). \
+                 Restarting the daemon also clears it. DO NOT reindex with `--force` and DO \
+                 NOT delete the corpus: rebuilding here destroys healthy data (issue #4333)"
             }
             Self::Contention => {
                 "durable corpus is held by another opener (contention / stale file lock). \
                  This is TRANSIENT and self-heals: the on-disk corpus was never read and is \
-                 presumed INTACT. Retry shortly, or restart the daemon. DO NOT reindex and \
-                 DO NOT run `--force` (issue #4333)"
+                 presumed INTACT, and the daemon re-attempts the open every 30 s and on each \
+                 reindex request, lifting the write quarantine once the other opener releases \
+                 the file (issue #8085). Restarting the daemon also clears it. DO NOT reindex \
+                 with `--force` (issue #4333)"
             }
             Self::FormatIncompatible => {
                 "redb corpus is in an incompatible on-disk format or is corrupted — redb \

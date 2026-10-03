@@ -21,6 +21,9 @@ mod snapshot_tests;
 mod tests_2936;
 #[cfg(test)]
 mod tests_close_8232;
+// #8778: a rewrite that collapses ids leaves no orphan vector.
+#[cfg(test)]
+mod tests_rewrite_8778;
 mod types;
 // #8167/#8232: releasing the snapshot mapping when its index is deleted.
 mod usearch_close;
