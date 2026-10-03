@@ -125,6 +125,40 @@ async fn dream_dedup_records_the_removed_and_surviving_drawer() {
     );
 }
 
+/// Why (#8729, owner ruling): the journal held the per-drawer record, but the
+/// daemon log showed only a count, so the log alone could not say which drawer
+/// a dream pass removed. Each removal must reach the default `warn` filter
+/// with its palace, drawer id and reason.
+#[tokio::test]
+async fn every_maintenance_removal_logs_its_id_and_reason() {
+    let (_dir, _data_dir, handle) = open_palace("dedup-log");
+    let content = "Dream dedup merges near-duplicate drawers above the threshold";
+    handle
+        .remember(content.into(), RoomType::Backend, vec![], 0.7)
+        .await
+        .unwrap();
+    let lose = handle
+        .remember(content.into(), RoomType::Backend, vec![], 0.6)
+        .await
+        .unwrap();
+
+    let (log, _guard) = capture_warn();
+    let stats = Dreamer::new(dedup_only_config())
+        .dream_cycle(&handle)
+        .await
+        .unwrap();
+    assert_eq!(stats.merged, 1);
+
+    let text = log.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains(&lose.to_string()))
+        .unwrap_or_else(|| panic!("no log line names removed drawer {lose}: {text}"));
+    for needle in ["WARN", "dedup-log", "dream_dedup"] {
+        assert!(line.contains(needle), "missing {needle} in {line}");
+    }
+}
+
 /// Why: the palace-open sweep deletes rows before any handle exists; its
 /// deletions must reach the journal too.
 #[test]

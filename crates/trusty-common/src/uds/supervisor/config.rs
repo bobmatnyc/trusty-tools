@@ -318,10 +318,12 @@ impl SupervisorConfig {
 ///
 /// What: the program, its arguments, and directories to create first. `stdin`
 /// and `stdout` are closed and `stderr` is inherited so the child's tracing
-/// output reaches the parent's log stream; `kill_on_drop` is always set so an
+/// output reaches the parent's log stream, unless a detached spec names a
+/// [`Self::stderr_to`] file (#8103); `kill_on_drop` is always set so an
 /// unsupervised drop still reaps the child rather than leaking it.
 ///
-/// Test: `spawn_spec_builder_accumulates_args_and_dirs`.
+/// Test: `spawn_spec_builder_accumulates_args_and_dirs`,
+/// `a_detached_child_with_a_stderr_log_writes_there_not_to_the_caller`.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct SpawnSpec {
@@ -331,6 +333,10 @@ pub struct SpawnSpec {
     pub args: Vec<OsString>,
     /// Directories created (recursively) before the spawn.
     pub create_dirs: Vec<PathBuf>,
+    /// File a DETACHED child's stderr is appended to instead of inheriting
+    /// the caller's (#8103). Ignored for a supervised child, whose stderr is
+    /// piped and relayed.
+    pub stderr_log: Option<PathBuf>,
 }
 
 impl SpawnSpec {
@@ -340,6 +346,7 @@ impl SpawnSpec {
             program: program.into(),
             args: Vec::new(),
             create_dirs: Vec::new(),
+            stderr_log: None,
         }
     }
 
@@ -352,6 +359,14 @@ impl SpawnSpec {
     /// Create `dir` (and its parents) before spawning.
     pub fn create_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.create_dirs.push(dir.into());
+        self
+    }
+
+    /// Append a detached child's stderr to `path` rather than the caller's
+    /// terminal (#8103). The file is opened owner-only, and moved to
+    /// `<path>.1` at spawn once it passes 8 MiB.
+    pub fn stderr_to(mut self, path: impl Into<PathBuf>) -> Self {
+        self.stderr_log = Some(path.into());
         self
     }
 }

@@ -60,6 +60,8 @@ pub mod error_codes {
     pub const INVALID_PARAMS: i32 = -32602;
     /// Internal JSON-RPC error.
     pub const INTERNAL_ERROR: i32 = -32603;
+    /// The thing asked for does not exist — [`crate::transport::CODE_NOT_FOUND`].
+    pub const NOT_FOUND: i32 = -32004;
 }
 
 /// JSON-RPC 2.0 request envelope.
@@ -162,16 +164,27 @@ impl JsonRpcResponse {
         }
     }
 
-    /// Convert an `anyhow::Error` into a JSON-RPC internal-error response.
+    /// Convert an `anyhow::Error` from a tool into a JSON-RPC error response.
     ///
     /// Why: tool dispatch returns `anyhow::Result` (the existing
     /// `dispatch_tool` contract); the alternate `{:#}` format walks
     /// the full `Caused by:` chain so the wire surfaces actionable
-    /// detail instead of just the outermost context.
-    /// What: code = `INTERNAL_ERROR`, message = `format!("{e:#}")`.
-    /// Test: covered indirectly when a tool call fails.
+    /// detail instead of just the outermost context. #9026: a palace with no
+    /// `palace.json` answered `-32603`, so a caller could not tell "this
+    /// project has no palace yet" from a daemon fault, and the catch-up digest
+    /// logged every such call as an unreachable daemon.
+    /// What: code = `NOT_FOUND` when the chain carries the registry's
+    /// genuine-absence error (`PalaceRegistry::open_error_is_absent`, the same
+    /// test `api_error::open_handle` uses), `INTERNAL_ERROR` otherwise;
+    /// message = `format!("{e:#}")` either way.
+    /// Test: `missing_palace_tool_error_is_not_found_on_the_wire`.
     pub fn from_anyhow(id: Value, e: anyhow::Error) -> Self {
-        Self::err(id, error_codes::INTERNAL_ERROR, format!("{e:#}"))
+        let code = if trusty_common::memory_core::PalaceRegistry::open_error_is_absent(&e) {
+            error_codes::NOT_FOUND
+        } else {
+            error_codes::INTERNAL_ERROR
+        };
+        Self::err(id, code, format!("{e:#}"))
     }
 }
 
@@ -783,6 +796,31 @@ mod tests {
         let err = resp.error.expect("error");
         assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
         assert!(err.message.contains("definitely_not_a_real_method"));
+    }
+
+    /// Why (#9026): `memory_list` against a palace with no `palace.json`
+    /// answered `-32603`, which the catch-up digest logged as an unreachable
+    /// daemon on every run. Absence is `-32004`; any other tool failure stays
+    /// `-32603`, so a real fault is never reported as a missing palace.
+    #[tokio::test]
+    async fn missing_palace_tool_error_is_not_found_on_the_wire() {
+        let state = test_state();
+        let req = JsonRpcRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(9)),
+            method: "memory_list".to_string(),
+            params: Some(json!({"palace": "never-created", "limit": 5})),
+        };
+        let err = dispatch(&state, req).await.error.expect("error");
+        assert_eq!(err.code, error_codes::NOT_FOUND, "{}", err.message);
+        assert_eq!(i64::from(err.code), crate::transport::CODE_NOT_FOUND);
+        assert!(err.message.contains("never-created"), "{}", err.message);
+
+        let other = JsonRpcResponse::from_anyhow(json!(1), anyhow::anyhow!("redb lock held"));
+        assert_eq!(
+            other.error.expect("error").code,
+            error_codes::INTERNAL_ERROR
+        );
     }
 
     /// Why: `initialize` is the first method Claude Code sends over the UDS/

@@ -238,3 +238,8 @@ fn find_daemon_pids_finds_a_live_serve_foreground_process() {
         "scan missed the live stand-in daemon pid {pid}; found {found:?}"
     );
 }
+
+// launchd exists only on macOS, so its `stop` and `service start` tests do too.
+#[cfg(target_os = "macos")]
+#[path = "stop_launchd_tests.rs"]
+mod launchd_tests;

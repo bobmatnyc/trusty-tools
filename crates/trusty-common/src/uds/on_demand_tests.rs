@@ -41,6 +41,27 @@ fn analyze_spawn_spec_runs_a_bare_serve() {
     );
 }
 
+/// Why (#8103): `tctl status` starts the server only to probe it, so its
+/// startup lines must land in a log, not on the operator's terminal. A plain
+/// handle still inherits stderr, for a user-initiated start.
+/// Test: this test itself.
+#[test]
+fn a_quiet_handle_logs_beside_its_socket() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let socket = tmp.path().join("sockets").join("trusty-analyze.sock");
+    assert_eq!(OnDemandAnalyze::at(&socket).stderr_log(), None);
+    let quiet = OnDemandAnalyze::at(&socket).quiet();
+    assert_eq!(
+        quiet.stderr_log(),
+        Some(
+            tmp.path()
+                .join("sockets")
+                .join("trusty-analyze.stderr.log")
+                .as_path()
+        )
+    );
+}
+
 /// Why: `ServiceTimeouts::new` is a `const fn` whose assert fires at build time,
 /// so an inverted pair would already have failed the compile. What this test
 /// adds is the direction of the margin — a patience that merely matched the

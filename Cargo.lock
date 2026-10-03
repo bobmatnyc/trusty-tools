@@ -11236,7 +11236,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.53.1"
+version = "0.53.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11549,6 +11549,7 @@ dependencies = [
  "toml 0.8.23",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "trusty-common",
  "trusty-mcp",
  "uuid",

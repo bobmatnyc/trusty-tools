@@ -752,8 +752,11 @@ impl MemoryService {
     /// the same reason it runs on the MCP one — `HTTP DELETE` and
     /// `memory_forget` remove the same drawer, and the backfill indexes it
     /// whichever way it was written, so a lexical copy left here is the same
-    /// stale document.
-    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`;
+    /// stale document. #8729: a real removal is logged through
+    /// `log_user_forget` before the lexical delete runs.
+    /// Test: `delete_drawer_404s_for_an_unknown_drawer_id`,
+    /// `a_user_forget_logs_palace_drawer_and_source_once_deleted`,
+    /// `a_user_forget_is_logged_even_when_the_lexical_delete_fails`;
     /// `tests/bm25_forget_delete.rs` covers the deletion contract itself.
     pub async fn delete_drawer(
         &self,
@@ -768,6 +771,10 @@ impl MemoryService {
             .forget(uuid)
             .await
             .map_err(|e| ServiceError::internal(format!("forget: {e:#}")))?;
+        // #8729: log before the lexical delete can fail; the drawer is gone.
+        if outcome.is_deleted() {
+            crate::tools::memory_ops::log_user_forget(handle.id.as_str(), id, uuid, source);
+        }
         // #5053: a drawer the user deleted must stop matching lexical queries.
         crate::tools::bm25::bm25_delete_document(&self.state, handle.id.as_str(), uuid)
             .await

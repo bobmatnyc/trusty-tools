@@ -528,6 +528,199 @@ async fn delete_drawer_404s_for_an_unknown_drawer_id() {
     );
 }
 
+/// Collects formatted log output so a test can assert on what reached the log.
+#[derive(Clone, Default)]
+struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl LogCapture {
+    /// Capture `info` and above on this thread until the guard drops.
+    fn install() -> (Self, tracing::subscriber::DefaultGuard) {
+        let cap = Self::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(cap.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        (cap, tracing::subscriber::set_default(subscriber))
+    }
+
+    /// The log lines that name `needle`.
+    fn lines_naming(&self, needle: &str) -> Vec<String> {
+        let bytes = self.0.lock().map(|b| b.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter(|l| l.contains(needle))
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut b) = self.0.lock() {
+            b.extend_from_slice(buf);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// Assert exactly one `#8729` `INFO` line names `drawer`, with the resolved
+/// `palace` id, the `requested` spelling and `source` as fields.
+#[track_caller]
+fn assert_one_forget_line(
+    log: &LogCapture,
+    drawer: &str,
+    palace: &str,
+    requested: &str,
+    source: &str,
+) {
+    let lines: Vec<String> = log
+        .lines_naming(drawer)
+        .into_iter()
+        .filter(|l| l.contains("#8729"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one log line per removal: {lines:?}");
+    let palace = format!("palace={palace} ");
+    let requested = format!("requested={requested} ");
+    let source = format!("source={source}");
+    for needle in ["INFO", &palace, &requested, &source] {
+        assert!(
+            lines[0].contains(needle),
+            "missing {needle} in {}",
+            lines[0]
+        );
+    }
+}
+
+/// Why (#8729, owner ruling "Add the guard"): a user-initiated forget left no
+/// trace in the daemon log, so a drawer gone from a palace could not be told
+/// apart from a silent maintenance deletion. Both user paths now log the
+/// palace, drawer id and caller at `info` — on a real removal only. Both calls
+/// go through an alias, so the line must carry the resolved id as `palace`
+/// (the bm25 lane's and the maintenance journal's key, #5036) and the alias
+/// as `requested`.
+/// Test: itself.
+#[tokio::test]
+async fn a_user_forget_logs_palace_drawer_and_source_once_deleted() {
+    let (svc, state) = service();
+    let canonical = svc
+        .create_palace(palace_body("forget-log"), ActivitySource::Http)
+        .await
+        .expect("create");
+    trusty_common::palace_alias::PalaceAliasStore::register_alias(
+        &state.data_root,
+        "fl-alias",
+        &canonical,
+    )
+    .expect("register_alias");
+    let mut ids = Vec::new();
+    for text in [
+        "the forget audit line names the palace drawer and caller for http",
+        "the forget audit line names the palace drawer and caller for mcp",
+    ] {
+        let id = svc
+            .create_drawer(
+                "forget-log",
+                drawer_body(text),
+                default_creator(),
+                ActivitySource::Http,
+            )
+            .await
+            .expect("create drawer");
+        ids.push(id.to_string());
+    }
+
+    let (log, _guard) = LogCapture::install();
+    svc.delete_drawer("fl-alias", &ids[0], ActivitySource::Http)
+        .await
+        .expect("delete over the service");
+    assert_one_forget_line(&log, &ids[0], &canonical, "fl-alias", "http");
+    crate::tools::dispatch_tool(
+        &state,
+        "memory_forget",
+        json!({ "palace": "fl-alias", "drawer_id": ids[1] }),
+    )
+    .await
+    .expect("memory_forget");
+    assert_one_forget_line(&log, &ids[1], &canonical, "fl-alias", "mcp");
+
+    // A no-op forget is not a removal and logs nothing.
+    let ghost = "deadbeef-0000-4000-8000-000000000000";
+    let _ = svc
+        .delete_drawer("forget-log", ghost, ActivitySource::Http)
+        .await;
+    assert!(log.lines_naming(ghost).is_empty(), "no line for a no-op");
+}
+
+/// Why (#8729): `forget` removes the drawer from the primary store before the
+/// lexical delete runs. When the log line sat after that delete's `?`, a
+/// failing lane returned an error for a drawer that was already gone and left
+/// no trace of the removal.
+/// What: writes two drawers with the lane off, plants a FILE where
+/// `<data_root>/<palace>/bm25/` must go (the seam
+/// `forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete`
+/// uses), arms a real lane, then forgets one drawer per user path. Each call
+/// must fail and still log its removal exactly once.
+/// Test: itself.
+#[tokio::test]
+async fn a_user_forget_is_logged_even_when_the_lexical_delete_fails() {
+    let (svc, state) = service();
+    let palace = svc
+        .create_palace(palace_body("forget-lane-down"), ActivitySource::Http)
+        .await
+        .expect("create");
+    let mut ids = Vec::new();
+    for text in [
+        "a removal over the service is logged when the lexical lane is down",
+        "a removal over mcp is logged when the lexical lane is down as well",
+    ] {
+        let id = svc
+            .create_drawer(
+                &palace,
+                drawer_body(text),
+                default_creator(),
+                ActivitySource::Http,
+            )
+            .await
+            .expect("create drawer");
+        ids.push(id.to_string());
+    }
+
+    let root = state.data_root.clone();
+    std::fs::create_dir_all(root.join(&palace)).expect("palace dir");
+    std::fs::write(root.join(&palace).join("bm25"), b"a file, not a directory")
+        .expect("block the corpus dir");
+    let state = state.with_bm25_lane(crate::bm25_lane::Bm25Lane::with_limits(root, 3, None));
+    let svc = MemoryService::new(state.clone());
+
+    let (log, _guard) = LogCapture::install();
+    let err = svc
+        .delete_drawer(&palace, &ids[0], ActivitySource::Http)
+        .await
+        .expect_err("the lexical delete cannot succeed");
+    assert!(matches!(err, ServiceError::Internal(_)), "{err:?}");
+    assert_one_forget_line(&log, &ids[0], &palace, &palace, "http");
+
+    crate::tools::dispatch_tool(
+        &state,
+        "memory_forget",
+        json!({ "palace": palace, "drawer_id": ids[1] }),
+    )
+    .await
+    .expect_err("the lexical delete cannot succeed");
+    assert_one_forget_line(&log, &ids[1], &palace, &palace, "mcp");
+}
+
 /// Why (#3225): `content` runs the signal/noise QUALITY gate by default, and a
 /// JSON-shaped payload is a designed rejection target —
 /// `non_alphabetic_ratio` counts braces, quotes, colons and digits. This proves

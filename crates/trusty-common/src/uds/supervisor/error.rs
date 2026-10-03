@@ -180,4 +180,18 @@ pub enum SupervisorError {
         #[source]
         source: Box<crate::uds::UdsSecurityError>,
     },
+
+    /// The stderr log a detached spec named could not be opened (#8103).
+    #[error("open stderr log {path} for {service} instance {key}: {source}")]
+    StderrLog {
+        /// Service label.
+        service: String,
+        /// Instance key.
+        key: String,
+        /// Log file that could not be opened.
+        path: PathBuf,
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
 }
