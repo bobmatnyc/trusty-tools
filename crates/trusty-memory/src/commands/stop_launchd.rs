@@ -14,7 +14,8 @@
 //! That keeps the per-crate stop policy #4113 and #4230 rely on; `service stop`
 //! remains the command that unloads the unit. A loaded unit with no pid is
 //! already current, so the install half of `service start` does nothing for
-//! it; [`start_loaded_unit`] kickstarts it by label instead.
+//! it; [`start_loaded_unit`] kickstarts it by label instead. The module is
+//! compiled on macOS only; elsewhere `stop` is the process-table scan alone.
 //! Test: `stop_terminates_a_launchd_daemon_the_process_table_misses`,
 //! `stop_propagates_a_failed_launchd_kill`,
 //! `stop_fails_when_the_launchd_daemon_outlives_the_grace`,
@@ -31,7 +32,7 @@ use super::{daemon_pids_in, pid_alive, stop_daemons_in, ProcInfo};
 /// launchd's view of the daemon's LaunchAgent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitState {
-    /// No unit is loaded under the label, or the platform has no launchd.
+    /// No unit is loaded under the label.
     NotLoaded,
     /// The unit is loaded. `pid` is its running process; `None` between spawns.
     Loaded { pid: Option<u32> },
@@ -72,7 +73,6 @@ pub(crate) enum PrintVerdict {
 /// find service", is [`PrintVerdict::NotLoaded`]; anything else, a signal death
 /// (`None`) included, is an error carrying the code and stderr.
 /// Test: `launchctl_print_exits_classify_into_loaded_absent_or_error`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn classify_print(code: Option<i32>, stderr: &str) -> Result<PrintVerdict> {
     /// launchctl's exit for a service the domain does not hold.
     const NOT_FOUND: i32 = 113;
@@ -86,10 +86,8 @@ pub(crate) fn classify_print(code: Option<i32>, stderr: &str) -> Result<PrintVer
 }
 
 /// The real `com.trusty.memory` LaunchAgent in the user's GUI domain.
-#[cfg(target_os = "macos")]
 pub(crate) struct UserLaunchAgent;
 
-#[cfg(target_os = "macos")]
 impl UserLaunchAgent {
     fn target(&self) -> String {
         format!(
@@ -100,7 +98,6 @@ impl UserLaunchAgent {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl LaunchdUnit for UserLaunchAgent {
     fn label(&self) -> &str {
         super::super::service::LAUNCHD_LABEL
@@ -154,29 +151,6 @@ impl LaunchdUnit for UserLaunchAgent {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        Ok(())
-    }
-}
-
-/// No launchd on this platform: the unit is never loaded.
-#[cfg(not(target_os = "macos"))]
-pub(crate) struct UserLaunchAgent;
-
-#[cfg(not(target_os = "macos"))]
-impl LaunchdUnit for UserLaunchAgent {
-    fn label(&self) -> &str {
-        "launchd"
-    }
-
-    fn state(&self) -> Result<UnitState> {
-        Ok(UnitState::NotLoaded)
-    }
-
-    fn terminate(&self) -> Result<()> {
-        Ok(())
-    }
-
-    fn kickstart(&self) -> Result<()> {
         Ok(())
     }
 }
