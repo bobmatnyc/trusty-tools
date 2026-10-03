@@ -159,7 +159,11 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
                 )
                 .await?
             } else {
-                super::legacy_kg::scan_report(&palace, allow_short)?
+                let mut report = super::legacy_kg::scan_report(&palace, allow_short)?;
+                // #8729 review: the dry run describes the apply these flags run.
+                report.no_embed = no_embed;
+                report.include_content_duplicates = include_content_duplicates;
+                report
             };
             print!("{}", report.render());
             // #8434: the import committed; print it before failing on embed.

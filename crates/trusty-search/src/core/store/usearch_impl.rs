@@ -265,7 +265,9 @@ impl VectorStore for UsearchStore {
     /// (a subsequent write path would skip promotion and mutate the view).
     /// Test: `tests::test_rewrite_keys_to_relative`,
     /// `tests::test_rewrite_keys_to_relative_promotes_view_to_mutable`,
-    /// `tests::test_rewrite_keys_applies_an_arbitrary_mapping`.
+    /// `tests::test_rewrite_keys_applies_an_arbitrary_mapping`,
+    /// `a_rewrite_onto_a_mapped_id_saves_a_pair_that_reloads`,
+    /// `collapsing_and_chained_rewrites_keep_graph_and_sidecar_equal`.
     async fn rewrite_keys(
         &self,
         remap: &(dyn for<'a> Fn(&'a str) -> Option<String> + Sync),
@@ -289,10 +291,26 @@ impl VectorStore for UsearchStore {
         }
 
         let count = rewrites.len();
-        for (old_id, new_id, key) in rewrites {
-            id_map.remove(&old_id);
-            id_map.insert(new_id.clone(), key);
+        // #8778: two phases, so a chain (`a → b`, `b → c`) never reads `b` as
+        // taken. Then a rename onto an id that is still mapped — another
+        // rewrite's target, or an id the mapping left alone — replaces that
+        // entry. The replaced key keeps its vector in the graph, so the saved
+        // binary held more vectors than its sidecar, and every boot discarded
+        // the pair as torn (#3970). Collect those keys and drop their vectors.
+        for (old_id, _, _) in &rewrites {
+            id_map.remove(old_id);
+        }
+        let mut displaced: Vec<u64> = Vec::new();
+        for (_, new_id, key) in rewrites {
+            if let Some(prior) = id_map.insert(new_id.clone(), key) {
+                if prior != key {
+                    displaced.push(prior);
+                }
+            }
             key_map.insert(key, new_id);
+        }
+        for key in &displaced {
+            key_map.remove(key);
         }
         // Release the id-map locks before touching the HNSW index lock inside
         // `ensure_mutable` below — the two lock pairs are never held together
@@ -315,7 +333,16 @@ impl VectorStore for UsearchStore {
         // mutable), keeping `is_view` truthful in both cases.
         if count > 0 {
             self.ensure_mutable().await?;
-            let _index = self.index.write().await;
+            let index = self.index.write().await;
+            // #8778: see the displaced-key note above.
+            for &key in &displaced {
+                if index.contains(key) {
+                    index.remove(key).map_err(|e| {
+                        anyhow!("usearch remove (displaced by rewrite) failed: {e}")
+                    })?;
+                    self.removed_since_save.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             self.mark_dirty();
         }
 

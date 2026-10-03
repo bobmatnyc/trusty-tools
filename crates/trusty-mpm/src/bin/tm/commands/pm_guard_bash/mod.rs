@@ -66,6 +66,8 @@ mod heredoc;
 // #8161: HEAD moves into a linked worktree a live agent stands in.
 mod linked_worktree_head_move;
 mod main_checkout;
+// #8524: operator-listed runtime checkouts.
+mod operator_checkouts;
 mod path_tokens;
 mod persistence;
 // #7648: an unscoped environment dump inside a Kubernetes pod.
@@ -79,6 +81,8 @@ mod read_only_gh;
 mod read_only_git;
 mod read_only_lex;
 mod read_only_programs;
+// #8571: a read-only dispatch's cp/rm inside its session scratchpad.
+mod read_only_scratchpad;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;

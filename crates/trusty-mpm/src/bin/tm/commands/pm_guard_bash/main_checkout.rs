@@ -140,7 +140,8 @@ use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
 
 use super::{
-    PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments, unresolved_target,
+    PathEnv, git_dash_c_override, operator_checkouts, resolve_target_path, split_shell_segments,
+    unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
@@ -206,7 +207,7 @@ fn evaluate_main_checkout_destructive_command_in(
     // #8572: every destructive segment is judged, not only the first — from a
     // worktree, `git reset --hard && git -C $MAIN reset --hard` was cleared on
     // its first segment.
-    for (verb, target, _) in
+    for (verb, target, tail) in
         git_verb_targets_with_tail(command, cwd, env, is_whole_tree_destructive)
     {
         // #7100: an unexpanded variable in the path is not evidence about which
@@ -235,6 +236,11 @@ fn evaluate_main_checkout_destructive_command_in(
         if main_checkout_root(&target)
             .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
         {
+            continue;
+        }
+        // #8524: owner ruling Option C — an allowlisted runtime checkout, a lone
+        // `reset --keep`, and an empty content diff against its target.
+        if operator_checkouts::reset_keep_is_exempt(command, &verb, &tail, &target) {
             continue;
         }
         return Some(deny_reason(&verb, &target));
@@ -316,7 +322,7 @@ pub(crate) enum CommitVerdict {
 /// commit, which is a statement about the index read above, not about `git add`.
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
 /// `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`,
-/// `command_is_a_lone_commit_*`.
+/// `command_is_a_lone_commit_*`, `commit_allows_a_scratchpad_clone_only` (#8485).
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
@@ -335,13 +341,19 @@ fn evaluate_main_checkout_commit_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<CommitVerdict> {
-    let (verb, target, tail) =
-        git_verb_target_dir_with_tail(command, cwd, env, |verb, _| verb == "commit")?;
     // `main_checkout_root` rather than `is_main_checkout` for the reason #5769
     // gave the HEAD-move rule: `cd crates/foo && git commit` resolves a
     // subdirectory that shares the checkout's HEAD, and the writer query has to
     // be keyed on a directory a delegation record can actually carry.
-    let root = main_checkout_root(&target)?;
+    // #8485 review: the first commit aimed at a main checkout, not the first
+    // commit segment — `git -C <worktree> commit && git -C <main> commit -a`
+    // returned early on the worktree and never reached the lone-commit check.
+    let (verb, target, tail, root) =
+        git_verb_targets_with_tail(command, cwd, env, |verb, _| verb == "commit")
+            .into_iter()
+            .find_map(|(verb, target, tail)| {
+                main_checkout_root(&target).map(|root| (verb, target, tail, root))
+            })?;
     // #7234: that upward walk is exactly what an unresolved component subverts.
     // `git -C ~/scratch/repo commit` with `$HOME` unset leaves `~` literal, the
     // path is joined onto the launch directory, and the walk finds the LAUNCH
@@ -363,12 +375,36 @@ fn evaluate_main_checkout_commit_command_in(
     if !command_is_a_lone_commit(command) {
         return Some(CommitVerdict::Deny(composed_commit_deny_reason(&root)));
     }
+    // #8485: a disposable clone under the session scratchpad shares no HEAD with
+    // anyone — the same canonicalized proof the destructive rule uses (#8339).
+    // Asked only after the lone-commit check, and of EVERY commit target: a
+    // first-segment-only answer let `git -C <pad>/c commit; git -C <main>
+    // commit -a` through (the #5788 CRITICAL-1 shape).
+    if every_commit_lands_in_a_scratchpad_clone(command, cwd, env) {
+        return None;
+    }
     Some(classify_staged_commit(
         &tail,
         staged_paths(&target),
         &target,
         root,
     ))
+}
+
+/// Whether every `git commit` target in `command` is a scratchpad clone (#8485).
+///
+/// What: `false` when no commit target is found; otherwise `true` only when
+/// each target's checkout root resolves and
+/// [`write_lands_in_a_scratchpad_clone`] accepts it.
+/// Test: `commit_allows_a_scratchpad_clone_only`,
+/// `commit_refuses_a_scratchpad_clone_chained_to_a_main_checkout_commit`.
+fn every_commit_lands_in_a_scratchpad_clone(command: &str, cwd: &Path, env: &PathEnv) -> bool {
+    let targets = git_verb_targets_with_tail(command, cwd, env, |verb, _| verb == "commit");
+    !targets.is_empty()
+        && targets.iter().all(|(_, target, _)| {
+            main_checkout_root(target)
+                .is_some_and(|root| write_lands_in_a_scratchpad_clone(target, &root))
+        })
 }
 
 /// Whether `command` is a single `git commit` and nothing that could restage.
@@ -1559,6 +1595,96 @@ mod tests {
                 .is_some(),
             "an unresolved directory proves nothing about where the checkout runs"
         );
+    }
+
+    /// 🔴 REGRESSION (#8485): `git commit -F-` fed a heredoc inside a
+    /// disposable clone under the session scratchpad was refused as a
+    /// composed commit in a main checkout. The clone is classified by its
+    /// canonical path, so a symlink into a real checkout still denies.
+    #[test]
+    fn commit_allows_a_scratchpad_clone_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join("red-proof");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone .git");
+        for command in [
+            "git commit -F- <<'EOF'\nfix: x\n\nbody\nEOF",
+            "git commit -m 'wip'",
+        ] {
+            assert!(
+                evaluate_main_checkout_commit_command(command, &clone).is_none(),
+                "`{command}` in a scratchpad clone shares no HEAD"
+            );
+        }
+        let real = dir.path().join("realrepo");
+        std::fs::create_dir_all(real.join(".git")).expect("mkdir real .git");
+        let link = dir.path().join("scratchpad").join("linkrepo");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", &link).is_some(),
+            "a symlink into a real checkout must not buy the exemption"
+        );
+    }
+
+    /// 🔴 REGRESSION (#8485 review, CRITICAL): the scratchpad exemption read
+    /// only the FIRST commit segment, so a clone commit chained to a main
+    /// checkout commit was allowed — the #5788 CRITICAL-1 shape. Both orders,
+    /// every separator, and a linked worktree in the first slot must deny.
+    #[test]
+    fn commit_refuses_a_scratchpad_clone_chained_to_a_main_checkout_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join("c");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone .git");
+        let main = main_checkout_dir();
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(&worktree).expect("mkdir wt");
+        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        let (pad, real, wt) = (clone.display(), main.path().display(), worktree.display());
+        let pad_first = format!("git -C {pad} commit --allow-empty -m x");
+        let main_side = format!("git -C {real} commit -a -m src");
+        let wt_first = format!("git -C {wt} commit --allow-empty -m x");
+        for sep in [" && ", " ; ", " || ", " | ", "\n"] {
+            for command in [
+                format!("{pad_first}{sep}{main_side}"),
+                format!("{main_side}{sep}{pad_first}"),
+                format!("{wt_first}{sep}{main_side}"),
+            ] {
+                assert!(
+                    matches!(
+                        evaluate_main_checkout_commit_command(&command, &clone),
+                        Some(CommitVerdict::Deny(_))
+                    ),
+                    "`{command}` must deny"
+                );
+            }
+        }
+    }
+
+    /// Probe (B3 round 3): a main-checkout commit wrapped in a subshell or a
+    /// brace group must still reach the commit rule, not lex as `(git` or `{`.
+    /// Ignored because all four forms are allowed today, on this branch and in
+    /// the released 1.7.10; the fix belongs to pm-guard batch B1. Tracked in
+    /// #9127.
+    #[test]
+    #[ignore = "pre-existing bypass, see issue #9127: subshell/brace-group commit skips the commit rule"]
+    fn commit_in_a_subshell_or_brace_group_must_deny() {
+        let main = main_checkout_dir();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let real = main.path().display();
+        let missed: Vec<String> = [
+            format!("(git -C {real} commit -a -m x)"),
+            format!("( git -C {real} commit -a -m x)"),
+            format!("( git -C {real} commit -a -m x )"),
+            format!("{{ git -C {real} commit -a -m x; }}"),
+        ]
+        .into_iter()
+        .filter(|command| {
+            !matches!(
+                evaluate_main_checkout_commit_command(command, elsewhere.path()),
+                Some(CommitVerdict::Deny(_))
+            )
+        })
+        .collect();
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
     }
 
     #[test]

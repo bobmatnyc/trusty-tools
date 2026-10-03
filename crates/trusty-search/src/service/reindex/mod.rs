@@ -177,6 +177,10 @@ pub(crate) use semaphore::remove_index_semaphore;
 /// Test: `service::server::tests_health_degraded::health_does_not_flag_an_in_flight_reindex_as_stuck_mid_walk`.
 pub(crate) use semaphore::index_task_in_flight;
 
+// #8659: who holds an index's permit, so a waiting migration can name it.
+mod permit_holder;
+pub(crate) use permit_holder::{index_permit_holder, mark_index_permit_holder};
+
 /// Re-export the cancel-signal accessors `service::server::search` needs (#3049).
 ///
 /// Why: `unregister_index` signals a cancel before waiting on the index permit

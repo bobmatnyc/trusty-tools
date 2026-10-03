@@ -106,6 +106,25 @@ fn config_pm_guard_can_be_disabled() {
     assert_eq!(cfg.hooks, HooksConfig::default());
 }
 
+/// #8524: the runtime checkout list parses, defaults empty, and a mistyped
+/// list leaves it empty — the narrower rule never applies by accident.
+#[test]
+fn config_pm_guard_runtime_checkouts() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(
+        dir.path(),
+        "[pm_guard]\nruntime_checkouts = [\"/srv/cron\"]\n",
+    );
+    assert_eq!(
+        cfg.pm_guard.runtime_checkouts,
+        vec![PathBuf::from("/srv/cron")]
+    );
+    assert!(cfg.pm_guard.enabled);
+    let bad = load_from_str(dir.path(), "[pm_guard]\nruntime_checkouts = \"/srv\"\n");
+    assert!(bad.pm_guard.runtime_checkouts.is_empty());
+    assert!(MpmConfig::default().pm_guard.runtime_checkouts.is_empty());
+}
+
 /// #9018 Fail-Open Check: a file that cannot be parsed — including one whose
 /// only fault is a mistyped `enabled` — leaves the guard ON, never off.
 #[test]
