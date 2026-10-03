@@ -443,8 +443,14 @@ async fn tm_route_smoke() {
         eprintln!("tm not on PATH; skipping tm_route_smoke");
         return;
     }
-    let tmp = tempfile::tempdir().unwrap();
-    let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
+    // #9139: `tm serve --stdio` + `session_new` must never reach the live
+    // daemon. Under the hermetic env the daemon socket is a temp path with
+    // nothing listening, so a spawn or handshake failure surfaces as `Err`
+    // (reported below), never as a fallback to ambient state.
+    let hermetic = HermeticChildEnv::install();
+    let project = hermetic.root().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let bridge = ProcessPmBridge::from_project(project);
     let result = bridge
         .run(BridgeRoute::Tm, None, "report session status")
         .await;
