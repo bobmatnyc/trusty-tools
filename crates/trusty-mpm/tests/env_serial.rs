@@ -21,6 +21,8 @@ mod common;
 
 mod auth_cost;
 mod daemon_dual_serve;
+// #9121: a test daemon's environment carries no inherited secret.
+mod daemon_env_isolation;
 mod inproject_cold_start;
 mod inproject_git_failure;
 mod mcp_spawn_gate;

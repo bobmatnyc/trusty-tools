@@ -284,9 +284,10 @@ pub struct DaemonState {
     /// What: [`crate::disk::size_index::DirSizeIndex`] behind a `parking_lot`
     /// `Mutex`, which is all it needs: nothing in it blocks or spawns, and the
     /// lock is never held across an await.
+    /// #8985: beside it, the last complete `disk_survey` pass per key.
     /// Test: `crate::disk::survey_tests` covers the index's use; the daemon
     /// side is exercised through `mcp_disk::disk_survey`.
-    pub(super) disk_size_index: Arc<Mutex<crate::disk::size_index::DirSizeIndex>>,
+    pub(super) disk: crate::daemon::disk_survey_cache::DiskResources,
     /// SESSCTL control-plane session registry (WI-2, #1593).
     ///
     /// Why: every HTTP handler and CLI command for the SESSCTL surface needs a
@@ -565,7 +566,7 @@ impl DaemonState {
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
             deliverable_manager: tokio::sync::OnceCell::new(),
-            disk_size_index: Arc::new(Mutex::new(crate::disk::size_index::DirSizeIndex::new())),
+            disk: Default::default(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),
@@ -649,7 +650,7 @@ impl DaemonState {
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
             deliverable_manager: tokio::sync::OnceCell::new(),
-            disk_size_index: Arc::new(Mutex::new(crate::disk::size_index::DirSizeIndex::new())),
+            disk: Default::default(),
             session_registry,
             proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
             supervised: std::sync::atomic::AtomicBool::new(true),

@@ -895,6 +895,66 @@ pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Pin `TRUSTY_MPM_WORKSPACE_ROOT` at an empty fixture dir for one test (#6551).
+///
+/// Why: `prune_worktrees_core` and `reconcile_worktrees_core` resolve the
+/// worktree root through `TrustyToolsConfig::load()` on EVERY call, and with the
+/// variable unset that resolves to `$HOME/trusty-mpm-projects` — the operator's
+/// real fleet. Two consequences, both observed: the two transports enumerate
+/// ~200 real worktrees instead of the `TempDir` fixture, and a sibling test that
+/// sets or clears this same process-global variable between the HTTP call and
+/// the RPC call splits the parity comparison. Pinning it removes both, because
+/// the two calls then read one value that names an empty directory.
+///
+/// What: takes the crate-wide `env_test_lock` and sets the variable, restoring
+/// the previous value (or removing it) on drop, unwinding panics included.
+/// BOTH guards are needed and they cover different populations, exactly as
+/// `prune::tests::prune_spares_a_stopped_records_workspace` records:
+/// `env_test_lock` serialises the env-precedence tests, `#[serial_test::serial]`
+/// serialises `connectors::tm_tests`, which mutates this variable under
+/// `serial` alone. The lock is held across the awaited route calls on purpose —
+/// releasing it earlier is the race.
+///
+/// `#[serial_test::file_serial]` is deliberately NOT used: the pinned resource
+/// is a process environment variable, so under `cargo nextest`'s
+/// process-per-test model (#4162) each test already has its own copy and there
+/// is nothing shared across processes to serialise.
+///
+/// Test: `managed_prune_worktrees_enumerates_only_the_pinned_workspace_root`.
+#[cfg(test)]
+pub(crate) struct WorkspaceRootEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    prev: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl WorkspaceRootEnv {
+    /// Pin the variable at `root` until the guard drops.
+    pub(crate) fn pin(root: &std::path::Path) -> Self {
+        let lock = env_test_lock();
+        let key = WORKSPACE_ROOT_ENV;
+        let prev = std::env::var_os(key);
+        // SAFETY: the crate-wide `env_test_lock` is held for this value's whole
+        // lifetime, and every other mutator of this variable takes it too.
+        unsafe { std::env::set_var(key, root) };
+        Self { _lock: lock, prev }
+    }
+}
+
+#[cfg(test)]
+impl Drop for WorkspaceRootEnv {
+    fn drop(&mut self) {
+        let key = WORKSPACE_ROOT_ENV;
+        // SAFETY: `_lock` is still held — it is dropped after this field.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "trusty_tools_config_tests.rs"]
 mod trusty_tools_config_tests;

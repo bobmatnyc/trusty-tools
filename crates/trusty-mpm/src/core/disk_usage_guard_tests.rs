@@ -19,6 +19,7 @@ fn measured(usage_pct: f32) -> MeasuredMount {
     MeasuredMount {
         mount_point: "/System/Volumes/Data".to_string(),
         usage_pct,
+        bytes: None,
     }
 }
 
@@ -297,4 +298,92 @@ fn the_default_gate_measures_the_real_mount() {
         (None, None) => {}
         (a, b) => panic!("MeasureTarget and a direct measure() disagree: {a:?} vs {b:?}"),
     }
+}
+
+/// Why (#8528): the gate's percent must be `df`'s formula — used over
+/// `used + available` — not `used / total`, which counts root-reserved blocks
+/// as free and is what `sysinfo` reported.
+/// Test: this test.
+#[test]
+fn df_usage_matches_the_df_formula() {
+    // 100 blocks of 4 KiB: 30 free, of which 20 are available to non-root.
+    let bytes = df_usage(100, 30, 20, 4096).expect("consistent sample");
+    assert_eq!(bytes.used_bytes, 70 * 4096);
+    assert_eq!(bytes.available_bytes, 20 * 4096);
+    let pct = bytes.usage_pct().expect("non-empty mount");
+    assert!((pct - 77.777_78).abs() < 0.001, "{pct}");
+}
+
+/// Why (#8528): an impossible sample is unmeasurable, never a guessed figure.
+/// Test: this test.
+#[test]
+fn df_usage_rejects_an_inconsistent_sample() {
+    assert_eq!(df_usage(10, 11, 0, 4096), None, "bfree above blocks");
+    assert_eq!(df_usage(u64::MAX, 0, 0, 2), None, "overflow");
+    let empty = df_usage(0, 0, 0, 4096).expect("an all-zero sample is consistent");
+    assert_eq!(empty.usage_pct(), None, "no capacity is no percent");
+}
+
+/// Why (#8528): the closure condition — a refusal states the raw bytes it
+/// measured, so it can be checked against `df` for the same mount.
+/// Test: this test.
+#[test]
+fn a_refusal_states_the_raw_bytes_it_measured() {
+    let mut m = measured(93.0);
+    m.bytes = Some(UsageBytes {
+        used_bytes: 930,
+        available_bytes: 70,
+    });
+    let msg = refusal_if_over(Some(&m), &threshold(90))
+        .expect("over threshold refuses")
+        .to_string();
+    assert!(
+        msg.contains("930 bytes used, 70 bytes available, as df counts them"),
+        "{msg}"
+    );
+}
+
+/// Why (#8528): `statvfs` on a path that does not exist fails, and that is
+/// unmeasurable — the fail-closed provisioning path then refuses.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_mount_point_is_unmeasurable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    assert_eq!(statvfs_usage(&dir.path().join("absent")), None);
+}
+
+/// 🔴 REGRESSION (#8528): the guard's percent for a mount matches the
+/// `Capacity` column `df -k` prints for that mount.
+///
+/// Why: the guard refused at 93% while `df` read 74% for the same mount. `df`
+/// rounds its percent UP to a whole number, so the guard's exact figure must
+/// sit in `(df - 1, df]`, widened by half a point for usage drifting between
+/// the two reads. Fails on origin/main, where `sysinfo`'s "available for
+/// important usage" put the dev host at 77% against `df`'s 81%.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn the_guard_percent_matches_df_for_the_same_mount() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let m = measure(dir.path()).expect("the temp dir's mount is measurable");
+    let out = std::process::Command::new("df")
+        .arg("-k")
+        .arg(&m.mount_point)
+        .output()
+        .expect("df runs");
+    assert!(out.status.success(), "df failed: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let df_pct: f32 = text
+        .lines()
+        .nth(1)
+        .and_then(|row| row.split_whitespace().find(|f| f.ends_with('%')))
+        .and_then(|f| f.trim_end_matches('%').parse().ok())
+        .unwrap_or_else(|| panic!("no Capacity column in df output:\n{text}"));
+    assert!(
+        m.usage_pct > df_pct - 1.5 && m.usage_pct <= df_pct + 0.5,
+        "guard read {:.2}% for {}, df reads {df_pct}%:\n{text}",
+        m.usage_pct,
+        m.mount_point
+    );
 }

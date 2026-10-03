@@ -27,21 +27,26 @@
 //! On first use for a never-before-selected `login`: reads the OPERATOR's
 //! `hosts.yml` (never mutated) to confirm `login` is actually logged in —
 //! refusing, dir untouched, when it is not — copies `config.yml` if present,
-//! and writes a NEW `hosts.yml` naming only `login`. No token is ever
-//! copied: `gh`'s credential store keys by login in the OS keyring/git
-//! credential store, so the freshly-written `hosts.yml` alone is enough for
-//! `gh auth token` (run with `GH_CONFIG_DIR` pointed at this dir) to resolve
-//! that account's own credential. `gh auth switch` is never called — the
-//! isolation comes from a SEPARATE config dir, not from mutating the shared
-//! one's active pointer.
+//! and writes a NEW `hosts.yml` naming only `login`. No token is copied or
+//! written: the new `hosts.yml` carries no `oauth_token`. Whether
+//! `gh auth token` (run with `GH_CONFIG_DIR` pointed at this dir) then finds a
+//! credential depends on where `gh` stored it. A keyring-backed login is read
+//! from the OS keyring by host and login, outside this dir, so it can resolve.
+//! A token kept in the operator's `hosts.yml` (`gh auth login
+//! --insecure-storage`) is not carried over, so that account resolves no token
+//! here. A token `gh` does return is only a candidate: `gh` can fall back to
+//! another account's keyring slot, so callers prove it with `GET /user`
+//! ([`crate::core::gh_account_proof`], #8510) before use. `gh auth switch` is
+//! never called — the isolation comes from a SEPARATE config dir, not from
+//! mutating the shared one's active pointer.
 //!
 //! Test: `account_config_dir_tests.rs`.
 
 use std::path::{Path, PathBuf};
 
 /// Restrict `dir` to owner-only access (#7166 review follow-up MEDIUM) —
-/// `gh`'s own `hosts.yml` is written 0600 because it normally holds a token;
-/// this directory never holds one, but it does reveal which GitHub accounts
+/// `gh`'s own `hosts.yml` is written 0600 because it can hold a token
+/// (insecure storage); this directory never holds one, but it does reveal which GitHub accounts
 /// are used with `tm` and copies the operator's real `config.yml` verbatim,
 /// so it must not be left at the ambient umask on a shared host.
 /// Test: `ensure_account_config_dir_sets_restrictive_permissions`.
@@ -88,8 +93,8 @@ fn set_private_file_permissions(_path: &Path) -> Result<(), String> {
 /// is NEVER created in that case. Otherwise creates the directory, copies
 /// `config.yml` when the operator has one (absent is not an error — `gh`
 /// tolerates a config dir with no `config.yml`), and writes a fresh
-/// `hosts.yml` naming ONLY the canonical spelling of `login` (no token —
-/// `gh`'s credential store keys by login independently of this file). Both
+/// `hosts.yml` naming ONLY the canonical spelling of `login` (no token — see
+/// the module doc for which credentials `gh` can still resolve here). Both
 /// paths leave `config.yml` declaring `version: "1"` (#8510), via
 /// [`crate::core::gh_account_dir::ensure_config_version`].
 /// Test: `ensure_account_config_dir_builds_from_operator_hosts_yml`,

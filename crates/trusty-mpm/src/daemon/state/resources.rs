@@ -31,7 +31,14 @@ impl DaemonState {
     pub fn disk_size_index(
         &self,
     ) -> std::sync::Arc<parking_lot::Mutex<crate::disk::size_index::DirSizeIndex>> {
-        std::sync::Arc::clone(&self.disk_size_index)
+        std::sync::Arc::clone(&self.disk.index)
+    }
+
+    /// The daemon's last complete `disk_survey` pass per key (#8985).
+    pub(crate) fn disk_survey_cache(
+        &self,
+    ) -> std::sync::Arc<crate::daemon::disk_survey_cache::DiskSurveyCache> {
+        std::sync::Arc::clone(&self.disk.surveys)
     }
 
     // ---- circuit breakers ----------------------------------------------

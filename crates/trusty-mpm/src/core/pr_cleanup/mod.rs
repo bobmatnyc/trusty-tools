@@ -99,6 +99,7 @@ pub mod registry;
 mod remove;
 mod repo_check;
 pub mod sweep;
+mod tip_relation;
 
 #[cfg(test)]
 #[path = "tests.rs"]
@@ -441,10 +442,8 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
             && let Some(branch) = t.branch.as_deref()
             && let Some(refusal) = landed::unlanded(git, req, &merged.merge, branch)
         {
-            lines.push(StepLine::failed(
-                STEP,
-                format!("{}: {refusal}", t.path.display()),
-            ));
+            let line = StepLine::failed(STEP, format!("{}: {refusal}", t.path.display()));
+            push_kept(git, req, view, t, line, lines);
             continue;
         }
         let line = remove::remove_one(
@@ -459,10 +458,12 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
         )
         .await;
         // `remove_one` answers ok only when the tree is gone (or would be).
-        if !line.is_failure() {
+        if line.is_failure() {
+            push_kept(git, req, view, t, line, lines);
+        } else {
             removed.push(t.path.clone());
+            lines.push(line);
         }
-        lines.push(line);
     }
     Some(
         entries
@@ -470,6 +471,32 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
             .filter(|e| !removed.contains(&e.path))
             .collect(),
     )
+}
+
+/// Push a kept tree's line, stating how its tip relates to the merged head.
+///
+/// Why (#8603): a kept line that names a tip and a merged head without their
+/// relation was misread as unpushed work when the tip was an ancestor.
+/// What: appends [`tip_relation::note`] to `line`, then pushes a separate
+/// WARNING line when the tip carries commits the merged head does not.
+/// Test: `cleanup_8603_a_kept_tree_on_an_ancestor_says_every_commit_is_in_the_merge`,
+/// `cleanup_8603_a_kept_tree_ahead_of_the_head_warns_separately`.
+fn push_kept<T: Git>(
+    git: &T,
+    req: &CleanupRequest,
+    view: &PrView,
+    entry: &plan::WorktreeEntry,
+    mut line: StepLine,
+    lines: &mut Vec<StepLine>,
+) {
+    let (tip, head) = (entry.head.as_str(), view.head_ref_oid.as_str());
+    let rel = tip_relation::relation(git, req, tip, head);
+    line.detail.push_str(&tip_relation::note(&rel, tip, head));
+    lines.push(line);
+    let shown = entry.path.display().to_string();
+    if let Some(warning) = tip_relation::unpushed_warning(&shown, &rel, tip, head) {
+        lines.push(StepLine::failed("worktree", warning));
+    }
 }
 
 /// Is this worktree the PR's own head — by branch name, or by sitting on the

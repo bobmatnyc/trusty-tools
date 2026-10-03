@@ -2812,3 +2812,114 @@ async fn cleanup_8489_a_failed_worktree_listing_deletes_no_branch() {
     let joined = git.calls().join("\n");
     assert!(!joined.contains("git branch -D"), "{joined}");
 }
+
+// ── #8603: a kept tree states how its tip relates to the merged head ────
+
+/// A `git` fake whose PR-branch tree sits at [`SIB_OID`], not the merged head,
+/// answering the relation probe with `relation` routes.
+fn git_kept_tip(relation: &[(&str, Option<&str>)]) -> Scripted {
+    let listing = format!(
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\n\
+         worktree {TREE}\nHEAD {SIB_OID}\nbranch refs/heads/{BRANCH}\n\n"
+    );
+    let mut s = Scripted::new()
+        .on(ORIGIN_QUERY, ORIGIN_URL)
+        .on(
+            "git ls-remote",
+            &format!("{HEAD_OID}\trefs/heads/{BRANCH}\n"),
+        )
+        .on("git push origin --delete", "")
+        .on("git worktree list", &listing)
+        .on("git branch --format", &branch_listing())
+        .on("git worktree prune", "")
+        .on("git fetch --prune", "");
+    for (needle, stdout) in relation {
+        s = match stdout {
+            Some(out) => s.on(needle, out),
+            None => s.on_fail(needle, ""),
+        };
+    }
+    s
+}
+
+/// Run cleanup against `git` with the ownership gate refusing the tree.
+async fn kept_report(git: &Scripted) -> String {
+    let mut claims = FakeClaims::held_by("tm-bobmatnyc-01");
+    claims.refuse = Some("nothing proves that session ended".to_string());
+    run(
+        &gh_merged(),
+        git,
+        &claims,
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await
+    .render()
+}
+
+/// 🔴 REGRESSION (#8603): a tree kept with its tip an ANCESTOR of the merged
+/// head says every commit on it is in the merge.
+///
+/// Fails on origin/main: the kept line named neither the relation nor the
+/// merged head, and a downstream agent read the tip as unpushed work.
+#[tokio::test]
+async fn cleanup_8603_a_kept_tree_on_an_ancestor_says_every_commit_is_in_the_merge() {
+    let git = git_kept_tip(&[("git merge-base --is-ancestor", Some(""))]);
+    let rendered = kept_report(&git).await;
+    assert!(
+        rendered.contains(
+            "its tip 55555555 is an ancestor of the merged head abc1234d — every commit on it \
+             is in the merge"
+        ),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("WARNING"), "{rendered}");
+    let joined = git.calls().join("\n");
+    assert!(!joined.contains("worktree remove"), "{joined}");
+}
+
+/// #8603: a tip carrying commits the merge did not gets a SEPARATE warning.
+#[tokio::test]
+async fn cleanup_8603_a_kept_tree_ahead_of_the_head_warns_separately() {
+    let git = git_kept_tip(&[
+        ("git merge-base --is-ancestor", None),
+        ("git rev-list --count", Some("3\n")),
+    ]);
+    let rendered = kept_report(&git).await;
+    assert!(
+        rendered.contains("its tip 55555555 has 3 commit(s) the merged head abc1234d"),
+        "{rendered}"
+    );
+    let warning = rendered
+        .lines()
+        .find(|l| l.contains("WARNING:"))
+        .unwrap_or_else(|| panic!("no separate warning line:\n{rendered}"));
+    assert!(
+        warning.contains(&format!("{TREE} holds 3 commit(s) beyond the merged head")),
+        "{warning}"
+    );
+    assert!(
+        !warning.contains("nothing proves"),
+        "the warning is its own line: {rendered}"
+    );
+}
+
+/// #8603 error arm: a relation git cannot answer is stated as unknown, never
+/// guessed as "every commit is in the merge".
+#[tokio::test]
+async fn cleanup_8603_an_unreadable_relation_is_stated_as_unknown() {
+    let git = git_kept_tip(&[]).on_fail("git merge-base --is-ancestor", "fatal: bad object");
+    let rendered = kept_report(&git).await;
+    assert!(
+        rendered.contains(
+            "how its tip 55555555 relates to the merged head abc1234d could not be read: fatal: \
+             bad object"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("every commit on it is in the merge"),
+        "{rendered}"
+    );
+}

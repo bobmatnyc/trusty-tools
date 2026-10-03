@@ -22,6 +22,8 @@ mod common;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
+// #8985: `disk_survey` through a built daemon's `/rpc`.
+mod disk_survey_mcp_smoke;
 #[cfg(feature = "daemon")]
 mod e2e;
 mod inproject_hygiene_test;

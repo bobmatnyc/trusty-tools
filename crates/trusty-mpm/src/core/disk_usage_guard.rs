@@ -71,6 +71,55 @@ pub struct MeasuredMount {
     pub mount_point: String,
     /// Used capacity of that mount as a percentage, 0..=100.
     pub usage_pct: f32,
+    /// The raw figures `usage_pct` was computed from, when measured (#8528).
+    pub bytes: Option<UsageBytes>,
+}
+
+/// The `df`-equivalent figures one mount measured at (#8528).
+///
+/// Why: a refusal stating only a percent cannot be cross-checked against `df`
+/// for the same mount, and the guard once read 93% where `df` read 74%.
+/// What: `used_bytes` is `(f_blocks - f_bfree) * f_frsize` and
+/// `available_bytes` is `f_bavail * f_frsize`, the two numbers `df` prints.
+/// Test: `df_usage_matches_the_df_formula`,
+/// `a_refusal_states_the_raw_bytes_it_measured`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UsageBytes {
+    /// Bytes in use, as `df`'s `Used` column counts them.
+    pub used_bytes: u64,
+    /// Bytes an unprivileged writer can still use, `df`'s `Avail` column.
+    pub available_bytes: u64,
+}
+
+impl UsageBytes {
+    /// `df`'s `Capacity`: used over `used + available`, as a percent.
+    ///
+    /// What: `None` when both are zero, which no real mount reports.
+    /// Test: `df_usage_matches_the_df_formula`.
+    #[must_use]
+    pub fn usage_pct(&self) -> Option<f32> {
+        let denom = self.used_bytes.checked_add(self.available_bytes)?;
+        if denom == 0 {
+            return None;
+        }
+        // f64 keeps a multi-TiB ratio exact enough; the result is 0..=100.
+        Some((self.used_bytes as f64 / denom as f64 * 100.0) as f32)
+    }
+}
+
+/// [`UsageBytes`] from raw `statvfs` fields (#8528).
+///
+/// Why: pure, so the formula is tested without a filesystem.
+/// What: `None` when `bfree > blocks` or a product overflows — a nonsense
+/// sample, reported as unmeasurable rather than as a guessed figure.
+/// Test: `df_usage_matches_the_df_formula`,
+/// `df_usage_rejects_an_inconsistent_sample`.
+#[must_use]
+pub fn df_usage(blocks: u64, bfree: u64, bavail: u64, frsize: u64) -> Option<UsageBytes> {
+    Some(UsageBytes {
+        used_bytes: blocks.checked_sub(bfree)?.checked_mul(frsize)?,
+        available_bytes: bavail.checked_mul(frsize)?,
+    })
 }
 
 /// Render a usage percentage, TRUNCATED rather than rounded.
@@ -102,9 +151,9 @@ pub fn fmt_pct(usage_pct: &f32) -> String {
 pub enum WorktreeDiskError {
     /// The mount holding the target is at or above the configured threshold.
     #[error(
-        "refusing to create a worktree: {mount_point} is at {} disk usage, at or above the \
-         disk.max_usage_pct threshold of {threshold_pct}%{rejected_note} — free space or raise \
-         disk.max_usage_pct in {config_path}",
+        "refusing to create a worktree: {mount_point} is at {} disk usage{raw_note}, at or above \
+         the disk.max_usage_pct threshold of {threshold_pct}%{rejected_note} — free space or \
+         raise disk.max_usage_pct in {config_path}",
         fmt_pct(usage_pct)
     )]
     OverThreshold {
@@ -112,6 +161,9 @@ pub enum WorktreeDiskError {
         mount_point: String,
         /// Measured used percentage of that mount.
         usage_pct: f32,
+        /// #8528: ` (<used> used, <avail> available, as df counts them)`, or
+        /// empty when no raw figures were measured.
+        raw_note: String,
         /// Threshold in force at the time of the decision.
         threshold_pct: u8,
         /// Empty, or the parenthetical naming a discarded configured value.
@@ -229,6 +281,7 @@ pub fn refusal_if_over(
     Some(WorktreeDiskError::OverThreshold {
         mount_point: measured.mount_point.clone(),
         usage_pct: measured.usage_pct,
+        raw_note: measured.bytes.map(raw_note).unwrap_or_default(),
         threshold_pct: threshold.threshold_pct,
         rejected_note: threshold.rejected_note(),
         config_path: config_path_display(),
@@ -266,20 +319,71 @@ pub fn check_usage(
 
 /// Measure the mount that holds `path`.
 ///
-/// Why: the ONE sysinfo-touching line in this module, so every decision above
-/// it stays pure.
-/// What: delegates to [`trusty_common::host_metrics::mount_for_path`], which
-/// resolves the nearest existing ancestor (the worktree does not exist yet) and
-/// picks its mount by device id. `None` when the OS lists no mount on that
-/// device — an unmeasurable result, never a substituted one.
-/// Test: covered live by `tests/worktree_disk_usage_gate.rs`; the selection
-/// rule itself is tested in `trusty_common::host_metrics`.
+/// Why: the ONE filesystem-touching function in this module, so every decision
+/// above it stays pure. #8528: the percent is `df`'s, not `sysinfo`'s. On macOS
+/// `sysinfo` reports "available capacity for important usage", which can sit
+/// far from `df` in either direction (93% against `df`'s 74% in the report;
+/// 77% against 80% on the dev host) — a gate an operator cannot cross-check.
+/// What: [`trusty_common::host_metrics::mount_for_path`] picks the mount (the
+/// nearest existing ancestor, matched by device id); on unix the usage is then
+/// read with `statvfs` on that mount point through [`df_usage`]. `None` when
+/// the OS lists no mount on that device or `statvfs` fails — an unmeasurable
+/// result, never a substituted one. Non-unix keeps the `sysinfo` figure.
+/// Test: `the_guard_percent_matches_df_for_the_same_mount`,
+/// `an_unreadable_mount_point_is_unmeasurable`; the selection rule itself is
+/// tested in `trusty_common::host_metrics`.
 #[must_use]
 pub fn measure(path: &Path) -> Option<MeasuredMount> {
-    trusty_common::host_metrics::mount_for_path(path).map(|m| MeasuredMount {
-        mount_point: m.mount_point,
-        usage_pct: m.usage_pct,
-    })
+    let mount = trusty_common::host_metrics::mount_for_path(path)?;
+    #[cfg(unix)]
+    {
+        let bytes = statvfs_usage(Path::new(&mount.mount_point))?;
+        Some(MeasuredMount {
+            usage_pct: bytes.usage_pct()?,
+            mount_point: mount.mount_point,
+            bytes: Some(bytes),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Some(MeasuredMount {
+            mount_point: mount.mount_point,
+            usage_pct: mount.usage_pct,
+            bytes: None,
+        })
+    }
+}
+
+/// `df`'s figures for the filesystem holding `path`, via `statvfs` (#8528).
+///
+/// What: `None`, with a `warn!`, when `statvfs` fails.
+/// Test: `the_guard_percent_matches_df_for_the_same_mount`,
+/// `an_unreadable_mount_point_is_unmeasurable`.
+#[cfg(unix)]
+pub(crate) fn statvfs_usage(path: &Path) -> Option<UsageBytes> {
+    match nix::sys::statvfs::statvfs(path) {
+        // The field widths differ per platform (u32 on macOS, u64 on Linux),
+        // so each widening is lossless here and an identity there.
+        #[allow(clippy::useless_conversion)]
+        Ok(s) => df_usage(
+            u64::from(s.blocks()),
+            u64::from(s.blocks_free()),
+            u64::from(s.blocks_available()),
+            u64::from(s.fragment_size()),
+        ),
+        Err(e) => {
+            warn!(path = %path.display(), "disk-usage gate: statvfs failed ({e})");
+            None
+        }
+    }
+}
+
+/// ` (<used> used, <avail> available, as df counts them)` (#8528).
+fn raw_note(bytes: UsageBytes) -> String {
+    format!(
+        " ({} bytes used, {} bytes available, as df counts them)",
+        bytes.used_bytes, bytes.available_bytes
+    )
 }
 
 /// How a provisioning path obtains the measurement its disk gate applies.
