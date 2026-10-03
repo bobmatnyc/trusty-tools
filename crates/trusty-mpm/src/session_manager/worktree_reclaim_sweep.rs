@@ -54,6 +54,8 @@ use super::worktree_reclaim::{
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
 use super::worktree_reclaim_launch::launch_refusal;
+// #8301: the preview's deadline and the batched pull-request listing.
+use super::worktree_reclaim_budget::{inspect_within, reclaim_index};
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
 // branch name alone.
 use super::worktree_reclaim_pr_match::{GhLandingProbe, PrResolution, resolve_with_index};
@@ -252,48 +254,53 @@ fn survey_scanned(
             });
             continue;
         }
-        // #7889: the landing-ref refresh gate 6 depends on runs in
-        // `reclaim_scoped`, on the destructive path only — a survey never
-        // mutates refs (#7652 critic round).
-        let index = indexes
-            .entry(scanned.registry_root.clone())
-            .or_insert_with(|| index_for(&scanned.registry_root));
-        // #6561 (the per-branch retry) and #7267 (the round-stem and head-commit
-        // widening) both live in `resolve_with_index`, so this call site and the
-        // pre-delete re-check below cannot drift apart.
-        // #8109: the by-name answer rides beside the final one.
-        let PrResolution {
-            by_name,
-            landing: pr,
-        } = resolve_with_index(
-            &scanned.path,
-            &scanned.registry_root,
-            scanned.branch.as_deref(),
-            index,
-            per_branch_fallback,
-            &GhLandingProbe,
-        );
-        // #6806: WHOSE claim, not merely whether one exists.
-        let claim = in_use.claim_state(&scanned.path);
-        // #7232: a claim that stopped blocking has to be visible, or the change
-        // reads as a regression to whoever saw yesterday's refusal.
-        if let Some(note) = claim.note() {
-            tracing::info!(path = %scanned.path.display(), "{note}");
-        }
-        let verdict = classify_with_landed_content(
-            &scanned.path,
-            scanned.admission,
-            &claim,
-            &pr,
-            &inspect_dirt,
-            agent_state,
-            // #7652: gate 4b's owner map rides in the claim snapshot.
-            &in_use.owners,
-            keep_list,
-            landed_content,
-        );
-        // #8109: no pull request of its own admits only on the landed proof.
-        let verdict = own_pr_gate(&scanned.path, verdict, &by_name, landed_content);
+        // #8301: every child this inspection starts ends at the deadline, and an
+        // inspection the deadline interrupted is kept, whatever it answered.
+        let (pr, verdict) = inspect_within(&scanned.path, budget.classify, || {
+            // #7889: the landing-ref refresh gate 6 depends on runs in
+            // `reclaim_scoped`, on the destructive path only — a survey never
+            // mutates refs (#7652 critic round).
+            let index = indexes
+                .entry(scanned.registry_root.clone())
+                .or_insert_with(|| index_for(&scanned.registry_root));
+            // #6561 (the per-branch retry) and #7267 (the round-stem and
+            // head-commit widening) both live in `resolve_with_index`, so this
+            // call site and the pre-delete re-check below cannot drift apart.
+            // #8109: the by-name answer rides beside the final one.
+            let PrResolution {
+                by_name,
+                landing: pr,
+            } = resolve_with_index(
+                &scanned.path,
+                &scanned.registry_root,
+                scanned.branch.as_deref(),
+                index,
+                per_branch_fallback,
+                &GhLandingProbe,
+            );
+            // #6806: WHOSE claim, not merely whether one exists.
+            let claim = in_use.claim_state(&scanned.path);
+            // #7232: a claim that stopped blocking has to be visible, or the
+            // change reads as a regression to whoever saw yesterday's refusal.
+            if let Some(note) = claim.note() {
+                tracing::info!(path = %scanned.path.display(), "{note}");
+            }
+            let verdict = classify_with_landed_content(
+                &scanned.path,
+                scanned.admission,
+                &claim,
+                &pr,
+                &inspect_dirt,
+                agent_state,
+                // #7652: gate 4b's owner map rides in the claim snapshot.
+                &in_use.owners,
+                keep_list,
+                landed_content,
+            );
+            // #8109: no pull request of its own admits only on the landed proof.
+            let verdict = own_pr_gate(&scanned.path, verdict, &by_name, landed_content);
+            (pr, verdict)
+        });
         candidates.push(ReclaimCandidate {
             // Measured in a SECOND pass — see below.
             bytes: None,
@@ -691,7 +698,8 @@ pub(crate) fn reclaim_scoped(
         &initial,
         probes.index_for,
         probes.agent_state,
-        SurveyBudget::for_reclaim(),
+        // #8301: a preview stops classifying at its deadline; `Remove` does not.
+        SurveyBudget::for_mode(mode),
         true,
         &(probes.keep_list)(),
         // #7889: the operator typed `prune-worktrees --merged-prs`, so the
@@ -937,7 +945,8 @@ pub(crate) fn reclaim_merged_pr_worktrees(
         repos_root,
         &FreshProbes {
             in_use_now: in_use_paths,
-            index_for: &PrIndex::from_gh,
+            // #8301: one full listing per repository, not one call per branch.
+            index_for: &reclaim_index,
             agent_state,
             keep_list,
             launched_from,
