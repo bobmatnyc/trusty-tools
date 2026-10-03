@@ -123,6 +123,9 @@ pub(super) fn lift_substitutions(
 /// What: the shell reads `$((` as arithmetic only when the `(` at `i + 2`
 /// closes immediately before the outer `)`; `$((cmd) )` and `$((a); (b))` run
 /// commands. An unclosed opener is not arithmetic, so the caller refuses it.
+/// A quote, backslash or backtick before the decision point also means "not
+/// arithmetic": a quoted `)` would skew the paren count, so the inner group is
+/// lifted and scanned instead (#8931).
 /// Test: `denies_a_subshell_substitution_shaped_like_arithmetic_8931`.
 fn opens_arithmetic(bytes: &[u8], i: usize) -> bool {
     if bytes[i] != b'$' || bytes.get(i + 1) != Some(&b'(') || bytes.get(i + 2) != Some(&b'(') {
@@ -131,6 +134,7 @@ fn opens_arithmetic(bytes: &[u8], i: usize) -> bool {
     let mut level = 0usize;
     for (j, &b) in bytes.iter().enumerate().skip(i + 2) {
         match b {
+            b'"' | b'\'' | b'\\' | b'`' => return false,
             b'(' => level += 1,
             b')' => {
                 level -= 1;

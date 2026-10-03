@@ -1673,6 +1673,8 @@ fn denies_a_subshell_substitution_shaped_like_arithmetic_8931() {
             "X=$((gcloud auth print-access-token) ) >/dev/null; echo $X",
             "X=$((  (gcloud auth print-access-token) ) ) >/dev/null; echo $X",
             "X=$((gcloud auth print-access-token); ) >/dev/null; echo $X",
+            // A quoted `)))` makes the paren count read `))` early.
+            "X=$((echo ')))'; gcloud auth print-access-token) ) >/dev/null; echo $X",
         ],
     );
     check(
