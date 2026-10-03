@@ -925,15 +925,12 @@ fn a_target_dir_after_the_double_dash_is_never_read_as_cargos_own_flag() {
 
 /// A real `tm daemon` on `port`, confined to `home` (#8819).
 ///
-/// What: `--force` because no launchd supervises a test daemon; the scratch
-/// `$HOME` disables its tmux and host-process discovery, and the orphan GC and
-/// Telegram bot are switched off so it touches nothing outside `home`.
+/// What: `common::daemon_command` — a cleared environment with the scratch
+/// `$HOME`, so it touches nothing outside `home` and inherits no operator
+/// secret (#9121).
 fn spawn_daemon(home: &Path, port: u16) -> Child {
-    let child = common::tm_command_in(home)
-        .current_dir(home)
-        .env("TRUSTY_MPM_ORPHAN_GC", "0")
-        .env_remove("TELEGRAM_BOT_TOKEN")
-        .args(["daemon", "--force", "--addr"])
+    let child = common::daemon_command(home, &home.join("trusty-mpm-projects"))
+        .arg("--addr")
         .arg(format!("127.0.0.1:{port}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())

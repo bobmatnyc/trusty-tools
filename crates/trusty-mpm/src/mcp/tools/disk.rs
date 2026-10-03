@@ -50,6 +50,10 @@ pub(super) fn disk_tools() -> Vec<Value> {
          `review`, and a project or root past it reports `bytes: null`. \
          Worktrees are measured before projects and the root, so a \
          budget-limited pass spends what it has on the rows a view colours. \
+         A pass that runs out of budget starts one unbudgeted background pass, \
+         and later budgeted calls are answered from the last complete pass at \
+         once (#8985): `freshness` (`live`, `cached`, `partial`), `age_seconds` and \
+         `background_pass` (`running`, `idle`) say which answer this is. \
          Every row also carries `owning_session` — the live session claiming \
          it, else the session its ownership sentinel names, so an ENDED \
          session's leftovers are attributed rather than orphaned — and \
@@ -66,7 +70,7 @@ pub(super) fn disk_tools() -> Vec<Value> {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 55,
-                    "description": "Stop after this many seconds — classification AND byte measurement both (#6929). Remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`; a project or root the budget was reached before reports `bytes: null`. CLAMPED to 55 (#7313): the `tm serve --stdio` bridge every caller reaches this tool through gives up at 60 s, so a larger budget returns a transport error rather than a survey. A clamped request answers with `budget_clamped: true`. Omit for an unbounded survey, which on a large fleet outruns any caller with a request timeout."
+                    "description": "Stop after this many seconds — classification AND byte measurement both (#6929). Remaining worktrees are listed as `review` with an `unknown-branch-state` reason, never as `stale`; a project or root the budget was reached before reports `bytes: null`. CLAMPED to 55 (#7313): the `tm serve --stdio` bridge every caller reaches this tool through gives up at 60 s, so a larger budget returns a transport error rather than a survey. A clamped request answers with `budget_clamped: true`. A budgeted call for a survey key known to exceed the budget is answered from the cache at once: the last complete pass, labelled `freshness: cached` with its `age_seconds` (#8985). Omit for a live, unbounded survey that never reads the cache, which on a large fleet outruns any caller with a request timeout."
                 },
                 "group_by": {
                     "type": "string",

@@ -191,6 +191,55 @@ pub fn tm_command_in(home: &Path) -> Command {
     cmd
 }
 
+/// Variables a spawned `tm daemon` copies from this process, and nothing else.
+///
+/// Why (#9121): a daemon that inherits the operator's shell inherits its
+/// secrets, and one holding `TELEGRAM_BOT_TOKEN` polls the real bot. Stripping
+/// names one at a time ([`CHILD_STATE_ENV`]) misses every secret nobody listed.
+/// What: `PATH` so the daemon finds `git` and `tmux`; `TMUX_TMPDIR` because the
+/// `isolate_tmux_server` constructor points it at this binary's private tmux
+/// directory, and a daemon without it would reach the operator's tmux server.
+const DAEMON_PASSTHROUGH_ENV: &[&str] = &["PATH", "TMUX_TMPDIR"];
+
+/// Give `cmd` the cleared, allowlisted environment of a test `tm daemon` (#9121).
+///
+/// Why: see [`DAEMON_PASSTHROUGH_ENV`]. Split from [`daemon_command`] so a test
+/// can run the same environment under a probe program instead of the daemon.
+/// What: `env_clear`, then `HOME` = `home` (confines the framework root and
+/// config), `TRUSTY_MPM_WORKSPACE_ROOT` = `workspace_root` (the tree the disk
+/// survey walks; without it the daemon falls back to a home-relative default),
+/// `TRUSTY_MPM_ORPHAN_GC=0` (a test daemon must not reap processes it did not
+/// start), and each [`DAEMON_PASSTHROUGH_ENV`] name this process has set.
+/// Test: `a_test_daemon_env_carries_no_secret_shaped_variable`.
+pub fn apply_daemon_env<'a>(
+    cmd: &'a mut Command,
+    home: &Path,
+    workspace_root: &Path,
+) -> &'a mut Command {
+    cmd.env_clear()
+        .env("HOME", home)
+        .env("TRUSTY_MPM_WORKSPACE_ROOT", workspace_root)
+        .env("TRUSTY_MPM_ORPHAN_GC", "0");
+    for key in DAEMON_PASSTHROUGH_ENV {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd
+}
+
+/// `tm daemon --force`, run in `home` with only [`apply_daemon_env`]'s variables.
+///
+/// `--force` because no launchd supervises a test daemon. The caller appends
+/// `--addr` and any further flags.
+pub fn daemon_command(home: &Path, workspace_root: &Path) -> Command {
+    let mut cmd = Command::new(tm_bin());
+    apply_daemon_env(&mut cmd, home, workspace_root)
+        .current_dir(home)
+        .args(["daemon", "--force"]);
+    cmd
+}
+
 /// The scratch `$HOME` this test process hands its spawned children (#7568).
 ///
 /// Why: most spawn sites never inspect what the child wrote — they assert on
