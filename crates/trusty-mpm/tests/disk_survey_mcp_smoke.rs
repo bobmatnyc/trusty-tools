@@ -144,9 +144,15 @@ fn assert_freshness_fields(survey: &Value) {
         ["live", "cached", "partial"].contains(&freshness),
         "freshness: {survey}"
     );
-    assert!(survey["age_seconds"].as_u64().is_some(), "age_seconds: {survey}");
+    assert!(
+        survey["age_seconds"].as_u64().is_some(),
+        "age_seconds: {survey}"
+    );
     let pass = survey["background_pass"].as_str().unwrap_or_default();
-    assert!(["running", "idle"].contains(&pass), "background_pass: {survey}");
+    assert!(
+        ["running", "idle"].contains(&pass),
+        "background_pass: {survey}"
+    );
     assert_eq!(survey["budget_clamped"], false, "{survey}");
 }
 
@@ -189,5 +195,12 @@ fn the_built_daemon_answers_disk_survey_with_the_freshness_fields() {
     let worktrees = unbudgeted["root"]["projects"][0]["worktrees"]
         .as_array()
         .unwrap_or_else(|| panic!("no worktree rows: {unbudgeted}"));
-    assert_eq!(worktrees.len(), 1, "{unbudgeted}");
+    // The main checkout is listed as a row too, beside the one worktree.
+    assert_eq!(worktrees.len(), 2, "{unbudgeted}");
+    assert!(
+        worktrees.iter().any(|w| w["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with(".worktrees/a"))),
+        "the registered worktree is listed: {unbudgeted}"
+    );
 }
