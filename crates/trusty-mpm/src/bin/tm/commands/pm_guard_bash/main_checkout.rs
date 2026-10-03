@@ -321,14 +321,17 @@ pub(crate) enum CommitVerdict {
 /// rules exist for (ADR-0049 decision 4). It is still refused when CHAINED to a
 /// commit, which is a statement about the index read above, not about `git add`.
 /// Grouping (#9127): a commit inside `( … )`, `{ …; }` or behind a reserved
-/// word is judged on its own command, and grouping that does not parse refuses
-/// any command carrying `git commit`.
+/// word (`coproc` included) is judged on its own command, and grouping that
+/// does not parse — or a `case`, function definition or coproc the walker
+/// cannot place — refuses any command carrying `git commit`.
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
 /// `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`,
 /// `command_is_a_lone_commit_*`, `commit_allows_a_scratchpad_clone_only` (#8485),
 /// `commit_in_a_subshell_or_brace_group_must_deny`,
 /// `commit_in_an_unbalanced_group_is_refused`,
-/// `grouped_commits_outside_a_main_checkout_and_grouped_reads_stay_allowed`.
+/// `grouped_commits_outside_a_main_checkout_and_grouped_reads_stay_allowed`,
+/// `a_cd_inside_eval_persists_9127`, `commit_or_reset_behind_coproc_must_deny_9127`,
+/// `commit_in_a_shape_the_walker_cannot_place_is_refused_9127`.
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
@@ -954,7 +957,8 @@ fn unresolved_directory_deny_reason(
 /// `true && git reset --hard` is classified on its second segment and
 /// `(git reset --hard)` on its command, #9127), tracks the effective working
 /// directory across `cd` segments and a leading `git -C` — restoring it when a
-/// subshell or a wrapper's child shell ends — and returns the first segment
+/// subshell, a coproc or a child-process wrapper's string ends, but not after
+/// an `eval`, which runs in the current shell — and returns the first segment
 /// whose `(verb, argv-tail)` satisfies `matches`.
 /// `None` when no segment qualifies — including a segment `shlex` cannot split,
 /// which yields no argv to classify.
@@ -1889,6 +1893,107 @@ mod tests {
         assert!(
             evaluate_main_checkout_destructive_command("(git status)", checkout.path()).is_none()
         );
+    }
+
+    /// A linked worktree under `main`: a `.git` FILE, as `git worktree add`
+    /// leaves it.
+    fn linked_worktree(main: &Path) -> PathBuf {
+        let wt = main.join(".claude/worktrees/agent-a");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere").expect("write .git");
+        wt
+    }
+
+    /// 🔴 REGRESSION (#9127 critic HIGH-1): `eval` runs in the current shell,
+    /// so its `cd` persists. Scoping it like `sh -c` cleared a commit and a
+    /// `reset --hard` that run in the main checkout.
+    #[test]
+    fn a_cd_inside_eval_persists_9127() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("eval \"cd {real}\"; git commit -a -m x"),
+                format!("eval cd {real} && git commit -a -m x"),
+                format!("(eval \"cd {real}\"; git commit -a -m x)"),
+            ],
+            &wt,
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        for command in [
+            format!("eval \"cd {real}\"; git reset --hard"),
+            format!("eval \"cd {real}\" && git checkout -- ."),
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(&command, &wt).is_some(),
+                "must deny: {command}"
+            );
+        }
+        // The other direction holds too: an `eval` cd into the worktree is real.
+        let into_wt = format!("eval \"cd {}\" && git commit -m x", wt.display());
+        assert!(evaluate_main_checkout_commit_command(&into_wt, main.path()).is_none());
+    }
+
+    /// 🔴 REGRESSION (#9127 critic HIGH-2): `coproc` hid the program word the
+    /// way `(` did, with or without a NAME and a compound body.
+    #[test]
+    fn commit_or_reset_behind_coproc_must_deny_9127() {
+        let main = main_checkout_dir();
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("coproc git -C {real} commit -a -m x"),
+                format!("coproc NAME {{ git -C {real} commit -a -m x; }}"),
+                format!("coproc NAME ( git -C {real} commit -a -m x )"),
+                format!("coproc {{ git -C {real} commit -a -m x; }}"),
+                format!("coproc NAME while true; do git -C {real} commit -a; done"),
+            ],
+            elsewhere.path(),
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        for command in [
+            "coproc git reset --hard",
+            "coproc NAME { git checkout -- .; }",
+        ] {
+            assert!(
+                evaluate_main_checkout_destructive_command(command, main.path()).is_some(),
+                "must deny: {command}"
+            );
+        }
+        // A coproc is a child shell: its `cd` does not clear the caller.
+        let wt = linked_worktree(main.path());
+        let leak = format!("coproc cd {}; git reset --hard", wt.display());
+        assert!(evaluate_main_checkout_destructive_command(&leak, main.path()).is_some());
+    }
+
+    /// 🔴 REGRESSION (#9127 critic HIGH-3): a paren-form `case` arm and a
+    /// function definition balance but run elsewhere than they stand, and a
+    /// quote or backslash inside `git`/`commit` hid the fail-closed check.
+    #[test]
+    fn commit_in_a_shape_the_walker_cannot_place_is_refused_9127() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let real = main.path().display();
+        let missed = commits_not_denied(
+            &[
+                format!("case x in (x) git -C {real} commit -a -m x;; esac"),
+                format!("f() ( git -C {real} commit -a -m x ); f"),
+                format!("function f ( git -C {real} commit -a -m x )"),
+                format!("(g''it -C {real} c''ommit -a -m x"),
+                format!("(git -C {real} co\\mmit -a -m x"),
+            ],
+            &wt,
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        // #9127 critic LOW: a stray `)` in a comment is named in the deny.
+        let Some(CommitVerdict::Deny(reason)) =
+            evaluate_main_checkout_commit_command("(git commit -m x) # a)", &wt)
+        else {
+            panic!("a stray `)` in a comment must deny");
+        };
+        assert!(reason.contains("comment"), "{reason}");
     }
 
     #[test]

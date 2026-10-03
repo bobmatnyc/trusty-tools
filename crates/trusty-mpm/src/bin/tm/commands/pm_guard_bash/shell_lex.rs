@@ -116,34 +116,51 @@ pub(super) enum WrappedCommand {
 /// `denies_a_command_string_behind_a_wrapper_option_8735`,
 /// `denies_a_delete_in_a_command_string_behind_an_unknown_option`.
 pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
+    wrapped_command_scoped(segment).0
+}
+
+/// [`wrapped_command`], plus whether the carrier runs its string in the
+/// CURRENT shell (#9127): `eval` does, so a `cd` inside it persists; a shell's
+/// `-c`, `env -S`, `flock -c` and `xargs` start a child process, whose `cd`
+/// ends with it.
+/// Test: `grouped_steps_scopes_a_child_shell_but_not_eval`,
+/// `a_cd_inside_eval_persists_9127`.
+pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, bool) {
     let Some(argv) = shlex::split(segment) else {
-        return WrappedCommand::None;
+        return (WrappedCommand::None, false);
     };
-    match resolve_program_word(&argv) {
-        Ok(word) if word.lookup => WrappedCommand::None,
-        Ok(word) => {
-            // `xargs` runs its whole argv, whatever program heads it.
-            let at = word.xargs_at.unwrap_or(word.index);
-            match argv.get(at) {
-                Some(program) => inner_or_none(carried_string(program, &argv[at + 1..])),
-                None => WrappedCommand::None,
-            }
-        }
+    let carried = |at: usize| {
+        carried_string(&argv[at], &argv[at + 1..])
+            .map(|inner| (inner, carrier(&argv[at]) == "eval"))
+    };
+    let found = match resolve_program_word(&argv) {
+        Ok(word) if word.lookup => None,
+        // `xargs` runs its whole argv, whatever program heads it.
+        Ok(word) => Some(word.xargs_at.unwrap_or(word.index))
+            .filter(|&at| at < argv.len())
+            .and_then(carried),
         // #8735 round 2: an option the resolver cannot measure hides the
         // program, so the first word that carries a command string stands in,
         // as `evaluator_at` does for the credential rules.
-        Err(Unresolved) => (0..argv.len())
-            .find_map(|at| carried_string(&argv[at], &argv[at + 1..]))
-            .map_or(WrappedCommand::None, |inner| inner_or_none(Some(inner))),
+        Err(Unresolved) => (0..argv.len()).find_map(carried),
+    };
+    match found {
+        Some((inner, current_shell)) => (inner_or_none(Some(inner)), current_shell),
+        None => (WrappedCommand::None, false),
     }
+}
+
+/// `program`'s basename, a leading alias-defeating `\` dropped.
+fn carrier(program: &str) -> &str {
+    let tok = program.strip_prefix('\\').unwrap_or(program);
+    tok.rsplit('/').next().unwrap_or(tok)
 }
 
 /// The command string word `program` runs from its arguments `rest`, if it
 /// is a carrier: a shell's `-c`, `env`/`genv` `-S`, `flock -c`, `xargs`' argv
 /// or `eval`'s operands.
 fn carried_string(program: &str, rest: &[String]) -> Option<String> {
-    let tok = program.strip_prefix('\\').unwrap_or(program);
-    let base = tok.rsplit('/').next().unwrap_or(tok);
+    let base = carrier(program);
     match base {
         _ if DASH_C_SHELLS.contains(&base) => dash_c_argument(rest),
         "env" | "genv" => env_split_string(rest),

@@ -254,6 +254,8 @@ const MAX_WRAPPER_DEPTH: usize = 8;
 /// is what stops a future rule from inheriting the same hole.
 /// What: `Some(reason)` when any segment, at any wrapper depth, carries
 /// `$'…'`/`$"…"` quoting the lexer mangles ([`shell_lex::has_live_ansi_c_quoting`]),
+/// a program word bash builds by brace expansion
+/// ([`shell_groups::has_brace_expanded_program`], #9127),
 /// a wrapper whose inner command will not lex
 /// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
 /// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
@@ -276,6 +278,10 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
         }
         if shell_lex::has_live_ansi_c_quoting(trimmed) {
             return Some(ANSI_C_QUOTING_REASON);
+        }
+        // #9127: `{git,-C,<main>,commit}` is a different program once expanded.
+        if shell_groups::has_brace_expanded_program(trimmed) {
+            return Some(shell_groups::BRACE_EXPANSION_REASON);
         }
         match shell_lex::wrapped_command(trimmed) {
             shell_lex::WrappedCommand::Unlexable => return Some(UNLEXABLE_WRAPPER_REASON),

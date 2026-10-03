@@ -1545,6 +1545,38 @@ fn unclassifiable_command_flags_ansi_c_quoting() {
     }
 }
 
+/// Why (#9127 fold-in): bash expands `{git,-C,<main>,commit}` into a git
+/// command while every rule reads one unknown program word, the same blind
+/// spot as `$'…'` quoting, refused the same way.
+/// Test: itself.
+#[test]
+fn brace_expanded_program_word_is_unclassifiable() {
+    for command in [
+        "{git,-C,/m,commit,-a}",
+        "({git,commit})",
+        "true && {git,commit}",
+        "if true; then {git,commit}; fi",
+        "env {git,commit}",
+        "/usr/bin/{git,x} commit",
+        "sh -c '{git,commit}'",
+    ] {
+        assert!(
+            unclassifiable_command(command).is_some_and(|r| r.contains("brace expansion")),
+            "brace expansion must be refused: {command}"
+        );
+    }
+    for command in [
+        "mkdir -p src/{a,b}",
+        "cp f{,.bak}",
+        "{ git commit; }",
+        "echo ${HOME}",
+        "git add src/{a,b}.rs",
+        "git commit -m '{a,b}'",
+    ] {
+        assert_eq!(unclassifiable_command(command), None, "{command}");
+    }
+}
+
 /// Why (#6660 review, CRITICAL 1): the fail-closed answer has to come from a
 /// function the ABSOLUTE guards' caller reaches, not only from
 /// `evaluate_bash_command`.

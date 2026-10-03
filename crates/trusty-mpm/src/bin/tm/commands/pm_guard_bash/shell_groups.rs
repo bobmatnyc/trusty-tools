@@ -5,38 +5,38 @@
 //! first word, so `(git -C <main> commit -a)` lexed as the program `(git` and
 //! `{ git -C <main> commit -a; }` as the program `{`, and the commit rule
 //! (ADR-0061: no commit lands on a local main checkout) never saw the commit.
-//! A reserved word in command position (`then git commit`, `! git commit`)
-//! hid it the same way. The walker also has to know where a subshell ends: a
-//! `cd` inside `( … )` or a `sh -c` string does not move the caller, and
-//! reading it as if it did cleared `sh -c 'cd <wt>' && git commit -a` against
-//! the worktree while the commit ran in the main checkout.
+//! A reserved word in command position (`then git commit`, `! git commit`,
+//! `coproc git commit`) hid it the same way. The walker also has to know where
+//! a child shell ends: a `cd` inside `( … )`, a coproc or a `sh -c` string does
+//! not move the caller, and reading it as if it did cleared
+//! `sh -c 'cd <wt>' && git commit -a` against the worktree while the commit ran
+//! in the main checkout. `eval` is the opposite case: it runs in the current
+//! shell, so its `cd` does persist.
 //!
 //! What: [`grouped_steps`] turns a command into [`Step`]s — each segment's
-//! command text with its leading `(`, `{`, `}`, `)` and reserved words peeled
-//! off and its trailing group closers cut, bracketed by [`Step::Enter`] and
-//! [`Step::Leave`] wherever a subshell or a wrapper's child shell begins and
-//! ends. A brace group runs in the current shell, so it brackets nothing. A
-//! command whose grouping does not balance comes back flat and marked
-//! unparsed; the commit rule refuses it when it carries a `git commit`
-//! ([`mentions_git_commit`]).
+//! command text with its leading `(`, `{`, `}`, `)` and reserved words
+//! ([`KEYWORDS`], shared with the credential rules) peeled off and its trailing
+//! group closers cut, bracketed by [`Step::Enter`] and [`Step::Leave`] wherever
+//! a subshell, a coproc or a child-process wrapper's string begins and ends. A
+//! brace group and an `eval` string run in the current shell, so they bracket
+//! nothing. A command whose grouping does not balance comes back flat and
+//! marked unparsed. A balanced command holding a shape the walker cannot place
+//! — a `case`, a function definition, a coproc — comes back peeled but also
+//! marked unparsed. The commit rule refuses either when it carries a
+//! `git commit` ([`mentions_git_commit`]).
 //!
-//! Residuals: a `case` pattern's `)` reads as a stray closer, so a `case`
-//! carrying a commit is refused as unparsed; a function body runs where the
-//! function is CALLED, which this does not follow, so its stray `}` marks it
-//! unparsed instead; `$(…)` and backticks are not descended, as the module
-//! doc of `main_checkout` already states.
+//! Residuals: a function body runs where the function is CALLED, which this
+//! does not follow, so a definition is unparsed rather than placed; `$(…)` and
+//! backticks are not descended, as the module doc of `main_checkout` already
+//! states.
 //!
 //! Test: `shell_groups::tests`, and the `#9127` rows in `main_checkout`'s
 //! suite.
 
+use super::credential_print::{COMPOUND_OPENERS, KEYWORDS, is_identifier};
 use super::heredoc::HeredocBodies;
 use super::shell_lex::{self, QuoteScan};
 use super::{MAX_WRAPPER_DEPTH, split_shell_segments, split_shell_segments_raw};
-
-/// Shell words that may stand in command position without being the command.
-const LEADING_KEYWORDS: &[&str] = &[
-    "!", "if", "then", "else", "elif", "do", "while", "until", "time",
-];
 
 /// Bytes that end a shell word as well as whitespace does.
 const WORD_BREAKS: &[u8] = b"();&|<>";
@@ -46,17 +46,20 @@ const WORD_BREAKS: &[u8] = b"();&|<>";
 pub(super) enum Step {
     /// A simple command's text, grouping syntax removed.
     Command(String),
-    /// A child shell starts: a `(` subshell or a wrapper's command string.
+    /// A child shell starts: a `(` subshell, a coproc, or a child-process
+    /// wrapper's command string.
     Enter,
     /// The child shell [`Step::Enter`] opened ends; its `cd`s end with it.
     Leave,
 }
 
-/// The steps of a command, and whether its grouping parsed.
+/// The steps of a command, and whether the walker can place every command.
 pub(super) struct Groups {
-    /// In command order. Flat segments, no `Enter`/`Leave`, when unparsed.
+    /// In command order. Flat segments, no `Enter`/`Leave`, when the grouping
+    /// does not balance.
     pub(super) steps: Vec<Step>,
-    /// `false` when a group opener or closer did not balance.
+    /// `false` when a group opener or closer did not balance, or when a
+    /// segment is a `case`, a function definition or a coproc.
     pub(super) parsed: bool,
 }
 
@@ -64,32 +67,49 @@ pub(super) struct Groups {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Group {
     Subshell,
-    Brace,
+    /// `scoped` when a coproc runs it, which makes it a child shell.
+    Brace {
+        scoped: bool,
+    },
 }
 
 /// The grouping did not balance.
 struct Unbalanced;
+
+/// One peeled segment: its command, if any, how many subshells close after
+/// it, and whether a coproc runs it as a child shell.
+struct Peeled {
+    command: Option<String>,
+    leaves: usize,
+    coproc: bool,
+}
 
 /// Walk `command` into [`Step`]s (#9127).
 ///
 /// Why: see the module doc.
 /// What: every segment [`split_shell_segments_raw`] cuts, peeled by
 /// [`peel_segment`], followed — as `expand_shell_segments` does — by the
-/// segments of a leading `sh -c`/`bash -c`/`env -S`/`xargs`/`eval` wrapper's
-/// string, bracketed by `Enter`/`Leave`, up to [`MAX_WRAPPER_DEPTH`] layers.
-/// When any level's openers and closers do not pair up, the answer is the flat
-/// [`split_shell_segments`] list with `parsed: false`, so a caller that ignores
-/// the flag reads exactly what it read before #9127.
+/// segments of a leading `sh -c`/`bash -c`/`env -S`/`flock -c`/`xargs`/`eval`
+/// wrapper's string, up to [`MAX_WRAPPER_DEPTH`] layers. The string is
+/// bracketed by `Enter`/`Leave` unless its carrier is `eval`
+/// ([`shell_lex::wrapped_command_scoped`]). When any level's openers and
+/// closers do not pair up, the answer is the flat [`split_shell_segments`]
+/// list with `parsed: false`, so a caller that ignores the flag reads exactly
+/// what it read before #9127.
 /// Test: `grouped_steps_peels_subshells_and_brace_groups`,
 /// `grouped_steps_brackets_a_wrapper_string`,
+/// `grouped_steps_scopes_a_child_shell_but_not_eval`,
+/// `grouped_steps_peels_and_scopes_a_coproc`,
+/// `grouped_steps_marks_shapes_it_cannot_place`,
 /// `grouped_steps_reports_an_unbalanced_group`,
 /// `grouped_steps_ignores_quoted_and_heredoc_parens`.
 pub(super) fn grouped_steps(command: &str) -> Groups {
     let mut steps = Vec::new();
-    match steps_into(command, 0, &mut steps) {
+    let mut opaque = false;
+    match steps_into(command, 0, &mut steps, &mut opaque) {
         Ok(()) => Groups {
             steps,
-            parsed: true,
+            parsed: !opaque,
         },
         Err(Unbalanced) => Groups {
             steps: split_shell_segments(command)
@@ -102,23 +122,43 @@ pub(super) fn grouped_steps(command: &str) -> Groups {
 }
 
 /// [`grouped_steps`] for one shell program: `command` at wrapper `depth`.
-fn steps_into(command: &str, depth: usize, out: &mut Vec<Step>) -> Result<(), Unbalanced> {
+fn steps_into(
+    command: &str,
+    depth: usize,
+    out: &mut Vec<Step>,
+    opaque: &mut bool,
+) -> Result<(), Unbalanced> {
     let mut open = Vec::new();
     for raw in split_shell_segments_raw(command) {
-        let (text, leaves) = peel_segment(raw, &mut open, out)?;
-        if let Some(text) = text {
-            let inner = match shell_lex::wrapped_command(&text) {
-                shell_lex::WrappedCommand::Inner(inner) if depth < MAX_WRAPPER_DEPTH => Some(inner),
+        let peeled = peel_segment(raw, &mut open, out, opaque)?;
+        if let Some(text) = peeled.command {
+            let inner = match shell_lex::wrapped_command_scoped(&text) {
+                (shell_lex::WrappedCommand::Inner(inner), current_shell)
+                    if depth < MAX_WRAPPER_DEPTH =>
+                {
+                    Some((inner, current_shell))
+                }
                 _ => None,
             };
-            out.push(Step::Command(text));
-            if let Some(inner) = inner {
+            if peeled.coproc {
                 out.push(Step::Enter);
-                steps_into(&inner, depth + 1, out)?;
+            }
+            out.push(Step::Command(text));
+            if let Some((inner, current_shell)) = inner {
+                // #9127: `eval` runs in this shell, so its `cd` persists.
+                if !current_shell {
+                    out.push(Step::Enter);
+                }
+                steps_into(&inner, depth + 1, out, opaque)?;
+                if !current_shell {
+                    out.push(Step::Leave);
+                }
+            }
+            if peeled.coproc {
                 out.push(Step::Leave);
             }
         }
-        out.extend(std::iter::repeat_with(|| Step::Leave).take(leaves));
+        out.extend(std::iter::repeat_with(|| Step::Leave).take(peeled.leaves));
     }
     if open.is_empty() {
         Ok(())
@@ -131,29 +171,30 @@ fn steps_into(command: &str, depth: usize, out: &mut Vec<Step>) -> Result<(), Un
 /// end its command.
 ///
 /// What: strips, in any order, a `(` (pushes a subshell, emits `Enter`), a
-/// `{` word (pushes a brace group), a `}` word or `)` (pops its own kind,
-/// `Leave` for a subshell) and a [`LEADING_KEYWORDS`] word (`time` with its
-/// `-p`). After a leading closer the rest is the group's redirections, not a
-/// command. Otherwise the rest is cut at its first live `)` that closes a
-/// paren this segment did not open ([`trailing_closers`]). Returns the
-/// command, if any, and how many subshells close after it.
+/// `{` word (pushes a brace group, a child shell after `coproc`), a `}` word
+/// or `)` (pops its own kind, `Leave` for a child shell) and a [`KEYWORDS`]
+/// word (`time` with its `-p`; `coproc` with its NAME). A coproc of a
+/// compound command other than `( … )` or `{ …; }` is [`Unbalanced`], since
+/// its end is not this segment's. After a leading closer the rest is the
+/// group's redirections, not a command. Otherwise the rest is cut at its first
+/// live `)` that closes a paren this segment did not open
+/// ([`trailing_closers`]), and a command [`cannot_place`] sets `opaque`.
 fn peel_segment(
     raw: &str,
     open: &mut Vec<Group>,
     out: &mut Vec<Step>,
-) -> Result<(Option<String>, usize), Unbalanced> {
+    opaque: &mut bool,
+) -> Result<Peeled, Unbalanced> {
     let mut rest = raw;
     let mut closed = false;
+    let mut coproc = false;
     loop {
         let t = rest.trim_start();
-        let word_end = t
-            .bytes()
-            .position(|b| b.is_ascii_whitespace() || WORD_BREAKS.contains(&b))
-            .unwrap_or(t.len());
-        let word = &t[..word_end];
+        let word = first_word(t);
         rest = if let Some(after) = t.strip_prefix('(') {
             open.push(Group::Subshell);
             out.push(Step::Enter);
+            coproc = false;
             after
         } else if let Some(after) = t.strip_prefix(')') {
             pop(open, Group::Subshell)?;
@@ -161,29 +202,96 @@ fn peel_segment(
             closed = true;
             after
         } else if word == "{" {
-            open.push(Group::Brace);
+            open.push(Group::Brace { scoped: coproc });
+            if coproc {
+                out.push(Step::Enter);
+            }
+            coproc = false;
             &t[1..]
         } else if word == "}" {
-            pop(open, Group::Brace)?;
+            match open.pop() {
+                Some(Group::Brace { scoped }) => {
+                    if scoped {
+                        out.push(Step::Leave);
+                    }
+                }
+                _ => return Err(Unbalanced),
+            }
             closed = true;
             &t[1..]
-        } else if LEADING_KEYWORDS.contains(&word) {
-            let after = t[word_end..].trim_start();
-            match after.strip_prefix("-p") {
-                Some(p) if word == "time" && p.starts_with(char::is_whitespace) => p,
-                _ => after,
+        } else if coproc && COMPOUND_OPENERS.contains(&word) {
+            return Err(Unbalanced);
+        } else if KEYWORDS.contains(&word) {
+            let after = t[word.len()..].trim_start();
+            if word == "coproc" {
+                coproc = true;
+                *opaque = true;
+                coproc_body(after)
+            } else {
+                match after.strip_prefix("-p") {
+                    Some(p) if word == "time" && p.starts_with(char::is_whitespace) => p,
+                    _ => after,
+                }
             }
         } else {
             break;
         };
     }
     if closed {
-        return Ok((None, 0));
+        return Ok(Peeled {
+            command: None,
+            leaves: 0,
+            coproc: false,
+        });
     }
     let body = rest.trim();
     let (end, leaves) = trailing_closers(body, open)?;
     let command = body[..end].trim();
-    Ok(((!command.is_empty()).then(|| command.to_string()), leaves))
+    *opaque |= cannot_place(command);
+    Ok(Peeled {
+        command: (!command.is_empty()).then(|| command.to_string()),
+        leaves,
+        coproc,
+    })
+}
+
+/// The first shell word of `t`: up to whitespace or a [`WORD_BREAKS`] byte.
+fn first_word(t: &str) -> &str {
+    let end = t
+        .bytes()
+        .position(|b| b.is_ascii_whitespace() || WORD_BREAKS.contains(&b))
+        .unwrap_or(t.len());
+    &t[..end]
+}
+
+/// What follows `coproc`: past its NAME when an identifier precedes a `(` or
+/// a [`COMPOUND_OPENERS`] word, as `keyword_words` reads it.
+fn coproc_body(after: &str) -> &str {
+    let name = first_word(after);
+    let next = after[name.len()..].trim_start();
+    if is_identifier(name)
+        && (next.starts_with('(') || COMPOUND_OPENERS.contains(&first_word(next)))
+    {
+        next
+    } else {
+        after
+    }
+}
+
+/// Whether a peeled command is a shape whose commands the walker cannot place
+/// (#9127): a `case` (its paren-form patterns read as balanced groups), or a
+/// function definition (`function f …`, `f() …`), whose body runs where the
+/// function is called.
+fn cannot_place(command: &str) -> bool {
+    let word = first_word(command);
+    let after = command[word.len()..].trim_start();
+    matches!(word, "case" | "function")
+        // `arr=()` is an empty array, not a definition.
+        || (!word.is_empty()
+            && !word.contains('=')
+            && after
+                .strip_prefix('(')
+                .is_some_and(|p| p.trim_start().starts_with(')')))
 }
 
 /// Cut `body` at its first live `)` that closes a paren `body` did not open,
@@ -240,29 +348,88 @@ fn pop(open: &mut Vec<Group>, kind: Group) -> Result<(), Unbalanced> {
 
 /// Whether `command` names `git` and `commit` as words anywhere (#9127).
 ///
-/// Why: the fail-closed test for a command whose grouping did not parse. It
-/// is deliberately loose — no argv, no position — because the parse that
-/// would place the words is the one that failed.
-/// What: a whitespace-separated word, stripped of grouping and quoting
-/// punctuation, equal to `commit`, and another whose basename is `git`.
+/// Why: the fail-closed test for a command the walker could not place. It is
+/// deliberately loose — no argv, no position — because the parse that would
+/// place the words is the one that failed.
+/// What: splits on whitespace and on `;&|()<>` and backticks, deletes every
+/// quote and backslash inside each word (so `c''ommit`, `g"i"t` and `co\mmit`
+/// read as the words bash runs), trims `{}!$` from its ends, then asks for a
+/// word equal to `commit` and another whose basename is `git`.
 /// Test: `mentions_git_commit_reads_words_not_substrings`.
 pub(super) fn mentions_git_commit(command: &str) -> bool {
-    let words: Vec<&str> = command
-        .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| "(){}!;&|'\"\\".contains(c)))
+    let words: Vec<String> = command
+        .split(|c: char| c.is_whitespace() || ";&|()<>`".contains(c))
+        .map(|w| {
+            let bare: String = w
+                .chars()
+                .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+                .collect();
+            bare.trim_matches(|c: char| "{}!$".contains(c)).to_string()
+        })
         .collect();
     let git = words
         .iter()
         .any(|w| w.rsplit('/').next().is_some_and(|base| base == "git"));
-    git && words.contains(&"commit")
+    git && words.iter().any(|w| w == "commit")
 }
 
-/// The refusal for a `git commit` inside grouping the guard cannot parse.
-pub(super) const UNPARSED_GROUP_COMMIT_REASON: &str = "Commit denied because its shell grouping \
-     does not parse (ADR-0061, #9127): this command carries `git commit` inside a `( … )` \
-     subshell, a `{ …; }` brace group, a function body or a `case` arm whose openers and closers \
-     the guard cannot pair up, so it cannot tell which checkout the commit lands in, and a commit \
-     never lands on a local main checkout. Run the commit as a plain command — `git -C \
+/// Whether a segment's program word is a brace expansion (#9127).
+///
+/// Why: `{git,-C,<main>,commit}` is the command `git -C <main> commit` once
+/// bash expands it, while every rule reads the single word `{git,-C,…}` and
+/// matches nothing — the same blind spot as `$'…'` quoting, and refused the
+/// same way, from `unclassifiable_command`.
+/// What: shlex-splits `segment`, drops leading [`KEYWORDS`] words and the `(`
+/// a subshell opens, and asks [`is_brace_expansion`] of the first word left
+/// and of the program word `resolve_program_word` finds behind a wrapper
+/// (`env {git,commit}`). A quoted `'{a,b}'` program reads the same; no real
+/// program is named that.
+/// Test: `brace_expanded_program_word_is_unclassifiable`.
+pub(super) fn has_brace_expanded_program(segment: &str) -> bool {
+    let Some(argv) = shlex::split(segment) else {
+        return false;
+    };
+    let words: Vec<&str> = argv
+        .iter()
+        .map(|w| w.trim_start_matches('('))
+        .skip_while(|w| w.is_empty() || KEYWORDS.contains(w) || *w == "-p")
+        .collect();
+    let resolved = crate::commands::program_word::resolve_program_word(&words)
+        .ok()
+        .and_then(|word| words.get(word.index).copied());
+    words
+        .first()
+        .into_iter()
+        .copied()
+        .chain(resolved)
+        .any(is_brace_expansion)
+}
+
+/// Whether `word` holds a `{…}` with a `,` or `..` in it that is not `${…}`.
+fn is_brace_expansion(word: &str) -> bool {
+    word.match_indices('{').any(|(at, _)| {
+        !word[..at].ends_with('$')
+            && word[at + 1..].find('}').is_some_and(|end| {
+                let inner = &word[at + 1..at + 1 + end];
+                inner.contains(',') || inner.contains("..")
+            })
+    })
+}
+
+/// The refusal for a program word bash builds by brace expansion (#9127).
+pub(super) const BRACE_EXPANSION_REASON: &str = "this command's program word is a brace \
+     expansion (`{git,-C,<dir>,commit}`), which bash turns into a different command than the \
+     word the guard reads, so it cannot establish what would actually run. Spell the command \
+     out word by word.";
+
+/// The refusal for a `git commit` the guard cannot place.
+pub(super) const UNPARSED_GROUP_COMMIT_REASON: &str = "Commit denied because the guard cannot \
+     place it (ADR-0061, #9127): this command carries `git commit` inside a `( … )` subshell, \
+     a `{ …; }` brace group, a function definition, a `case` or a `coproc` whose openers and \
+     closers the guard cannot pair up or whose commands it cannot follow, so it cannot tell \
+     which checkout the commit lands in, and a commit never lands on a local main checkout. A \
+     stray `)` or `}` counts too — in a `#` comment or an unquoted regex — so quote it or drop \
+     the comment. Run the commit as a plain command — `git -C \
      /abs/path/.claude/worktrees/<name> commit …`, or `cd` into the worktree first — with no \
      grouping around it. Nothing is lost; the changes are still in the tree.";
 
@@ -380,12 +547,83 @@ mod tests {
         }
     }
 
+    /// #9127 critic HIGH-1: `eval` runs in the current shell, so its string is
+    /// not bracketed; every child-process carrier's string is.
+    #[test]
+    fn grouped_steps_scopes_a_child_shell_but_not_eval() {
+        let eval = grouped_steps("eval \"cd /m\"; git commit");
+        assert!(eval.parsed);
+        assert_eq!(
+            eval.steps,
+            [
+                Step::Command("eval \"cd /m\"".into()),
+                Step::Command("cd /m".into()),
+                Step::Command("git commit".into()),
+            ]
+        );
+        for carrier in [
+            "sh -c 'cd /m'",
+            "env -S 'cd /m'",
+            "flock /tmp/l -c 'cd /m'",
+            "xargs cd /m",
+        ] {
+            let groups = grouped_steps(&format!("{carrier}; git commit"));
+            assert!(groups.parsed, "{carrier}");
+            assert_eq!(groups.steps[1], Step::Enter, "{carrier}");
+            assert_eq!(groups.steps[3], Step::Leave, "{carrier}");
+        }
+    }
+
+    /// #9127 critic HIGH-2: `coproc` is a leading keyword, NAME included, and
+    /// what it runs is a child shell.
+    #[test]
+    fn grouped_steps_peels_and_scopes_a_coproc() {
+        for (command, expected) in [
+            ("coproc git commit", vec!["git commit"]),
+            ("coproc NAME { git commit; }", vec!["git commit"]),
+            ("coproc NAME ( git commit )", vec!["git commit"]),
+            ("coproc { git commit; }", vec!["git commit"]),
+            ("(coproc git commit)", vec!["git commit"]),
+        ] {
+            let groups = grouped_steps(command);
+            assert!(!groups.parsed, "`{command}` is a coproc, never placed");
+            assert_eq!(commands(&groups), expected, "{command}");
+            assert_eq!(groups.steps.first(), Some(&Step::Enter), "{command}");
+            assert_eq!(groups.steps.last(), Some(&Step::Leave), "{command}");
+        }
+        let groups = grouped_steps("coproc NAME while true; do git commit; done");
+        assert!(!groups.parsed);
+    }
+
+    /// #9127 critic HIGH-3a: a paren-form `case` arm and a function definition
+    /// balance, but their commands do not run where they stand.
+    #[test]
+    fn grouped_steps_marks_shapes_it_cannot_place() {
+        for command in [
+            "case x in (x) git commit;; esac",
+            "f() ( git commit ); f",
+            "f () ( git commit )",
+            "function f ( git commit )",
+            "sh -c 'case x in (x) git commit;; esac'",
+        ] {
+            assert!(!grouped_steps(command).parsed, "`{command}` must not parse");
+        }
+        for command in ["arr=(); git commit", "git commit -m 'case (x) f() coproc'"] {
+            assert!(grouped_steps(command).parsed, "`{command}` must parse");
+        }
+    }
+
     #[test]
     fn mentions_git_commit_reads_words_not_substrings() {
         for command in [
             "(git commit",
             "{ /usr/bin/git -C x commit",
             "(\"git\" commit",
+            // #9127 critic HIGH-3b: quotes and backslashes inside a word.
+            "(g''it c''ommit",
+            "(git co\\mmit",
+            "(g\"i\"t commit",
+            "(cd x;git commit",
         ] {
             assert!(mentions_git_commit(command), "{command}");
         }
