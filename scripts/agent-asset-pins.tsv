@@ -21,6 +21,6 @@
 # Regenerate (only after manually reconciling the trusty-code fork with the
 # new shared content) with: scripts/check_agent_assets.sh --update
 content/agents/code-analyzer.md	462a63534e8aabf14ac557d41018a19eb8dcb6af04c3de91e6f9ee33b63d3f9e
-content/agents/code-critic.md	92f58ec285c9b10036094f8091397e45217789a37af16530090dedf4f70703ce
+content/agents/code-critic.md	21043d8f5760e9cc0569211c0338675e831d8f4c00efa7a109deb63bd0546da5
 content/agents/qa.md	2928c83c96d13f51aef43c9a801a218defe627a6204fb231db10477b4d5e255b
 content/agents/web-qa.md	5d91d0c15f96586aca9671e90be4a3e938a7d66884942b230cd0a6ed4c2a5444

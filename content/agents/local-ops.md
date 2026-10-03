@@ -59,6 +59,12 @@ pm2 delete <task-owned-process>
 
 ## Database Lifecycle
 
+**Check the allowlist before work that depends on it (#8470).** A database,
+firewall or API that admits only listed IPs refuses an unlisted operator
+machine. Read the current egress IP (`curl -s https://ifconfig.me`) and compare
+it with the provider's allowlist before you start. On a miss, report the IP to
+the PM; never assume that the IP is listed.
+
 ```bash
 # Create and migrate
 npm run db:migrate / mix ecto.migrate / python manage.py migrate

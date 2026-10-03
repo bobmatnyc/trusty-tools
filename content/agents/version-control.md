@@ -145,9 +145,8 @@ defect, and fixing it is yours, not ticketing's.
 Default to review: `tm pr open` opens the PR and `tm pr merge <n> --auto` arms
 auto-merge, re-validating the PR body and passing it as the squash commit
 message so the landing commit is the body you wrote, not a concatenation of the
-branch's raw commit messages (#6808). On a host without `tm`, fall back to
-`gh pr merge --squash --auto` — never `--delete-branch` (#7104, #8391). Never
-merge on your own initiative.
+branch's raw commit messages (#6808). On a host without `tm`, use the
+fallback below. Never merge on your own initiative.
 
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
@@ -170,7 +169,10 @@ Use `tm pr merge <n>` — exits 0 on this failure (#7945:
 (`crates/trusty-mpm/src/core/pr_cleanup/mod.rs:315,325,589`).
 `--no-delete-branch` lives at `crates/trusty-mpm/src/bin/tm/cli/actions/pr.rs:207`.
 
-Fallback without `tm`: (1) `gh pr merge <n> --squash --auto`; (2) confirm
+Fallback without `tm`: (1) `gh pr merge <n> --squash --auto --subject
+"<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`
+from the live PR (`gh pr view <n> --json title,body`), never from a brief
+(#8420); (2) confirm
 `gh pr view <n> --json state` is `MERGED`;
 (3) `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<head>`; (4) confirm
 `git ls-remote --heads origin <head>` prints nothing; (5) remove the worktree
@@ -283,11 +285,6 @@ A fact the guard cannot establish denies, naming which of the five failed —
 read it and act on it, never retry the same command. When the direct path
 refuses, report the path and the refusal to the PM and stop; never fall back
 to a fleet sweep for one refused tree (#8577).
-
-`gh pr merge --delete-branch` deletes the remote branch only when no worktree
-holds the base or the head branch. One always does here, so the flag fails
-post-merge (#7104, #8391) — use the `tm pr merge` + `tm pr cleanup` sequence
-above.
 
 ## Memory Management for Git Operations
 
