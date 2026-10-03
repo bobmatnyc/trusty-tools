@@ -921,10 +921,10 @@ fn pinned_units(passes: usize, subs: usize, kib: usize) -> usize {
 /// nesting row. #8765: the timed form failed CI at 1.00-1.17 s once #8734's
 /// fixed point added a second pass, so this counts the scan's own work units.
 /// What: at n, 2n and 4n KiB of run, pins the exact units, which fixes the
-/// pass count (2 for an allowed row with the `T=` binding, 1 for a refused
-/// row or with no binding), the charge per KiB and linear growth; then pins
-/// the verdict where two passes cross the budget. The work-unit pins are the
-/// primary assertion. #8765: one wall-clock backstop runs first, on the
+/// pass count (1: #8771 rescans only when a pass judged text against an older
+/// name set, and nothing here precedes the `T=` binding), the charge per KiB
+/// and linear growth; then pins that a 2 MiB bound row fits one pass's budget.
+/// The work-unit pins are the primary assertion. #8765: one wall-clock backstop runs first, on the
 /// timed form's own input (100k `${X:0:1}` runs, bound), and exists only to
 /// catch superlinear work the budget never charges; #8771 tracks the proper
 /// close, a `#[cfg(test)]` byte counter. Worst CI time today is 1.17 s, and
@@ -945,14 +945,13 @@ fn wide_bracket_runs_scan_in_linear_work() {
     const N_KIB: usize = 128;
     let unbound = "gcloud auth print-access-token >/dev/null; echo ";
     let body = |run: &str, kib: usize| run.repeat(kib * KIB / run.len());
-    // A refused row stops inside its first pass; an allowed one takes two,
-    // the second finding `T` already bound.
+    // #8771: every row takes one pass; the binding is the first stage.
     for (run, deny, passes) in [
         ("A[", true, 1),
         ("$[", true, 1),
         ("${X:", true, 1),
-        ("A[x]", false, 2),
-        ("${X:0:1}", false, 2),
+        ("A[x]", false, 1),
+        ("${X:0:1}", false, 1),
     ] {
         let mut units = Vec::new();
         for kib in [N_KIB, 2 * N_KIB, 4 * N_KIB] {
@@ -973,16 +972,99 @@ fn wide_bracket_runs_scan_in_linear_work() {
         let (n, n2, n4) = (units[0], units[1], units[2]);
         assert_eq!(n4 - n2, 2 * (n2 - n), "{run:?}: {units:?} not linear");
     }
-    // At 2 MiB one pass fits the budget and two do not: the bound form
-    // refuses as it charges its second pass, and the unbound form is allowed.
+    // #8771: at 2 MiB one pass fits the budget, bound or not; before the fix
+    // the bound form charged a second pass and refused here.
     let text = body("${X:0:1}", 2 * KIB);
     let (got, refused) = scan_units(&format!("{bound}{text}"));
-    assert!(refused, "2 MiB bound must cross the budget");
-    assert_eq!(got, pinned_units(2, 1, 2 * KIB), "2 MiB bound");
+    assert!(!refused, "2 MiB bound fits one pass");
+    assert_eq!(got, pinned_units(1, 1, 2 * KIB), "2 MiB bound");
     assert!(pinned_units(1, 1, 2 * KIB) <= super::WORK_BUDGET);
     let (got, refused) = scan_units(&format!("{unbound}{text}"));
     assert!(!refused, "2 MiB unbound fits in one pass");
     assert_eq!(got, pinned_units(1, 0, 2 * KIB), "2 MiB unbound");
+}
+
+/// 🔴 REGRESSION (#8771): a command that binds a credential is refused at the
+/// size one pass's budget allows, as it was before #8734's rescan; past it,
+/// it still refuses (fail closed). Before the fix the binding charged a
+/// second whole pass, so the bound form refused at about half the size.
+#[test]
+fn a_bound_command_keeps_the_one_pass_threshold_8771() {
+    const KIB: usize = 1_024;
+    let bound = "T=$(gcloud auth print-access-token); echo ";
+    let unbound = "gcloud auth print-access-token >/dev/null; echo ";
+    let run = |kib: usize| "a ".repeat(kib * KIB / 2);
+    // One pass costs 1 + KiB units, the lifted `$(…)` one more; the budget
+    // is `WORK_BUDGET` units per pass.
+    let fits = super::WORK_BUDGET - 2;
+    let (got, refused) = scan_units(&format!("{bound}{}", run(fits)));
+    assert!(!refused, "bound at {fits} KiB fits one pass");
+    assert_eq!(
+        got,
+        pinned_units(1, 1, fits),
+        "bound at {fits} KiB: one pass"
+    );
+    let (got, refused) = scan_units(&format!("{bound}{}", run(fits + 1)));
+    assert!(refused, "bound past one pass's budget refuses");
+    assert_eq!(got, pinned_units(1, 1, fits + 1));
+    let (_, refused) = scan_units(&format!("{unbound}{}", run(fits + 1)));
+    assert!(!refused, "unbound at {} KiB fits", fits + 1);
+    let (_, refused) = scan_units(&format!("{unbound}{}", run(fits + 2)));
+    assert!(refused, "unbound past the budget refuses");
+}
+
+/// 🔴 REGRESSION (#8771): text the shell runs after a binding but the scan
+/// judged before it — a loop body, a function, a later substitution, the
+/// binding's own command — still gets the rescan, and each pass carries its
+/// own budget, so a large looped binding no longer refuses at half the size.
+/// A chain needing more than `MAX_PASSES` refuses with bounded work.
+#[test]
+fn a_late_binding_still_rescans_8771() {
+    check(
+        true,
+        &[
+            "while :; do echo \"$T\"; T=$(gcloud auth print-access-token); done",
+            "f(){ echo \"$T\"; }; T=$(gcloud auth print-access-token); f",
+            "T=$(gcloud auth print-access-token); echo \"$(echo $T)\"",
+            "T=$(gcloud auth print-access-token) printenv T",
+        ],
+    );
+    const KIB: usize = 1_024;
+    let looped = |kib: usize| {
+        format!(
+            "while :; do echo {}; T=$(gcloud auth print-access-token); done",
+            "a ".repeat(kib * KIB / 2)
+        )
+    };
+    let (got, refused) = scan_units(&looped(2 * KIB));
+    assert!(!refused, "a 2 MiB loop fits a budget per pass");
+    assert_eq!(got, pinned_units(2, 1, 2 * KIB), "two passes, each charged");
+    let chain = "while :; do G=$F; F=$E; E=$D; D=$C; C=$B; B=$A; \
+                 A=$(gcloud auth print-access-token); done";
+    let (got, refused) = scan_units(chain);
+    assert!(refused, "a chain past MAX_PASSES refuses");
+    assert!(
+        got <= super::credential_print_passes::MAX_PASSES * 2,
+        "{got} units"
+    );
+}
+
+/// #8771: the arithmetic readers touch each byte a bounded number of times —
+/// at most `MAX_NEST` (32) per byte — so no rescan or reader is quadratic.
+/// Counted, not timed.
+#[test]
+fn arithmetic_reading_stays_linear_8771() {
+    use super::credential_print_taint_forms::ARITH_BYTES;
+    for run in ["${X:0:1}", "A[x]", "$((x))"] {
+        let command = format!(
+            "T=$(gcloud auth print-access-token); echo {}",
+            run.repeat(100_000)
+        );
+        ARITH_BYTES.with(|c| c.set(0));
+        assert_eq!(evaluate_credential_print_command(&command), None, "{run}");
+        let read = ARITH_BYTES.with(std::cell::Cell::get);
+        assert!(read <= 32 * command.len(), "{run}: {read} bytes read");
+    }
 }
 
 /// #8676 round 3: the deny reason never quotes the command, so a credential
