@@ -174,6 +174,8 @@ pub(crate) async fn relocate_index_report(
         tracing::warn!("relocate[{id}]: refused — a reindex is running on this index (#8499)");
         return Err(relocate_busy_response(id));
     };
+    // #8659: name the relocate to a migration waiting on this permit.
+    let _holder = crate::service::reindex::mark_index_permit_holder(&index_id, "relocate");
 
     // Issue #2336: reject relocating onto a root_path already owned by a
     // DIFFERENT registered index. Same hazard as `create_index_handler`: two

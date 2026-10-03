@@ -1,0 +1,2 @@
+Fixed
+- A reindex requested for an index whose durable corpus failed to open on a held lock now re-opens the corpus once the other holder has released it, instead of answering `409 index_write_quarantined` until a daemon restart. The reindex then writes the redb again, so per-file content hashes come back without a restart. While the lock is still held the `409` now carries `retryable: true` (#8958).

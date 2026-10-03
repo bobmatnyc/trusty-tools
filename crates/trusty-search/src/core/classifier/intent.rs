@@ -29,4 +29,15 @@ impl QueryIntent {
             QueryIntent::Keyword | QueryIntent::Unknown => (0.6, 0.4, false),
         }
     }
+
+    /// `true` for the two intents with balanced routing, `Keyword` and
+    /// `Unknown` (#9027).
+    ///
+    /// Why: `Keyword` keeps `Unknown`'s routing at every site — the Code→All
+    /// mode upgrade, the soft doc downrank, the entity exact-match boost. One
+    /// predicate keeps those sites from drifting apart when an intent changes.
+    /// Test: `only_keyword_and_unknown_are_balanced`.
+    pub fn is_balanced(&self) -> bool {
+        matches!(self, QueryIntent::Keyword | QueryIntent::Unknown)
+    }
 }

@@ -615,6 +615,11 @@ pub(crate) async fn create_index_report(
             indexer.corpus_open_failure,
         ));
     }
+    // #8777: a new, empty corpus is already current; unstamped, it migrated on
+    // its first restart. A failed stamp only costs that migration, so it warns.
+    if let Err(e) = crate::core::migration::stamp_new_index_schema(&indexer).await {
+        tracing::warn!(index_id = %req.id, "create_index: schema stamp failed: {e:#}");
+    }
 
     // Resolve repo-config filters (issue: trusty-search.yaml wiring). The
     // CLI sends `paths:` as relative strings; resolve them against `root_path`

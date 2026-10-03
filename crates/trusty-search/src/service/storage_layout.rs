@@ -229,6 +229,32 @@ impl StorageLayout {
         Ok(self.storage_dir(index_id, root_path)?.join(name))
     }
 
+    /// The path [`Self::file`] names, resolved without creating anything;
+    /// `None` when no such file exists (#8085).
+    ///
+    /// Why: [`Self::storage_dir`] creates the per-index directory, so a
+    /// corpus re-open that resolved its path that way recreated the store a
+    /// `DELETE ?delete_data=true` had just removed.
+    /// What: the same directory [`Self::storage_dir`] resolves, only probed.
+    /// The data-dir layout still resolves the shared data dir itself.
+    /// Test: `a_reopen_never_creates_a_missing_corpus`.
+    pub(crate) fn existing_file(
+        self,
+        index_id: &str,
+        root_path: &Path,
+        name: &str,
+    ) -> Result<Option<PathBuf>> {
+        let dir = match self {
+            Self::Colocated if root_path.as_os_str().is_empty() => return Ok(None),
+            Self::Colocated => root_path.join(COLOCATED_DIR_NAME),
+            Self::DataDir => persistence::data_dir()?
+                .join("indexes")
+                .join(persistence::sanitize_id_for_path(index_id)),
+        };
+        let path = dir.join(name);
+        Ok(path.is_file().then_some(path))
+    }
+
     /// Remove this index's storage without creating anything (#8438).
     ///
     /// Why: `delete_index?delete_data=true` removed only the data dir, so a

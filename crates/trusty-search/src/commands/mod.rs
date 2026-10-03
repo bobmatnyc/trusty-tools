@@ -79,6 +79,10 @@ pub mod service;
 // #4823: reading/preserving an already-installed launchd unit so regeneration
 // does not silently discard deliberate operator configuration.
 pub mod service_unit;
+// #8686: a restart that proves the old daemon, detached or not, is gone.
+pub mod service_restart;
+#[cfg(test)]
+mod service_restart_tests;
 pub mod setup;
 pub mod start;
 pub mod start_restore;

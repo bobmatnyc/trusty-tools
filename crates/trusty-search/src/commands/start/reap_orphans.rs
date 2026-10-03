@@ -259,7 +259,7 @@ pub fn plan(candidates: &[Candidate], our_data_dir: &Path, platform_default: &Pa
 /// `start` in argv, never our own pid.
 /// Test: side-effecting (reads the live process table); the decision it feeds is
 /// covered by the `plan_*` and `identify_*` tests.
-fn observe_candidates() -> Vec<Candidate> {
+pub(crate) fn observe_candidates() -> Vec<Candidate> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing().with_processes(

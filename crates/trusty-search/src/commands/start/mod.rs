@@ -30,7 +30,8 @@ mod graceful_bootstrap;
 mod isolation;
 // #4395: ownership-aware orphan reaping — the reaper `daemon` calls before it
 // starts, which used to match by process name alone.
-mod reap_orphans;
+// #8686: `service restart` scopes its kill set with the same plan.
+pub(crate) mod reap_orphans;
 mod restore;
 mod swap_back_watchdog;
 

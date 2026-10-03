@@ -436,6 +436,8 @@ pub(crate) async fn index_status_report(
         "corpus_open_failure": corpus_open_failure,
         // #7979: every outstanding migration fault, or null.
         "migration_error": migration_error,
+        // #8659: a schema chain waiting for this index's permit, or null.
+        "migration_waiting": crate::core::migration::wait::migration_wait_json(&index_id),
         // #7991: the last refused staged-corpus promotion, or null.
         "promotion_deferred": promotion_deferred,
         "status": legacy_status,

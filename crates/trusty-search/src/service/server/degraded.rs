@@ -130,19 +130,21 @@ pub(super) async fn corpus_failure_response(
 /// Why: such a reindex used to answer `queued: true`, walk and embed the whole
 /// tree, and then have every durable write refused by the #4226 guard. The
 /// index kept `chunk_count: null` and a caller polling for completion waited
-/// forever. Only a successful `CorpusStore::open` lifts the quarantine, and
-/// nothing in a running daemon re-attempts that open, so the run could never
-/// persist anything.
-/// What: `None` when [`crate::core::indexer::CodeIndexer::is_write_quarantined`]
-/// is false, and the caller queues the reindex. Otherwise `409
-/// index_write_quarantined` with `queued: false`, `retryable: false`, the #4333
-/// `failure_kind`, and a `message` naming the quarantine, its classified
-/// reason, and the daemon restart that clears it.
+/// forever. Only a successful `CorpusStore::open` lifts the quarantine.
+/// What: the caller first gives a transiently quarantined index one in-process
+/// re-open attempt under its teardown guard (#8958); a success lifts the
+/// quarantine and the reindex proceeds, re-writing the redb. `None` when
+/// [`crate::core::indexer::CodeIndexer::is_write_quarantined`] is then false,
+/// and the caller queues the reindex. Otherwise `409 index_write_quarantined`
+/// with `queued: false`, the #4333 `failure_kind`, `retryable` true only for a
+/// transient kind (the open is retried, #8085), and a `message` naming the
+/// quarantine, its classified reason, and the daemon restart that also clears it.
 /// Test: `reindex_of_a_write_quarantined_index_is_refused_with_409`,
-/// `reindex_of_a_healthy_index_is_still_queued`.
+/// `reindex_of_a_healthy_index_is_still_queued`,
+/// `a_reindex_after_the_holder_releases_reattaches_the_corpus`.
 pub(super) async fn write_quarantine_refusal(
     index_id: &str,
-    handle: &IndexHandle,
+    handle: &std::sync::Arc<IndexHandle>,
 ) -> Option<(StatusCode, serde_json::Value)> {
     let indexer = handle.indexer.read().await;
     if !indexer.is_write_quarantined() {
@@ -153,6 +155,16 @@ pub(super) async fn write_quarantine_refusal(
 
     // The kind is written with the flag, so `None` is unreachable; report the
     // flag rather than invent a cause, as `corpus_failure_response` does.
+    // #8085: a transient kind is re-opened in process, so a retry can succeed.
+    let transient = kind.is_some_and(|k| k.is_transient());
+    let retry = if transient {
+        "The daemon re-attempts the open in the background and on every reindex \
+         request, so retry once the other opener releases the file; to clear it now, \
+         restart the daemon."
+    } else {
+        "Retrying the request does not clear the quarantine; restart the daemon, \
+         which re-opens the corpus and lifts it on success."
+    };
     let (failure_kind, reason) = match kind {
         Some(k) => (k.label(), k.stage_reason()),
         None => (
@@ -166,13 +178,12 @@ pub(super) async fn write_quarantine_refusal(
             "error": "index_write_quarantined",
             "index_id": index_id,
             "failure_kind": failure_kind,
-            "retryable": false,
+            "retryable": transient,
             "queued": false,
             "message": format!(
                 "index '{index_id}' is write-quarantined: its durable corpus failed to open, \
                  so a reindex could persist nothing and was not queued (issue #8105). \
-                 Retrying the request does not clear the quarantine; restart the daemon, \
-                 which re-opens the corpus and lifts it on success. {reason}"
+                 {retry} {reason}"
             ),
         }),
     ))

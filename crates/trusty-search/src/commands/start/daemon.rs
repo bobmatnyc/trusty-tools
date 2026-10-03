@@ -497,6 +497,8 @@ pub async fn handle_start(
                 // Gated by TRUSTY_NO_BOOT_RECONCILE=1.
                 crate::service::reconcile::reconcile_stale_indexes(&install_state).await;
                 crate::core::migration::spawn_index_migrations(&install_state);
+                // #8085, #8958: re-open transiently quarantined corpora in process.
+                crate::service::corpus_reopen::spawn_corpus_reopen_sweep(install_state.clone());
                 // Issue #41 Phase 1: prime the `trusty_index_count` gauge.
                 crate::service::metrics::set_index_count(install_state.registry.list().len());
                 // Issue #40: auto-discover Claude Code / git projects.

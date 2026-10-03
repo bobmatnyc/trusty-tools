@@ -24,6 +24,10 @@ pub mod m004;
 pub mod m005;
 // #7923: shared, loss-free absolute → relative rewrite for M002 and M004.
 mod relativize;
+// #8659: a migration waiting on its index permit is logged and reported.
+pub(crate) mod wait;
+#[cfg(test)]
+mod wait_8659_tests;
 
 use std::sync::Arc;
 
@@ -366,22 +370,38 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
         let Some(handle) = state.registry.get(&index_id) else {
             continue;
         };
-        let reg = std::sync::Arc::clone(&registry);
-        tokio::spawn(async move {
-            match run_migrations_exclusive(&handle, &reg).await {
-                // #8726: a migration can leave chunks with no vector — M005
-                // hands a stored vector only to text it already held — while
-                // warm boot has already published `semantic: ready`.
-                Ok(()) => {
-                    crate::service::vector_gap::reconcile_semantic_vector_gap(&handle).await;
-                }
-                Err(e) => tracing::warn!(
-                    index_id = %handle.id,
-                    "schema migration failed (index kept at current schema): {e:#}"
-                ),
-            }
-        });
+        spawn_one_index_migration(handle, std::sync::Arc::clone(&registry));
     }
+}
+
+/// Spawn the detached migration task for one index (#143, #8085).
+///
+/// Why: a corpus re-opened in process (#8085) missed the boot-time run, whose
+/// schema-version write failed for lack of a corpus.
+/// What: the per-index body of [`spawn_index_migrations`]; honours
+/// `TRUSTY_DISABLE_MIGRATIONS=1`.
+/// Test: `a_reopen_reruns_a_schema_chain_that_failed_for_lack_of_a_corpus`.
+pub(crate) fn spawn_one_index_migration(
+    handle: std::sync::Arc<IndexHandle>,
+    reg: std::sync::Arc<MigrationRegistry>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() == Ok("1") {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        match run_migrations_exclusive(&handle, &reg).await {
+            // #8726: a migration can leave chunks with no vector — M005
+            // hands a stored vector only to text it already held — while
+            // warm boot has already published `semantic: ready`.
+            Ok(()) => {
+                crate::service::vector_gap::reconcile_semantic_vector_gap(&handle).await;
+            }
+            Err(e) => tracing::warn!(
+                index_id = %handle.id,
+                "schema migration failed (index kept at current schema): {e:#}"
+            ),
+        }
+    }))
 }
 
 /// Run `index`'s migration chain with every other writer of its corpus excluded
@@ -404,17 +424,21 @@ pub fn spawn_index_migrations(state: &crate::service::SearchAppState) {
 /// matching `reindex::runner` and `reindex::defer_embed_queue` — the reverse
 /// order would deadlock against a pending DELETE, which is the teardown lock's
 /// only writer.
-/// Test: `m005_waits_for_the_index_permit_before_clearing_the_corpus`.
+/// Test: `m005_waits_for_the_index_permit_before_clearing_the_corpus`,
+/// `a_waiting_migration_is_logged_and_reported_with_its_holder`.
 pub(crate) async fn run_migrations_exclusive(
     index: &IndexHandle,
     registry: &MigrationRegistry,
 ) -> Result<(), MigrationError> {
     // #6581: the reindex holds this for its snapshot AND its swap, so taking it
     // here is what makes the two mutually exclusive.
-    let _index_permit = crate::service::reindex::index_semaphore(&index.id)
-        .acquire_owned()
-        .await
-        .expect("per-index semaphore is never closed — a fresh Semaphore per IndexId");
+    // #8659: a held permit is logged and reported, not waited on silently.
+    let _index_permit = wait::acquire_index_permit(
+        index,
+        registry,
+        crate::service::reindex::index_semaphore(&index.id),
+    )
+    .await;
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index.id).await;
     run_migrations(index, registry).await
 }
@@ -552,6 +576,38 @@ async fn narrow_chunk_id_shapes(index: &IndexHandle, current: u32) {
 /// What: equals `M005ChunkIdEndLine::target_version()`.
 /// Test: `core::migration::m005::tests::m005_advances_exactly_one_version`.
 pub const M005_TARGET_VERSION: u32 = 5;
+
+/// Stamp a brand-new index's corpus at [`CURRENT_SCHEMA_VERSION`] (#8777).
+///
+/// Why: an unstamped corpus reads back as version 0, so a freshly created
+/// index ran the whole M001-M005 chain on its first restart, including M005's
+/// corpus clear and re-chunk, although every chunk it holds was written in the
+/// current shape.
+/// What: writes the stamp only when the corpus is wired, holds no chunk, has no
+/// stamp yet, and the load recorded no migration fault. A corpus restored with
+/// rows, or seeded from a legacy snapshot, keeps its own version and migrates.
+/// Returns whether it stamped.
+/// Test: `a_created_index_is_stamped_at_the_current_schema`,
+/// `a_restored_unstamped_corpus_is_not_stamped`.
+pub(crate) async fn stamp_new_index_schema(
+    indexer: &crate::core::indexer::CodeIndexer,
+) -> anyhow::Result<bool> {
+    if !indexer.migration_faults().is_empty() {
+        return Ok(false);
+    }
+    let Some(corpus) = indexer.corpus_store() else {
+        return Ok(false);
+    };
+    tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+        if corpus.chunk_count()? != 0 || corpus.read_schema_version_sync()? != 0 {
+            return Ok(false);
+        }
+        corpus.write_schema_version_sync(CURRENT_SCHEMA_VERSION)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("schema stamp task panicked: {e}"))?
+}
 
 // ── Read/write schema_version on IndexHandle ──────────────────────────────────
 

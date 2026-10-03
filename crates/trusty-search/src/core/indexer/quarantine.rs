@@ -53,9 +53,11 @@
 //!
 //! So the trigger list above is complete as written, and the quarantine
 //! population is no longer transient-dominated. One consequence still worth
-//! keeping in view: an in-process reopen retry would clear the transient part of
-//! this population, which today needs a daemon restart (#4122 / PR #4220
-//! HIGH-1). A corrupt index needs that restart too, but for a different reason —
+//! keeping in view: the transient part of this population is now cleared by the
+//! in-process re-open in `service::corpus_reopen` (#8085), which wires the corpus
+//! only through [`CodeIndexer::set_corpus_store`] under the indexer write lock,
+//! so the invariant below holds. A corrupt index still needs a restart, for a
+//! different reason —
 //! the damaged file is already off the canonical path, so the next boot opens a
 //! clean corpus and boot reconcile rebuilds it from source.
 //!
@@ -274,7 +276,8 @@ impl CodeIndexer {
                  recovery source (issue #4226). {refused} write(s) refused so far. \
                  TO RECOVER: fix the underlying redb file (permissions, stale lock, \
                  corruption), then RESTART THE DAEMON — only a successful \
-                 CorpusStore::open lifts the quarantine."
+                 CorpusStore::open lifts the quarantine. A transient failure (stale \
+                 lock, open timeout) is re-opened in process every 30 s (issue #8085)."
             );
         } else {
             tracing::debug!(
@@ -340,12 +343,12 @@ impl CodeIndexer {
                  legacy chunks.json snapshot, not the HNSW graph (issue #4226) — so \
                  all of them stay recoverable. TO RECOVER: fix the underlying redb \
                  file (permissions, stale lock, corruption), then RESTART THE DAEMON — \
-                 only a successful CorpusStore::open lifts the quarantine, and it is \
-                 attempted solely at load time (there is no in-process reopen retry). \
-                 A reindex will NOT clear this state and will NOT persist anything: \
-                 with no corpus wired it skips staging entirely, so its results are \
-                 discarded at the next restart. Saves dropped while quarantined are \
-                 picked up by the first reindex AFTER a successful restart."
+                 only a successful CorpusStore::open lifts the quarantine. A \
+                 transient failure (stale lock, open timeout) is re-opened in process \
+                 every 30 s and on each reindex request (issue #8085); any other kind \
+                 is retried only at load time. A reindex that cannot re-open the corpus \
+                 is refused (issue #8105). Saves dropped while quarantined are picked \
+                 up by the first reindex after the corpus opens."
             );
         } else {
             tracing::debug!(
@@ -450,5 +453,50 @@ impl CodeIndexer {
             self.index_id,
             refused
         );
+    }
+
+    /// Wire a re-opened corpus onto a quarantined index, lifting the
+    /// quarantine only once its rows read back (#8085).
+    ///
+    /// Why: wiring through [`CodeIndexer::set_corpus_store`] first lifted the
+    /// quarantine, reset the refusal counter and logged the recovery, and a
+    /// read-back failure then had to re-quarantine — losing the count of
+    /// refused writes and logging a recovery that never happened.
+    /// What: with `&mut self` (the caller's indexer write lock) no reader can
+    /// see the corpus before the read-back settles. Loads the chunks; on
+    /// success lifts the quarantine through
+    /// [`CodeIndexer::clear_corpus_open_failure`]. On failure detaches the
+    /// corpus again and records `Unclassified`, leaving the refusal counter
+    /// and the module invariant as they were. Refuses an index that already
+    /// holds a corpus or is not quarantined, which the invariant rules out.
+    /// Test: `a_corpus_that_cannot_be_read_back_stays_quarantined`,
+    /// `the_sweep_lifts_a_contention_quarantine_once_the_lock_is_released`.
+    pub(crate) async fn reattach_corpus(
+        &mut self,
+        corpus: std::sync::Arc<crate::core::corpus::CorpusStore>,
+    ) -> anyhow::Result<usize> {
+        if self.corpus.is_some() || !self.corpus_open_failed {
+            anyhow::bail!("reattach_corpus needs a quarantined index with no corpus wired");
+        }
+        self.corpus = Some(corpus);
+        match self.load_chunks_from_redb().await {
+            Ok(chunks) => {
+                self.corpus_ever_wired = true;
+                self.clear_corpus_open_failure();
+                Ok(chunks)
+            }
+            Err(e) => {
+                self.corpus = None;
+                self.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
+                tracing::error!(
+                    index_id = %self.index_id,
+                    "index '{}': the re-opened durable corpus could not be read back \
+                     ({e:#}); it stays write-quarantined and is no longer retried in \
+                     process (#8085)",
+                    self.index_id
+                );
+                Err(e)
+            }
+        }
     }
 }
