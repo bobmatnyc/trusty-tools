@@ -6,7 +6,7 @@
 //! against the wrong index, and the context gate then reported the resulting
 //! unknown index as a generic `infra_unavailable` skip.
 //!
-//! What: [`resolve_repo_index`] maps `owner/repo` to an index id through the
+//! What: `resolve_repo_index` maps `owner/repo` to an index id through the
 //! `repo_identity` trusty-search records for each index (DOC-37). The session's
 //! pinned index wins when it belongs to the repo. With no identity match, an
 //! index whose id is the bare repo name and that has no recorded identity is
