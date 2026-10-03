@@ -545,6 +545,8 @@ pub fn get_output(
         original_bytes: compressed.stats.original_bytes,
         compressed_bytes: compressed.stats.compressed_bytes,
         compress_level: compressed.level_label,
+        // #8407: callers must not parse escapes to tell a suggestion from a draft.
+        input_box: TmuxService::input_box(&session),
     })
 }
 

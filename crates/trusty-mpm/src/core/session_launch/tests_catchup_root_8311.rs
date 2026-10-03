@@ -69,3 +69,67 @@ fn session_prep_writes_the_catchup_watermark_under_the_framework_root() {
         );
     }
 }
+
+/// Why (#8311): the palace-alias writer resolved the trusty-memory registry
+/// itself, so a launch with every other path injected still registered the
+/// alias in the real registry — and a missed root succeeds silently, which is
+/// the Fail-Open Check surface this test covers.
+/// What: a real launch for a split-brain remote (bare palace present,
+/// owner-repo absent) in both a named registry and the ambient one
+/// (`TRUSTY_DATA_DIR_OVERRIDE`, standing in for the real home's). The alias
+/// lands in the named registry and the ambient one is untouched.
+/// Test: this is the test.
+#[test]
+#[serial_test::serial]
+fn session_prep_writes_the_palace_alias_under_the_named_registry() {
+    use trusty_common::palace_alias::PalaceAliasStore;
+    const REMOTE: &str = "git@github.com:bobmatnyc/trusty-tools.git";
+    let seed = |registry: &Path| {
+        let bare = registry.join("trusty-tools");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("palace.json"), b"{}").unwrap();
+    };
+    let home = crate::test_support::hermetic_temp_dir();
+    let ambient = crate::test_support::hermetic_temp_dir();
+    let named = crate::test_support::hermetic_temp_dir();
+    let _home_env = EnvVarGuard::set("HOME", home.path());
+    let _data_env = EnvVarGuard::set("TRUSTY_DATA_DIR_OVERRIDE", ambient.path());
+    let _palace_env = EnvVarGuard::clear("TRUSTY_MEMORY_PALACE");
+    let ambient_registry = ambient.path().join("trusty-memory");
+    seed(&ambient_registry);
+    seed(named.path());
+    let fw_base = crate::test_support::hermetic_temp_dir();
+    let project = crate::test_support::hermetic_temp_dir();
+    let fw = FrameworkPaths::under(fw_base.path());
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(fw.root.join("config.toml"), CATCHUP_OFFLINE).unwrap();
+
+    prepare_session_inner(
+        &fw,
+        project.path(),
+        None,
+        false,
+        Some(REMOTE),
+        None,
+        HostInputs {
+            home: Some(home.path()),
+            memory_reachable: Some(false),
+            palace_registry: Some(named.path()),
+            ..HostInputs::default()
+        },
+    )
+    .expect("prep succeeds");
+
+    assert_eq!(
+        PalaceAliasStore::resolve_alias(named.path(), "bobmatnyc-trusty-tools")
+            .unwrap()
+            .as_deref(),
+        Some("trusty-tools"),
+        "the named registry must receive the alias"
+    );
+    assert_eq!(
+        PalaceAliasStore::resolve_alias(&ambient_registry, "bobmatnyc-trusty-tools").unwrap(),
+        None,
+        "the ambient registry must be untouched when a registry is named"
+    );
+}
