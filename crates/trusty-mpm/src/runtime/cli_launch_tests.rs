@@ -108,15 +108,25 @@ fn isolated_spec_matches_the_shell_line_it_replaces() {
 fn inplace_and_client_specs_match_the_lines_they_replace() {
     for alternate_screen in [true, false] {
         let want = crate::core::alt_screen::configured_env(alternate_screen);
-        let inplace = super::inplace_spec(Path::new("/w"), alternate_screen);
-        let line =
-            crate::core::model_inject::build_inplace_session_command_configured(alternate_screen);
+        let inplace = super::inplace_spec(Path::new("/w"), Path::new("/p"), alternate_screen);
+        let line = crate::core::model_inject::build_inplace_session_command_with_prompt(
+            Path::new("/p"),
+            alternate_screen,
+        );
         assert_eq!(
             inplace.env_unset,
             crate::core::claude_env_scrub::parse_env_unset_vars(&line)
         );
         assert_eq!(inplace.env_set, want);
-        assert_eq!(inplace.args, ["--dangerously-skip-permissions"]);
+        // #8286: the in-place spec carries the PM prompt file, as the line does.
+        assert_eq!(
+            inplace.args,
+            [
+                "--append-system-prompt-file",
+                "/p",
+                "--dangerously-skip-permissions"
+            ]
+        );
 
         let client = super::client_spec(Path::new("/w"), Some(Path::new("/p")), alternate_screen);
         assert_eq!(client.env_unset, inplace.env_unset);
@@ -223,7 +233,7 @@ fn send_spec_launch_types_a_short_line_naming_a_readable_spec() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (bin, log) = fake_tmux(tmp.path(), 0);
     let spec_dir = tmp.path().join("specs");
-    let spec = super::inplace_spec(tmp.path(), false);
+    let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
     super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
         .expect("a short line is typed");
@@ -245,7 +255,7 @@ fn send_spec_launch_removes_the_spec_when_tmux_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (bin, _) = fake_tmux(tmp.path(), 1);
     let spec_dir = tmp.path().join("specs");
-    let spec = super::inplace_spec(tmp.path(), false);
+    let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
     let err = super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
         .expect_err("a failing send-keys is an error");
@@ -259,7 +269,7 @@ fn send_spec_launch_removes_the_spec_when_tmux_fails() {
 /// `TM_MANAGED_SESSION_ID` — the inline line it replaces exported none.
 #[test]
 fn a_cli_spec_exports_no_managed_session_id() {
-    let cmd = super::inplace_spec(Path::new("/w"), false).to_command();
+    let cmd = super::inplace_spec(Path::new("/w"), Path::new("/p"), false).to_command();
     let name = std::ffi::OsStr::new(crate::core::harness_root::MANAGED_SESSION_ID_ENV);
     assert!(
         cmd.get_envs().all(|(k, _)| k != name),
@@ -272,7 +282,7 @@ fn a_cli_spec_exports_no_managed_session_id() {
 #[test]
 fn a_cli_spec_writes_no_started_sentinel() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let path = super::inplace_spec(tmp.path(), false)
+    let path = super::inplace_spec(tmp.path(), Path::new("/p"), false)
         .write_in(tmp.path())
         .expect("write");
     LaunchSpec::mark_started(&path, "");

@@ -14,8 +14,9 @@
 //! `an_ambient_build_prompt_file_records_under_whatever_home_it_inherits` in
 //! `runtime::claude_code::tests`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use super::RuntimeError;
 use crate::core::session_profile::SessionProfile;
 
 /// Build and write the PM system-prompt file for `project_dir`, for injection
@@ -33,13 +34,12 @@ use crate::core::session_profile::SessionProfile;
 /// What: resolves live native-output-style support (fail-safe to injection via
 /// [`crate::core::output_style::claude_supports_native_output_style`]), builds
 /// the override-resolved + style-injected prompt for `project_dir`, and writes
-/// it to a fresh temp file via [`crate::core::model_inject::write_prompt_file`].
-/// Returns `None` (logged) on any write failure so `spawn` still proceeds —
-/// matching the non-fatal pattern every other `prepare_managed_config` step in
-/// `runtime::claude_code` follows. There is no CLAUDE.md-carrier fallback:
-/// #2173 made "trusty-mpm must never modify the target project's CLAUDE.md" a
-/// hard constraint, so a write failure here means the session runs without the
-/// injected PM system prompt rather than falling back to a different carrier.
+/// it to a fresh file under `prompt_dir` via
+/// [`crate::core::model_inject::write_prompt_file_in`].
+/// #8286: a write failure is `Err` ([`RuntimeError::Spawn`] naming the file and
+/// the I/O cause), and every caller refuses the launch on it. Each caller
+/// launches a PM or supervisor session, whose role IS this prompt, and there
+/// is no other carrier: #2173 forbids falling back to the project's CLAUDE.md.
 ///
 /// #4752/#4832: this is also where the session's compiled prompt
 /// (`<harness-root>/.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`) is
@@ -69,11 +69,8 @@ use crate::core::session_profile::SessionProfile;
 /// without that fatal upstream write would resurrect the same hole — check the
 /// list above before adding a fourth spawn path.
 ///
-/// Making it fatal here would also invert this function's own priority: a
-/// failure of the strictly MORE important write below (the actual system-prompt
-/// file) already degrades to spawning without it (#2173). Refusing to launch
-/// over the inspection copy while shrugging at the real prompt would be exactly
-/// backwards.
+/// The prompt file below is the write the launch depends on, and since #8286
+/// it is the fatal one; the compiled copy is only for inspection.
 /// Test: `build_prompt_file_writes_resolved_prompt_for_project`,
 /// `build_prompt_file_refreshes_the_compiled_prompt`,
 /// `build_prompt_file_compiled_write_failure_does_not_block_the_spawn`.
@@ -82,11 +79,16 @@ use crate::core::session_profile::SessionProfile;
 pub(super) fn build_prompt_file(
     project_dir: &Path,
     session_id: Option<&str>,
-) -> (Option<std::path::PathBuf>, SessionProfile) {
+) -> (Result<PathBuf, RuntimeError>, SessionProfile) {
     // #7514: a real spawn, so the ambient framework root is the right ledger —
     // read once, here, and passed down rather than resolved inside the writer.
     let framework_root = crate::core::paths::FrameworkPaths::default().root;
-    build_prompt_file_in(&framework_root, project_dir, session_id)
+    build_prompt_file_in(
+        &framework_root,
+        &std::env::temp_dir(),
+        project_dir,
+        session_id,
+    )
 }
 
 /// [`build_prompt_file`] against a caller-named framework root.
@@ -103,14 +105,17 @@ pub(super) fn build_prompt_file(
 /// What: the body of [`build_prompt_file`] — composes the project's prompt,
 /// refreshes the compiled copy under `framework_root` (best-effort; see the
 /// entry point for why this write is not fatal here), and writes the
-/// `--append-system-prompt-file` payload to a temp file.
+/// `--append-system-prompt-file` payload to a file under `prompt_dir`
+/// (production: the process temp dir; #8286 tests name an unwritable one).
 /// Test: `build_prompt_file_records_under_the_named_framework_root`,
-/// `an_ambient_build_prompt_file_records_under_whatever_home_it_inherits`.
+/// `an_ambient_build_prompt_file_records_under_whatever_home_it_inherits`,
+/// `spawn_refuses_when_the_prompt_file_cannot_be_written`.
 pub(super) fn build_prompt_file_in(
     framework_root: &Path,
+    prompt_dir: &Path,
     project_dir: &Path,
     session_id: Option<&str>,
-) -> (Option<std::path::PathBuf>, SessionProfile) {
+) -> (Result<PathBuf, RuntimeError>, SessionProfile) {
     // #8453: resolved once, against the named root's user config; the prompt
     // is composed for it and the caller stamps the same value.
     let profile = crate::core::session_profile::resolve(
@@ -144,12 +149,13 @@ pub(super) fn build_prompt_file_in(
         );
     }
 
-    let file = crate::core::model_inject::write_prompt_file(&prompt);
-    if file.is_none() {
-        tracing::warn!(
-            project = %project_dir.display(),
-            "failed to write PM system-prompt file; spawning without --append-system-prompt-file"
-        );
-    }
+    // #8286: no flag-less fallback; the caller refuses the launch on `Err`.
+    let file =
+        crate::core::model_inject::write_prompt_file_in(prompt_dir, &prompt).map_err(|err| {
+            RuntimeError::Spawn(format!(
+                "{err}; refusing to launch {} without its PM instructions (#8286)",
+                project_dir.display()
+            ))
+        });
     (file, profile)
 }

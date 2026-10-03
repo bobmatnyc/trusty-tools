@@ -36,7 +36,13 @@
 //! consolidation (#2010) and is tracked separately in #2020.
 //! What: [`relaunch_command`] returns the shell command sent to the pane —
 //! `claude` behind the #4467 inherited-session-marker `env` scrub.
-//! Test: `relaunch_command_scrubs_inherited_session_markers`.
+//!
+//! #8286: the GUI spawn no longer types [`relaunch_command`]. It types
+//! [`gui_spawn_command`], the same scrub plus the profile stamp and the PM
+//! prompt file; only the config-apply restarter still relaunches a bare
+//! `claude`.
+//! Test: `relaunch_command_scrubs_inherited_session_markers`,
+//! `gui_spawn_command_carries_the_prompt_file_and_the_stamp`.
 
 /// The shell command used to (re)launch `claude` inside an already-running,
 /// already-configured tmux pane.
@@ -74,9 +80,116 @@ pub(crate) fn relaunch_command() -> String {
     )
 }
 
+/// The line the GUI "New Session" spawn types into its fresh pane (#8286).
+///
+/// Why: that spawn starts a PM session, and every PM launch mode delivers its
+/// prompt through `--append-system-prompt-file`. [`relaunch_command`] stays
+/// bare for the config-apply restarter, which relaunches an existing pane.
+/// What: the same `env -u …` scrub, then the profile stamp the prompt was
+/// composed for (#8453), then `claude --append-system-prompt-file '<file>'`.
+/// Both values are single-quoted because the pane shell re-splits the line.
+/// Test: `gui_spawn_command_carries_the_prompt_file_and_the_stamp`,
+/// `pm_launch_builders_carry_the_prompt_file`.
+pub(crate) fn gui_spawn_command(prompt_file: &std::path::Path, stamp: &(String, String)) -> String {
+    use crate::core::spawn_disclaim::pane::shell_single_quote;
+    format!(
+        "env{} {}={} claude --append-system-prompt-file {}",
+        crate::core::claude_env_scrub::env_unset_flags(),
+        stamp.0,
+        shell_single_quote(&stamp.1),
+        shell_single_quote(&prompt_file.display().to_string())
+    )
+}
+
+/// Compose and write the GUI spawn's PM prompt for `workdir`, then return the
+/// line that hands it to `claude` (#8286).
+///
+/// Why: a GUI session used to start a bare `claude` with no PM instructions.
+/// What: one [`crate::core::session_launch::cli_launch`] resolution gives the
+/// prompt and the stamp; the prompt is written under `prompt_dir` (production:
+/// the process temp dir). `Err` names the file, the I/O cause and `workdir`,
+/// and the caller refuses the spawn on it.
+/// Test: `gui_spawn_line_writes_the_prompt_it_names`,
+/// `gui_spawn_line_refuses_when_the_prompt_file_cannot_be_written`.
+pub(crate) fn gui_spawn_line(
+    workdir: &std::path::Path,
+    prompt_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let cli = crate::core::session_launch::cli_launch(workdir, None);
+    let file = crate::core::model_inject::write_pm_prompt_file_in(
+        prompt_dir,
+        &cli.prompt,
+        workdir,
+        "spawn",
+    )?;
+    Ok(gui_spawn_command(
+        &file,
+        &crate::core::session_profile::launch_env(cli.profile),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::relaunch_command;
+    use super::{gui_spawn_command, gui_spawn_line, relaunch_command};
+
+    /// #8286: the GUI spawn line scrubs the markers, stamps the profile and
+    /// hands `claude` the prompt file as one shell word.
+    #[test]
+    fn gui_spawn_command_carries_the_prompt_file_and_the_stamp() {
+        let stamp = ("TRUSTY_MPM_SESSION_PROFILE".to_owned(), "pm".to_owned());
+        let cmd = gui_spawn_command(std::path::Path::new("/t/with space/p.txt"), &stamp);
+        assert!(cmd.starts_with("env -u "), "{cmd}");
+        assert!(cmd.contains("-u CLAUDE_CODE_CHILD_SESSION"), "{cmd}");
+        assert!(
+            cmd.ends_with(
+                " TRUSTY_MPM_SESSION_PROFILE='pm' claude \
+                 --append-system-prompt-file '/t/with space/p.txt'"
+            ),
+            "{cmd}"
+        );
+    }
+
+    /// #8286: the line names the file the prompt was written to.
+    #[test]
+    fn gui_spawn_line_writes_the_prompt_it_names() {
+        let project = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let line = gui_spawn_line(project.path(), dir.path()).unwrap();
+        let written: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert!(
+            line.contains(&format!(
+                "--append-system-prompt-file '{}'",
+                written[0].display()
+            )),
+            "{line}"
+        );
+        assert!(
+            !std::fs::read_to_string(&written[0])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+    }
+
+    /// #8286: a prompt that cannot be written refuses the spawn.
+    #[test]
+    fn gui_spawn_line_refuses_when_the_prompt_file_cannot_be_written() {
+        let project = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let err = gui_spawn_line(project.path(), &not_a_dir)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&*not_a_dir.to_string_lossy()) && err.contains("refusing to spawn"),
+            "{err}"
+        );
+    }
 
     /// #4467: the relaunch line must scrub the inherited session markers, or a
     /// config-restart silently loses the pane's transcript. Marker names are

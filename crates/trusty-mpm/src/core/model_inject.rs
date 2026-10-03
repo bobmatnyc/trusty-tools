@@ -8,7 +8,7 @@
 //! command.
 //! What: [`build_claude_command`] composes the full shell string passed to
 //! `tmux send-keys`; it optionally appends `--model <id>` and
-//! `--append-system-prompt-file <path>` flags. [`write_prompt_file`] handles
+//! `--append-system-prompt-file <path>` flags. [`write_prompt_file_in`] handles
 //! the temp-file side of that second flag.
 //!
 //! Issue #4467: this module owns THREE launch-line builders, and every one of
@@ -23,7 +23,7 @@
 //! of the operator's own settings and agents load.
 //! Test: `claude_command_bare`, `claude_command_with_model`,
 //! `claude_command_with_prompt`, `claude_command_with_both`,
-//! `write_prompt_file_returns_path`,
+//! `write_prompt_file_in_returns_the_written_path`,
 //! `inplace_session_command_scrubs_inherited_session_markers`,
 //! `client_session_command_scrubs_inherited_session_markers`.
 
@@ -32,26 +32,80 @@ use std::path::{Path, PathBuf};
 use crate::core::config::MpmConfig;
 use crate::core::delegation_authority::AgentSummary;
 
-/// Write the session prompt text to a unique temp file.
+/// A system-prompt file that could not be written (#8286).
 ///
-/// Why: `claude --append-system-prompt-file` requires a file path; callers
-/// must create that file before spawning `claude`. This helper encapsulates the
-/// temp-file creation so every launch path handles it consistently.
-/// What: writes `prompt` to `<tmp>/trusty-mpm-system-prompt-<uuid>.txt` and
-/// returns the path. Returns `None` and logs a warning on any I/O error.
-/// Test: `write_prompt_file_returns_path`.
-pub fn write_prompt_file(prompt: &str) -> Option<PathBuf> {
-    let file = std::env::temp_dir().join(format!(
+/// Why: a launch that refuses over a missing prompt must tell the operator
+/// which file it tried and why the write failed.
+/// What: the target path and the I/O error, both in the `Display` text.
+/// Test: `write_prompt_file_in_names_the_path_and_the_cause`.
+#[derive(Debug, thiserror::Error)]
+#[error("could not write the PM system-prompt file {}: {cause}", path.display())]
+pub struct PromptFileError {
+    /// The file the write targeted.
+    pub path: PathBuf,
+    /// The error the write returned.
+    pub cause: std::io::Error,
+}
+
+/// Write the session prompt to a unique file under `dir`, keeping the error.
+///
+/// Why (#8286): the PM launch paths refuse on a write failure, and their tests
+/// need a real failing write without touching the process-global `TMPDIR`.
+/// What: writes `prompt` to a new `<dir>/trusty-mpm-system-prompt-<uuid>.txt`
+/// through [`write_new_private`] (mode 0600, never an existing file);
+/// `Err` carries that path and the I/O error.
+/// Test: `write_prompt_file_in_names_the_path_and_the_cause`,
+/// `write_prompt_file_in_creates_an_owner_only_file`.
+pub fn write_prompt_file_in(dir: &Path, prompt: &str) -> Result<PathBuf, PromptFileError> {
+    let path = dir.join(format!(
         "trusty-mpm-system-prompt-{}.txt",
         uuid::Uuid::new_v4()
     ));
-    match std::fs::write(&file, prompt) {
-        Ok(()) => Some(file),
-        Err(err) => {
-            tracing::warn!("failed to write system prompt file: {err}");
-            None
-        }
+    match write_new_private(&path, prompt) {
+        Ok(()) => Ok(path),
+        Err(cause) => Err(PromptFileError { path, cause }),
     }
+}
+
+/// Create `path` owner-only and write `text`, refusing a file already there.
+///
+/// Why (#8286): the prompt file sits in a shared temp dir. `create_new` stops
+/// a planted file or symlink at that name from receiving the prompt, and mode
+/// 0600 keeps other local users from reading it.
+/// What: `O_CREAT|O_EXCL` open, mode 0600 on unix, then one write.
+/// Test: `write_new_private_refuses_an_existing_file`,
+/// `write_prompt_file_in_creates_an_owner_only_file`.
+fn write_new_private(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    opts.open(path)?.write_all(text.as_bytes())
+}
+
+/// [`write_prompt_file_in`] for a PM launch that refuses on failure (#8286).
+///
+/// Why: every PM launch mode shares one refusal wording, so an operator reads
+/// the same file, cause and project whichever mode failed.
+/// What: `Err` is "<PromptFileError>; refusing to `action` `project` without
+/// its PM instructions (#8286)".
+/// Test: `write_pm_prompt_file_in_names_the_path_the_cause_and_the_project`.
+pub fn write_pm_prompt_file_in(
+    dir: &Path,
+    prompt: &str,
+    project: &Path,
+    action: &str,
+) -> anyhow::Result<PathBuf> {
+    write_prompt_file_in(dir, prompt).map_err(|err| {
+        anyhow::anyhow!(
+            "{err}; refusing to {action} {} without its PM instructions (#8286)",
+            project.display()
+        )
+    })
 }
 
 /// Resolve the model for a PM-session launch (no named agent).
@@ -431,15 +485,55 @@ pub fn build_claude_command_with_configured(
 /// Neither disturbs the settings-tier reasoning above: both are environment
 /// defaults, not `--setting-sources` flags, so this path still loads the
 /// operator's own `user` tier.
+///
+/// #8286: this line carries NO prompt flag, so a session launched from it runs
+/// on the project `CLAUDE.md` alone. The in-place launch now uses
+/// [`build_inplace_session_command_with_prompt`]; this builder keeps its 1.7.x
+/// signature for the semver gate (#8405) and stays covered by the
+/// `transcript_saving` doctor check's scrub probe.
 /// Test: `inplace_session_command_scrubs_inherited_session_markers`,
-/// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`,
+/// `inplace_session_command_keeps_the_permission_flag_and_nothing_else`.
+pub fn build_inplace_session_command_configured(alternate_screen: bool) -> String {
+    inplace_session_line(None, alternate_screen)
+}
+
+/// The in-place `tm session start` line carrying the PM prompt file (#8286).
+///
+/// Why: the owner rule is that every PM launch mode delivers its prompt through
+/// `--append-system-prompt-file`. This is the shell-string twin of
+/// [`crate::runtime::cli_launch::inplace_spec`], the spec the in-place launch
+/// actually sends, so the doctor check and the spec tests read the same flags.
+/// `prompt_file` is required, not optional, so a prompt-less line cannot be
+/// built through this function.
+/// What: [`build_inplace_session_command_configured`]'s line with
+/// `--append-system-prompt-file '<prompt_file>'` ahead of the permission flag.
+/// The path is single-quoted because a pane shell re-splits this line.
+/// Test: `inplace_session_command_scrubs_inherited_session_markers`,
+/// `inplace_session_command_carries_the_prompt_file_and_the_permission_flag`,
+/// `inplace_session_command_quotes_the_prompt_file`,
 /// `inplace_session_command_assigns_the_configured_renderer`,
 /// `inplace_session_command_defaults_the_mouse_capture_off`.
-pub fn build_inplace_session_command_configured(alternate_screen: bool) -> String {
+pub fn build_inplace_session_command_with_prompt(
+    prompt_file: &Path,
+    alternate_screen: bool,
+) -> String {
+    inplace_session_line(Some(prompt_file), alternate_screen)
+}
+
+/// The shared body of the two in-place builders above.
+fn inplace_session_line(prompt_file: Option<&Path>, alternate_screen: bool) -> String {
     // #4467: same shared scrub every other launch line uses — never a second
     // mechanism.
+    let prompt = prompt_file
+        .map(|p| {
+            format!(
+                " --append-system-prompt-file {}",
+                crate::core::spawn_disclaim::pane::shell_single_quote(&p.display().to_string())
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "env{} {} claude {}",
+        "env{} {} claude{prompt} {}",
         crate::core::claude_env_scrub::env_unset_flags(),
         // #6495/#7160/#8405: the configured renderer + mouse capture off.
         crate::core::alt_screen::configured_shell_assignments(alternate_screen),
@@ -585,7 +679,8 @@ pub fn build_claude_command_with(
 ///
 /// Superseded by [`build_inplace_session_command_configured`], which takes the renderer explicitly;
 /// kept un-`#[deprecated]` because that attribute is a minor-level change
-/// the 1.7.x patch semver gate refuses (#8405).
+/// the 1.7.x patch semver gate refuses (#8405). Like it, this line carries no
+/// prompt flag; see [`build_inplace_session_command_with_prompt`] (#8286).
 pub fn build_inplace_session_command() -> String {
     build_inplace_session_command_configured(crate::core::alt_screen::configured_alternate_screen())
 }
@@ -927,6 +1022,10 @@ mod tests {
     #[test]
     fn inplace_session_command_scrubs_inherited_session_markers() {
         assert_scrubbed_launch_line(&build_inplace_session_command_configured(false));
+        assert_scrubbed_launch_line(&build_inplace_session_command_with_prompt(
+            Path::new("/tmp/p.txt"),
+            false,
+        ));
     }
 
     /// This pin guards the FLAG list: adding `--setting-sources project,local`
@@ -937,8 +1036,7 @@ mod tests {
     /// #6495/#7160 changed the expected string by adding `env` operands
     /// (`configured_shell_assignments`) ahead of `claude`. That is deliberate and
     /// does not weaken what this test asserts: the guard is about which SETTINGS
-    /// TIERS the line loads, an environment default changes none of them, and
-    /// `--dangerously-skip-permissions` is still the only flag. The
+    /// TIERS the line loads, an environment default changes none of them. The
     /// `SETTING_SOURCES_FLAG` assertion below remains the sharp edge.
     #[test]
     fn inplace_session_command_keeps_the_permission_flag_and_nothing_else() {
@@ -953,6 +1051,38 @@ mod tests {
         assert!(
             !build_inplace_session_command_configured(false).contains(SETTING_SOURCES_FLAG),
             "must not add --setting-sources: that would drop the user settings tier"
+        );
+    }
+
+    /// #8286: the prompt-carrying twin pins `--append-system-prompt-file`, the
+    /// one carrier every PM launch mode uses, ahead of the permission flag, and
+    /// still adds no `--setting-sources`.
+    #[test]
+    fn inplace_session_command_carries_the_prompt_file_and_the_permission_flag() {
+        let cmd = build_inplace_session_command_with_prompt(Path::new("/tmp/p.txt"), false);
+        assert_eq!(
+            cmd,
+            format!(
+                "env{} {} claude --append-system-prompt-file '/tmp/p.txt' {PERMISSION_MODE_FLAG}",
+                crate::core::claude_env_scrub::env_unset_flags(),
+                crate::core::alt_screen::configured_shell_assignments(false)
+            )
+        );
+        assert!(
+            !cmd.contains(SETTING_SOURCES_FLAG),
+            "must not add --setting-sources: that would drop the user settings tier"
+        );
+    }
+
+    /// #8286: the in-place line is typed into a pane shell, so a prompt path
+    /// holding a space must stay one shell word.
+    #[test]
+    fn inplace_session_command_quotes_the_prompt_file() {
+        let cmd =
+            build_inplace_session_command_with_prompt(Path::new("/tmp/with space/p.txt"), false);
+        assert!(
+            cmd.contains("--append-system-prompt-file '/tmp/with space/p.txt' "),
+            "the prompt path must be one shell word: {cmd}"
         );
     }
 
@@ -1058,7 +1188,10 @@ mod tests {
     fn inplace_session_command_assigns_the_configured_renderer() {
         for alternate_screen in [true, false] {
             assert_assigns_the_configured_renderer(
-                &build_inplace_session_command_configured(alternate_screen),
+                &build_inplace_session_command_with_prompt(
+                    Path::new("/tmp/p.txt"),
+                    alternate_screen,
+                ),
                 alternate_screen,
             );
         }
@@ -1067,7 +1200,7 @@ mod tests {
     /// #7160: the `tm session start` line keeps the yielding mouse operand.
     #[test]
     fn inplace_session_command_defaults_the_mouse_capture_off() {
-        let cmd = build_inplace_session_command_configured(false);
+        let cmd = build_inplace_session_command_with_prompt(Path::new("/tmp/p.txt"), false);
         assert!(
             cmd.contains(crate::core::alt_screen::MOUSE_SHELL_ASSIGNMENT),
             "the in-place session line must default mouse capture off: {cmd}"
@@ -1205,12 +1338,62 @@ mod tests {
     }
 
     #[test]
-    fn write_prompt_file_returns_path() {
-        let path = write_prompt_file("hello trusty-mpm").unwrap();
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "hello trusty-mpm");
-        std::fs::remove_file(path).unwrap();
+    fn write_prompt_file_in_returns_the_written_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_prompt_file_in(tmp.path(), "hello trusty-mpm").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello trusty-mpm");
+    }
+
+    /// #8286: the shared refusal names the file, the cause and the project.
+    #[test]
+    fn write_pm_prompt_file_in_names_the_path_the_cause_and_the_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let err = write_pm_prompt_file_in(&not_a_dir, "p", Path::new("/proj"), "launch")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&*not_a_dir.to_string_lossy()), "{err}");
+        assert!(err.contains("os error"), "{err}");
+        assert!(
+            err.contains("refusing to launch /proj without its PM"),
+            "{err}"
+        );
+    }
+
+    /// #8286: the refusal text names the file and the I/O cause.
+    #[test]
+    fn write_prompt_file_in_names_the_path_and_the_cause() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_a_dir = tmp.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "").unwrap();
+        let err = write_prompt_file_in(&not_a_dir, "prompt").unwrap_err();
+        assert!(err.path.starts_with(&not_a_dir), "{}", err.path.display());
+        let text = err.to_string();
+        assert!(text.contains(&*err.path.to_string_lossy()), "{text}");
+        assert!(text.contains(&err.cause.to_string()), "{text}");
+    }
+
+    /// #8286: the prompt file in a shared temp dir is readable by its owner only.
+    #[cfg(unix)]
+    #[test]
+    fn write_prompt_file_in_creates_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_prompt_file_in(tmp.path(), "secret prompt").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the prompt file must be owner-only: {mode:o}");
+    }
+
+    /// #8286: a file already at the prompt path is refused, never overwritten.
+    #[test]
+    fn write_new_private_refuses_an_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let planted = tmp.path().join("planted.txt");
+        std::fs::write(&planted, "planted").unwrap();
+        let err = write_new_private(&planted, "prompt").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&planted).unwrap(), "planted");
     }
 
     #[test]

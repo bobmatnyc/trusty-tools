@@ -117,26 +117,57 @@ pub fn build_launch_command_configured(
     cmd
 }
 
+/// [`build_launch_command_configured`] carrying the PM prompt file (#8286).
+///
+/// Why: the owner rule is that every PM launch mode delivers its prompt
+/// through `--append-system-prompt-file`; `tm run` launched a bare `claude`.
+/// `prompt_file` is required, so a prompt-less `tm run` cannot be built here.
+/// What: the configured command plus `--append-system-prompt-file <path>`,
+/// unquoted because the argv goes straight to `exec`.
+/// Test: `run_launch_command_carries_the_prompt_file`,
+/// `pm_launch_builders_carry_the_prompt_file`.
+pub fn build_launch_command_with_prompt(
+    repo_path: &Path,
+    claude_config_dir: &Path,
+    api_key: Option<&str>,
+    mcp_config: Option<&Path>,
+    prompt_file: &Path,
+    alternate_screen: bool,
+) -> Command {
+    let mut cmd = build_launch_command_configured(
+        repo_path,
+        claude_config_dir,
+        api_key,
+        mcp_config,
+        alternate_screen,
+    );
+    cmd.arg("--append-system-prompt-file").arg(prompt_file);
+    cmd
+}
+
 /// The `claude` command `tm run` spawns, with the renderer the config under
 /// `config_root` decides (#8405).
 ///
 /// Why: the one seam where `run_alias` turns the operator's config into the
 /// renderer, split out so a test can drive it from a config root.
-/// What: [`build_launch_command_configured`] with
+/// What: [`build_launch_command_with_prompt`] with
 /// [`crate::core::alt_screen::configured_alternate_screen_in`].
-/// Test: `run_launch_command_follows_the_configured_renderer`.
+/// Test: `run_launch_command_follows_the_configured_renderer`,
+/// `run_launch_command_carries_the_prompt_file`.
 fn run_launch_command(
     config_root: Option<&Path>,
     repo_path: &Path,
     claude_config_dir: &Path,
     api_key: Option<&str>,
     mcp_config: Option<&Path>,
+    prompt_file: &Path,
 ) -> Command {
-    build_launch_command_configured(
+    build_launch_command_with_prompt(
         repo_path,
         claude_config_dir,
         api_key,
         mcp_config,
+        prompt_file,
         crate::core::alt_screen::configured_alternate_screen_in(config_root),
     )
 }
@@ -250,8 +281,10 @@ pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> Aut
 /// pointing users to `tm login` — but we do not block, because a valid keychain
 /// entry cannot be probed without spawning `claude auth status`.
 /// What: (1) `load_alias` — idempotent, (2) reads `ANTHROPIC_API_KEY` and
-/// calls `check_credentials` for a hint, (3) builds the command with
-/// `build_launch_command` (which adds `--bare` when the key is set), (4)
+/// calls `check_credentials` for a hint, (3) writes the PM prompt file and
+/// builds the command with [`build_launch_command_with_prompt`] (which adds
+/// `--bare` when the key is set); a prompt that cannot be written refuses the
+/// run (#8286), (4)
 /// spawns via `crate::core::spawn_disclaim::disclaimed_status` (macOS:
 /// disclaims TCC responsibility for the child so consent prompts attribute to
 /// `claude` rather than the signed `trusty-mpm`/`tm` binary, issue #2997;
@@ -297,6 +330,17 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     let mcp_config = crate::core::session_mcp_scope::provision(&repo_path, claude_config_dir)
         .context("failed to compose the session-scoped MCP config")?;
 
+    // #8286: `tm run` launches a PM, so it carries the PM prompt file and
+    // refuses when that file cannot be written. One profile resolution gives
+    // the prompt and the stamp (#8453).
+    let cli = crate::core::session_launch::cli_launch(&repo_path, None);
+    let prompt_file = crate::core::model_inject::write_pm_prompt_file_in(
+        &std::env::temp_dir(),
+        &cli.prompt,
+        &repo_path,
+        "run",
+    )?;
+
     let mut cmd = run_launch_command(
         // #8405: the operator's config decides the renderer.
         crate::core::alt_screen::operator_config_root().as_deref(),
@@ -304,7 +348,11 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
         claude_config_dir,
         api_key.as_deref(),
         Some(&mcp_config),
+        &prompt_file,
     );
+    // #8286: assigned after the builder's scrub, so this value wins.
+    let (stamp_name, stamp_value) = crate::core::session_profile::launch_env(cli.profile);
+    cmd.env(stamp_name, stamp_value);
     // Routed through the disclaim-aware spawn (issue #2997) rather than
     // `cmd.status()` directly: on macOS this disclaims TCC responsibility for
     // the child, so mis-attributed consent prompts (media library, App-Data,
@@ -569,6 +617,31 @@ mod tests {
         );
     }
 
+    /// #8286: `tm run` hands `claude` the PM prompt file. FAILS BEFORE THIS
+    /// CHANGE: the argv carried no `--append-system-prompt-file`.
+    #[test]
+    fn run_launch_command_carries_the_prompt_file() {
+        let tmp = TempDir::new().unwrap();
+        let prompt = tmp.path().join("pm prompt.txt");
+        let cmd = run_launch_command(
+            None,
+            &tmp.path().join("repo"),
+            &tmp.path().join("cfg"),
+            None,
+            None,
+            &prompt,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let pos = args
+            .iter()
+            .position(|a| a == "--append-system-prompt-file")
+            .expect("tm run must carry --append-system-prompt-file");
+        assert_eq!(args[pos + 1], prompt.display().to_string(), "{args:?}");
+    }
+
     /// #8405: `tm run` assigns the renderer config decides, in both
     /// directions, whatever the launching shell exports. At df212601d the
     /// builder yielded to an exported value, so this fails there under any
@@ -593,6 +666,7 @@ mod tests {
                 &tmp.path().join("cfg"),
                 None,
                 None,
+                &tmp.path().join("p.txt"),
             );
             let carried = cmd
                 .get_envs()

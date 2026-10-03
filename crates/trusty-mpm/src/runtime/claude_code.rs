@@ -498,8 +498,8 @@ fn compose_inplace_args(
 /// `"in-place-relaunch"` — there is no tmux session name in this context),
 /// builds the PM system-prompt file via `build_prompt_file` (#4336 — the
 /// SAME carrier `spawn`/`spawn_resume` use, previously missing from this path
-/// alone; non-fatal, a write failure omits the flag), then delegates argv
-/// composition to [`compose_inplace_args`].
+/// alone; #8286: a write failure is `Err`, never a flag-less relaunch), then
+/// delegates argv composition to [`compose_inplace_args`].
 /// Test: `build_inplace_resume_command_resolves_claude_binary`,
 /// `build_inplace_resume_command_carries_prompt_file`.
 pub fn build_inplace_resume_command(
@@ -524,6 +524,18 @@ pub fn build_inplace_resume_command_under(
     cwd: &Path,
     claude_session_id: Option<&str>,
 ) -> Result<InPlaceResumeCommand, RuntimeError> {
+    build_inplace_resume_command_with(fw, &std::env::temp_dir(), cwd, claude_session_id)
+}
+
+/// [`build_inplace_resume_command_under`] writing its prompt file under
+/// `prompt_dir`.
+/// Test: `inplace_resume_command_refuses_when_the_prompt_file_cannot_be_written`.
+fn build_inplace_resume_command_with(
+    fw: &FrameworkPaths,
+    prompt_dir: &Path,
+    cwd: &Path,
+    claude_session_id: Option<&str>,
+) -> Result<InPlaceResumeCommand, RuntimeError> {
     let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd);
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
@@ -545,12 +557,14 @@ pub fn build_inplace_resume_command_under(
     // #4832: no explicit id here — this path runs INSIDE the managed pane, so
     // `session_scope` reads `TM_MANAGED_SESSION_ID` from the environment.
     // #8545: the savings row lands under `fw`, not the process home.
-    let (prompt_file, profile) = build_prompt_file_in(&fw.root, cwd, None);
+    let (prompt_file, profile) = build_prompt_file_in(&fw.root, prompt_dir, cwd, None);
+    // #8286: a relaunched PM pane never runs without its prompt.
+    let prompt_file = prompt_file?;
     let args = compose_inplace_args(
         cwd,
         Some(&config_dir),
         claude_session_id,
-        prompt_file.as_deref(),
+        Some(prompt_file.as_path()),
     );
     let oauth_token = crate::core::oauth_token::resolve_oauth_token();
     // #4181: same per-project MCP pins the tmux-pane paths export.
@@ -583,6 +597,9 @@ pub struct ClaudeCodeAdapter {
     /// resolved once by the caller (`DaemonState::framework_root`) instead of
     /// from `dirs::home_dir()` on each spawn.
     fw: FrameworkPaths,
+    /// #8286: where `spawn`/`spawn_resume` write the PM prompt file — the
+    /// process temp dir; tests name an unwritable one to prove the refusal.
+    prompt_dir: std::path::PathBuf,
 }
 
 impl ClaudeCodeAdapter {
@@ -616,6 +633,7 @@ impl ClaudeCodeAdapter {
             tmux,
             memory_reachable,
             fw: FrameworkPaths::from_root(framework_root),
+            prompt_dir: std::env::temp_dir(),
         }
     }
 
@@ -725,7 +743,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// deleted by the shim) rather than in any typed text, so the token still
     /// never reaches the pane's shell history or any process's argv.
     /// Test: `spawn_sends_the_parameterized_launch_line`,
-    /// `spawn_errors_when_the_line_is_refused`.
+    /// `spawn_errors_when_the_line_is_refused`,
+    /// `spawn_refuses_when_the_prompt_file_cannot_be_written`.
     fn spawn(
         &self,
         tmux_name: &str,
@@ -772,10 +791,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         );
         // Build and inject the PM system prompt (issue #2125 item 3) so this,
         // the default daemon on-ramp, can no longer silently spawn vanilla
-        // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
-        // out a CLAUDE.md-carrier fallback, so there is no other carrier).
+        // Claude Code. #8286: a write failure refuses the spawn — #2173 ruled
+        // out a CLAUDE.md-carrier fallback, so there is no other carrier.
         // #8233: the compiled-prompt ledger under the NAMED framework root.
-        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) =
+            build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
+        let prompt_file = prompt_file?;
         // Issue #2246: inject CLAUDE_CODE_OAUTH_TOKEN when one is available
         // (an operator-set env var, else the tm-managed store) to bypass the
         // CLAUDE_CONFIG_DIR-keyed Keychain divergence that causes the
@@ -809,7 +830,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude_bin: &claude_bin,
             config_dir: Some(&config_dir),
             session_id,
-            prompt_file: prompt_file.as_deref(),
+            prompt_file: Some(prompt_file.as_path()),
             oauth_token: oauth_token.as_deref(),
             gh_env,
             mcp_env: &mcp_env,
@@ -879,7 +900,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `spawn_resume_sends_prompt_file_when_binary_available`,
     /// `spawn_resume_sends_oauth_token_when_available`,
     /// `spawn_resume_targets_stored_pane_id_when_known`,
-    /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown`.
+    /// `spawn_resume_falls_back_to_session_target_when_pane_id_unknown`,
+    /// `spawn_resume_refuses_when_the_prompt_file_cannot_be_written`.
     #[allow(clippy::too_many_arguments)]
     fn spawn_resume(
         &self,
@@ -913,9 +935,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // #2230: build the PM system prompt for the resume path too — before
         // this fix only spawn() passed --append-system-prompt-file, so every
         // resumed/guided-resume/crash-recovery session silently ran vanilla
-        // Claude Code. Non-fatal: a write failure omits the flag.
+        // Claude Code. #8286: a write failure refuses the resume, as in `spawn`.
         // #8233: named framework root, exactly as `spawn` uses.
-        let (prompt_file, profile) = build_prompt_file_in(&self.fw.root, cwd, Some(session_id));
+        let (prompt_file, profile) =
+            build_prompt_file_in(&self.fw.root, &self.prompt_dir, cwd, Some(session_id));
+        let prompt_file = prompt_file?;
         // #2246: the resume path must ALSO carry CLAUDE_CODE_OAUTH_TOKEN —
         // every resumed/guided-resume/crash-recovery session funnels through
         // here, so omitting it would leave exactly those sessions exposed to
@@ -978,7 +1002,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude_bin: &claude_bin,
             config_dir: Some(&config_dir),
             session_id,
-            prompt_file: prompt_file.as_deref(),
+            prompt_file: Some(prompt_file.as_path()),
             oauth_token: oauth_token.as_deref(),
             gh_env,
             mcp_env: &mcp_env,

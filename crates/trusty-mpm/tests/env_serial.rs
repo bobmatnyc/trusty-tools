@@ -25,6 +25,7 @@ mod inproject_cold_start;
 mod inproject_git_failure;
 mod mcp_spawn_gate;
 mod pane_launch_line_8233;
+mod prompt_refusal_before_post_8286;
 mod scratch_home_tmux_gate;
 mod scratch_root_tmux_gate;
 mod session_manager_mvp;
