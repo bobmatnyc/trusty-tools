@@ -7,9 +7,11 @@
 //! What: every drawer a maintenance path deletes is appended as one JSON line to
 //! `<palace data_dir>/maintenance_deletions.jsonl`: time, palace, drawer id,
 //! reason, the surviving drawer id and cosine score where one exists, and the
-//! pid of the deleting process. A per-id `warn` line would flood the log under a
-//! mass dedup, so the file holds the per-id record and each deleting pass logs
-//! one summary at `warn`. `trusty-memory palace deletions` reads the file back.
+//! pid of the deleting process. Each deleting pass also logs one summary at
+//! `warn`. #8729 (owner ruling): every removal is also logged on its own `warn`
+//! line naming the palace, drawer id and reason, so the daemon log alone shows
+//! which drawers went and why. `trusty-memory palace deletions` reads the file
+//! back.
 //! User-initiated deletions (`memory_forget`, the HTTP drawer delete) call
 //! [`PalaceHandle::forget`] directly and never reach this module.
 //!
@@ -17,6 +19,7 @@
 //! logged at `error` instead, which the default filter keeps. A palace with no
 //! data dir (in-memory) logs the record at `warn`.
 //! Test: `maintenance_log_tests::dream_dedup_records_the_removed_and_surviving_drawer`,
+//! `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
 //! `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 
 use crate::memory_core::palace::PalaceId;
@@ -194,10 +197,11 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
 /// Record one maintenance deletion; never drops it silently.
 ///
 /// Why/What: see the module doc. Appends to the journal when the palace has a
-/// data dir. When the append fails, the whole record goes to the log at
-/// `error`; with no data dir it goes at `warn`. Both reach the daemon's log at
-/// its default filter.
-/// Test: `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
+/// data dir, and logs the removal at `warn` (#8729). When the append fails, the
+/// whole record goes to the log at `error`; with no data dir it goes at `warn`.
+/// Every arm reaches the daemon's log at its default filter.
+/// Test: `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
+/// `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutcome {
     let Some(dir) = data_dir else {
         tracing::warn!(
@@ -208,7 +212,16 @@ pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutco
         return RecordOutcome::LoggedOnly;
     };
     match append(dir, rec, ROTATE_AT_BYTES) {
-        Ok(()) => RecordOutcome::Journaled,
+        Ok(()) => {
+            // #8729: each removal is logged with its id and reason, not only
+            // counted in the pass summary.
+            tracing::warn!(
+                palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
+                survivor_id = ?rec.survivor_id, score = ?rec.score,
+                "#8729: maintenance removed drawer {} ({})", rec.drawer_id, rec.reason
+            );
+            RecordOutcome::Journaled
+        }
         Err(e) => {
             tracing::error!(
                 palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
