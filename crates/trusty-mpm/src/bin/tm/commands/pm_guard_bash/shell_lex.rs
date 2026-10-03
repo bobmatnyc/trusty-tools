@@ -21,7 +21,9 @@
 
 use crate::commands::hook_rewrite::{is_env_assignment, strip_wrapper_prefix};
 // #8735: the xargs option table moved beside the other wrapper grammars.
-use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word};
+use crate::commands::program_word::{
+    COMMAND_WRAPPERS, Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word,
+};
 
 /// Shell programs that run their `-c` argument as a command string.
 ///
@@ -38,10 +40,26 @@ use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_pro
 // its separators must keep splitting.
 pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
 
-/// Words that may precede `eval` while it still runs in the current shell
-/// (#9127 critic MEDIUM-1). Any other word before it — `env`, `nohup`, `sudo`,
-/// `timeout`, … — is a process, and `eval` cannot run as a builtin there.
-const CURRENT_SHELL_PREFIXES: &[&str] = &["command", "builtin", "noglob", "nocorrect"];
+/// [`COMMAND_WRAPPERS`] words that are not a process in every shell (#9127
+/// critic r3): bash runs `command eval` in place where zsh finds no `eval`,
+/// and zsh runs `noglob eval` in place where bash finds no `noglob`. An `eval`
+/// behind one of these is [`Scope::Unplaceable`].
+const SHELL_PRECOMMANDS: &[&str] = &["command", "builtin", "noglob", "nocorrect", "exec", "time"];
+
+/// Where a wrapper's command string runs, so whether a `cd` in it persists
+/// (#9127).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// The current shell: `eval` behind nothing but assignments and at most a
+    /// bare `builtin` as its last prefix word.
+    Current,
+    /// A child process: a shell's `-c`, `env -S`, `flock -c`, `xargs`, or
+    /// `eval` behind a process wrapper (`env`, `nohup`, `sudo`, …).
+    Child,
+    /// An `eval` behind any other word, which bash and zsh run in different
+    /// places — or not at all. Fail closed.
+    Unplaceable,
+}
 
 /// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
 ///
@@ -124,23 +142,25 @@ pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
     wrapped_command_scoped(segment).0
 }
 
-/// [`wrapped_command`], plus whether the carrier runs its string in the
-/// CURRENT shell (#9127): `eval` does, so a `cd` inside it persists; a shell's
-/// `-c`, `env -S`, `flock -c` and `xargs` start a child process, whose `cd`
-/// ends with it. So does `eval` behind a process wrapper (`env eval`,
-/// `nohup eval`): only assignments and [`CURRENT_SHELL_PREFIXES`] may precede it.
+/// [`wrapped_command`], plus the [`Scope`] its string runs in (#9127): `eval`
+/// runs in the current shell, so a `cd` inside it persists; a shell's `-c`,
+/// `env -S`, `flock -c` and `xargs` start a child process, whose `cd` ends with
+/// it ([`eval_scope`] places an `eval` behind a prefix). The scope of a segment
+/// with no wrapper is [`Scope::Child`] and means nothing.
 /// Test: `grouped_steps_scopes_a_child_shell_but_not_eval`,
 /// `a_cd_inside_eval_persists_9127`.
-pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, bool) {
+pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, Scope) {
     let Some(argv) = shlex::split(segment) else {
-        return (WrappedCommand::None, false);
+        return (WrappedCommand::None, Scope::Child);
     };
     let carried = |at: usize| {
         carried_string(&argv[at], &argv[at + 1..]).map(|inner| {
-            let in_this_shell = argv[..at]
-                .iter()
-                .all(|w| is_env_assignment(w) || CURRENT_SHELL_PREFIXES.contains(&carrier(w)));
-            (inner, carrier(&argv[at]) == "eval" && in_this_shell)
+            let scope = if carrier(&argv[at]) == "eval" {
+                eval_scope(&argv[..at])
+            } else {
+                Scope::Child
+            };
+            (inner, scope)
         })
     };
     let found = match resolve_program_word(&argv) {
@@ -155,8 +175,34 @@ pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, bool) {
         Err(Unresolved) => (0..argv.len()).find_map(carried),
     };
     match found {
-        Some((inner, current_shell)) => (inner_or_none(Some(inner)), current_shell),
-        None => (WrappedCommand::None, false),
+        Some((inner, scope)) => (inner_or_none(Some(inner)), scope),
+        None => (WrappedCommand::None, Scope::Child),
+    }
+}
+
+/// The [`Scope`] of an `eval` whose words before it are `prefix` (#9127
+/// critic r3).
+///
+/// What: assignments are skipped. Nothing left, or one bare `builtin` as the
+/// last word, is [`Scope::Current`]. A first remaining word that is a
+/// [`COMMAND_WRAPPERS`] process (not in [`SHELL_PRECOMMANDS`]) is
+/// [`Scope::Child`]. Anything else — `command`, `command -p`, `builtin --`,
+/// `noglob`, a path to `builtin` — is [`Scope::Unplaceable`].
+fn eval_scope(prefix: &[String]) -> Scope {
+    let words: Vec<&str> = prefix
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| is_env_assignment(w))
+        .collect();
+    match words.as_slice() {
+        [] | ["builtin"] => Scope::Current,
+        [first, ..]
+            if COMMAND_WRAPPERS.contains(&carrier(first))
+                && !SHELL_PRECOMMANDS.contains(&carrier(first)) =>
+        {
+            Scope::Child
+        }
+        _ => Scope::Unplaceable,
     }
 }
 

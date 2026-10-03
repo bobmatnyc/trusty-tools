@@ -21,8 +21,9 @@
 //! brace group and an `eval` string run in the current shell, so they bracket
 //! nothing. A command whose grouping does not balance comes back flat and
 //! marked unparsed. A balanced command holding a shape the walker cannot place
-//! — a `case`, a function definition, a coproc — comes back peeled but also
-//! marked unparsed. The commit rule refuses either when it carries a
+//! — a `case`, a function definition, a coproc, an `eval` behind `command` or
+//! `noglob` ([`Scope::Unplaceable`]) — comes back peeled but also marked
+//! unparsed. The commit rule refuses either when it carries a
 //! `git commit` ([`mentions_git_commit`]), and the destructive rule when it
 //! carries a destructive git verb ([`mentions_git_verb`]).
 //!
@@ -36,7 +37,7 @@
 
 use super::credential_print::{COMPOUND_OPENERS, KEYWORDS, is_identifier};
 use super::heredoc::HeredocBodies;
-use super::shell_lex::{self, QuoteScan};
+use super::shell_lex::{self, QuoteScan, Scope};
 use super::{MAX_WRAPPER_DEPTH, split_shell_segments, split_shell_segments_raw};
 
 /// Bytes that end a shell word as well as whitespace does.
@@ -60,7 +61,8 @@ pub(super) struct Groups {
     /// does not balance.
     pub(super) steps: Vec<Step>,
     /// `false` when a group opener or closer did not balance, or when a
-    /// segment is a `case`, a function definition or a coproc.
+    /// segment is a `case`, a function definition, a coproc or an
+    /// unplaceable `eval`.
     pub(super) parsed: bool,
 }
 
@@ -93,7 +95,8 @@ struct Peeled {
 /// segments of a leading `sh -c`/`bash -c`/`env -S`/`flock -c`/`xargs`/`eval`
 /// wrapper's string, up to [`MAX_WRAPPER_DEPTH`] layers. The string is
 /// bracketed by `Enter`/`Leave` unless its carrier is `eval`
-/// ([`shell_lex::wrapped_command_scoped`]). When any level's openers and
+/// ([`shell_lex::wrapped_command_scoped`]); a [`Scope::Unplaceable`] `eval`
+/// marks the command unparsed. When any level's openers and
 /// closers do not pair up, the answer is the flat [`split_shell_segments`]
 /// list with `parsed: false`, so a caller that ignores the flag reads exactly
 /// what it read before #9127.
@@ -133,25 +136,26 @@ fn steps_into(
     for raw in split_shell_segments_raw(command) {
         let peeled = peel_segment(raw, &mut open, out, opaque)?;
         if let Some(text) = peeled.command {
-            let inner = match shell_lex::wrapped_command_scoped(&text) {
-                (shell_lex::WrappedCommand::Inner(inner), current_shell)
-                    if depth < MAX_WRAPPER_DEPTH =>
-                {
-                    Some((inner, current_shell))
-                }
+            let (wrapped, scope) = shell_lex::wrapped_command_scoped(&text);
+            // #9127 critic r3: bash and zsh disagree on where `command eval`
+            // or `noglob eval` runs, so its `cd` cannot be placed.
+            *opaque |= scope == Scope::Unplaceable;
+            let inner = match wrapped {
+                shell_lex::WrappedCommand::Inner(inner) if depth < MAX_WRAPPER_DEPTH => Some(inner),
                 _ => None,
             };
             if peeled.coproc {
                 out.push(Step::Enter);
             }
             out.push(Step::Command(text));
-            if let Some((inner, current_shell)) = inner {
+            if let Some(inner) = inner {
                 // #9127: `eval` runs in this shell, so its `cd` persists.
-                if !current_shell {
+                let child = scope == Scope::Child;
+                if child {
                     out.push(Step::Enter);
                 }
                 steps_into(&inner, depth + 1, out, opaque)?;
-                if !current_shell {
+                if child {
                     out.push(Step::Leave);
                 }
             }
@@ -449,8 +453,9 @@ pub(super) const BRACE_EXPANSION_REASON: &str = "this command's program word is 
 /// The refusal for a `git commit` the guard cannot place.
 pub(super) const UNPARSED_GROUP_COMMIT_REASON: &str = "Commit denied because the guard cannot \
      place it (ADR-0061, #9127): this command carries `git commit` inside a `( … )` subshell, \
-     a `{ …; }` brace group, a function definition, a `case` or a `coproc` whose openers and \
-     closers the guard cannot pair up or whose commands it cannot follow, so it cannot tell \
+     a `{ …; }` brace group, a function definition, a `case`, a `coproc` or an `eval` behind \
+     `command`/`noglob` whose openers and closers the guard cannot pair up or whose commands \
+     it cannot follow, so it cannot tell \
      which checkout the commit lands in, and a commit never lands on a local main checkout. A \
      stray `)` or `}` counts too — in a `#` comment or an unquoted regex — so quote it or drop \
      the comment. Run the commit as a plain command — `git -C \
@@ -463,8 +468,8 @@ pub(super) fn unparsed_group_destructive_reason(verb: &str) -> String {
     format!(
         "Destructive git command denied because the guard cannot place it (ADR-0037, #9127): \
          this command carries `git {verb}` in a form that discards work, inside a `( … )` \
-         subshell, a `{{ …; }}` brace group, a function definition, a `case` or a `coproc` whose \
-         openers and closers the guard cannot pair up or whose commands it cannot follow, so it \
+         subshell, a `{{ …; }}` brace group, a function definition, a `case`, a `coproc` or an \
+         `eval` behind `command`/`noglob` whose openers and closers the guard cannot pair up or whose commands it cannot follow, so it \
          cannot tell whether it lands in a main checkout. Run it as a plain command — `git -C \
          /abs/path/.claude/worktrees/<name> {verb} …`, or `cd` into the worktree first — with \
          no grouping around it."
@@ -609,6 +614,31 @@ mod tests {
             assert!(groups.parsed, "{carrier}");
             assert_eq!(groups.steps[1], Step::Enter, "{carrier}");
             assert_eq!(groups.steps[3], Step::Leave, "{carrier}");
+        }
+        // #9127 critic r3: the words before `eval` decide its scope.
+        for (prefix, scope) in [
+            ("A=1 ", Scope::Current),
+            ("builtin ", Scope::Current),
+            ("A=1 builtin ", Scope::Current),
+            ("env ", Scope::Child),
+            ("nohup ", Scope::Child),
+            ("timeout 5 ", Scope::Child),
+            ("command ", Scope::Unplaceable),
+            ("command -p ", Scope::Unplaceable),
+            ("command -- ", Scope::Unplaceable),
+            ("builtin -- ", Scope::Unplaceable),
+            ("/bin/builtin ", Scope::Unplaceable),
+            ("noglob ", Scope::Unplaceable),
+            ("nocorrect ", Scope::Unplaceable),
+        ] {
+            let command = format!("{prefix}eval 'cd /m'");
+            assert_eq!(
+                shell_lex::wrapped_command_scoped(&command).1,
+                scope,
+                "{command}"
+            );
+            let parsed = grouped_steps(&format!("{command}; git commit")).parsed;
+            assert_eq!(parsed, scope != Scope::Unplaceable, "{command}");
         }
     }
 

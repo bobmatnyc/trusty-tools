@@ -14,6 +14,10 @@ Fixed
   `eval "cd <main checkout>"; git commit` from a worktree is refused. Behind a
   process wrapper such as `env` or `nohup`, `eval` runs in a child process, so
   `env eval "cd <worktree>"; git commit -a` in a main checkout is refused.
+  Only assignments or a bare `builtin` keep `eval` in the current shell. Behind
+  `command`, `command -p`, `builtin --`, `noglob` or `nocorrect`, bash and zsh
+  disagree on where `eval` runs, so a `git commit` or destructive git command
+  in that command is refused as one the guard cannot place.
 - A `git commit` the guard cannot place is refused from any directory: inside
   grouping that does not balance (a stray `)` in a comment counts), a
   paren-form `case` arm, a function definition, or a coproc. The check reads

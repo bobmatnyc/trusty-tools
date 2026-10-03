@@ -1721,6 +1721,21 @@ mod tests {
             .collect()
     }
 
+    /// The `commands` from `cwd` the commit rule does not refuse as
+    /// unplaceable — any other verdict, another deny reason included (#9127).
+    fn unplaced_commits_not_refused(commands: &[String], cwd: &Path) -> Vec<String> {
+        commands
+            .iter()
+            .filter(|command| {
+                !matches!(
+                    evaluate_main_checkout_commit_command(command, cwd),
+                    Some(CommitVerdict::Deny(reason)) if reason.contains("cannot place it")
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
     /// 🔴 REGRESSION (#9127): a main-checkout commit wrapped in a subshell or a
     /// brace group lexed as `(git` or `{`, so the commit rule never saw it.
     /// All four forms were allowed on origin/main and in the released 1.7.10.
@@ -1945,8 +1960,29 @@ mod tests {
         // The other direction holds too: an `eval` cd into the worktree is real.
         let into_wt = format!("eval \"cd {}\" && git commit -m x", wt.display());
         assert!(evaluate_main_checkout_commit_command(&into_wt, main.path()).is_none());
-        let builtin = format!("command eval \"cd {}\" && git commit -m x", wt.display());
+        // A bare `builtin eval` runs in place in bash and zsh alike.
+        let builtin = format!("builtin eval \"cd {}\" && git commit -m x", wt.display());
         assert!(evaluate_main_checkout_commit_command(&builtin, main.path()).is_none());
+        // #9127 critic r3: bash runs `command eval` in place and zsh finds no
+        // `eval`, so its `cd` cannot be placed — refused from either side.
+        let unplaced = unplaced_commits_not_refused(
+            &[
+                format!("command -p eval \"cd {real}\"; git commit -a -m x"),
+                format!("command -- eval \"cd {real}\"; git commit -a -m x"),
+                format!("builtin -- eval \"cd {real}\"; git commit -a -m x"),
+                format!("noglob eval \"cd {real}\"; git commit -a -m x"),
+            ],
+            &wt,
+        );
+        assert!(unplaced.is_empty(), "not refused:\n{}", unplaced.join("\n"));
+        let unplaced = unplaced_commits_not_refused(
+            &[format!(
+                "command eval \"cd {}\"; git commit -a -m x",
+                wt.display()
+            )],
+            main.path(),
+        );
+        assert!(unplaced.is_empty(), "not refused:\n{}", unplaced.join("\n"));
         // #9127 critic MEDIUM-1: behind a process wrapper `eval` is a child
         // process, so its `cd` into the worktree ends with it.
         let wt = wt.display();
@@ -1996,8 +2032,9 @@ mod tests {
         // grouping unparsed, so a destructive verb in it is refused unplaced.
         let unparsed = "coproc while :; do :; done; (git reset --hard)";
         assert!(
-            evaluate_main_checkout_destructive_command(unparsed, main.path()).is_some(),
-            "must deny: {unparsed}"
+            evaluate_main_checkout_destructive_command(unparsed, main.path())
+                .is_some_and(|reason| reason.contains("cannot place it")),
+            "must refuse unplaced: {unparsed}"
         );
         // A parsed worktree-only reset stays allowed.
         let in_wt = format!("(git -C {} reset --hard)", wt.display());
@@ -2020,13 +2057,19 @@ mod tests {
                 format!("function f ( git -C {real} commit -a -m x )"),
                 format!("(g''it -C {real} c''ommit -a -m x"),
                 format!("(git -C {real} co\\mmit -a -m x"),
-                // #9127 critic MEDIUM-3: a brace expansion off the program word.
+            ],
+            &wt,
+        );
+        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        // #9127 critic MEDIUM-3: a brace expansion off the program word.
+        let unplaced = unplaced_commits_not_refused(
+            &[
                 format!("case x in (x) {{git,-C,{real},commit,-a}};; esac"),
                 format!("f() ( {{git,-C,{real},commit,-a}} ); f"),
             ],
             &wt,
         );
-        assert!(missed.is_empty(), "not denied:\n{}", missed.join("\n"));
+        assert!(unplaced.is_empty(), "not refused:\n{}", unplaced.join("\n"));
         for command in [
             "git add src/{a,b}.rs",
             "mkdir -p src/{a,b}",
