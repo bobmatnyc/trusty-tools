@@ -11,7 +11,7 @@
 //! calls, not `cargo run`), sends SIGTERM, polls up to five seconds for them
 //! to exit, and SIGKILLs stragglers. Mirrors the `trusty-search stop` flow so
 //! the two daemons share a stop UX. On macOS, a daemon launchd supervises is
-//! stopped through its label first ([`launchd::stop_with_unit`], #8750).
+//! stopped through its label first (`launchd::stop_with_unit`, #8750).
 //! Test: `daemon_pids_in_returns_only_daemon_mode_serve_processes`,
 //! `find_daemon_pids_finds_a_live_serve_foreground_process`,
 //! `stop_terminates_the_daemon_and_spares_a_stdio_bridge`.
@@ -29,7 +29,7 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// Exits non-zero ("No daemon running") when nothing matches so
 /// shell-scripted callers can distinguish "I stopped it" from "nothing to
 /// stop", and non-zero when a daemon is still alive after SIGKILL.
-/// What: on macOS, [`launchd::stop_with_unit`] over [`list_processes`] and the
+/// What: on macOS, `launchd::stop_with_unit` over [`list_processes`] and the
 /// real `com.trusty.memory` unit, whose daemon gets the shared termination
 /// grace (#8750); elsewhere, [`stop_daemons_in`] over the table alone. On a
 /// clean stop, removes the stale address file.
