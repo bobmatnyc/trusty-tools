@@ -1662,9 +1662,10 @@ mod tests {
     /// Probe (B3 round 3): a main-checkout commit wrapped in a subshell or a
     /// brace group must still reach the commit rule, not lex as `(git` or `{`.
     /// Ignored because all four forms are allowed today, on this branch and in
-    /// the released 1.7.10; the fix belongs to pm-guard batch B1.
+    /// the released 1.7.10; the fix belongs to pm-guard batch B1. Tracked in
+    /// #9127.
     #[test]
-    #[ignore = "pre-existing bypass, see issue: subshell/brace-group commit skips the commit rule"]
+    #[ignore = "pre-existing bypass, see issue #9127: subshell/brace-group commit skips the commit rule"]
     fn commit_in_a_subshell_or_brace_group_must_deny() {
         let main = main_checkout_dir();
         let elsewhere = tempfile::tempdir().expect("tempdir");
