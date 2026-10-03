@@ -16,13 +16,13 @@ mod support;
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use trusty_agents_common::agents::manifest::MANIFEST_FILE;
 
 /// `tcode` with `args`, an empty `$HOME` and its cwd in `project`, so no
 /// content resolves. `tcode_command` sets the test-harness guard (#3036).
-fn tcode_without_content(home: &Path, project: &Path, args: &[&str]) -> Command {
+fn tcode_without_content(home: &Path, project: &Path, args: &[&str]) -> support::TcodeCommand {
     let mut cmd = support::tcode_command();
     cmd.args(args)
         .current_dir(project)
@@ -35,16 +35,18 @@ fn tcode_without_content(home: &Path, project: &Path, args: &[&str]) -> Command 
 /// closes stdin and returns the output.
 fn serve_without_content(home: &Path, project: &Path, ids: &[u32]) -> Output {
     let project_arg = project.display().to_string();
-    let mut child = tcode_without_content(
+    // #9139: bound so its isolation tree outlives the spawned child.
+    let mut cmd = tcode_without_content(
         home,
         project,
         &["serve", "--project", &project_arg, "--stdio"],
-    )
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .expect("spawn tcode serve --stdio");
+    );
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tcode serve --stdio");
     {
         let mut stdin = child.stdin.take().expect("stdin");
         for id in ids {

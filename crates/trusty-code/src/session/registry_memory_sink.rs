@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 
 use crate::session::memory_sink::{
     MemoryDurabilityObserver, MemoryTurnOutcome, PalaceCreation, TurnMemorySink,
-    derive_palace_id_for_project,
+    derive_palace_id_for_project, resolve_recorder_socket,
 };
 
 use super::*;
@@ -50,8 +50,8 @@ impl SessionRegistry {
     /// `begin_execution`/`begin_pm_transcript`). On the FIRST call for a
     /// session, derives the palace id from `project_dir` via
     /// [`derive_palace_id_for_project`], resolves trusty-memory's base URL
-    /// via `trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`
-    /// (fail-open — the sink is built regardless of whether the daemon is
+    /// via [`resolve_recorder_socket`] (never the live daemon from a test
+    /// process, #9139; fail-open — the sink is built regardless of whether the daemon is
     /// currently reachable; every write attempt after that is independently
     /// fail-open, see `memory_sink::write_turn`), and stores the constructed
     /// `Arc`. On every SUBSEQUENT call, `project_dir` is ignored and the
@@ -147,7 +147,8 @@ impl SessionRegistry {
         let mut sessions = self.lock();
         let entry = sessions.get_mut(id)?;
         if entry.memory_sink.is_none() {
-            let socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+            // #9139: a test process never binds the operator's live daemon.
+            let socket = resolve_recorder_socket();
             // #4638: only a durable project root entitles the recorder to bring
             // a new palace into being — a temp root's id is unique per run.
             let creation = if trusty_common::bin_resolve::is_under_system_temp(project_dir) {

@@ -74,17 +74,126 @@ const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 /// looked green. `spawn_inner`/`spawn_http_daemon_with_env` already set this
 /// on the two children they own; the 28 call sites across 24 test functions
 /// that built their own `Command` did not, and that residue is #3036/#3195.
-/// What: `std::process::Command` for the binary, with
-/// `TRUSTY_TEST_HARNESS=1` set so the child reports itself as a test process
-/// and every `search_index` write is refused at the source. Pinning `HOME`
-/// is NOT a substitute: macOS resolves the data dir through `NSFileManager`,
-/// which ignores `$HOME`.
+/// What: a [`TcodeCommand`] for the binary whose environment is cleared and
+/// rebuilt by [`ChildIsolation`] (#9139): `TRUSTY_TEST_HARNESS=1` so every
+/// `search_index` write is refused at the source, plus a private `HOME`, data
+/// root and memory socket. Pinning `HOME` alone is NOT a substitute: macOS
+/// resolves the data dir through `NSFileManager`, which ignores `$HOME`.
 /// Test: `no_test_spawns_the_tcode_binary_unguarded` (in the lib suite)
-/// fails if any test file names the binary directly instead of calling this.
-pub fn tcode_command() -> std::process::Command {
+/// fails if any test file names the binary directly instead of calling this;
+/// `hermetic_palace_e2e::turn_recording_children_never_reach_the_ambient_memory_daemon`.
+pub fn tcode_command() -> TcodeCommand {
+    let isolation = ChildIsolation::new();
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
-    cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
-    cmd
+    cmd.env_clear().envs(isolation.env());
+    TcodeCommand {
+        cmd,
+        _isolation: isolation,
+    }
+}
+
+/// A `tcode` [`std::process::Command`] that owns its [`ChildIsolation`].
+///
+/// Why: the isolation tree must outlive the child. Dereferencing to the
+/// `Command` keeps every `support::tcode_command().args(..).output()` call
+/// site unchanged; the temporary lives to the end of that statement. A caller
+/// that `spawn()`s must keep the `TcodeCommand` alive while the child runs.
+pub struct TcodeCommand {
+    cmd: std::process::Command,
+    _isolation: ChildIsolation,
+}
+
+impl std::ops::Deref for TcodeCommand {
+    type Target = std::process::Command;
+    fn deref(&self) -> &Self::Target {
+        &self.cmd
+    }
+}
+
+impl std::ops::DerefMut for TcodeCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.cmd
+    }
+}
+
+/// Inherited variables a spawned `tcode` may see — nothing that can name the
+/// operator's daemons, data root or palace (#9139).
+const INHERITED_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "USER",
+    "LOGNAME",
+    "RUST_BACKTRACE",
+    "RUST_LOG",
+];
+
+/// A private `HOME`, data root and memory socket for one spawned `tcode`.
+///
+/// Why (#9139): every spawn inherited the whole parent environment. A
+/// trusty-mpm managed shell exports `TRUSTY_MEMORY_PALACE=trusty-tools`, and
+/// the default memory socket is the live daemon's, so each child's turn
+/// recorder wrote its fixture turns into the live palace: 2,308 drawers.
+/// What: a fresh `TempDir` with `home/` and `data/`, and the env a child gets:
+/// [`INHERITED_ENV_ALLOWLIST`] from the parent, then `TRUSTY_TEST_HARNESS=1`,
+/// `HOME`, `TRUSTY_DATA_DIR_OVERRIDE` and `TRUSTY_MEMORY_SOCKET` pointed into
+/// the tree. Nothing binds that socket, so the recorder's dial is refused.
+/// Construction panics when the tree cannot be made — fail closed, never a
+/// fall back to the inherited environment.
+/// Test: `hermetic_palace_e2e::turn_recording_children_never_reach_the_ambient_memory_daemon`.
+pub struct ChildIsolation {
+    root: tempfile::TempDir,
+}
+
+impl ChildIsolation {
+    /// Create the isolation tree, panicking (failing the test) on any error.
+    pub fn new() -> Self {
+        let root = tempfile::Builder::new()
+            .prefix("tcode-child-")
+            .tempdir()
+            .expect("#9139: cannot create the child isolation root — refusing to spawn");
+        for dir in ["home", "data"] {
+            std::fs::create_dir(root.path().join(dir))
+                .expect("#9139: cannot create the child isolation tree — refusing to spawn");
+        }
+        Self { root }
+    }
+
+    /// The child's `HOME`.
+    pub fn home(&self) -> std::path::PathBuf {
+        self.root.path().join("home")
+    }
+
+    /// The child's `TRUSTY_DATA_DIR_OVERRIDE`.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        self.root.path().join("data")
+    }
+
+    /// The child's `TRUSTY_MEMORY_SOCKET` — a path nothing serves.
+    pub fn memory_socket(&self) -> std::path::PathBuf {
+        self.root.path().join("no-memory-daemon.sock")
+    }
+
+    /// The complete environment for the child, applied after `env_clear()`.
+    pub fn env(&self) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = INHERITED_ENV_ALLOWLIST
+            .iter()
+            .filter_map(|key| std::env::var_os(key).map(|value| ((*key).into(), value)))
+            .collect();
+        env.push((trusty_common::test_harness::FORCE_ENV.into(), "1".into()));
+        env.push(("HOME".into(), self.home().into()));
+        env.push((
+            trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV.into(),
+            self.data_dir().into(),
+        ));
+        env.push((
+            trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV.into(),
+            self.memory_socket().into(),
+        ));
+        env
+    }
 }
 
 /// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.md`.
@@ -153,6 +262,8 @@ pub struct StdioSession {
     /// Kept alive so a session that owns its project root (see [`Self::spawn`])
     /// removes that root on drop. `None` when the caller supplied the root.
     _project: Option<tempfile::TempDir>,
+    /// #9139: the child's private `HOME`, data root and memory socket.
+    _isolation: ChildIsolation,
 }
 
 impl StdioSession {
@@ -278,14 +389,13 @@ impl StdioSession {
     ) -> Self {
         let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
         cmd.arg("serve");
-        // #4255: the child is `target/<profile>/tcode`, not a `deps/` test
-        // binary, so it cannot detect the harness from its own path — and
-        // `tcode serve` warms its working project into whatever trusty-search
-        // daemon it discovers. Without this the e2e suite registered one
-        // `$TMPDIR/.tmpXXXXXX` fixture root per target in the operator's live
-        // registry. Setting `HOME` is not enough: on macOS `data_local_dir()`
-        // goes through NSFileManager, which ignores `$HOME`.
-        cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
+        // #4255, #9139: the child is `target/<profile>/tcode`, not a `deps/`
+        // test binary, so it cannot detect the harness from its own path, and
+        // it inherited the operator's daemons and palace. `ChildIsolation`
+        // clears the environment and sets `TRUSTY_TEST_HARNESS=1` plus a
+        // private `HOME`, data root and memory socket.
+        let isolation = ChildIsolation::new();
+        cmd.env_clear().envs(isolation.env());
         for (key, value) in extra_envs {
             cmd.env(key, value);
         }
@@ -317,6 +427,7 @@ impl StdioSession {
             stdin,
             lines,
             _project: None,
+            _isolation: isolation,
         }
     }
 
@@ -418,6 +529,8 @@ pub struct HttpDaemon {
     /// [`spawn_http_daemon`]) removes that root on drop. `None` when the caller
     /// supplied the root.
     _project: Option<tempfile::TempDir>,
+    /// #9139: the child's private `HOME` and memory socket.
+    _isolation: ChildIsolation,
 }
 
 /// Spawn `tcode serve --http --port 0` and discover its ephemeral bound
@@ -462,10 +575,11 @@ pub async fn spawn_http_daemon_with_env(
         .arg("--project")
         .arg(project)
         .args(["--http", "--port", "0"]);
-    // #4255: same reason as `spawn_inner` — the spawned `tcode` cannot detect
-    // the test harness from its own path, and would warm `project` (a
-    // `tempfile` fixture) into the operator's live trusty-search registry.
-    cmd.env(trusty_common::test_harness::FORCE_ENV, "1");
+    // #4255, #9139: same reason as `spawn_inner` — the spawned `tcode` cannot
+    // detect the test harness from its own path, and inherited the operator's
+    // daemons and palace.
+    let isolation = ChildIsolation::new();
+    cmd.env_clear().envs(isolation.env());
     // #5439: give every spawned daemon its OWN data directory. Without this
     // they all mint into the operator's real `~/…/trusty-code/auth_token`, so
     // a test run rewrites a live daemon's credential and two concurrent test
@@ -535,6 +649,7 @@ pub async fn spawn_http_daemon_with_env(
         token,
         data_dir,
         _project: None,
+        _isolation: isolation,
     }
 }
 

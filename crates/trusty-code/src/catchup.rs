@@ -41,13 +41,15 @@ use trusty_common::catchup::{CatchupOptions, run_catchup};
 /// offline or the project has no git history.
 ///
 /// What: resolves `memory_socket` via
-/// [`trusty_common::memory_rpc::resolve_memory_socket_or_unreachable`] (env override
+/// [`crate::session::memory_sink::resolve_recorder_socket`] (env override
 /// `TRUSTY_MEMORY_SOCKET` first, else the derived socket path,
-/// else a fail-fast placeholder — issue #2030), then delegates to
+/// else a fail-fast placeholder — issue #2030; never the live daemon from a
+/// test process — #9139), then delegates to
 /// [`pm_catchup_context_with_socket`].
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
 pub async fn pm_catchup_context(project_dir: &Path) -> Option<String> {
-    let memory_socket = trusty_common::memory_rpc::resolve_memory_socket_or_unreachable();
+    // #9139: a test process never dials the operator's live daemon.
+    let memory_socket = crate::session::memory_sink::resolve_recorder_socket();
     pm_catchup_context_with_socket(project_dir, memory_socket).await
 }
 
