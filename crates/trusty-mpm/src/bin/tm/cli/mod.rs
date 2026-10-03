@@ -736,6 +736,14 @@ pub(crate) enum Command {
         /// correct way to bring the daemon back, not a bare `tm daemon`.
         #[arg(long)]
         force: bool,
+        /// Run as an isolated live-check sandbox (#9121): refuse to start when
+        /// any variable outside a closed allowlist is set, when
+        /// `TRUSTY_DATA_DIR_OVERRIDE` is unset, or when `$HOME` is the real
+        /// home; never start the Telegram bot or read a credential tier.
+        /// Launch it with the project's sandbox launcher (`env -i` +
+        /// allowlist).
+        #[arg(long)]
+        sandbox: bool,
     },
     /// Run the unattended fleet supervisor (24/7 observer + auto-resumer, #1206).
     ///
