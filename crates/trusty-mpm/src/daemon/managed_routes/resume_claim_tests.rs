@@ -191,6 +191,19 @@ impl ManagedTmuxDriver for ClaimRecordingDriver {
         self.observe("list_sessions");
         Ok(Vec::new())
     }
+
+    /// #9101: the recreated pane names its session, so the resume spawn
+    /// proves it is the record's own and types into it.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(crate::test_support::self_describing_pane(name))
+    }
+
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        Ok(crate::test_support::self_describing_identity(pane_id))
+    }
 }
 
 /// #8233 P0: the claim is STILL HELD at the first driver call the route makes

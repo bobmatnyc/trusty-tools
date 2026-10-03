@@ -251,20 +251,21 @@ pub(super) fn verify_pane_cwd(
 /// every time it creates a session — folding them into one call keeps that
 /// call site a single line instead of growing `manager.rs` (already at its
 /// 500-SLOC cap) by the width of both.
-/// What: `driver.create_session(name, workdir)` (mapped to
-/// [`ManagedError::TmuxUnavailable`] on failure), then
-/// [`verify_pane_cwd`] against the same `workdir`.
+/// What: `driver.create_session_exclusive(name, workdir)`, then
+/// [`verify_pane_cwd`] against the same `workdir`. #9101: exclusive, because
+/// `create_session` renders `new-session -A`, which attaches to a session
+/// that already holds the name; a taken name is
+/// [`ManagedError::NameCollision`] and no pane is adopted.
 /// Test: covered end-to-end via `SessionManager::resume` in
 /// `resume_reattach_tests.rs` (`manager_resume_respawns_in_existing_workspace`,
-/// `manager_resume_errors_when_recreated_pane_cwd_mismatches`).
+/// `manager_resume_errors_when_recreated_pane_cwd_mismatches`);
+/// `the_resume_create_never_attaches_to_a_session_holding_the_name`.
 pub(super) fn create_and_verify_pane(
     driver: &dyn ManagedTmuxDriver,
     name: &str,
     workdir: &str,
 ) -> Result<(), ManagedError> {
-    driver
-        .create_session(name, workdir)
-        .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+    driver.create_session_exclusive(name, workdir)?;
     verify_pane_cwd(driver, name, Path::new(workdir))
 }
 

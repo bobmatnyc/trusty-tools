@@ -19,9 +19,8 @@
 //! (`Pending` → `Success`/`FailedTimeout`/`FailedSessionDied`) so callers can poll
 //! it instead of blind-waiting. The readiness check itself is hardened beyond the
 //! bare "`claude` PID exists" probe: [`pane_shows_blocking_modal`] additionally
-//! inspects captured pane content (via the SAME pane-scoped `capture_pane`/
-//! `capture` fallback `SessionManager::observe` uses — #2545 convention, never a
-//! session-scoped read when a `pane_id` is known) for known first-run onboarding /
+//! inspects captured pane content (a pane-scoped `capture_pane` of a pane
+//! `SessionManager::owned_pane` proved, #9101) for known first-run onboarding /
 //! trust-dialog markers, so a modal that would otherwise silently swallow the
 //! injected keystrokes instead keeps the loop polling (and, if the modal never
 //! clears, correctly reports `FailedTimeout` instead of the #2361-review-flagged
@@ -50,7 +49,7 @@ use crate::runtime::RuntimeKind;
 
 use super::injection_status::InjectionStatus;
 use super::manager::{ManagedError, SessionManager};
-use super::record::{ManagedSessionId, ManagedSessionState};
+use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
 /// Max readiness-probe attempts before giving up (issue #1903).
 ///
@@ -215,10 +214,10 @@ impl SessionManager {
     /// transitioned to `Stopped`/`Errored`/`Decommissioned` while waiting, and
     /// only treats the runtime as ready when BOTH `runtime_ready` reports the
     /// `claude` PID present AND the captured pane tail shows no known
-    /// blocking-modal marker (pane-scoped `capture_pane` when the record's
-    /// `pane_id` is known, session-scoped `capture` otherwise — mirrors
-    /// [`Self::observe`]'s #2545 pane-scoped-capture convention; never a
-    /// session-scoped read when a pane id is known). Exhausting the budget
+    /// blocking-modal marker (a pane-scoped `capture_pane`). #9101: each probe
+    /// first proves the pane with [`Self::owned_pane`]; a refusal marks
+    /// `FailedSessionDied` and returns the `Err`, with no pane read or typed
+    /// into. Exhausting the budget
     /// (whether from PID absence or a persistently blocked modal) marks
     /// `FailedTimeout`. On readiness it calls [`Self::send_input`]: success
     /// marks `Success` and returns `Ok(true)`; a failure at this late stage
@@ -251,7 +250,6 @@ impl SessionManager {
             return Ok(false);
         }
         let name = initial.tmux_name;
-        let pane_id = initial.pane_id;
 
         self.set_injection_status(id, InjectionStatus::Pending)
             .await;
@@ -265,7 +263,8 @@ impl SessionManager {
             }
             // Bail if the session died / was torn down while we waited — typing
             // into a dead pane is pointless and `send_input` would reject it.
-            let state = self.get(id).await?.state;
+            let record = self.get(id).await?;
+            let state = record.state.clone();
             if matches!(
                 state,
                 ManagedSessionState::Stopped
@@ -282,9 +281,20 @@ impl SessionManager {
                     .await;
                 return Ok(false);
             }
-            if self.pane_readiness(&name, pane_id.as_deref()) == PaneReadiness::Ready {
-                ready = true;
-                break;
+            match self.pane_readiness(id, &record) {
+                Ok(PaneReadiness::Ready) => {
+                    ready = true;
+                    break;
+                }
+                Ok(_) => {}
+                // #9101: a pane not proven to be this record's is never polled
+                // again, and nothing is typed into it.
+                Err(e) => {
+                    warn!(id = %id, name = %name, "task injection aborted: {e}; task retained as metadata");
+                    self.set_injection_status(id, InjectionStatus::FailedSessionDied)
+                        .await;
+                    return Err(e);
+                }
             }
         }
 
@@ -338,18 +348,16 @@ impl SessionManager {
     /// `pub(super)` (#3591): also called directly by [`Self::send_input`]'s
     /// modal-only gate in `super::manager` — see that method's doc for why it
     /// reuses this capture but NOT [`Self::pane_readiness`] wholesale.
-    /// What: `capture_pane(name, pane_id, MODAL_PROBE_LINES)` when `pane_id`
-    /// is `Some`, else `capture(name, MODAL_PROBE_LINES)`.
-    /// Test: exercised via `inject_when_ready_waits_out_blocking_modal_then_succeeds`
-    /// (pane-scoped) and the session-scoped fallback is covered by every other
-    /// `inject_when_ready_*` test (no `pane_id` seeded); `send_input`'s reuse
-    /// is covered by `manager_send_input_rejected_when_pane_shows_blocking_modal`.
-    pub(super) fn capture_readiness_pane(&self, name: &str, pane_id: Option<&str>) -> String {
-        match pane_id {
-            Some(p) => self.tmux.capture_pane(name, p, MODAL_PROBE_LINES),
-            None => self.tmux.capture(name, MODAL_PROBE_LINES),
-        }
-        .unwrap_or_default()
+    /// What: `capture_pane(name, pane_id, MODAL_PROBE_LINES)`. #9101: callers
+    /// pass only a pane [`Self::owned_pane`] proved, so the session-scoped
+    /// `capture` fallback is gone.
+    /// Test: `inject_when_ready_checks_pane_scoped_capture_when_pane_id_known`;
+    /// `send_input`'s reuse is covered by
+    /// `manager_send_input_rejected_when_pane_shows_blocking_modal`.
+    pub(super) fn capture_readiness_pane(&self, name: &str, pane_id: &str) -> String {
+        self.tmux
+            .capture_pane(name, pane_id, MODAL_PROBE_LINES)
+            .unwrap_or_default()
     }
 
     /// One-shot readiness probe used by [`Self::inject_task_when_ready`]'s
@@ -360,22 +368,30 @@ impl SessionManager {
     /// Why: split out so the loop reads as one clear condition instead of the
     /// `runtime_ready(...) && !pane_shows_blocking_modal(...)` conjunction
     /// inline.
-    /// What: short-circuits to [`PaneReadiness::RuntimeNotReady`] without
-    /// paying for a pane capture when `runtime_ready` is false; otherwise
-    /// inspects the captured tail (pane-scoped via
-    /// [`Self::capture_readiness_pane`] when `pane_id` is known — #2545
-    /// convention) for a [`BLOCKING_MODAL_MARKERS`] hit.
+    /// What: #9101: first [`Self::owned_pane`], whose refusal is the `Err`, so
+    /// no probe reads a pane the record does not own. Then short-circuits to
+    /// [`PaneReadiness::RuntimeNotReady`] without paying for a pane capture
+    /// when `runtime_ready` is false; otherwise inspects the owned pane's
+    /// captured tail for a [`BLOCKING_MODAL_MARKERS`] hit.
     /// Test: `pane_readiness_ready_when_pid_up_and_no_modal`,
     /// `pane_readiness_not_ready_when_pid_absent`,
-    /// `pane_readiness_blocking_modal_when_pid_up_but_modal_shown`.
-    pub(super) fn pane_readiness(&self, name: &str, pane_id: Option<&str>) -> PaneReadiness {
+    /// `pane_readiness_blocking_modal_when_pid_up_but_modal_shown`,
+    /// `a_stale_record_after_a_server_restart_never_has_its_task_injected`,
+    /// `an_unreadable_pane_identity_stops_task_injection_unread`.
+    pub(super) fn pane_readiness(
+        &self,
+        id: &ManagedSessionId,
+        record: &SessionRecord,
+    ) -> Result<PaneReadiness, ManagedError> {
+        let pane_id = self.owned_pane(id, record)?;
+        let name = record.tmux_name.as_str();
         if !self.tmux.runtime_ready(name) {
-            return PaneReadiness::RuntimeNotReady;
+            return Ok(PaneReadiness::RuntimeNotReady);
         }
-        if pane_shows_blocking_modal(&self.capture_readiness_pane(name, pane_id)) {
-            return PaneReadiness::BlockingModal;
+        if pane_shows_blocking_modal(&self.capture_readiness_pane(name, &pane_id)) {
+            return Ok(PaneReadiness::BlockingModal);
         }
-        PaneReadiness::Ready
+        Ok(PaneReadiness::Ready)
     }
 
     /// Persist an [`InjectionStatus`] transition on the session record (#2364).
@@ -417,7 +433,8 @@ impl SessionManager {
     /// second copy inline in `send_input` — see [`PaneReadiness`]'s doc for
     /// why this reuses only the modal half, not the `runtime_ready` half.
     /// What: refuses `Provisioning`/`Errored` outright (the shell-execution
-    /// risk this issue is about); for `RuntimeKind::ClaudeCode` also refuses
+    /// risk this issue is about); for `RuntimeKind::ClaudeCode` proves the
+    /// pane with [`Self::owned_pane`] (#9101) and refuses
     /// a pane showing a [`BLOCKING_MODAL_MARKERS`] hit. Fail-fast: a single
     /// probe, no retry loop — see `send_input`'s doc for the block-vs-fail-fast
     /// rationale.
@@ -439,9 +456,11 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
+        // #9101: the modal probe reads the pane, so it runs only on a pane
+        // proven to be this record's.
         if record.runtime == RuntimeKind::ClaudeCode
             && pane_shows_blocking_modal(
-                &self.capture_readiness_pane(&record.tmux_name, record.pane_id.as_deref()),
+                &self.capture_readiness_pane(&record.tmux_name, &self.owned_pane(id, &record)?),
             )
         {
             return Err(ManagedError::TmuxUnavailable(format!(
@@ -457,7 +476,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::super::record::ManagedSessionState;
-    use super::super::tests::make_manager;
+    use super::super::tests::{make_manager, make_manager_with_pane};
     use super::*;
     use tempfile::TempDir;
 
@@ -527,7 +546,8 @@ mod tests {
         // defaults to `session_exists` → true after create), injection delivers
         // the task through the SAME `send_line` seam `tm session send` uses.
         let dir = TempDir::new().unwrap();
-        let (mgr, fake) = make_manager(&dir).await;
+        // #9101: the send needs a pane the record owns.
+        let (mgr, fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up the widget".into(), None, None, None, None, None)
             .await
@@ -553,14 +573,14 @@ mod tests {
             injected,
             "task should have been injected into the ready pane"
         );
-        let sends = fake.send_calls.lock().unwrap();
+        let sends = fake.pane_send_calls.lock().unwrap();
         assert_eq!(
             sends.len(),
             1,
             "exactly one send-line should fire: {sends:?}"
         );
         assert_eq!(sends[0].0, record.tmux_name);
-        assert_eq!(sends[0].1, "wire up the widget");
+        assert_eq!(sends[0].2, "wire up the widget");
     }
 
     #[tokio::test]
@@ -619,14 +639,14 @@ mod tests {
         // runtime_ready == session_exists, true right after create) and no
         // capture_responses seeded (empty tail, no marker match).
         let dir = TempDir::new().unwrap();
-        let (mgr, _fake) = make_manager(&dir).await;
+        let (mgr, _fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up SSO".into(), None, None, None, None, None)
             .await
             .expect("create");
 
         assert_eq!(
-            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            mgr.pane_readiness(&record.id, &record).expect("owned pane"),
             PaneReadiness::Ready
         );
     }
@@ -638,7 +658,7 @@ mod tests {
         // session_exists/runtime_ready signal) must report RuntimeNotReady,
         // and must NOT pay for a modal-marker capture in that case.
         let dir = TempDir::new().unwrap();
-        let (mgr, _fake) = make_manager(&dir).await;
+        let (mgr, _fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up SSO".into(), None, None, None, None, None)
             .await
@@ -648,7 +668,7 @@ mod tests {
             .expect("kill_session");
 
         assert_eq!(
-            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            mgr.pane_readiness(&record.id, &record).expect("owned pane"),
             PaneReadiness::RuntimeNotReady
         );
     }
@@ -658,18 +678,19 @@ mod tests {
         // #3591: PID present but the captured tail matches a known
         // onboarding/trust-dialog marker — must report BlockingModal, not Ready.
         let dir = TempDir::new().unwrap();
-        let (mgr, fake) = make_manager(&dir).await;
+        let (mgr, fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up SSO".into(), None, None, None, None, None)
             .await
             .expect("create");
+        // #9101: the probe reads only the owned pane.
         fake.capture_responses.lock().unwrap().insert(
-            record.tmux_name.clone(),
+            "%1".to_string(),
             "Do you trust the files in this folder?".into(),
         );
 
         assert_eq!(
-            mgr.pane_readiness(&record.tmux_name, record.pane_id.as_deref()),
+            mgr.pane_readiness(&record.id, &record).expect("owned pane"),
             PaneReadiness::BlockingModal
         );
     }
@@ -679,7 +700,7 @@ mod tests {
         // #2364a: a successful delivery must leave the record's
         // injection_status as Success, not just return Ok(true).
         let dir = TempDir::new().unwrap();
-        let (mgr, _fake) = make_manager(&dir).await;
+        let (mgr, _fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("ship the feature".into(), None, None, None, None, None)
             .await
@@ -740,13 +761,14 @@ mod tests {
         // `start_paused` fast-forwards Tokio's virtual clock through the
         // ~30-attempt backoff schedule without a real ~60s wall-clock wait.
         let dir = TempDir::new().unwrap();
-        let (mgr, fake) = make_manager(&dir).await;
+        let (mgr, fake) = make_manager_with_pane(&dir).await;
         let record = mgr
             .create("wire up SSO".into(), None, None, None, None, None)
             .await
             .expect("create");
+        // #9101: the probe reads only the owned pane.
         fake.capture_responses.lock().unwrap().insert(
-            record.tmux_name.clone(),
+            "%1".to_string(),
             "Do you trust the files in this folder?".into(),
         );
 

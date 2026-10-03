@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use trusty_mpm::provisioner::FakeGitBackend;
+use trusty_mpm::session_manager::pane_identity::PaneIdentity;
 use trusty_mpm::session_manager::{
     ManagedError, ManagedSessionId, ManagedTmuxDriver, SessionManager,
 };
@@ -142,6 +143,28 @@ impl ManagedTmuxDriver for RecordingTmux {
     /// delegates to it) keeps answering `false` rather than diverging.
     fn session_exists_checked(&self, _name: &str) -> Result<bool, ManagedError> {
         Ok(false)
+    }
+    /// #9101: a pane id naming its session, so a record proves its pane.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(named_pane(name))
+    }
+    fn pane_identity(&self, pane_id: &str) -> Result<PaneIdentity, ManagedError> {
+        Ok(named_pane_identity(pane_id))
+    }
+}
+
+/// #9101: the pane id the doubles below give session `name`.
+fn named_pane(name: &str) -> String {
+    format!("%{name}")
+}
+
+/// #9101: the identity of a [`named_pane`] pane, on one fake server.
+fn named_pane_identity(pane_id: &str) -> PaneIdentity {
+    PaneIdentity {
+        pane_id: pane_id.to_owned(),
+        session_id: "$0".into(),
+        server: "1:1".into(),
+        session_name: pane_id.trim_start_matches('%').to_owned(),
     }
 }
 
@@ -283,6 +306,13 @@ impl ManagedTmuxDriver for BareShellTmux {
     fn runtime_ready(&self, _name: &str) -> bool {
         false
     }
+    /// #9101: a pane id naming its session, so a record proves its pane.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(named_pane(name))
+    }
+    fn pane_identity(&self, pane_id: &str) -> Result<PaneIdentity, ManagedError> {
+        Ok(named_pane_identity(pane_id))
+    }
 }
 
 /// A live pane that refuses every launch line (#8233).
@@ -343,6 +373,13 @@ impl ManagedTmuxDriver for RefusingTmux {
     }
     fn runtime_ready(&self, name: &str) -> bool {
         self.inner.runtime_ready(name)
+    }
+    /// #9101: a pane id naming its session, so a record proves its pane.
+    fn get_pane_id(&self, name: &str) -> Option<String> {
+        Some(named_pane(name))
+    }
+    fn pane_identity(&self, pane_id: &str) -> Result<PaneIdentity, ManagedError> {
+        Ok(named_pane_identity(pane_id))
     }
 }
 

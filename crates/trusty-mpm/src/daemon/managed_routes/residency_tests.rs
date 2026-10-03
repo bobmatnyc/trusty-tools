@@ -62,6 +62,22 @@ impl ManagedTmuxDriver for ControllableTmux {
             Err(e) => Err(ManagedError::TmuxUnavailable(e.clone())),
         }
     }
+    /// #9101: the pane sits in the first live session, on one fake server.
+    fn pane_identity(
+        &self,
+        pane_id: &str,
+    ) -> Result<crate::session_manager::pane_identity::PaneIdentity, ManagedError> {
+        let name = match &*self.live.lock().unwrap() {
+            Ok(names) => names.first().cloned().unwrap_or_default(),
+            Err(e) => return Err(ManagedError::TmuxUnavailable(e.clone())),
+        };
+        Ok(crate::session_manager::pane_identity::PaneIdentity {
+            pane_id: pane_id.to_owned(),
+            session_id: "$0".into(),
+            server: "1:1".into(),
+            session_name: name,
+        })
+    }
 }
 
 /// Build a `DaemonState` over a fresh temp dir with a caller-controlled tmux
@@ -298,6 +314,9 @@ async fn generation_increments_across_resume() {
     let mut record = make_record(None);
     record.tmux_name = "tm-resume-gen".into();
     record.state = ManagedSessionState::Stopped;
+    // #9101: a resume re-attaches only to a pane the record owns.
+    record.pane_id = Some("%0".into());
+    record.tmux_server = Some("1:1".into());
     // `resume` resolves and existence-checks its workdir, so this must be a
     // real directory.
     record.cwd = dir.path().to_path_buf();

@@ -68,9 +68,10 @@ async fn graceful_terminate_runtime_signals_then_kills() {
         "expected a Ctrl-C interrupt to the record's pane before it is reclaimed"
     );
     assert!(fake.interrupt_calls.lock().unwrap().is_empty());
+    // #9101: reclaimed by session id, which the fake records instead of the name.
     assert_eq!(
         *fake.kill_calls.lock().unwrap(),
-        vec!["tm-drain-1".to_string()],
+        vec![super::tests::FAKE_SESSION_ID.to_string()],
         "expected the pane to be reclaimed after the grace window"
     );
 }
@@ -156,6 +157,7 @@ impl ManagedTmuxDriver for DefaultGsDriver {
 /// child on any early exit so the test never leaks a process.
 /// Test: this is the test.
 #[cfg(unix)]
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[test]
 fn default_graceful_stop_sends_sigterm() {
     use std::process::{Child, Command};

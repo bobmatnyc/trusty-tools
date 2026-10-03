@@ -118,12 +118,13 @@ pub fn runtime_ownership(
 
 /// The verdict for a record whose pane id `name`'s session lists (#9004):
 /// a pane id proves ownership only on the server instance it was read on.
-/// Every failure is `Unverifiable`, never `Owned`.
+/// Every failure is `Unverifiable`, never `Owned`. #9101: also the pane
+/// operations' verdict, through `SessionManager::owned_pane`.
 /// Test: `a_record_from_before_a_server_restart_never_owns_the_new_session`,
 /// `a_record_without_a_server_identity_never_owns_its_pane`,
 /// `an_unreadable_pane_identity_leaves_the_runtime_running`,
 /// `a_pane_identity_naming_another_session_leaves_the_runtime_running`.
-fn same_server(
+pub(crate) fn same_server(
     record: &SessionRecord,
     name: &str,
     pane_id: &str,

@@ -59,6 +59,9 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
 /// #9004: the one tmux server instance [`FakeTmuxDriver`] reports.
 pub const FAKE_TMUX_SERVER: &str = "1:1";
 
+/// #9101: the `$N` id the fake's server gives every session.
+pub const FAKE_SESSION_ID: &str = "$0";
+
 /// A fake tmux driver for unit testing.
 ///
 /// Why: the manager must be testable without a real tmux binary; this
@@ -154,6 +157,11 @@ pub struct FakeTmuxDriver {
     /// reconcile re-asserts tm's server globals on a tmux server it did not
     /// start (a tmux-resurrect restore).
     pub scrollback_option_calls: Mutex<u32>,
+    /// #9101: the store a rename test watches. `pane_identity` records in
+    /// `probed_under_guard` whether that store's lock was held when it ran.
+    pub watched_store: Mutex<Option<Arc<tokio::sync::RwLock<super::store::SessionStore>>>>,
+    /// #9101: whether an ownership probe ran with `watched_store` locked.
+    pub probed_under_guard: Mutex<bool>,
 }
 
 impl FakeTmuxDriver {
@@ -183,6 +191,8 @@ impl FakeTmuxDriver {
             cold_tmux_host: Mutex::new(false),
             list_sessions_should_fail: Mutex::new(false),
             scrollback_option_calls: Mutex::new(0),
+            watched_store: Mutex::new(None),
+            probed_under_guard: Mutex::new(false),
         })
     }
 }
@@ -351,9 +361,14 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         &self,
         pane_id: &str,
     ) -> Result<super::pane_identity::PaneIdentity, ManagedError> {
+        if let Some(store) = self.watched_store.lock().unwrap().as_ref()
+            && store.try_write().is_err()
+        {
+            *self.probed_under_guard.lock().unwrap() = true;
+        }
         Ok(super::pane_identity::PaneIdentity {
             pane_id: pane_id.to_owned(),
-            session_id: "$0".into(),
+            session_id: FAKE_SESSION_ID.into(),
             server: FAKE_TMUX_SERVER.into(),
             session_name: self
                 .pane_session
@@ -364,9 +379,31 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         })
     }
 
-    /// #9004: recorded in `kill_calls` under the session's name.
-    fn kill_session_id(&self, name: &str, _session_id: &str) -> Result<(), ManagedError> {
-        self.kill_session(name)
+    /// #9004: recorded in `kill_calls` as the `$N` id, never the name
+    /// (#9101), so a test can tell a kill by id from a kill by name.
+    fn kill_session_id(&self, name: &str, session_id: &str) -> Result<(), ManagedError> {
+        self.kill_calls.lock().unwrap().push(session_id.to_owned());
+        self.sessions.lock().unwrap().remove(name);
+        Ok(())
+    }
+
+    /// #9101: recorded in `rename_calls` as `(session_id, new)`; the
+    /// in-memory session `name` moves to `new`.
+    fn rename_session_id(
+        &self,
+        name: &str,
+        session_id: &str,
+        new: &str,
+    ) -> Result<(), ManagedError> {
+        self.rename_calls
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), new.to_owned()));
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(workdir) = sessions.remove(name) {
+            sessions.insert(new.to_owned(), workdir);
+        }
+        Ok(())
     }
 
     /// Records `(name, pane_id, text)` instead of delegating to `send_line`
@@ -728,8 +765,11 @@ async fn manager_stop_keeps_workspace() {
     // State must be Stopped (runtime gone) not Dead (which implied loss).
     assert_eq!(stopped.state, ManagedSessionState::Stopped);
 
-    // tmux session must have been killed.
-    assert!(fake.kill_calls.lock().unwrap().contains(&record.tmux_name));
+    // tmux session must have been killed — #9101: by its session id.
+    assert_eq!(
+        fake.kill_calls.lock().unwrap().as_slice(),
+        [FAKE_SESSION_ID.to_string()]
+    );
 
     // Workspace directory must STILL EXIST on disk.
     assert!(
@@ -1231,9 +1271,10 @@ async fn decommission_full_still_terminates_the_runtime() {
         .await
         .expect("full decommission");
 
+    // #9101: by session id, which the fake records instead of the name.
     assert_eq!(
         *fake.kill_calls.lock().unwrap(),
-        vec![record.tmux_name.clone()],
+        vec![FAKE_SESSION_ID.to_string()],
         "the FULL decommission path must still reclaim the pane (#1975)"
     );
 }
@@ -1579,7 +1620,8 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
 #[tokio::test]
 async fn manager_send_input() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    // #9101: a send needs a pane the record owns.
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -1604,8 +1646,8 @@ async fn manager_send_input() {
     mgr.send_input(&record.id, "hello from test")
         .await
         .expect("send");
-    let calls = fake.send_calls.lock().unwrap();
-    assert!(calls.iter().any(|(_, text)| text == "hello from test"));
+    let calls = fake.pane_send_calls.lock().unwrap();
+    assert!(calls.iter().any(|(_, _, text)| text == "hello from test"));
 }
 
 /// send_input must be rejected for Stopped and Decommissioned sessions.
@@ -1668,8 +1710,7 @@ async fn manager_env_scrub_command_sent() {
     // convention here: the command must not reference ANTHROPIC_API_KEY
     // without the `env -u` prefix.
     let dir = crate::test_support::hermetic_temp_dir();
-    let fake = FakeTmuxDriver::new();
-    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -1698,17 +1739,17 @@ async fn manager_env_scrub_command_sent() {
     .await
     .expect("send");
 
-    let calls = fake.send_calls.lock().unwrap();
+    let calls = fake.pane_send_calls.lock().unwrap();
     let found = calls
         .iter()
-        .any(|(_, cmd)| cmd.contains("env -u ANTHROPIC_API_KEY claude"));
+        .any(|(_, _, cmd)| cmd.contains("env -u ANTHROPIC_API_KEY claude"));
     assert!(found, "env scrub command must be sent; calls: {calls:?}");
 }
 
 #[tokio::test]
 async fn manager_answer_decision() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let (mgr, fake) = make_manager_with_pane(&dir).await;
 
     let record = mgr
         .create(
@@ -1738,8 +1779,8 @@ async fn manager_answer_decision() {
     // The answer must be injected into the pane. Compute the assertion into
     // an owned bool so the mutex guard is released before the next `.await`.
     let injected = {
-        let calls = fake.send_calls.lock().unwrap();
-        calls.iter().any(|(_, text)| text == "rebase")
+        let calls = fake.pane_send_calls.lock().unwrap();
+        calls.iter().any(|(_, _, text)| text == "rebase")
     };
     assert!(injected);
 
@@ -2841,6 +2882,7 @@ async fn workspace_owned_flag_round_trips_via_set() {
 /// What: creates a session, calls `graceful_stop` with a dummy PID, then
 /// asserts the name appears in `kill_calls` and `graceful_stop_calls`.
 /// Test: this is the test.
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[tokio::test]
 async fn fake_driver_graceful_stop_with_pid() {
     let dir = crate::test_support::hermetic_temp_dir();
@@ -2884,6 +2926,7 @@ async fn fake_driver_graceful_stop_with_pid() {
 /// What: calls `graceful_stop(name, None)` on the fake and asserts that
 /// `kill_calls` contains the name and `graceful_stop_calls` records `None`.
 /// Test: this is the test.
+#[allow(deprecated)] // #9101: the deprecated name-addressed graceful_stop
 #[tokio::test]
 async fn fake_driver_graceful_stop_without_pid() {
     let dir = crate::test_support::hermetic_temp_dir();
@@ -2916,23 +2959,24 @@ async fn fake_driver_graceful_stop_without_pid() {
     );
 }
 
-/// `SessionManager::shutdown` exercises the real shutdown → graceful_stop path.
+/// `SessionManager::shutdown` signals and kills an owned Active session.
 ///
-/// Why: the two trait-level unit tests above call `fake.graceful_stop` directly,
-/// bypassing the `SessionManager::shutdown` orchestration. This test exercises
-/// the FULL integration path: create an Active session, call `mgr.shutdown()`,
-/// assert that the FakeTmuxDriver recorded a graceful_stop call for that session.
-/// What: builds a manager with one Active session, calls `mgr.shutdown()`, then
-/// asserts both the graceful_stop and kill_session calls were recorded. The grace
-/// window in test builds is 0 s (`SIGTERM_GRACE_SECS = 0` under `#[cfg(test)]`)
-/// so the test completes without sleeping.
+/// Why: the trait-level unit tests above call the driver directly, bypassing
+/// the `SessionManager::shutdown` orchestration.
+/// What: builds a manager with one Active session whose pane `%1` is on the
+/// fake's server, calls `mgr.shutdown()`, and asserts one Ctrl-C reached that
+/// pane and the session was killed. #9101: by session id after an ownership
+/// re-check, no longer by name. The grace window in test builds is 0 s
+/// (`SIGTERM_GRACE_SECS = 0` under `#[cfg(test)]`).
 /// Test: this is the test.
 #[tokio::test]
-async fn shutdown_calls_graceful_stop_for_active_sessions() {
+async fn shutdown_stops_an_owned_active_session() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let (mgr, fake) = make_manager(&dir).await;
+    let fake = fake_with_pane();
+    let mgr = SessionManager::new(dir.path(), fake.clone())
+        .await
+        .expect("manager");
 
-    // Create a session and advance it to Active state.
     let record = mgr
         .create(
             "shutdown-integration-task".into(),
@@ -2944,33 +2988,28 @@ async fn shutdown_calls_graceful_stop_for_active_sessions() {
         )
         .await
         .expect("create");
-
-    // Manually advance the state to Active so shutdown() includes it.
+    assert_eq!(record.tmux_server.as_deref(), Some(FAKE_TMUX_SERVER));
     {
         let mut store = mgr.store.write().await;
         let mut r = record.clone();
         r.state = ManagedSessionState::Active;
         store.upsert(r).await.expect("upsert active");
     }
-
     let tmux_name = record.tmux_name.clone();
 
-    // Call the real shutdown() — in test builds SIGTERM_GRACE_SECS=0, so no delay.
     mgr.shutdown().await;
 
-    // Assert graceful_stop was recorded for our session.
-    let gs_calls = fake.graceful_stop_calls.lock().unwrap();
-    assert!(
-        gs_calls.iter().any(|(n, _)| n == &tmux_name),
-        "shutdown must call graceful_stop for every Active session; \
-         expected {tmux_name} in graceful_stop_calls but got {gs_calls:?}"
+    assert_eq!(
+        fake.pane_interrupt_calls.lock().unwrap().as_slice(),
+        [(tmux_name.clone(), "%1".to_string())],
+        "shutdown signals the owned pane once"
     );
-
-    // Assert kill_session was called as part of graceful_stop.
-    let kills = fake.kill_calls.lock().unwrap();
-    assert!(
-        kills.iter().any(|n| n == &tmux_name),
-        "shutdown must ultimately kill_session for every Active session"
+    // #9101: the fake records a kill by id as the id, a kill by name as the
+    // name, so this tells the two apart.
+    assert_eq!(
+        fake.kill_calls.lock().unwrap().as_slice(),
+        [FAKE_SESSION_ID.to_string()],
+        "shutdown must kill every owned Active session by its session id"
     );
 }
 

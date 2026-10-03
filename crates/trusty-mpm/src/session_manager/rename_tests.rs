@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use super::manager::{ManagedError, ManagedTmuxDriver};
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::rename::validate_session_name;
-use super::tests::{make_manager, seed_record};
+use super::tests::{FAKE_SESSION_ID, bind_pane, make_manager, seed_record};
 
 #[test]
 fn validate_session_name_accepts_valid_and_trims() {
@@ -211,6 +211,7 @@ async fn rename_rolls_back_tmux_when_store_write_fails() {
     let (mgr, fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
     seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    bind_pane(&mgr, &id).await; // #9101: the rename needs an owned pane
     let old_name = mgr.get(&id).await.expect("get").tmux_name;
 
     // Make the store dir read-only: reads (the reload) still work, but the
@@ -231,18 +232,15 @@ async fn rename_rolls_back_tmux_when_store_write_fails() {
         matches!(err, ManagedError::InvalidState(_, _)),
         "got {err:?}"
     );
+    // #9101: both renames address the session by its `$N` id.
     let renames = fake.rename_calls.lock().unwrap();
-    assert!(
-        renames
-            .iter()
-            .any(|(o, n)| o == &old_name && n == "tm-doomed-rename"),
-        "the forward rename must have happened: {renames:?}"
-    );
-    assert!(
-        renames
-            .iter()
-            .any(|(o, n)| o == "tm-doomed-rename" && n == &old_name),
-        "the compensating rollback rename must have happened: {renames:?}"
+    assert_eq!(
+        renames.as_slice(),
+        [
+            (FAKE_SESSION_ID.to_string(), "tm-doomed-rename".to_string()),
+            (FAKE_SESSION_ID.to_string(), old_name.clone()),
+        ],
+        "the forward rename and its compensating rollback, both by id"
     );
     drop(renames);
     assert!(
@@ -324,17 +322,17 @@ async fn rename_renames_live_tmux_session() {
     let id = ManagedSessionId::new();
     // Active seed registers a live tmux session in the fake driver.
     seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    bind_pane(&mgr, &id).await; // #9101: the rename needs an owned pane
     let old_name = mgr.get(&id).await.expect("get").tmux_name;
 
     mgr.rename(&id, "tm-live-renamed").await.expect("rename");
 
-    // The driver was told to rename old -> new.
+    // #9101: the driver was told to rename the session by its `$N` id.
     let renames = fake.rename_calls.lock().unwrap();
-    assert!(
-        renames
-            .iter()
-            .any(|(o, n)| o == &old_name && n == "tm-live-renamed"),
-        "expected rename_session({old_name} -> tm-live-renamed), got {renames:?}"
+    assert_eq!(
+        renames.as_slice(),
+        [(FAKE_SESSION_ID.to_string(), "tm-live-renamed".to_string())],
+        "expected session {FAKE_SESSION_ID} renamed by id to tm-live-renamed"
     );
     drop(renames);
     // And the live tmux session now answers to the new name, not the old.
@@ -345,46 +343,34 @@ async fn rename_renames_live_tmux_session() {
     assert!(!fake.session_exists(&old_name), "old name must be gone");
 }
 
-/// A LEGACY record (pre-#2453, no captured `pane_id`) must keep the
-/// pre-#3714 name-only tmux-liveness check for the rename MUTATION path —
-/// there is no stronger per-pane signal available for it, so `rename` must
-/// still physically rename the live tmux session exactly as before #3714.
-///
-/// Why: proves the legacy fallback explicitly, rather than incidentally —
-/// `pane_exists_override` is forced to `Some(false)` (an incorrect gone
-/// answer, if it were ever consulted): if the mutation path mistakenly
-/// probed `pane_exists` for a record with no `pane_id`, the tmux rename
-/// would be skipped and this assertion would fail. Observing the rename
-/// call fire anyway is proof the pane check was never reached — the
-/// `pane_id: None` branch short-circuits straight to the name-only check.
+/// Fail open (#9101): a LEGACY record (pre-#2453, no captured `pane_id`) has
+/// nothing to prove a live session with its name is its own, so the rename
+/// refuses: neither the tmux session nor the record is renamed. Before #9101
+/// it renamed the live session by name alone.
 #[tokio::test]
-async fn rename_legacy_record_without_pane_id_still_renames_live_tmux_session() {
+async fn rename_refuses_a_legacy_record_whose_live_session_it_cannot_prove() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
     let id = ManagedSessionId::new();
     // seed_record never sets `pane_id` (always `None`) — the legacy shape.
     seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
-    assert_eq!(
-        mgr.get(&id).await.expect("get").pane_id,
-        None,
-        "sanity: seeded record is legacy (no pane_id)"
-    );
     let old_name = mgr.get(&id).await.expect("get").tmux_name;
-    // If the pane check were (wrongly) consulted for this legacy record, it
-    // would report "gone" — proving below that the rename still happened
-    // means it was never consulted.
-    *fake.pane_exists_override.lock().unwrap() = Some(false);
-
-    mgr.rename(&id, "tm-legacy-renamed").await.expect("rename");
-
-    let renames = fake.rename_calls.lock().unwrap();
     assert!(
-        renames
-            .iter()
-            .any(|(o, n)| o == &old_name && n == "tm-legacy-renamed"),
-        "a legacy record's rename must still physically rename its live tmux \
-         session via the name-only check: {renames:?}"
+        fake.session_exists(&old_name),
+        "precondition: the name is live"
     );
+
+    let err = mgr
+        .rename(&id, "tm-legacy-renamed")
+        .await
+        .expect_err("an unprovable live session must refuse the rename");
+
+    assert!(
+        matches!(&err, ManagedError::InvalidState(_, why) if why.contains("no pane id")),
+        "{err:?}"
+    );
+    assert!(fake.rename_calls.lock().unwrap().is_empty());
+    assert_eq!(mgr.get(&id).await.expect("get").tmux_name, old_name);
 }
 
 /// #3714 remediation: renaming a record whose OWN recorded pane is confirmed
@@ -499,10 +485,37 @@ async fn rename_renames_live_session_when_pane_confirmed_alive() {
         .expect("rename");
 
     let renames = fake.rename_calls.lock().unwrap();
+    assert_eq!(
+        renames.as_slice(),
+        [(FAKE_SESSION_ID.to_string(), "tm-live-renamed-2".to_string())],
+        "a confirmed-alive pane must still rename the live tmux session by id"
+    );
+    drop(renames);
+    assert!(fake.session_exists("tm-live-renamed-2"));
+    assert!(!fake.session_exists(&old_name));
+}
+
+/// #9101: the ownership probe a live rename runs (three tmux calls) never
+/// runs under the store write guard (#3698's "no tmux calls held"). Red on
+/// bac1c1b4cb, which probed inside Guard 1.
+#[tokio::test]
+async fn rename_proves_ownership_with_no_store_guard_held() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Active, false).await;
+    bind_pane(&mgr, &id).await;
+    *fake.watched_store.lock().unwrap() = Some(mgr.store.clone());
+
+    mgr.rename(&id, "tm-unguarded-probe").await.expect("rename");
+
+    assert_eq!(
+        fake.rename_calls.lock().unwrap().len(),
+        1,
+        "precondition: the live path ran"
+    );
     assert!(
-        renames
-            .iter()
-            .any(|(o, n)| o == &old_name && n == "tm-live-renamed-2"),
-        "a confirmed-alive pane must still rename the live tmux session: {renames:?}"
+        !*fake.probed_under_guard.lock().unwrap(),
+        "the ownership probe ran with the store guard held"
     );
 }
