@@ -1,0 +1,3 @@
+Fixed
+- `tm hook --pm-guard` no longer refuses `git commit` (including `git commit -F-` fed a heredoc) inside a disposable clone under the session scratchpad. The commit rule now exempts a scratchpad clone by its canonical path, as the destructive and write rules already did; a symlink into a real checkout still denies (#8485).
+- A read-only dispatch (`code-critic`, `code-analyzer`, `research`, `security`, `Explore`, `Plan`) may run `cp` and `rm` when every operand is a literal absolute path inside the session scratchpad, so a red-on-base tree under `<scratchpad>/base-<sha>/` can be copied and deleted. A `..`, a symlink out, a variable, the scratchpad root itself and `cp -t` are refused (#8571).

@@ -140,7 +140,8 @@ use trusty_mpm::core::project_aliases::{is_main_checkout, main_checkout_root};
 use trusty_mpm::core::staged_paths::staged_paths;
 
 use super::{
-    PathEnv, git_dash_c_override, resolve_target_path, split_shell_segments, unresolved_target,
+    PathEnv, git_dash_c_override, operator_checkouts, resolve_target_path, split_shell_segments,
+    unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard::is_source_code_path;
@@ -206,7 +207,7 @@ fn evaluate_main_checkout_destructive_command_in(
     // #8572: every destructive segment is judged, not only the first — from a
     // worktree, `git reset --hard && git -C $MAIN reset --hard` was cleared on
     // its first segment.
-    for (verb, target, _) in
+    for (verb, target, tail) in
         git_verb_targets_with_tail(command, cwd, env, is_whole_tree_destructive)
     {
         // #7100: an unexpanded variable in the path is not evidence about which
@@ -235,6 +236,11 @@ fn evaluate_main_checkout_destructive_command_in(
         if main_checkout_root(&target)
             .is_some_and(|root| write_lands_in_a_scratchpad_clone(&target, &root))
         {
+            continue;
+        }
+        // #8524: owner ruling Option C — an allowlisted runtime checkout, a lone
+        // `reset --keep`, and an empty content diff against its target.
+        if operator_checkouts::reset_keep_is_exempt(command, &verb, &tail, &target) {
             continue;
         }
         return Some(deny_reason(&verb, &target));
@@ -316,7 +322,7 @@ pub(crate) enum CommitVerdict {
 /// commit, which is a statement about the index read above, not about `git add`.
 /// Test: `commit_target_dir_*`, `evaluate_main_checkout_commit_*`,
 /// `commit_deny_names_a_surviving_tilde_rather_than_the_checkout`,
-/// `command_is_a_lone_commit_*`.
+/// `command_is_a_lone_commit_*`, `commit_allows_a_scratchpad_clone_only` (#8485).
 pub(crate) fn evaluate_main_checkout_commit_command(
     command: &str,
     cwd: &Path,
@@ -356,6 +362,11 @@ fn evaluate_main_checkout_commit_command_in(
             &unresolved.token,
         )));
     }
+    // #8485: a disposable clone under the session scratchpad shares no HEAD with
+    // anyone — the same canonicalized proof the destructive rule uses (#8339).
+    if write_lands_in_a_scratchpad_clone(&target, &root) {
+        return None;
+    }
     // #5788 review, CRITICAL 1: one index read authorises at most one commit,
     // and only when nothing between the read and that commit can change the
     // index. Asked before the staged set is even read, because a composition
@@ -368,6 +379,7 @@ fn evaluate_main_checkout_commit_command_in(
         staged_paths(&target),
         &target,
         root,
+        operator_checkouts::is_documents_repo,
     ))
 }
 
@@ -439,12 +451,14 @@ fn command_is_a_lone_commit(command: &str) -> bool {
 /// `classify_staged_commit_denies_source_and_names_it`,
 /// `classify_staged_commit_denies_a_mixed_set_and_names_only_the_source`,
 /// `classify_staged_commit_denies_an_unreadable_or_empty_index`,
-/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`.
+/// `classify_staged_commit_denies_the_forms_the_index_does_not_describe`,
+/// `classify_staged_commit_counts_source_as_documents_in_a_documents_repo` (#7905).
 fn classify_staged_commit(
     tail: &[String],
     staged: Option<Vec<String>>,
     target: &Path,
     root: PathBuf,
+    documents_repo: impl FnOnce(&Path) -> bool,
 ) -> CommitVerdict {
     if !commit_flags_leave_the_index_authoritative(tail) {
         return CommitVerdict::Deny(commit_deny_reason(&root));
@@ -457,7 +471,8 @@ fn classify_staged_commit(
         .map(String::as_str)
         .filter(|p| is_source_code_path(p))
         .collect();
-    if source.is_empty() {
+    // #7905: an operator-listed documents repo counts every path as a document.
+    if source.is_empty() || documents_repo(&root) {
         CommitVerdict::DocsOnly {
             dirs: [root.clone(), target.to_path_buf()],
             root,
@@ -1561,6 +1576,34 @@ mod tests {
         );
     }
 
+    /// 🔴 REGRESSION (#8485): `git commit -F-` fed a heredoc inside a
+    /// disposable clone under the session scratchpad was refused as a
+    /// composed commit in a main checkout. The clone is classified by its
+    /// canonical path, so a symlink into a real checkout still denies.
+    #[test]
+    fn commit_allows_a_scratchpad_clone_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clone = dir.path().join("scratchpad").join("red-proof");
+        std::fs::create_dir_all(clone.join(".git")).expect("mkdir clone .git");
+        for command in [
+            "git commit -F- <<'EOF'\nfix: x\n\nbody\nEOF",
+            "git commit -m 'wip'",
+        ] {
+            assert!(
+                evaluate_main_checkout_commit_command(command, &clone).is_none(),
+                "`{command}` in a scratchpad clone shares no HEAD"
+            );
+        }
+        let real = dir.path().join("realrepo");
+        std::fs::create_dir_all(real.join(".git")).expect("mkdir real .git");
+        let link = dir.path().join("scratchpad").join("linkrepo");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        assert!(
+            evaluate_main_checkout_commit_command("git commit -m 'wip'", &link).is_some(),
+            "a symlink into a real checkout must not buy the exemption"
+        );
+    }
+
     #[test]
     fn unresolved_directory_deny_reason_names_the_variable_and_the_remedy() {
         let reason = unresolved_directory_deny_reason(
@@ -1679,6 +1722,11 @@ mod tests {
     /// `classify_staged_commit` with the shapes the caller supplies, so each
     /// case reads as the argv tail plus the staged set and nothing else.
     fn classify(tail: &[&str], staged: Option<&[&str]>) -> CommitVerdict {
+        classify_in(tail, staged, false)
+    }
+
+    /// [`classify`] with the #7905 documents-repo answer chosen.
+    fn classify_in(tail: &[&str], staged: Option<&[&str]>, documents: bool) -> CommitVerdict {
         let tail: Vec<String> = tail.iter().map(|s| (*s).to_string()).collect();
         let staged = staged.map(|s| s.iter().map(|p| (*p).to_string()).collect());
         classify_staged_commit(
@@ -1686,7 +1734,33 @@ mod tests {
             staged,
             Path::new("/repo/crates"),
             PathBuf::from("/repo"),
+            |_| documents,
         )
+    }
+
+    /// 🔴 REGRESSION (#7905): in an operator-listed documents repo a staged
+    /// `.py` is a document, so the rename commit is not refused as source.
+    /// Every other deny arm still holds there: `-a` and an empty index.
+    #[test]
+    fn classify_staged_commit_counts_source_as_documents_in_a_documents_repo() {
+        let staged = &["drafts/video/make-graphics.py", "archive/x.md"][..];
+        assert!(is_docs_only(&classify_in(
+            &["-m", "s", "-m", "b"],
+            Some(staged),
+            true
+        )));
+        assert!(!is_docs_only(&classify_in(
+            &["-m", "s"],
+            Some(staged),
+            false
+        )));
+        assert!(!is_docs_only(&classify_in(
+            &["-a", "-m", "s"],
+            Some(staged),
+            true
+        )));
+        assert!(!is_docs_only(&classify_in(&["-m", "s"], Some(&[]), true)));
+        assert!(!is_docs_only(&classify_in(&["-m", "s"], None, true)));
     }
 
     fn is_docs_only(verdict: &CommitVerdict) -> bool {

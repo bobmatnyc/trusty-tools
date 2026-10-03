@@ -14,7 +14,7 @@
 //! `config_malformed_falls_back`, `model_resolution_precedence`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -333,17 +333,31 @@ impl Default for HooksConfig {
 /// the hooks it loaded at startup; the change applies at its next launch.
 /// Test: `config_pm_guard_defaults_to_enabled`,
 /// `config_pm_guard_can_be_disabled`,
-/// `config_pm_guard_malformed_file_stays_enabled`.
+/// `config_pm_guard_malformed_file_stays_enabled`,
+/// `config_pm_guard_operator_checkout_lists` (#8524, #7905).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PmGuardConfig {
     /// Write the `hook --pm-guard` `PreToolUse` entry at every launch.
     pub enabled: bool,
+    /// Cron-host runtime checkouts updated in place (#8524). In these, and
+    /// only these, a lone `git reset --keep [<rev>]` is allowed when the
+    /// tracked content already equals `<rev>`. Default empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub runtime_checkouts: Vec<PathBuf>,
+    /// Documents repositories whose main checkout may write and commit any
+    /// path, source extensions included (#7905). Default empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub documents_repos: Vec<PathBuf>,
 }
 
 impl Default for PmGuardConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            runtime_checkouts: Vec::new(),
+            documents_repos: Vec::new(),
+        }
     }
 }
 

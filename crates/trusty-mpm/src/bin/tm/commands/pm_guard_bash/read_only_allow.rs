@@ -319,6 +319,7 @@ fn deny_reason(agent: &str, what: &str) -> String {
     // #8567: names the gh read verbs and `date`. #8586: the quoted-pattern hint.
     // #8628: names the one environment prefix `git ls-remote` may carry.
     // #9001: names the literal-path remedy for a variable path.
+    // #8571: names the scratchpad-only cp/rm.
     format!(
         "Read-only dispatch refused a command (#8439): `{agent}` is a read-only agent, and this \
          command has {what}. A read-only agent runs only allowlisted reads, one per call, with \
@@ -327,7 +328,8 @@ fn deny_reason(agent: &str, what: &str) -> String {
          ls-remote` to use the project's gh credential; cat/head/tail/wc/ls/grep/rg; find without \
          -exec/-delete/-fprint; sed -n with a print script; plutil -p/-lint; defaults read; \
          launchctl print/list; tmux capture-pane -p; cargo metadata/tree; gh issue view/list, \
-         gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd. A \
+         gh pr view/list/diff/checks, gh run view/list, gh api (GET only); date [-u] [+format]; echo; pwd; \
+         cp/rm whose every operand is a literal absolute path inside the session scratchpad. A \
          pipe into cat/head/tail/wc/grep/rg/sed is allowed, and so are `2>&1`, `2>/dev/null` \
          and one leading `cd <dir> &&` with a literal path. Write every path out literally \
          — `sed -n '10,20p' src/lib.rs`, never `sed -n '10,20p' \"$F\"`; a path held in a \

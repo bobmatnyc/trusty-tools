@@ -22,6 +22,8 @@
 //! - `gh`: see [`super::read_only_gh`] (#8567).
 //! - `date` that only prints ([`date`], #8567).
 //! - `echo`, `pwd`.
+//! - `cp`, `rm` with every operand inside the session scratchpad: see
+//!   [`super::read_only_scratchpad`] (#8571).
 //!
 //! A pipe stage after the first must be `cat`, `head`, `tail`, `wc`, `grep`,
 //! `rg` or `sed`. One environment prefix is admitted: a bare
@@ -32,6 +34,7 @@
 
 use super::read_only_gh::check_gh;
 use super::read_only_git::{check_git, check_git_ls_remote};
+use super::read_only_scratchpad::scratchpad_write;
 
 /// One argument of a judged command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +175,8 @@ pub(super) fn check_command(args: &[Arg], piped: bool) -> Verdict {
         "date" => date(rest),
         "echo" => Ok(()),
         "pwd" if rest.is_empty() => Ok(()),
+        // #8571: owner ruling — scratchpad-only writes for a red-on-base tree.
+        "cp" | "rm" => scratchpad_write(program, rest),
         _ => Err(format!(
             "`{program}`, which is not on the read-only allowlist"
         )),

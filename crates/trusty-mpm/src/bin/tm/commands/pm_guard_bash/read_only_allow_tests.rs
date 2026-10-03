@@ -945,3 +945,64 @@ fn a_variable_path_refusal_names_the_literal_path_remedy_9001() {
         None
     );
 }
+
+/// A session-scratchpad fixture: `<tmp>/scratchpad/base-abc/`, which exists.
+fn scratchpad_fixture() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join("scratchpad").join("base-abc");
+    std::fs::create_dir_all(base.join("src")).expect("mkdir base");
+    let shown = base.display().to_string();
+    (dir, shown)
+}
+
+/// 🔴 REGRESSION (#8571): owner ruling 2026-09-28 — a read-only agent may
+/// `ls`, `cp` and `rm` inside its session scratchpad. `cp`/`rm` were refused
+/// on origin/main.
+#[test]
+fn scratchpad_cp_and_rm_are_allowed() {
+    let (_dir, base) = scratchpad_fixture();
+    let rows = [
+        format!("ls {base}"),
+        format!("cp -R {base}/src {base}/src-copy"),
+        format!("cp {base}/src/a.rs {base}/b.rs"),
+        format!("rm -rf {base}"),
+        format!("rm -- {base}/b.rs"),
+    ];
+    for command in &rows {
+        assert_eq!(run(Some("code-critic"), command), None, "{command}");
+    }
+}
+
+#[test]
+fn cp_and_rm_outside_the_scratchpad_are_refused() {
+    let (dir, base) = scratchpad_fixture();
+    let pad = dir.path().join("scratchpad").display().to_string();
+    let outside = dir.path().join("elsewhere").display().to_string();
+    let link = format!("{pad}/link");
+    std::os::unix::fs::symlink(dir.path(), &link).expect("symlink");
+    let rows = [
+        format!("rm -rf {outside}"),
+        format!("cp {base}/a {outside}/a"),
+        format!("cp /etc/hosts {base}/hosts"),
+        // The scratchpad root itself, `..`, a symlink, relative, a variable.
+        format!("rm -rf {pad}"),
+        format!("rm -rf {base}/../../elsewhere"),
+        format!("rm -rf {link}/elsewhere"),
+        "rm -rf base-abc".to_string(),
+        "rm -rf ~/scratchpad/x".to_string(),
+        format!("for f in {base}/a; do rm \"$f\"; done"),
+        // A flag outside the short list, a target-directory move, no operand.
+        format!("cp -t {base} {base}/a"),
+        format!("cp --target-directory={base} {base}/a"),
+        format!("rm -ri {base}"),
+        "rm -rf".to_string(),
+        format!("cp {base}/a"),
+        // Composition and a pipe stay refused.
+        format!("ls {base} | rm -rf {base}"),
+        format!("rm -rf {base}; rm -rf {outside}"),
+        "rm -rf /scratchpad/x".to_string(),
+    ];
+    for command in &rows {
+        assert!(run(Some("code-critic"), command).is_some(), "{command}");
+    }
+}

@@ -140,6 +140,7 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
+use super::pm_guard_bash::operator_checkouts::is_documents_repo;
 use super::pm_guard_bash::{UnplaceableWrite, shell_write_targets};
 
 /// Deny a source-file write whose target lives in a project's main checkout.
@@ -235,6 +236,10 @@ fn deny_reason_for_target(target: &str, cwd: &Path, home: Option<&str>) -> Optio
     if write_lands_in_a_scratchpad_clone(&resolved, &root) {
         return None;
     }
+    // #7905: an operator-listed documents repo has no source to protect.
+    if is_documents_repo(&root) {
+        return None;
+    }
     // The message quotes the spelling the caller used, not the expansion.
     Some(deny_reason(target))
 }
@@ -313,7 +318,7 @@ pub(crate) fn write_lands_in_a_scratchpad_clone(resolved: &Path, root: &Path) ->
 /// Test: `denies_a_symlink_below_an_exempt_root`,
 /// `allows_a_source_write_in_a_scratchpad_rooted_clone` (whose target directory
 /// does not exist).
-fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+pub(crate) fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
     path.ancestors().find_map(|dir| dir.canonicalize().ok())
 }
 
@@ -334,7 +339,7 @@ fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
 /// undetermined case can never widen the exemption.
 /// Test: `scratchpad_root_names_only_a_temp_rooted_harness_directory`,
 /// `denies_when_no_scratchpad_root_can_be_determined`.
-fn scratchpad_root(path: &Path) -> Option<PathBuf> {
+pub(crate) fn scratchpad_root(path: &Path) -> Option<PathBuf> {
     let mut prefix = PathBuf::new();
     for component in path.components() {
         prefix.push(component);

@@ -75,10 +75,12 @@ mod process_env_dump;
 // #8439: a read-only dispatch runs only allowlisted command shapes.
 mod read_only_allow;
 // #8567: the `gh` read verbs a read-only dispatch may run.
+pub(crate) mod operator_checkouts;
 mod read_only_gh;
 mod read_only_git;
 mod read_only_lex;
 mod read_only_programs;
+mod read_only_scratchpad;
 mod secret_file_copy;
 mod sed_awk;
 mod shell_lex;
