@@ -433,8 +433,9 @@ pub(crate) async fn reindex_report(
 /// object: `started`, plus `stream_url` or the refusal `reason`.
 /// The caller holds this index's teardown read guard, and the index permit
 /// when `permit_held`; the #8958 re-open runs under them.
-/// Test: `a_valid_patch_catches_up_what_the_hold_refused`.
-pub(super) async fn start_release_catch_up(
+/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
+/// `a_release_catch_up_returns_while_a_delete_is_queued`.
+pub(crate) async fn start_release_catch_up(
     state: &Arc<SearchAppState>,
     handle: Arc<IndexHandle>,
     permit_held: bool,

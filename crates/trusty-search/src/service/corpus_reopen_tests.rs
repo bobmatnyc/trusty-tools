@@ -383,6 +383,84 @@ async fn a_reopen_skips_an_index_whose_permit_is_held() {
     ));
 }
 
+/// MEDIUM (#8958 review): the config-release catch-up re-opens under the
+/// PATCH's own teardown read guard and permit (`permit_held = true`). A DELETE
+/// queued on the fair teardown lock must not block it: a second teardown read
+/// would queue behind that writer while the PATCH's first read holds it off,
+/// and neither would ever proceed. Taking the permit the PATCH already holds
+/// would answer `Busy` and leave the index quarantined, so the catch-up would
+/// not start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_release_catch_up_returns_while_a_delete_is_queued() {
+    let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let root = isolated.path().join("root");
+    let id = "release-8958";
+    let (state, _redb, holder) = contended_index(id, &root).await;
+    let h = handle(&state, id);
+    drop(holder);
+    // The PATCH's guards, taken in its order: teardown read, then the permit.
+    let teardown = crate::service::reindex::acquire_index_teardown_read(&h.id).await;
+    let permit = crate::service::reindex::index_semaphore(&h.id)
+        .try_acquire_owned()
+        .expect("permit");
+    let delete = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let params = crate::service::server::DeleteIndexParams {
+                delete_data: false,
+                expected_root_path: None,
+            };
+            crate::service::server::delete_index_report(&state, id, params).await
+        })
+    };
+    let lock = crate::service::reindex::index_teardown_lock(&h.id);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while lock.try_read().is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the DELETE never queued on the teardown lock"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let catch_up = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::service::server::start_release_catch_up(&state, Arc::clone(&h), true),
+    )
+    .await
+    .expect("#8958: the catch-up took a second teardown read behind the queued DELETE");
+    assert_eq!(catch_up["started"], true, "{catch_up}");
+    assert!(
+        !h.indexer.read().await.is_write_quarantined(),
+        "the re-open runs under the PATCH's permit"
+    );
+
+    drop(permit);
+    drop(teardown);
+    let body = tokio::time::timeout(Duration::from_secs(60), delete)
+        .await
+        .expect("the delete ends once the PATCH's guards drop")
+        .expect("delete task")
+        .map_err(|(s, b)| format!("{s}: {b}"))
+        .expect("the delete succeeds");
+    assert_eq!(body["removed"], true, "{body}");
+    // The spawned catch-up must end before the sandbox, and TRUSTY_DATA_DIR, go.
+    let progress = state
+        .reindex_progress
+        .get(&h.id)
+        .map(|p| Arc::clone(&p))
+        .expect("progress entry");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while progress.status.load() == ReindexStatus::Running {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "catch-up never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Add an entity row under `key`, then make that key invalid UTF-8 on disk.
 ///
 /// `load_all_entities` decodes every key with redb's `&str` decoder, which is

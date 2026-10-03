@@ -318,6 +318,8 @@ pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 pub(crate) use reindex_handlers::reindex_report;
+#[cfg(test)]
+pub(crate) use reindex_handlers::start_release_catch_up;
 pub(crate) use search::{delete_index_report, DeleteIndexParams};
 
 // #6285 slice 5.5: the four routes with a named consumer that no earlier slice

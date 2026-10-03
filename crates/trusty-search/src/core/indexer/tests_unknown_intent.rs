@@ -179,6 +179,13 @@ async fn test_bugdebt_intent_still_hard_filters_code_mode() {
 /// #9027: a bare one-word query classifies `Keyword` and takes `Unknown`'s
 /// Code→All mode upgrade, so its matching `.md` hit surfaces at the default
 /// mode instead of being filtered out.
+///
+/// The surfacing alone also holds in `Code` mode, where the balanced-intent
+/// soft downrank keeps the doc. What only the upgrade produces is a default-mode
+/// result identical to an explicit `All` query: without it, `Code` mode
+/// multiplies the doc's score by the 0.1 prose penalty a second time.
+/// `archive_reason` cannot tell the two apart — `doc_score_penalty` labels a
+/// `.md` file in every mode.
 #[tokio::test]
 async fn test_keyword_intent_upgrades_code_mode_and_surfaces_docs() {
     let idx = make_indexer();
@@ -210,9 +217,25 @@ async fn test_keyword_intent_upgrades_code_mode_and_surfaces_docs() {
         ..Default::default()
     };
     let results = idx.search(&q).await.unwrap();
-    let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
-    assert!(
-        files.contains(&abs("docs/pooling.md").as_str()),
-        "Keyword-intent query must surface the matching doc hit: {files:?}"
+    let doc = abs("docs/pooling.md");
+    let doc_score = |results: &[super::CodeChunk]| {
+        results
+            .iter()
+            .find(|c| c.file == doc)
+            .map(|c| c.score)
+            .unwrap_or_else(|| panic!("Keyword-intent query must surface {doc}: {results:?}"))
+    };
+    let default_score = doc_score(&results);
+    let explicit_all = idx
+        .search(&SearchQuery {
+            mode: SearchMode::All,
+            ..q.clone()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        default_score,
+        doc_score(&explicit_all),
+        "#9027: the default mode must run as All for a Keyword query"
     );
 }

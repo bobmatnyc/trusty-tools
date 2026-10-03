@@ -91,25 +91,52 @@ pub(crate) fn restart_with(
 
 /// The data dir an installed unit declares: `--data-dir` in its
 /// `ProgramArguments`, else a non-empty `TRUSTY_DATA_DIR` in its environment;
-/// `None` when it declares neither and so serves the platform default (#8686).
+/// `Ok(None)` when it declares neither and so serves the platform default
+/// (#8686).
 ///
 /// Why: the restart must act on the unit's daemon, not on whatever data dir the
-/// CLI's own environment names.
-/// Test: `the_unit_data_dir_comes_from_the_plist`.
+/// CLI's own environment names. Falling back to the platform default when the
+/// unit's own declaration is unreadable would signal a daemon that is not the
+/// unit's.
+/// What: `Err` when `args` is empty — a launchd unit always has
+/// `ProgramArguments`, so none means a binary or malformed plist — and when
+/// `--data-dir` has no value, matching `reap_orphans::declared_data_dir`.
+/// Test: `the_unit_data_dir_comes_from_the_plist`,
+/// `a_unit_without_program_arguments_signals_nothing`,
+/// `a_dangling_data_dir_signals_nothing`.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn unit_data_dir_override(args: &[String], env: &[(String, String)]) -> Option<PathBuf> {
+pub(crate) fn unit_data_dir_override(
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<Option<PathBuf>> {
+    // #8686: an undeterminable data dir fails closed, never to the default.
+    if args.is_empty() {
+        bail!(
+            "the installed unit declares no ProgramArguments (a binary or malformed plist), so \
+             its data dir cannot be determined — not restarting (#8686)"
+        );
+    }
     let mut words = args.iter();
     while let Some(word) = words.next() {
-        if let Some(value) = word.strip_prefix("--data-dir=") {
-            return Some(PathBuf::from(value));
-        }
-        if word == "--data-dir" {
-            return words.next().map(PathBuf::from);
-        }
+        let value = if let Some(value) = word.strip_prefix("--data-dir=") {
+            Some(value)
+        } else if word == "--data-dir" {
+            words.next().map(String::as_str)
+        } else {
+            continue;
+        };
+        return match value.filter(|v| !v.is_empty()) {
+            Some(v) => Ok(Some(PathBuf::from(v))),
+            None => bail!(
+                "the installed unit passes `--data-dir` with no value, so its data dir cannot \
+                 be determined — not restarting (#8686)"
+            ),
+        };
     }
-    env.iter()
+    Ok(env
+        .iter()
         .find(|(k, v)| k == "TRUSTY_DATA_DIR" && !v.is_empty())
-        .map(|(_, v)| PathBuf::from(v))
+        .map(|(_, v)| PathBuf::from(v)))
 }
 
 /// The socket the unit's daemon binds, from the unit's data dir (#8686).
@@ -187,6 +214,77 @@ pub(crate) fn version_from_health(report: &serde_json::Value) -> Option<String> 
     report.get("version")?.as_str().map(str::to_string)
 }
 
+/// The process and launchd effects one restart performs (#8686).
+///
+/// Why: injected so [`restart_unit`]'s fail-closed arms are testable without a
+/// launchd unit or a live daemon — a test records every signal.
+/// What: [`LaunchdEffects`] binds the real process table, signals, `launchctl`
+/// and `search.health`.
+/// Test: `a_unit_without_program_arguments_signals_nothing`.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) trait RestartEffects {
+    /// Every running `trusty-search start` process.
+    fn candidates(&self) -> Vec<Candidate>;
+    /// Send `sig` (`"TERM"` or `"KILL"`) to `pid`.
+    fn signal(&self, pid: u32, sig: &'static str);
+    /// Wait up to `within` for `done` to hold.
+    fn wait_until(&self, within: Duration, done: &dyn Fn() -> bool);
+    /// The socket the unit's daemon binds, from its data-dir override.
+    fn socket_for(&self, unit_override: Option<&Path>) -> Result<PathBuf>;
+    /// Boot the unit out and wait for launchd to unload it.
+    fn bootout(&self) -> Result<()>;
+    /// Bootstrap the unit.
+    fn bootstrap(&self) -> Result<()>;
+    /// The version the daemon on `socket` reports once it answers.
+    fn health_version(&self, socket: &Path) -> Result<String>;
+}
+
+/// Restart the unit described by its plist's `unit_args` / `unit_env` (#8686).
+///
+/// What: resolves the unit's data dir with [`unit_data_dir_override`] BEFORE
+/// scanning or signalling anything, so an undeterminable one aborts with no
+/// effect. Then runs [`restart_with`] with [`scoped_daemon_pids`] over
+/// `fx.candidates()` and [`terminate_scoped`] over `fx.signal`.
+/// Test: `a_unit_without_program_arguments_signals_nothing`,
+/// `a_dangling_data_dir_signals_nothing`,
+/// `the_restart_signals_only_the_units_daemon`.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn restart_unit(
+    unit_args: &[String],
+    unit_env: &[(String, String)],
+    platform_default: &Path,
+    expected_version: &str,
+    fx: &impl RestartEffects,
+) -> Result<RestartReport> {
+    let unit_override = unit_data_dir_override(unit_args, unit_env)?;
+    let unit_dir = unit_override
+        .clone()
+        .unwrap_or_else(|| platform_default.to_path_buf());
+    let socket = fx.socket_for(unit_override.as_deref())?;
+    let scoped_now = || scoped_daemon_pids(&fx.candidates(), &unit_dir, platform_default);
+    restart_with(
+        scoped_now(),
+        expected_version,
+        || fx.bootout(),
+        |pid| scoped_now().contains(&pid),
+        |pids| {
+            println!(
+                "· terminating detached daemon PID(s) {pids:?} on {} that bootout left \
+                 running (#8686)",
+                unit_dir.display()
+            );
+            terminate_scoped(
+                pids,
+                scoped_now,
+                |pid, sig| fx.signal(pid, sig),
+                |within, done| fx.wait_until(within, done),
+            )
+        },
+        || fx.bootstrap(),
+        || fx.health_version(&socket),
+    )
+}
+
 /// One `search.health` call on `socket` — the same report `GET /health`
 /// serves; `None` when nothing answers (#8686).
 #[cfg(target_os = "macos")]
@@ -198,86 +296,92 @@ fn probe_health_version(socket: &Path) -> Option<String> {
     version_from_health(&report)
 }
 
+/// The real [`RestartEffects`]: live process table, signals, `launchctl` and
+/// `search.health` (#8686).
+#[cfg(target_os = "macos")]
+struct LaunchdEffects<'a> {
+    cfg: &'a trusty_common::launchd::LaunchdConfig,
+    budget_secs: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl RestartEffects for LaunchdEffects<'_> {
+    fn candidates(&self) -> Vec<Candidate> {
+        super::start::reap_orphans::observe_candidates()
+    }
+
+    fn signal(&self, pid: u32, sig: &'static str) {
+        let _ = super::stop::send_signal(pid, sig);
+    }
+
+    fn wait_until(&self, within: Duration, done: &dyn Fn() -> bool) {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline && !done() {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn socket_for(&self, unit_override: Option<&Path>) -> Result<PathBuf> {
+        unit_socket_path(unit_override)
+    }
+
+    fn bootout(&self) -> Result<()> {
+        if self.cfg.is_loaded() {
+            self.cfg.bootout()?;
+            trusty_common::launchd_restart::await_unload(
+                self.budget_secs,
+                || self.cfg.is_loaded(),
+                || std::thread::sleep(Duration::from_secs(1)),
+            );
+        }
+        Ok(())
+    }
+
+    fn bootstrap(&self) -> Result<()> {
+        self.cfg.bootstrap()
+    }
+
+    fn health_version(&self, socket: &Path) -> Result<String> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(self.budget_secs.max(60));
+        loop {
+            let expired = std::time::Instant::now() >= deadline;
+            match probe_health_version(socket) {
+                Some(v) if v == env!("CARGO_PKG_VERSION") || expired => return Ok(v),
+                None if expired => bail!(
+                    "no daemon answered search.health on {} after the restart (#8686)",
+                    socket.display()
+                ),
+                _ => std::thread::sleep(Duration::from_millis(500)),
+            }
+        }
+    }
+}
+
 /// Restart the launchd-supervised daemon and verify the result (#8686).
 ///
-/// What: resolves the unit's data dir and socket from `unit_args` /
-/// `unit_env` (the installed plist), then runs [`restart_with`] with
-/// [`scoped_daemon_pids`] over a live `reap_orphans::observe_candidates` scan.
-/// Test: the ordering is tested through [`restart_with`], the scoping through
-/// [`scoped_daemon_pids`] and [`terminate_scoped`]; this binding runs real
-/// `launchctl` calls.
+/// What: [`restart_unit`] over [`LaunchdEffects`], with the platform default
+/// data dir as the fallback for a unit that declares none.
+/// Test: the decisions are tested through [`restart_unit`]; this binding runs
+/// real `launchctl` calls.
 #[cfg(target_os = "macos")]
 pub(crate) fn service_restart(
     cfg: &trusty_common::launchd::LaunchdConfig,
     unit_args: &[String],
     unit_env: &[(String, String)],
 ) -> Result<()> {
-    use super::start::reap_orphans::observe_candidates;
-    use crate::service::daemon::resolve_daemon_dir;
-    use std::time::Instant;
-
-    let unit_override = unit_data_dir_override(unit_args, unit_env);
-    let Some(unit_dir) = resolve_daemon_dir(unit_override.as_deref().map(Path::as_os_str)) else {
-        bail!("the unit's data dir is unresolvable — not restarting (#4395)");
-    };
-    let Some(platform_default) = resolve_daemon_dir(None) else {
+    let Some(platform_default) = crate::service::daemon::resolve_daemon_dir(None) else {
         bail!("the platform default data dir is unresolvable — not restarting (#4395)");
     };
-    let socket = unit_socket_path(unit_override.as_deref())?;
-    let scoped_now = || scoped_daemon_pids(&observe_candidates(), &unit_dir, &platform_default);
-    let budget = trusty_common::shutdown::termination_grace().as_secs();
-    let report = restart_with(
-        scoped_now(),
+    let fx = LaunchdEffects {
+        cfg,
+        budget_secs: trusty_common::shutdown::termination_grace().as_secs(),
+    };
+    let report = restart_unit(
+        unit_args,
+        unit_env,
+        &platform_default,
         env!("CARGO_PKG_VERSION"),
-        || {
-            if cfg.is_loaded() {
-                cfg.bootout()?;
-                trusty_common::launchd_restart::await_unload(
-                    budget,
-                    || cfg.is_loaded(),
-                    || std::thread::sleep(Duration::from_secs(1)),
-                );
-            }
-            Ok(())
-        },
-        |pid| scoped_now().contains(&pid),
-        |pids| {
-            println!(
-                "· terminating detached daemon PID(s) {pids:?} on {} that bootout left \
-                 running (#8686)",
-                unit_dir.display()
-            );
-            terminate_scoped(
-                pids,
-                scoped_now,
-                |pid, sig| {
-                    let _ = super::stop::send_signal(pid, sig);
-                },
-                |within, done| {
-                    let deadline = Instant::now() + within;
-                    while Instant::now() < deadline && !done() {
-                        std::thread::sleep(Duration::from_millis(200));
-                    }
-                },
-            )
-        },
-        || cfg.bootstrap(),
-        || {
-            let deadline = Instant::now() + Duration::from_secs(budget.max(60));
-            loop {
-                match probe_health_version(&socket) {
-                    Some(v) if v == env!("CARGO_PKG_VERSION") => return Ok(v),
-                    Some(v) if Instant::now() >= deadline => return Ok(v),
-                    None if Instant::now() >= deadline => {
-                        bail!(
-                            "no daemon answered search.health on {} after the restart (#8686)",
-                            socket.display()
-                        )
-                    }
-                    _ => std::thread::sleep(Duration::from_millis(500)),
-                }
-            }
-        },
+        &fx,
     )?;
     println!(
         "✓ restarted: /health reports {}; replaced daemon PID(s) {:?} are gone",

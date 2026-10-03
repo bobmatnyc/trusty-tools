@@ -13,8 +13,8 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use super::service_restart::{
-    restart_with, scoped_daemon_pids, terminate_scoped, unit_data_dir_override, unit_socket_path,
-    version_from_health,
+    restart_unit, restart_with, scoped_daemon_pids, terminate_scoped, unit_data_dir_override,
+    unit_socket_path, version_from_health, RestartEffects,
 };
 use super::start::reap_orphans::Candidate;
 
@@ -180,19 +180,121 @@ fn a_scoped_daemon_that_ignores_sigterm_is_sigkilled() {
 fn the_unit_data_dir_comes_from_the_plist() {
     let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let env = vec![("TRUSTY_DATA_DIR".to_string(), "/data/env".to_string())];
+    let read = |a: &[&str], e: &[(String, String)]| {
+        unit_data_dir_override(&args(a), e).expect("a declared data dir")
+    };
     assert_eq!(
-        unit_data_dir_override(&args(&["ts", "start", "--data-dir", "/data/flag"]), &env),
+        read(&["ts", "start", "--data-dir", "/data/flag"], &env),
         Some(PathBuf::from("/data/flag"))
     );
     assert_eq!(
-        unit_data_dir_override(&args(&["ts", "start", "--data-dir=/data/eq"]), &[]),
+        read(&["ts", "start", "--data-dir=/data/eq"], &[]),
         Some(PathBuf::from("/data/eq"))
     );
     assert_eq!(
-        unit_data_dir_override(&args(&["ts", "start"]), &env),
+        read(&["ts", "start"], &env),
         Some(PathBuf::from("/data/env"))
     );
-    assert_eq!(unit_data_dir_override(&args(&["ts", "start"]), &[]), None);
+    assert_eq!(read(&["ts", "start"], &[]), None);
+}
+
+const PLATFORM_DEFAULT: &str = "/platform/default";
+
+/// Recorded [`RestartEffects`]: a process table a signal removes PIDs from,
+/// and every signal and launchd step taken.
+struct Recorder {
+    table: RefCell<Vec<Candidate>>,
+    signals: RefCell<Vec<(u32, &'static str)>>,
+    steps: RefCell<Vec<&'static str>>,
+}
+
+impl Recorder {
+    fn new(table: Vec<Candidate>) -> Self {
+        Self {
+            table: RefCell::new(table),
+            signals: RefCell::new(Vec::new()),
+            steps: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl RestartEffects for Recorder {
+    fn candidates(&self) -> Vec<Candidate> {
+        self.table.borrow().clone()
+    }
+    fn signal(&self, pid: u32, sig: &'static str) {
+        self.signals.borrow_mut().push((pid, sig));
+        self.table.borrow_mut().retain(|c| c.pid != pid);
+    }
+    fn wait_until(&self, _: std::time::Duration, _: &dyn Fn() -> bool) {}
+    fn socket_for(&self, _: Option<&Path>) -> anyhow::Result<PathBuf> {
+        Ok(PathBuf::from("/unit/trusty-search.sock"))
+    }
+    fn bootout(&self) -> anyhow::Result<()> {
+        self.steps.borrow_mut().push("bootout");
+        Ok(())
+    }
+    fn bootstrap(&self) -> anyhow::Result<()> {
+        self.steps.borrow_mut().push("bootstrap");
+        Ok(())
+    }
+    fn health_version(&self, _: &Path) -> anyhow::Result<String> {
+        Ok("0.55.0".to_string())
+    }
+}
+
+/// Restart a unit over `rec` whose table holds a daemon on the platform
+/// default — the daemon a fallback to the default would signal.
+fn restart_over_default_daemon(args: &[&str], rec: &Recorder) -> anyhow::Result<()> {
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    restart_unit(&args, &[], Path::new(PLATFORM_DEFAULT), "0.55.0", rec).map(|_| ())
+}
+
+/// MEDIUM (#8686 review): a plist with no `ProgramArguments` (binary or
+/// malformed) aborts the restart before any scan, bootout or signal. On pre-fix
+/// code it fell back to the platform default and signalled that daemon.
+#[test]
+fn a_unit_without_program_arguments_signals_nothing() {
+    let rec = Recorder::new(vec![daemon(30, PLATFORM_DEFAULT)]);
+    let err = restart_over_default_daemon(&[], &rec).expect_err("no ProgramArguments fails");
+    assert!(err.to_string().contains("ProgramArguments"), "{err}");
+    assert!(rec.signals.borrow().is_empty(), "{:?}", rec.signals);
+    assert!(rec.steps.borrow().is_empty(), "{:?}", rec.steps);
+}
+
+/// MEDIUM (#8686 review): a dangling or empty `--data-dir` aborts the restart
+/// before any scan, bootout or signal, as `reap_orphans::declared_data_dir`
+/// does. On pre-fix code it fell back to the platform default.
+#[test]
+fn a_dangling_data_dir_signals_nothing() {
+    for args in [
+        &["trusty-search", "start", "--data-dir"][..],
+        &["trusty-search", "start", "--data-dir="][..],
+    ] {
+        let rec = Recorder::new(vec![daemon(30, PLATFORM_DEFAULT)]);
+        let err = restart_over_default_daemon(args, &rec).expect_err("a dangling flag fails");
+        assert!(err.to_string().contains("`--data-dir`"), "{args:?}: {err}");
+        assert!(
+            rec.signals.borrow().is_empty(),
+            "{args:?}: {:?}",
+            rec.signals
+        );
+        assert!(rec.steps.borrow().is_empty(), "{args:?}: {:?}", rec.steps);
+    }
+}
+
+/// #8686: a unit with a declared data dir signals only its own detached
+/// daemon, never the one on the platform default, then bootstraps.
+#[test]
+fn the_restart_signals_only_the_units_daemon() {
+    let rec = Recorder::new(vec![daemon(10, "/data/unit"), daemon(30, PLATFORM_DEFAULT)]);
+    restart_over_default_daemon(
+        &["trusty-search", "start", "--data-dir", "/data/unit"],
+        &rec,
+    )
+    .expect("the restart succeeds");
+    assert_eq!(rec.signals.into_inner(), vec![(10, "TERM")]);
+    assert_eq!(rec.steps.into_inner(), vec!["bootout", "bootstrap"]);
 }
 
 /// HIGH-2: the health probe dials the socket under the unit's data dir, not
