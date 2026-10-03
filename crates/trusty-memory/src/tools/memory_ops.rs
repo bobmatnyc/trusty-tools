@@ -378,10 +378,12 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
 /// shape a retry after a half-completed forget takes, and skipping it there
 /// would strand the stale document forever. `handle.id`, not the requested
 /// slug, keys the lane — `open_palace` follows aliases and the writer indexed
-/// under the resolved id (#5036). A real removal is logged at `info` with the
-/// palace, drawer id and source `mcp` (#8729).
+/// under the resolved id (#5036). A real removal is logged through
+/// [`log_user_forget`] before the BM25 delete runs, so a failing lexical lane
+/// cannot suppress the line (#8729).
 /// Test: `tests/bm25_forget_delete.rs::a_forgotten_drawer_leaves_the_lexical_corpus`,
 /// `service::core_tests::a_user_forget_logs_palace_drawer_and_source_once_deleted`,
+/// `service::core_tests::a_user_forget_is_logged_even_when_the_lexical_delete_fails`,
 /// `forget_fails_loudly_when_the_lexical_lane_cannot_confirm_the_delete`,
 /// `forget_succeeds_when_the_lexical_lane_is_disabled`.
 pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Result<Value> {
@@ -394,18 +396,17 @@ pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Resul
         .map_err(|e| anyhow!("memory_forget: invalid drawer_id UUID: {e}"))?;
     let handle = open_palace_handle(state, &palace)?;
     let outcome = handle.forget(drawer_id).await.context("forget")?;
+    // #8729: log the removal before the lexical delete can fail — the drawer
+    // is already gone from the primary store at this point.
+    if outcome.is_deleted() {
+        log_user_forget(handle.id.as_str(), &palace, drawer_id, ActivitySource::Mcp);
+    }
     // #5053: the lexical lane is the other place this drawer's text lives.
     bm25_delete_document(state, handle.id.as_str(), drawer_id).await?;
     // #5231: only a real deletion emits DrawerDeleted and reports "deleted".
     // A no-op used to do both, so an audit loop saw N delete events for zero
     // deletions.
     if outcome.is_deleted() {
-        // #8729: every user-initiated removal reaches the daemon log, as the
-        // maintenance removals do.
-        tracing::info!(
-            palace = %palace, drawer_id = %drawer_id, source = ActivitySource::Mcp.as_str(),
-            "#8729: user forget removed drawer {drawer_id} from palace {palace} (mcp)"
-        );
         // Issue #96: emit so MCP-driven deletes are visible in the feed.
         let drawer_count = handle.drawers.read().len();
         state.emit(DaemonEvent::DrawerDeleted {
@@ -417,6 +418,29 @@ pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Resul
     // Issue #228: skip the per-write `StatusChanged` emit — the ticker
     // handles aggregate roll-ups.
     Ok(json!({ "status": outcome.as_str(), "drawer_id": drawer_id_str, "palace": palace }))
+}
+
+/// Log one user-initiated drawer removal at `info` (#8729).
+///
+/// Why: owner ruling "Add the guard" — every removal reaches the daemon log, a
+/// user forget included, so a drawer missing from a palace can be traced.
+/// What: `palace` is the resolved id (`handle.id`), the key the BM25 lane and
+/// the maintenance journal use (#5036); `requested` is the caller's spelling,
+/// which differs for an aliased palace. Callers log right after `forget`
+/// reports a deletion, before any later step can return an error.
+/// Test: `service::core_tests::a_user_forget_logs_palace_drawer_and_source_once_deleted`,
+/// `service::core_tests::a_user_forget_is_logged_even_when_the_lexical_delete_fails`.
+pub(crate) fn log_user_forget(
+    palace: &str,
+    requested: &str,
+    drawer_id: Uuid,
+    source: ActivitySource,
+) {
+    let source = source.as_str();
+    tracing::info!(
+        palace = %palace, requested = %requested, drawer_id = %drawer_id, source = %source,
+        "#8729: user forget removed drawer {drawer_id} from palace {palace} ({source})"
+    );
 }
 
 pub(crate) async fn handle_memory_send_message(state: &AppState, args: Value) -> Result<Value> {
