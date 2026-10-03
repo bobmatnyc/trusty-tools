@@ -71,6 +71,9 @@ pub mod supervisor;
 // #8233 item 1: the resume claim's span across `resume_managed`.
 #[cfg(test)]
 mod resume_claim_tests;
+// #8983: the resume grant across both daemon resume paths.
+#[cfg(test)]
+mod resume_grant_tests;
 pub(crate) mod route_outcome_http;
 mod session_prep;
 mod session_summary;
