@@ -91,15 +91,11 @@ fn healthy(port: u16) -> bool {
 
 /// A real `tm daemon` on `port`, confined to `home`, surveying `repos_root`.
 ///
-/// What: the same isolation `tm_build_lease::spawn_daemon` uses — `--force`
-/// because no launchd supervises it, orphan GC and the Telegram bot off.
+/// What: `common::daemon_command` — a cleared environment, so no operator
+/// secret reaches the daemon (#9121).
 fn spawn_daemon(home: &Path, repos_root: &Path, port: u16) -> Daemon {
-    let child = common::tm_command_in(home)
-        .current_dir(home)
-        .env("TRUSTY_MPM_ORPHAN_GC", "0")
-        .env("TRUSTY_MPM_WORKSPACE_ROOT", repos_root)
-        .env_remove("TELEGRAM_BOT_TOKEN")
-        .args(["daemon", "--force", "--addr"])
+    let child = common::daemon_command(home, repos_root)
+        .arg("--addr")
         .arg(format!("127.0.0.1:{port}"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
