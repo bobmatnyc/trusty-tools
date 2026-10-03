@@ -117,7 +117,7 @@ impl SessionManager {
     /// rename physically retarget an UNRELATED live session that happens to
     /// hold the same name; when that mismatch is detected, only the DB record
     /// is renamed (with a `warn!` notice) and the live tmux entity is left
-    /// untouched. #9101: [`Self::owns_live_name`] also requires the pane to be
+    /// untouched. #9101: `owned_session_id` also requires the pane to be
     /// on the server the record captured it on, and refuses the rename when
     /// ownership cannot be proved.
     /// Test: `rename_updates_name_and_persists`,
