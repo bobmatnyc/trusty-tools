@@ -43,6 +43,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
+use trusty_mpm::core::architect_conversation::CONVERSATION_EXT;
 use trusty_mpm::core::architect_launch::{self, ARCHITECT_DIR, ARCHITECT_EXT};
 use trusty_mpm::core::architect_session::SESSION_EXT;
 use trusty_mpm::core::config::MpmConfig;
@@ -404,8 +405,9 @@ impl Anchors {
     /// Whether a target whose directory is unknown could still name an
     /// anchor: its file name is an expansion or glob, empty, `.`/`..`, an
     /// anchor path component (`envfile-grants` included), a `*.architect`
-    /// launch record, its `*.architect-session` name sidecar or a `*.grant`
-    /// `tm env` grant (any case), or a `*.json` while records could be live.
+    /// launch record, its `*.architect-session` name sidecar, the
+    /// `*.architect-conversation` record or a `*.grant` `tm env` grant (any
+    /// case), or a `*.json` while records could be live.
     /// Test: `the_launch_record_dir_is_an_anchor`.
     fn could_be(&self, spelling: &str) -> bool {
         let name = spelling.trim_end_matches('/');
@@ -422,10 +424,12 @@ impl Anchors {
             // #8878 ruling A: a planted launch record would be an identity,
             // and (R1 critic HIGH) a planted name sidecar would rename it.
             // #8939: a planted `tm env` grant would be a main-thread proof.
+            // #8981: a planted conversation record would pick what it resumes.
             || Path::new(name).extension().is_some_and(|ext| {
                 ext.eq_ignore_ascii_case(ARCHITECT_EXT)
                     || ext.eq_ignore_ascii_case(SESSION_EXT)
                     || ext.eq_ignore_ascii_case(GRANT_EXT)
+                    || ext.eq_ignore_ascii_case(CONVERSATION_EXT)
             })
             || (self.records_live && is_json(name.as_ref()))
     }

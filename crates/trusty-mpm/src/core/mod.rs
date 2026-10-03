@@ -381,6 +381,8 @@ pub mod twin_arming;
 pub mod architect_launch;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;
+// #8981: the Architect's conversation id, resumed by the next `tm fleet init`.
+pub mod architect_conversation;
 // #8942 ruling 2: `tm fleet init` prunes a sidecar only for a proven-dead launch.
 pub mod architect_sidecar_prune;
 pub mod twin_identity;
