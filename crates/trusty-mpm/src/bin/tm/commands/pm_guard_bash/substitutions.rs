@@ -18,6 +18,8 @@
 //! `inert_heredoc_bodies_leave_the_argv_text`; the forbidden-verb callers in
 //! `evaluate_bash_command_*`.
 
+use std::ops::Range;
+
 use super::heredoc::{DataBody, blank_spans, data_bodies};
 use super::shell_lex::QuoteScan;
 use super::{is_evaluator, split_shell_segments};
@@ -32,7 +34,7 @@ use super::{is_evaluator, split_shell_segments};
 pub(crate) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 /// One substitution body, as the shell would run it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Substitution {
     /// A balanced body: the text between the opener and its close.
     Closed(String),
@@ -81,6 +83,17 @@ pub(super) fn paren_substitution_live_at(scan: &QuoteScan, bytes: &[u8], i: usiz
 /// Test: `substitutions_list_each_live_body_once`,
 /// `evaluate_bash_command_denies_unbalanced_substitution`.
 pub(super) fn segment_substitutions(segment: &str) -> Vec<Substitution> {
+    segment_substitution_spans(segment)
+        .into_iter()
+        .map(|(_, body)| body)
+        .collect()
+}
+
+/// [`segment_substitutions`] with the byte range each substitution occupies
+/// in `segment`, opener and close included (#8931: a caller that must know
+/// which argv word a substitution lands in).
+/// Test: `substitution_spans_cover_opener_and_close_8931`.
+pub(crate) fn segment_substitution_spans(segment: &str) -> Vec<(Range<usize>, Substitution)> {
     let scan = QuoteScan::new(segment);
     scan_bodies(
         segment,
@@ -99,7 +112,7 @@ fn scan_bodies(
     honour_escapes: bool,
     paren_live: impl Fn(&[u8], usize) -> Option<bool>,
     backtick_live: impl Fn(usize) -> bool,
-) -> Vec<Substitution> {
+) -> Vec<(Range<usize>, Substitution)> {
     let bytes = text.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
@@ -124,19 +137,26 @@ fn scan_bodies(
                 j += 1;
             }
             if paren != 0 {
-                found.push(Substitution::Unclosed(text[i + 2..].to_string()));
+                found.push((
+                    i..text.len(),
+                    Substitution::Unclosed(text[i + 2..].to_string()),
+                ));
                 return found;
             }
-            found.push(Substitution::Closed(text[i + 2..j - 1].to_string()));
+            found.push((i..j, Substitution::Closed(text[i + 2..j - 1].to_string())));
             i = j;
             continue;
         }
         if bytes[i] == b'`' && backtick_live(i) {
             let Some(len) = text[i + 1..].find('`') else {
-                found.push(Substitution::Unclosed(text[i + 1..].to_string()));
+                found.push((
+                    i..text.len(),
+                    Substitution::Unclosed(text[i + 1..].to_string()),
+                ));
                 return found;
             };
-            found.push(Substitution::Closed(text[i + 1..i + 1 + len].to_string()));
+            let body = Substitution::Closed(text[i + 1..i + 1 + len].to_string());
+            found.push((i..i + len + 2, body));
             i += len + 2;
             continue;
         }
@@ -185,6 +205,8 @@ fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitut
                 |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
                 |_| true,
             )
+            .into_iter()
+            .map(|(_, body)| body)
         })
         .collect()
 }
@@ -272,6 +294,18 @@ mod tests {
         for (segment, want) in cases {
             assert_eq!(&segment_substitutions(segment), want, "{segment:?}");
         }
+    }
+
+    /// #8931: each span runs from the opener to its close, so the caller can
+    /// map a substitution back onto the argv word it sits in.
+    #[test]
+    fn substitution_spans_cover_opener_and_close_8931() {
+        let segment = "cat x$(a b)/y `c` \"$(d)\" $(e";
+        let spans: Vec<&str> = segment_substitution_spans(segment)
+            .into_iter()
+            .map(|(range, _)| &segment[range])
+            .collect();
+        assert_eq!(spans, ["$(a b)", "`c`", "$(d)", "$(e"]);
     }
 
     /// An unquoted-delimiter body expands; a quoted one is literal.

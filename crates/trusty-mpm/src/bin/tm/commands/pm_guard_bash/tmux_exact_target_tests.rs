@@ -631,3 +631,105 @@ fn a_stopped_tmux_server_times_out_the_listing() {
     assert!(probe.panes(&argv).is_err());
     assert!(again.elapsed() < std::time::Duration::from_millis(500));
 }
+
+/// 🔴 REGRESSION (#9053, case 1): a runner that runs its operands — `watch`,
+/// BSD `script` after its file, util-linux `script -c` — reaches tmux. Each
+/// row passed at 156a72be84. A runner of a read-only tmux call or of another
+/// program still passes.
+#[test]
+fn a_runner_running_tmux_is_read_9053() {
+    assert_rows_deny(
+        &fake(),
+        &[
+            ("watch tmux send-keys -t nos hi", "`nos`"),
+            ("watch -n 1 tmux send-keys -t nos hi", "`nos`"),
+            ("watch 'tmux send-keys -t nos hi'", "`nos`"),
+            ("script -q /dev/null tmux send-keys -t nos hi", "`nos`"),
+            ("script -c 'tmux send-keys -t nos hi' /dev/null", "`nos`"),
+        ],
+    );
+    for command in [
+        "watch -n 5 tmux ls",
+        "watch -n 5 make test",
+        "script -q out.log make",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// 🔴 REGRESSION (#9053, cases 1-2): `xargs` into a wrapper with no program
+/// of its own takes the program from stdin, and GNU `parallel` builds its
+/// commands from inputs; with tmux named, each is unreadable. Each row
+/// passed at 156a72be84. Neither route naming no tmux is refused.
+#[test]
+fn xargs_into_a_wrapper_or_runner_naming_tmux_denies_9053() {
+    assert_rows_deny(
+        &fake(),
+        &[
+            ("echo 'tmux send-keys -t nos hi' | xargs env", "`xargs`"),
+            ("echo 'tmux send-keys -t nos hi' | xargs sudo", "`xargs`"),
+            ("echo 'tmux send-keys -t nos hi' | xargs nice", "`xargs`"),
+            (
+                "echo 'tmux send-keys -t nos hi' | xargs timeout 5",
+                "`xargs`",
+            ),
+            (
+                "echo 'tmux send-keys -t nos hi' | xargs -n 2 env",
+                "`xargs`",
+            ),
+            ("echo 'tmux send-keys -t nos hi' | xargs watch", "`xargs`"),
+            ("parallel ::: 'tmux send-keys -t nos hi'", "`parallel`"),
+            ("echo send-keys | parallel tmux", "`parallel`"),
+        ],
+    );
+    for command in [
+        "echo a b | xargs env",
+        "ls | parallel gzip",
+        "echo x | xargs nice echo",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}
+
+/// 🔴 REGRESSION (#9053, case 3): unparseable text naming `TMUX` in any case
+/// may run tmux (APFS is case-insensitive). The row passed at 156a72be84.
+#[test]
+fn unparseable_text_naming_tmux_in_any_case_denies_9053() {
+    use super::super::architect_pane_parse::may_run_tmux;
+    assert!(may_run_tmux("TMUX kill-server 'x", 1));
+    assert!(may_run_tmux("Tmux kill-server 'x", 1));
+    assert!(!may_run_tmux("TMUXED kill-server 'x", 1));
+    assert_rows_deny(
+        &fake(),
+        &[("echo \"$(TMUX send-keys -t nos hi 'x)\"", "cannot read")],
+    );
+}
+
+/// 🔴 REGRESSION (#9053, case 4): an evaluator option the guard does not
+/// know may take the next word as its value, so that word is not read as a
+/// script and the fed shell still denies. Each row passed at 156a72be84; a
+/// known flag before a script still passes.
+#[test]
+fn an_unknown_evaluator_option_is_no_script_operand_9053() {
+    assert_rows_deny(
+        &fake(),
+        &[
+            (
+                "echo 'tmux send-keys -t nos hi' | node --stack-size 100",
+                "stdin",
+            ),
+            ("echo 'tmux send-keys -t nos hi' | ruby -E utf-8", "stdin"),
+            (
+                "echo 'tmux send-keys -t nos hi' | python3 --check-hash-based-pycs always",
+                "stdin",
+            ),
+        ],
+    );
+    for command in [
+        "cat log | python3 -u scripts/summarize.py tmux",
+        "cat log | bash -x scripts/report.sh tmux",
+        "cat log | ruby -E utf-8 report.rb tmux",
+    ] {
+        assert_eq!(denied(&fake(), command), None, "{command}");
+    }
+}

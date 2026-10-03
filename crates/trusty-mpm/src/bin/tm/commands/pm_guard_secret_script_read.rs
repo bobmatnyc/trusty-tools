@@ -19,8 +19,9 @@ pub(crate) enum Unread {
     Unreadable,
     /// Not a regular file: a directory, a FIFO, a device.
     NotRegular,
-    /// The path's last component is a symlink to a non-executable file.
-    Symlink,
+    /// A script run past the `MAX_SCRIPT_DEPTH` nesting bound: its body is
+    /// not followed (#9037).
+    TooDeep,
     /// Larger than [`MAX_SCRIPT_BYTES`].
     TooLarge,
     /// Not UTF-8 text, or carrying a NUL byte.
@@ -61,15 +62,16 @@ const EXECUTABLE_MAGIC: &[[u8; 4]] = &[
 /// What: opens the path `O_NONBLOCK` (a FIFO cannot block the hook) and
 /// requires the OPENED handle to be a regular file; reads through
 /// `take(MAX_SCRIPT_BYTES + 1)` so no size report is trusted. A compiled
-/// executable is [`Body::Executable`], symlinked or not. Otherwise a symlinked
-/// last component, an over-bound body, and non-UTF-8 or NUL-bearing bytes are
-/// each an [`Unread`] error. Nothing the body names is opened here.
+/// executable is [`Body::Executable`]. A symlink is judged by the target the
+/// open reached (#9037: `node_modules/.bin` and Homebrew shims); a symlink
+/// loop fails the open and is [`Unread::Unreadable`]. An over-bound body and
+/// non-UTF-8 or NUL-bearing bytes are each an [`Unread`] error. Nothing the
+/// body names is opened here.
 /// Test: `read_script_reports_each_unread_class`,
-/// `every_unread_class_refuses_8879`.
+/// `every_unread_class_refuses_8879`, `a_symlinked_script_is_judged_by_its_target_9037`.
 pub(crate) fn read_script(path: &Path) -> Result<Body, Unread> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
-    let link = std::fs::symlink_metadata(path).map_err(|_| Unread::Unreadable)?;
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -86,9 +88,6 @@ pub(crate) fn read_script(path: &Path) -> Result<Body, Unread> {
     // #8879: a compiled program run by path is not a script; the kernel runs it.
     if EXECUTABLE_MAGIC.iter().any(|m| bytes.starts_with(m)) {
         return Ok(Body::Executable);
-    }
-    if link.file_type().is_symlink() {
-        return Err(Unread::Symlink);
     }
     if bytes.len() as u64 > MAX_SCRIPT_BYTES {
         return Err(Unread::TooLarge);

@@ -237,10 +237,12 @@
 //! not screened (see above); a path that reaches the command only through a
 //! variable (`sed -n 1,5p "$F"`) is not resolved, because this rule reads words
 //! and not the filesystem; a filename COMPUTED in-line by the same command —
-//! `cat $(printf '\056env')`, `cat $(echo LmVudg== | base64 -d)`, a name
-//! assembled by arithmetic — never appears as literal path text, so no word
-//! scan can see it, an unbounded class of the same shape as the variable
-//! indirection beside it (see `DOCUMENTED_RESIDUALS`); a GLOB whose only
+//! `cat $(printf '\056env')`, `cat $(echo LmVudg== | base64 -d)` — never
+//! appears as literal path text, so no word scan can see it (see
+//! `DOCUMENTED_RESIDUALS`). #8931 closes that class for a file READ at the
+//! entry point: [`evaluate_secret_file_read`] chains
+//! `pm_guard_secret_substitution_read`, which refuses a file operand whose
+//! substitution it cannot resolve; a GLOB whose only
 //! literal is the TAIL of an `.env.<name>` file
 //! (`Grep(glob = "*.production")`) names no family's core, a trade #7266
 //! round 4 made to keep every ordinary extension search working; and a search
@@ -288,11 +290,11 @@
 //! runs (`bash <file>`, `python3 <file>`, `./<file>`) never appears in this
 //! rule's text. `pm_guard_secret_script` runs this rule, and the other
 //! credential rules, over the script's body, and refuses a body it cannot read
-//! in full (unreadable, symlinked, over its 256 KiB bound, not UTF-8) or a
-//! script it cannot resolve (a computed path, a missing file). The accepted
-//! trades — a script an earlier stage of the same command writes, and scripts
-//! a script sources dynamically — are pinned in `DOCUMENTED_RESIDUALS` and in
-//! that module's tests.
+//! in full (unreadable, over its 256 KiB bound, not UTF-8) or a script it
+//! cannot resolve (a computed path, a missing file, a chain past its depth
+//! bound — at any nesting depth, #9037). The accepted trade — a script an
+//! earlier stage of the same command writes — is pinned in
+//! `DOCUMENTED_RESIDUALS` and in that module's tests.
 //!
 //! `git show HEAD:terraform.tfvars` is DENIED, not residual: `:` is not a path
 //! byte, so `HEAD:terraform.tfvars` cuts into `HEAD` and `terraform.tfvars`,
@@ -394,6 +396,7 @@ use crate::commands::pm_guard_secret_env_files::names_a_process_manager_dump;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
 use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
+use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -602,7 +605,9 @@ pub(crate) fn evaluate_secret_file_read(
             .or_else(|| evaluate_credential_print_command(command))
             // #7648, #8756: a pod's or a launchd/pm2 job's env dump prints its
             // keys, naming no file; round 2 reads every substitution body too.
-            .or_else(|| evaluate_nested_secret_rules(command));
+            .or_else(|| evaluate_nested_secret_rules(command))
+            // #8931: a file read whose name a command substitution computes.
+            .or_else(|| evaluate_substitution_read_command(command));
     }
     evaluate_secret_file_read_tool(tool_name, tool_input)
 }
@@ -2193,6 +2198,9 @@ mod tests {
     /// documented beside the variable-indirection residual rather than chased.
     /// These rows ALLOW today. A row that starts denying is not a regression —
     /// it is a residual that closed, and this list is what makes that visible.
+    /// #8931: the two computed-name rows allow in this WORD rule only; the
+    /// entry point refuses them through `pm_guard_secret_substitution_read`
+    /// (`denies_a_read_of_a_computed_filename_8931`).
     /// Test: `the_documented_residuals_still_allow`.
     const DOCUMENTED_RESIDUALS: &[&str] = &[
         "cat $(printf '\\056env')",
@@ -2230,10 +2238,10 @@ mod tests {
         // #8879, owner ruling 268: this rule reads command TEXT only. A script
         // the command runs is judged by its body in `pm_guard_secret_script`,
         // which fails CLOSED on a body it cannot read in full and on a script
-        // it cannot resolve. Its accepted trades: a script an earlier stage of
-        // the same command writes (that stage's text is judged here), and a
-        // script a script runs or sources dynamically (`source "$LIB/x.sh"`).
-        // Pinned with real files in `the_documented_residuals_allow`.
+        // it cannot resolve, at any nesting depth (#9037). Its accepted trade:
+        // a script an earlier stage of the same command writes (that stage's
+        // text is judged here). Pinned with real files in
+        // `the_documented_residuals_allow`.
         "printf 'echo hi' > ./s.sh; bash ./s.sh",
     ];
 
