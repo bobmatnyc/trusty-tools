@@ -465,7 +465,14 @@ pub(crate) async fn patch_index_config_report(
     // persist fails: the in-memory config it serves is live.
     let catch_up_reindex = if was_held && crate::service::exclude_hold::hold(&registered).is_none()
     {
-        Some(super::reindex_handlers::start_release_catch_up(state, Arc::clone(&registered)).await)
+        Some(
+            super::reindex_handlers::start_release_catch_up(
+                state,
+                Arc::clone(&registered),
+                permit.is_some(),
+            )
+            .await,
+        )
     } else {
         None
     };

@@ -499,18 +499,23 @@ fn service_install(request_off: bool, request_on: bool, force: bool) -> Result<(
 }
 
 /// `service restart` (#8686): the plist on disk is reused, so only the label
-/// and plist path of the config matter.
+/// and plist path of the config matter. The plist's own arguments and
+/// environment name the data dir whose daemons the restart may terminate.
 #[cfg(target_os = "macos")]
 fn service_restart() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("could not resolve current exe: {e}"))?;
     let cfg = build_launchd_config(exe, launchd_log_dir()?, false, None);
-    if !cfg.plist_path()?.exists() {
+    let plist = cfg.plist_path()?;
+    if !plist.exists() {
         anyhow::bail!(
             "no LaunchAgent plist for {LAUNCHD_LABEL} — run `trusty-search service install` first"
         );
     }
-    crate::commands::service_restart::service_restart(&cfg)
+    let xml = std::fs::read_to_string(&plist)
+        .map_err(|e| anyhow::anyhow!("could not read {}: {e}", plist.display()))?;
+    let unit = crate::commands::service_unit::parse_installed_unit(&xml);
+    crate::commands::service_restart::service_restart(&cfg, &unit.args, &unit.env)
 }
 
 #[cfg(target_os = "macos")]

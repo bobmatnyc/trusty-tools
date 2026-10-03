@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
-use super::corpus_reopen::{reopen_sweep_once, try_reopen_quarantined_corpus, ReopenOutcome};
+use super::corpus_reopen::{reopen_guarded, reopen_sweep_once, ReopenOutcome};
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::corpus::{CorpusOpenFailure, CorpusStore};
 use crate::core::embed::{Embedder, MockEmbedder};
@@ -89,7 +89,7 @@ async fn a_lock_that_never_releases_keeps_the_index_degraded() {
     let (state, _redb, _holder) = contended_index("held-8958", dir.path()).await;
     let h = handle(&state, "held-8958");
 
-    let outcome = try_reopen_quarantined_corpus(&h, Duration::from_millis(120)).await;
+    let outcome = reopen_guarded(&state.registry, &h, Duration::from_millis(120)).await;
     assert!(
         matches!(outcome, ReopenOutcome::StillUnavailable(_)),
         "{outcome:?}"
@@ -132,7 +132,7 @@ async fn the_sweep_lifts_a_contention_quarantine_once_the_lock_is_released() {
     }
     assert_eq!(h.stages.read().await.lexical.status, StageStatus::Ready);
     assert_eq!(
-        try_reopen_quarantined_corpus(&h, Duration::from_millis(50)).await,
+        reopen_guarded(&state.registry, &h, Duration::from_millis(50)).await,
         ReopenOutcome::NotQuarantined
     );
 }
@@ -200,7 +200,7 @@ async fn a_reopen_reruns_a_schema_chain_that_failed_for_lack_of_a_corpus() {
     drop(holder);
 
     assert!(matches!(
-        try_reopen_quarantined_corpus(&h, Duration::from_millis(200)).await,
+        reopen_guarded(&state.registry, &h, Duration::from_millis(200)).await,
         ReopenOutcome::Reopened { .. }
     ));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
@@ -208,4 +208,241 @@ async fn a_reopen_reruns_a_schema_chain_that_failed_for_lack_of_a_corpus() {
         assert!(tokio::time::Instant::now() < deadline, "chain never re-ran");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Assert the quarantine is still up, with `kind` and no corpus wired.
+async fn assert_still_quarantined(h: &IndexHandle, kind: CorpusOpenFailure) {
+    let indexer = h.indexer.read().await;
+    assert!(
+        indexer.is_write_quarantined(),
+        "the quarantine must stay up"
+    );
+    assert!(!indexer.has_corpus_store(), "no corpus may be wired");
+    assert_eq!(indexer.corpus_open_failure, Some(kind));
+}
+
+/// Run one re-open while a DELETE lands mid-attempt, and return its outcome.
+///
+/// The re-open starts against a held lock, so it sits in its retry loop
+/// holding the teardown read guard; the DELETE then queues behind it; the
+/// holder is released, so the re-open succeeds before the DELETE tears down.
+/// The returned guard keeps the sandbox, and `TRUSTY_DATA_DIR`, alive.
+async fn reopen_racing_a_delete(
+    id: &str,
+    delete_data: bool,
+) -> (
+    ReopenOutcome,
+    PathBuf,
+    crate::service::server::tests_components::IsolatedDataDir,
+) {
+    let isolated = crate::service::server::tests_components::IsolatedDataDir::new();
+    let root = isolated.path().join("root");
+    let (state, redb, holder) = contended_index(id, &root).await;
+    let h = handle(&state, id);
+    let reopen = {
+        let (state, h) = (Arc::clone(&state), Arc::clone(&h));
+        tokio::spawn(
+            async move { reopen_guarded(&state.registry, &h, Duration::from_secs(3)).await },
+        )
+    };
+    let lock = crate::service::reindex::index_teardown_lock(&IndexId::new(id));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while lock.try_write().is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "#8085: the re-open never took the teardown read guard"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let delete = {
+        let state = Arc::clone(&state);
+        let id = id.to_string();
+        tokio::spawn(async move {
+            let params = crate::service::server::DeleteIndexParams {
+                delete_data,
+                expected_root_path: None,
+            };
+            crate::service::server::delete_index_report(&state, &id, params).await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    drop(holder);
+    let outcome = reopen.await.expect("re-open task");
+    let body = delete
+        .await
+        .expect("delete task")
+        .map_err(|(s, b)| format!("{s}: {b}"))
+        .expect("the delete succeeds");
+    assert_eq!(body["removed"], true, "{body}");
+    assert!(
+        state.registry.get(&IndexId::new(id)).is_none(),
+        "the index is gone"
+    );
+    (outcome, redb, isolated)
+}
+
+/// HIGH-1 (#8085 review): a `delete_data=true` DELETE landing during a re-open
+/// waits for it, then closes and removes the corpus. On pre-fix code the DELETE
+/// did not wait, removed the data dir, and the re-open's open recreated it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_delete_during_a_reopen_leaves_no_corpus_behind() {
+    let (outcome, redb, _isolated) = reopen_racing_a_delete("del-data-8085", true).await;
+    assert!(
+        matches!(outcome, ReopenOutcome::Reopened { .. }),
+        "the DELETE waits for the in-flight re-open: {outcome:?}"
+    );
+    assert!(
+        !redb.exists(),
+        "index.redb must be gone: {}",
+        redb.display()
+    );
+}
+
+/// HIGH-1: the same race with `delete_data=false` leaves the file in place but
+/// closed, so a new opener gets it. On pre-fix code the re-open wired the
+/// corpus onto the deregistered handle and held the file open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_keep_data_delete_during_a_reopen_closes_the_corpus() {
+    let (outcome, redb, _isolated) = reopen_racing_a_delete("del-keep-8085", false).await;
+    assert!(
+        matches!(outcome, ReopenOutcome::Reopened { .. }),
+        "{outcome:?}"
+    );
+    assert!(redb.is_file(), "delete_data=false keeps index.redb");
+    CorpusStore::open(&redb).expect("index.redb must be closed after the delete");
+}
+
+/// HIGH-1: a handle that is no longer the registered one is not re-attached,
+/// and the corpus the attempt opened is closed again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swapped_handle_is_not_reattached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, redb, holder) = contended_index("swap-8085", dir.path()).await;
+    let old = handle(&state, "swap-8085");
+    state.registry.register(IndexHandle::bare(
+        IndexId::new("swap-8085"),
+        Arc::new(RwLock::new(crate::core::indexer::CodeIndexer::new(
+            "swap-8085",
+            dir.path(),
+        ))),
+        dir.path().to_path_buf(),
+    ));
+    drop(holder);
+
+    let outcome = reopen_guarded(&state.registry, &old, Duration::from_millis(200)).await;
+    assert_eq!(outcome, ReopenOutcome::Superseded);
+    assert_still_quarantined(&old, CorpusOpenFailure::Contention).await;
+    CorpusStore::open(&redb).expect("the superseded attempt must close index.redb");
+}
+
+/// HIGH-1: a re-open never creates a missing corpus. `CorpusStore::open` runs
+/// `create_dir_all` and creates the file, which resurrected a deleted store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reopen_never_creates_a_missing_corpus() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, redb, holder) = contended_index("gone-8085", dir.path()).await;
+    let h = handle(&state, "gone-8085");
+    drop(holder);
+    let store_dir = redb.parent().expect("store dir").to_path_buf();
+    std::fs::remove_dir_all(&store_dir).expect("remove the store");
+
+    let outcome = reopen_guarded(&state.registry, &h, Duration::from_millis(200)).await;
+    assert!(
+        matches!(outcome, ReopenOutcome::StillUnavailable(_)),
+        "{outcome:?}"
+    );
+    assert!(
+        !store_dir.exists(),
+        "the re-open recreated {}",
+        store_dir.display()
+    );
+    assert_still_quarantined(&h, CorpusOpenFailure::Contention).await;
+}
+
+/// HIGH-1: the sweep skips an index whose permit a reindex, relocate or
+/// catch-up holds, and re-opens it once the permit is free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reopen_skips_an_index_whose_permit_is_held() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, _redb, holder) = contended_index("busy-8085", dir.path()).await;
+    let h = handle(&state, "busy-8085");
+    drop(holder);
+    let permit = crate::service::reindex::index_semaphore(&IndexId::new("busy-8085"))
+        .try_acquire_owned()
+        .expect("permit");
+
+    let outcome = reopen_guarded(&state.registry, &h, Duration::from_millis(200)).await;
+    assert_eq!(outcome, ReopenOutcome::Busy);
+    assert_still_quarantined(&h, CorpusOpenFailure::Contention).await;
+    drop(permit);
+    assert!(matches!(
+        reopen_guarded(&state.registry, &h, Duration::from_millis(200)).await,
+        ReopenOutcome::Reopened { .. }
+    ));
+}
+
+/// Add an entity row under `key`, then make that key invalid UTF-8 on disk.
+///
+/// `load_all_entities` decodes every key with redb's `&str` decoder, which is
+/// `from_utf8(..).unwrap()`, so the read-back task panics and
+/// `load_chunks_from_redb` returns `Err`. A row whose VALUE does not
+/// deserialize is skipped rather than failing the load, and a chunk row's key
+/// is decoded only inside a log macro, so neither can exercise this arm.
+fn plant_an_undecodable_row(redb: &Path, key: &str) {
+    CorpusStore::open(redb)
+        .expect("open to plant the row")
+        .upsert_entities(&[(key.to_string(), Vec::new())])
+        .expect("plant the row");
+    let mut bytes = std::fs::read(redb).expect("read redb");
+    let needle = key.as_bytes();
+    let mut hits = 0;
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            bytes[i] = 0xFF;
+            hits += 1;
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    assert!(hits > 0, "the planted key is in the file");
+    std::fs::write(redb, bytes).expect("write redb");
+}
+
+/// MEDIUM (#8085 review): a corpus that opens but cannot be read back (a row
+/// whose key does not decode, the holder gone) stays
+/// quarantined as `Unclassified`, with no corpus wired and the refused-write
+/// count it had before the attempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_corpus_that_cannot_be_read_back_stays_quarantined() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (state, redb, holder) = contended_index("unread-8085", dir.path()).await;
+    let h = handle(&state, "unread-8085");
+    {
+        let indexer = h.indexer.read().await;
+        assert!(indexer.refuse_incremental_write("index_file", "src/a.rs"));
+        assert!(indexer.refuse_incremental_write("index_file", "src/b.rs"));
+    }
+    drop(holder);
+    plant_an_undecodable_row(&redb, "src/undecodable_key_8085.rs");
+
+    let outcome = reopen_guarded(&state.registry, &h, Duration::from_millis(200)).await;
+    assert!(
+        matches!(outcome, ReopenOutcome::StillUnavailable(_)),
+        "{outcome:?}"
+    );
+    assert_still_quarantined(&h, CorpusOpenFailure::Unclassified).await;
+    assert_eq!(
+        h.indexer.read().await.refused_incremental_writes(),
+        2,
+        "a failed read-back keeps the refused-write count"
+    );
+    assert_eq!(
+        reopen_guarded(&state.registry, &h, Duration::from_millis(50)).await,
+        ReopenOutcome::NotTransient,
+        "an unreadable corpus is not retried"
+    );
 }

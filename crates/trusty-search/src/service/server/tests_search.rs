@@ -507,3 +507,41 @@ fn reindex_root_override_syncs_indexer_root_path() {
         "#4951: chunks must resolve inside the new root after the sync"
     );
 }
+
+/// #9027: the search response reports a bare one-word query's intent as the
+/// wire string `"Keyword"`. The value is the variant's `Debug` text, so a
+/// rename of the variant would change the wire silently without this test.
+#[tokio::test]
+async fn search_handler_reports_a_bare_word_as_the_keyword_wire_string() {
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle::bare(
+        IndexId::new("keyword-wire-9027"),
+        Arc::new(tokio::sync::RwLock::new(CodeIndexer::new(
+            "keyword-wire-9027",
+            tmp.path(),
+        ))),
+        tmp.path().to_path_buf(),
+    ));
+    let state = Arc::new(SearchAppState::new(registry));
+
+    let resp = search_handler(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path("keyword-wire-9027".to_string()),
+        axum::extract::Json(crate::core::indexer::SearchQuery {
+            text: "authentication".to_string(),
+            top_k: 5,
+            expand_graph: false,
+            compact: false,
+            stage: Some(crate::core::indexer::SearchStage::Lexical),
+            ..Default::default()
+        }),
+    )
+    .await;
+
+    let Json(body) = resp.expect("handler must succeed");
+    assert_eq!(body["intent"], "Keyword", "{body}");
+}

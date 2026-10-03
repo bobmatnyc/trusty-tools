@@ -131,9 +131,9 @@ pub(super) async fn corpus_failure_response(
 /// tree, and then have every durable write refused by the #4226 guard. The
 /// index kept `chunk_count: null` and a caller polling for completion waited
 /// forever. Only a successful `CorpusStore::open` lifts the quarantine.
-/// What: a transiently quarantined index first gets one in-process re-open
-/// attempt (#8958); a success lifts the quarantine and the reindex proceeds,
-/// re-writing the redb. `None` when
+/// What: the caller first gives a transiently quarantined index one in-process
+/// re-open attempt under its teardown guard (#8958); a success lifts the
+/// quarantine and the reindex proceeds, re-writing the redb. `None` when
 /// [`crate::core::indexer::CodeIndexer::is_write_quarantined`] is then false,
 /// and the caller queues the reindex. Otherwise `409 index_write_quarantined`
 /// with `queued: false`, the #4333 `failure_kind`, `retryable` true only for a
@@ -146,12 +146,6 @@ pub(super) async fn write_quarantine_refusal(
     index_id: &str,
     handle: &std::sync::Arc<IndexHandle>,
 ) -> Option<(StatusCode, serde_json::Value)> {
-    // #8958: the next reindex re-attaches a corpus whose lock holder is gone.
-    crate::service::corpus_reopen::try_reopen_quarantined_corpus(
-        handle,
-        crate::service::corpus_reopen::REOPEN_ATTEMPT_BUDGET,
-    )
-    .await;
     let indexer = handle.indexer.read().await;
     if !indexer.is_write_quarantined() {
         return None;

@@ -175,3 +175,44 @@ async fn test_bugdebt_intent_still_hard_filters_code_mode() {
         "BugDebt intent + code mode must still exclude .md: {files:?}"
     );
 }
+
+/// #9027: a bare one-word query classifies `Keyword` and takes `Unknown`'s
+/// Code→All mode upgrade, so its matching `.md` hit surfaces at the default
+/// mode instead of being filtered out.
+#[tokio::test]
+async fn test_keyword_intent_upgrades_code_mode_and_surfaces_docs() {
+    let idx = make_indexer();
+    idx.add_chunk(raw(
+        "doc:pool",
+        "docs/pooling.md",
+        "# pooling\nHow the database pooling subsystem batches reuse.",
+    ))
+    .await
+    .unwrap();
+    idx.add_chunk(raw(
+        "src:other",
+        "src/other.rs",
+        "fn unrelated() -> bool { true }",
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        QueryClassifier::classify("pooling"),
+        QueryIntent::Keyword,
+        "fixture query must classify as Keyword for this to be a valid test"
+    );
+
+    let q = SearchQuery {
+        text: "pooling".to_string(),
+        top_k: 20,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results = idx.search(&q).await.unwrap();
+    let files: Vec<&str> = results.iter().map(|c| c.file.as_str()).collect();
+    assert!(
+        files.contains(&abs("docs/pooling.md").as_str()),
+        "Keyword-intent query must surface the matching doc hit: {files:?}"
+    );
+}

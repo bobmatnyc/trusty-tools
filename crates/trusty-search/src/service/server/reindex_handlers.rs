@@ -88,6 +88,14 @@ pub(crate) async fn reindex_report(
 
     // #8105: a write-quarantined index can persist nothing, so refuse before
     // anything is queued. Ahead of the #120 cooldown: the quarantine outlasts it.
+    // #8958: first re-attach a corpus whose lock holder is gone. This path
+    // holds no teardown guard, so `reopen_guarded` takes it and the permit.
+    crate::service::corpus_reopen::reopen_guarded(
+        &state.registry,
+        &handle,
+        crate::service::corpus_reopen::REOPEN_ATTEMPT_BUDGET,
+    )
+    .await;
     if let Some(refusal) = write_quarantine_refusal(&index_id.0, &handle).await {
         tracing::warn!(
             index_id = %index_id.0,
@@ -423,10 +431,13 @@ pub(crate) async fn reindex_report(
 /// progress entry so the reindex stream follows it, and spawns a non-forced
 /// interactive reindex. Returns the PATCH response's `catch_up_reindex`
 /// object: `started`, plus `stream_url` or the refusal `reason`.
+/// The caller holds this index's teardown read guard, and the index permit
+/// when `permit_held`; the #8958 re-open runs under them.
 /// Test: `a_valid_patch_catches_up_what_the_hold_refused`.
 pub(super) async fn start_release_catch_up(
     state: &Arc<SearchAppState>,
     handle: Arc<IndexHandle>,
+    permit_held: bool,
 ) -> serde_json::Value {
     let index_id = handle.id.clone();
     let refused = |reason: String| {
@@ -436,6 +447,15 @@ pub(super) async fn start_release_catch_up(
         );
         serde_json::json!({ "started": false, "reason": reason })
     };
+    // #8958: the PATCH already holds the teardown read guard; a second read
+    // would queue behind a waiting DELETE and deadlock it.
+    crate::service::corpus_reopen::reopen_with_teardown_held(
+        &state.registry,
+        &handle,
+        crate::service::corpus_reopen::REOPEN_ATTEMPT_BUDGET,
+        permit_held,
+    )
+    .await;
     if let Some((_, body)) = write_quarantine_refusal(&index_id.0, &handle).await {
         return refused(body.to_string());
     }

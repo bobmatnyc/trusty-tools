@@ -454,4 +454,49 @@ impl CodeIndexer {
             refused
         );
     }
+
+    /// Wire a re-opened corpus onto a quarantined index, lifting the
+    /// quarantine only once its rows read back (#8085).
+    ///
+    /// Why: wiring through [`CodeIndexer::set_corpus_store`] first lifted the
+    /// quarantine, reset the refusal counter and logged the recovery, and a
+    /// read-back failure then had to re-quarantine — losing the count of
+    /// refused writes and logging a recovery that never happened.
+    /// What: with `&mut self` (the caller's indexer write lock) no reader can
+    /// see the corpus before the read-back settles. Loads the chunks; on
+    /// success lifts the quarantine through
+    /// [`CodeIndexer::clear_corpus_open_failure`]. On failure detaches the
+    /// corpus again and records `Unclassified`, leaving the refusal counter
+    /// and the module invariant as they were. Refuses an index that already
+    /// holds a corpus or is not quarantined, which the invariant rules out.
+    /// Test: `a_corpus_that_cannot_be_read_back_stays_quarantined`,
+    /// `the_sweep_lifts_a_contention_quarantine_once_the_lock_is_released`.
+    pub(crate) async fn reattach_corpus(
+        &mut self,
+        corpus: std::sync::Arc<crate::core::corpus::CorpusStore>,
+    ) -> anyhow::Result<usize> {
+        if self.corpus.is_some() || !self.corpus_open_failed {
+            anyhow::bail!("reattach_corpus needs a quarantined index with no corpus wired");
+        }
+        self.corpus = Some(corpus);
+        match self.load_chunks_from_redb().await {
+            Ok(chunks) => {
+                self.corpus_ever_wired = true;
+                self.clear_corpus_open_failure();
+                Ok(chunks)
+            }
+            Err(e) => {
+                self.corpus = None;
+                self.corpus_open_failure = Some(CorpusOpenFailure::Unclassified);
+                tracing::error!(
+                    index_id = %self.index_id,
+                    "index '{}': the re-opened durable corpus could not be read back \
+                     ({e:#}); it stays write-quarantined and is no longer retried in \
+                     process (#8085)",
+                    self.index_id
+                );
+                Err(e)
+            }
+        }
+    }
 }

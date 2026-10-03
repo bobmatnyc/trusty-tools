@@ -555,8 +555,9 @@ trusty-search service install --no-auto-discover     # macOS: bake the above int
                                                      # preserved on every later `service install`;
                                                      # `--auto-discover` turns the scan back on
 trusty-search service restart                        # macOS: bootout + bootstrap that also stops a
-                                                     # daemon detached from launchd, then checks
-                                                     # /health reports this binary's version (#8686)
+                                                     # daemon detached from launchd on the unit's
+                                                     # data dir, then checks /health reports this
+                                                     # binary's version (#8686)
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]   # register + index (primary command)
                                                      # updates settings on an existing allowlist
