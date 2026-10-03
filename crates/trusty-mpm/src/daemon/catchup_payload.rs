@@ -3,8 +3,8 @@
 //! Why: split out of `mcp_context.rs` to keep that file under the 500-SLOC
 //! production cap; the shaping is a pure function, so it lives apart from the
 //! I/O that gathers its inputs.
-//! What: [`catchup_payload`], the [`HydrationReceipt`] it reports, and
-//! [`resolved_note`], the reason a null `resolved_snapshot` was not tried
+//! What: [`catchup_payload`], the `HydrationReceipt` it reports, and
+//! `resolved_note`, the reason a null `resolved_snapshot` was not tried
 //! further (#8408).
 //! Test: the `catchup_payload_*` tests in `super::mcp_context`, plus this
 //! file's `resolved_note_*` tests.
