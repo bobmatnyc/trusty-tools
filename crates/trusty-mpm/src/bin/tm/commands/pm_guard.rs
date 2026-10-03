@@ -454,9 +454,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         }
         // #8439: a read-only dispatch runs only allowlisted read shapes. ABSOLUTE
         // and ahead of Guards 1/4, because the caller it binds is always an agent.
-        if let Some(reason) =
-            evaluate_read_only_dispatch_command(command, DispatchIdentity::from_payload(&payload))
-        {
+        // #8571: the payload's session id binds a read-only cp/rm to its scratchpad.
+        if let Some(reason) = evaluate_read_only_dispatch_command(command, &payload) {
             audit_denied_tool(&refused, "read-only-dispatch", &reason).await;
             println!("{}", build_pm_guard_deny_response(&reason));
             return Ok(());

@@ -313,7 +313,7 @@ pub(crate) fn write_lands_in_a_scratchpad_clone(resolved: &Path, root: &Path) ->
 /// Test: `denies_a_symlink_below_an_exempt_root`,
 /// `allows_a_source_write_in_a_scratchpad_rooted_clone` (whose target directory
 /// does not exist).
-fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
+pub(crate) fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
     path.ancestors().find_map(|dir| dir.canonicalize().ok())
 }
 
@@ -334,7 +334,7 @@ fn canonical_existing_ancestor(path: &Path) -> Option<PathBuf> {
 /// undetermined case can never widen the exemption.
 /// Test: `scratchpad_root_names_only_a_temp_rooted_harness_directory`,
 /// `denies_when_no_scratchpad_root_can_be_determined`.
-fn scratchpad_root(path: &Path) -> Option<PathBuf> {
+pub(crate) fn scratchpad_root(path: &Path) -> Option<PathBuf> {
     let mut prefix = PathBuf::new();
     for component in path.components() {
         prefix.push(component);

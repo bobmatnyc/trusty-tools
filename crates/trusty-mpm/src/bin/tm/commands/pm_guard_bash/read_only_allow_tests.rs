@@ -4,14 +4,25 @@
 use std::time::{Duration, Instant};
 
 use super::{READ_ONLY_DISPATCH_AGENTS, evaluate_read_only_dispatch_command, judge};
-use crate::commands::pm_guard_bash::worktree_remove::DispatchIdentity;
+
+/// The session id every [`run`] call carries (#8571).
+const SESSION: &str = "sess-8571";
 
 fn run(agent: Option<&'static str>, command: &str) -> Option<String> {
-    let identity = DispatchIdentity {
-        agent_id: agent.map(|_| "agent-abc123"),
-        agent_type: agent,
-    };
-    evaluate_read_only_dispatch_command(command, identity)
+    run_in(agent, command, Some(SESSION))
+}
+
+/// [`run`] with the payload's session id chosen; `None` omits the field.
+fn run_in(agent: Option<&'static str>, command: &str, session: Option<&str>) -> Option<String> {
+    let mut payload = serde_json::json!({});
+    if let Some(agent) = agent {
+        payload["agent_id"] = "agent-abc123".into();
+        payload["agent_type"] = agent.into();
+    }
+    if let Some(session) = session {
+        payload["session_id"] = session.into();
+    }
+    evaluate_read_only_dispatch_command(command, &payload)
 }
 
 /// Every command in `rows` gets `want` (true = allowed); all misses at once.
@@ -944,4 +955,169 @@ fn a_variable_path_refusal_names_the_literal_path_remedy_9001() {
         run(Some("code-critic"), "sed -n '10,20p' crates/x/src/lib.rs"),
         None
     );
+}
+
+/// A session-scratchpad fixture: `<tmp>/<SESSION>/scratchpad/base-abc/`,
+/// which exists.
+fn scratchpad_fixture() -> (tempfile::TempDir, String) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = dir.path().join(SESSION).join("scratchpad").join("base-abc");
+    std::fs::create_dir_all(base.join("src")).expect("mkdir base");
+    let shown = base.display().to_string();
+    (dir, shown)
+}
+
+/// 🔴 REGRESSION (#8571): owner ruling 2026-09-28 — a read-only agent may
+/// `ls`, `cp` and `rm` inside its session scratchpad. `cp`/`rm` were refused
+/// on origin/main.
+#[test]
+fn scratchpad_cp_and_rm_are_allowed() {
+    let (_dir, base) = scratchpad_fixture();
+    let rows = [
+        format!("ls {base}"),
+        format!("cp -R {base}/src {base}/src-copy"),
+        format!("cp {base}/src/a.rs {base}/b.rs"),
+        format!("rm -rf {base}"),
+        format!("rm -- {base}/b.rs"),
+    ];
+    for command in &rows {
+        assert_eq!(run(Some("code-critic"), command), None, "{command}");
+    }
+    // A new entry directly below the root is created inside it.
+    let pad = std::path::Path::new(&base).parent().expect("pad").display();
+    let new_child = format!("cp -R {base}/src {pad}/base-copy");
+    assert_eq!(run(Some("code-critic"), &new_child), None, "{new_child}");
+}
+
+#[test]
+fn cp_and_rm_outside_the_scratchpad_are_refused() {
+    let (dir, base) = scratchpad_fixture();
+    let pad = dir.path().join(SESSION).join("scratchpad");
+    let pad = pad.display().to_string();
+    let outside = dir.path().join("elsewhere").display().to_string();
+    let link = format!("{pad}/link");
+    std::os::unix::fs::symlink(dir.path(), &link).expect("symlink");
+    let rows = [
+        format!("rm -rf {outside}"),
+        format!("cp {base}/a {outside}/a"),
+        format!("cp /etc/hosts {base}/hosts"),
+        // The scratchpad root itself, `..`, a symlink, relative, a variable.
+        format!("rm -rf {pad}"),
+        format!("rm -rf {base}/../../elsewhere"),
+        format!("rm -rf {link}/elsewhere"),
+        "rm -rf base-abc".to_string(),
+        "rm -rf ~/scratchpad/x".to_string(),
+        format!("for f in {base}/a; do rm \"$f\"; done"),
+        // A flag outside the short list, a target-directory move, no operand.
+        format!("cp -t {base} {base}/a"),
+        format!("cp --target-directory={base} {base}/a"),
+        format!("rm -ri {base}"),
+        "rm -rf".to_string(),
+        format!("cp {base}/a"),
+        // Composition and a pipe stay refused.
+        format!("ls {base} | rm -rf {base}"),
+        format!("rm -rf {base}; rm -rf {outside}"),
+        "rm -rf /scratchpad/x".to_string(),
+    ];
+    for command in &rows {
+        assert!(run(Some("code-critic"), command).is_some(), "{command}");
+    }
+}
+
+/// 🔴 REGRESSION (#8571 review, HIGH): the root was read off the path as
+/// spelled and then canonicalized without a re-check, so a symlinked
+/// `scratchpad` component (`/tmp/scratchpad -> ~`) passed. The
+/// `<SESSION>/notpad` target keeps the session parent, so only the
+/// resolved root's own scratchpad-root check refuses it.
+#[test]
+fn a_symlinked_scratchpad_root_is_refused() {
+    for target in ["home", "notpad"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = dir.path().join(SESSION);
+        let real = match target {
+            "home" => dir.path().join("home"),
+            _ => session.join("notpad"),
+        };
+        std::fs::create_dir_all(real.join("project")).expect("mkdir target");
+        std::fs::create_dir_all(&session).expect("mkdir session");
+        let pad = session.join("scratchpad");
+        std::os::unix::fs::symlink(&real, &pad).expect("symlink");
+        let pad = pad.display();
+        for command in [
+            format!("rm -rf {pad}/project"),
+            format!("cp {pad}/project/a {pad}/project/b"),
+        ] {
+            assert!(
+                run(Some("code-critic"), &command).is_some(),
+                "{target}: {command}"
+            );
+        }
+    }
+}
+
+/// 🔴 REGRESSION (#8571 review, MEDIUM): any temp-rooted `scratchpad` was
+/// accepted, so a read-only agent could `rm` another live session's
+/// scratchpad. The root is bound to the payload's session id, a symlink to
+/// another session's scratchpad does not rebind it, and no id refuses.
+#[test]
+fn another_sessions_scratchpad_is_refused() {
+    let (dir, base) = scratchpad_fixture();
+    let other = dir
+        .path()
+        .join("sess-other")
+        .join("scratchpad")
+        .join("base-x");
+    std::fs::create_dir_all(&other).expect("mkdir other");
+    let linked = dir.path().join("sess-link");
+    std::fs::create_dir_all(&linked).expect("mkdir sess-link");
+    let other_pad = dir.path().join("sess-other").join("scratchpad");
+    std::os::unix::fs::symlink(&other_pad, linked.join("scratchpad")).expect("symlink");
+    let other = other.display();
+    let rm_other = format!("rm -rf {other}");
+    assert!(run(Some("code-critic"), &rm_other).is_some(), "{rm_other}");
+    let via_link = format!("rm -rf {}/scratchpad/base-x", linked.display());
+    assert!(
+        run_in(Some("code-critic"), &via_link, Some("sess-link")).is_some(),
+        "{via_link}"
+    );
+    let rm_own = format!("rm -rf {base}");
+    for session in [None, Some("")] {
+        assert!(
+            run_in(Some("code-critic"), &rm_own, session).is_some(),
+            "{rm_own} with session {session:?}"
+        );
+    }
+    assert_eq!(run(Some("code-critic"), &rm_own), None, "{rm_own}");
+}
+
+/// 🔴 REGRESSION (#8571 review, MEDIUM): a `cp` into a clone's
+/// `.git/hooks/*` or `.git/config` runs code at the next git command.
+/// Round 2: a case variant (APFS is case-insensitive), an in-pad symlink to
+/// `.git/config`, and a directory symlink to `.git` reach the same files.
+#[test]
+fn a_git_component_operand_is_refused() {
+    let (_dir, base) = scratchpad_fixture();
+    std::fs::create_dir_all(format!("{base}/clone/.git/hooks")).expect("mkdir .git");
+    std::fs::write(format!("{base}/clone/.git/config"), "").expect("write config");
+    std::os::unix::fs::symlink(".git/config", format!("{base}/clone/cfg")).expect("symlink");
+    std::os::unix::fs::symlink(format!("{base}/clone/.git"), format!("{base}/gitdir"))
+        .expect("dir symlink");
+    for command in [
+        format!("cp {base}/src/a {base}/clone/.git/hooks/pre-commit"),
+        format!("cp {base}/src/a {base}/clone/.git/config"),
+        format!("cp -R {base}/src {base}/clone/.git"),
+        format!("rm -rf {base}/clone/.git"),
+        format!("cp {base}/src/a {base}/clone/.GIT/config"),
+        format!("cp {base}/src/a {base}/clone/.Git/hooks/pre-commit"),
+        // No `.git` exists under `src`, so only the case fold sees this one.
+        format!("cp {base}/src/a {base}/src/.GIT"),
+        format!("cp {base}/src/a {base}/clone/cfg"),
+        format!("cp {base}/src/a {base}/gitdir/config"),
+        format!("cp {base}/src/a {base}/gitdir/hooks/pre-commit"),
+    ] {
+        assert!(run(Some("code-critic"), &command).is_some(), "{command}");
+    }
+    // A name that merely starts with `.git` is not a `.git` component.
+    let ignore = format!("cp {base}/src/a {base}/clone/.gitignore");
+    assert_eq!(run(Some("code-critic"), &ignore), None, "{ignore}");
 }
