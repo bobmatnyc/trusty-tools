@@ -59,7 +59,7 @@ emit() {
 # #8716: a changelog-assembly PR made for a publish (#9112) is release-shaped
 # too; it is Cargo-inert, so without this arm it skipped the doc build.
 is_release_title() {
-  printf '%s\n' "$1" | grep -qE '^chore\(release\)!?:|^chore\([A-Za-z0-9_.-]+\)!?: (release |assemble .*changelog)'
+  printf '%s\n' "$1" | grep -qE '^chore\(release\)!?:|^chore\([A-Za-z0-9_.-]+\)!?: (release |assemble [0-9][^ ]* changelog)'
 }
 
 event="${EVENT_NAME:-}"
