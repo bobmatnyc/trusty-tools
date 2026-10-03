@@ -55,6 +55,23 @@ assert_eq "chore/release- branch, plain title" release \
   "$(scope pull_request true 'assemble notes' chore/release-tga-8.0.0 '')"
 assert_eq "release/ branch, plain title" release \
   "$(scope pull_request true 'assemble notes' release/trusty-mpm-1.7.8 '')"
+# #8716: #9112's exact title and branch. Cargo-inert, so it printed `skip`.
+assert_eq "changelog-assembly PR (#9112 exact title and branch)" release \
+  "$(scope pull_request true 'chore(trusty-common): assemble 0.53.1 changelog' chore/trusty-common-0.53.1-changelog '')"
+assert_eq "assemble-changelog title, plain branch" release \
+  "$(scope pull_request true 'chore(trusty-common): assemble 0.53.1 changelog' feature-x '')"
+assert_eq "chore/<crate>-<ver>-changelog branch, plain title" release \
+  "$(scope pull_request true 'notes' chore/trusty-common-0.53.1-changelog '')"
+assert_eq "plain docs PR naming a changelog still skips" skip \
+  "$(scope pull_request true 'docs: explain the changelog format' docs/changelog-format '')"
+# #8716: boundaries of the assembly arms. A version is required in the title,
+# and the branch needs a three-part version; a prerelease suffix still counts.
+assert_eq "title without a version is not an assembly" skip \
+  "$(scope pull_request true 'chore(x): assemble the docs changelog' chore/docs '')"
+assert_eq "two-part version branch is not an assembly" skip \
+  "$(scope pull_request true 'notes' chore/foo-1.2-changelog '')"
+assert_eq "prerelease-suffixed version branch is release" release \
+  "$(scope pull_request true 'notes' chore/x-1.0.0-rc1-changelog '')"
 # Ordinary PRs keep their old behaviour.
 assert_eq "docs-only ordinary PR skips" skip \
   "$(scope pull_request true 'docs: fix a typo' docs/typo '')"
@@ -80,6 +97,11 @@ assert_eq "docs-only ordinary push skips" skip \
   "$(scope push true '' '' 'docs: x (#3)')"
 assert_eq "code push runs the ordinary scope" ordinary \
   "$(scope push false '' '' 'fix: y (#4)')"
+
+assert_eq "squash-merged assembly commit (#9112)" release \
+  "$(scope push true '' '' 'chore(trusty-common): assemble 0.53.1 changelog (#9112)')"
+assert_eq "multi-line assembly subject, body below" release \
+  "$(scope push true '' '' $'chore(x): assemble 1.0.0 changelog\n\nbody')"
 
 echo "rustdoc-links-scope: other events"
 assert_eq "workflow_dispatch" release "$(scope workflow_dispatch false '' '' '')"

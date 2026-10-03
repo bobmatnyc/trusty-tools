@@ -20,8 +20,9 @@
 #               job skips its doc build, as before.
 #   A release candidate is recognised the way this repo names release work:
 #     - a pull_request whose title starts `chore(release)` or reads
-#       `chore(<crate>): release …`, or whose head branch starts
-#       `chore/release-` or `release/`;
+#       `chore(<crate>): release …` or `chore(<crate>): assemble <ver>
+#       changelog`, or whose head branch starts `chore/release-` or
+#       `release/`, or reads `chore/<crate>-<ver>-changelog`;
 #     - a push whose head commit subject has that title shape (a squash merge
 #       keeps the PR title as the subject);
 #     - a workflow_dispatch, the manual run used to check a branch before a cut.
@@ -55,8 +56,10 @@ emit() {
 }
 
 # is_release_title <subject>
+# #8716: a changelog-assembly PR made for a publish (#9112) is release-shaped
+# too; it is Cargo-inert, so without this arm it skipped the doc build.
 is_release_title() {
-  printf '%s\n' "$1" | grep -qE '^chore\(release\)!?:|^chore\([A-Za-z0-9_.-]+\)!?: release '
+  printf '%s\n' "$1" | grep -qE '^chore\(release\)!?:|^chore\([A-Za-z0-9_.-]+\)!?: (release |assemble [0-9][^ ]* changelog)'
 }
 
 event="${EVENT_NAME:-}"
@@ -71,6 +74,11 @@ case "$event" in
     case "${PR_HEAD_REF:-}" in
       chore/release-* | release/*)
         emit release "release PR branch"
+        exit 0
+        ;;
+      # #8716: chore/<crate>-<ver>-changelog, e.g. chore/trusty-common-0.53.1-changelog.
+      chore/*-[0-9]*.[0-9]*.[0-9]*-changelog)
+        emit release "changelog-assembly PR branch"
         exit 0
         ;;
     esac
