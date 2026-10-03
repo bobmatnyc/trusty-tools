@@ -462,15 +462,39 @@ pub(super) const UNPARSED_GROUP_COMMIT_REASON: &str = "Commit denied because the
      /abs/path/.claude/worktrees/<name> commit …`, or `cd` into the worktree first — with no \
      grouping around it. Nothing is lost; the changes are still in the tree.";
 
-/// The refusal for a destructive git verb the guard cannot place (#9127
-/// critic MEDIUM-2).
-pub(super) fn unparsed_group_destructive_reason(verb: &str) -> String {
+/// The [`unparsed_group_git_reason`] refusal when `command` does not parse
+/// and [`mentions_git_verb`] finds a verb `matches` accepts (#9127).
+///
+/// Why: every rule that places a git verb through [`grouped_steps`] must fail
+/// closed on a command that walk could not place; four of them read the steps
+/// of an unplaced `command -p eval "cd <wt>"; git …` as if they were real
+/// (critic r4 HIGH). One call keeps the rules from drifting apart.
+/// What: `None` when the command parses or names no matching verb.
+/// Test: `head_switch_refuses_an_eval_it_cannot_place`,
+/// `classify_refuses_an_eval_it_cannot_place`,
+/// `denies_a_remove_behind_an_eval_it_cannot_place`,
+/// `main_checkout_head_move_refuses_an_eval_it_cannot_place`.
+pub(super) fn unplaced_git_verb_reason(
+    command: &str,
+    matches: impl Fn(&str, &[String]) -> bool,
+) -> Option<String> {
+    if grouped_steps(command).parsed {
+        return None;
+    }
+    mentions_git_verb(command, matches).map(|verb| unparsed_group_git_reason(&verb))
+}
+
+/// The refusal for a git verb the guard cannot place — a destructive one
+/// (#9127 critic MEDIUM-2), a HEAD switch or move, or a worktree removal
+/// (#9127 critic r4 HIGH).
+fn unparsed_group_git_reason(verb: &str) -> String {
     format!(
-        "Destructive git command denied because the guard cannot place it (ADR-0037, #9127): \
-         this command carries `git {verb}` in a form that discards work, inside a `( … )` \
-         subshell, a `{{ …; }}` brace group, a function definition, a `case`, a `coproc` or an \
-         `eval` behind `command`/`noglob` whose openers and closers the guard cannot pair up or whose commands it cannot follow, so it \
-         cannot tell whether it lands in a main checkout. Run it as a plain command — `git -C \
+        "Git command denied because the guard cannot place it (#9127): this command carries \
+         `git {verb}` in a form that discards work, moves a HEAD or removes a worktree, inside a \
+         `( … )` subshell, a `{{ …; }}` brace group, a function definition, a `case`, a \
+         `coproc` or an `eval` behind `command`/`noglob` whose openers and closers the guard \
+         cannot pair up or whose commands it cannot follow, so it cannot tell which checkout or \
+         worktree it lands in. Run it as a plain command — `git -C \
          /abs/path/.claude/worktrees/<name> {verb} …`, or `cd` into the worktree first — with \
          no grouping around it."
     )

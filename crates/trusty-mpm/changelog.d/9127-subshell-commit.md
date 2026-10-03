@@ -27,5 +27,10 @@ Fixed
   refused the same way. Grouped commits in
   a worktree or a scratchpad clone, quoted commit messages containing
   parentheses, and grouped reads such as `(git status)` stay allowed.
+- The HEAD-switch, main-checkout HEAD-move, linked-worktree HEAD-move and
+  worktree-removal rules refuse a command the guard cannot place, as the
+  commit and destructive rules do. From a dirty main checkout,
+  `command -p eval "cd <worktree>"; git stash` (or `git checkout x`) was
+  judged in the worktree and allowed, while zsh never runs that `cd`.
 - A command whose program word is a brace expansion, such as
   `{git,-C,<dir>,commit}`, is refused as unclassifiable, like `$'…'` quoting.

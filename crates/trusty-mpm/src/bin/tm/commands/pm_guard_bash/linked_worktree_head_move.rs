@@ -47,7 +47,7 @@ use trusty_mpm::core::project_aliases::worktree_root;
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
 use super::main_checkout::{git_verb_targets_with_tail, starts_a_head_move};
-use super::{PathEnv, unresolved_target};
+use super::{PathEnv, shell_groups, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_deny_log::DenyContext;
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
@@ -98,7 +98,8 @@ fn moves_a_linked_head(subcommand: &str, tail: &[String]) -> bool {
 /// What: one check per HEAD-moving segment, in order (#8161 critic round 2:
 /// every segment, not the first). A segment whose target is not in a linked
 /// worktree, or is a subagent's own tree, yields nothing; an unresolved target
-/// yields `Deny`; the rest yield `Query`.
+/// yields `Deny`; the rest yield `Query`. A command the shared walker cannot
+/// place yields one `Deny` when it names a HEAD-moving verb (#9127).
 /// Test: `classify_*` below.
 pub(crate) fn classify_linked_worktree_head_move(
     command: &str,
@@ -115,6 +116,10 @@ fn classify_in(
     caller_is_subagent: bool,
     env: &PathEnv,
 ) -> Vec<LinkedHeadMoveCheck> {
+    // #9127 critic r4 HIGH: an unplaced `eval "cd <wt>"` must not place it.
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, moves_a_linked_head) {
+        return vec![LinkedHeadMoveCheck::Deny(reason)];
+    }
     git_verb_targets_with_tail(command, cwd, env, moves_a_linked_head)
         .into_iter()
         .filter_map(|(verb, target, _)| classify_target(verb, target, cwd, caller_is_subagent))

@@ -577,25 +577,34 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // denied and a daemon that cannot answer allows. The query is made only
         // after both lexical halves match, so ordinary Bash traffic never pays
         // for it.
-        if let Some((verb, target, root)) = main_checkout_head_move(command, &hook_cwd) {
-            // Two keys, not one (#5769): `tm hook` stamps a delegation's `cwd`
-            // from its own process directory, while `target` is resolved through
-            // `cd` and `git -C`. They name the same HEAD but need not be the
-            // same string, and a query on one alone matched nothing for a
-            // command run from a subdirectory of the checkout.
-            let live = pm_guard_dispatch::live_shared_tree_writers_in(
-                url,
-                session_id,
-                &[root.as_path(), target.as_path()],
-                &payload,
-            )
-            .await;
-            if !live.is_empty() && !architect.is_architect() {
-                let reason = head_move_deny_reason(&verb, &root, &live);
+        match main_checkout_head_move(command, &hook_cwd) {
+            // #9127: a HEAD move the guard cannot place is refused unasked.
+            Some(Err(reason)) if !architect.is_architect() => {
                 audit_denied_tool(&refused, "head-move", &reason).await;
                 println!("{}", build_pm_guard_deny_response(&reason));
                 return Ok(());
             }
+            Some(Ok((verb, target, root))) => {
+                // Two keys, not one (#5769): `tm hook` stamps a delegation's
+                // `cwd` from its own process directory, while `target` is
+                // resolved through `cd` and `git -C`. They name the same HEAD
+                // but need not be the same string, and a query on one alone
+                // matched nothing for a command run from a subdirectory.
+                let live = pm_guard_dispatch::live_shared_tree_writers_in(
+                    url,
+                    session_id,
+                    &[root.as_path(), target.as_path()],
+                    &payload,
+                )
+                .await;
+                if !live.is_empty() && !architect.is_architect() {
+                    let reason = head_move_deny_reason(&verb, &root, &live);
+                    audit_denied_tool(&refused, "head-move", &reason).await;
+                    println!("{}", build_pm_guard_deny_response(&reason));
+                    return Ok(());
+                }
+            }
+            _ => {}
         }
         // #8161: the same move aimed at a LINKED worktree — see that module.
         let linked = (command, hook_cwd.as_path(), caller_is_subagent);

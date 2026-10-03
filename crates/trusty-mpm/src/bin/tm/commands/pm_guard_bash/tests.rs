@@ -1487,7 +1487,7 @@ fn wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules() {
             resolved.is_some(),
             "the main-checkout HEAD-move rule must see through: {command}"
         );
-        assert_eq!(resolved.expect("resolved").0, "merge");
+        assert_eq!(resolved.expect("resolved").expect("placed").0, "merge");
     }
 
     // --- Rule 3: destructive delete of a worktree root. --------------------

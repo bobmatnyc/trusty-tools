@@ -211,10 +211,9 @@ fn evaluate_main_checkout_destructive_command_in(
 ) -> Option<String> {
     // #9127 critic MEDIUM-2: fail closed as the commit rule does — grouping
     // that does not parse cannot be placed.
-    if !shell_groups::grouped_steps(command).parsed
-        && let Some(verb) = shell_groups::mentions_git_verb(command, is_whole_tree_destructive)
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, is_whole_tree_destructive)
     {
-        return Some(shell_groups::unparsed_group_destructive_reason(&verb));
+        return Some(reason);
     }
     // #8572: every destructive segment is judged, not only the first — from a
     // worktree, `git reset --hard && git -C $MAIN reset --hard` was cleared on
@@ -624,11 +623,13 @@ fn commit_flags_leave_the_index_authoritative(tail: &[String]) -> bool {
 /// is shared, and moving it changes the ground another session's uncommitted
 /// work is sitting on — with no error at any step, the same silence the commit
 /// rule above exists for.
-/// What: `Some((verb, directory, checkout_root))` when a segment
+/// What: `Some(Ok((verb, directory, checkout_root)))` when a segment
 /// [`starts_a_head_move`] and the directory it would act on belongs to a main
 /// checkout. It returns those rather than a reason because the deny is not
 /// decided here: the caller asks the daemon who else is live and denies only on
-/// a positive answer. See [`head_move_deny_reason`].
+/// a positive answer. See [`head_move_deny_reason`]. The one deny decided here
+/// is `Some(Err(reason))`: a command the shared walker cannot place that names
+/// such a verb, refused without a daemon query (#9127).
 ///
 /// **Why two directories and not one (#5769).** `directory` is what the command
 /// resolves to through `cd` and `git -C`; `checkout_root` is the main checkout
@@ -645,11 +646,15 @@ fn commit_flags_leave_the_index_authoritative(tail: &[String]) -> bool {
 pub(crate) fn main_checkout_head_move(
     command: &str,
     cwd: &Path,
-) -> Option<(String, PathBuf, PathBuf)> {
+) -> Option<Result<(String, PathBuf, PathBuf), String>> {
+    // #9127 critic r4 HIGH: an unplaced `eval "cd <wt>"` must not place it.
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, starts_a_head_move) {
+        return Some(Err(reason));
+    }
     let (verb, target) =
         git_verb_target_dir(command, cwd, &PathEnv::from_process(), starts_a_head_move)?;
     let root = main_checkout_root(&target)?;
-    Some((verb, target, root))
+    Some(Ok((verb, target, root)))
 }
 
 /// Flags that operate on an operation already in progress rather than start a
@@ -2620,6 +2625,34 @@ mod tests {
         assert!(!starts_a_head_move("rebase", &tail(&["--continue"])));
     }
 
+    /// [`main_checkout_head_move`] for a command the walker places.
+    fn placed_head_move(command: &str, cwd: &Path) -> Option<(String, PathBuf, PathBuf)> {
+        main_checkout_head_move(command, cwd).map(|r| r.expect("the walker places it"))
+    }
+
+    /// 🔴 REGRESSION (#9127 critic r4 HIGH): an unplaced `eval "cd <wt>"`
+    /// placed the merge in the worktree, so no daemon query was made; zsh
+    /// never runs that `cd`, and the merge lands on the main checkout.
+    #[test]
+    fn main_checkout_head_move_refuses_an_eval_it_cannot_place() {
+        let main = main_checkout_dir();
+        let wt = linked_worktree(main.path());
+        let wt = wt.display();
+        for command in [
+            format!("command -p eval \"cd {wt}\"; git merge x"),
+            format!("noglob eval \"cd {wt}\"; git rebase origin/main"),
+        ] {
+            let verdict = main_checkout_head_move(&command, main.path());
+            assert!(
+                matches!(&verdict, Some(Err(reason)) if reason.contains("cannot place it")),
+                "`{command}` must be refused unplaced: {verdict:?}"
+            );
+        }
+        // A parsed `cd` into the worktree still resolves nothing.
+        let parsed = format!("cd {wt} && git merge x");
+        assert_eq!(main_checkout_head_move(&parsed, main.path()), None);
+    }
+
     #[test]
     fn main_checkout_head_move_resolves_a_subdirectory_to_the_checkout_root() {
         // #5769: a delegation record is stamped from `tm hook`'s own process
@@ -2628,7 +2661,7 @@ mod tests {
         let checkout = main_checkout_dir();
         let sub = checkout.path().join("crates/foo");
         std::fs::create_dir_all(&sub).expect("mkdir sub");
-        let (verb, target, root) = main_checkout_head_move(
+        let (verb, target, root) = placed_head_move(
             &format!("cd {} && git merge origin/main", sub.display()),
             checkout.path(),
         )
@@ -2641,9 +2674,8 @@ mod tests {
     #[test]
     fn main_checkout_head_move_finds_the_checkout_and_skips_a_worktree() {
         let checkout = main_checkout_dir();
-        let (verb, target, root) =
-            main_checkout_head_move("git rebase origin/main", checkout.path())
-                .expect("a rebase in a main checkout must resolve");
+        let (verb, target, root) = placed_head_move("git rebase origin/main", checkout.path())
+            .expect("a rebase in a main checkout must resolve");
         assert_eq!(verb, "rebase");
         assert_eq!(target, checkout.path());
         assert_eq!(root, checkout.path());
@@ -2654,16 +2686,13 @@ mod tests {
         let worktree = tempfile::tempdir().expect("tempdir");
         std::fs::write(worktree.path().join(".git"), "gitdir: /elsewhere").expect("write .git");
         assert_eq!(
-            main_checkout_head_move("git rebase origin/main", worktree.path()),
+            placed_head_move("git rebase origin/main", worktree.path()),
             None
         );
 
         // Not a repository at all: nothing to protect.
         let plain = tempfile::tempdir().expect("tempdir");
-        assert_eq!(
-            main_checkout_head_move("git merge main", plain.path()),
-            None
-        );
+        assert_eq!(placed_head_move("git merge main", plain.path()), None);
     }
 
     #[test]
@@ -2675,11 +2704,11 @@ mod tests {
         // `-C` and `cd` both aim the verb at a checkout the hook is not
         // standing in — the two overrides the sibling rules already close.
         let (_, via_dash_c, _) =
-            main_checkout_head_move(&format!("git -C {path} rebase origin/main"), outside.path())
+            placed_head_move(&format!("git -C {path} rebase origin/main"), outside.path())
                 .expect("-C must move the target");
         assert_eq!(via_dash_c, checkout.path());
 
-        let (_, via_cd, _) = main_checkout_head_move(
+        let (_, via_cd, _) = placed_head_move(
             &format!("cd {path} && git merge origin/main"),
             outside.path(),
         )
@@ -2694,7 +2723,7 @@ mod tests {
             "git fetch origin && git merge origin/main",
             "git pull && git merge origin/main",
         ] {
-            let (verb, _, _) = main_checkout_head_move(command, checkout.path())
+            let (verb, _, _) = placed_head_move(command, checkout.path())
                 .expect("the second segment must be classified");
             assert_eq!(verb, "merge", "`{command}` must classify its merge");
         }
@@ -2721,7 +2750,7 @@ mod tests {
             "",
         ] {
             assert_eq!(
-                main_checkout_head_move(command, checkout.path()),
+                placed_head_move(command, checkout.path()),
                 None,
                 "`{command}` must not resolve a HEAD move"
             );
