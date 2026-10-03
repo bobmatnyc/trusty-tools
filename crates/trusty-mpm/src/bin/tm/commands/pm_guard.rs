@@ -131,9 +131,8 @@
 //! [`SOURCE_CODE_EXTENSIONS`] the PM rule uses, so the two cannot drift apart.
 //! **Main-checkout HEAD move (ADR-0048 decision 10):** a fourth rule sits with
 //! those three and ahead of the same two exemptions.
-//! [`crate::commands::pm_guard_bash::main_checkout_head_move`] classifies
-//! `git merge` and `git rebase` aimed at a main checkout, and the
-//! call site then asks
+//! [`crate::commands::pm_guard_bash::deny_main_checkout_head_move`] classifies
+//! `git merge` and `git rebase` aimed at a main checkout, and then asks
 //! [`crate::commands::pm_guard_dispatch::live_shared_tree_writers`] — the
 //! daemon's directory-keyed writer query, the same one the #4480 dispatch guard
 //! decides on — who else is writing there. The deny fires only when both halves
@@ -216,12 +215,12 @@ use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DeleteTarget, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
-    deny_linked_worktree_head_move, docs_commit_deny_reason, evaluate_bash_command,
-    evaluate_destructive_delete_command, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, evaluate_main_checkout_head_switch,
-    evaluate_read_only_dispatch_command, evaluate_secret_file_copy_command, evaluate_worktree_add,
-    evaluate_worktree_remove_command, extract_shell_edit_target, head_move_deny_reason,
-    main_checkout_head_move, print_deny_then_audit, removal_recheck_deny, unclassifiable_reason,
+    deny_linked_worktree_head_move, deny_main_checkout_head_move, docs_commit_deny_reason,
+    evaluate_bash_command, evaluate_destructive_delete_command,
+    evaluate_main_checkout_commit_command, evaluate_main_checkout_destructive_command,
+    evaluate_main_checkout_head_switch, evaluate_read_only_dispatch_command,
+    evaluate_secret_file_copy_command, evaluate_worktree_add, evaluate_worktree_remove_command,
+    extract_shell_edit_target, print_deny_then_audit, removal_recheck_deny, unclassifiable_reason,
 };
 use crate::commands::pm_guard_budget::{self, BudgetDecision, DEFAULT_FILE_CHANGE_BUDGET};
 use crate::commands::pm_guard_build_lease;
@@ -576,35 +575,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         // writer in it, so a solo session updating its own checkout is never
         // denied and a daemon that cannot answer allows. The query is made only
         // after both lexical halves match, so ordinary Bash traffic never pays
-        // for it.
-        match main_checkout_head_move(command, &hook_cwd) {
-            // #9127: a HEAD move the guard cannot place is refused unasked.
-            Some(Err(reason)) if !architect.is_architect() => {
-                audit_denied_tool(&refused, "head-move", &reason).await;
-                println!("{}", build_pm_guard_deny_response(&reason));
-                return Ok(());
-            }
-            Some(Ok((verb, target, root))) => {
-                // Two keys, not one (#5769): `tm hook` stamps a delegation's
-                // `cwd` from its own process directory, while `target` is
-                // resolved through `cd` and `git -C`. They name the same HEAD
-                // but need not be the same string, and a query on one alone
-                // matched nothing for a command run from a subdirectory.
-                let live = pm_guard_dispatch::live_shared_tree_writers_in(
-                    url,
-                    session_id,
-                    &[root.as_path(), target.as_path()],
-                    &payload,
-                )
-                .await;
-                if !live.is_empty() && !architect.is_architect() {
-                    let reason = head_move_deny_reason(&verb, &root, &live);
-                    audit_denied_tool(&refused, "head-move", &reason).await;
-                    println!("{}", build_pm_guard_deny_response(&reason));
-                    return Ok(());
-                }
-            }
-            _ => {}
+        // for it. #9127: a HEAD move the guard cannot place is refused unasked.
+        let head_move = (command, hook_cwd.as_path());
+        if deny_main_checkout_head_move(url, session_id, &payload, head_move, &architect).await {
+            return Ok(());
         }
         // #8161: the same move aimed at a LINKED worktree — see that module.
         let linked = (command, hook_cwd.as_path(), caller_is_subagent);

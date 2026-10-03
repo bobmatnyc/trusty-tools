@@ -126,10 +126,12 @@ pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_co
 pub(crate) use floor_d4::evaluate_d4_floor;
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
-pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
+pub(crate) use linked_worktree_head_move::{
+    deny_linked_worktree_head_move, deny_main_checkout_head_move,
+};
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
+    evaluate_main_checkout_destructive_command,
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;

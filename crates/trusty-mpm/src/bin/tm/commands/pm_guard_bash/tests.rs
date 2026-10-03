@@ -5,6 +5,7 @@
 use super::*;
 // #7234: the rules now ask `unresolved_target`, so the narrower `$NAME` half is
 // no longer imported by `mod.rs` and is reached here directly.
+use super::main_checkout::main_checkout_head_move;
 use super::path_tokens::unexpanded_shell_variable;
 
 #[test]
