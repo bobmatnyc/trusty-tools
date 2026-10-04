@@ -26,6 +26,12 @@
 #     missing-dir   --dir that does not exist refuses
 #     bad-bin       a --bin that is not executable refuses
 #     bad-arg       an unknown argument is a usage error (exit 2)
+#     cwd           run from a caller cwd beside a fake `.env.local`, with a
+#                   relative --bin, the stub runs with cwd <dir>/home (#9161)
+#     cwd-env-local a --dir below an ancestor `.env.local` refuses
+#     cwd-symlinked-home  a <dir>/home symlinked into a tree under a
+#                   `.env.local` refuses: the walk uses the physical path
+#     cwd-home-env-local  <dir>/home/.env.local itself refuses
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -39,7 +45,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER="$SCRIPT_DIR/sandbox_daemon.sh"
 PASSED=0
 FAILED=0
-TMP_ROOT="$(mktemp -d)"
+# Physical, so it compares equal to the stub's `pwd -P` (macOS TMPDIR is a symlink).
+TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
 FAKE_TOKEN="9121-selftest-fake-token-value"
@@ -56,6 +63,7 @@ cat > "$STUB" <<'STUB_EOF'
 #!/bin/sh
 env | cut -d= -f1 | sort > "$HOME/stub-env-names"
 printf '%s\n' "$@" > "$HOME/stub-args"
+pwd -P > "$HOME/stub-pwd"
 STUB_EOF
 chmod +x "$STUB"
 
@@ -82,7 +90,7 @@ launcher_names() {
   {
     grep '^PINNED="' "$LAUNCHER"
     sed -n '/^FORWARDED="/,/"$/p' "$LAUNCHER"
-  } | sed -e 's/^[A-Z]*="//' | tr -d '"\\' | tr ' ' '\n' \
+  } | sed -e 's/^[A-Z]*="//' | tr -d '\\"' | tr ' ' '\n' \
     | grep -E '^[A-Z_]+$' | sort -u
 }
 
@@ -208,6 +216,44 @@ touch "$TMP_ROOT/not-executable"
 expect_refusal bad-bin 1 "not an executable file" \
   --bin "$TMP_ROOT/not-executable" --dir "$DIR2" --dry-run
 expect_refusal bad-arg 2 "unknown argument" --bin "$STUB" --no-such-flag
+
+# 4. cwd (#9161): the caller sits beside a fake `.env.local` and names the stub
+# by a relative path; the stub must run under <dir>/home, never that cwd.
+LEAK="$TMP_ROOT/leak"
+DIR4="$TMP_ROOT/case4"
+mkdir -p "$LEAK" "$DIR4"
+echo "OPENAI_API_KEY=$FAKE_KEY" > "$LEAK/.env.local"
+set +e
+OUT4="$(cd "$LEAK" && run_launcher --bin ../stub-tm --dir "$DIR4" 2>&1)"
+STATUS4=$?
+set -e
+CWD4="$(cat "$DIR4/home/stub-pwd" 2>/dev/null || true)"
+if [ "$STATUS4" -ne 0 ]; then
+  fail cwd "launcher exit $STATUS4"
+  printf '%s\n' "$OUT4" | sed 's/^/    /'
+elif [ "$CWD4" != "$DIR4/home" ]; then
+  fail cwd "stub cwd was [$CWD4], want [$DIR4/home]"
+else
+  pass cwd
+fi
+mkdir -p "$LEAK/sb"
+expect_refusal cwd-env-local 1 "$LEAK/.env.local would be loaded" \
+  --bin "$STUB" --dir "$LEAK/sb" --dry-run
+
+# A <dir>/home symlinked into a tree under a `.env.local`: the daemon's cwd is
+# the physical path, so the walk must follow the link.
+LEAK2="$TMP_ROOT/leak2"
+DIR5="$TMP_ROOT/case5"
+mkdir -p "$LEAK2/real" "$DIR5"
+touch "$LEAK2/.env.local"
+ln -s "$LEAK2/real" "$DIR5/home"
+expect_refusal cwd-symlinked-home 1 "$LEAK2/.env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR5" --dry-run
+DIR6="$TMP_ROOT/case6"
+mkdir -p "$DIR6/home"
+touch "$DIR6/home/.env.local"
+expect_refusal cwd-home-env-local 1 "$DIR6/home/.env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR6" --dry-run
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
