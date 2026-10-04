@@ -74,7 +74,11 @@ pub struct ManagedRegistry {
 pub enum RegistryError {
     /// The alias is already registered with a different URL and `--force` was
     /// not passed.
-    #[error("alias '{alias}' is already registered as '{existing_url}'; use --force to overwrite")]
+    // #9124: an entry stored before the fix may carry a token.
+    #[error(
+        "alias '{alias}' is already registered as '{}'; use --force to overwrite",
+        crate::core::remote_url_redact::redact_url(.existing_url)
+    )]
     DuplicateAlias {
         /// The alias that collides.
         alias: String,

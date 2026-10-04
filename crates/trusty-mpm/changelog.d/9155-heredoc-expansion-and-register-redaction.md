@@ -1,0 +1,3 @@
+Security
+- pm-guard reads the `$(…)` and backtick substitutions of every unquoted-delimiter here-document body with the body's quotes as literal text, including a body that `python3`, `node` or `bash` runs. `python3 - <<PY` with `print('$(rm -rf /)')` was allowed under every bypass; it now hits the rm-root floor. A quoted-delimiter body stays inert (#9155).
+- `tm register <url>` strips a URL's embedded `user:token@` before writing `registry.json` and printing the confirmation, with a stderr notice. Its refusals, `tm run`'s identity error, the alias-collision error and `tm ls` redact any URL credential, and an owner-less credentialed URL no longer turns the token into the managed-checkout owner (#9124).

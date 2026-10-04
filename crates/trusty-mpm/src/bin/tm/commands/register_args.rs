@@ -211,12 +211,16 @@ pub(crate) fn resolve_register_args(
             // #4912: the legacy order — `tm register <ALIAS> <url>` still works.
             (false, true) => Ok((first.to_string(), resolved_url(second)?)),
             (true, true) => Err(anyhow::anyhow!(
-                "both arguments name a repository ('{first}' and '{second}') — \
-                 refusing to guess which is the alias. Usage: tm register <owner/repo> [alias]"
+                "both arguments name a repository ('{}' and '{}') — \
+                 refusing to guess which is the alias. Usage: tm register <owner/repo> [alias]",
+                shown(first),
+                shown(second)
             )),
             (false, false) => Err(anyhow::anyhow!(
-                "neither argument names a repository ('{first}' and '{second}'). \
-                 Usage: tm register <owner/repo> [alias]"
+                "neither argument names a repository ('{}' and '{}'). \
+                 Usage: tm register <owner/repo> [alias]",
+                shown(first),
+                shown(second)
             )),
         },
         None => {
@@ -318,14 +322,15 @@ pub(crate) fn resolve_account(
 /// Test: `relative_paths_are_never_shorthand`, `one_arg_non_repo_errors`,
 /// `two_non_urls_error`.
 pub(crate) fn rejection(s: &str) -> anyhow::Error {
+    let shown_s = shown(s);
     match classify(s) {
         Positional::RelativePath => anyhow::anyhow!(
-            "'{s}' is a relative path, not a repository. It would be resolved \
+            "'{shown_s}' is a relative path, not a repository. It would be resolved \
              against the current directory but cloned from elsewhere. Pass \
              <owner>/<repo>, a full URL, or an absolute path"
         ),
         _ => anyhow::anyhow!(
-            "'{s}' does not name a repository. Pass <owner>/<repo> (GitHub is \
+            "'{shown_s}' does not name a repository. Pass <owner>/<repo> (GitHub is \
              assumed), or a full URL such as https://github.com/<owner>/<repo> \
              or git@github.com:<owner>/<repo>.git"
         ),
@@ -376,15 +381,17 @@ pub(crate) fn resolved_url(s: &str) -> anyhow::Result<String> {
     };
 
     let segments = path_segments(&url);
+    // #9124: these errors echo the input, which may embed `user:token@`.
+    let shown_s = shown(s);
     if segments.is_empty() {
         return Err(anyhow::anyhow!(
-            "'{s}' has no owner/repo path — it names a host, not a repository. \
+            "'{shown_s}' has no owner/repo path — it names a host, not a repository. \
              Pass <owner>/<repo>, or a full repository URL"
         ));
     }
     if let Some(bad) = non_repo_segment(&url, &segments) {
         return Err(anyhow::anyhow!(
-            "'{s}' points inside a repository ('/{bad}/…'), not at it. \
+            "'{shown_s}' points inside a repository ('/{bad}/…'), not at it. \
              Pass the repository root, e.g. <owner>/<repo>"
         ));
     }
@@ -453,11 +460,19 @@ fn non_repo_segment<'a>(url: &str, segments: &[&'a str]) -> Option<&'a str> {
 /// `shorthand_resolves_to_github`.
 fn derive_alias(url: &str) -> anyhow::Result<String> {
     trusty_common::palace_id::owner_repo_from_git_remote(url).ok_or_else(|| {
+        let url = shown(url);
         anyhow::anyhow!(
             "cannot derive an alias from '{url}' — no owner/repo path found. \
              Pass one explicitly: tm register {url} <alias>"
         )
     })
+}
+
+/// A positional as an error message may show it: every URL credential
+/// redacted (#9124), since `tm register` and `tm run` echo what they were given.
+/// Test: `register_errors_never_echo_an_embedded_token_9124`.
+pub(crate) fn shown(s: &str) -> std::borrow::Cow<'_, str> {
+    trusty_mpm::core::remote_url_redact::redact_url(s)
 }
 
 /// Split a URL into its host-relative path segments.

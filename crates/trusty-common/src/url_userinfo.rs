@@ -23,7 +23,7 @@ pub fn ends_url(c: char) -> bool {
 }
 
 /// Characters that end a URL authority when it sits inside free text.
-fn ends_authority(c: char) -> bool {
+pub fn ends_authority(c: char) -> bool {
     matches!(c, '/' | '?' | '#') || ends_url(c)
 }
 

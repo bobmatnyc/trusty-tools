@@ -746,3 +746,77 @@ fn resolve_account_rejects_a_malformed_flag_value() {
         "{err}"
     );
 }
+
+/// The synthetic credential the #9124 tests feed in, and the lowercase
+/// fragments that must never appear in what comes back (sink 3 lowercases).
+const TOKEN_URL_PARTS: [&str; 2] = ["secretqatoken2", "qauser"];
+
+/// Fail when `text` holds any part of the #9124 synthetic credential.
+fn assert_no_token(what: &str, text: &str) {
+    let lowered = text.to_ascii_lowercase();
+    for part in TOKEN_URL_PARTS {
+        assert!(!lowered.contains(part), "{what} leaks {part:?}: {text}");
+    }
+}
+
+/// #9124 sink 1: `tm register` with a credentialed URL prints and stores the
+/// URL without its userinfo; the alias and the stored URL hold no token.
+#[test]
+fn register_never_prints_or_stores_an_embedded_token_9124() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let line = crate::commands::standalone::register_alias(
+        &paths,
+        "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+        None,
+        false,
+    )
+    .unwrap();
+    assert_no_token("the printed line", &line);
+    let stored = std::fs::read_to_string(dir.path().join("registry.json")).unwrap();
+    assert_no_token("registry.json", &stored);
+    let registry =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    assert_eq!(registry.list()[0].url, "https://example.invalid/org/x.git");
+    assert_eq!(registry.list()[0].alias, "org-x");
+}
+
+/// #9124 sink 2: every refusal `tm register` makes for a credentialed URL —
+/// host-only, a web-UI path, a collision with an entry stored before the fix
+/// — names the URL without its token.
+#[test]
+fn register_errors_never_echo_an_embedded_token_9124() {
+    for bad in [
+        "https://qauser:SECRETQATOKEN2@example.invalid/",
+        "https://qauser:SECRETQATOKEN2@github.com/o/r/issues",
+    ] {
+        let err = resolve_register_args(bad, None).unwrap_err();
+        assert_no_token(bad, &format!("{err:#}"));
+    }
+    let err = resolve_register_args(
+        "https://qauser:SECRETQATOKEN2@example.invalid/a/b",
+        Some("https://qauser:SECRETQATOKEN2@example.invalid/c/d"),
+    )
+    .unwrap_err();
+    assert_no_token("two repos", &format!("{err:#}"));
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let mut old =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    old.add(
+        "org-x",
+        "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+        false,
+    )
+    .unwrap();
+    old.save().unwrap();
+    let err = crate::commands::standalone::register_alias(
+        &paths,
+        "https://example.invalid/other/y.git",
+        Some("org-x"),
+        false,
+    )
+    .unwrap_err();
+    assert_no_token("the collision", &format!("{err:#}"));
+}

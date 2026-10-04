@@ -26,9 +26,10 @@ use super::managed_root::ManagedPaths;
 /// [`super::register_args::resolve_register_args`] (which accepts both the
 /// `<url> [alias]` and legacy `<alias> <url>` orders and derives an `owner-repo`
 /// alias when none was given), validates the alias, calls `ManagedRegistry::add`,
-/// saves, and prints `registered <alias> → <url>` to stdout. A derived alias that
-/// is already bound to a different URL refuses without touching the registry —
-/// `add` errors before mutating and `save` is never reached.
+/// saves, and prints [`register_alias`]'s `registered <alias> → <url>` line to
+/// stdout. A derived alias that is already bound to a different URL refuses
+/// without touching the registry — `add` errors before mutating and `save` is
+/// never reached.
 /// Test: `register_args_tests.rs`; registry semantics in registry tests.
 pub(crate) fn register_cmd(
     paths: &ManagedPaths,
@@ -36,9 +37,41 @@ pub(crate) fn register_cmd(
     second: Option<&str>,
     force: bool,
 ) -> anyhow::Result<()> {
+    println!("{}", register_alias(paths, first, second, force)?);
+    Ok(())
+}
+
+/// [`register_cmd`] without the print: registers the alias and returns the
+/// confirmation line.
+///
+/// Why (#9124): `tm register https://user:<token>@host/o/r` printed the token
+/// and wrote it to `registry.json`. Nothing downstream needs it there: `tm
+/// load` runs a plain `git clone`, which asks git's credential helper for the
+/// password when the URL carries none, and a stored token would also land in
+/// the clone's `.git/config`. So the userinfo is stripped before the URL is
+/// stored, with a stderr notice, rather than the URL being refused.
+/// What: resolves the positionals, strips the URL's userinfo
+/// ([`trusty_common::url_userinfo::strip_userinfo`]), adds and saves, and
+/// returns `registered <alias> → <url>` with the URL passed through
+/// `redact_url` as well.
+/// Test: `register_never_prints_or_stores_an_embedded_token_9124`.
+pub(crate) fn register_alias(
+    paths: &ManagedPaths,
+    first: &str,
+    second: Option<&str>,
+    force: bool,
+) -> anyhow::Result<String> {
     // #4912: URL first, alias optional — and the legacy order still accepted.
-    let (alias, url) = super::register_args::resolve_register_args(first, second)?;
+    let (alias, raw_url) = super::register_args::resolve_register_args(first, second)?;
     let derived = second.is_none();
+    // #9124: a credential embedded in the URL is never written to disk.
+    let url = trusty_common::url_userinfo::strip_userinfo(&raw_url).into_owned();
+    if url != raw_url {
+        eprintln!(
+            "tm register: dropped the credentials embedded in the URL; git's credential \
+             helper supplies them when the repository is cloned"
+        );
+    }
 
     let root = &paths.root;
     let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
@@ -54,8 +87,10 @@ pub(crate) fn register_cmd(
         }
     })?;
     registry.save().context("failed to save registry")?;
-    println!("registered {alias} → {url}");
-    Ok(())
+    Ok(format!(
+        "registered {alias} → {}",
+        trusty_mpm::core::remote_url_redact::redact_url(&url)
+    ))
 }
 
 /// Handle `tm ls [--json]`.
@@ -100,7 +135,8 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             .map(|e| {
                 serde_json::json!({
                     "alias": e.alias,
-                    "url": e.url,
+                    // #9124: an entry stored before the fix may carry a token.
+                    "url": trusty_mpm::core::remote_url_redact::redact_url(&e.url),
                     "ref": e.git_ref,
                     "loaded": registry.is_loaded(&e.alias, root),
                     "repo_path": root.join("projects").join(&e.alias).join("repo"),
@@ -167,7 +203,8 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             } else {
                 "no"
             };
-            println!("  {:<alias_w$}  {:<10}  {}", e.alias, loaded, e.url);
+            let url = trusty_mpm::core::remote_url_redact::redact_url(&e.url);
+            println!("  {:<alias_w$}  {:<10}  {url}", e.alias, loaded);
         }
     }
 
