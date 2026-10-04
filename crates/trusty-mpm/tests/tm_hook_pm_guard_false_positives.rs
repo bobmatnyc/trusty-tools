@@ -404,12 +404,18 @@ fn pm_guard_allows_the_b2_false_positives() {
     );
     assert_allowed("cd crates/trusty-common/src/secrets && ls");
     assert_allowed("git checkout feat/7521-secrets-token");
-    assert_allowed(
-        // Absolute, so the #7122 worktree-destination rule never sees a
-        // worktree when the suite itself runs inside one.
-        "cp /srv/infra/terraform/local/terraform.tfstate \
-         /srv/infra/terraform/local/terraform.tfstate.20260915-pre-490-rollout.backup",
-    );
+    // Absolute, so the #7122 worktree-destination rule never sees a worktree
+    // when the suite itself runs inside one; the source must exist (#8093).
+    let tree = tempfile::tempdir().expect("tempdir");
+    let state = tree.path().join("terraform.tfstate");
+    std::fs::write(&state, "{}").expect("state");
+    assert_allowed(&format!(
+        "cp {0} {0}.20260915-pre-490-rollout.backup",
+        state.display()
+    ));
+    // #7833: `cat` writing a quoted here-document body to a file.
+    assert_allowed("cat > /tmp/s.py <<'EOF'\nprint(r.key)\nEOF");
+    assert_allowed("cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1})\nEOF");
 }
 
 /// #7190, #9006, #8110, #8093, #8520, #8660: the deny bounding each fix still
@@ -430,6 +436,15 @@ fn pm_guard_still_denies_the_b2_bounds() {
     assert_denied("cp terraform.tfstate /tmp/x.txt");
     assert_denied("grep -c API_KEY .env");
     assert_denied("terraform apply -var-file=/repo/infra/terraform/local/terraform.tfvars");
+    // #8093: a compound or wrapped copy gets no grant.
+    let tree = tempfile::tempdir().expect("tempdir");
+    let state = tree.path().join("terraform.tfstate");
+    std::fs::write(&state, "{}").expect("state");
+    assert_denied(&format!("true; cp {0} {0}.old", state.display()));
+    assert_denied(&format!("command cp {0} {0}.old", state.display()));
+    // #7833: a body the shell prints or runs keeps its scan.
+    assert_denied("cat <<'EOF'\nprint(open('.env').read())\nEOF");
+    assert_denied("cat > /tmp/s.py <<'EOF' && python3 /tmp/s.py\nopen('.env')\nEOF");
 }
 
 /// 🔴 REGRESSION (#8093 critic MEDIUM): the binary resolves a relative copy
@@ -443,6 +458,7 @@ fn pm_guard_denies_a_same_class_copy_through_a_symlink_8093() {
     std::fs::create_dir(&outside).expect("outside dir");
     std::os::unix::fs::symlink(&outside, tree.path().join("terraform.tfstate.link"))
         .expect("symlink");
+    std::fs::write(tree.path().join("terraform.tfstate"), "{}").expect("source");
     let verdict = |command: &str| {
         let payload = serde_json::json!({
             "hook_event_name": "PreToolUse",

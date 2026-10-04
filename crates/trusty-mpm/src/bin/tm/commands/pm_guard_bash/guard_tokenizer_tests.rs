@@ -92,8 +92,8 @@ fn guard_7839_sed_expression_wildcard() {
 /// worked. The row exists so the next reader can see the issue was verified
 /// rather than skipped.
 /// What: the issue's shape — a heredoc writing a Python script whose body
-/// carries an f-string `word:` literal — must allow; a body naming a real
-/// dotenv file must still refuse.
+/// carries an f-string `word:` literal — must allow; a printed body naming a
+/// real dotenv file must still refuse.
 /// Test: itself.
 #[test]
 fn guard_7833_heredoc_body_word_token() {
@@ -107,11 +107,43 @@ fn guard_7833_heredoc_body_word_token() {
             "a heredoc body's word token names no file: {command}"
         );
     }
+    // #7833: a body `cat` writes to a file is data; one it prints still refuses.
     assert!(
-        evaluate_secret_file_read_command("cat > /tmp/s/p.py <<'PY'\nopen('.env').read()\nPY")
-            .is_some(),
-        "a heredoc body naming a real dotenv file must still refuse"
+        evaluate_secret_file_read_command("cat <<'PY'\nopen('.env').read()\nPY").is_some(),
+        "a printed heredoc body naming a real dotenv file must still refuse"
     );
+}
+
+/// 🔴 REGRESSION (#7833, reopened 2026-10-03): `cat` writing a quoted
+/// here-document to a file prints nothing and runs nothing, so a body word
+/// such as `r.key` or `{"id"` is data. Refused at 1cdb903cdf. A body the
+/// shell expands, prints or hands on keeps its scan.
+#[test]
+fn guard_7833_a_quoted_body_cat_writes_to_a_file_is_data() {
+    for command in [
+        "cat > /tmp/s.py <<'EOF'\nprint(r.key)\nEOF",
+        "cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1, \"name\": \"a\"})\nEOF",
+        "cat <<'EOF' > /tmp/s/p.py\nfor r in rows: print(r.key, r['id'])\nEOF",
+        "cat > /tmp/s/p.py <<\"PY\"\nprint(open('.env').read())\nPY",
+    ] {
+        assert_eq!(refusal(command), None, "{command}");
+    }
+    // The bound: a body the shell expands, prints or hands on, and a write
+    // whose destination is itself secret-shaped, keep the refusal.
+    for command in [
+        "cat > /tmp/s.py <<EOF\n$(cat .env)\nEOF",
+        "cat <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat > /tmp/s.py <<'EOF'\nopen('.env')\nEOF\npython3 /tmp/s.py",
+        "cat > /tmp/s.py <<'EOF' && python3 /tmp/s.py\nopen('.env')\nEOF",
+        "cat > /tmp/s.py <<'EOF' | sh\nopen('.env')\nEOF",
+        "tee /tmp/s.py <<'EOF'\nopen('.env')\nEOF",
+        "python3 <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat <<'EOF' > .env\nAPI_KEY=1\nEOF",
+        "cat > $OUT <<'EOF'\nopen('.env')\nEOF",
+        "cat - .env > /tmp/s.py <<'EOF'\nx\nEOF",
+    ] {
+        assert!(refusal(command).is_some(), "expected DENY: {command}");
+    }
 }
 
 /// #7479: the dotenv class refused committed placeholder files.

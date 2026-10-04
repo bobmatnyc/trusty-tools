@@ -399,7 +399,7 @@ use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_se
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
 // #8093, #8110, #8520, #8660: narrow grants and refusal hints, split out at the cap.
 use crate::commands::pm_guard_secret_handling::{
-    URL_FETCHERS, is_tokeninfo_url, refusal_hint, same_class_copy,
+    URL_FETCHERS, body_written_to_a_file, is_tokeninfo_url, refusal_hint, same_class_copy,
 };
 
 /// Which kind of text a word scan is reading (#7266 round 9).
@@ -681,9 +681,8 @@ fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Op
             || terraform_only_consumes_state(trimmed, &named)
             || key_only_consumed(trimmed, &named)
             || listed_or_searched(&argv_text, trimmed, &named)
-            // #8093: a copy that lands on a name this rule also refuses. Only
-            // a lone segment runs in the hook's working directory.
-            || same_class_copy(trimmed, &named, cwd.filter(|_| lone))
+            // #8093: a lone copy that lands on a name this rule also refuses.
+            || (lone && same_class_copy(trimmed, &named, cwd))
         // #9001
         {
             continue;
@@ -691,6 +690,10 @@ fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Op
         // #8520, #8660: the refusal names the supported route for its shape.
         let reason = deny_reason(first, &describe_command(trimmed));
         return Some(reason + refusal_hint(first, trimmed));
+    }
+    // #7833: a body `cat` only writes to a file is data, never read back here.
+    if body_written_to_a_file(command) {
+        return None;
     }
     for body in &bodies {
         if let Some(first) = secret_files_named_in_program_text(body).first() {

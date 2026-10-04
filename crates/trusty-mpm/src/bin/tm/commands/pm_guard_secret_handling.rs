@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
-use crate::commands::pm_guard_bash::tokenize;
+use crate::commands::pm_guard_bash::{lone_inert_heredoc, tokenize};
 use crate::commands::pm_guard_secret_read::{
     NESTED_COMMAND_MARKERS, Scan, command_basename, is_secret_read_target, secret_files_named_in,
 };
@@ -35,22 +35,25 @@ const SHELL_REWRITE_BYTES: &[char] = &['$', '`', '*', '?', '[', ']', '{', '}', '
 /// so the copy launders nothing. The copy stays in the source's own directory,
 /// so it cannot carry a key from `~/.ssh` into a repository that a docs-only
 /// commit and a push would then publish.
-/// What: `true` only for `cp [-pnifv…] [--] <src> <dst>` with no nested
-/// command, both operands literal and in the same directory (compared
-/// lexically), both [`is_secret_read_target`], and every word in `named` cut
-/// from one of them. A long flag, a third operand, a redirect, an expansion or
-/// another directory keeps the deny. The #7122 worktree-destination rule
-/// judges the same command on its own. `cwd` is the hook's working directory
-/// when `segment` is the whole command; with it, or with an absolute
-/// destination, the destination is resolved, and anything already standing
-/// there other than a regular file keeps the deny, since `cp` writes through a
-/// symlink and into a directory.
-/// Residual: tests prove the refusal for an existing directory and a symlink
-/// to a directory. A relative destination with no `cwd` (a `cd` earlier in the
-/// command, a wrapper before `cp`) is judged by name only, and nothing made
-/// after the hook runs is seen.
+/// What: `true` only for a whole command that is `cp [-pnifv…] [--] <src>
+/// <dst>` with no wrapper, no other segment and no nested command, both
+/// operands literal and in the same directory (compared lexically), both
+/// [`is_secret_read_target`], and every word in `named` cut from one of them.
+/// A long flag, a third operand, a redirect, an expansion or another
+/// directory keeps the deny. The #7122 worktree-destination rule judges the
+/// same command on its own. Both operands are resolved against `cwd`, the
+/// hook's working directory, unless absolute; one that cannot be resolved
+/// keeps the deny. The source must be a regular file with one link, and the
+/// destination nothing or such a file, since `cp` follows a symlink, writes
+/// into a directory, and shares bytes through a hard link.
+/// Residual: tests prove the refusal for a directory, a symlink and a hard
+/// link. Nothing made between the hook and the copy is seen. Making a symlink,
+/// FIFO or hard link under a secret-class name needs a command this rule
+/// refuses, or the #8879 interpreter residual.
 /// Test: `allows_a_same_class_copy_8093`, `denies_a_copy_out_of_the_class_8093`,
-/// `denies_a_same_class_copy_onto_a_directory_or_symlink_8093`.
+/// `denies_a_same_class_copy_onto_a_directory_or_symlink_8093`,
+/// `denies_a_compound_or_wrapped_same_class_copy_8093`,
+/// `denies_a_same_class_copy_through_a_hard_link_8093`.
 pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path>) -> bool {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return false;
@@ -58,15 +61,16 @@ pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path
     let Ok(argv) = tokenize(segment) else {
         return false;
     };
-    let Some(start) = strip_wrapper_prefix(&argv) else {
-        return false;
-    };
-    if argv.get(start).map(|p| command_basename(p)).as_deref() != Some("cp") {
+    // #8093: a wrapper (`command`, `env -C`, `sudo`) may run another `cp` or
+    // move the working directory, so only a bare `cp` is read.
+    if strip_wrapper_prefix(&argv) != Some(0)
+        || argv.first().map(|p| command_basename(p)).as_deref() != Some("cp")
+    {
         return false;
     }
     let mut operands: Vec<&str> = Vec::new();
     let mut options_ended = false;
-    for token in &argv[start + 1..] {
+    for token in &argv[1..] {
         if !options_ended && token == "--" {
             options_ended = true;
         } else if !options_ended && token.starts_with('-') {
@@ -95,23 +99,39 @@ pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path
     if !named.iter().all(|word| cut.contains(word)) {
         return false;
     }
-    // A wrapper (`env -C`) may move a relative destination off `cwd`.
-    let dest = Path::new(dest);
-    let resolved = match cwd {
-        _ if dest.is_absolute() => Some(dest.to_path_buf()),
-        Some(cwd) if start == 0 => Some(cwd.join(dest)),
-        _ => None,
+    // #8093: an operand that cannot be resolved cannot be inspected.
+    let resolve = |op: &str| {
+        let op = Path::new(op);
+        match cwd {
+            _ if op.is_absolute() => Some(op.to_path_buf()),
+            Some(cwd) => Some(cwd.join(op)),
+            None => None,
+        }
     };
-    resolved.is_none_or(|path| lands_on_a_file(&path))
+    let (Some(source), Some(dest)) = (resolve(source), resolve(dest)) else {
+        return false;
+    };
+    match std::fs::symlink_metadata(&dest) {
+        Ok(meta) if !is_lone_file(&meta) => return false,
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => return false,
+        _ => {}
+    }
+    std::fs::symlink_metadata(&source).is_ok_and(|meta| is_lone_file(&meta))
 }
 
-/// Whether `cp` writing `path` writes that name itself: nothing stands there,
-/// or a regular file does (#8093). A symlink, a directory or an unreadable
-/// entry answers `false`.
-fn lands_on_a_file(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) => meta.file_type().is_file(),
-        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+/// Whether `meta` is a regular file with one link (#8093). A symlink, a
+/// directory, a FIFO or a hard-linked file answers `false`.
+fn is_lone_file(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        meta.file_type().is_file() && meta.nlink() == 1
+    }
+    // No link count to read: fail closed.
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
     }
 }
 
@@ -121,6 +141,31 @@ fn directory_of(operand: &str) -> &Path {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
+}
+
+/// Whether the whole of `command` is `cat` writing one quoted here-document
+/// body to a literal file (#7833).
+///
+/// Why: the #7266 body scan read `print(r.key)` and `rows.append({"id"…` in a
+/// script an agent was writing as secret file names. `cat` with a quoted
+/// delimiter writes the body verbatim and prints nothing, so no byte of any
+/// file reaches the transcript; a later run of the written script is judged
+/// by the #8879 script-body rule.
+/// What: [`lone_inert_heredoc`] accepts the command, so its delimiter is a
+/// quoted plain word, its operator line is first and carries no `|`, `;`,
+/// `&` or `$`, and nothing follows the terminator. The operator line must
+/// also be `cat` with a `>`/`>>` redirect: a body `cat` prints, an
+/// interpreter runs, or an unquoted delimiter expands keeps the scan. The
+/// operator line's own argv keeps its scan, so `cat > .env <<'EOF'` denies.
+/// The #7266 read rule skips its body scan and the copy rule blanks the body.
+/// Test: `guard_7833_a_quoted_body_cat_writes_to_a_file_is_data`.
+pub(crate) fn body_written_to_a_file(command: &str) -> bool {
+    if lone_inert_heredoc(command).is_none() {
+        return false;
+    }
+    let line = command.trim_start().lines().next().unwrap_or_default();
+    // `lone_inert_heredoc` passed `cat` only with a redirect beside `<<WORD`.
+    shlex::split(line).is_some_and(|argv| argv.len() > 2 && argv[0] == "cat")
 }
 
 /// Programs whose URL operand the #8110 grant reads (#8110).

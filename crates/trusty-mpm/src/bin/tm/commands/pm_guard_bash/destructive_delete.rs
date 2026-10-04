@@ -259,7 +259,7 @@ const STDIN_DATA_CONSUMERS: &[&str] = &["python3", "python", "node", "ruby", "ca
 /// body already can on the pre-change guard.
 /// Test: `allows_a_quoted_heredoc_body_fed_to_an_interpreter_7190`,
 /// `keeps_every_captured_or_shell_run_heredoc_body_live_7190`.
-fn lone_inert_heredoc(command: &str) -> Option<String> {
+pub(crate) fn lone_inert_heredoc(command: &str) -> Option<String> {
     let bodies = data_bodies(command);
     let [body] = bodies.as_slice() else {
         return None;

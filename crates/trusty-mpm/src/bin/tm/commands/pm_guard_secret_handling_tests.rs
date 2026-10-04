@@ -3,6 +3,8 @@
 //! Every command goes through `evaluate_secret_file_read`, the entry
 //! `pm_guard` calls, so an allow is an allow from every secret rule.
 
+use std::path::Path;
+
 use crate::commands::pm_guard_secret_read::{
     evaluate_secret_file_read, evaluate_secret_file_read_in,
 };
@@ -28,18 +30,95 @@ fn denied(commands: &[&str]) {
     assert!(allowed.is_empty(), "expected DENY: {allowed:#?}");
 }
 
+/// The unified secret verdict for a Bash `command` run from `cwd`.
+fn secret_in(command: &str, cwd: &Path) -> Option<String> {
+    let input = serde_json::json!({ "command": command });
+    evaluate_secret_file_read_in("Bash", Some(&input), Some(cwd))
+}
+
+/// A temporary hook cwd holding each of `files` as a one-line regular file.
+fn tree_with(files: &[&str]) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for file in files {
+        let path = tmp.path().join(file);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+        std::fs::write(path, "{}").expect("file");
+    }
+    tmp
+}
+
 /// 🔴 REGRESSION (#8093): a Terraform state, or a dotenv file, copied to a
 /// sibling backup that is itself in the secret class. Denied on origin/main.
 #[test]
 fn allows_a_same_class_copy_8093() {
-    allowed(&[
+    let tmp = tree_with(&[
+        "infra/terraform/local/terraform.tfstate",
+        "terraform.tfstate",
+        ".env",
+    ]);
+    for command in [
         "cp infra/terraform/local/terraform.tfstate \
          infra/terraform/local/terraform.tfstate.20260915-pre-490-rollout.backup",
         "cp -p terraform.tfstate terraform.20260915.tfstate",
         "cp -- terraform.tfstate terraform.tfstate.backup",
         "cp .env .env.bak",
+    ] {
+        assert_eq!(secret_in(command, tmp.path()), None, "{command}");
+    }
+    let absolute = format!(
+        "cp {0}/terraform.tfstate {0}/terraform.tfstate.old",
+        tmp.path().display()
+    );
+    assert_eq!(secret(&absolute), None, "{absolute}");
+}
+
+/// 🔴 REGRESSION (#8093 critic MEDIUM): only a lone `cp` with no wrapper is
+/// granted, because only it is known to run in the hook cwd on the file the
+/// grant inspected. Allowed at 1cdb903cdf.
+#[test]
+fn denies_a_compound_or_wrapped_same_class_copy_8093() {
+    let tmp = tree_with(&["terraform.tfstate"]);
+    for command in [
+        "true; cp terraform.tfstate terraform.tfstate.old",
+        "cp terraform.tfstate terraform.tfstate.old && echo done",
+        "command cp terraform.tfstate terraform.tfstate.old",
         "cd infra/terraform/local && cp terraform.tfstate terraform.tfstate.pre-apply",
-    ]);
+    ] {
+        assert!(
+            secret_in(command, tmp.path()).is_some(),
+            "expected DENY: {command}"
+        );
+    }
+    let lone = "cp terraform.tfstate terraform.tfstate.old";
+    assert_eq!(secret_in(lone, tmp.path()), None, "{lone}");
+    // With no cwd a relative operand cannot be inspected.
+    assert!(secret(lone).is_some(), "expected DENY with no cwd: {lone}");
+}
+
+/// 🔴 REGRESSION (#8093 critic MEDIUM): a hard link shares its bytes with a
+/// file elsewhere, so a hard-linked source can be a key from another
+/// directory, and a hard-linked destination writes the copy into another
+/// name. Allowed at 1cdb903cdf.
+#[cfg(unix)]
+#[test]
+fn denies_a_same_class_copy_through_a_hard_link_8093() {
+    let tmp = tree_with(&["outside/id_rsa", "notes.txt", "plain.tfstate"]);
+    let cwd = tmp.path();
+    std::fs::hard_link(cwd.join("outside/id_rsa"), cwd.join("terraform.tfstate"))
+        .expect("hard-linked source");
+    std::fs::hard_link(cwd.join("notes.txt"), cwd.join("plain.tfstate.old"))
+        .expect("hard-linked destination");
+    for command in [
+        "cp terraform.tfstate terraform.tfstate.old",
+        "cp plain.tfstate plain.tfstate.old",
+    ] {
+        assert!(
+            secret_in(command, cwd).is_some(),
+            "expected DENY: {command}"
+        );
+    }
+    let control = "cp plain.tfstate plain.tfstate.new";
+    assert_eq!(secret_in(control, cwd), None, "{control}");
 }
 
 /// #8093 bound: a dated backup is now in the class, so reading it denies, and
@@ -80,6 +159,7 @@ fn denies_a_same_class_copy_onto_a_directory_or_symlink_8093() {
     std::fs::create_dir(cwd.join("terraform.tfstate.dir")).expect("dir dest");
     std::os::unix::fs::symlink(&outside, cwd.join("terraform.tfstate.link")).expect("symlink");
     std::fs::write(cwd.join("terraform.tfstate.old"), "{}").expect("file dest");
+    std::fs::write(cwd.join("terraform.tfstate"), "{}").expect("source");
     let in_cwd = |command: &str| {
         let input = serde_json::json!({ "command": command });
         evaluate_secret_file_read_in("Bash", Some(&input), Some(cwd))
