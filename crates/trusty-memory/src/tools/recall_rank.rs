@@ -50,7 +50,7 @@ pub(crate) const RULING_TAGS: &[&str] = &[
 /// Tags that mark a drawer as a session snapshot — a point-in-time fact.
 ///
 /// Why: `status` and `resume-target` are the two snapshot tags the review
-/// measured in trusty-tools (1,482 and 1,318 drawers, almost none keyed).
+/// measured in one project palace (1,482 and 1,318 drawers, almost none keyed).
 /// What: compared exactly against each stored tag.
 /// Test: `a_stale_snapshot_loses_score_and_a_fresh_one_does_not`,
 /// `tags_match_exactly_never_by_substring`.

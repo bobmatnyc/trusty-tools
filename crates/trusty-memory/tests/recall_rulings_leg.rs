@@ -65,8 +65,8 @@ fn assert_primary_survives(envelope: &Value) {
     );
 }
 
-/// The `rulings_degraded` entries as (palace, reason).
-fn degraded(envelope: &Value) -> Vec<(String, String)> {
+/// The `rulings_degraded` entries as (palace, reason code, cached).
+fn degraded(envelope: &Value) -> Vec<(String, String, bool)> {
     envelope["rulings_degraded"]
         .as_array()
         .unwrap_or_else(|| panic!("rulings_degraded must be set: {envelope:#}"))
@@ -75,9 +75,15 @@ fn degraded(envelope: &Value) -> Vec<(String, String)> {
             (
                 d["palace"].as_str().expect("palace").to_string(),
                 d["reason"].as_str().expect("reason").to_string(),
+                d["cached"].as_bool().expect("cached"),
             )
         })
         .collect()
+}
+
+/// One expected `rulings_degraded` entry.
+fn entry(palace: &str, reason: &str, cached: bool) -> (String, String, bool) {
+    (palace.to_string(), reason.to_string(), cached)
 }
 
 fn plain(top_k: u64) -> Value {
@@ -177,19 +183,16 @@ async fn an_absent_rulings_palace_degrades_and_is_not_retried_at_once() {
 
     let first = recall_envelope(&state, plain(5)).await;
     assert_primary_survives(&first);
-    let d = degraded(&first);
-    assert_eq!(d.len(), 1, "{d:?}");
-    assert_eq!(d[0].0, "rulings-ghost");
-    assert!(d[0].1.starts_with("absent"), "{d:?}");
+    assert_eq!(degraded(&first), [entry("rulings-ghost", "absent", false)]);
 
     create_palaces(&state, &tmp, &["rulings-ghost"]).await;
     let late = remember(&state, "rulings-ghost", QUERY, &["bob-ruling"], None).await;
     let second = recall_envelope(&state, plain(5)).await;
     assert_primary_survives(&second);
-    let d = degraded(&second);
-    assert!(
-        d[0].1.contains("cached"),
-        "not retried within the window: {d:?}"
+    assert_eq!(
+        degraded(&second),
+        [entry("rulings-ghost", "absent", true)],
+        "not retried within the window"
     );
     let results = second["results"].as_array().expect("results");
     assert_eq!(
@@ -199,9 +202,11 @@ async fn an_absent_rulings_palace_degrades_and_is_not_retried_at_once() {
     );
 }
 
-/// Why (#9143 review): an open failure other than absence is reported too.
+/// Why (#9143 review): an open failure other than absence is reported too, as
+/// a bare code: the error's text named the palace's path on disk.
 /// What: evict a rulings palace from the registry and make its `palace.json`
-/// unreadable, so the reopen fails with a permission error.
+/// unreadable, so the reopen fails with a permission error. The reason is
+/// `unreadable` and carries neither the tempdir path nor any `/`.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_unreadable_rulings_palace_degrades_and_primary_hits_survive() {
@@ -221,7 +226,11 @@ async fn an_unreadable_rulings_palace_degrades_and_primary_hits_survive() {
     let envelope = recall_envelope(&state, plain(5)).await;
     assert_primary_survives(&envelope);
     let d = degraded(&envelope);
-    assert!(d[0].1.starts_with("open failed"), "{d:?}");
+    assert_eq!(d, [entry("rulings-a", "unreadable", false)]);
+    let reason = envelope["rulings_degraded"].to_string();
+    let root = tmp.path().to_string_lossy();
+    assert!(!reason.contains(root.as_ref()), "path leaked: {reason}");
+    assert!(!reason.contains('/'), "path leaked: {reason}");
     let results = envelope["results"].as_array().expect("results");
     assert_eq!(rank_of(results, ruling), None);
 }
@@ -252,7 +261,10 @@ async fn odd_env_values_degrade_once_and_blank_values_disable_the_leg() {
         .with_rulings_palaces(parse_rulings_palaces(" , rulings-ghost ,rulings-ghost,, "));
     let envelope = recall_envelope(&odd, plain(5)).await;
     assert_primary_survives(&envelope);
-    assert_eq!(degraded(&envelope).len(), 1, "{envelope:#}");
+    assert_eq!(
+        degraded(&envelope),
+        [entry("rulings-ghost", "absent", false)]
+    );
 
     let blank = state
         .clone()
@@ -262,19 +274,22 @@ async fn odd_env_values_degrade_once_and_blank_values_disable_the_leg() {
     assert!(envelope.get("rulings_degraded").is_none(), "{envelope:#}");
 }
 
-/// Why (#9143 review): a hung rulings palace must not hang the recall.
+/// Why (#9143 review): a hung rulings palace must not hang the recall, pile
+/// up blocking tasks, or lose the search's late success.
 /// What: a plain thread holds the rulings palace's drawer-table write lock,
-/// so its search blocks. The recall runs as its own task on a multi-thread
-/// runtime and must return within the bound, reporting the palace as timed
-/// out, with the project hits intact.
+/// so its search blocks. The first recall returns within the bound and reports
+/// `timed_out`. A second recall inside the stall reports `in_flight` and
+/// starts no search: one search in total. Once the lock is released, the
+/// stalled search records its success, and the next recall returns the ruling
+/// with no degraded entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_hung_rulings_palace_returns_within_the_bound_as_degraded() {
+async fn a_hung_rulings_palace_runs_one_search_and_its_late_success_counts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let bound = Duration::from_millis(300);
     let state = state_with(&tmp, &["project-a", "rulings-a"], &["rulings-a"])
         .await
         .with_rulings_timeout(bound);
-    seed(&state).await;
+    let (ruling, _) = seed(&state).await;
     let handle = state
         .registry
         .open_palace(&state.data_root, &PalaceId::new("rulings-a"))
@@ -293,16 +308,35 @@ async fn a_hung_rulings_palace_returns_within_the_bound_as_degraded() {
     let task = tokio::spawn(async move { recall_envelope(&task_state, plain(5)).await });
     let joined = tokio::time::timeout(Duration::from_secs(10), task).await;
     let elapsed = started.elapsed();
+    let second = tokio::time::timeout(Duration::from_secs(10), recall_envelope(&state, plain(5)))
+        .await
+        .expect("the second recall must not wait on the stalled search");
+    let started_during_stall = state.rulings.searches_started("rulings-a");
     drop(release_tx);
     holder.join().expect("lock holder");
 
-    let envelope = joined
+    let first = joined
         .expect("the recall must return while the rulings palace hangs")
         .expect("recall task");
     assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
-    assert_primary_survives(&envelope);
-    let d = degraded(&envelope);
-    assert!(d[0].1.starts_with("timed out"), "{d:?}");
+    assert_primary_survives(&first);
+    assert_eq!(degraded(&first), [entry("rulings-a", "timed_out", false)]);
+    assert_primary_survives(&second);
+    assert_eq!(degraded(&second), [entry("rulings-a", "in_flight", false)]);
+    assert_eq!(started_during_stall, 1, "one search for the whole stall");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.rulings.in_flight("rulings-a") {
+        assert!(
+            Instant::now() < deadline,
+            "the stalled search never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let after = recall_envelope(&state, plain(5)).await;
+    assert!(after.get("rulings_degraded").is_none(), "{after:#}");
+    let results = after["results"].as_array().expect("results");
+    assert!(rank_of(results, ruling).is_some(), "{after:#}");
 }
 
 /// Why (#9143 review, scope leak): a room-scoped recall asked for one slice

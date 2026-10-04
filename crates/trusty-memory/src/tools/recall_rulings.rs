@@ -7,14 +7,15 @@
 //! is optional and generic: trusty-memory names no palace, and with
 //! [`RULINGS_PALACES_ENV`] unset recall is exactly what it was before.
 //! What: [`RulingsLeg`] holds the operator's palace list, the per-recall time
-//! bound and a short cache of failed palaces. [`fetch_user_rulings`] searches
-//! every listed palace concurrently, each on the blocking pool under
-//! [`RULINGS_TIMEOUT`]; [`fold_rulings`] keeps ruling-tagged drawers
+//! bound and one [`PalaceState`] per palace: the running search, if any, and
+//! the last failure. [`fetch_user_rulings`] searches every listed palace
+//! concurrently, each on the blocking pool under [`RULINGS_TIMEOUT`];
+//! [`fold_rulings`] keeps ruling-tagged drawers
 //! ([`super::recall_rank::is_ruling`]), drops duplicates, caps the leg's share
 //! and merges the rest into the project recall at layer 1. Every palace that
-//! failed comes back as a [`RulingsDegraded`] entry, which the recall
-//! envelope reports as `rulings_degraded`; the project's own hits are always
-//! returned.
+//! contributed nothing comes back as a [`RulingsDegraded`] entry with a fixed
+//! [`DegradedReason`] code, which the recall envelope reports as
+//! `rulings_degraded`; the project's own hits are always returned.
 //! Test: `tests/recall_rulings_leg.rs`; `tools::recall_rulings_tests`.
 
 use std::collections::{HashMap, HashSet};
@@ -37,21 +38,22 @@ use crate::AppState;
 /// Environment variable naming the user-scope rulings palaces.
 ///
 /// What: a comma-separated list of palace ids, e.g. `<palace>,<palace>`.
-/// Unset or blank means no user-scope leg.
+/// Unset or blank means no user-scope leg. Read only by
+/// [`AppState::with_rulings_palaces_from_env`], which the daemon calls.
 pub const RULINGS_PALACES_ENV: &str = "TRUSTY_MEMORY_RULINGS_PALACES";
 
 /// Upper bound on the whole rulings leg of one recall.
 ///
 /// Why (#9143 review): a slow or hung rulings palace must not stall the
 /// project recall. Palaces run concurrently, so this bounds the leg, not each
-/// palace in turn.
+/// palace in turn. A search that outlives the bound keeps running; see
+/// [`DegradedReason::InFlight`].
 pub const RULINGS_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long a failed rulings palace is skipped before it is tried again.
 ///
-/// Why: an absent, unreadable or hung palace would otherwise cost an open or
-/// a full [`RULINGS_TIMEOUT`] on every recall. It is still reported as
-/// degraded while skipped.
+/// Why: an absent or unreadable palace would otherwise cost an open on every
+/// recall. It is still reported, with `cached: true`, while skipped.
 pub const RULINGS_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// Candidates fetched from each rulings palace before the ruling filter.
@@ -64,31 +66,74 @@ fn rulings_window(top_k: usize) -> usize {
     top_k.saturating_mul(4).max(32)
 }
 
+/// Why one rulings palace contributed nothing, as a fixed code.
+///
+/// Why (#9143 review): the reason reaches the recall caller, and an error's
+/// text can carry a filesystem path or panic text. The code says which way
+/// the palace failed; the full error chain goes to the `warn!` log only.
+/// What: serialized as its snake_case name.
+/// Test: `an_unreadable_rulings_palace_degrades_and_primary_hits_survive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DegradedReason {
+    /// `absent`: no palace has this id.
+    Absent,
+    /// `unreadable`: the palace exists but could not be opened.
+    Unreadable,
+    /// `search_failed`: the palace opened but its vector search failed.
+    SearchFailed,
+    /// `task_failed`: the search task panicked or was dropped unrun.
+    TaskFailed,
+    /// `timed_out`: this recall's search outlived [`RULINGS_TIMEOUT`]. The
+    /// search keeps running and records its own outcome when it ends.
+    TimedOut,
+    /// `in_flight`: a search an earlier recall started is still running, so
+    /// this recall started none.
+    InFlight,
+}
+
 /// One rulings palace the leg could not use, as the recall envelope shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RulingsDegraded {
     /// The configured palace id.
     pub palace: String,
-    /// Why it contributed nothing: absent, open failed, search failed,
-    /// timed out, or skipped because it failed within [`RULINGS_RETRY_AFTER`].
-    pub reason: String,
+    /// Why it contributed nothing.
+    pub reason: DegradedReason,
+    /// `true` when `reason` is a failure recorded within
+    /// [`RULINGS_RETRY_AFTER`] and the palace was not tried for this recall.
+    pub cached: bool,
 }
 
-/// What one rulings palace returned: its hits, or the reason it failed.
-pub(crate) type PalaceOutcome = (String, Result<Vec<RecallResult>, String>);
+/// What one rulings palace returned: its hits, or why it contributed nothing.
+pub(crate) type PalaceOutcome = Result<Vec<RecallResult>, RulingsDegraded>;
+
+/// One rulings palace's search state (#9143 review).
+///
+/// Why: a timed-out search used to be detached and forgotten, so repeated
+/// stalls piled up blocking tasks and a late success was thrown away.
+/// What: `generation` counts the searches started; only the newest may record
+/// an outcome. `running` is true while that search runs. `failure` is the last
+/// recorded failure and when it was recorded.
+#[derive(Debug, Default)]
+struct PalaceState {
+    generation: u64,
+    running: bool,
+    failure: Option<(Instant, DegradedReason)>,
+}
 
 /// The configured user-scope rulings leg (#9143).
 ///
-/// Why: the palace list, the time bound and the failed-palace cache travel
+/// Why: the palace list, the time bound and the per-palace state travel
 /// together on `AppState`, so a recall reads one value and tests can replace
 /// the list or the bound without the process environment.
 /// What: an immutable, de-duplicated palace list and timeout, plus a mutex
-/// guarded map of palace id to (failure time, reason).
-/// Test: `a_failed_palace_is_skipped_until_the_retry_window_passes`.
+/// guarded map of palace id to [`PalaceState`].
+/// Test: `a_failed_palace_is_skipped_until_the_retry_window_passes`,
+/// `a_running_search_admits_no_second_search`.
 pub struct RulingsLeg {
     palaces: Vec<String>,
     timeout: Duration,
-    failed: parking_lot::Mutex<HashMap<String, (Instant, String)>>,
+    states: parking_lot::Mutex<HashMap<String, PalaceState>>,
 }
 
 impl RulingsLeg {
@@ -102,28 +147,8 @@ impl RulingsLeg {
         Self {
             palaces,
             timeout,
-            failed: parking_lot::Mutex::new(HashMap::new()),
+            states: parking_lot::Mutex::new(HashMap::new()),
         }
-    }
-
-    /// The leg configured in [`RULINGS_PALACES_ENV`], validated once.
-    ///
-    /// Why: read once per `AppState`, like `PalaceRegistry::from_env`, so the
-    /// recall hot path never touches the environment; an odd value (blank
-    /// entries, duplicates) is reported here at warn, once, not per recall.
-    /// What: the parsed list, or empty when the variable is unset or not UTF-8.
-    pub fn from_env() -> Self {
-        let raw = std::env::var(RULINGS_PALACES_ENV).unwrap_or_default();
-        let palaces = parse_rulings_palaces(&raw);
-        let entries = raw.split(',').count();
-        if !raw.trim().is_empty() && entries != palaces.len() {
-            tracing::warn!(
-                "#9143: {RULINGS_PALACES_ENV} has {entries} entries but {} distinct \
-                 palace ids; blank and repeated entries are ignored",
-                palaces.len()
-            );
-        }
-        Self::new(palaces, RULINGS_TIMEOUT)
     }
 
     /// The configured palace ids.
@@ -131,23 +156,83 @@ impl RulingsLeg {
         &self.palaces
     }
 
-    /// The reason `palace` failed, when that was within [`RULINGS_RETRY_AFTER`].
-    fn cached_failure(&self, palace: &str) -> Option<String> {
-        let failed = self.failed.lock();
-        let (at, reason) = failed.get(palace)?;
-        (at.elapsed() < RULINGS_RETRY_AFTER).then(|| format!("{reason} (cached; not retried)"))
+    /// Whether a search of `palace` is running now.
+    pub fn in_flight(&self, palace: &str) -> bool {
+        self.states.lock().get(palace).is_some_and(|s| s.running)
     }
 
-    /// Remember a failure, or forget one once the palace answers again.
-    fn record(&self, palace: &str, outcome: &Result<Vec<RecallResult>, String>) {
-        let mut failed = self.failed.lock();
-        match outcome {
-            Ok(_) => {
-                failed.remove(palace);
+    /// How many searches of `palace` this leg has started.
+    pub fn searches_started(&self, palace: &str) -> u64 {
+        self.states.lock().get(palace).map_or(0, |s| s.generation)
+    }
+
+    /// Start a search of `palace`, or say why this recall must not.
+    ///
+    /// What: `Err(InFlight)` while a search runs; the cached failure, with
+    /// `cached: true`, within [`RULINGS_RETRY_AFTER`] of it; otherwise marks a
+    /// new search running and returns its generation.
+    fn admit(&self, palace: &str) -> Result<u64, (DegradedReason, bool)> {
+        let mut states = self.states.lock();
+        let state = states.entry(palace.to_string()).or_default();
+        // #9143 review: one search per palace at a time, so stalls never pile up.
+        if state.running {
+            return Err((DegradedReason::InFlight, false));
+        }
+        if let Some((at, reason)) = state.failure {
+            if at.elapsed() < RULINGS_RETRY_AFTER {
+                return Err((reason, true));
             }
-            Err(reason) => {
-                failed.insert(palace.to_string(), (Instant::now(), reason.clone()));
-            }
+        }
+        state.generation += 1;
+        state.running = true;
+        Ok(state.generation)
+    }
+
+    /// Record the outcome of search `generation` of `palace`.
+    ///
+    /// What: ignored unless `generation` is the newest search started, so an
+    /// older result never overwrites a newer one. Otherwise the search stops
+    /// running, a success clears the failure and a failure replaces it.
+    fn finish(&self, palace: &str, generation: u64, outcome: Result<(), DegradedReason>) {
+        let mut states = self.states.lock();
+        let Some(state) = states.get_mut(palace) else {
+            return;
+        };
+        // #9143 review: a stale result never overwrites a newer one.
+        if generation != state.generation {
+            return;
+        }
+        state.running = false;
+        state.failure = outcome.err().map(|reason| (Instant::now(), reason));
+    }
+}
+
+/// Records one search's outcome exactly once, on every exit path.
+///
+/// Why: the blocking task records its own outcome so a search that outlives
+/// the recall still clears or sets the palace's state. A panic, or a task the
+/// runtime drops unrun, would otherwise leave the palace `in_flight` forever.
+/// What: [`Self::record`] records the outcome; dropping it unrecorded records
+/// [`DegradedReason::TaskFailed`].
+struct FinishGuard {
+    leg: Arc<RulingsLeg>,
+    palace: String,
+    generation: u64,
+    recorded: bool,
+}
+
+impl FinishGuard {
+    fn record(mut self, outcome: Result<(), DegradedReason>) {
+        self.recorded = true;
+        self.leg.finish(&self.palace, self.generation, outcome);
+    }
+}
+
+impl Drop for FinishGuard {
+    fn drop(&mut self) {
+        if !self.recorded {
+            let failed = Err(DegradedReason::TaskFailed);
+            self.leg.finish(&self.palace, self.generation, failed);
         }
     }
 }
@@ -180,6 +265,30 @@ impl AppState {
         self.rulings = Arc::new(RulingsLeg::new(self.rulings.palaces.clone(), timeout));
         self
     }
+
+    /// Read the rulings palaces from [`RULINGS_PALACES_ENV`] (#9143).
+    ///
+    /// Why (#9143 review): `AppState::new` reads no environment, so a test
+    /// state is hermetic on a machine that exports the variable. The daemon
+    /// opts in at startup, like `with_bm25_lane_from_env`. An odd value (blank
+    /// entries, duplicates) is reported here at warn, once, not per recall.
+    /// What: [`Self::with_rulings_palaces`] over the parsed list; empty when
+    /// the variable is unset or not UTF-8.
+    /// Test: `a_default_state_ignores_the_rulings_env_until_the_daemon_opts_in`.
+    #[must_use]
+    pub fn with_rulings_palaces_from_env(self) -> Self {
+        let raw = std::env::var(RULINGS_PALACES_ENV).unwrap_or_default();
+        let palaces = parse_rulings_palaces(&raw);
+        let entries = raw.split(',').count();
+        if !raw.trim().is_empty() && entries != palaces.len() {
+            tracing::warn!(
+                "#9143: {RULINGS_PALACES_ENV} has {entries} entries but {} distinct \
+                 palace ids; blank and repeated entries are ignored",
+                palaces.len()
+            );
+        }
+        self.with_rulings_palaces(palaces)
+    }
 }
 
 /// Whether the rulings leg runs for this recall.
@@ -204,10 +313,10 @@ fn leg_applies(state: &AppState, scope: &RecallScope) -> bool {
 /// Why: see the module doc. Running here, beside the project lanes, keeps the
 /// leg off the recall's critical path except for its own bound.
 /// What: empty when [`leg_applies`] is false or `top_k` is 0. Otherwise, for
-/// each palace, a cached failure is returned as is; anything else runs
-/// [`search_one_bounded`] and the outcome updates the failure cache. Failures
-/// are logged at warn when first seen.
-/// Test: `an_absent_rulings_palace_degrades_and_is_not_retried_at_once`.
+/// each palace, [`RulingsLeg::admit`] either refuses (`in_flight`, or a cached
+/// failure) or starts [`search_one_bounded`].
+/// Test: `an_absent_rulings_palace_degrades_and_is_not_retried_at_once`,
+/// `a_hung_rulings_palace_runs_one_search_and_its_late_success_counts`.
 pub(crate) async fn fetch_user_rulings(
     state: &AppState,
     target: &PalaceId,
@@ -235,16 +344,23 @@ pub(crate) async fn fetch_user_rulings(
             let (leg, search, state) = (leg.clone(), search.clone(), state.clone());
             let palace = palace.clone();
             async move {
-                if let Some(reason) = leg.cached_failure(&palace) {
-                    tracing::debug!(palace = %palace, "#9143: rulings palace skipped: {reason}");
-                    return (palace, Err(reason));
-                }
-                let outcome = search_one_bounded(state, &palace, search, leg.timeout).await;
-                if let Err(reason) = &outcome {
-                    tracing::warn!(palace = %palace, "#9143: rulings palace degraded: {reason}");
-                }
-                leg.record(&palace, &outcome);
-                (palace, outcome)
+                let generation = match leg.admit(&palace) {
+                    Ok(generation) => generation,
+                    Err((reason, cached)) => {
+                        tracing::debug!(palace = %palace, ?reason, cached, "#9143: rulings palace not searched");
+                        return Err(RulingsDegraded {
+                            palace,
+                            reason,
+                            cached,
+                        });
+                    }
+                };
+                let outcome = search_one_bounded(state, &palace, search, leg, generation).await;
+                outcome.map_err(|reason| RulingsDegraded {
+                    palace,
+                    reason,
+                    cached: false,
+                })
             }
         });
     futures::future::join_all(legs).await
@@ -259,62 +375,103 @@ struct LegSearch {
     embedder: Arc<dyn Embedder + Send + Sync>,
 }
 
-/// Open and search one rulings palace on the blocking pool, under `timeout`.
+/// Run search `generation` of one rulings palace on the blocking pool, and
+/// wait for it at most the leg's timeout.
 ///
 /// Why: a palace open is disk I/O and the L2 join takes the palace's drawer
 /// lock synchronously; either can stall. On the blocking pool a stall holds a
 /// blocking thread, never a tokio worker, and the timeout returns the recall.
+/// The task records its own outcome through a [`FinishGuard`], so a search
+/// that ends after the recall gave up still updates the palace's state.
+/// What: the hits, or the code for an absent or unreadable palace, a failed
+/// search, a failed task, or the timeout.
+/// Test: `a_hung_rulings_palace_runs_one_search_and_its_late_success_counts`.
+async fn search_one_bounded(
+    state: AppState,
+    palace: &str,
+    search: Arc<LegSearch>,
+    leg: Arc<RulingsLeg>,
+    generation: u64,
+) -> Result<Vec<RecallResult>, DegradedReason> {
+    let timeout = leg.timeout;
+    let guard = FinishGuard {
+        leg,
+        palace: palace.to_string(),
+        generation,
+        recorded: false,
+    };
+    // #9143: blocking pool, so a hung open or lock never blocks a worker.
+    let task = tokio::task::spawn_blocking(move || {
+        let outcome = search_palace(&state, &guard.palace, &search);
+        guard.record(outcome.as_ref().map(|_| ()).map_err(|reason| *reason));
+        outcome
+    });
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(join)) => {
+            tracing::warn!(palace = %palace, "#9143: rulings search task failed: {join}");
+            Err(DegradedReason::TaskFailed)
+        }
+        Err(_) => {
+            tracing::warn!(
+                palace = %palace,
+                "#9143: rulings search still running after {} ms; reported as timed out",
+                timeout.as_millis()
+            );
+            Err(DegradedReason::TimedOut)
+        }
+    }
+}
+
+/// Open and search one rulings palace. Runs on the blocking pool.
+///
 /// Score scale (#9143 review): the project hits carry the vector score plus an
 /// RRF bonus from the project palace's BM25 lane, so each rulings palace's hits
 /// get the same fusion from that palace's own BM25 lane — one scorer, one
 /// scale. With no BM25 lane for that palace a ruling lacks the bonus (at most
 /// `1/61`), which errs toward the project hit.
-/// What: `Err` with a reason for an absent palace, any other open failure, a
-/// search failure, a panicked task, or the timeout; `Ok(vec![])` when the
-/// palace is an alias of the project palace.
-/// Test: `a_hung_rulings_palace_returns_within_the_bound_as_degraded`.
-async fn search_one_bounded(
-    state: AppState,
+/// What: the hits; `Ok(vec![])` when the palace is an alias of the project
+/// palace. Each failure is logged with its full error chain and returned as a
+/// bare code.
+fn search_palace(
+    state: &AppState,
     palace: &str,
-    search: Arc<LegSearch>,
-    timeout: Duration,
-) -> Result<Vec<RecallResult>, String> {
-    let palace = palace.to_string();
-    // #9143: blocking pool, so a hung open or lock never blocks a worker.
-    let task = tokio::task::spawn_blocking(move || {
-        let handle = match open_palace_handle(&state, &palace) {
-            Ok(h) => h,
-            Err(e) if PalaceRegistry::open_error_is_absent(&e) => {
-                return Err("absent: no palace with this id".to_string());
-            }
-            Err(e) => return Err(format!("open failed: {e:#}")),
-        };
-        if handle.id == search.target {
-            return Ok(Vec::new()); // an alias of the project palace itself
+    search: &LegSearch,
+) -> Result<Vec<RecallResult>, DegradedReason> {
+    let handle = match open_palace_handle(state, palace) {
+        Ok(h) => h,
+        Err(e) if PalaceRegistry::open_error_is_absent(&e) => {
+            tracing::warn!(palace = %palace, "#9143: rulings palace absent");
+            return Err(DegradedReason::Absent);
         }
-        tokio::runtime::Handle::current().block_on(async {
-            let s = &search;
-            let mut hits = retrieve_l2_scoped(
-                &handle,
-                s.embedder.as_ref(),
-                &s.expanded,
-                &RecallScope::All,
-                s.window,
-            )
-            .await
-            .map_err(|e| format!("search failed: {e:#}"))?;
-            let lexical = bm25_search_optional(&state, handle.id.as_str(), &s.query, s.window);
-            if let Some(bm25_hits) = lexical.await {
-                fuse_bm25_into_recall(&mut hits, &bm25_hits, s.window);
-            }
-            Ok(hits)
-        })
-    });
-    match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(outcome)) => outcome,
-        Ok(Err(join)) => Err(format!("search task failed: {join}")),
-        Err(_) => Err(format!("timed out after {} ms", timeout.as_millis())),
+        Err(e) => {
+            // #9143 review: the chain can name a path; it goes to the log only.
+            tracing::warn!(palace = %palace, "#9143: rulings palace unreadable: {e:#}");
+            return Err(DegradedReason::Unreadable);
+        }
+    };
+    if handle.id == search.target {
+        return Ok(Vec::new()); // an alias of the project palace itself
     }
+    tokio::runtime::Handle::current().block_on(async {
+        let mut hits = retrieve_l2_scoped(
+            &handle,
+            search.embedder.as_ref(),
+            &search.expanded,
+            &RecallScope::All,
+            search.window,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(palace = %palace, "#9143: rulings search failed: {e:#}");
+            DegradedReason::SearchFailed
+        })?;
+        let lexical = bm25_search_optional(state, handle.id.as_str(), &search.query, search.window);
+        if let Some(bm25_hits) = lexical.await {
+            fuse_bm25_into_recall(&mut hits, &bm25_hits, search.window);
+        }
+        Ok(hits)
+    })
 }
 
 /// Merge the rulings leg's outcomes into `results` and report the failures.
@@ -323,7 +480,7 @@ async fn search_one_bounded(
 /// matching #9143's "at L1". `min_score` is applied here because
 /// `apply_score_floor` exempts layer 1 by design. The cap keeps the leg from
 /// crowding the project's own answer (#9143 review).
-/// What: every `Err` becomes a [`RulingsDegraded`]. From the `Ok` hits it keeps
+/// What: every `Err` is returned as is. From the `Ok` hits it keeps
 /// ruling-tagged drawers at or above `min_score` whose drawer id and content
 /// hash are new — against `results` and against every earlier ruling, so one
 /// ruling stored in two palaces appears once — then the best
@@ -342,9 +499,9 @@ pub(crate) fn fold_rulings(
     let mut ids: HashSet<_> = results.iter().map(|r| r.drawer.id).collect();
     let mut hashes: HashSet<_> = results.iter().map(|r| r.drawer.content_hash()).collect();
     let mut rulings = Vec::new();
-    for (palace, outcome) in outcomes {
+    for outcome in outcomes {
         match outcome {
-            Err(reason) => degraded.push(RulingsDegraded { palace, reason }),
+            Err(failed) => degraded.push(failed),
             Ok(hits) => {
                 for hit in hits {
                     let admitted = is_ruling(&hit.drawer)

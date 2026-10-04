@@ -349,10 +349,11 @@ pub struct AppState {
     /// see the `authz` module docs for the full design rationale.
     pub multi_tenant_mode: bool,
     /// The user-scope rulings leg (#9143): the configured palaces, the
-    /// per-recall time bound and the failed-palace cache. Read from
-    /// `TRUSTY_MEMORY_RULINGS_PALACES` at construction; empty (the default)
-    /// disables the leg. Override with `with_rulings_palaces` and
-    /// `with_rulings_timeout`. See `tools::recall_rulings`.
+    /// per-recall time bound and each palace's search state. Empty (the
+    /// default) disables the leg; `new` reads no environment, so a test state
+    /// is hermetic. The daemon reads `TRUSTY_MEMORY_RULINGS_PALACES` through
+    /// `with_rulings_palaces_from_env`. Override with `with_rulings_palaces`
+    /// and `with_rulings_timeout`. See `tools::recall_rulings`.
     pub rulings: Arc<tools::recall_rulings::RulingsLeg>,
     /// Most recent on-disk footprint of `data_root`, in bytes (issue #35).
     ///
@@ -743,7 +744,11 @@ impl AppState {
             // unexpected files are written to the OS data dir.
             error_store: None,
             multi_tenant_mode: false,
-            rulings: Arc::new(tools::recall_rulings::RulingsLeg::from_env()),
+            // #9143 review: no env read here; the daemon opts in.
+            rulings: Arc::new(tools::recall_rulings::RulingsLeg::new(
+                Vec::new(),
+                tools::recall_rulings::RULINGS_TIMEOUT,
+            )),
             disk_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sys_metrics: Arc::new(tokio::sync::Mutex::new(
                 trusty_common::sys_metrics::SysMetrics::new(),

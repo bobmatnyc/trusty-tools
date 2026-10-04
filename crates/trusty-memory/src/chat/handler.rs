@@ -41,6 +41,24 @@ use trusty_common::{ChatEvent, ChatMessage};
 
 use super::tools::{all_tools, execute_get_dream_status, execute_tool, ChatBody, MAX_TOOL_ROUNDS};
 
+/// The "relevant memories" lines chat context injection adds to the prompt.
+///
+/// Why (#8246): ranked through the service, so a stale snapshot is demoted
+/// before it can fill one of the five context lines.
+/// What: [`MemoryService::recall_ranked`] for `message`, top 5, one
+/// `- (L<layer>) <content>` line per hit; empty when the recall fails.
+/// Test: `chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot`.
+pub(crate) async fn recall_context(state: &AppState, palace_id: &str, message: &str) -> String {
+    let ranked = MemoryService::new(state.clone())
+        .recall_ranked(palace_id, message, 5, false)
+        .await;
+    let mut context = String::new();
+    for r in ranked.iter().flatten().take(5) {
+        context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content()));
+    }
+    context
+}
+
 /// Open a `memory.chat` stream (#6286).
 ///
 /// # Errors
@@ -189,16 +207,7 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
                 palace_block.push_str(&format!("- identity:\n{identity_trimmed}\n",));
             }
 
-            // #8246: ranked through the service, so a stale snapshot is
-            // demoted before it can fill one of the five context lines.
-            let ranked = MemoryService::new(state.clone())
-                .recall_ranked(&palace_id, &body.message, 5, false)
-                .await;
-            if let Ok(hits) = ranked {
-                for r in hits.iter().take(5) {
-                    context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content()));
-                }
-            }
+            context = recall_context(&state, &palace_id, &body.message).await;
         }
     }
 
