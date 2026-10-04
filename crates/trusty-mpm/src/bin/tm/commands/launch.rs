@@ -165,8 +165,9 @@ pub(crate) async fn launch(
     };
     let gh = trusty_common::github_path::parse_github_path(&origin_url).ok_or_else(|| {
         anyhow::anyhow!(
-            "could not parse a GitHub owner/repo from origin remote: {origin_url:?}\n\
-             Run `tm connect` to start a session in the live checkout instead."
+            "could not parse a GitHub owner/repo from origin remote: {:?}\n\
+             Run `tm connect` to start a session in the live checkout instead.",
+            trusty_mpm::core::remote_url_redact::redact_url(&origin_url) // #9124
         )
     })?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);

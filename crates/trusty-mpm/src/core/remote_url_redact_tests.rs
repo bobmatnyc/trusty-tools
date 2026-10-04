@@ -60,3 +60,46 @@ fn redact_url_redacts_every_url_in_free_text() {
     assert!(out.contains("'https://***@github.com/a/b.git/'"));
     assert!(out.contains("ssh://***@host:22/c.git"));
 }
+
+/// Why: git accepts a raw `/` in a password; the authority then ends at that
+/// `/`, and a redaction keyed on the authority alone printed the tail.
+/// Test: this test.
+#[test]
+fn redact_url_masks_a_password_holding_a_raw_slash() {
+    let url = "https://octo:ghp_9124Head/Tail9124Secret@github.com/acme/widget.git";
+    let out = redact_url(url);
+    assert!(!out.contains("Tail9124Secret"), "the tail survived");
+    assert!(!out.contains("ghp_9124Head"), "the head survived");
+    assert_eq!(out, "https://***@github.com/acme/widget.git");
+}
+
+/// Why: GitLab's `private_token`, OAuth's `access_token` and friends carry the
+/// credential in the query string, not the userinfo.
+/// Test: this test.
+#[test]
+fn redact_url_masks_query_string_tokens() {
+    for key in [
+        "access_token",
+        "private_token",
+        "token",
+        "oauth_token",
+        "Access_Token",
+    ] {
+        let url =
+            format!("https://gitlab.example/api/v4/projects?per_page=5&{key}={TOKEN}&x=1#top");
+        let out = redact_url(&url);
+        assert!(!out.contains(TOKEN), "{key}: the token survived");
+        assert_eq!(
+            out,
+            format!("https://gitlab.example/api/v4/projects?per_page=5&{key}=***&x=1#top")
+        );
+    }
+    let first = format!("fetch 'https://h/o/r.git?token={TOKEN}' failed");
+    assert_eq!(
+        redact_url(&first),
+        "fetch 'https://h/o/r.git?token=***' failed"
+    );
+    // A key that only ends in `token` is not one of the listed keys.
+    let other = "https://h/o?mytoken=abc&page=2";
+    assert!(matches!(redact_url(other), Cow::Borrowed(_)));
+}

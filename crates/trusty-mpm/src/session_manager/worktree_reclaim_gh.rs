@@ -348,13 +348,17 @@ pub(crate) fn proof_origin(
 ) -> Result<String, String> {
     super::worktree_repo_slug::parse_repo_slug(origin, aliases)
         .map(|slug| slug_as_url(&slug))
-        .map_err(|refusal| match refusal {
-            super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
-                "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry renames \
-                 SSH alias '{alias}'"
-            ),
-            super::worktree_repo_slug::SlugRefusal::NoRepository => {
-                format!("cannot tell which gh host serves {origin}: it names no repository")
+        .map_err(|refusal| {
+            // #9124: the refusal is logged; never the origin's token.
+            let origin = crate::core::remote_url_redact::redact_url(origin);
+            match refusal {
+                super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
+                    "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry \
+                     renames SSH alias '{alias}'"
+                ),
+                super::worktree_repo_slug::SlugRefusal::NoRepository => {
+                    format!("cannot tell which gh host serves {origin}: it names no repository")
+                }
             }
         })
 }

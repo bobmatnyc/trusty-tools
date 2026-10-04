@@ -7,7 +7,9 @@
 #
 # Since #8700 the same job also runs trusty-mpm's agent resident-budget tests
 # off the same build, so a bundled-asset edit that overruns a budget cannot
-# merge through this required context.
+# merge through this required context. Since #9123 it also runs the workspace
+# credential-test scan off that build, on any diff that changes a crate's Rust
+# source.
 #
 # REQUIRED CONTEXT since 2026-09-11 (owner ruling, decision a). Before that
 # date this job carried `paths:` filters on both triggers and was NOT a
@@ -151,6 +153,17 @@ jobs:
           changed_nl="${RUNNER_TEMP}/capabilities-drift-changed.lines"
           tr '\0' '\n' < "$changed" > "$changed_nl"
 
+          # #9123: the credential-test scan reads every crate's Rust sources,
+          # so ANY .rs change under crates/ — inside trusty-mpm's closure or
+          # not — runs it. Computed before every early exit below; a
+          # fail-closed arm above sets relevant=true, which runs it too.
+          if grep -qE '^crates/[^/]+/(src|tests)/.*\.rs$' "$changed_nl"; then
+            echo "credential_scan=true" >> "$GITHUB_OUTPUT"
+            echo "capabilities-drift: a crate's Rust source changed — the credential-test scan runs"
+          else
+            echo "credential_scan=false" >> "$GITHUB_OUTPUT"
+          fi
+
           # #8378: an instruction-content edit is Cargo-inert, so `Rust tests
           # (affected crates)` skips it. `asset_content=true` makes this job
           # run the listed asset-content tests (scripts/asset-content-tests.tsv)
@@ -225,11 +238,15 @@ jobs:
 
       # MSRV floor is 1.94 (root Cargo.toml rust-version), matching ci.yml.
       - name: Install Rust toolchain (1.94)
-        if: steps.relevance.outputs.relevant != 'false'
+        if: >-
+          steps.relevance.outputs.relevant != 'false'
+          || steps.relevance.outputs.credential_scan == 'true'
         uses: dtolnay/rust-toolchain@1.94
 
       - name: Cache cargo build
-        if: steps.relevance.outputs.relevant != 'false'
+        if: >-
+          steps.relevance.outputs.relevant != 'false'
+          || steps.relevance.outputs.credential_scan == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: capabilities-drift
@@ -260,7 +277,9 @@ jobs:
       # note on ci.yml's test-shard cache).
       - name: Build tm and the trusty-mpm lib test harness (one dependency graph)
         id: build
-        if: steps.relevance.outputs.relevant != 'false'
+        if: >-
+          steps.relevance.outputs.relevant != 'false'
+          || steps.relevance.outputs.credential_scan == 'true'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
           CARGO_PROFILE_DEV_DEBUG: "0"
@@ -304,6 +323,40 @@ jobs:
           fi
           if ! grep -qx "running 4 tests" "$log"; then
             echo "::error::expected exactly the 4 resident-budget tests to run; a name above no longer matches a test (#8700, #8378)"
+            exit 1
+          fi
+
+      # #9123: the workspace credential-test scan. It lives in trusty-mpm's
+      # lib, so `Rust tests (affected crates)` ran it only when trusty-mpm was
+      # affected — a credential test added to any other crate merged unseen.
+      # Here it runs on every diff that changes a crate's Rust source, off the
+      # build above. Names every scan test under `--exact` and requires
+      # `running 4 tests`, like the budget step.
+      - name: Credential-test scan (every crate, reuse the build above)
+        if: >-
+          !cancelled() && steps.build.outcome == 'success'
+          && (steps.relevance.outputs.relevant != 'false'
+              || steps.relevance.outputs.credential_scan == 'true')
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/tm-target
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          set -uo pipefail
+          log="${RUNNER_TEMP}/credential-scan.log"
+          status=0
+          bash scripts/check_test_count.sh -- \
+            cargo test -p trusty-mpm --lib --locked --no-fail-fast -- --exact \
+            secret_source::credential_test_scan::every_credential_test_is_serial_and_sandboxed \
+            secret_source::credential_test_scan::the_credential_test_scan_judges_each_shape \
+            secret_source::credential_test_scan::a_helper_that_mutates_a_credential_flags_its_test \
+            secret_source::credential_test_scan::the_ratchet_judges_by_test_name \
+            > "$log" 2>&1 || status=$?
+          cat "$log"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          if ! grep -qx "running 4 tests" "$log"; then
+            echo "::error::expected exactly the 4 credential-test scan tests to run; a name above no longer matches a test (#9123)"
             exit 1
           fi
 

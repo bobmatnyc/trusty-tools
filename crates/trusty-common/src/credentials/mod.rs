@@ -84,6 +84,22 @@ mod secret;
 #[cfg(feature = "credential-test-sandbox")]
 pub mod test_sandbox;
 
+/// Whether a credential test sandbox is live in this process (#9123): the
+/// keychain tier and the `.env.local` reads answer nothing while it is. Always
+/// `false` in a build without `credential-test-sandbox`, so no production
+/// build can switch a tier off.
+/// Test: `credentials::test_sandbox::tests::the_sandbox_hides_env_local_and_the_keychain`.
+pub(crate) fn sandbox_active() -> bool {
+    #[cfg(feature = "credential-test-sandbox")]
+    {
+        test_sandbox::is_active()
+    }
+    #[cfg(not(feature = "credential-test-sandbox"))]
+    {
+        false
+    }
+}
+
 pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
 // #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.
 pub use bounded_store::{
@@ -92,7 +108,7 @@ pub use bounded_store::{
 };
 pub use dotenv::{
     env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
-    read_var_from_env_local, skip_env_local_load, user_env_local_path,
+    read_var_from_env_local, user_env_local_path,
 };
 pub use error::CredentialError;
 pub use file_store::FileKeyStore;

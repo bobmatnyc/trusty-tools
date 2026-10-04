@@ -156,11 +156,9 @@ fn fetch(base_path: &Path, refspec: &str) -> Result<(), String> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(format!(
-        "exit {}: {}",
-        out.status,
-        stderr.trim().replace('\n', "; ")
-    ))
+    // #9124: git's fetch stderr quotes the remote URL, token included.
+    let stderr = crate::core::remote_url_redact::redact_url(stderr.trim()).replace('\n', "; ");
+    Err(format!("exit {}: {stderr}", out.status))
 }
 
 fn ref_exists(base_path: &Path, full_ref: &str) -> bool {

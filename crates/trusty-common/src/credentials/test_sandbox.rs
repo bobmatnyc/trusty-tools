@@ -13,10 +13,13 @@
 //! carrying a credential marker (`TOKEN`, `SECRET`, `_KEY`, `AUTH`, …), a
 //! config-dir redirect, and any value that is a URL with embedded userinfo.
 //! It points `HOME`, the XDG dirs, `GH_CONFIG_DIR` and
-//! `TRUSTY_DATA_DIR_OVERRIDE` at a fresh temp directory, latches the
+//! `TRUSTY_DATA_DIR_OVERRIDE` at a fresh temp directory, sets
+//! `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, latches the
 //! `.env.local` loader so it never reads a file, and verifies the result — a
 //! sandbox that cannot be set up panics rather than run the test against
-//! ambient state. Drop restores every variable it touched.
+//! ambient state. While one is live, `default_store` skips the OS keychain and
+//! `env_local_value` reads nothing (`is_active`). Drop restores every
+//! variable it touched.
 //! [`assert_secret_eq`] compares a resolved value and prints only a redacted
 //! preview on failure.
 //!
@@ -30,11 +33,12 @@
 //! environment, which other test threads read.
 //!
 //! Test: `the_sandbox_clears_credentials_and_restores_them`,
-//! `the_sandbox_reads_no_env_local`, `a_failed_secret_assert_never_prints_the_value`.
+//! `the_sandbox_reads_no_env_local`, `the_sandbox_hides_env_local_and_the_keychain`,
+//! `a_failed_secret_assert_never_prints_the_value`.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::redact_secret;
 
@@ -82,6 +86,17 @@ fn has_url_userinfo(value: &str) -> bool {
 /// Distinguishes two sandboxes created in the same nanosecond.
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Live sandboxes in this process. Only [`CredentialSandbox`] moves it, and
+/// this module exists only under `credential-test-sandbox`, so a production
+/// build has no way to raise it.
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a sandbox is live: the keychain tier of `default_store` and
+/// `env_local_value` answer nothing while one is (#9123).
+pub(crate) fn is_active() -> bool {
+    ACTIVE.load(Ordering::SeqCst) > 0
+}
+
 /// An isolated credential environment for one test. See the module docs.
 ///
 /// Why: the type's lifetime is the isolation window; dropping it restores the
@@ -116,6 +131,9 @@ impl CredentialSandbox {
                 panic!("credential sandbox: cannot create {}: {e}", root.display())
             });
         }
+        // Raised as the value whose drop lowers it is built, so a panic in
+        // the setup below still lowers it exactly once.
+        ACTIVE.fetch_add(1, Ordering::SeqCst);
         let mut sandbox = Self {
             root,
             saved: Vec::new(),
@@ -134,9 +152,13 @@ impl CredentialSandbox {
         sandbox.set("XDG_CACHE_HOME", root.join("cache"));
         sandbox.set("GH_CONFIG_DIR", root.join("config/gh"));
         sandbox.set("TRUSTY_DATA_DIR_OVERRIDE", root.join("data"));
+        // Git reads no system config (credential helpers, `insteadOf`
+        // rewrites) and never prompts for a credential.
+        sandbox.set("GIT_CONFIG_NOSYSTEM", "1");
+        sandbox.set("GIT_TERMINAL_PROMPT", "0");
         // Either latched here, or an earlier load ran and the clear above
         // already removed whatever it put in the environment.
-        let _ = super::skip_env_local_load();
+        let _ = super::dotenv::skip_env_local_load();
         sandbox.verify();
         sandbox
     }
@@ -208,6 +230,7 @@ impl Drop for CredentialSandbox {
             }
         }
         let _ = std::fs::remove_dir_all(&self.root);
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -309,9 +332,44 @@ mod tests {
             "the loader read a .env.local inside the sandbox"
         );
         assert!(
-            !super::super::skip_env_local_load(),
+            !super::super::dotenv::skip_env_local_load(),
             "the sandbox must leave the loader latched"
         );
+    }
+
+    /// Why: env vars are one tier; the keychain and a cwd-upward
+    /// `.env.local` are two more, and a sandboxed test must reach neither.
+    /// What: a repo-shaped temp dir binds a probe variable in `.env.local`;
+    /// the read and the keychain gate answer normally outside a sandbox and
+    /// nothing inside one, and git's isolation variables are set.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn the_sandbox_hides_env_local_and_the_keychain() {
+        hides_env_local_and_the_keychain();
+    }
+
+    #[serial(dotenv_credential_env, inference_env)]
+    fn hides_env_local_and_the_keychain() {
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let repo = tempfile::TempDir::new().expect("repo");
+        std::fs::create_dir(repo.path().join(".git")).expect(".git");
+        std::fs::write(repo.path().join(".env.local"), "TRUSTY_9123_PROBE=v\n").expect("write");
+        let read = || super::super::dotenv::env_local_value_from(repo.path(), "TRUSTY_9123_PROBE");
+        assert_eq!(read().as_deref(), Some("v"), "the probe must be readable");
+        assert!(super::super::resolver::keychain_allowed());
+        {
+            let _sandbox = CredentialSandbox::enter();
+            assert!(is_active());
+            assert_eq!(read(), None, "a sandboxed read reached .env.local");
+            assert!(!super::super::resolver::keychain_allowed());
+            assert_eq!(std::env::var("GIT_CONFIG_NOSYSTEM").as_deref(), Ok("1"));
+            assert_eq!(std::env::var("GIT_TERMINAL_PROMPT").as_deref(), Ok("0"));
+        }
+        assert!(!is_active(), "the flag outlived the sandbox");
+        assert_eq!(read().as_deref(), Some("v"));
     }
 
     /// Why: the leak lived in the failure path; provoke it and read it.

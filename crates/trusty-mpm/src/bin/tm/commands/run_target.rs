@@ -511,8 +511,9 @@ pub(crate) fn preflight_verdict(
 ) -> anyhow::Result<()> {
     resolved.map(drop).map_err(|e| {
         anyhow::anyhow!(
-            "cannot choose the gh account for {origin}: {e}\n\
-             No session was started. `tm doctor` reports the [accounts] table."
+            "cannot choose the gh account for {}: {e}\n\
+             No session was started. `tm doctor` reports the [accounts] table.",
+            trusty_mpm::core::remote_url_redact::redact_url(origin) // #9124
         )
     })
 }

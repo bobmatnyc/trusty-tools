@@ -170,6 +170,28 @@ async fn a_local_only_repo_spawns_a_worktree_from_its_local_head() {
     );
 }
 
+/// #9124: both refusals that quote the origin go to the daemon log and the
+/// client, so neither may carry the origin's embedded token.
+/// What: an unparseable credentialed origin, then a parseable one, through
+/// [`spawn_managed_local`] on a real repository.
+/// Test: itself.
+#[test]
+fn a_local_spawn_refusal_never_quotes_the_origin_token() {
+    const TOKEN: &str = "ghp_9124LocalSpawnSynthetic0000";
+    let id = ManagedSessionId::new();
+    for origin in [
+        format!("https://octo:{TOKEN}@example.test/"),
+        format!("https://octo:{TOKEN}@github.com/acme/widget.git"),
+    ] {
+        let checkout = tempfile::TempDir::new().expect("checkout");
+        repo(checkout.path(), Some(&origin));
+        let msg = spawn_managed_local(&id, &params(checkout.path(), false));
+        assert!(msg.starts_with("spawn failed"), "not a refusal: {msg}");
+        assert!(!msg.contains(TOKEN), "the refusal quoted the origin token");
+        assert!(msg.contains("https://***@"), "the origin lost its shape");
+    }
+}
+
 /// #8934: a repository WITH an origin keeps today's routing and gh behaviour —
 /// it is never routed local-only, and an unpinned origin still injects nothing.
 /// Test: itself.
