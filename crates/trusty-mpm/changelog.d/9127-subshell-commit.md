@@ -34,3 +34,5 @@ Fixed
   judged in the worktree and allowed, while zsh never runs that `cd`.
 - A command whose program word is a brace expansion, such as
   `{git,-C,<dir>,commit}`, is refused as unclassifiable, like `$'…'` quoting.
+- A source-scan test now fails CI when a pm-guard rule reads the shell-group
+  walk without refusing a command the walk cannot place.

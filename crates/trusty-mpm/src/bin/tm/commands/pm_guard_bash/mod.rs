@@ -1119,3 +1119,7 @@ mod false_positive_9001_tests;
 // bound every relaxation.
 #[cfg(test)]
 mod guard_tokenizer_tests;
+
+// #9127: a rule reading the shell-group walk must refuse what it cannot place.
+#[cfg(test)]
+mod step_reader_scan_tests;
