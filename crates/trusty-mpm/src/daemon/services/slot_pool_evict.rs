@@ -10,13 +10,14 @@
 //! interval. A tick measures the volume holding `builders.slot_pool_root`
 //! against [`effective_evict_pct`] and, at or over it, evicts idle `slot-N`
 //! directories oldest-first.
-//! Fail direction: keep. A scratch-rooted daemon, an unusable lease store or an
-//! unmeasurable volume evicts nothing and says so at `warn`.
+//! Fail direction: keep. A scratch-rooted daemon, an unusable lease store, an
+//! unsafe pool root or an unmeasurable volume evicts nothing and says so at
+//! `warn`.
 //! Test: `slot_pool_evict_tests` below; the sweep itself is `evict_tests.rs`.
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::time::MissedTickBehavior;
 use tracing::{info, warn};
@@ -82,15 +83,24 @@ pub(crate) async fn evict_loop(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            _ = tick.tick() => run_one_tick(&state).await,
+            _ = tick.tick() => run_one_tick(&state, interval, &cancel).await,
         }
     }
 }
 
 /// One sweep against the operator's real pool, gated on host state.
 ///
-/// Test: `a_scratch_rooted_daemon_evicts_nothing`.
-pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
+/// What: the maintenance-lane permit moves into the blocking pass, so the lane
+/// stays held until the pass ends even when shutdown drops this future; the
+/// pass polls `cancel` between slots, so it ends at the next slot boundary.
+/// A pass longer than `interval` logs a `warn`.
+/// Test: `a_scratch_rooted_daemon_evicts_nothing`,
+/// `a_pass_longer_than_the_interval_warns`.
+pub(crate) async fn run_one_tick(
+    state: &Arc<DaemonState>,
+    interval: Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
     // #6348: a scratch-rooted daemon is a test process; the pool is real.
     if let Some(reason) = crate::daemon::host_state_refusal(state) {
         warn!("slot-pool eviction: skipped — {reason}");
@@ -100,15 +110,41 @@ pub(crate) async fn run_one_tick(state: &Arc<DaemonState>) {
         warn!("slot-pool eviction: skipped — no home directory to resolve the pool from");
         return;
     };
-    let Ok(_permit) = super::sweep_status::lane().acquire().await else {
+    let Ok(permit) = super::sweep_status::lane().acquire().await else {
         warn!("slot-pool eviction: maintenance lane closed; pass not run");
         return;
     };
-    let joined = tokio::task::spawn_blocking(move || evict_in(&home)).await;
-    match joined {
-        Ok(line) => log_tick(&line),
-        Err(e) => warn!("slot-pool eviction: the pass did not complete: {e}"),
+    // #8451: the pass owns the permit and the cancel, so a shutdown stops it at
+    // the next slot boundary and the lane frees only when it has stopped.
+    let cancel = cancel.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let started = Instant::now();
+        log_tick(&evict_in(&home, &|| cancel.is_cancelled()));
+        if let Some(msg) = overrun_warning(started.elapsed(), interval) {
+            warn!("slot-pool eviction: {msg}");
+        }
+    })
+    .await;
+    if let Err(e) = joined {
+        warn!("slot-pool eviction: the pass did not complete: {e}");
     }
+}
+
+/// The warning for a pass that ran longer than the sweep interval.
+///
+/// Why: the pass holds the one maintenance-lane permit, so an overlong pass
+/// delays the next tick and every other lane user (#8451).
+/// Test: `a_pass_longer_than_the_interval_warns`.
+pub(crate) fn overrun_warning(elapsed: Duration, interval: Duration) -> Option<String> {
+    (elapsed > interval).then(|| {
+        format!(
+            "the pass took {}s, longer than the {}s interval; it held the maintenance \
+             lane throughout",
+            elapsed.as_secs(),
+            interval.as_secs()
+        )
+    })
 }
 
 /// What one tick logs: the level and the line.
@@ -137,7 +173,7 @@ fn log_tick(line: &TickLog) {
 /// guard from `disk.max_usage_pct`, the threshold from
 /// `builders.slot_pool_evict_pct` — then [`evict_measured`].
 /// Test: `evict_measured`'s tests; this reads the operator's config files.
-pub(crate) fn evict_in(home: &Path) -> TickLog {
+pub(crate) fn evict_in(home: &Path, cancelled: &dyn Fn() -> bool) -> TickLog {
     let builders = crate::core::config::MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
     let pool = builders.effective_slot_pool_root(home);
@@ -147,9 +183,11 @@ pub(crate) fn evict_in(home: &Path) -> TickLog {
     let mut measure = |p: &Path| disk_usage_guard::measure(p).map(|m| m.usage_pct);
     evict_measured(
         &pool,
+        home,
         store.as_ref().map_err(ToString::to_string),
         threshold,
         &mut measure,
+        cancelled,
     )
 }
 
@@ -157,14 +195,18 @@ pub(crate) fn evict_in(home: &Path) -> TickLog {
 ///
 /// What: an unusable `store` evicts nothing (no slot can be proven idle);
 /// otherwise [`sweep`] runs and its outcome becomes a [`TickLog`]. A removal
-/// that did not finish is always a `Warn`, never folded into the success line.
+/// that did not finish is always a `Warn`, never folded into the success line;
+/// so is a refused pool root. A sweep the cancel stopped says so.
 /// Test: `an_unusable_store_evicts_nothing`, `a_tick_evicts_over_the_threshold`,
-/// `an_unmeasurable_tick_warns`, `a_failed_removal_tick_warns`.
+/// `an_unmeasurable_tick_warns`, `a_failed_removal_tick_warns`,
+/// `a_refused_root_tick_warns`, `a_cancelled_tick_says_it_stopped`.
 pub(crate) fn evict_measured(
     pool: &Path,
+    home: &Path,
     store: Result<&SlotDir, String>,
     threshold: u8,
     measure: &mut dyn FnMut(&Path) -> Option<f32>,
+    cancelled: &dyn Fn() -> bool,
 ) -> TickLog {
     // Without the lease store no slot's flock can be taken, so no slot can be
     // proven idle: evict nothing.
@@ -172,8 +214,11 @@ pub(crate) fn evict_measured(
         Ok(store) => store,
         Err(e) => return TickLog::Warn(format!("no usable lease store ({e}); nothing evicted")),
     };
-    match sweep(pool, store, threshold, measure) {
+    match sweep(pool, home, store, threshold, measure, cancelled) {
         SweepOutcome::NoPool | SweepOutcome::UnderThreshold(_) => TickLog::Quiet,
+        SweepOutcome::Refused(why) => {
+            TickLog::Warn(format!("refusing to sweep: {why}; nothing evicted"))
+        }
         SweepOutcome::Unmeasurable => TickLog::Warn(format!(
             "the volume holding {} cannot be measured; nothing evicted",
             pool.display()
@@ -204,6 +249,10 @@ pub(crate) fn evict_measured(
                     "{summary}; {} removal(s) did not complete: {}",
                     failed.len(),
                     failed.join("; ")
+                ))
+            } else if report.cancelled {
+                TickLog::Info(format!(
+                    "{summary}; stopped early: the daemon is shutting down"
                 ))
             } else if report.evicted.is_empty() && report.leftovers_removed == 0 {
                 TickLog::Warn(format!(

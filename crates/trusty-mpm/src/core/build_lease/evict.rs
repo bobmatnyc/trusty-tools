@@ -28,6 +28,14 @@
 //! the flock is released, and the renamed tree is deleted. A deletion that does
 //! not finish leaves that tree, which the next sweep removes first.
 //!
+//! **Root guard.** The walk deletes any real `slot-<u32>` directory two levels
+//! under the root, so a root that is `/`, the home directory, or an ancestor of
+//! home, or that does not resolve, is refused before anything is read
+//! ([`SweepOutcome::Refused`]). The pool has no root marker to check instead.
+//!
+//! **Cancellation.** The sweep checks its cancel signal before each slot and
+//! each leftover tree, so a shutdown waits on at most one removal.
+//!
 //! **Fail direction: keep.** A volume that cannot be measured evicts nothing; a
 //! slot whose state cannot be read is spared; a slot whose age cannot be read
 //! sorts newest.
@@ -161,6 +169,8 @@ pub struct EvictReport {
     pub leftovers_removed: usize,
     /// The volume's usage when the sweep stopped; `None` when unmeasurable.
     pub usage_after: Option<f32>,
+    /// The cancel signal stopped the sweep at a slot boundary.
+    pub cancelled: bool,
 }
 
 impl EvictReport {
@@ -188,6 +198,9 @@ pub enum SweepOutcome {
     UnderThreshold(f32),
     /// The pool root exists but cannot be listed; nothing was touched.
     Unlistable(String),
+    /// The pool root is unsafe to sweep (see the module's root guard); nothing
+    /// was read or touched.
+    Refused(String),
     /// The volume was at or over the threshold and the sweep ran.
     Swept(EvictReport),
 }
@@ -195,22 +208,29 @@ pub enum SweepOutcome {
 /// Evict `slot-N` directories under `pool_root`, oldest first, while the
 /// volume is at or over `threshold_pct`.
 ///
-/// What: `measure` reads the used percent of the volume holding a path
+/// What: `pool_root` first passes [`check_pool_root`] against `home`.
+/// `measure` reads the used percent of the volume holding a path
 /// (`disk_usage_guard::measure` in production). It is read before the sweep
 /// and again after each eviction; the sweep stops as soon as the volume reads
 /// under the threshold or cannot be read. Each candidate goes through
-/// [`evict_one`] against `store`, the machine's lease store.
+/// [`evict_one`] against `store`, the machine's lease store. `cancelled` is
+/// polled before each slot; once it reads true the sweep stops there.
 /// Test: `an_over_threshold_volume_evicts_oldest_first_until_below`,
 /// `an_unmeasurable_volume_evicts_nothing`,
-/// `an_under_threshold_volume_evicts_nothing`, `a_missing_pool_is_empty`.
+/// `an_under_threshold_volume_evicts_nothing`, `a_missing_pool_is_empty`,
+/// `a_cancelled_sweep_evicts_no_further_slots`.
 pub fn sweep(
     pool_root: &Path,
+    home: &Path,
     store: &SlotDir,
     threshold_pct: u8,
     measure: &mut dyn FnMut(&Path) -> Option<f32>,
+    cancelled: &dyn Fn() -> bool,
 ) -> SweepOutcome {
-    if !pool_root.is_dir() {
-        return SweepOutcome::NoPool;
+    match check_pool_root(pool_root, home) {
+        RootCheck::Missing => return SweepOutcome::NoPool,
+        RootCheck::Refused(why) => return SweepOutcome::Refused(why),
+        RootCheck::Safe => {}
     }
     let threshold = f32::from(threshold_pct);
     let Some(usage) = measure(pool_root) else {
@@ -220,13 +240,18 @@ pub fn sweep(
         return SweepOutcome::UnderThreshold(usage);
     }
     let mut report = EvictReport::default();
-    remove_leftovers(pool_root, &mut report);
+    remove_leftovers(pool_root, &mut report, cancelled);
     let slots = match list_pool_slots(pool_root) {
         Ok(slots) => slots,
         Err(err) => return SweepOutcome::Unlistable(err.to_string()),
     };
     report.usage_after = measure(pool_root);
     for slot in slots {
+        // #8451: stop at a slot boundary so shutdown waits on one removal at most.
+        if report.cancelled || cancelled() {
+            report.cancelled = true;
+            break;
+        }
         if report.usage_after.is_none_or(|usage| usage < threshold) {
             break;
         }
@@ -240,6 +265,64 @@ pub fn sweep(
     SweepOutcome::Swept(report)
 }
 
+/// What [`check_pool_root`] found.
+enum RootCheck {
+    /// No directory at the root: nothing to sweep.
+    Missing,
+    /// Unsafe to sweep, and why.
+    Refused(String),
+    /// Safe to sweep.
+    Safe,
+}
+
+/// Whether `root` is safe to sweep, given the operator's `home`.
+///
+/// Why: a misconfigured `builders.slot_pool_root` (`/`, home, an ancestor of
+/// home) would point the `<root>/*/*/slot-N` deletion at unrelated directories.
+/// What: a root that does not exist, or is not a directory, is `Missing`. A
+/// root that fails to canonicalize for any other reason is refused, as is a
+/// canonical root that is `/`, or that equals or contains the canonical home.
+/// A home that does not canonicalize is refused too: the root cannot be
+/// checked against it.
+/// Test: `the_filesystem_root_is_refused`, `the_home_directory_is_refused`,
+/// `an_ancestor_of_home_is_refused`, `an_unresolvable_root_is_refused`,
+/// `an_unresolvable_home_is_refused`.
+fn check_pool_root(root: &Path, home: &Path) -> RootCheck {
+    let canon = match std::fs::canonicalize(root) {
+        Ok(canon) => canon,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return RootCheck::Missing,
+        // #8451: a root that does not resolve cannot be checked; keep everything.
+        Err(err) => {
+            return RootCheck::Refused(format!("{} does not resolve ({err})", root.display()));
+        }
+    };
+    if !canon.is_dir() {
+        return RootCheck::Missing;
+    }
+    // #8451: the walk under `/` reaches every `/<a>/<b>/slot-N` on the host.
+    if canon.parent().is_none() {
+        return RootCheck::Refused(format!("{} is the filesystem root", root.display()));
+    }
+    let home = match std::fs::canonicalize(home) {
+        Ok(home) => home,
+        Err(err) => {
+            return RootCheck::Refused(format!(
+                "home {} does not resolve ({err}), so {} cannot be checked against it",
+                home.display(),
+                root.display()
+            ));
+        }
+    };
+    // #8451: a root at or above home would walk the operator's own files.
+    if home.starts_with(&canon) {
+        return RootCheck::Refused(format!(
+            "{} is the home directory or an ancestor of it",
+            root.display()
+        ));
+    }
+    RootCheck::Safe
+}
+
 /// Why [`evict_one`] did not evict.
 enum Outcome {
     Spared(Spared),
@@ -251,6 +334,13 @@ enum Outcome {
 /// What: see the module's in-use guard. A failed delete leaves the renamed
 /// `.evicting.` tree for the next sweep and is reported, never folded into a
 /// success.
+///
+/// Residual window: the lease flock excludes only builds run under
+/// `tm build-lease`. A cargo build pointed at the slot by hand can take
+/// `.cargo-lock` after the `cargo_lock_held` check and before the rename; the
+/// rename then moves its tree away mid-build.
+/// Test: one test per [`Spared`] arm, plus
+/// `a_failed_rename_is_reported_and_keeps_the_slot`.
 fn evict_one(slot: &PoolSlot, store: &SlotDir) -> Result<(), Outcome> {
     let parent = slot.path.parent().unwrap_or(&slot.path);
     if live_staging(parent, slot.index) {
@@ -300,7 +390,15 @@ const EVICTING_INFIX: &str = ".evicting.";
 ///
 /// What: a tree whose pid is this process or a dead one is removed; a live
 /// other process's tree is left to it. A removal error is reported as failed.
-fn remove_leftovers(root: &Path, report: &mut EvictReport) {
+/// `cancelled` is polled before each tree.
+///
+/// Two limits. A dead sweep's pid that the OS has recycled to a live process
+/// reads as live, so its tree stays until that process exits. And leftovers
+/// are only removed by a sweep that runs, which needs the volume at or over
+/// the threshold; under it they stay on disk.
+/// Test: `a_failed_removal_is_reported_and_left_for_the_next_sweep`,
+/// `a_sweep_cancelled_before_it_starts_touches_nothing`.
+fn remove_leftovers(root: &Path, report: &mut EvictReport, cancelled: &dyn Fn() -> bool) {
     for repo in repo_dirs(root) {
         let Ok(entries) = std::fs::read_dir(&repo) else {
             continue;
@@ -318,6 +416,11 @@ fn remove_leftovers(root: &Path, report: &mut EvictReport) {
             if pid != std::process::id() && crate::core::process::is_process_alive(pid) {
                 continue;
             }
+            // #8451: a cancel stops before the next tree, not after the last.
+            if cancelled() {
+                report.cancelled = true;
+                return;
+            }
             match std::fs::remove_dir_all(entry.path()) {
                 Ok(()) => report.leftovers_removed += 1,
                 Err(err) => report.failed.push((entry.path(), err.to_string())),
@@ -330,7 +433,10 @@ fn remove_leftovers(root: &Path, report: &mut EvictReport) {
 ///
 /// What: an entry `.slot-<index>.seeding.<pid>.<nanos>` (the name
 /// `builder_slot_pool::staging_path` mints) whose pid is alive, or cannot be
-/// parsed — an unreadable name is treated as live.
+/// parsed — an unreadable name is treated as live, and so is a `parent` that
+/// cannot be listed.
+/// Test: `a_live_seed_staging_spares_its_slot`,
+/// `an_unreadable_repo_dir_reads_as_live_staging`.
 fn live_staging(parent: &Path, index: u32) -> bool {
     let prefix = format!(".slot-{index}.seeding.");
     let Ok(entries) = std::fs::read_dir(parent) else {

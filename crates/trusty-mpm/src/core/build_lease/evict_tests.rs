@@ -10,10 +10,12 @@ use std::time::{Duration, SystemTime};
 use super::*;
 use crate::core::build_lease::slots::HolderRecord;
 
-/// A pool root, a lease store, and the temp dir that owns both.
+/// A pool root, an injected home beside it, a lease store, and the temp dir
+/// that owns all three.
 struct Fixture {
     _tmp: tempfile::TempDir,
     pool: PathBuf,
+    home: PathBuf,
     store: SlotDir,
 }
 
@@ -21,12 +23,20 @@ fn fixture() -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
     let pool = tmp.path().join("pool");
     std::fs::create_dir_all(&pool).expect("pool root");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).expect("home");
     let store = SlotDir::at(tmp.path().join("store")).expect("lease store");
     Fixture {
         _tmp: tmp,
         pool,
+        home,
         store,
     }
+}
+
+/// Sweep the fixture's pool at an 85% threshold, never cancelled.
+fn run(f: &Fixture, measure: &mut dyn FnMut(&Path) -> Option<f32>) -> SweepOutcome {
+    sweep(&f.pool, &f.home, &f.store, 85, measure, &|| false)
 }
 
 /// Make `<pool>/<repo>/slot-<index>/debug/artifact`, last used `age` ago.
@@ -115,7 +125,14 @@ fn a_missing_pool_is_empty() {
             .expect("absent is empty")
             .is_empty()
     );
-    let outcome = sweep(&missing, &f.store, 85, &mut |_: &Path| Some(99.0));
+    let outcome = sweep(
+        &missing,
+        &f.home,
+        &f.store,
+        85,
+        &mut |_: &Path| Some(99.0),
+        &|| false,
+    );
     assert_eq!(outcome, SweepOutcome::NoPool);
 }
 
@@ -125,7 +142,7 @@ fn a_missing_pool_is_empty() {
 fn an_unmeasurable_volume_evicts_nothing() {
     let f = fixture();
     let slot = make_slot(&f.pool, "o/r", 0, HOUR);
-    let outcome = sweep(&f.pool, &f.store, 85, &mut |_: &Path| None);
+    let outcome = run(&f, &mut |_: &Path| None);
     assert_eq!(outcome, SweepOutcome::Unmeasurable);
     assert!(slot.is_dir());
 }
@@ -135,7 +152,7 @@ fn an_unmeasurable_volume_evicts_nothing() {
 fn an_under_threshold_volume_evicts_nothing() {
     let f = fixture();
     let slot = make_slot(&f.pool, "o/r", 0, HOUR);
-    let outcome = sweep(&f.pool, &f.store, 85, &mut |_: &Path| Some(84.9));
+    let outcome = run(&f, &mut |_: &Path| Some(84.9));
     assert_eq!(outcome, SweepOutcome::UnderThreshold(84.9));
     assert!(slot.is_dir());
 }
@@ -147,7 +164,7 @@ fn an_unlistable_pool_evicts_nothing() {
     let f = fixture();
     make_slot(&f.pool, "o/r", 0, HOUR);
     std::fs::set_permissions(&f.pool, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-    let outcome = sweep(&f.pool, &f.store, 85, &mut |_: &Path| Some(99.0));
+    let outcome = run(&f, &mut |_: &Path| Some(99.0));
     std::fs::set_permissions(&f.pool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     assert!(
         matches!(outcome, SweepOutcome::Unlistable(_)),
@@ -165,7 +182,7 @@ fn an_over_threshold_volume_evicts_oldest_first_until_below() {
     let oldest = make_slot(&f.pool, "o/r", 0, 3 * HOUR);
     let middle = make_slot(&f.pool, "p/q", 1, 2 * HOUR);
     let newest = make_slot(&f.pool, "o/r", 2, HOUR);
-    let report = swept(sweep(&f.pool, &f.store, 85, &mut per_slot(75.0)));
+    let report = swept(run(&f, &mut per_slot(75.0)));
     assert_eq!(report.evicted, vec![oldest.clone(), middle.clone()]);
     assert!(report.spared.is_empty() && !report.failed());
     assert_eq!(report.usage_after, Some(80.0));
@@ -187,7 +204,7 @@ fn an_over_threshold_volume_evicts_oldest_first_until_below() {
 fn sweep_with_busy_slot_0(f: &Fixture) -> (Vec<(PathBuf, Spared)>, bool) {
     let busy = f.pool.join("o/r/slot-0");
     let idle = make_slot(&f.pool, "o/r", 1, HOUR);
-    let report = swept(sweep(&f.pool, &f.store, 85, &mut |_: &Path| Some(95.0)));
+    let report = swept(run(f, &mut |_: &Path| Some(95.0)));
     assert!(busy.is_dir(), "the busy slot was evicted");
     assert!(!report.failed(), "{:?}", report.failed);
     (report.spared, report.evicted == vec![idle])
@@ -249,7 +266,9 @@ fn a_corrupt_slot_record_spares_its_slot() {
     assert!(idle_evicted);
 }
 
-/// Fail-Open Check: a slot file that cannot be opened spares the slot.
+/// Fail-Open Check: a slot file that cannot be opened spares the slot. This is
+/// the `try_acquire` error arm: opening a directory for write fails with
+/// `EISDIR` before any flock or record is read.
 #[test]
 #[serial_test::serial(build_slot_fds)]
 fn a_broken_slot_file_spares_its_slot() {
@@ -258,7 +277,7 @@ fn a_broken_slot_file_spares_its_slot() {
     std::fs::create_dir_all(f.store.path().join("slot-0.lock")).expect("a directory, not a file");
     let (spared, idle_evicted) = sweep_with_busy_slot_0(&f);
     assert!(
-        matches!(spared.as_slice(), [(_, Spared::Unknown(_))]),
+        matches!(spared.as_slice(), [(_, Spared::Unknown(e))] if e.contains("Is a directory")),
         "{spared:?}"
     );
     assert!(idle_evicted);
@@ -310,7 +329,7 @@ fn a_failed_removal_is_reported_and_left_for_the_next_sweep() {
     std::fs::create_dir_all(&foreign).expect("foreign tree");
     let debug = slot.join("debug");
     std::fs::set_permissions(&debug, std::fs::Permissions::from_mode(0o555)).expect("chmod");
-    let report = swept(sweep(&f.pool, &f.store, 85, &mut |_: &Path| Some(95.0)));
+    let report = swept(run(&f, &mut |_: &Path| Some(95.0)));
     assert!(report.failed(), "{report:?}");
     assert!(report.evicted.is_empty());
     let doomed: Vec<PathBuf> = std::fs::read_dir(f.pool.join("o/r"))
@@ -329,9 +348,173 @@ fn a_failed_removal_is_reported_and_left_for_the_next_sweep() {
         std::fs::Permissions::from_mode(0o755),
     )
     .expect("chmod back");
-    let again = swept(sweep(&f.pool, &f.store, 85, &mut |_: &Path| Some(95.0)));
+    let again = swept(run(&f, &mut |_: &Path| Some(95.0)));
     assert_eq!(again.leftovers_removed, 1);
     assert!(!again.failed(), "{again:?}");
     assert!(!doomed[0].exists());
     assert!(foreign.is_dir(), "a live process's tree is left to it");
+}
+
+/// Sweep `root` with an injected `home`, expect a refusal, and return its
+/// reason. `measure` counts its calls: a refused root is never measured.
+fn refusal(f: &Fixture, root: &Path, home: &Path, reading: Option<f32>) -> String {
+    let mut reads = 0;
+    let outcome = sweep(
+        root,
+        home,
+        &f.store,
+        85,
+        &mut |_: &Path| {
+            reads += 1;
+            reading
+        },
+        &|| false,
+    );
+    assert_eq!(reads, 0, "a refused root was measured: {outcome:?}");
+    match outcome {
+        SweepOutcome::Refused(why) => why,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// The volume reads unmeasurable here, so even a missing guard could not
+/// evict anything under `/`; the refusal reason is what the test pins.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn the_filesystem_root_is_refused() {
+    let f = fixture();
+    let why = refusal(&f, Path::new("/"), &f.home, None);
+    assert!(why.contains("filesystem root"), "{why}");
+}
+
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn the_home_directory_is_refused() {
+    let f = fixture();
+    let slot = make_slot(&f.home, "o/r", 0, HOUR);
+    let why = refusal(&f, &f.home, &f.home, Some(99.0));
+    assert!(why.contains("home directory or an ancestor"), "{why}");
+    assert!(slot.is_dir(), "nothing under home is evicted");
+}
+
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn an_ancestor_of_home_is_refused() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    let home = f.pool.join("users/me");
+    std::fs::create_dir_all(&home).expect("home under the pool");
+    let why = refusal(&f, &f.pool, &home, Some(99.0));
+    assert!(why.contains("home directory or an ancestor"), "{why}");
+    assert!(slot.is_dir(), "nothing above home is evicted");
+}
+
+/// A root that fails to canonicalize for a reason other than absence (here a
+/// symlink loop) is refused, not read as a missing pool.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn an_unresolvable_root_is_refused() {
+    let f = fixture();
+    let base = f.pool.parent().expect("tempdir").to_path_buf();
+    std::os::unix::fs::symlink(base.join("loop-b"), base.join("loop-a")).expect("link a");
+    std::os::unix::fs::symlink(base.join("loop-a"), base.join("loop-b")).expect("link b");
+    let why = refusal(&f, &base.join("loop-a"), &f.home, Some(99.0));
+    assert!(why.contains("does not resolve"), "{why}");
+}
+
+/// A home that does not resolve leaves the root unchecked, so it is refused.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn an_unresolvable_home_is_refused() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    let home = f.pool.parent().expect("tempdir").join("no-such-home");
+    let why = refusal(&f, &f.pool, &home, Some(99.0));
+    assert!(
+        why.contains("home") && why.contains("does not resolve"),
+        "{why}"
+    );
+    assert!(slot.is_dir());
+}
+
+/// A cancel that fires once the first slot is gone stops the sweep at the next
+/// slot boundary, though the volume still reads over the threshold.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_cancelled_sweep_evicts_no_further_slots() {
+    let f = fixture();
+    let oldest = make_slot(&f.pool, "o/r", 0, 3 * HOUR);
+    let middle = make_slot(&f.pool, "o/r", 1, 2 * HOUR);
+    let newest = make_slot(&f.pool, "p/q", 2, HOUR);
+    let probe = oldest.clone();
+    let cancelled = move || !probe.exists();
+    let report = swept(sweep(
+        &f.pool,
+        &f.home,
+        &f.store,
+        85,
+        &mut |_: &Path| Some(99.0),
+        &cancelled,
+    ));
+    assert_eq!(report.evicted, vec![oldest]);
+    assert!(report.cancelled && !report.failed(), "{report:?}");
+    assert!(middle.is_dir() && newest.is_dir());
+}
+
+/// A sweep cancelled from the start removes no leftover tree and no slot.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_sweep_cancelled_before_it_starts_touches_nothing() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    // This process's own `.evicting.` tree is one the sweep would remove.
+    let leftover = f
+        .pool
+        .join(format!("o/r/.slot-3.evicting.{}.1", std::process::id()));
+    std::fs::create_dir_all(&leftover).expect("leftover tree");
+    let report = swept(sweep(
+        &f.pool,
+        &f.home,
+        &f.store,
+        85,
+        &mut |_: &Path| Some(99.0),
+        &|| true,
+    ));
+    assert!(report.cancelled, "{report:?}");
+    assert_eq!(report.leftovers_removed, 0);
+    assert!(report.evicted.is_empty());
+    assert!(leftover.is_dir() && slot.is_dir());
+}
+
+/// Fail-Open Check: a repo dir that cannot be listed reads as a live seed.
+#[test]
+fn an_unreadable_repo_dir_reads_as_live_staging() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("o/r");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let live = live_staging(&repo, 0);
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(live, "an unlistable parent must spare the slot");
+}
+
+/// Fail-Open Check: a rename that fails is reported, the slot keeps its name,
+/// and its lease is released.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_failed_rename_is_reported_and_keeps_the_slot() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    let repo = f.pool.join("o/r");
+    // A read-only parent lists, but refuses the rename.
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    let report = swept(run(&f, &mut |_: &Path| Some(95.0)));
+    std::fs::set_permissions(&repo, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        matches!(report.failed.as_slice(), [(p, e)] if p == &slot && e.starts_with("rename to")),
+        "{report:?}"
+    );
+    assert!(report.evicted.is_empty());
+    assert!(slot.is_dir());
+    assert!(f.store.try_acquire(0).expect("lock").is_some());
 }
