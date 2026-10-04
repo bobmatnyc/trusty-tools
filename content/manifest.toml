@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.1.0"
+version = "2.1.1"
 schema_major = 1
 
 [[member]]
@@ -152,7 +152,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/security.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/svelte-engineer.md"
@@ -176,7 +176,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/version-control.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/web-qa.md"
@@ -232,7 +232,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/git-workflow.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/internal-comms.md"
@@ -388,7 +388,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-workflow.md"
-version = "2.1.0"
+version = "2.1.1"
 
 [[member]]
 path = "skills/tm.md"
