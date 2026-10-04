@@ -1256,8 +1256,24 @@ assert_eq "capabilities-drift.yml classifies relevance from the diff, not the ev
 # (#5501): unanchored, this is a substring match that a widened condition
 # would also satisfy, so it would keep counting the old total and report green
 # over the exact regression it exists to catch.
-assert_eq "capabilities-drift.yml gates its costly steps on relevance, not the job" "4" \
+#
+# #9123 split the count in two. The credential-test scan must run on any
+# crate's Rust change, including diffs where `relevant=false`, so the first
+# three gates above were deliberately widened to a folded `if: >-` ending in
+# `|| ...credential_scan == 'true'`, and the new scan step carries the same
+# clause inside a parenthesised `&&` group (so its line ends in `')`). They no longer
+# match the single-line form, which now holds only the drift check. Both
+# halves stay anchored on `$`, so a further widening of either shape (an extra
+# `||` on the drift step, a fifth folded gate, a dropped continuation line)
+# still changes a count and fails here.
+assert_eq "capabilities-drift.yml: one single-line relevance gate (the drift check)" "1" \
   "$(grep -cE "if: steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml: three step gates widen by credential_scan (#9123)" "3" \
+  "$(grep -cE "\|\| steps\.relevance\.outputs\.credential_scan == 'true'$" "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml: the credential-scan step gate widens the same way" "1" \
+  "$(grep -cE "\|\| steps\.relevance\.outputs\.credential_scan == 'true'\)$" "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml relevance step emits credential_scan" "2" \
+  "$(grep -cE 'echo "credential_scan=(true|false)" >> "\$GITHUB_OUTPUT"' "${cap_wf}" || true)"
 # Structural, not string-matched on the old wording (#5407): no JOB the check
 # reports from may decide anything from the activity type. `concurrency:` may
 # still name `github.event.action` — that decides what gets cancelled, never
