@@ -203,7 +203,7 @@ pub enum DaemonError {
     )]
     ProjectNotFoundForRepoUrl {
         /// The `repo_url` that did not resolve to any registered project.
-        repo_url: String,
+        repo_url: crate::core::remote_url_redact::RedactedUrl,
     },
 
     /// A requested Deliverable status change is not a legal transition (#2380).
@@ -624,8 +624,10 @@ mod tests {
     fn project_not_found_message_redacts_the_url_credentials() {
         const TOKEN: &str = "ghp_9124DaemonErrorSyntheticToken0";
         let e = DaemonError::ProjectNotFoundForRepoUrl {
-            repo_url: format!("https://octo:{TOKEN}@github.com/acme/widget.git"),
+            repo_url: format!("https://octo:{TOKEN}@github.com/acme/widget.git").into(),
         };
+        // #9124: `Debug` redacts too; the field keeps the raw value.
+        assert!(!format!("{e:?}").contains(TOKEN), "the token reached Debug");
         let msg = e.to_string();
         assert!(!msg.contains(TOKEN), "the token reached the message");
         assert!(

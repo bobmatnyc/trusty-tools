@@ -27,7 +27,7 @@ use std::path::Path;
 /// credentials redacted (#9124).
 /// Test: `non_local_repo_url_message_names_adr_0055_and_the_remedy`,
 /// `non_local_repo_url_message_redacts_the_url_credentials`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "repo_url {:?} is not an existing local directory. trusty-mpm no longer clones a \
      repository or creates a worktree for a session (ADR-0055): the only supported form is an \
@@ -39,6 +39,18 @@ use std::path::Path;
 pub struct NonLocalRepoUrl {
     /// The `repo_url` as the caller supplied it.
     pub repo_url: String,
+}
+
+// #9124: derived `Debug` printed the raw field; `{:?}` reaches logs and panics.
+impl std::fmt::Debug for NonLocalRepoUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NonLocalRepoUrl")
+            .field(
+                "repo_url",
+                &crate::core::remote_url_redact::redact_url(&self.repo_url),
+            )
+            .finish()
+    }
 }
 
 /// Whether `s` names an EXISTING local directory usable as a session workspace
@@ -118,6 +130,12 @@ mod tests {
         let err = require_local_repo_url(&url).expect_err("a remote URL is not local");
         let msg = err.to_string();
         assert!(!msg.contains(TOKEN), "the token reached the message");
+        // #9124: `Debug` redacts too; the field keeps the raw value.
+        assert!(
+            !format!("{err:?}").contains(TOKEN),
+            "the token reached Debug"
+        );
+        assert_eq!(err.repo_url, url);
         assert!(
             msg.contains("https://***@github.com/owner/repo.git"),
             "{msg}"

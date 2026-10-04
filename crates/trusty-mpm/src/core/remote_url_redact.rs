@@ -24,6 +24,37 @@ pub const REDACTED: &str = "***";
 /// case-insensitively after a `?` or `&`.
 pub const TOKEN_KEYS: &[&str] = &["access_token", "private_token", "oauth_token", "token"];
 
+/// A `repo_url` that keeps its raw value but prints redacted under `Debug`
+/// (#9124): a derived `Debug` on an error variant would otherwise show it.
+/// Test: `daemon::error::tests::project_not_found_message_redacts_the_url_credentials`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedUrl(pub String);
+
+impl std::ops::Deref for RedactedUrl {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for RedactedUrl {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for RedactedUrl {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl std::fmt::Debug for RedactedUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&redact_url(&self.0), f)
+    }
+}
+
 /// Characters that end a URL when it sits inside free text.
 fn ends_url(c: char) -> bool {
     matches!(c, '\'' | '"' | '<' | '>' | '`') || c.is_whitespace()

@@ -7,5 +7,6 @@ Fixed
   any credential test in the workspace that is not `#[serial]` and sandboxed,
   including one that clears a credential, or loads `.env.local`, through a
   helper in the same file or in another file. Known exceptions are listed by
-  test name, so the list only shrinks. The scan runs on every pull request in
+  test name, so the list only shrinks. A `#[path]` attribute quoted in a
+  comment no longer maps a test file onto itself. The scan runs on every pull request in
   the required `Capabilities drift` job (#9123).

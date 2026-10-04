@@ -896,18 +896,41 @@ fn use_items(code: &str) -> Vec<(String, bool)> {
 }
 
 /// The files `text` (at `rel`) declares with `#[path = "…"]`, resolved
-/// against `rel`'s directory.
+/// against `rel`'s directory. Only an attribute that is code counts: one a
+/// comment or a string quotes is skipped, and a file never maps to itself.
+///
+/// #9123: about twenty real `#[path]` test files quote their own attribute in
+/// a doc comment; matching the raw text mapped such a file to itself, so its
+/// `use super::*` imported nothing from its real parent.
 fn path_children(rel: &str, text: &str) -> Vec<String> {
     let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
-    text.match_indices("#[path")
-        .filter_map(|(at, _)| {
-            let rest = &text[at..];
-            let open = rest.find('"')?;
-            let len = rest[open + 1..].find('"')?;
-            let target = &rest[open + 1..open + 1 + len];
-            Some(format!("{dir}/{target}"))
-        })
-        .collect()
+    let lexed = lex(text);
+    let chars: Vec<char> = lexed.iter().map(|&(c, _)| c).collect();
+    let needle: Vec<char> = "#[path".chars().collect();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at + needle.len() <= chars.len() {
+        if chars[at..at + needle.len()] != needle[..]
+            || !lexed[at..at + needle.len()].iter().all(|l| l.1)
+        {
+            at += 1;
+            continue;
+        }
+        let rest = &chars[at..];
+        let Some(open) = rest.iter().position(|&c| c == '"') else {
+            break;
+        };
+        let Some(len) = rest[open + 1..].iter().position(|&c| c == '"') else {
+            break;
+        };
+        let target: String = rest[open + 1..open + 1 + len].iter().collect();
+        let child = format!("{dir}/{target}");
+        if child != rel {
+            out.push(child);
+        }
+        at += open + 1 + len;
+    }
+    out
 }
 
 /// The module name a file under `crates/` is reached by from another file:
@@ -1378,6 +1401,16 @@ fn a_helper_in_another_file_flags_its_test() {
             "use super::*;\n#[test]\nfn by_super() { wipe(); }",
         ),
         file(
+            "k/src/d.rs",
+            "fn wipe() { unsafe { std::env::remove_var(\"Y_API_KEY\") } }\n\
+             #[cfg(test)]\n#[path = \"d_tests.rs\"]\nmod tests;",
+        ),
+        // #9123: the doc comment cites the file's own `#[path]`; it is not code.
+        file(
+            "k/src/d_tests.rs",
+            "//! Declared by `#[path = \"d_tests.rs\"]` in d.rs.\nuse super::*;\n#[test]\nfn by_cited_super() { wipe(); }",
+        ),
+        file(
             "k/src/fixed.rs",
             "#[test]\n#[serial]\nfn sandboxed() { let _s = crate::test_env::sandbox(); \
              crate::test_env::clear_all(); }",
@@ -1412,6 +1445,7 @@ fn a_helper_in_another_file_flags_its_test() {
         flagged,
         vec![
             ("k/src/c_tests.rs", "by_super"),
+            ("k/src/d_tests.rs", "by_cited_super"),
             ("k/src/imported.rs", "by_use"),
             ("k/src/loader.rs", "by_loader"),
             ("k/src/qualified.rs", "by_path"),

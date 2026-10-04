@@ -13,5 +13,5 @@ Fixed
   account-pin refusal, the reclaim and PR-cleanup origin refusals, both
   project-registry auto-registration log lines, the catalog-sync log lines,
   the standalone clone error, the non-local `repo_url` refusal, the
-  unregistered-project 404, and `tm`'s clone, fallback, launch,
+  unregistered-project 404 (whose `Debug` output is redacted too), and `tm`'s clone, fallback, launch,
   account-preflight and `--account` messages (#9124).
