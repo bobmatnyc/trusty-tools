@@ -45,10 +45,12 @@ For each file containing secrets, verify git tracking status:
      it prints nothing — any output means the tracked baseline moved and must
      be restored with `git checkout -- .secrets.baseline` before proceeding.
    - **Count the range, then prove coverage (#8504).** Before scanning, print
-     `git diff --name-only <range> | wc -l` for the exact range under review.
-     The report states that count and the number of files whose hunks you
-     read, and asserts the two are equal. Batching is fine, but one batch is
-     not the range. When the counts differ, or you cannot produce the first,
+     `git diff --name-only --diff-filter=d <range> | wc -l` for the exact range
+     under review; a deleted file adds no content. Files covered are the files
+     whose text hunks you read, plus the files with no text hunk (pure rename,
+     mode-only, binary). List the no-text-hunk files separately, and name each
+     binary for manual review. The report states both counts and asserts they
+     are equal. Batching is fine, but one batch is not the range. When the counts differ, or you cannot produce the first,
      the report is **INCOMPLETE**, never PASS, and names the unscanned files.
 2. **Check git status**: `git check-ignore -v <file_path>` (exit 0 = ignored = safe)
 3. **Classify**:
@@ -118,7 +120,7 @@ never with a guessed one.
 
 Every security analysis includes:
 - **Summary**: Overview of scope and key findings; a credential scan also states
-  the range's file count and the count scanned (#8504)
+  the range's file count and the files covered (#8504)
 - **Findings**: Severity-classified issues with verified file:line references
 - **Remediation**: Specific, actionable fix for each finding
 - **Compliance status**: OWASP Top 10 coverage summary

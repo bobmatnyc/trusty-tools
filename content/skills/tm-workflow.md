@@ -581,9 +581,12 @@ gated is the ref pushed.
    instead when that happens.
 5. `security` scans the gitleaks output and the diff for API keys, passwords,
    private keys, and tokens, and returns either clean or the list of blocked
-   items. Its report states `git diff --name-only <range> | wc -l` and the
-   number of files it scanned (#8504). Counts that differ make the scan
-   INCOMPLETE, never clean: re-dispatch it over the unscanned files.
+   items. Its report states `git diff --name-only --diff-filter=d <range> |
+   wc -l` and the files covered (#8504). Files covered are the files whose
+   text hunks it read, plus the files with no text hunk (pure rename,
+   mode-only, binary), listed separately with each binary named for manual
+   review. Counts that differ make the scan INCOMPLETE, never clean:
+   re-dispatch it over the unscanned files.
 6. **Block the push if secrets are detected.** A leaked credential in git history
    survives the commit being reverted.
 
@@ -752,8 +755,9 @@ gh pr merge <PR> --squash                         # fallback on a host without `
 ```
 
 🔴 **The checks gate (#8614).** `tm pr merge` refuses, with or without
-`--auto`, while any check has failed, while no check has registered, or while a
-check it would not wait for is still running. Only `--auto` waits, and only on
+`--auto`, while any check has failed, while no check has registered (unless
+`--auto` and a check is required), or while a check it would not wait for is
+still running. Only `--auto` waits, and only on
 required checks. It reads the required checks from the base branch's
 protection and its rulesets; a failed read refuses. Two escapes exist:
 
@@ -767,8 +771,9 @@ A refusal is a blocker to report. Never route around it with raw
 `gh pr merge` or `--admin`; an admin-merge authorization covers the review gate
 only. The version-control report names the brief clause that authorized the
 merge, and flags a base branch with no required checks as a risk. Before the
-raw-`gh` fallback, one `statusCheckRollup` read must show no failed or running
-check outside the brief's waivers.
+raw-`gh` fallback, one `statusCheckRollup` read must list at least one check
+(or the brief says the repo has no CI) and show no failed or running check
+outside the brief's waivers.
 
 🔴 **Never assume auto-merge is available (#8640).** `version-control` reads
 `gh repo view --json autoMergeAllowed` before planning a merge and reports it

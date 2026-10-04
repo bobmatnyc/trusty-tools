@@ -98,22 +98,20 @@ contract against nine exact headings, verbatim (#7727): `## Outcome`,
 `## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Gates not run`,
 `## Partial-red accounting`, `## Docs`, `## Review` — in that order, matching
 `tm-workflow.md`'s "Minimal PR Body (nine fields)" section. A body missing one
-of these, or holding it empty, exits 2 naming which field, before `gh` is ever
-called. The last two are the #7336 disclosure fields: name every gate the rung
-asked for that you did not run and why, and itemize every target still failing
-with its rerun result. A clean run writes the single word `none` under each —
-that is a valid whole section, and omitting the heading is not. It also checks
-the attribution footer (missing one exits 2 without calling `gh`; `tm pr open`
-never appends it itself) and attaches `--assignee @me --label trusty-mpm
---label ws/<session>` itself — you never type them. Before spawning `gh` it
-runs `scripts/check_changelog_fragment.sh` (`--docs-only` skips this for a PR
-touching no crate source); a rung 1 (docs-only) branch needs `--docs-only`
-passed explicitly or the gate refuses it. A failed check exits 2 without
-calling `gh` — fix the finding and re-run. `--issue N` emits `Refs #N` — this
-repo's fix PRs never use `--closes`, which would emit `Closes #N` instead.
-`--dry-run` prints the assembled `gh pr create` argv and exits 0 without
-calling `gh`. Hand-assembled `gh pr create` is the fallback only on a host
-where `tm` is not on PATH.
+of these, or holding it empty, exits 2 naming the field, before `gh` runs. The
+last two are the #7336 disclosure fields: name every gate the rung asked for
+that you did not run and why, and itemize every target still failing with its
+rerun result. A clean run writes the single word `none` under each — that is a
+valid whole section, and omitting the heading is not. It also checks the
+attribution footer (a missing one exits 2; it never appends one) and attaches
+`--assignee @me --label trusty-mpm --label ws/<session>` itself — you never
+type them. Before spawning `gh` it runs `scripts/check_changelog_fragment.sh`
+(`--docs-only` skips this for a PR touching no crate source); a rung 1
+(docs-only) branch needs `--docs-only` passed explicitly or the gate refuses
+it. A failed check exits 2 without calling `gh` — fix the finding and re-run.
+`--issue N` emits `Refs #N` — this repo's fix PRs never use `--closes`, which
+would emit `Closes #N` instead. Hand-assembled `gh pr create` is the fallback
+only on a host where `tm` is not on PATH.
 
 ## Labels, project, milestone on the PR
 
@@ -126,8 +124,8 @@ nothing here restates it.
 the component labels for every crate the diff touches, and the milestone and
 project(s) of the issue the body's first `Refs #N` names. You pass no flag.
 Each step is best-effort: a refused step prints a warning and the PR still
-opens. A warning is yours to fix on the PR; a "no project or milestone" line on
-a `Refs`-less or docs-only PR is the correct outcome.
+opens. A warning is yours to fix on the PR. A "no component label" line on a
+docs-only PR, or "no project or milestone" on a `Refs`-less one, is correct.
 
 🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
 yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
@@ -147,8 +145,8 @@ own initiative.
 
 🔴 **Merge gate (#8614).** A failing check blocks the merge whatever branch
 protection requires; a branch-caused one is never waived. `tm pr merge`
-refuses, with or without `--auto`, on a failed check, on no registered check,
-and on a running check it would not wait for (only `--auto` waits, on required
+refuses, with or without `--auto`, on a failed check, on no registered check
+(unless `--auto` and a check is required), and on a running check it would not wait for (only `--auto` waits, on required
 checks). It reads required checks from branch protection and rulesets; a failed
 read refuses. `--allow-failing <check>` (exact name, repeatable) waives a
 non-required check and records it in the squash body. Pass it only for a check
@@ -178,8 +176,8 @@ Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
 `tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
 
 Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
-shows no failed or running check the brief does not waive, `gh pr merge <n>
---squash --subject
+lists a check (or the brief says the repo has no CI) and none failed or running
+that the brief does not waive, `gh pr merge <n> --squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`
 from the live PR (`gh pr view <n> --json title,body`), never from a brief
 (#8420); (2) confirm
@@ -214,7 +212,7 @@ or report, not a note for later.
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment, same tier as a failing test; `tm pr open` runs this itself, so this covers only the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
 | Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main" --jq '.protection.required_status_checks.contexts'` — derive the repo, never type a slug; `/protection` answers 404 on an unprotected branch) | N/A — a live read, never hand-copied; a stale copy cost one PR its merge (#5836) |
-| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears every listed PR to merge; exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; full procedure in `tm-workflow.md`'s "Merge-Queue Ownership" section |
+| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears the queue checks; `tm pr merge` still applies the checks gate. Exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` for machines; procedure: `tm-workflow` "Merge-Queue Ownership" |
 | Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false`, a failed check, or a running check the brief does not waive: do not merge |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
 | After the task PR's `state: MERGED` is confirmed | `git worktree remove /absolute/repo/.claude/worktrees/task-name` (verified literal path) | A guard refusal is reported; preserve the tree until ownership, clean state and merged status are established |
