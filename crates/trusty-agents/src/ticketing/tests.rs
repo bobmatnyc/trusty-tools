@@ -20,6 +20,7 @@ fn from_env_default_provider_is_github() {
 }
 
 #[test]
+#[serial_test::serial]
 fn github_client_new_requires_token() {
     let cfg = TicketingConfig {
         provider: "github".to_string(),
@@ -27,17 +28,11 @@ fn github_client_new_requires_token() {
         github_repo: Some("owner/repo".to_string()),
         ..Default::default()
     };
-    // Clear GITHUB_TOKEN for this test so the fallback doesn't trigger.
-    let prev = std::env::var("GITHUB_TOKEN").ok();
-    unsafe {
-        std::env::remove_var("GITHUB_TOKEN");
-    }
+    // #9123: the sandbox clears GITHUB_TOKEN (and every other credential) so
+    // the env fallback cannot trigger, and restores it on drop.
+    let _home_guard = crate::test_env::lock_home();
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
     let res = github::GitHubClient::new(&cfg);
-    if let Some(v) = prev {
-        unsafe {
-            std::env::set_var("GITHUB_TOKEN", v);
-        }
-    }
     assert!(res.is_err(), "expected error without token");
 }
 

@@ -988,7 +988,9 @@ fn refused_spawn_env(
             "this project is pinned to gh account '{who}', and no gh token is proven by `GET /user` to be its own ({reason}). The session's gh is \
              given a token that authenticates as nobody, so it fails instead of acting as the \
              machine's global account (#8510). Fix: `tm projects register <name> --repo-url \
-             {origin} --gh-account {who} --gh-config-dir <dir>`."
+             {} --gh-account {who} --gh-config-dir <dir>`.",
+            // #9124: the origin may embed `user:token@`.
+            crate::core::remote_url_redact::redact_url(origin)
         ),
     };
     GhSpawnEnv {

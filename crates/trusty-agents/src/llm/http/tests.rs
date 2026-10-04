@@ -585,23 +585,15 @@ fn transport_error_rejects_non_http_error() {
 /// command — because `credential_hint` had no arm for it.
 /// Test: itself.
 #[test]
+#[serial_test::serial]
 fn send_raw_completion_atlascloud_missing_key_errors_with_atlascloud_name() {
     let _env_guard = crate::test_env::ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let _home_guard = crate::test_env::lock_home();
-    crate::test_env::force_env_local_loaded();
-    let prev_key = std::env::var_os("ATLASCLOUD_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: ENV_LOCK + HOME_LOCK held for the whole test body.
-    unsafe {
-        std::env::remove_var("ATLASCLOUD_API_KEY");
-    }
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    // No store seeded — every tier is absent.
+    // #9123: no credential variable, an empty `$HOME`, and a `.env.local`
+    // loader that reads nothing — every tier is absent, not merely this one.
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
 
     let adapter = crate::llm::adapter::AtlasCloudAdapter {
         model_id: "openai/gpt-5.6-sol".to_string(),
@@ -618,18 +610,6 @@ fn send_raw_completion_atlascloud_missing_key_errors_with_atlascloud_name() {
         msg.contains("ATLASCLOUD_API_KEY"),
         "error must hint the correct env var: {msg}"
     );
-
-    // SAFETY: still holding ENV_LOCK + HOME_LOCK.
-    unsafe {
-        match prev_key {
-            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
-            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 /// Live smoke test: one real completion through the AtlasCloud adapter.

@@ -229,7 +229,8 @@ impl<G: GitBackend> CatalogSync<G> {
             });
         }
 
-        info!(repo = %self.repo_url, git_ref = %self.git_ref, dir = %self.catalog_dir.display(), "syncing catalog");
+        // #9124: a remote URL may embed `user:token@`.
+        info!(repo = %crate::core::remote_url_redact::redact_url(&self.repo_url), git_ref = %self.git_ref, dir = %self.catalog_dir.display(), "syncing catalog");
 
         // Ensure the catalog parent directory exists before any git operation.
         std::fs::create_dir_all(&self.catalog_dir)?;

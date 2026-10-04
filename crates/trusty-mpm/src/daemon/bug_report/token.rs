@@ -571,6 +571,7 @@ impl TokenProvider for ResolvedProvider {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -595,27 +596,26 @@ mod tests {
     fn resolution_order_env_wins_over_file() {
         // When TOKEN_ENV_VAR is set, EnvFileTokenProvider should return it.
         let sentinel = "ghp_test_env_wins_phase4_unique"; // pragma: allowlist secret
-        // SAFETY: env mutation; cleaned up before return.
-        unsafe { std::env::set_var(TOKEN_ENV_VAR, sentinel) };
-        let tok = EnvFileTokenProvider.token();
-        unsafe { std::env::remove_var(TOKEN_ENV_VAR) };
-        assert!(tok.is_some(), "expected Some when env var is set: {tok:?}");
+        let mut sandbox = CredentialSandbox::enter(); // #9123
+        sandbox.set(TOKEN_ENV_VAR, sentinel);
+        assert_secret_eq(
+            EnvFileTokenProvider.token().as_deref(),
+            Some(sentinel),
+            "the env var must win",
+        );
     }
 
     #[test]
     #[serial]
     fn resolution_order_file_used_when_env_absent() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), "ghp_from_file_phase4\n").unwrap();
-        unsafe {
-            std::env::remove_var(TOKEN_ENV_VAR);
-            std::env::set_var(TOKEN_FILE_ENV_VAR, tmp.path().as_os_str());
-        }
-        let tok = EnvFileTokenProvider.token();
-        unsafe { std::env::remove_var(TOKEN_FILE_ENV_VAR) };
-        assert!(
-            tok.is_some(),
-            "expected Some from file when env var absent: {tok:?}"
+        let mut sandbox = CredentialSandbox::enter(); // #9123
+        let file = sandbox.root().join("bugreport-token");
+        std::fs::write(&file, "ghp_from_file_phase4\n").unwrap();
+        sandbox.set(TOKEN_FILE_ENV_VAR, &file);
+        assert_secret_eq(
+            EnvFileTokenProvider.token().as_deref(),
+            Some("ghp_from_file_phase4"),
+            "expected the file's token when the env var is absent",
         );
     }
 
@@ -636,32 +636,19 @@ mod tests {
     fn resolve_token_prefers_pat_env() {
         let sentinel = "ghp_pat_env_wins_over_app"; // pragma: allowlist secret
 
-        // Set PAT and App env vars simultaneously.
-        unsafe {
-            std::env::set_var(TOKEN_ENV_VAR, sentinel);
-            std::env::remove_var(TOKEN_FILE_ENV_VAR);
-            std::env::set_var(APP_ID_ENV_VAR, "12345");
-            std::env::set_var(APP_INSTALL_ID_ENV_VAR, "67890");
-            std::env::set_var(
-                APP_KEY_FILE_ENV_VAR,
-                "/tmp/trusty-test-nonexistent-pem-pattest.pem",
-            );
-        }
+        // #9123: the sandbox empties the credential env and moves `$HOME`, so
+        // the token-file tier is the sandbox's, never the operator's.
+        let mut sandbox = CredentialSandbox::enter();
+        let pem = sandbox.root().join("absent.pem");
+        sandbox.set(TOKEN_ENV_VAR, sentinel);
+        sandbox.set(APP_ID_ENV_VAR, "12345");
+        sandbox.set(APP_INSTALL_ID_ENV_VAR, "67890");
+        sandbox.set(APP_KEY_FILE_ENV_VAR, pem);
 
-        let tok = resolve_token();
-
-        // Clean up before any assert so failures don't leak env state.
-        unsafe {
-            std::env::remove_var(TOKEN_ENV_VAR);
-            std::env::remove_var(APP_ID_ENV_VAR);
-            std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
-            std::env::remove_var(APP_KEY_FILE_ENV_VAR);
-        }
-
-        assert_eq!(
-            tok.as_deref(),
+        assert_secret_eq(
+            resolve_token().as_deref(),
             Some(sentinel),
-            "resolve_token must prefer PAT env over GitHub App env vars: {tok:?}"
+            "resolve_token must prefer PAT env over GitHub App env vars",
         );
     }
 
@@ -779,39 +766,25 @@ mod tests {
     fn resolved_provider_uses_pat_env() {
         // When TOKEN_ENV_VAR is set, ResolvedProvider should return that PAT.
         let sentinel = "ghp_resolved_provider_pat_test"; // pragma: allowlist secret
-        unsafe { std::env::set_var(TOKEN_ENV_VAR, sentinel) };
-        let tok = ResolvedProvider.token();
-        unsafe { std::env::remove_var(TOKEN_ENV_VAR) };
-        assert_eq!(
-            tok.as_deref(),
+        let mut sandbox = CredentialSandbox::enter(); // #9123
+        sandbox.set(TOKEN_ENV_VAR, sentinel);
+        assert_secret_eq(
+            ResolvedProvider.token().as_deref(),
             Some(sentinel),
-            "ResolvedProvider must return the PAT env value"
+            "ResolvedProvider must return the PAT env value",
         );
     }
 
     #[test]
     #[serial]
     fn resolved_provider_returns_none_without_sources() {
-        // When neither TOKEN_ENV_VAR nor App vars are set, should return None.
-        // We cannot guarantee a clean env in all CI scenarios; the test removes
-        // the PAT var and uses a non-existent token file path so the chain
-        // falls through gracefully.
-        unsafe {
-            std::env::remove_var(TOKEN_ENV_VAR);
-            std::env::remove_var(APP_ID_ENV_VAR);
-            std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
-            std::env::remove_var(APP_KEY_FILE_ENV_VAR);
-            // Point the file fallback at a non-existent path.
-            std::env::set_var(
-                TOKEN_FILE_ENV_VAR,
-                "/tmp/trusty-test-nonexistent-token-file-abc123",
-            );
-        }
-        let tok = ResolvedProvider.token();
-        unsafe { std::env::remove_var(TOKEN_FILE_ENV_VAR) };
-        assert!(
-            tok.is_none(),
-            "ResolvedProvider must return None when all sources absent"
+        // #9123: the sandbox clears every source and moves `$HOME`, so the
+        // default token file is the sandbox's (absent) one.
+        let _sandbox = CredentialSandbox::enter();
+        assert_secret_eq(
+            ResolvedProvider.token().as_deref(),
+            None,
+            "ResolvedProvider must return None when all sources absent",
         );
     }
 
@@ -823,27 +796,18 @@ mod tests {
         // can confirm the *selection* path: when App vars are set but the PEM
         // file does not exist, `resolve_token()` logs a warning and returns
         // None (App provider failed gracefully), not an error/panic.
-        unsafe {
-            std::env::remove_var(TOKEN_ENV_VAR);
-            std::env::remove_var(TOKEN_FILE_ENV_VAR);
-            std::env::set_var(APP_ID_ENV_VAR, "12345");
-            std::env::set_var(APP_INSTALL_ID_ENV_VAR, "67890");
-            std::env::set_var(
-                APP_KEY_FILE_ENV_VAR,
-                "/tmp/trusty-test-nonexistent-pem-abc123.pem",
-            );
-        }
-        // The App provider attempts to read the PEM, fails gracefully → None.
-        let tok = resolve_token();
-        unsafe {
-            std::env::remove_var(APP_ID_ENV_VAR);
-            std::env::remove_var(APP_INSTALL_ID_ENV_VAR);
-            std::env::remove_var(APP_KEY_FILE_ENV_VAR);
-        }
+        // #9123: with no PAT and no token-file override, the PAT tier reads
+        // `$HOME/.config/trusty-mpm/bugreport-token` — the sandbox's `$HOME`.
+        let mut sandbox = CredentialSandbox::enter();
+        let pem = sandbox.root().join("absent.pem");
+        sandbox.set(APP_ID_ENV_VAR, "12345");
+        sandbox.set(APP_INSTALL_ID_ENV_VAR, "67890");
+        sandbox.set(APP_KEY_FILE_ENV_VAR, pem);
         // None is the expected graceful-failure result: no panic, no unwrap.
-        assert!(
-            tok.is_none(),
-            "resolve_token with missing PEM must return None gracefully"
+        assert_secret_eq(
+            resolve_token().as_deref(),
+            None,
+            "resolve_token with missing PEM must return None gracefully",
         );
     }
 

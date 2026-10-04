@@ -155,12 +155,17 @@ fn fetch(base_path: &Path, refspec: &str) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(format!(
-        "exit {}: {}",
-        out.status,
-        stderr.trim().replace('\n', "; ")
-    ))
+    Err(fetch_failure(&out.status, &out.stderr))
+}
+
+/// The error a failed fetch reports: its exit status and stderr on one line.
+/// #9124: git's fetch stderr can quote the remote URL, token included, so the
+/// stderr is redacted.
+/// Test: `a_fetch_failure_never_quotes_the_remote_token`.
+fn fetch_failure(status: &impl std::fmt::Display, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = crate::core::remote_url_redact::redact_url(stderr.trim()).replace('\n', "; ");
+    format!("exit {status}: {stderr}")
 }
 
 fn ref_exists(base_path: &Path, full_ref: &str) -> bool {
@@ -195,4 +200,27 @@ fn git(base_path: &Path) -> Command {
     // prompt blocks the spawn indefinitely instead of failing fast.
     cmd.env("GIT_TERMINAL_PROMPT", "0").arg("-C").arg(base_path);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #9124: the fetch failure lands in a `StartPoint` warning the daemon
+    /// logs; a token in git's stderr never reaches it.
+    #[test]
+    fn a_fetch_failure_never_quotes_the_remote_token() {
+        const TOKEN: &str = "ghp_9124FetchSyntheticToken000000";
+        let stderr = format!(
+            "fatal: unable to access 'https://octo:{TOKEN}@github.com/acme/widget.git/': \
+             Could not resolve host\nfatal: the remote end hung up"
+        );
+        let msg = fetch_failure(&"exit status: 128", stderr.as_bytes());
+        assert!(!msg.contains(TOKEN), "the token reached the fetch error");
+        assert!(
+            msg.contains("'https://***@github.com/acme/widget.git/'"),
+            "{msg}"
+        );
+        assert!(msg.contains("; fatal: the remote end hung up"), "{msg}");
+    }
 }

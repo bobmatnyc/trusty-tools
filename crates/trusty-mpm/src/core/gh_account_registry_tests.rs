@@ -1277,3 +1277,25 @@ fn an_account_only_pin_refuses_a_symlinked_tm_account_dir() {
     assert!(err.contains("is a symlink"), "got: {err}");
     assert!(probe.calls().is_empty(), "gh ran: {:?}", probe.calls());
 }
+
+/// #9124: the account-only refusal quotes the record's `repo_url` in a fix
+/// command the daemon logs; a credentialed URL must reach it redacted.
+/// Test: itself.
+#[test]
+fn the_account_only_refusal_redacts_the_record_url() {
+    const TOKEN: &str = "ghp_9124RegistrySynthetic0000";
+    let pin = super::RegistryPin {
+        account: Some("octo-pinned".to_string()),
+        github: None,
+        record: Some((
+            "widget".to_string(),
+            format!("https://octo:{TOKEN}@github.com/acme/widget.git"),
+        )),
+    };
+    let msg = super::account_only_refusal(&pin, "octo-pinned", &[]);
+    assert!(!msg.contains(TOKEN), "the refusal quoted the token");
+    assert!(
+        msg.contains("--repo-url https://***@github.com/acme/widget.git"),
+        "the fix command lost the URL"
+    );
+}

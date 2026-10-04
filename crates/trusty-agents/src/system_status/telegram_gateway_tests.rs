@@ -23,7 +23,7 @@ fn row(refs: &str, state: &str) -> TelegramBotStatus {
 /// A binding whose token will not resolve is visible in `system status`, with
 /// its reason — the surface that replaces a log line izzie's host never keeps.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_records_a_skipped_binding() {
     clear();
     record_scan(
@@ -53,7 +53,7 @@ fn telegram_gateway_status_records_a_skipped_binding() {
 /// #8190 finding 4: the scan re-runs, so a fixed binding must be able to remove
 /// its own warning. Appending would grow a log of stale complaints.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_scan_replaces_the_previous_warnings() {
     clear();
     record_scan(vec![row("telegram", "skipped")], vec!["stale".into()]);
@@ -66,7 +66,7 @@ fn telegram_gateway_status_scan_replaces_the_previous_warnings() {
 
 /// A live state change between scans reaches the report.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_records_a_live_state_change() {
     clear();
     record_scan(vec![row("telegram/izzie", "starting")], Vec::new());
@@ -103,7 +103,7 @@ fn telegram_gateway_status_records_a_live_state_change() {
 /// Pre-change this fails: the second `record_scan` overwrites the live row and
 /// the state reads `starting`.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_a_rescan_preserves_a_polling_row() {
     clear();
     // Scan 1 publishes the placeholder; the poller then reports it is polling.
@@ -149,7 +149,7 @@ fn telegram_gateway_status_a_rescan_preserves_a_polling_row() {
 /// The separate `tagent system status` process holds no gateway state, so the
 /// live lock probe is the only thing that can report a running poller.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_snapshot_reports_a_live_lock_holder() {
     clear();
     let dir = tempfile::tempdir().expect("tempdir");
@@ -179,7 +179,7 @@ fn telegram_gateway_status_snapshot_reports_a_live_lock_holder() {
 /// No bot token and no digest of one may appear anywhere an operator or an
 /// LLM can read — not in a row, not in a warning, not in the rendered text.
 #[test]
-#[serial_test::serial(telegram_gateway_status)]
+#[serial_test::serial]
 fn telegram_gateway_status_never_renders_the_bot_token() {
     clear();
     let key = crate::telegram::BotKey::from_token(FIXTURE_TOKEN);

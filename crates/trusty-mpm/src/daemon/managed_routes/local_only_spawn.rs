@@ -175,7 +175,9 @@ async fn live_session_on(
 /// for the in-project path to open.
 /// Test: `a_non_root_directory_without_an_origin_is_refused` in tests/local_spawn.rs;
 /// the ADR-0055 arm by `a_subdirectory_of_a_repo_is_refused_not_provisioned`
-/// in tests/session_new_requires_a_local_path.rs.
+/// in tests/session_new_requires_a_local_path.rs; the origin's credentials are
+/// redacted in both origin-quoting refusals
+/// (`a_local_spawn_refusal_never_quotes_the_origin_token`).
 pub(super) fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnParams) -> String {
     let local_dir = std::path::PathBuf::from(&params.repo_url);
 
@@ -192,11 +194,13 @@ pub(super) fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnP
         }
         Ok(Some(url)) => url,
     };
+    // #9124: the refusal reaches the daemon log and the client; never the token.
+    let shown = crate::core::remote_url_redact::redact_url(&origin_url);
 
     if trusty_common::github_path::parse_github_path(&origin_url).is_none() {
         return format!(
             "spawn failed: could not parse a GitHub owner/repo from origin remote \
-             '{origin_url}' for '{}'. \
+             '{shown}' for '{}'. \
              Use `tm connect` to run in the live checkout instead.",
             local_dir.display()
         );
@@ -209,7 +213,7 @@ pub(super) fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnP
     // in for one.
     format!(
         "spawn failed for session {session_id}: '{}' resolves to the repository at \
-         '{origin_url}' but is not that repository's root, so there is no checkout to run \
+         '{shown}' but is not that repository's root, so there is no checkout to run \
          the session in. trusty-mpm no longer provisions one for you (ADR-0055): pass the \
          repository ROOT — the directory holding `.git` — instead.",
         local_dir.display()

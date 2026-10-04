@@ -611,3 +611,19 @@ fn preflight_refuses_a_broken_accounts_table_naming_the_file() {
     preflight_verdict(origin, Ok(Some(chosen))).expect("a mapped account launches");
     preflight_verdict(origin, Ok(None)).expect("the ambient identity launches");
 }
+
+/// #9124: the account-preflight refusal reaches the terminal; it never quotes
+/// the origin's token.
+#[test]
+fn preflight_refusal_never_quotes_the_origin_token() {
+    const TOKEN: &str = "ghp_9124PreflightSyntheticToken000";
+    let origin = format!("https://octo:{TOKEN}@github.com/acme/widget.git");
+    let err = preflight_verdict(&origin, Err("no [accounts] row".to_string()))
+        .expect_err("an unresolved account refuses the launch")
+        .to_string();
+    assert!(!err.contains(TOKEN), "the token reached the refusal");
+    assert!(
+        err.contains("https://***@github.com/acme/widget.git"),
+        "{err}"
+    );
+}

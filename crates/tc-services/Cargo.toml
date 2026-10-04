@@ -29,3 +29,10 @@ trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.0" }
 # `async-openai` is intentionally NOT a dependency: tc-services only emits
 # OpenAI-compatible function schemas as `serde_json::Value`. Hosts that need
 # the typed async-openai representation (e.g. trusty-agents) own that bridge.
+
+[dev-dependencies]
+# #9123: credential tests run `#[serial]` inside the shared credential test
+# sandbox. trusty-common is already in this crate's normal tree (through
+# trusty-gworkspace); the dev edge only turns the test-only feature on.
+serial_test = { workspace = true }
+trusty-common = { workspace = true, features = ["credential-test-sandbox"] }

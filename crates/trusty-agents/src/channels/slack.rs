@@ -238,7 +238,7 @@ mod tests {
 
     /// The token on the wire follows `credential_ref`, not the process default.
     #[tokio::test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     async fn slack_adapter_send_uses_the_credential_the_binding_names() {
         let _bot = EnvVarGuard::set("SLACK_BOT_TOKEN", "xoxb-7427-default");
         let _app = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-7427-named");
@@ -270,7 +270,7 @@ mod tests {
     /// sent as another. Pre-change this test cannot even be written — there was
     /// no `read` on the adapter to call.
     #[tokio::test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     async fn slack_adapter_read_uses_the_credential_the_binding_names() {
         let _bot = EnvVarGuard::set("SLACK_BOT_TOKEN", "xoxb-8037-default");
         let _app = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-8037-named");

@@ -141,7 +141,7 @@ mod tests {
     /// #8037: serialized against the stub tests, which turn
     /// `stub::ENABLE_ENV` on and would otherwise add a fourth entry here.
     #[test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     fn channel_providers_json_reports_registry_capabilities() {
         let providers = providers_json();
         let list = providers.as_array().unwrap();
