@@ -29,7 +29,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::scan_tests::{Lexed, eat, is_ident, lex, matching, names_word, skip_ws};
+use super::scan_tests::lex::{Lexed, eat, is_ident, lex, matching, skip_ws};
+use super::scan_tests::names_word;
 
 /// Calls that mutate the process environment, matched as whole identifiers.
 const MUTATIONS: &[&str] = &[

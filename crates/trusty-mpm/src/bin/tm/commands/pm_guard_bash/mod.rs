@@ -85,6 +85,8 @@ mod read_only_programs;
 mod read_only_scratchpad;
 mod secret_file_copy;
 mod sed_awk;
+// #9127: `( … )`, `{ …; }` and reserved words peeled off for the git-verb walker.
+mod shell_groups;
 mod shell_lex;
 // #8756: one substitution scanner for the forbidden-verb and secret rules.
 mod substitutions;
@@ -124,10 +126,12 @@ pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_co
 pub(crate) use floor_d4::evaluate_d4_floor;
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
-pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
+pub(crate) use linked_worktree_head_move::{
+    deny_linked_worktree_head_move, deny_main_checkout_head_move,
+};
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
+    evaluate_main_checkout_destructive_command,
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
@@ -253,6 +257,8 @@ const MAX_WRAPPER_DEPTH: usize = 8;
 /// is what stops a future rule from inheriting the same hole.
 /// What: `Some(reason)` when any segment, at any wrapper depth, carries
 /// `$'…'`/`$"…"` quoting the lexer mangles ([`shell_lex::has_live_ansi_c_quoting`]),
+/// a program word bash builds by brace expansion
+/// ([`shell_groups::has_brace_expanded_program`], #9127),
 /// a wrapper whose inner command will not lex
 /// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
 /// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
@@ -275,6 +281,10 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
         }
         if shell_lex::has_live_ansi_c_quoting(trimmed) {
             return Some(ANSI_C_QUOTING_REASON);
+        }
+        // #9127: `{git,-C,<main>,commit}` is a different program once expanded.
+        if shell_groups::has_brace_expanded_program(trimmed) {
+            return Some(shell_groups::BRACE_EXPANSION_REASON);
         }
         match shell_lex::wrapped_command(trimmed) {
             shell_lex::WrappedCommand::Unlexable => return Some(UNLEXABLE_WRAPPER_REASON),
@@ -1110,3 +1120,7 @@ mod false_positive_9001_tests;
 // bound every relaxation.
 #[cfg(test)]
 mod guard_tokenizer_tests;
+
+// #9127: a rule reading the shell-group walk must refuse what it cannot place.
+#[cfg(test)]
+mod step_reader_scan_tests;
