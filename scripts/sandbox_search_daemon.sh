@@ -18,20 +18,41 @@
 #   No other variable reaches the daemon: no token, no API key, no OPENROUTER*,
 #   ANTHROPIC*, GITHUB* or SLACK* name. KNOBS (pass through only when the
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
-#   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG.
-#   Port 7878 is refused. The default port is the first free one from 17900.
+#   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
+#   TRUSTY_EMBEDDERD_BIN.
+#   Working directory: the daemon runs with cwd <dir>/home. At startup it walks
+#   up from its cwd for a `.env.local` and loads it (`load_env_local_once`,
+#   crates/trusty-common/src/credentials/dotenv.rs); no variable disables that,
+#   so a cwd inside a checkout would reload the very keys `env -i` removed. The
+#   script also refuses a sandbox dir with a `.env.local` in any ancestor.
+#   Embedder sidecar: with PATH /usr/bin:/bin the daemon finds `trusty-embedderd`
+#   only as a sibling of the `--bin` executable or through TRUSTY_EMBEDDERD_BIN.
+#   `--bin` therefore needs a sibling `trusty-embedderd`, or export
+#   TRUSTY_EMBEDDERD_BIN before calling.
+#   Port: 7814..7878 is refused, because the daemon walks forward up to 64 ports
+#   from the one requested (`bind_with_auto_port`) and could land on the live
+#   daemon's 7878. The default is the first free port from 17900. The bound port
+#   can still differ from the requested one: callers MUST read
+#   <dir>/data/daemon.port. The script waits up to 60 s for that file and prints
+#   the actual port, or says it timed out.
 #   Model cache: a fresh HOME makes the embedder download its ONNX model into
 #   <dir>/home/.cache/fastembed. `--model-cache PATH` (or an exported
 #   FASTEMBED_CACHE_DIR) forwards that one directory as FASTEMBED_CACHE_DIR;
 #   the resolver is `resolve_fastembed_cache_dir` in
 #   crates/trusty-common/src/embedder/types.rs. The mount is not read-only: no
 #   env var can make it so, and fastembed may write lock files there. The
-#   directory must already exist, so the script never creates anything in the
-#   real home.
+#   directory must already exist. The script creates nothing in the real home,
+#   with one exception: when `--model-cache` (or FASTEMBED_CACHE_DIR) names a
+#   directory in the real home, such as ~/.cache/fastembed, fastembed may write
+#   lock files and new model files there. The flag is not refused.
 #   Teardown is kill-by-pid only. The child pid is written to <dir>/sandbox.pid.
 #   On EXIT, INT or TERM, and under `--stop DIR`, the script signals that pid
-#   after checking that the process's argv contains <dir>. It never uses pkill,
-#   killall, a name match or launchctl.
+#   after checking that the process's argv holds the token
+#   `--data-dir <dir>/data` followed by a space or the end of argv. It sends
+#   TERM, waits up to 10 s, sends KILL only if the argv check still holds, and
+#   waits up to 5 s more. It reports success only when the process is dead; on
+#   failure it keeps sandbox.pid and says why. It never uses pkill, killall, a
+#   name match or launchctl.
 #   Output names variables and the paths this script chose; it prints a value
 #   only for the names this script pins or the knobs above.
 #
@@ -39,7 +60,8 @@
 #                                         [--model-cache PATH] [--dry-run]
 #        scripts/sandbox_search_daemon.sh --stop DIR
 #   --bin PATH          the trusty-search binary (default: on PATH)
-#   --port N            loopback port (default: a free port from 17900; not 7878)
+#   --port N            requested loopback port (default: a free port from 17900;
+#                       7814..7878 is refused)
 #   --dir DIR           an existing sandbox directory (default: a new `mktemp -d`);
 #                       must not be, or resolve to, the real home
 #   --model-cache PATH  an existing fastembed cache directory to reuse
@@ -57,9 +79,12 @@ set -euo pipefail
 
 # Passed through from the caller only when exported — tuning knobs, never a credential.
 KNOBS="TRUSTY_WARMBOOT_MAX_INDEXES TRUSTY_MAX_RESIDENT_INDEXES TRUSTY_REDB_CACHE_MB \
-TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG"
+TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN"
 SANDBOX_PATH="/usr/bin:/bin"
 LIVE_PORT=7878
+# The daemon walks forward up to 64 ports from the requested one.
+LIVE_LOW=$((LIVE_PORT - 64))
+PORT_WAIT_SECS="${SANDBOX_PORT_WAIT_SECS:-60}"
 FIRST_PORT=17900
 
 die() {
@@ -98,39 +123,74 @@ port_busy() {
 free_port() {
   local p="$FIRST_PORT"
   while [ "$p" -lt $((FIRST_PORT + 100)) ]; do
-    if [ "$p" -ne "$LIVE_PORT" ] && ! port_busy "$p"; then echo "$p"; return 0; fi
+    if ! port_busy "$p"; then echo "$p"; return 0; fi
     p=$((p + 1))
   done
 }
 
 # owned_pid PID DIR: succeeds only when PID is a plain pid above 1 and its argv
-# contains DIR. A negative, zero, group-shaped or reused pid fails.
+# holds the token `--data-dir DIR/data` followed by a space or the end of argv.
+# A negative, zero, group-shaped or reused pid, and a sibling dir such as
+# `DIR-other`, fail.
 owned_pid() {
   local pid="$1" dir="$2" args
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   [ "$pid" -gt 1 ] || return 1
   args="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [ -n "$args" ] || return 1
-  case "$args" in *"$dir"*) return 0 ;; *) return 1 ;; esac
+  case "$args " in *"--data-dir $dir/data "*) return 0 ;; *) return 1 ;; esac
 }
 
-# stop_recorded DIR: signal TERM to the pid in DIR/sandbox.pid when it still
-# owns DIR; returns 1 and signals nothing otherwise. Re-checks before KILL.
-stop_recorded() {
-  local dir="$1" pidfile pid i
-  pidfile="$dir/sandbox.pid"
-  [ -f "$pidfile" ] || { echo "sandbox_search_daemon: no $pidfile" >&2; return 1; }
-  pid="$(tr -d ' \n' < "$pidfile")"
+# is_alive PID: a running process; a zombie awaiting its parent is dead.
+is_alive() {
+  local st
+  kill -0 "$1" 2>/dev/null || return 1
+  st="$(ps -p "$1" -o stat= 2>/dev/null || true)"
+  case "$st" in ''|Z*) return 1 ;; *) return 0 ;; esac
+}
+
+# wait_dead PID TENTHS: poll for up to TENTHS tenths of a second; succeeds when dead.
+wait_dead() {
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    is_alive "$1" || return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_alive "$1"
+}
+
+# terminate_owned PID DIR: TERM, wait 10 s, KILL only while owned_pid still
+# holds, wait 5 s. Returns 0 only when PID is dead. Returns 1 and prints why
+# when PID is alive but not owned (nothing signalled) or survives KILL.
+terminate_owned() {
+  local pid="$1" dir="$2"
+  is_alive "$pid" || return 0
   if ! owned_pid "$pid" "$dir"; then
-    echo "sandbox_search_daemon: refused: pid '$pid' is not a process whose argv contains $dir; nothing signalled" >&2
+    echo "sandbox_search_daemon: refused: pid '$pid' is not a process whose argv holds --data-dir $dir/data; nothing signalled" >&2
     return 1
   fi
   kill -TERM "$pid" 2>/dev/null || true
-  i=0
-  while [ "$i" -lt 50 ] && kill -0 "$pid" 2>/dev/null; do sleep 0.2; i=$((i + 1)); done
-  if kill -0 "$pid" 2>/dev/null && owned_pid "$pid" "$dir"; then
+  wait_dead "$pid" 100 && return 0
+  if owned_pid "$pid" "$dir"; then
     kill -KILL "$pid" 2>/dev/null || true
+    wait_dead "$pid" 50 && return 0
   fi
+  echo "sandbox_search_daemon: pid $pid is still alive after TERM and KILL; $dir/sandbox.pid kept" >&2
+  return 1
+}
+
+# stop_recorded DIR: terminate the pid in DIR/sandbox.pid. The pidfile is
+# removed, and 0 returned, only once that process is dead.
+stop_recorded() {
+  local dir="$1" pidfile pid
+  pidfile="$dir/sandbox.pid"
+  [ -f "$pidfile" ] || { echo "sandbox_search_daemon: no $pidfile" >&2; return 1; }
+  pid=""
+  read -r pid < "$pidfile" || true
+  case "$pid" in ''|*[!0-9]*) echo "sandbox_search_daemon: refused: pidfile holds '$pid', not a pid; nothing signalled" >&2; return 1 ;; esac
+  [ "$pid" -gt 1 ] || { echo "sandbox_search_daemon: refused: pid '$pid'; nothing signalled" >&2; return 1; }
+  terminate_owned "$pid" "$dir" || return 1
   rm -f "$pidfile"
   echo "sandbox_search_daemon: stopped pid $pid"
 }
@@ -165,7 +225,9 @@ if [ -n "$PORT" ]; then
   case "$PORT" in
     *[!0-9]*) echo "sandbox_search_daemon: --port must be a number" >&2; usage ;;
   esac
-  [ "$PORT" -ne "$LIVE_PORT" ] || die "port $LIVE_PORT is the live daemon's port"
+  if [ "$PORT" -ge "$LIVE_LOW" ] && [ "$PORT" -le "$LIVE_PORT" ]; then
+    die "port $PORT is within 64 of the live daemon's port $LIVE_PORT; the daemon walks forward on a busy port"
+  fi
   [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "--port is out of range: $PORT"
 else
   PORT="$(free_port)"
@@ -176,7 +238,12 @@ if [ -z "$BIN" ]; then
   BIN="$(command -v trusty-search || true)"
   [ -n "$BIN" ] || die "no trusty-search binary on PATH; pass --bin"
 fi
-[ -x "$BIN" ] || die "--bin is not an executable file: $BIN"
+[ -x "$BIN" ] && [ -f "$BIN" ] || die "--bin is not an executable file: $BIN"
+# Absolute, so the launch works from the sandbox cwd and a sibling
+# trusty-embedderd is found next to it.
+BIN_DIR="$(resolve "$(dirname "$BIN")")"
+[ -n "$BIN_DIR" ] || die "cannot resolve the directory of --bin: $BIN"
+BIN="$BIN_DIR/$(basename "$BIN")"
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"
@@ -195,6 +262,17 @@ elif [ "$DRY_RUN" -eq 1 ]; then
 else
   SANDBOX="$(resolve "$(mktemp -d "${TMPDIR:-/tmp}/ts-sandbox.XXXXXX")")"
   [ -n "$SANDBOX" ] || die "could not create a sandbox directory"
+fi
+
+# #9121: the daemon loads the first `.env.local` found walking up from its cwd.
+# Its cwd is <dir>/home, so no ancestor of that may hold one.
+if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
+  anc="$SANDBOX"
+  while :; do
+    [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded by the daemon from <dir>/home; pick a --dir outside it"
+    [ "$anc" != "/" ] || break
+    anc="$(dirname "$anc")"
+  done
 fi
 
 # The model cache: --model-cache wins, then an exported FASTEMBED_CACHE_DIR.
@@ -237,25 +315,45 @@ fi
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
 
 CHILD=""
-# teardown: signal only the pid this script spawned, and only while its argv
-# still contains the sandbox dir.
+# teardown: end only the pid this script spawned, and only while its argv still
+# holds the sandbox's --data-dir. The pidfile goes only once the child is dead.
 # shellcheck disable=SC2329  # invoked through the traps below
 teardown() {
+  local dead=1
   trap - EXIT INT TERM
-  if [ -n "$CHILD" ] && owned_pid "$CHILD" "$SANDBOX"; then
-    kill -TERM "$CHILD" 2>/dev/null || true
+  if [ -n "$CHILD" ] && terminate_owned "$CHILD" "$SANDBOX"; then
+    dead=0
     wait "$CHILD" 2>/dev/null || true
   fi
-  rm -f "$SANDBOX/sandbox.pid"
+  if [ "$dead" -eq 0 ]; then rm -f "$SANDBOX/sandbox.pid"; fi
 }
 trap teardown EXIT
 trap 'teardown; exit 130' INT
 trap 'teardown; exit 143' TERM
 
+# A stale port file from an earlier run in this dir must not pass for ours.
+rm -f "$SANDBOX/data/daemon.port"
+# cwd <dir>/home: see the Working directory note in the header.
+cd "$SANDBOX/home"
 env -i "${ENV_WORDS[@]}" "${ARGV[@]}" &
 CHILD=$!
 echo "$CHILD" > "$SANDBOX/sandbox.pid"
 echo "sandbox_search_daemon: started pid $CHILD (stop with: scripts/sandbox_search_daemon.sh --stop $SANDBOX)"
+
+# The daemon walks forward from the requested port; the port file is the truth.
+PORT_FILE="$SANDBOX/data/daemon.port"
+waited=0
+while [ "$waited" -lt $((PORT_WAIT_SECS * 5)) ] && [ ! -s "$PORT_FILE" ] && is_alive "$CHILD"; do
+  sleep 0.2
+  waited=$((waited + 1))
+done
+if [ -s "$PORT_FILE" ]; then
+  echo "sandbox_search_daemon: bound port: $(tr -d ' \n' < "$PORT_FILE") (from $PORT_FILE; requested $PORT)"
+elif is_alive "$CHILD"; then
+  echo "sandbox_search_daemon: no $PORT_FILE after ${PORT_WAIT_SECS}s; the bound port is unknown (requested $PORT); read that file once it appears" >&2
+else
+  echo "sandbox_search_daemon: the daemon exited before writing $PORT_FILE" >&2
+fi
 STATUS=0
 wait "$CHILD" || STATUS=$?
 exit "$STATUS"
