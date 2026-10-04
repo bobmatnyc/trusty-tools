@@ -66,8 +66,8 @@ mod heredoc;
 // #8161: HEAD moves into a linked worktree a live agent stands in.
 mod linked_worktree_head_move;
 mod main_checkout;
-// #8524: operator-listed runtime checkouts.
-mod operator_checkouts;
+// #8524, #7905: operator-listed runtime and documents checkouts.
+pub(crate) mod operator_checkouts;
 mod path_tokens;
 mod persistence;
 // #7648: an unscoped environment dump inside a Kubernetes pod.
@@ -122,7 +122,9 @@ mod force_push;
 
 pub(crate) use anchor_verbs::{AnchorWrite, anchor_writes};
 pub(crate) use credential_print::evaluate_credential_print_command;
-pub(crate) use destructive_delete::{DeleteTarget, evaluate_destructive_delete_command};
+pub(crate) use destructive_delete::{
+    DeleteTarget, evaluate_destructive_delete_command, lone_inert_heredoc,
+};
 pub(crate) use floor_d4::evaluate_d4_floor;
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;

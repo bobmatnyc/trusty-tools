@@ -299,7 +299,8 @@ pub(crate) const NEW_REF_FLAGS: &[&str] = &["-b", "-B", "-c", "-C"];
 /// wants that word in its branch name.
 /// What: `Some(index)` — the first token that names a ref — for a
 /// [`REF_NAMING_GIT_SUBCOMMANDS`] call, for a `checkout`/`switch` call at
-/// the token after its [`NEW_REF_FLAGS`] spelling, and for `worktree add` at
+/// the token after its [`NEW_REF_FLAGS`] spelling — or, with no such flag and
+/// no `-p`/`--patch`, at its first operand (#8110) — and for `worktree add` at
 /// its first operand (#7533). A nested command withdraws
 /// it, exactly as it withdraws [`for_word_list_start`], because the words are
 /// then whatever that command prints. `None` for every other segment, so no
@@ -353,15 +354,33 @@ pub(crate) fn ref_name_start(segment: &str) -> Option<usize> {
     } else if matches!(sub, "checkout" | "switch") {
         // #7498: the new-branch flag is what makes the next token a ref, and
         // only a flag before the separator is a flag at all.
-        at + 2
-            + argv
-                .get(at + 1..end_of_options)?
-                .iter()
-                .position(|t| NEW_REF_FLAGS.contains(&t.as_str()))?
+        let window = argv.get(at + 1..end_of_options)?;
+        match window
+            .iter()
+            .position(|t| NEW_REF_FLAGS.contains(&t.as_str()))
+        {
+            Some(flag) => at + 2 + flag,
+            // #8110: `switch` takes only refs, and `checkout` restores a path
+            // without printing it unless `-p`/`--patch` shows the hunks. The
+            // window is read only when no `--` exists, since every word from
+            // `from` on is read in the ref position.
+            None if end_of_options == argv.len() && !window.iter().any(|t| shows_a_patch(t)) => {
+                at + 1
+            }
+            None => return None,
+        }
     } else {
         return None;
     };
     (from < end_of_options).then_some(from)
+}
+
+/// Whether a `checkout` option token asks for patch mode, which prints hunks
+/// (#8110): a short cluster carrying `p`, or any long option starting `--p`,
+/// since git accepts an abbreviation such as `--pa` for `--patch`.
+fn shows_a_patch(token: &str) -> bool {
+    token.starts_with("--p")
+        || (token.starts_with('-') && !token.starts_with("--") && token.contains('p'))
 }
 
 /// Flags whose next token is a human-readable TEXT PAYLOAD, never a path

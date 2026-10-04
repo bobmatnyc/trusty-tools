@@ -206,6 +206,31 @@ const SED_PROGRAMS: &[&str] = &["sed", "gsed", "ssed"];
 /// sed flags whose value is an EXPRESSION, i.e. program text (#7839).
 const SED_EXPRESSION_FLAGS: &[&str] = &["-e", "--expression"];
 
+/// SQL clients whose statement flag takes SQL, not a path (#9006).
+const SQL_CLIENTS: &[&str] = &["mysql", "mariadb"];
+
+/// The separate statement flags of [`SQL_CLIENTS`]; a joined `-e…` or
+/// `--execute=…` keeps the argv scan.
+const SQL_STATEMENT_FLAGS: &[&str] = &["-e", "--execute"];
+
+/// Client commands that hand text to a shell or an editor (#9006): mysql runs
+/// `system`/`\!` through `/bin/sh` even in batch mode, and `pager` and `edit`
+/// start a program.
+const SQL_SHELL_ESCAPES: &[&str] = &["system", "pager", "edit"];
+
+/// Whether a SQL statement can reach no shell, so its `.*` is SQL syntax.
+///
+/// Why: the #9001 critic showed `mysql -e '\! cat .*'` globs onto `.env` when
+/// the statement is read as SQL. Any backslash (every client command has a
+/// `\` short form) or any [`SQL_SHELL_ESCAPES`] word, in any case and even
+/// inside an identifier, keeps the argv scan.
+/// Test: `a_sql_wildcard_in_a_mysql_statement_is_no_path_9006`,
+/// `a_secret_named_in_a_mysql_statement_still_denies_9001`.
+fn sql_reaches_no_shell(statement: &str) -> bool {
+    let lower = statement.to_ascii_lowercase();
+    !lower.contains('\\') && !SQL_SHELL_ESCAPES.iter().any(|w| lower.contains(w))
+}
+
 /// Flags that load the program from a FILE, so every positional is a path.
 ///
 /// Why: `awk -f prog.awk data.txt` and `sed -f script.sed .env` have no inline
@@ -228,16 +253,28 @@ const PROGRAM_FILE_FLAGS: &[&str] = &["-f", "--file"];
 /// sed alone) the empty string BSD `sed -i ''` leaves behind. A
 /// [`PROGRAM_FILE_FLAGS`] spelling withdraws the whole answer, so every
 /// positional stays a path.
+/// For a [`SQL_CLIENTS`] entry, each [`SQL_STATEMENT_FLAGS`] value that
+/// [`sql_reaches_no_shell`] (#9006).
 /// Test: `bash_tokens_finds_the_sed_expression`,
 /// `bash_tokens_withdraws_on_a_program_file_flag`,
 /// `guard_tokenizer_bounds_the_program_text_relaxations`,
 /// `guard_7839_sed_expression_wildcard`, `guard_7744_awk_pattern_match_rule`,
-/// `guard_7738_python_inline_regex_literal`.
+/// `guard_7738_python_inline_regex_literal`,
+/// `a_sql_wildcard_in_a_mysql_statement_is_no_path_9006`.
 pub(crate) fn program_text_indices(program: &str, argv: &[String], start: usize) -> Vec<usize> {
     let rest_start = start + 1;
     let Some(rest) = argv.get(rest_start..) else {
         return Vec::new();
     };
+    if SQL_CLIENTS.contains(&program) {
+        return rest
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| SQL_STATEMENT_FLAGS.contains(&token.as_str()))
+            .map(|(offset, _)| rest_start + offset + 1)
+            .filter(|&index| argv.get(index).is_some_and(|s| sql_reaches_no_shell(s)))
+            .collect();
+    }
     if INLINE_PROGRAM_INTERPRETERS.contains(&program) {
         return rest
             .iter()

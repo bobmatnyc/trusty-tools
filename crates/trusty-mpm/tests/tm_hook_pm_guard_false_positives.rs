@@ -331,7 +331,8 @@ fn pm_guard_still_denies_what_the_7533_withdrawals_protected() {
 #[test]
 fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("echo '**A pipe confirms nothing at all.**'");
-    assert_denied("cat <<'EOF' > note.md\n**A short note.**\nEOF");
+    // #7833: a quoted body `cat` writes to a file is never globbed.
+    assert_allowed("cat <<'EOF' > note.md\n**A short note.**\nEOF");
     for glob in ["*M", "*Y", "*S", "*N", "*C"] {
         assert_denied(&format!("cat ~/.ssh/{glob}"));
     }
@@ -344,6 +345,21 @@ fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("cat id_rsa.");
     assert_denied("git worktree add .worktrees/x .env");
     assert_denied("git worktree add .worktrees/x config/credentials");
+}
+
+/// The guard's stdout, trimmed, for a `gcp-ops` agent's Bash `command` (#8110).
+fn gcp_ops_stdout(command: &str) -> String {
+    let home = guard_home();
+    let payload = serde_json::json!({
+        "agent_id": "agent-8110",
+        "agent_type": "gcp-ops",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    });
+    run_pm_guard(&payload.to_string(), home.path())
+        .trim()
+        .to_string()
 }
 
 /// #9001 case 3: the reported shapes allow through the real binary.
@@ -368,4 +384,155 @@ fn pm_guard_still_denies_the_9001_bounds() {
     assert_denied("for k in .env.*; do gh issue list --search \"$k\"; cat \"$k\"; done");
     assert_denied("gh api -X DELETE repos/o/r/actions/secrets/NAME");
     assert_denied(r"grep -c $'\x1b' /tmp/x.log");
+}
+
+/// 🔴 REGRESSION (#7190, #9006, #8110, #8093): each reported shape allows
+/// through the real binary. Every row was denied on origin/main.
+#[test]
+fn pm_guard_allows_the_b2_false_positives() {
+    assert_allowed("python3 - <<'PY'\nprint('It\\'s time to find it')\nPY");
+    assert_allowed(
+        "python3 - <<'EOF'\np = 'docs/notes.md'\ns = open(p).read()\n\
+         print('it's d[k] x[0]')\nopen(p, 'w').write(s.replace('old', 'new'))\nEOF",
+    );
+    // The PM may not fetch at all (P-network), so the #8110 row is a gcp-ops
+    // agent's, as reported.
+    assert_eq!(
+        gcp_ops_stdout(
+            "curl -s -H \"Authorization: Bearer $TOK\" https://oauth2.googleapis.com/tokeninfo"
+        ),
+        ""
+    );
+    assert_allowed("cd crates/trusty-common/src/secrets && ls");
+    assert_allowed("git checkout feat/7521-secrets-token");
+    // Absolute, so the #7122 worktree-destination rule never sees a worktree
+    // when the suite itself runs inside one; the source must exist (#8093).
+    let tree = tempfile::tempdir().expect("tempdir");
+    let state = tree.path().join("terraform.tfstate");
+    std::fs::write(&state, "{}").expect("state");
+    assert_allowed(&format!(
+        "cp {0} {0}.20260915-pre-490-rollout.backup",
+        state.display()
+    ));
+    // #7833: `cat` writing a quoted here-document body to a file.
+    assert_allowed("cat > /tmp/s.py <<'EOF'\nprint(r.key)\nEOF");
+}
+
+/// #7833: a quoted here-document appended to a relative source file, judged
+/// against the payload's own `cwd` and not the one `cargo test` inherited.
+///
+/// Why: the row first ran with no payload `cwd`, so `tm` inherited cargo's. A CI
+/// clone is a main checkout and the ADR-0044 source-write rule denied it, while
+/// a local run under `.claude/worktrees/` allowed it. The pair pins both rules.
+/// What: the same command allows in a tempdir that is no repo and denies, with
+/// the ADR-0044 reason, in one holding a `.git` directory.
+/// Test: itself.
+#[test]
+fn pm_guard_heredoc_append_follows_the_payload_cwd_not_the_inherited_one_7833() {
+    let command = "cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1})\nEOF";
+    let no_repo = tempfile::tempdir().expect("tempdir");
+    let stdout = pm_guard_stdout_in(command, no_repo.path());
+    assert_eq!(stdout.trim(), "", "expected ALLOW outside a repo: {stdout}");
+    let main_checkout = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(main_checkout.path().join(".git")).expect(".git dir");
+    let stdout = pm_guard_stdout_in(command, main_checkout.path());
+    assert!(stdout.contains("\"deny\""), "expected DENY: {stdout}");
+    assert!(
+        stdout.contains("ADR-0044"),
+        "expected the ADR-0044 reason: {stdout}"
+    );
+}
+
+/// #7190, #9006, #8110, #8093, #8520, #8660: the deny bounding each fix still
+/// holds through the real binary.
+#[test]
+fn pm_guard_still_denies_the_b2_bounds() {
+    assert_denied("eval \"$(cat <<'PY'\nrm -rf /\nPY\n)\"");
+    assert_denied("read x <<'PY'\nrm -rf /\nPY\neval \"$x\"");
+    assert_denied(
+        "G=g H=h python3 - <<'EOF'\nprint('it\\'s')\n\
+         os.system(\"$G$H api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+    );
+    let metadata = gcp_ops_stdout(
+        "curl http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+    );
+    assert!(metadata.contains("issue #7266"), "{metadata}");
+    assert_denied("cat terraform.tfstate.20260915-pre-490-rollout.backup");
+    assert_denied("cp terraform.tfstate /tmp/x.txt");
+    assert_denied("grep -c API_KEY .env");
+    assert_denied("terraform apply -var-file=/repo/infra/terraform/local/terraform.tfvars");
+    // #8093: a compound or wrapped copy gets no grant. The payload names a cwd
+    // holding the source, and the bare copy there allows, so each deny is the
+    // wrapper bound and not a missing-cwd or missing-file path.
+    let copy_cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::write(copy_cwd.path().join("terraform.tfstate"), "{}").expect("state");
+    for command in [
+        "true; cp terraform.tfstate terraform.tfstate.old",
+        "command cp terraform.tfstate terraform.tfstate.old",
+    ] {
+        let stdout = pm_guard_stdout_in(command, copy_cwd.path());
+        assert!(stdout.contains("\"deny\""), "expected DENY: {command}");
+    }
+    let control = "cp terraform.tfstate terraform.tfstate.old";
+    let stdout = pm_guard_stdout_in(control, copy_cwd.path());
+    assert_eq!(stdout.trim(), "", "expected ALLOW, got: {stdout}");
+    // #8093 critic HIGH: a path-qualified `cp` can be any binary of that name.
+    // Each one exists, as `ln -s /bin/cat cp` leaves it, so the #8879 rule
+    // judges a compiled program and lets it run; only the copy grant decides.
+    #[cfg(unix)]
+    {
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tree.path().join("terraform.tfstate"), "{}").expect("state");
+        for dir in ["", "bin/", "x/"] {
+            std::fs::create_dir_all(tree.path().join(dir)).expect("dir");
+            std::os::unix::fs::symlink("/bin/cat", tree.path().join(format!("{dir}cp")))
+                .expect("cat named cp");
+        }
+        let absolute = format!("{}/x/cp", tree.path().display());
+        for program in ["./cp", absolute.as_str(), "bin/cp"] {
+            let command = format!("{program} terraform.tfstate terraform.tfstate.bak");
+            let stdout = pm_guard_stdout_in(&command, tree.path());
+            assert!(stdout.contains("\"deny\""), "expected DENY: {command}");
+        }
+        let control = "cp terraform.tfstate terraform.tfstate.bak";
+        let stdout = pm_guard_stdout_in(control, tree.path());
+        assert_eq!(stdout.trim(), "", "expected ALLOW, got: {stdout}");
+    }
+    // #7833: a body the shell prints or runs keeps its scan.
+    assert_denied("cat <<'EOF'\nprint(open('.env').read())\nEOF");
+    assert_denied("cat > /tmp/s.py <<'EOF' && python3 /tmp/s.py\nopen('.env')\nEOF");
+    assert_denied("cat > /dev/stdout <<'EOF'\nprint(open('.env').read())\nEOF");
+}
+
+/// 🔴 REGRESSION (#8093 critic MEDIUM): the binary resolves a relative copy
+/// destination against the payload's `cwd`, so a symlink standing there
+/// keeps the deny while a new name keeps the grant.
+#[cfg(unix)]
+#[test]
+fn pm_guard_denies_a_same_class_copy_through_a_symlink_8093() {
+    let tree = tempfile::tempdir().expect("tempdir");
+    let outside = tree.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside dir");
+    std::os::unix::fs::symlink(&outside, tree.path().join("terraform.tfstate.link"))
+        .expect("symlink");
+    std::fs::write(tree.path().join("terraform.tfstate"), "{}").expect("source");
+    let symlink = pm_guard_stdout_in("cp terraform.tfstate terraform.tfstate.link", tree.path());
+    assert!(
+        symlink.contains("\"deny\""),
+        "expected DENY, got: {symlink}"
+    );
+    let fresh = pm_guard_stdout_in("cp terraform.tfstate terraform.tfstate.bak", tree.path());
+    assert_eq!(fresh.trim(), "", "expected ALLOW, got: {fresh}");
+}
+
+/// The guard's stdout for a Bash `command` whose payload names `cwd` (#8093).
+fn pm_guard_stdout_in(command: &str, cwd: &std::path::Path) -> String {
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "cwd": cwd,
+    });
+    let home = guard_home();
+    run_pm_guard(&payload.to_string(), home.path())
 }

@@ -208,15 +208,84 @@ fn gh_calls<'a>(argv: &'a [String], sub: &'a str) -> impl Iterator<Item = (&'a s
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell
-/// rewrites (`$G`, `` `which gh` ``, `g[h]`, `/opt/homebrew/bin/g[h]`).
+/// rewrites into it (`$G`, `` `which gh` ``, `g[h]`, `/opt/homebrew/bin/g[h]`).
 fn possibly_named(program: &str, name: &str) -> bool {
-    command_basename(program) == name || is_rewritten(program)
+    command_basename(program) == name || could_rewrite_to(program, name)
 }
 
 /// Whether a subcommand word could be `sub`: literally, or rewritten (`$A`,
 /// `{api,}`).
 fn possibly_sub(word: &str, sub: &str) -> bool {
-    word == sub || is_rewritten(word)
+    word == sub || could_rewrite_to(word, sub)
+}
+
+/// Whether the shell's rewrite of `word` could produce `name` (#9006).
+///
+/// Why: a Python subscript pair such as `d[k] x[0]` in a here-document body
+/// read as a rewritten `gh api`, so an inert edit script was refused as a
+/// secret DELETE. An expansion, a backtick or a brace can produce any text,
+/// but a word whose only rewrite is a glob becomes `name` only by matching it.
+/// What: `false` for a word the shell leaves alone; `true` for an expansion,
+/// a backtick or a brace; otherwise [`glob_could_match`] on the basename.
+/// Test: `a_python_subscript_pair_is_no_gh_api_call_9006`,
+/// `a_glob_that_can_spell_gh_still_denies_9006`.
+fn could_rewrite_to(word: &str, name: &str) -> bool {
+    if !is_rewritten(word) {
+        return false;
+    }
+    word.contains(['$', '`', '{', '}']) || glob_could_match(&command_basename(word), name)
+}
+
+/// Whether the glob `pattern` could match the file name `name` (#9006).
+///
+/// What: deliberately over-approximate. A bracket class stands for any one
+/// byte, case is folded (`nocaseglob`), and a pattern carrying any byte
+/// outside letters, digits, `.`, `_`, `-`, `*`, `?` and a balanced `[…]` —
+/// zsh's `(a|b)`, `<1-9>`, `^`, `#`, `~` — answers `true`, so syntax this
+/// reader does not model keeps the deny.
+/// Test: `a_glob_that_can_spell_gh_still_denies_9006`.
+fn glob_could_match(pattern: &str, name: &str) -> bool {
+    let mut tokens: Vec<Option<Option<u8>>> = Vec::new();
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            // A run of `*` is one `*`, which keeps the match linear in stars.
+            b'*' if tokens.last() == Some(&None) => {}
+            b'*' => tokens.push(None),
+            b'?' => tokens.push(Some(None)),
+            b'[' => match bytes[i + 1..].iter().position(|&c| c == b']') {
+                Some(close) if close > 0 => {
+                    tokens.push(Some(None));
+                    i += close + 1;
+                }
+                _ => return true,
+            },
+            c if c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-') => {
+                tokens.push(Some(Some(c.to_ascii_lowercase())));
+            }
+            _ => return true,
+        }
+        i += 1;
+    }
+    // Each non-`*` token takes one byte, so more of them than `name` has
+    // bytes cannot match.
+    if tokens.iter().filter(|t| t.is_some()).count() > name.len() {
+        return false;
+    }
+    wildcard_match(&tokens, name.to_ascii_lowercase().as_bytes())
+}
+
+/// Match `tokens` — `None` for `*`, `Some(None)` for any one byte,
+/// `Some(Some(b))` for the byte `b` — against all of `text`.
+fn wildcard_match(tokens: &[Option<Option<u8>>], text: &[u8]) -> bool {
+    match tokens.split_first() {
+        None => text.is_empty(),
+        Some((None, rest)) => (0..=text.len()).any(|skip| wildcard_match(rest, &text[skip..])),
+        Some((Some(atom), rest)) => text.split_first().is_some_and(|(&b, tail)| {
+            atom.is_none_or(|want| want == b) && wildcard_match(rest, tail)
+        }),
+    }
 }
 
 /// Whether the shell rewrites a word before the program sees it: an

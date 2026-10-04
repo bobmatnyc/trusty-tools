@@ -140,6 +140,7 @@ use std::path::{Path, PathBuf};
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
 use super::pm_guard::{EDIT_TOOLS, edit_tool_target_path, is_source_code_path};
+use super::pm_guard_bash::operator_checkouts::is_documents_repo;
 use super::pm_guard_bash::{UnplaceableWrite, shell_write_targets};
 
 /// Deny a source-file write whose target lives in a project's main checkout.
@@ -233,6 +234,10 @@ fn deny_reason_for_target(target: &str, cwd: &Path, home: Option<&str>) -> Optio
     // #7778: a disposable clone under the session scratchpad is nobody's shared
     // tree, so ADR-0044 has no other session's work to protect there.
     if write_lands_in_a_scratchpad_clone(&resolved, &root) {
+        return None;
+    }
+    // #7905: an operator-listed documents repo has no source to protect.
+    if is_documents_repo(&root) {
         return None;
     }
     // The message quotes the spelling the caller used, not the expansion.

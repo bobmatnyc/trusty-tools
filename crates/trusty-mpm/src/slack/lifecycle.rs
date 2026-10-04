@@ -149,14 +149,21 @@ pub fn stop_via_pid_file(path: &Path) -> StopOutcome {
 /// Isolating the raw `kill(2)` call keeps that classification in one place.
 /// What: on Unix, calls `libc::kill(pid, SIGTERM)`; `ESRCH` (no such process) maps
 /// to [`StopOutcome::NotRunning`], any other errno to [`StopOutcome::Failed`], and
-/// success to [`StopOutcome::Stopped`]. On non-Unix it reports unsupported.
-/// Test: covered indirectly via `stop_via_pid_file_stale_pid_is_not_running`.
+/// success to [`StopOutcome::Stopped`]. A pid naming a process group, not one
+/// process, is `Failed` before any signal. On non-Unix it reports unsupported.
+/// Test: covered indirectly via `stop_via_pid_file_stale_pid_is_not_running`,
+/// `stop_via_pid_file_group_shaped_pid_is_failed`.
 fn signal_terminate(pid: u32) -> StopOutcome {
     #[cfg(unix)]
     {
+        // #9153: a PID file naming 0 or a pid above i32::MAX would make `kill`
+        // signal a whole process GROUP (0 is our own); refuse it.
+        let Some(raw) = crate::core::daemon_identity::single_process_pid(pid) else {
+            return StopOutcome::Failed(format!("PID file names {pid}, not a single process"));
+        };
         // SAFETY: `kill` is async-signal-safe and merely posts a signal; passing a
         // pid and a constant signal number has no memory-safety implications.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        let rc = unsafe { libc::kill(raw, libc::SIGTERM) };
         if rc == 0 {
             return StopOutcome::Stopped(pid);
         }

@@ -112,6 +112,25 @@ fn a_plain_quoted_heredoc_with_substitution_text_still_allows() {
     }
 }
 
+/// #7833: `cat` writing a quoted body to a file is data, but only behind a
+/// delimiter the #9150 scan reads. A lone `cat > out.txt` behind a refused
+/// delimiter still denies, under each bypass, so the #7833 allowance cannot
+/// reopen #9150.
+#[test]
+fn a_cat_write_behind_a_refused_delimiter_denies_7833() {
+    let fx = Fixture::new();
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        for command in [
+            "cat > out.txt <<'A B'\nx\nA B\n$(rm -rf /)\nA",
+            "cat > out.txt <<'A B'\nx\nA B\necho \"$(rm -rf /)\"\nA",
+        ] {
+            let out = run(&fx, &bash_payload(&fx, command), &env, Some("pm"));
+            assert!(out.contains("\"deny\""), "{bypass:?} {command:?}: {out}");
+        }
+    }
+}
+
 /// #9150 round 3: a delimiter word the scanner refuses denies under each
 /// bypass even when its "body" holds a credential-printing command, because
 /// the unclassifiable refusal runs before the credential-print rule and the

@@ -46,7 +46,7 @@ use crate::commands::pm_guard_deny_log::{AUDIT_POST_TIMEOUT, DenyContext};
 use crate::commands::pm_guard_floor::ArchitectGate;
 use crate::commands::pm_guard_secret_env_files::evaluate_env_plist_read;
 use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
-use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
+use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_in;
 use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 use crate::commands::pm_guard_trust_anchor_paths::{Resolved, resolve};
@@ -145,7 +145,8 @@ pub(crate) fn evaluate_secret_file_read_gated(
     }
     // 2. The #7266 file rule. Its entry point re-runs the Bash value rules,
     // which step 1 has already cleared, so only the file rule can answer.
-    let reason = evaluate_secret_file_read(tool_name, tool_input)?;
+    // #8093: the hook cwd lets the copy grant see its destination.
+    let reason = evaluate_secret_file_read_in(tool_name, tool_input, Some(hook_cwd))?;
     // 3. The exemption: the shape first, then the identity.
     let shape = |c| envfile_shape(c, hook_cwd, gate.env(), || gate.config());
     let Some(call) = command.and_then(shape) else {

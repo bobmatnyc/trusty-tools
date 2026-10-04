@@ -2782,8 +2782,10 @@ fn pm_guard_denies_a_secret_copied_to_a_source_extension_name() {
     // A copy that keeps the source's own extension is out of the RENAME rule's
     // scope, but since #7266 round 5 the read rule refuses any command naming a
     // secret-shaped file under a verb outside its allowlist. `cp` is not on it.
+    // #8093: a same-class sibling in the same directory is granted; a copy
+    // into another directory is not.
     let stdout = run_pm_guard_at(
-        &bash_payload_at("cp terraform.tfvars backup.tfvars", &repo, ""),
+        &bash_payload_at("cp terraform.tfvars ../backup.tfvars", &repo, ""),
         UNREACHABLE_DAEMON,
         &repo,
     );
