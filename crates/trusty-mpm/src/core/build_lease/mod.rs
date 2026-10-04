@@ -34,6 +34,8 @@
 //! - [`census_detail`] — the census attributed per group (pgid, leader,
 //!   driver, parent chain) for `tm build-lease --census`.
 //! - [`acquire`] — the bounded wait.
+//! - [`evict`] — disk-budget eviction of the slot pool's `slot-N`
+//!   directories, skipping every slot in use (#8451).
 //! - [`orphan`] — a build still running after its holder was SIGKILLed.
 //! - [`target_dir`] — the slot's private `CARGO_TARGET_DIR`.
 //! - [`stale_guard`] — clears a slot's workspace fingerprints when its next
@@ -90,6 +92,8 @@ pub mod admission;
 pub mod census;
 pub mod census_detail;
 pub mod config;
+// #8451: the daemon's percent-of-volume sweep over the slot pool.
+pub mod evict;
 pub mod orphan;
 pub mod slots;
 pub mod stale_guard;

@@ -292,6 +292,8 @@ pub async fn serve_with_shutdown(
     // cadence and the spawn all live in the service module, which keeps this file
     // under its SLOC cap and keeps the policy next to the loop it governs.
     services::merged_pr_reclaim::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
+    // #8451: evict idle builder-slot dirs once their volume passes its budget.
+    services::slot_pool_evict::spawn_if_enabled(Arc::clone(&state), cancel.child_token());
     project_adoption::spawn_startup_marker_migration(&state); // #8511
 
     // Cloud log drain (#6535): OFF unless `log_drain.enabled` is true, so the

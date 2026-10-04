@@ -41,6 +41,8 @@ pub(crate) mod divert_worker;
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
 pub(crate) mod doctor_builder_cap;
+// #8451: the slot pool's volume against its eviction threshold.
+pub(crate) mod doctor_slot_pool;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
