@@ -1,112 +1,22 @@
 //! End-to-end recall ranking for epic #9138 O4: stale snapshots rank below
-//! current rulings (#8246, #9142), and a user-scope ruling reaches a project
-//! palace's recall (#9143).
+//! current rulings on every recall surface (#8246, #9142).
 //!
 //! Why: the unit tests in `tools::recall_rank_tests` prove the weight; these
-//! prove the MCP `memory_recall` surface applies it and the rulings leg, over
-//! real palaces in a temp data root.
+//! prove each recall surface applies it, over real palaces in a temp data root.
 //! What: each test builds an `AppState` on a `TempDir`, writes drawers through
 //! `memory_remember`, backdates snapshot drawers in the in-memory table (the
-//! table recall reads), and recalls through `dispatch_tool`. Its own binary,
-//! so seeding the mock embedder cannot race the lib tests' real singleton.
+//! table recall reads), and recalls. Its own binary, so seeding the mock
+//! embedder cannot race the lib tests' real singleton. The user-scope rulings
+//! leg (#9143) is tested in `recall_rulings_leg.rs`.
 //! Test: this IS the test module.
 
-use chrono::{Duration, Utc};
+mod recall_support;
+
+use chrono::Duration;
+use recall_support::{backdate, fact_key, rank_of, recall, remember, state_with};
 use serde_json::{json, Value};
-use tempfile::TempDir;
-use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+use trusty_memory::service::MemoryService;
 use trusty_memory::tools::dispatch_tool;
-use trusty_memory::AppState;
-use uuid::Uuid;
-
-/// A ready `AppState` on `tmp` with each named palace created.
-async fn state_with(tmp: &TempDir, palaces: &[&str], rulings: &[&str]) -> AppState {
-    seed_shared_embedder_with_mock();
-    let state = AppState::new(tmp.path().to_path_buf())
-        .with_rulings_palaces(rulings.iter().map(|p| p.to_string()).collect());
-    state.set_ready();
-    let cwd = tmp.path().to_string_lossy().to_string();
-    for name in palaces {
-        dispatch_tool(
-            &state,
-            "palace_create",
-            json!({ "name": name, "force": true, "cwd": cwd }),
-        )
-        .await
-        .expect("palace_create");
-    }
-    state
-}
-
-/// Write one drawer through `memory_remember`; returns its id.
-async fn remember(
-    state: &AppState,
-    palace: &str,
-    text: &str,
-    tags: &[&str],
-    key: Option<&str>,
-) -> Uuid {
-    let mut args = json!({ "palace": palace, "text": text, "tags": tags, "force": true });
-    if let Some(k) = key {
-        args["fact_key"] = json!(k);
-    }
-    let out = dispatch_tool(state, "memory_remember", args)
-        .await
-        .expect("memory_remember");
-    out["drawer_id"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .expect("drawer_id")
-}
-
-/// Move a drawer's `created_at` into the past in the table recall reads.
-fn backdate(state: &AppState, palace: &str, id: Uuid, age: Duration) {
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new(palace))
-        .expect("open palace");
-    let mut drawers = handle.drawers.write();
-    let d = drawers
-        .iter_mut()
-        .find(|d| d.id == id)
-        .expect("drawer present");
-    d.created_at = Utc::now() - age;
-}
-
-/// The stored `fact_key` of one drawer.
-fn fact_key(state: &AppState, palace: &str, id: Uuid) -> Option<String> {
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new(palace))
-        .expect("open palace");
-    let drawers = handle.drawers.read();
-    drawers
-        .iter()
-        .find(|d| d.id == id)
-        .expect("drawer present")
-        .fact_key
-        .clone()
-}
-
-async fn recall(state: &AppState, palace: &str, query: &str, top_k: u64) -> Vec<Value> {
-    let out = dispatch_tool(
-        state,
-        "memory_recall",
-        json!({ "palace": palace, "query": query, "top_k": top_k }),
-    )
-    .await
-    .expect("memory_recall");
-    out["results"].as_array().expect("results").clone()
-}
-
-/// Rank of the hit with drawer `id`, or `None` when absent.
-fn rank_of(results: &[Value], id: Uuid) -> Option<usize> {
-    let id = id.to_string();
-    results
-        .iter()
-        .position(|r| r["drawer_id"].as_str() == Some(id.as_str()))
-}
 
 /// Why (#9142, #8246): the review's Q02/Q11 shape — an old status snapshot
 /// that matches the query better than the current ruling outranked it.
@@ -115,10 +25,10 @@ fn rank_of(results: &[Value], id: Uuid) -> Option<usize> {
 #[tokio::test]
 async fn a_ruling_outranks_an_older_snapshot_on_the_same_subject() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let state = state_with(&tmp, &["proj"], &[]).await;
+    let state = state_with(&tmp, &["project-a"], &[]).await;
     let snapshot = remember(
         &state,
-        "proj",
+        "project-a",
         "rust builder cap snapshot: the band allowed six builders as of 2026-09-01",
         &["status", "resume-target"],
         None,
@@ -126,7 +36,7 @@ async fn a_ruling_outranks_an_older_snapshot_on_the_same_subject() {
     .await;
     let ruling = remember(
         &state,
-        "proj",
+        "project-a",
         "Owner ruling 2026-10-01: at most four rust builders run at once",
         &["bob-ruling"],
         None,
@@ -134,15 +44,15 @@ async fn a_ruling_outranks_an_older_snapshot_on_the_same_subject() {
     .await;
     remember(
         &state,
-        "proj",
+        "project-a",
         "Sourdough starter wants daily flour and water",
         &["kg"],
         None,
     )
     .await;
-    backdate(&state, "proj", snapshot, Duration::days(30));
+    backdate(&state, "project-a", snapshot, Duration::days(30));
 
-    let results = recall(&state, "proj", "rust builder cap", 5).await;
+    let results = recall(&state, "project-a", "rust builder cap", 5).await;
     let (s, r) = (rank_of(&results, snapshot), rank_of(&results, ruling));
     assert!(
         s.is_some() && r.is_some(),
@@ -163,13 +73,13 @@ async fn a_ruling_outranks_an_older_snapshot_on_the_same_subject() {
 #[tokio::test]
 async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_nothing() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let state = state_with(&tmp, &["proj"], &[]).await;
+    let state = state_with(&tmp, &["project-a"], &[]).await;
     let tags = ["status", "resume-target"];
     let a_text = "resume state for session s1: working on PR 100";
-    let a = remember(&state, "proj", a_text, &tags, Some("ws:s1/resume")).await;
+    let a = remember(&state, "project-a", a_text, &tags, Some("ws:s1/resume")).await;
     let b = remember(
         &state,
-        "proj",
+        "project-a",
         "resume state for session s1: working on PR 200",
         &tags,
         Some("ws:s1/resume"),
@@ -177,7 +87,7 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
     .await;
     let c = remember(
         &state,
-        "proj",
+        "project-a",
         "resume state for session s2: working on PR 300",
         &tags,
         Some("ws:s2/resume"),
@@ -185,21 +95,24 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
     .await;
 
     assert_eq!(
-        fact_key(&state, "proj", a),
+        fact_key(&state, "project-a", a),
         None,
         "same key retires the first"
     );
-    assert_eq!(fact_key(&state, "proj", b).as_deref(), Some("ws:s1/resume"));
     assert_eq!(
-        fact_key(&state, "proj", c).as_deref(),
+        fact_key(&state, "project-a", b).as_deref(),
+        Some("ws:s1/resume")
+    );
+    assert_eq!(
+        fact_key(&state, "project-a", c).as_deref(),
         Some("ws:s2/resume"),
         "another key retires nothing"
     );
 
     for id in [a, b, c] {
-        backdate(&state, "proj", id, Duration::days(3));
+        backdate(&state, "project-a", id, Duration::days(3));
     }
-    let results = recall(&state, "proj", a_text, 5).await;
+    let results = recall(&state, "project-a", a_text, 5).await;
     let (ra, rb, rc) = (
         rank_of(&results, a),
         rank_of(&results, b),
@@ -215,83 +128,144 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
     );
 }
 
-/// Why (#9143 criteria 1-3): a ruling stored in the user-scope palace must
-/// reach a project palace's plain `memory_recall`, and only rulings may cross.
-/// What: `rules` is the configured user-scope palace and holds a ruling plus a
-/// non-ruling on the same subject; `apex` is an unconfigured project palace
-/// with an on-topic note. Recall in `proj` returns the ruling in the top 3 at
-/// layer 1, and neither non-ruling. A state with no rulings palace configured
-/// does not see the ruling.
+/// One recall surface, as the parametrised test drives it.
+#[derive(Debug, Clone, Copy)]
+enum Surface {
+    McpRecall,
+    McpRecallDeep,
+    McpRecallAll,
+    ServiceRecall,
+    ServiceRecallAll,
+}
+
+/// The ranked hits `surface` returns for `query` in `palace`.
+async fn recall_on(
+    state: &trusty_memory::AppState,
+    surface: Surface,
+    palace: &str,
+    query: &str,
+) -> Vec<Value> {
+    let top_k = 5;
+    let out = match surface {
+        Surface::McpRecall => {
+            dispatch_tool(
+                state,
+                "memory_recall",
+                json!({ "palace": palace, "query": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::McpRecallDeep => {
+            dispatch_tool(
+                state,
+                "memory_recall_deep",
+                json!({ "palace": palace, "query": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::McpRecallAll => {
+            dispatch_tool(
+                state,
+                "memory_recall_all",
+                json!({ "q": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::ServiceRecall => Ok(MemoryService::new(state.clone())
+            .recall(palace, query, top_k, false)
+            .await
+            .expect("service recall")),
+        Surface::ServiceRecallAll => Ok(MemoryService::new(state.clone())
+            .recall_all(query, top_k, false)
+            .await),
+    }
+    .unwrap_or_else(|e| panic!("{surface:?}: {e:#}"));
+    match out.get("results") {
+        Some(r) => r.as_array().expect("results").clone(),
+        None => out
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface:?}: {out}"))
+            .clone(),
+    }
+}
+
+/// Why (#8246 review): every recall surface demotes, not only `memory_recall`.
+/// The chat tools and chat context injection route through the service
+/// methods driven here (`recall_ranked`, `recall_all`); the embedder-warming
+/// path is covered in `recall_degraded_lane.rs`, which needs a cold embedder.
+/// What: the Q02/Q11 shape from the first test, recalled on each surface.
 #[tokio::test]
-async fn a_ruling_in_the_user_scope_palace_is_recalled_from_a_project_palace() {
+async fn demotion_applies_on_every_recall_surface() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let state = state_with(&tmp, &["proj", "rules", "apex"], &["rules"]).await;
-    remember(
+    let state = state_with(&tmp, &["project-a"], &[]).await;
+    let snapshot = remember(
         &state,
-        "proj",
-        "Quokkas are photogenic marsupials on Rottnest Island",
-        &[],
-        None,
-    )
-    .await;
-    remember(
-        &state,
-        "proj",
-        "Basalt columns form when thick lava cools slowly",
-        &[],
+        "project-a",
+        "rust builder cap snapshot: the band allowed six builders as of 2026-09-01",
+        &["status", "resume-target"],
         None,
     )
     .await;
     let ruling = remember(
         &state,
-        "rules",
-        "issue titles name the symptom, never the proposed fix",
-        &["bob-ruling", "standing-rule"],
+        "project-a",
+        "Owner ruling 2026-10-01: at most four rust builders run at once",
+        &["bob-ruling"],
         None,
     )
     .await;
-    let rules_note = remember(
+    backdate(&state, "project-a", snapshot, Duration::days(30));
+
+    for surface in [
+        Surface::McpRecall,
+        Surface::McpRecallDeep,
+        Surface::McpRecallAll,
+        Surface::ServiceRecall,
+        Surface::ServiceRecallAll,
+    ] {
+        let results = recall_on(&state, surface, "project-a", "rust builder cap").await;
+        let (s, r) = (rank_of(&results, snapshot), rank_of(&results, ruling));
+        assert!(r.is_some(), "{surface:?}: ruling recalled: {results:#?}");
+        assert!(
+            s.is_none() || r < s,
+            "{surface:?}: the ruling must rank above the stale snapshot: {results:#?}"
+        );
+    }
+}
+
+/// Why (#8246 review): demotion used to re-sort only the `top_k` the lanes
+/// returned, so a fresh drawer at rank `top_k + 1` could never be lifted.
+/// What: three stale snapshots out-match a fresh note on similarity alone, so
+/// the note is fourth before demotion. With `top_k` 3 the lanes now fetch 6,
+/// demotion halves the snapshots, and the note enters the top 3.
+#[tokio::test]
+async fn a_fresh_drawer_just_past_top_k_is_lifted_above_stale_snapshots() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a"], &[]).await;
+    let query = "deploy freeze window for the release train";
+    for n in 1..=3 {
+        let id = remember(
+            &state,
+            "project-a",
+            &format!("{query} s{n}"),
+            &["status"],
+            None,
+        )
+        .await;
+        backdate(&state, "project-a", id, Duration::days(30));
+    }
+    let fresh = remember(
         &state,
-        "rules",
-        "issue titles drafted on 2026-09-02 were long",
-        &["note"],
-        None,
-    )
-    .await;
-    let apex_note = remember(
-        &state,
-        "apex",
-        "issue titles in apex carry the ticket key",
+        "project-a",
+        &format!("{query} lifts on Mondays after the train leaves"),
         &[],
         None,
     )
     .await;
 
-    let query = "issue titles name the symptom";
-    let results = recall(&state, "proj", query, 5).await;
-    let r = rank_of(&results, ruling).expect("the user-scope ruling is recalled");
-    assert!(r < 3, "the ruling ranks in the top 3: {results:#?}");
-    assert_eq!(
-        results[r]["layer"],
-        json!(1),
-        "user-scope rulings join at L1"
-    );
-    assert_eq!(
-        rank_of(&results, rules_note),
-        None,
-        "a non-ruling never crosses palaces"
-    );
-    assert_eq!(
-        rank_of(&results, apex_note),
-        None,
-        "an unconfigured palace never contributes"
-    );
-
-    let unconfigured = state.clone().with_rulings_palaces(Vec::new());
-    let results = recall(&unconfigured, "proj", query, 5).await;
-    assert_eq!(
-        rank_of(&results, ruling),
-        None,
-        "no rulings palace, no rulings leg"
+    let results = recall(&state, "project-a", query, 3).await;
+    assert!(
+        rank_of(&results, fresh).is_some(),
+        "the fresh note must be lifted into the top 3: {results:#?}"
     );
 }

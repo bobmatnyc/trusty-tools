@@ -17,6 +17,8 @@
 
 pub mod core;
 pub mod core_kg;
+// #8246: ranked recall, split from `core.rs` at the SLOC cap.
+pub mod core_recall;
 pub mod helpers;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;

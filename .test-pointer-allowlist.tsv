@@ -901,7 +901,6 @@ crates/trusty-gworkspace/src/api/services/docs/table_style.rs	balance_widths_equ
 crates/trusty-installer/src/commands/port_guard.rs	probe_reports_free_for_a_genuinely_free_port
 crates/trusty-installer/src/commands/up/mod.rs	up_dispatch
 crates/trusty-installer/src/download/fetch.rs	download_and_verify_live
-crates/trusty-memory/src/chat/tools.rs	recall_across_palaces_merges_results
 crates/trusty-memory/src/commands/inbox_check.rs	hook_activity_endpoint_appends_to_activity_log
 crates/trusty-memory/src/commands/inbox_check.rs	messages_endpoint_round_trip
 crates/trusty-memory/src/commands/prompt_context/mod.rs	prompt_context_stdin_read_bounded_by_deadline
@@ -912,7 +911,6 @@ crates/trusty-memory/src/console_metrics/mod.rs	handle_console_metrics_aggregate
 crates/trusty-memory/src/discovery.rs	discover_and_assert
 crates/trusty-memory/src/lib.rs	error_store_captures_and_queries
 crates/trusty-memory/src/prompt_facts.rs	prompt_tests
-crates/trusty-memory/src/service/core.rs	recall_across_palaces_merges_results
 crates/trusty-memory/src/service/helpers.rs	kg_gaps_endpoint_returns_cached_gaps
 crates/trusty-memory/src/service/user_config.rs	config_endpoint_returns_payload
 crates/trusty-memory/src/tools/chat_assets.rs	asset_ownership_and_restart_are_enforced

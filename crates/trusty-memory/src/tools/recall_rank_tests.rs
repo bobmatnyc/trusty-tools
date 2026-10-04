@@ -120,3 +120,66 @@ fn cross_palace_demotion_reorders_the_merged_list() {
     demote_stale_snapshots_across(&mut results, now);
     assert_eq!(results[0].palace_id, "b");
 }
+
+/// Why: tags match exactly — a tag that merely contains a ruling or snapshot
+/// word must not change a drawer's weight.
+#[test]
+fn tags_match_exactly_never_by_substring() {
+    let now = Utc::now();
+    for tag in ["decisionless", "rulings", "Decision", "bob-ruling-draft"] {
+        let d = drawer("x", &[tag, "status"], Duration::days(30), now);
+        assert!(!is_ruling(&d), "tag {tag} is not a ruling");
+        assert!(temporal_weight(&d, now) < 0.51, "tag {tag} exempts nothing");
+    }
+    for tag in ["statusbar", "snapshots", "resume"] {
+        let d = drawer("x", &[tag], Duration::days(30), now);
+        assert_eq!(temporal_weight(&d, now), 1.0, "tag {tag} is not a snapshot");
+    }
+    let exact = drawer("x", &["decision", "status"], Duration::days(30), now);
+    assert!(is_ruling(&exact));
+}
+
+/// Why (clock skew): a snapshot written by a host whose clock runs ahead has a
+/// future `created_at`; that is age zero, never a weight above 1.
+#[test]
+fn a_future_created_at_is_age_zero_not_a_boost() {
+    let now = Utc::now();
+    let future = drawer("f", &["status"], -Duration::days(10), now);
+    assert_eq!(temporal_weight(&future, now), 1.0);
+    let mut results = vec![
+        hit(future, 0.5),
+        hit(drawer("p", &["kg"], Duration::days(1), now), 0.6),
+    ];
+    demote_stale_snapshots(&mut results, now);
+    assert_eq!(results[0].drawer.content(), "p", "skew must not lift it");
+    assert!((results[1].score - 0.5).abs() < 1e-6);
+}
+
+/// Why: the comparator must be a total order; with NaN-as-Equal the sort can
+/// leave finite scores unordered.
+#[test]
+fn a_nan_score_never_unorders_the_finite_scores() {
+    let now = Utc::now();
+    let mut results: Vec<RecallResult> = [0.1, f32::NAN, 0.9, 0.5, f32::NAN, 0.7]
+        .into_iter()
+        .map(|s| hit(drawer("x", &["kg"], Duration::zero(), now), s))
+        .collect();
+    demote_stale_snapshots(&mut results, now);
+    let finite: Vec<f32> = results
+        .iter()
+        .map(|r| r.score)
+        .filter(|s| !s.is_nan())
+        .collect();
+    assert_eq!(finite, [0.9, 0.7, 0.5, 0.1]);
+}
+
+/// Why (#8246 review): demotion needs candidates past `top_k` to lift.
+#[test]
+fn ranking_window_doubles_top_k_and_caps() {
+    use crate::tools::recall_projection::MAX_CANDIDATE_WINDOW;
+    assert_eq!(ranking_window(10, None), 20);
+    assert_eq!(ranking_window(0, None), 0);
+    assert_eq!(ranking_window(150, None), MAX_CANDIDATE_WINDOW);
+    assert_eq!(ranking_window(500, None), 500, "never below top_k");
+    assert_eq!(ranking_window(10, Some(0.4)), 40, "the floor's window wins");
+}

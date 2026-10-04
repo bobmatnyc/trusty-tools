@@ -28,12 +28,11 @@
 //! `ChatBody`) come from the sibling `tools` submodule.
 //! Test: `crate::transport::uds::tests` — `rpc_chat_*`.
 
-use crate::service::load_user_config;
+use crate::service::{load_user_config, MemoryService};
 use crate::AppState;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use trusty_common::memory_core::palace::PalaceId;
-use trusty_common::memory_core::retrieval::recall_with_default_embedder;
 use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::uds::server::{RpcError, RpcStreamItems};
 use trusty_common::{ChatEvent, ChatMessage};
@@ -190,7 +189,12 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
                 palace_block.push_str(&format!("- identity:\n{identity_trimmed}\n",));
             }
 
-            if let Ok(hits) = recall_with_default_embedder(&handle, &body.message, 5).await {
+            // #8246: ranked through the service, so a stale snapshot is
+            // demoted before it can fill one of the five context lines.
+            let ranked = MemoryService::new(state.clone())
+                .recall_ranked(&palace_id, &body.message, 5, false)
+                .await;
+            if let Ok(hits) = ranked {
                 for r in hits.iter().take(5) {
                     context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content()));
                 }
