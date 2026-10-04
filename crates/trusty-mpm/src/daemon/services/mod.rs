@@ -26,6 +26,8 @@ pub mod hook_service;
 pub mod merged_pr_reclaim;
 pub mod pairing_service;
 pub mod session_service;
+// #8451: the disk-budget sweep over the builder slot pool.
+pub(crate) mod slot_pool_evict;
 // #6556: the reader for the `SubagentStop` records a hook parked on disk when
 // this daemon was unreachable.
 pub mod stop_spool_drain;
