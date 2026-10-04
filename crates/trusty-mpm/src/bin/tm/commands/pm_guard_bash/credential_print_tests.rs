@@ -1682,3 +1682,24 @@ fn denies_a_subshell_substitution_shaped_like_arithmetic_8931() {
         &["X=$((1+2)); echo $X", "X=$(( (1+2) * 3 )); echo $X"],
     );
 }
+
+/// #9150: the walk reads a delimiter word with the here-document scanner's
+/// grammar, so a word that scanner refuses (`x$y`, `A B`) strips no body, and
+/// an `A\r` line never ends an `A` body. Each deny row but the unquoted one
+/// was allowed on a753c016c9; the CRLF body is data like its LF form.
+#[test]
+fn denies_a_body_behind_a_refused_delimiter() {
+    check(
+        true,
+        &[
+            "cat <<'x$y'\ngcloud auth print-access-token\nx$y",
+            "cat <<x$y\ngcloud auth print-access-token\nx$y",
+            "cat <<'A B'\ngcloud auth print-access-token\nA B",
+            "cat <<'A'\nx\nA\r\ncat <<'X'\nA\ngcloud auth print-access-token\nX",
+        ],
+    );
+    check(
+        false,
+        &["cat > notes.md <<'EOF'\r\nNever run gcloud auth print-access-token bare.\r\nEOF\r\n"],
+    );
+}

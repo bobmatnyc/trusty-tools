@@ -261,19 +261,25 @@ const MAX_WRAPPER_DEPTH: usize = 8;
 /// ([`shell_groups::has_brace_expanded_program`], #9127),
 /// a wrapper whose inner command will not lex
 /// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
-/// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
-/// classify the command as before.
+/// [`MAX_WRAPPER_DEPTH`], or a here-document delimiter the body scanner cannot
+/// read as the shell does (#9150). `None` — the ordinary case — leaves every
+/// rule to classify the command as before.
 /// Test: `unclassifiable_command_flags_ansi_c_quoting`,
 /// `unclassifiable_command_flags_an_unlexable_wrapper`,
 /// `unclassifiable_command_denies_past_the_depth_cap`,
 /// `unclassifiable_command_allows_ordinary_commands`, and end to end in
-/// `tests/tm_hook_pm_guard.rs`.
+/// `tests/tm_hook_pm_guard.rs` and
+/// `a_quoted_heredoc_delimiter_with_a_word_break_denies`.
 pub(crate) fn unclassifiable_command(command: &str) -> Option<&'static str> {
     unclassifiable_at(command, 0)
 }
 
 /// Depth-aware core of [`unclassifiable_command`].
 fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
+    // #9150: no rule can tell which lines run past an unreadable delimiter.
+    if heredoc::HeredocBodies::scan(command).is_unscannable() {
+        return Some(heredoc::HEREDOC_DELIMITER_REASON);
+    }
     for raw in split_shell_segments_raw(command) {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
