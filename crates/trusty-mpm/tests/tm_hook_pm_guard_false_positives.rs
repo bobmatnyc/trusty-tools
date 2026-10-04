@@ -416,7 +416,31 @@ fn pm_guard_allows_the_b2_false_positives() {
     ));
     // #7833: `cat` writing a quoted here-document body to a file.
     assert_allowed("cat > /tmp/s.py <<'EOF'\nprint(r.key)\nEOF");
-    assert_allowed("cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1})\nEOF");
+}
+
+/// #7833: a quoted here-document appended to a relative source file, judged
+/// against the payload's own `cwd` and not the one `cargo test` inherited.
+///
+/// Why: the row first ran with no payload `cwd`, so `tm` inherited cargo's. A CI
+/// clone is a main checkout and the ADR-0044 source-write rule denied it, while
+/// a local run under `.claude/worktrees/` allowed it. The pair pins both rules.
+/// What: the same command allows in a tempdir that is no repo and denies, with
+/// the ADR-0044 reason, in one holding a `.git` directory.
+/// Test: itself.
+#[test]
+fn pm_guard_heredoc_append_follows_the_payload_cwd_not_the_inherited_one_7833() {
+    let command = "cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1})\nEOF";
+    let no_repo = tempfile::tempdir().expect("tempdir");
+    let stdout = pm_guard_stdout_in(command, no_repo.path());
+    assert_eq!(stdout.trim(), "", "expected ALLOW outside a repo: {stdout}");
+    let main_checkout = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(main_checkout.path().join(".git")).expect(".git dir");
+    let stdout = pm_guard_stdout_in(command, main_checkout.path());
+    assert!(stdout.contains("\"deny\""), "expected DENY: {stdout}");
+    assert!(
+        stdout.contains("ADR-0044"),
+        "expected the ADR-0044 reason: {stdout}"
+    );
 }
 
 /// #7190, #9006, #8110, #8093, #8520, #8660: the deny bounding each fix still
