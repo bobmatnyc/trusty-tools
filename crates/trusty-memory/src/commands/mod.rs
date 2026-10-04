@@ -40,6 +40,7 @@ pub mod note;
 pub mod palace;
 // #8732: `palace deletions` — read the maintenance deletion journal.
 pub mod palace_deletions;
+pub mod palace_reclaim;
 pub mod port;
 pub mod prompt_context;
 pub mod rooms;

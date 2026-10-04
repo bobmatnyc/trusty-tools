@@ -39,6 +39,7 @@ use super::maintenance_gate::{open_purging_under_lease, require_lease};
 /// tool's blast radius with nothing in its name to warn a caller.
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
 /// `LegacyKg` writes only with `--apply` (#8434). `Deletions` is read-only (#8732).
+/// `Reclaim` is a dry run with no apply step (#9140).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -120,6 +121,21 @@ pub enum PalaceAction {
         #[arg(long)]
         json: bool,
     },
+    /// List what a reclaim would remove, and why, across every palace (#9140).
+    ///
+    /// DRY RUN ONLY. Lists `*.v2-incompatible` files, KG backups, empty
+    /// palaces idle 30+ days, directories without `palace.json`, a stale
+    /// `uds_addr`, and trusty-code fixture turn drawers, with path, size,
+    /// palace and reason. Reads drawer tables from private copies; deletes
+    /// nothing. This build has no apply step.
+    Reclaim {
+        /// Accepted for the documented spelling; the command is always a dry run.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the JSON manifest (sizes and mtimes per item) instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -183,6 +199,12 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
                 super::palace_deletions::deletions_report(&name, &palace, drawer, limit, json)?;
             print!("{report}");
             Ok(())
+        }
+        // #9140: read-only; ruling b9 keeps any delete path out of this build.
+        PalaceAction::Reclaim { dry_run: _, json } => {
+            tokio::task::spawn_blocking(move || super::palace_reclaim::handle_reclaim(json))
+                .await
+                .context("join palace reclaim")?
         }
     }
 }

@@ -278,7 +278,8 @@ impl HnswStore {
     /// What: Touches `VECTORS` / `VECTOR_KEYS` / `DELETED_VECTORS` /
     /// `VECTOR_ID_SEQ` to create them if missing, then reads every
     /// `(vector_id, vec)` row from `VECTORS` (skipping tombstoned ids) and
-    /// replays them into a fresh in-memory `Hnsw<f32, DistCosine>` index.
+    /// replays them, in parallel (#9141), into a fresh in-memory
+    /// `Hnsw<f32, DistCosine>` index.
     /// Raises the persisted `VECTOR_ID_SEQ` counter to at least
     /// `max(VECTORS, VECTOR_KEYS) + 1` (#5005).
     /// Test: `hydration_restores_index`.
@@ -333,6 +334,7 @@ impl HnswStore {
         // Replay every live vector into the in-memory graph and find the
         // largest vector_id ever assigned so `next_id` resumes correctly.
         let mut max_seen: u64 = 0;
+        let mut live: Vec<(Vec<f32>, usize)> = Vec::new();
         {
             let rtx = db.begin_read()?;
             let table = rtx.open_table(VECTORS)?;
@@ -352,9 +354,13 @@ impl HnswStore {
                         got: vec.len(),
                     });
                 }
-                index.insert((vec.as_slice(), id as usize));
+                live.push((vec, id as usize));
             }
         }
+        // #9141: the serial replay was the dominant cost of a cold palace open
+        // (2.4 s of a 3 s open at 6,644 vectors); insert on rayon instead.
+        let refs: Vec<(&[f32], usize)> = live.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
+        index.parallel_insert_slice(&refs);
 
         // Also consider the highest mapped id from VECTOR_KEYS in case
         // VECTORS was cleared but the mapping survived (defensive).

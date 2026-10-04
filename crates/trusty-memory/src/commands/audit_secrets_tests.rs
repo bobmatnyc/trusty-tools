@@ -506,8 +506,10 @@ fn undecodable_drawer_row_is_counted_and_fails_the_run() {
 /// Why: #8645 review — `exists()` read a denied stat as "no store", so an
 /// unreadable palace rendered like an empty one; a genuinely absent store must
 /// also render distinctly from a scanned, clean one.
-/// What: registers `gamma` whose data dir is mode `0o000`, and `delta` whose
-/// data dir holds no `kg.redb`. Asserts gamma is an error row that fails the
+/// What: registers `gamma`, whose `kg.redb` is a symlink into a mode `0o000`
+/// directory, and `delta`, whose data dir holds no `kg.redb`. A palace's
+/// `data_dir` is the directory holding its `palace.json` (#9140 batch), so the
+/// denied stat is reached through the symlink. Asserts gamma is an error row that fails the
 /// verdict and delta is `store=absent` that does not. Skipped as root, because
 /// root bypasses directory permission bits and the stat would succeed.
 /// Test: This test.
@@ -523,8 +525,9 @@ fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
     }
     let root = tempfile::tempdir().expect("root");
     let scratch = tempfile::tempdir().expect("scratch");
-    // `palace.json` sits in the registry entry; its `data_dir` names a
-    // subdirectory, so the listing still reads while the store stat is denied.
+    // `palace.json` sits in the registry entry and `kg.redb` beside it is a
+    // symlink into a subdirectory, so the listing still reads while the store
+    // stat is denied.
     let locked = root.path().join("gamma").join("data");
     fixture_palace(root.path(), "gamma/data", &["a plain note".to_string()]);
     std::fs::copy(
@@ -532,6 +535,8 @@ fn unstattable_palace_dir_is_an_error_row_not_an_absent_store() {
         root.path().join("gamma/palace.json"),
     )
     .expect("register gamma");
+    std::os::unix::fs::symlink(locked.join("kg.redb"), root.path().join("gamma/kg.redb"))
+        .expect("link gamma store");
     std::fs::create_dir_all(root.path().join("delta")).expect("delta dir");
     PalaceStore::save_palace(&Palace {
         id: PalaceId("delta".to_string()),

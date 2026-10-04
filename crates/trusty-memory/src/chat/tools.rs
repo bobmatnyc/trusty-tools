@@ -369,6 +369,8 @@ pub(crate) async fn execute_recall_all(
         Ok(v) => v,
         Err(e) => return json!({ "error": format!("{e:#}") }),
     };
+    // #9141: an empty palace is skipped without being opened.
+    let (palaces, _) = crate::service::recall_stream::skip_empty_palaces(state, palaces).await;
     // #7125: stream the estate in batches instead of opening all of it.
     let streamed = recall_streamed(
         state,

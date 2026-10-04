@@ -1,0 +1,2 @@
+Added
+- `trusty-memory palace reclaim [--dry-run] [--json]` lists what a reclaim would remove, with path, size, mtime, palace and reason: `*.v2-incompatible` files, `kg.redb.*.bak` backups, empty palaces idle 30+ days, directories without `palace.json`, a stale `uds_addr`, and trusty-code e2e fixture turn drawers. It is read-only: drawer tables are read from private copies, and there is no apply step (#9140).
