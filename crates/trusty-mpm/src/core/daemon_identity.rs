@@ -100,15 +100,21 @@ pub fn render_lock(lock: &DaemonLock) -> String {
 /// Is `pid` a live process?
 ///
 /// What: `kill(pid, 0)` on Unix, read by [`kill_probe_means_alive`]; assumes
-/// alive on other platforms, where the lock file's PID cannot be checked.
+/// alive on other platforms, where the lock file's PID cannot be checked. A
+/// pid [`single_process_pid`] rejects is dead without any probe.
 /// Test: `pid_alive_true_for_self`, `read_lock_rejects_dead_pid`,
-/// `kill_probe_eperm_means_alive`.
+/// `kill_probe_eperm_means_alive`, `pid_alive_false_for_group_shaped_pids`.
 pub fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
+        // #9153: `pid as pid_t` turned 0 and pids above i32::MAX into a
+        // process-GROUP probe, so a corrupt lock read as alive.
+        let Some(raw) = single_process_pid(pid) else {
+            return false;
+        };
         // SAFETY: `kill` with signal 0 performs the permission/existence check
         // only; it delivers no signal and cannot affect the target process.
-        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        let rc = unsafe { libc::kill(raw, 0) };
         let errno = std::io::Error::last_os_error().raw_os_error();
         kill_probe_means_alive(rc, errno)
     }
@@ -117,6 +123,19 @@ pub fn pid_alive(pid: u32) -> bool {
         let _ = pid;
         true
     }
+}
+
+/// `pid` as a `pid_t` that names exactly one process, or `None`.
+///
+/// Why: #9153 — `kill(2)` reads `0` as the caller's own process group and a
+/// negative value (what `as pid_t` makes of a pid above `i32::MAX`) as group
+/// `-pid`. A pid read from a file must never reach `kill` in either shape.
+/// What: `None` for `0` and for anything above `i32::MAX`; else `Some(pid)`.
+/// Test: `pid_alive_false_for_group_shaped_pids`,
+/// `stop_via_pid_file_group_shaped_pid_is_failed`.
+#[cfg(unix)]
+pub fn single_process_pid(pid: u32) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(pid).ok().filter(|p| *p > 0)
 }
 
 /// Map a `kill(pid, 0)` result onto "the process exists".
@@ -374,6 +393,16 @@ mod tests {
         assert!(!kill_probe_means_alive(-1, Some(libc::ESRCH)));
         // pid 1 (launchd/init) runs as root: `kill(1, 0)` from a user is EPERM.
         assert!(pid_alive(1), "a root-owned live process is alive");
+    }
+
+    /// #9153: `0` probes the caller's own group (always alive) and a pid above
+    /// `i32::MAX` wraps negative into a group probe; neither names a process.
+    #[cfg(unix)]
+    #[test]
+    fn pid_alive_false_for_group_shaped_pids() {
+        for pid in [0, i32::MAX as u32 + 1, u32::MAX] {
+            assert!(!pid_alive(pid), "pid {pid} names no single process");
+        }
     }
 
     #[test]
