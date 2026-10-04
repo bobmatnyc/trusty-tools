@@ -53,6 +53,8 @@
 #   waits up to 5 s more. It reports success only when the process is dead; on
 #   failure it keeps sandbox.pid and says why. It never uses pkill, killall, a
 #   name match or launchctl.
+#   Limit: the launcher cannot isolate the OS Keychain or secure-store credential
+#   tiers; it relies on trusty-search not reading them (see #9121).
 #   Output names variables and the paths this script chose; it prints a value
 #   only for the names this script pins or the knobs above.
 #
@@ -190,6 +192,11 @@ stop_recorded() {
   read -r pid < "$pidfile" || true
   case "$pid" in ''|*[!0-9]*) echo "sandbox_search_daemon: refused: pidfile holds '$pid', not a pid; nothing signalled" >&2; return 1 ;; esac
   [ "$pid" -gt 1 ] || { echo "sandbox_search_daemon: refused: pid '$pid'; nothing signalled" >&2; return 1; }
+  if ! is_alive "$pid"; then
+    rm -f "$pidfile"
+    echo "sandbox_search_daemon: pid $pid already dead; removed sandbox.pid"
+    return 0
+  fi
   terminate_owned "$pid" "$dir" || return 1
   rm -f "$pidfile"
   echo "sandbox_search_daemon: stopped pid $pid"
@@ -265,9 +272,12 @@ else
 fi
 
 # #9121: the daemon loads the first `.env.local` found walking up from its cwd.
-# Its cwd is <dir>/home, so no ancestor of that may hold one.
+# Its cwd is <dir>/home, and `current_dir()` is the physical path, so the walk
+# starts at the physical <dir>/home (a symlinked home must not escape it) and
+# covers <dir>/home/.env.local itself.
 if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
-  anc="$SANDBOX"
+  anc="$(resolve "$SANDBOX/home")"
+  [ -n "$anc" ] || anc="$SANDBOX"
   while :; do
     [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded by the daemon from <dir>/home; pick a --dir outside it"
     [ "$anc" != "/" ] || break

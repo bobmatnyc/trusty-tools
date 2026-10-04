@@ -29,6 +29,9 @@
 #     cwd         the child runs under <dir>/home, never the caller's cwd, and
 #                 no ancestor of that cwd holds a `.env.local`; a --dir under
 #                 an ancestor `.env.local` refuses
+#                 a symlinked <dir>/home into a tree under a `.env.local`, and a
+#                 <dir>/home/.env.local itself, refuse
+#     stop-dead   --stop on a pid already dead says so and removes sandbox.pid
 #     port-range  --port 7850 (within 64 of 7878) refuses
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
 #                 directory refuses
@@ -364,6 +367,39 @@ esac
 mkdir -p "$LEAK/sb"
 expect_refusal cwd-env-local 1 ".env.local would be loaded" \
   --bin "$STUB" --dir "$LEAK/sb" --dry-run
+
+# 11b. a home symlinked into a tree whose ancestor holds `.env.local` refuses
+# (the daemon's cwd is the physical path); so does <dir>/home/.env.local itself.
+LEAK2="$TMP_ROOT/leak2"
+DIR13="$TMP_ROOT/case13"
+mkdir -p "$LEAK2/real" "$DIR13"
+touch "$LEAK2/.env.local"
+ln -s "$LEAK2/real" "$DIR13/home"
+expect_refusal cwd-symlinked-home 1 ".env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR13" --dry-run
+DIR14="$TMP_ROOT/case14"
+mkdir -p "$DIR14/home"
+touch "$DIR14/home/.env.local"
+expect_refusal cwd-home-env-local 1 "$DIR14/home/.env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR14" --dry-run
+
+# 11c. stop-dead: a pid already dead on entry is reported as such.
+DIR15="$TMP_ROOT/case15"
+mkdir -p "$DIR15"
+sh -c 'exit 0' &
+DEAD_PID=$!
+wait "$DEAD_PID" || true
+echo "$DEAD_PID" > "$DIR15/sandbox.pid"
+set +e
+OUT15="$(run_launcher --stop "$DIR15" 2>&1)"
+S15=$?
+set -e
+if [ "$S15" -eq 0 ] && [ ! -e "$DIR15/sandbox.pid" ] \
+    && printf '%s' "$OUT15" | grep -qF "pid $DEAD_PID already dead; removed sandbox.pid"; then
+  pass stop-dead
+else
+  fail stop-dead "exit $S15: $OUT15"
+fi
 
 # 12. port-range: within 64 of the live port refuses.
 expect_refusal port-range 1 "within 64" --bin "$STUB" --dir "$DIR1" --port 7850 --dry-run
