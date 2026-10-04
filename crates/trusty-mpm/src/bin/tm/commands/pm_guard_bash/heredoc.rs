@@ -22,6 +22,7 @@
 //! `has_file_write_redirection_ignores_heredoc_body` and
 //! `evaluate_bash_command_allows_readonly_heredoc_script` in the parent's.
 
+use super::credential_print::{OperatorCtx, heredoc_operators};
 use super::shell_lex::QuoteScan;
 
 /// A here-document delimiter word plus its `<<-` tab-stripping mode.
@@ -31,6 +32,8 @@ struct Delimiter {
     strip_tabs: bool,
     /// #8756: a quoted delimiter (`<<'EOF'`) leaves the body unexpanded.
     quoted: bool,
+    /// #9150: an [`OperatorCtx::Ambiguous`] `<<`, read loosely.
+    ambiguous: bool,
 }
 
 /// One here-document body its operator line hands to something other than a
@@ -76,11 +79,12 @@ enum Abandon {
 }
 
 /// Deny reason for a here-document delimiter the guard cannot read (#9150).
-pub(crate) const HEREDOC_DELIMITER_REASON: &str = "this command opens a here-document whose \
-     delimiter word is quoted or escaped across a space, tab, `<`, `>`, `|`, `;`, `&`, `(` or \
-     `)`, or whose quote or escape never closes on the `<<` line. The shell ends that body at a \
-     different line than the guard can find, so the guard cannot tell which lines run (#9150). \
-     Use a plain delimiter such as `<<'EOF'`.";
+pub(crate) const HEREDOC_DELIMITER_REASON: &str = "this command opens a here-document the \
+     guard cannot delimit: its delimiter word is not letters, digits, `_`, `.` and `-` (bare, \
+     in one pair of quotes, or `\\`-escaped), or its `<<` sits in arithmetic or in a `$(…)` or \
+     backtick that closes on the same line while a later line matches the word. The shell may \
+     end that body at a different line than the guard finds, so the guard cannot tell which \
+     lines run (#9150). Use a plain delimiter such as `<<'EOF'` in plain command position.";
 
 impl HeredocBodies {
     /// Locate every here-document body in `command`.
@@ -102,14 +106,16 @@ impl HeredocBodies {
     /// `heredoc_frames_are_empty_for_a_shell_operator_line`.
     pub(super) fn scan(command: &str) -> Self {
         let quotes = QuoteScan::new(command);
+        // #9150: only a `<<` the shell reads as an operator opens a body.
+        let ops = heredoc_operators(command);
         if quotes.balanced {
-            return Self::settle(Self::collect(command, Some(&quotes)));
+            return Self::settle(Self::collect(command, Some(&quotes), &ops));
         }
         // #8111: an apostrophe in a BODY (`it's`) unbalances the whole-command
         // map, and claiming nothing made that body prose live shell. Retry with
         // each operator line's own quotes; keep the answer only when blanking
         // the bodies it found leaves the rest of the command balanced.
-        match Self::collect(command, None) {
+        match Self::collect(command, None, &ops) {
             Ok(found)
                 if !found.spans.is_empty()
                     && QuoteScan::new(&blank_spans(command, &found.spans)).balanced =>
@@ -148,8 +154,13 @@ impl HeredocBodies {
     /// whole-command map, or `None` to read each operator line's quotes alone.
     /// [`Abandon::NoConfidence`] back when a delimiter has no terminator line,
     /// or an operator line's own quotes do not close; [`Abandon::Delimiter`]
-    /// when [`delimiters_on`] cannot read a delimiter word (#9150).
-    fn collect(command: &str, quotes: Option<&QuoteScan>) -> Result<Self, Abandon> {
+    /// when [`delimiters_on`] cannot read a delimiter word, or an ambiguous
+    /// `<<` would claim a body (#9150).
+    fn collect(
+        command: &str,
+        quotes: Option<&QuoteScan>,
+        ops: &[(usize, OperatorCtx)],
+    ) -> Result<Self, Abandon> {
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
@@ -159,12 +170,12 @@ impl HeredocBodies {
             let (start, end) = lines[line];
             let operator_line = &command[start..end];
             let delimiters = match quotes {
-                Some(quotes) => delimiters_on(operator_line, start, quotes),
+                Some(quotes) => delimiters_on(operator_line, (start, start), quotes, ops),
                 None => {
                     let own = QuoteScan::new(operator_line);
                     // #9150: an unclosed quote in a delimiter word is a
                     // delimiter the shell reads past this line.
-                    let read = delimiters_on(operator_line, 0, &own);
+                    let read = delimiters_on(operator_line, (start, 0), &own, ops);
                     if !own.balanced && read.is_some() {
                         return Err(Abandon::NoConfidence);
                     }
@@ -175,6 +186,14 @@ impl HeredocBodies {
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
             line += 1;
             for delimiter in delimiters {
+                if delimiter.ambiguous {
+                    // #9150: a shell that reads this `<<` as an operator
+                    // ends its body at a line the guard cannot place.
+                    if body_span(command, &lines, line, &delimiter).is_some() {
+                        return Err(Abandon::Delimiter);
+                    }
+                    continue;
+                }
                 let body =
                     body_span(command, &lines, line, &delimiter).ok_or(Abandon::NoConfidence)?;
                 if body.span.0 < body.span.1 {
@@ -351,18 +370,25 @@ fn line_spans(command: &str) -> Vec<(usize, usize)> {
 /// What: scans for an unquoted `<<` that is not the `<<<` here-string
 /// operator, honours the `<<-` tab-stripping form, and reads the delimiter
 /// word with its quoting removed (`<<'PY'`, `<<"PY"`, and `<<PY` name the same
-/// terminator). `offset` maps a line-local index onto `quotes`, which was
-/// built over the whole command.
+/// terminator). `at` is the line's byte offset in the command and the offset
+/// `quotes` was built over: the whole command's, or `0` for the line's own.
 ///
-/// #9150: `None` — no confidence — when a delimiter word quotes or escapes a
-/// word-break byte (`<<'A B'`, `<<A\ B`), or a quote or `\` in it does not
-/// close on this line. The shell keeps that whole word and ends the body at a
-/// different line than a cut at the break byte would.
+/// #9150: a `<<` opens a body only where [`heredoc_operators`] read it as
+/// shell code; one in a comment, `${…}` text or after a `\` is skipped, and an
+/// [`OperatorCtx::Ambiguous`] one is read loosely for [`HeredocBodies::collect`]
+/// to refuse. `None` — no confidence — when a code `<<` has a word
+/// [`delimiter_word`] does not accept.
 /// Test: `heredoc_bodies_ignore_a_here_string`,
 /// `heredoc_bodies_ignore_quoted_operator`,
 /// `heredoc_bodies_handle_tab_stripped_delimiter`,
-/// `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`.
-fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Option<Vec<Delimiter>> {
+/// `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`,
+/// `heredoc_bodies_skip_an_operator_outside_code`.
+fn delimiters_on(
+    line: &str,
+    (at, offset): (usize, usize),
+    quotes: &QuoteScan,
+    ops: &[(usize, OperatorCtx)],
+) -> Option<Vec<Delimiter>> {
     let bytes = line.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
@@ -376,6 +402,11 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Option<Vec<De
             i += 3;
             continue;
         }
+        let Some(&(_, ctx)) = ops.iter().find(|(pos, _)| *pos == at + i) else {
+            // #9150: a comment, `${…}` text or `\<<` opens no body.
+            i += 2;
+            continue;
+        };
         let mut j = i + 2;
         let strip_tabs = bytes.get(j) == Some(&b'-');
         if strip_tabs {
@@ -384,64 +415,110 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Option<Vec<De
         while matches!(bytes.get(j), Some(b' ' | b'\t')) {
             j += 1;
         }
-        let word_start = j;
-        // #9150: a cut at a quoted break byte ended the body too late.
-        j = word_end(bytes, j)?;
-        let raw = &line[word_start..j];
-        let word: String = raw
-            .chars()
-            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-            .collect();
+        let ambiguous = ctx == OperatorCtx::Ambiguous;
+        let (word, quoted, end) = if ambiguous {
+            loose_word(bytes, j)
+        } else {
+            delimiter_word(bytes, j)?
+        };
         if !word.is_empty() {
-            // #8756: any quoting on the word keeps the body unexpanded.
-            let quoted = word.len() != raw.len();
             found.push(Delimiter {
                 word,
                 strip_tabs,
                 quoted,
+                ambiguous,
             });
         }
-        i = j.max(i + 2);
+        i = end.max(i + 2);
     }
     Some(found)
 }
 
-/// The end of the delimiter word starting at `start`: the first unquoted,
-/// unescaped word-break byte, or the end of the line.
+/// The delimiter word starting at `start`: the word, whether any of it was
+/// quoted (#8756), and where it ends.
 ///
-/// What: `None` when a quoted or escaped byte inside the word is a word-break
-/// byte, or a quote or trailing `\` is still open at the end of the line —
-/// both shapes the shell reads past where a plain cut would stop (#9150).
-fn word_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut quote = None;
+/// What: an allowlist (#9150). The word is a run of [`is_word_byte`] bytes,
+/// `'…'` or `"…"` around such bytes, and `\` before one, in any
+/// concatenation (`E'O'F`); it ends at a blank, `<`, `>`, `|`, `;`, `&`, `)`
+/// or the line's end. Anything else — `$`, a backtick, `(`, `<(`, a `\` inside
+/// quotes, an empty quoted word, a quote left open — is `None`, because the
+/// shell's word there is not one this scan can compare a line with. An empty
+/// unquoted word is `Some` and opens no body.
+/// Test: `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`.
+fn delimiter_word(bytes: &[u8], start: usize) -> Option<(String, bool, usize)> {
+    let mut word = String::new();
+    let mut quoted = false;
     let mut j = start;
-    while j < bytes.len() {
-        let byte = bytes[j];
-        match quote {
-            Some(open) if byte == open => quote = None,
-            Some(b'"') | None if byte == b'\\' => {
-                // An escape of nothing (line continuation) or of a break byte.
-                j += 1;
-                if bytes.get(j).is_none_or(|next| is_word_break(*next)) {
+    while let Some(&byte) = bytes.get(j) {
+        match byte {
+            b'\'' | b'"' => {
+                let len = bytes[j + 1..].iter().position(|b| *b == byte)?;
+                let inner = &bytes[j + 1..j + 1 + len];
+                if inner.is_empty() || !inner.iter().all(|b| is_word_byte(*b)) {
                     return None;
                 }
+                word.extend(inner.iter().map(|b| char::from(*b)));
+                quoted = true;
+                j += len + 2;
             }
-            Some(_) if is_word_break(byte) => return None,
-            Some(_) => {}
+            b'\\' => {
+                let next = bytes.get(j + 1).filter(|b| is_word_byte(**b))?;
+                word.push(char::from(*next));
+                quoted = true;
+                j += 2;
+            }
+            // A CRLF line keeps its `\r`, as the shell's word does.
+            b'\r' if j + 1 == bytes.len() => {
+                word.push('\r');
+                j += 1;
+            }
+            // A `<(…)` or `>(…)` is process substitution inside the word.
+            b'<' | b'>' if bytes.get(j + 1) == Some(&b'(') => return None,
+            b' ' | b'\t' | b'<' | b'>' | b'|' | b';' | b'&' | b')' => break,
+            _ if is_word_byte(byte) => {
+                word.push(char::from(byte));
+                j += 1;
+            }
+            _ => return None,
+        }
+    }
+    Some((word, quoted, j))
+}
+
+/// Whether `byte` may appear in a delimiter word: `[A-Za-z0-9_.-]` (#9150).
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+}
+
+/// An ambiguous `<<`'s word read loosely — quotes and `\` removed, cut at an
+/// unquoted break byte — only to ask whether a later line matches it (#9150).
+fn loose_word(bytes: &[u8], start: usize) -> (String, bool, usize) {
+    let mut word = Vec::new();
+    let mut quote = None;
+    let mut j = start;
+    while let Some(&byte) = bytes.get(j) {
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => word.push(byte),
             None if byte == b'\'' || byte == b'"' => quote = Some(byte),
-            None if is_word_break(byte) => return Some(j),
-            None => {}
+            None if byte == b'\\' => {
+                j += 1;
+                word.extend(bytes.get(j));
+            }
+            None if is_word_break(byte) => break,
+            None => word.push(byte),
         }
         j += 1;
     }
-    quote.is_none().then_some(j)
+    let word = String::from_utf8_lossy(&word).into_owned();
+    (word, true, j.min(bytes.len()))
 }
 
-/// Whether `byte` ends a here-document delimiter word.
+/// Whether `byte` ends a loosely read word.
 fn is_word_break(byte: u8) -> bool {
     matches!(
         byte,
-        b' ' | b'\t' | b'<' | b'>' | b'|' | b';' | b'&' | b'(' | b')'
+        b' ' | b'\t' | b'<' | b'>' | b'|' | b';' | b'&' | b'(' | b')' | b']'
     )
 }
 
@@ -486,212 +563,5 @@ fn body_span(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The body of a `<<'PY'` script — the #5356 reproduction — is claimed.
-    #[test]
-    fn heredoc_bodies_cover_a_quoted_delimiter_body() {
-        let command = "python3 <<'PY'\nprint(len(k) > 3)\nPY";
-        let bodies = HeredocBodies::scan(command);
-        let gt = command.find('>').expect("comparison operator");
-        assert!(bodies.contains(gt), "the script's `>` must be body content");
-    }
-
-    /// A redirect on the operator line stays live syntax.
-    #[test]
-    fn heredoc_bodies_exclude_the_operator_line() {
-        let command = "python3 <<'PY' > out.rs\nprint(1)\nPY";
-        let bodies = HeredocBodies::scan(command);
-        let gt = command.find('>').expect("redirect");
-        assert!(!bodies.contains(gt), "the operator line must stay live");
-    }
-
-    /// `<<<` is a here-string; nothing follows it as a body.
-    #[test]
-    fn heredoc_bodies_ignore_a_here_string() {
-        let command = "grep x <<< 'a > b'\necho done > f.rs";
-        let bodies = HeredocBodies::scan(command);
-        let redirect = command.rfind('>').expect("redirect");
-        assert!(!bodies.contains(redirect));
-    }
-
-    /// An unterminated delimiter — and an arithmetic `<<`, which looks the
-    /// same — claims nothing, so the pre-#5356 over-deny is preserved.
-    #[test]
-    fn heredoc_bodies_claim_nothing_when_unterminated() {
-        let unterminated = "python3 <<'PY'\nprint(1)\n";
-        assert!(!HeredocBodies::scan(unterminated).contains(20));
-        let shift = "echo $((1 << 3))\necho x > f.rs";
-        let redirect = shift.rfind('>').expect("redirect");
-        assert!(!HeredocBodies::scan(shift).contains(redirect));
-    }
-
-    /// #6946: the frame runs from the newline that opened the body through the
-    /// end of the terminator line, and stops there.
-    #[test]
-    fn heredoc_frames_cover_the_terminator_line() {
-        let command = "cat <<'EOF' > f\nbody\nEOF\nnext";
-        let bodies = HeredocBodies::scan(command);
-        let opening_newline = command.find('\n').expect("operator line ends");
-        assert!(bodies.suppresses_separator(opening_newline));
-        assert!(!bodies.suppresses_separator(opening_newline - 1));
-        let terminator = command.find("EOF\nnext").expect("terminator line");
-        for idx in terminator..terminator + 3 {
-            assert!(bodies.suppresses_separator(idx));
-        }
-        // The newline after the terminator is a live separator again.
-        assert!(!bodies.suppresses_separator(terminator + 3));
-    }
-
-    /// #6946 fail-open check: a body handed to a shell is shell source, so it
-    /// gets no frame and its separators keep splitting.
-    #[test]
-    fn heredoc_frames_are_empty_for_a_shell_operator_line() {
-        for command in [
-            "bash <<'EOF'\nbody\nEOF",
-            "sudo /bin/sh <<EOF\nbody\nEOF",
-            "true && zsh <<EOF\nbody\nEOF",
-        ] {
-            let bodies = HeredocBodies::scan(command);
-            let newline = command.find('\n').expect("operator line ends");
-            assert!(
-                !bodies.suppresses_separator(newline),
-                "{command} should not be framed"
-            );
-            // The #5356 body span is still claimed — only framing differs.
-            assert!(bodies.contains(newline + 1), "{command} body span");
-        }
-    }
-
-    /// `<<-` allows a tab-indented terminator.
-    #[test]
-    fn heredoc_bodies_handle_tab_stripped_delimiter() {
-        let command = "cat <<-EOF\n\ta > b\n\tEOF";
-        let bodies = HeredocBodies::scan(command);
-        let gt = command.find('>').expect("arrow");
-        assert!(bodies.contains(gt));
-    }
-
-    /// A `<<` inside quotes is argument text, not an operator.
-    #[test]
-    fn heredoc_bodies_ignore_quoted_operator() {
-        let command = "grep -n '<<EOF' f\necho x > g.rs";
-        let bodies = HeredocBodies::scan(command);
-        let redirect = command.rfind('>').expect("redirect");
-        assert!(!bodies.contains(redirect));
-    }
-
-    /// #7266: the body leaves the argv text as spaces and comes back as text.
-    #[test]
-    fn splits_a_heredoc_body_out_of_the_argv_text() {
-        let command = "cat >> verb.rs <<'RSEOF'\nstruct VerbStub {\n}\nRSEOF";
-        let (argv_text, bodies) = split_heredoc_bodies(command);
-        assert_eq!(argv_text.len(), command.len(), "byte offsets are preserved");
-        assert!(argv_text.starts_with("cat >> verb.rs <<'RSEOF'"));
-        assert!(argv_text.trim_end().ends_with("RSEOF"), "{argv_text:?}");
-        assert!(!argv_text.contains('{'), "{argv_text:?}");
-        assert_eq!(bodies, vec!["struct VerbStub {\n}\n".to_string()]);
-    }
-
-    /// #7266 fail-open check: a body the operator line hands to a shell IS
-    /// shell source, so it stays in place for the segment classifiers.
-    #[test]
-    fn leaves_a_shell_heredoc_body_in_the_argv_text() {
-        let command = "bash <<'EOF'\nls .env\nEOF";
-        let (argv_text, bodies) = split_heredoc_bodies(command);
-        assert_eq!(argv_text, command);
-        assert!(bodies.is_empty());
-    }
-
-    /// #7266: no here-document, and an unterminated one, both leave the
-    /// command byte-identical — the pre-fix scan runs unchanged.
-    #[test]
-    fn splits_nothing_without_a_heredoc() {
-        for command in ["awk '{print}' f", "cat <<EOF\nno terminator"] {
-            let (argv_text, bodies) = split_heredoc_bodies(command);
-            assert_eq!(argv_text, command);
-            assert!(bodies.is_empty(), "{command:?}");
-        }
-    }
-
-    /// #8756: only an unquoted delimiter expands its body, and each data body
-    /// knows the line that opened it.
-    #[test]
-    fn data_bodies_record_whether_the_delimiter_was_quoted() {
-        for (command, expands) in [
-            ("cat <<EOF\n$(date)\nEOF", true),
-            ("cat <<'EOF'\n$(date)\nEOF", false),
-            ("cat <<\"EOF\"\n$(date)\nEOF", false),
-            ("cat <<\\EOF\n$(date)\nEOF", false),
-            ("cat <<-E'O'F\n$(date)\n\tEOF", false),
-        ] {
-            let bodies = data_bodies(command);
-            assert_eq!(bodies.len(), 1, "{command:?}");
-            assert_eq!(bodies[0].expands, expands, "{command:?}");
-            let (start, end) = bodies[0].operator_line;
-            assert!(command[start..end].starts_with("cat <<"), "{command:?}");
-        }
-    }
-
-    /// #9150: bash and zsh keep a quoted or escaped break byte in the
-    /// delimiter word, so a cut there ends the body at the wrong line. Each
-    /// such word, and one whose quote or `\` never closes on its line, makes
-    /// the scan unscannable and claim nothing; a plain delimiter does not.
-    #[test]
-    fn heredoc_bodies_refuse_a_delimiter_split_by_a_word_break() {
-        for command in [
-            "cat <<'A B'\nx\nA B\necho \"$(rm -rf /)\"\nA",
-            "cat <<'A>B'\nx\nA>B\nA",
-            "cat <<'A<B'\nx\nA<B\nA",
-            "cat <<-'A B'\n\tx\n\tA B\n\tA",
-            "cat <<'A\tB'\nx\nA\tB\nA",
-            "cat <<\"A;B\"\nx\nA;B\nA",
-            "cat <<A\\ B\nx\nA B\nA",
-            "cat <<A\\\nB\n$(rm -rf /)\nA\nAB",
-            "cat <<'A\nB'\nx\nA",
-            // #8111 retry path: an apostrophe in the body unbalances the map.
-            "cat <<'A B'\nit's\nA B\nA",
-        ] {
-            let bodies = HeredocBodies::scan(command);
-            assert!(bodies.is_unscannable(), "{command:?}");
-            assert!(bodies.spans.is_empty(), "{command:?} claims nothing");
-            assert_eq!(
-                super::super::unclassifiable_command(command),
-                Some(HEREDOC_DELIMITER_REASON),
-                "{command:?}"
-            );
-        }
-        for command in [
-            "cat <<'EOF'\n$(rm -rf /)\nEOF\necho benign",
-            "cat <<\"EOF\" > out\nx\nEOF",
-            "cat <<\\EOF\nx\nEOF",
-            "cat <<-E'O'F\nx\n\tEOF",
-            "cat <<'EOF';echo hi\nx\nEOF",
-            "cat <<'EOF'\nit's\nEOF",
-            "echo $((1 << 3))",
-            "python3 <<'PY'\nprint(1)\n",
-        ] {
-            assert!(
-                !HeredocBodies::scan(command).is_unscannable(),
-                "{command:?}"
-            );
-            assert_eq!(
-                super::super::unclassifiable_command(command),
-                None,
-                "{command:?}"
-            );
-        }
-    }
-
-    /// Two here-documents opened on one line consume their bodies in order.
-    #[test]
-    fn heredoc_bodies_span_two_heredocs_on_one_line() {
-        let command = "diff <<A <<B\na > b\nA\nc > d\nB";
-        let bodies = HeredocBodies::scan(command);
-        let first = command.find('>').expect("first arrow");
-        let second = command.rfind('>').expect("second arrow");
-        assert!(bodies.contains(first), "first body claimed");
-        assert!(bodies.contains(second), "second body claimed");
-    }
-}
+#[path = "heredoc_tests.rs"]
+mod tests;

@@ -94,6 +94,8 @@ use super::shell_lex::{WrappedCommand, wrapped_command};
 use crate::commands::program_word::resolve_program_word;
 use credential_print_clis::{interactive_security, judge_cli_echoes, names_cli_trigger};
 use credential_print_heredoc::strip_comments_and_heredocs;
+// #9150: the here-document scanner asks this walk which `<<` opens a body.
+pub(super) use credential_print_heredoc::{OperatorCtx, heredoc_operators};
 pub(super) use credential_print_programs::{basename, code_operands, evaluator_name};
 use credential_print_programs::{
     consumes_stdin, credential_fds, enables_xtrace, first_credential_program, keyword_words,

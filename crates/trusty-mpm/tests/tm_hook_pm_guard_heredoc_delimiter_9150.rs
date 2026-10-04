@@ -9,8 +9,11 @@
 //! What: spawns `tm hook --pm-guard` through the #8878 fixture and checks that
 //! every shape bash and zsh delimit differently from the old scanner denies,
 //! under each bypass, while a correctly delimited quoted body that only holds
-//! `$(…)` text still allows. The shell behaviour each row relies on was
-//! probed with `/bin/bash` 3.2 and `/bin/zsh` 5.9 (recorded on #9150).
+//! `$(…)` text still allows. Round 2 adds delimiter words outside the
+//! `[A-Za-z0-9_.-]` allowlist and a `<<` the shell never reads as an operator
+//! (comment, `\<<`, `${…}`) or may not (arithmetic, a same-line `$(…)`). The
+//! shell behaviour each row relies on was probed with `/bin/bash` 3.2 and
+//! `/bin/zsh` 5.9 (recorded on #9150); every row allowed on 656136c7dc.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_heredoc_delimiter_9150::`.
 
 use crate::tm_hook_pm_guard_trust_anchor_8878::{Fixture, bash_payload, run};
@@ -24,7 +27,7 @@ const BYPASSES: [Option<(&str, &str)>; 3] = [
 
 /// Shapes the shell delimits at the whole quoted word, so the `$(…)` after
 /// the real terminator runs. Each allowed before the #9150 fix.
-const HIDDEN_SUBSTITUTIONS: [&str; 10] = [
+const HIDDEN_SUBSTITUTIONS: [&str; 29] = [
     // The #9150 report.
     "cat <<'A B'\nx\nA B\necho \"$(rm -rf /)\"\nA",
     "cat <<'A>B'\nx\nA>B\necho \"$(rm -rf /)\"\nA",
@@ -38,6 +41,29 @@ const HIDDEN_SUBSTITUTIONS: [&str; 10] = [
     // A trailing `\` continues the line: the shell's word is the unquoted
     // `AB`, so the body expands and its `$(…)` runs.
     "cat <<A\\\nB\n$(rm -rf /)\nA\nAB",
+    // Round 2, item 1: a substitution or glob group in the word.
+    "cat <<'A'$(x)\nx\nA$(x)\necho \"$(rm -rf /)\"\nA$",
+    "cat <<'A'$((1 + 2))\nA$((1 + 2))\necho \"$(rm -rf /)\"\nA$",
+    "cat <<'A'$[1 + 2]\nx\nA$[1 + 2]\necho \"$(rm -rf /)\"\nA$[1",
+    "cat <<'A'(x y)\nx\nA(x y)\necho \"$(rm -rf /)\"\nA",
+    "cat <<'A'<(x)\nx\nA<(x)\necho \"$(rm -rf /)\"\nA",
+    "cat <<'A'>(x)\nx\nA>(x)\necho \"$(rm -rf /)\"\nA",
+    // Round 2, item 2: a `\` or quote the shell keeps in the word. The
+    // trailing `: '` rebalances the quotes so the old scan claimed the body.
+    "cat <<'A\\B'\nx\nA\\B\necho \"$(rm -rf /)\"\nAB",
+    "cat <<\"A\\B\"\nx\nA\\B\necho \"$(rm -rf /)\"\nAB",
+    "cat <<A\\\\B\nx\nA\\B\necho \"$(rm -rf /)\"\nAB",
+    "cat <<\"A'B\"\nx\nA'B\necho \"$(rm -rf /)\"\nAB\n: '",
+    "cat <<'A\"B'\nx\nA\"B\necho \"$(rm -rf /)\"\nAB\n: \"",
+    "cat <<A\\'B\nx\nA'B\necho \"$(rm -rf /)\"\nAB\n: '",
+    "cat <<A\\\"B\nx\nA\"B\necho \"$(rm -rf /)\"\nAB\n: \"",
+    // Round 2, item 3: a `<<` that opens no body, so the next line runs.
+    "echo hi # <<'EOF'\necho \"$(rm -rf /)\"\nEOF",
+    "echo $((1<<\"2\"))\necho \"$(rm -rf /)\"\n2",
+    "(( x = 1 <<\\2 ))\necho \"$(rm -rf /)\"\n2",
+    "echo ${x:-<<'EOF'}\necho \"$(rm -rf /)\"\nEOF}",
+    "echo \\<<'EOF'\necho \"$(rm -rf /)\"\nEOF",
+    "x=$(cat <<'EOF')\necho \"$(rm -rf /)\"\nEOF",
 ];
 
 /// #9150: every shape above denies, under each bypass.
@@ -58,13 +84,22 @@ fn a_quoted_heredoc_delimiter_with_a_word_break_denies() {
 }
 
 /// #9150 no-false-deny: a correctly delimited quoted body is data, so `$(…)`
-/// text in it stays inert and a benign command after it still allows.
+/// text in it stays inert and a benign command after it still allows; so do
+/// an unquoted body, a plain comment, arithmetic and a multi-line `$(…)`.
 #[test]
 fn a_plain_quoted_heredoc_with_substitution_text_still_allows() {
     let fx = Fixture::new();
     for command in [
         "cat <<'EOF'\n$(rm -rf /)\nEOF\necho benign",
         "cat <<-'EOF'\n\t$(rm -rf /)\n\tEOF\necho benign",
+        "cat <<EOF\nhello\nEOF\necho benign",
+        "cat <<-EOF\n\thello\n\tEOF\necho benign",
+        "# list files\nls -la",
+        "cat <<'EOF' # note\n$(rm -rf /)\nEOF\necho benign",
+        "x=$(cat <<'EOF'\n$(rm -rf /)\nEOF\n)\necho \"$x\"",
+        "(cat <<'EOF')\n$(rm -rf /)\nEOF\necho benign",
+        "echo $((1 << 3))\necho benign",
+        "cat <<'END_OF-file.1'\n$(rm -rf /)\nEND_OF-file.1\necho benign",
     ] {
         let out = run(&fx, &bash_payload(&fx, command), &[], Some("pm"));
         assert!(!out.contains("\"deny\""), "{command:?}: {out}");
