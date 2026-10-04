@@ -32,6 +32,13 @@
 #     cwd-symlinked-home  a <dir>/home symlinked into a tree under a
 #                   `.env.local` refuses: the walk uses the physical path
 #     cwd-home-env-local  <dir>/home/.env.local itself refuses
+#     cwd-newline   a `.env.local` in an ancestor whose name ends in a newline
+#                   refuses
+#     unresolvable-home  an existing <dir>/home that cannot be entered (mode
+#                   000) refuses before the walk falls back to <dir>
+#     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
+#                   enter; it exits 1 and the daemon never starts
+#   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -47,7 +54,8 @@ PASSED=0
 FAILED=0
 # Physical, so it compares equal to the stub's `pwd -P` (macOS TMPDIR is a symlink).
 TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+# chmod first: the mode-000 cases leave directories rm cannot descend into.
+trap 'chmod -R u+rwx "$TMP_ROOT" 2>/dev/null; rm -rf "$TMP_ROOT"' EXIT
 
 FAKE_TOKEN="9121-selftest-fake-token-value"
 FAKE_KEY="9121-selftest-fake-key-value"
@@ -254,6 +262,49 @@ mkdir -p "$DIR6/home"
 touch "$DIR6/home/.env.local"
 expect_refusal cwd-home-env-local 1 "$DIR6/home/.env.local would be loaded" \
   --bin "$STUB" --dir "$DIR6" --dry-run
+
+# `$(dirname)` strips a trailing newline, so the walk would skip this ancestor.
+NL_DIR="$TMP_ROOT/nl
+"
+mkdir -p "$NL_DIR/sb"
+touch "$NL_DIR/.env.local"
+expect_refusal cwd-newline 1 ".env.local would be loaded" \
+  --bin "$STUB" --dir "$NL_DIR/sb" --dry-run
+
+if [ "$(id -u)" -eq 0 ]; then
+  echo "skip unresolvable-home, cd-fails: root enters a mode-000 directory"
+else
+  # An existing home the launcher cannot resolve must refuse, not fall back
+  # to walking from <dir>.
+  DIR7="$TMP_ROOT/case7"
+  mkdir -p "$DIR7/home"
+  chmod 000 "$DIR7/home"
+  expect_refusal unresolvable-home 1 "cannot resolve <dir>/home" \
+    --bin "$STUB" --dir "$DIR7"
+  chmod 700 "$DIR7/home"
+
+  # The home is absent at the walk, and mkdir under umask 0777 creates it with
+  # mode 000, so only the `cd` fails. The stub's marker is outside that home,
+  # where a started daemon could still write it.
+  DIR8="$TMP_ROOT/case8"
+  mkdir -p "$DIR8"
+  MARK_STUB="$TMP_ROOT/mark-stub"
+  printf '#!/bin/sh\ntouch "%s"\n' "$DIR8/stub-ran" > "$MARK_STUB"
+  chmod +x "$MARK_STUB"
+  set +e
+  OUT8="$(umask 0777 && run_launcher --bin "$MARK_STUB" --dir "$DIR8" 2>&1)"
+  STATUS8=$?
+  set -e
+  chmod 700 "$DIR8/home" "$DIR8/data" 2>/dev/null || true
+  if [ "$STATUS8" -ne 1 ] || [ -e "$DIR8/stub-ran" ]; then
+    fail cd-fails "exit $STATUS8 (want 1), stub ran: $([ -e "$DIR8/stub-ran" ] && echo yes || echo no)"
+    printf '%s\n' "$OUT8" | sed 's/^/    /'
+  elif ! printf '%s' "$OUT8" | grep -qF "cannot enter <dir>/home"; then
+    fail cd-fails "output lacks 'cannot enter <dir>/home'"
+  else
+    pass cd-fails
+  fi
+fi
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

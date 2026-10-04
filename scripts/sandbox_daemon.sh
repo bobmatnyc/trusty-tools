@@ -135,13 +135,21 @@ fi
 # path, so the walk starts at the physical <dir>/home (a symlinked home must
 # not escape the check) and covers <dir>/home/.env.local itself. It climbs to
 # /, past every boundary the loader stops at, so it covers the loader's reach.
+# Only an absent <dir>/home (mkdir creates it below) starts the walk at <dir>.
+# `${anc%/*}`, not `$(dirname)`: command substitution strips a trailing newline
+# from a directory name and would skip that directory.
 if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
-  anc="$(resolve "$SANDBOX/home")"
-  [ -n "$anc" ] || anc="$SANDBOX"
+  if [ -e "$SANDBOX/home" ] || [ -L "$SANDBOX/home" ]; then
+    anc="$(resolve "$SANDBOX/home")"
+    [ -n "$anc" ] || die "cannot resolve <dir>/home: $SANDBOX/home"
+  else
+    anc="$SANDBOX"
+  fi
   while :; do
     [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded by the daemon from <dir>/home; pick a --dir outside it"
     [ "$anc" != "/" ] || break
-    anc="$(dirname "$anc")"
+    anc="${anc%/*}"
+    [ -n "$anc" ] || anc=/
   done
 fi
 
@@ -174,7 +182,8 @@ fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
 # #9161: never the caller's cwd; see the Working directory note in the header.
-cd "$SANDBOX/home"
+# CDPATH stays set: the path is absolute, and CDPATH never rewrites one.
+cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"
 # `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 exec env -i \
   HOME="$SANDBOX/home" \
