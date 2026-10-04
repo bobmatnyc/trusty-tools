@@ -1,6 +1,6 @@
 # trusty-memory internals as input to a shared project-memory sync design
 
-Repo: /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools, main checkout, HEAD e3ff4c7358, tree clean at start. Read-only. No cargo run.
+Repo: trusty-tools, main checkout, HEAD e3ff4c7358, tree clean at start. Read-only. No cargo run.
 Paths are repo-relative. `tm` below means the trusty-memory crate (`crates/trusty-memory`), `tc` means `crates/trusty-common`.
 VERIFIED = I read the cited lines. INFERENCE = my reading, no direct citation; labelled each time.
 
