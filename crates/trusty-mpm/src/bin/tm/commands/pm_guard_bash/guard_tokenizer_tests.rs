@@ -125,6 +125,9 @@ fn guard_7833_a_quoted_body_cat_writes_to_a_file_is_data() {
         "cat >> tests/test_sanitized_dataset.py <<'EOF'\nrows.append({\"id\": 1, \"name\": \"a\"})\nEOF",
         "cat <<'EOF' > /tmp/s/p.py\nfor r in rows: print(r.key, r['id'])\nEOF",
         "cat > /tmp/s/p.py <<\"PY\"\nprint(open('.env').read())\nPY",
+        // Folded #8333 and the #8878 brace corpus: never globbed or expanded.
+        "cat <<'EOF' > note.md\n**A pipe confirms nothing at all.**\nEOF",
+        "cat > run.sh <<'EOF'\nfirst=${line%% *}\nEOF",
     ] {
         assert_eq!(refusal(command), None, "{command}");
     }

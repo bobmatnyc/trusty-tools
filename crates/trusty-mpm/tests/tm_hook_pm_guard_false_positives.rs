@@ -331,7 +331,8 @@ fn pm_guard_still_denies_what_the_7533_withdrawals_protected() {
 #[test]
 fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("echo '**A pipe confirms nothing at all.**'");
-    assert_denied("cat <<'EOF' > note.md\n**A short note.**\nEOF");
+    // #7833: a quoted body `cat` writes to a file is never globbed.
+    assert_allowed("cat <<'EOF' > note.md\n**A short note.**\nEOF");
     for glob in ["*M", "*Y", "*S", "*N", "*C"] {
         assert_denied(&format!("cat ~/.ssh/{glob}"));
     }
