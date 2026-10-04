@@ -5,7 +5,7 @@
 **Owner:** Architecture / Technical Leadership
 **Last-updated:** 2026-08-11
 **Spec ID:** `SPEC-ADR-01` (DOC-46)
-**Builds on:** `docs/adr/README.md` (existing ADR convention); DOC-38 (Spec-Linked Documentation / SLD); DOC-30 (Project Manager vision — decision vetting); the tm-adr bundled skill (`crates/trusty-mpm/src/assets/skills/tm-adr.md`)
+**Builds on:** `docs/adr/README.md` (existing ADR convention); DOC-38 (Spec-Linked Documentation / SLD); DOC-30 (Project Manager vision — decision vetting); the tm-adr bundled skill (`content/skills/tm-adr.md`)
 
 ---
 
@@ -427,7 +427,7 @@ This spec is successful when:
 | `docs/adr/INDEX.md` | NEW: seeded from existing ADRs, format per §5 |
 | `docs/adr/template.md` | Update: add "Related Decisions" section; add frontmatter fields (Status, Scope, Reversibility Cost, Decision Drivers) |
 | `docs/reference/documentation-layout.md` | Update: mention ADRs alongside Specs and Reqs as first-class artifacts |
-| `crates/trusty-mpm/src/assets/skills/tm-adr.md` | Update: remove "opt-in" framing; link to DOC-46 for formal standard (bundled asset v2.0.0) |
+| `content/skills/tm-adr.md` | Update: remove "opt-in" framing; link to DOC-46 for formal standard (bundled asset v2.0.0) |
 | `CHANGELOG.md` | Entry (per CHANGELOG-per-PR convention): "docs(spec): DOC-46 — formalize ADRs as first-class artifact with consistency-vetting protocol" |
 | `scripts/check_adr.sh` | Implemented: structural, lifecycle-link, metadata, section, numbering, and index checks |
 

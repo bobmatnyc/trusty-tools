@@ -132,6 +132,7 @@ pub mod config_keys;
 pub mod connect;
 // #9011: the agent roster and harness docs resolve from content here.
 pub mod content_source;
+// #9012: skills, instructions, output styles and SM instructions from content.
 pub mod daemon_identity;
 pub mod delegation_authority;
 pub mod deploy_validate;
@@ -143,6 +144,7 @@ pub mod disk_usage_guard;
 pub mod dispatch_isolation;
 pub mod doctor;
 pub mod doctor_repair;
+pub mod framework_content;
 // #7678: `tm doctor --fix`'s session-scope arm — re-applies the plugin and MCP
 // scope writes to a live project through the launch path's own writers.
 pub mod doctor_repair_scope;

@@ -313,7 +313,9 @@ mod tests {
         // catalog's render. This is the single-source-of-truth guard: if a verb
         // changes in the catalog without regenerating the asset (or vice versa),
         // this test fails, so the prompt and the code can never silently drift.
-        let committed = include_str!("../../assets/sm_instructions/SM_TOOLS.md");
+        // #9012: the asset is runtime content under content/instructions/.
+        let content = crate::core::content_source::test_support::repo_content();
+        let committed = content.required("sm_instructions/SM_TOOLS.md");
         let rendered = render_sm_tools();
         assert_eq!(
             rendered, committed,

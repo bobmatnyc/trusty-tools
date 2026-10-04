@@ -341,11 +341,10 @@ const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, Option<&str>, &str)] = &[
 ///
 /// Why: a pointer names a skill as a bare backticked token as often as it
 /// says "`<name>` skill", so detection keys on the set of real skill names.
-/// What: reads `trusty-mpm/src/assets/skills/*.md`; panics when the directory
-/// is missing or empty so the check can never pass vacuously.
+/// What: reads `content/skills/*.md` (#9012: moved out of trusty-mpm); panics
+/// when the directory is missing or empty so the check can never pass vacuously.
 fn bundled_skill_names() -> BTreeSet<String> {
-    let dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../trusty-mpm/src/assets/skills");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/skills");
     let names: BTreeSet<String> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("bundled skills dir {} must exist: {e}", dir.display()))
         .filter_map(|entry| {

@@ -522,26 +522,21 @@ fn status_with_nothing_installed_names_the_fix() {
     assert!(status.lines().join("\n").contains(INSTALL_HINT));
 }
 
-/// Critic M2: while built-in content ships, `tm content status` with nothing
-/// installed prints the doctor's info line and exits 0; after ADR-0064
-/// PHASE_1 it exits non-zero. A broken install never exits 0.
+/// Critic M2, after #9012 dropped the last built-in content: `tm content
+/// status` with nothing installed exits non-zero. A broken install never
+/// exits 0.
 #[test]
-fn status_with_nothing_installed_is_info_while_builtin_content_ships() {
+fn status_with_nothing_installed_exits_non_zero() {
     let cache = tempfile::tempdir().unwrap();
     let status = content_status(cache.path(), Some(cache.path()));
-    let info = status.builtin_info(true).expect("info line");
-    assert!(info.starts_with("info: "), "{info}");
-    assert!(status.exits_ok(true));
-    assert!(status.builtin_info(false).is_none());
-    assert!(!status.exits_ok(false));
+    assert!(!status.exits_ok());
 
     let mut src = FakeSource::default();
     src.publish(A);
     update(cache.path(), &src, Some(A)).expect("pin A");
     std::fs::write(cache.path().join(format!("{A}.tar.gz")), b"tampered").unwrap();
     let broken = content_status(cache.path(), None);
-    assert!(broken.builtin_info(true).is_none());
-    assert!(!broken.exits_ok(true), "a broken install never exits 0");
+    assert!(!broken.exits_ok(), "a broken install never exits 0");
 }
 
 #[test]

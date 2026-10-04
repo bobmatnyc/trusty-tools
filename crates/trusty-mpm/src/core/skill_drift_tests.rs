@@ -9,6 +9,7 @@
 //! Test: this file.
 
 use super::*;
+use crate::core::content_source::test_support::repo_content;
 use crate::core::skill_deployer::deploy_skills;
 use std::fs;
 use tempfile::TempDir;
@@ -133,17 +134,17 @@ fn the_roster_flag_adds_nothing_when_the_ledger_is_unreadable() {
 
 #[test]
 fn reference_falls_back_to_embedded() {
-    // With no submodule, the reference is the compiled-in table — never the
-    // `~/.trusty-mpm/framework/skills` extraction cache.
-    let reference = skill_reference(None);
+    // With no submodule, the reference is the loaded content (#9012) — never
+    // the `~/.trusty-mpm/framework/skills` extraction cache.
+    let reference = skill_reference(None, Some(&repo_content()));
     assert!(
-        reference.origin.contains("embedded"),
+        reference.origin.contains("instructional content"),
         "origin was: {}",
         reference.origin
     );
     assert!(
         reference.assets.contains_key("tm-workflow"),
-        "the binary must embed tm-workflow"
+        "the content must carry tm-workflow"
     );
 }
 
@@ -157,7 +158,7 @@ fn reference_falls_back_to_embedded() {
 /// Test: this test.
 #[test]
 fn reference_includes_nested_reference_keys() {
-    let reference = skill_reference(None);
+    let reference = skill_reference(None, Some(&repo_content()));
     let nested: Vec<&String> = reference
         .assets
         .keys()
@@ -179,10 +180,10 @@ fn reference_includes_nested_reference_keys() {
 /// REAL embedded reference, must be entirely Fresh.
 ///
 /// Why: this is the critic's measured claim reduced to a hermetic test. The
-/// bundled source is materialised from `bundle::ALL` exactly as
+/// bundled source is materialised from the repository content exactly as
 /// `core::skill_source` does, deployed by the real `deploy_skills` (which writes
 /// the nested `<stem>/references/<file>.md` manifest keys), then audited against
-/// `skill_reference(None)`. Before the fix, every nested key missed the
+/// `skill_reference(None, Some(&repo_content()))`. Before the fix, every nested key missed the
 /// reference map and became `Unverifiable`, so a pristine install could never
 /// report Ok — `skill_staleness` was pinned to Unknown permanently.
 /// Test: this test.
@@ -191,20 +192,17 @@ fn a_pristine_bundled_deploy_is_entirely_fresh() {
     let src = TempDir::new().unwrap();
     // Materialise the bundled skills exactly as `skill_source` does: flat
     // `<stem>.md` entry points plus nested `<stem>/references/<file>.md`.
-    for artifact in crate::core::bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-    {
-        let rel = artifact.rel_path.strip_prefix("skills/").unwrap();
+    for (rel_path, contents) in repo_content().skills() {
+        let rel = rel_path.strip_prefix("skills/").unwrap();
         let path = src.path().join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, artifact.contents).unwrap();
+        fs::write(&path, contents).unwrap();
     }
 
     let dest = TempDir::new().unwrap();
     deploy_skills(src.path(), dest.path()).unwrap();
 
-    let audit = audit_deployed_skills(&skill_reference(None), dest.path());
+    let audit = audit_deployed_skills(&skill_reference(None, Some(&repo_content())), dest.path());
     assert_eq!(audit.manifest, ManifestState::Present);
 
     let nested = audit
@@ -240,7 +238,7 @@ fn reference_prefers_the_submodule() {
     fs::create_dir_all(&refs).unwrap();
     fs::write(refs.join("extra.md"), "submodule reference").unwrap();
 
-    let reference = skill_reference(Some(tmp.path()));
+    let reference = skill_reference(Some(tmp.path()), Some(&repo_content()));
     assert_eq!(
         reference.assets.get("tm-workflow").unwrap(),
         "submodule text"
@@ -265,9 +263,9 @@ fn empty_submodule_dir_falls_back_to_embedded() {
     // An unpopulated submodule must not produce an EMPTY reference — that
     // would make every deployed skill unverifiable at once.
     let tmp = TempDir::new().unwrap();
-    let reference = skill_reference(Some(tmp.path()));
+    let reference = skill_reference(Some(tmp.path()), Some(&repo_content()));
     assert!(
-        reference.origin.contains("embedded"),
+        reference.origin.contains("instructional content"),
         "{}",
         reference.origin
     );

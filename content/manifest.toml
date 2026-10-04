@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "0.2.0"
+version = "2.1.0"
 schema_major = 1
 
 [[member]]
@@ -185,3 +185,231 @@ version = "0.1.0"
 [[member]]
 path = "agents/web-ui-engineer.md"
 version = "0.1.0"
+
+[[member]]
+path = "skills/api-design-patterns.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/api-documentation.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/artifacts-builder.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/brainstorming.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/code-production-process.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/code-review-standards.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/condition-based-waiting.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/contract-driven-testing.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/database-migration.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/documentation-style.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/env-manager.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/git-workflow.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/internal-comms.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/json-data-handling.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/model-context-builder.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/requesting-code-review.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/root-cause-tracing.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/rust-build-performance.md"
+version = "1.1.0"
+
+[[member]]
+path = "skills/rust-delivery-workflow.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/security-scanning.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/self-improvement-loop.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/software-patterns.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/systematic-debugging.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/test-driven-development.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/test-quality-inspector.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/testing-anti-patterns.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-adr.md"
+version = "2.0.0"
+
+[[member]]
+path = "skills/tm-agent-architecture.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-architect-setup.md"
+version = "0.1.0"
+
+[[member]]
+path = "skills/tm-bug-reporting.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-capabilities.md"
+version = "1.1.0"
+
+[[member]]
+path = "skills/tm-circuit-breaker.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-cli-operations.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-delegation-patterns.md"
+version = "1.1.0"
+
+[[member]]
+path = "skills/tm-doctor.md"
+version = "0.1.0"
+
+[[member]]
+path = "skills/tm-epic.md"
+version = "0.1.0"
+
+[[member]]
+path = "skills/tm-git-file-tracking.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-init.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-issues-prune.md"
+version = "1.2.0"
+
+[[member]]
+path = "skills/tm-postmortem.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-prose-style.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-secrets.md"
+version = "1.2.0"
+
+[[member]]
+path = "skills/tm-session-management.md"
+version = "1.1.0"
+
+[[member]]
+path = "skills/tm-session-pause.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-session-resume.md"
+version = "1.1.0"
+
+[[member]]
+path = "skills/tm-slack.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-teaching-templates.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-ticketing.md"
+version = "2.1.0"
+
+[[member]]
+path = "skills/tm-tool-usage-guide.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-verification-protocols.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/tm-workflow.md"
+version = "2.1.0"
+
+[[member]]
+path = "skills/tm.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/verification-before-completion.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/web-performance-optimization.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/webapp-testing.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/writing-plans.md"
+version = "1.0.0"
+
+[[member]]
+path = "skills/xlsx.md"
+version = "1.0.0"

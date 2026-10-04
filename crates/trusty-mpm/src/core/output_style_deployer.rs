@@ -19,6 +19,7 @@ use std::path::Path;
 
 use crate::core::agent_manifest::atomic_write;
 use crate::core::bundle::OUTPUT_STYLES;
+use crate::core::framework_content::FrameworkContent;
 
 /// Summary of one [`deploy_output_styles`] run.
 ///
@@ -80,7 +81,10 @@ impl OutputStyleDeployResult {
 /// `deploy_output_styles_idempotent` (no spurious write on second call),
 /// `deploy_output_styles_refreshes_stale_file` (overwrite when source changed),
 /// `deploy_continues_past_an_unreadable_style` (per-style isolation).
-pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputStyleDeployResult> {
+pub fn deploy_output_styles(
+    content: &FrameworkContent,
+    claude_config_dir: &Path,
+) -> anyhow::Result<OutputStyleDeployResult> {
     let styles_dir = claude_config_dir.join("output-styles");
     std::fs::create_dir_all(&styles_dir)?;
 
@@ -88,7 +92,8 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
 
     for style in OUTPUT_STYLES {
         let target = styles_dir.join(style.file_name);
-        let bundled_bytes = style.content.as_bytes();
+        // #9012: the body is runtime content.
+        let bundled_bytes = style.content(content).as_bytes();
 
         // Idempotency guard: read the on-disk bytes and compare directly.
         // Using `read` (raw bytes) rather than `read_to_string` avoids two
@@ -120,7 +125,7 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
 
         // Write atomically (temp-then-rename) so a crash between writes cannot
         // leave a half-written style file.
-        match atomic_write(&target, style.content) {
+        match atomic_write(&target, style.content(content)) {
             Ok(()) => result.deployed.push(style.file_name.to_string()),
             Err(e) => result.failed.push((
                 style.file_name.to_string(),
@@ -169,12 +174,15 @@ pub enum StyleDrift {
 /// [`OUTPUT_STYLES`] order; an in-sync style produces no entry. Reads only —
 /// it never creates `styles_dir`.
 /// Test: `drift_is_empty_when_in_sync`, `drift_reports_missing_drifted_and_unreadable`.
-pub fn output_style_drift(styles_dir: &Path) -> Vec<(&'static str, StyleDrift)> {
+pub fn output_style_drift(
+    content: &FrameworkContent,
+    styles_dir: &Path,
+) -> Vec<(&'static str, StyleDrift)> {
     OUTPUT_STYLES
         .iter()
         .filter_map(|style| {
             let state = match std::fs::read(styles_dir.join(style.file_name)) {
-                Ok(bytes) if bytes == style.content.as_bytes() => return None,
+                Ok(bytes) if bytes == style.content(content).as_bytes() => return None,
                 Ok(_) => StyleDrift::Drifted,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => StyleDrift::Missing,
                 Err(e) => StyleDrift::Unreadable(e.to_string()),
@@ -187,14 +195,15 @@ pub fn output_style_drift(styles_dir: &Path) -> Vec<(&'static str, StyleDrift)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::content_source::test_support::repo_content;
     use tempfile::TempDir;
 
     #[test]
     fn drift_is_empty_when_in_sync() {
         let tmp = TempDir::new().unwrap();
-        deploy_output_styles(tmp.path()).unwrap();
+        deploy_output_styles(&repo_content(), tmp.path()).unwrap();
         assert!(
-            output_style_drift(&tmp.path().join("output-styles")).is_empty(),
+            output_style_drift(&repo_content(), &tmp.path().join("output-styles")).is_empty(),
             "a freshly deployed tier must report no drift"
         );
     }
@@ -208,7 +217,7 @@ mod tests {
         std::fs::create_dir_all(&styles).unwrap();
 
         // Nothing deployed at all: every style is Missing.
-        let all_missing = output_style_drift(&styles);
+        let all_missing = output_style_drift(&repo_content(), &styles);
         assert_eq!(all_missing.len(), OUTPUT_STYLES.len());
         assert!(
             all_missing
@@ -216,11 +225,11 @@ mod tests {
                 .all(|(_, state)| *state == StyleDrift::Missing)
         );
 
-        deploy_output_styles(tmp.path()).unwrap();
+        deploy_output_styles(&repo_content(), tmp.path()).unwrap();
         let first = &OUTPUT_STYLES[0];
         std::fs::write(styles.join(first.file_name), "stale text").unwrap();
 
-        let drift = output_style_drift(&styles);
+        let drift = output_style_drift(&repo_content(), &styles);
         assert_eq!(
             drift,
             vec![(first.file_name, StyleDrift::Drifted)],
@@ -233,7 +242,7 @@ mod tests {
     fn an_unreadable_style_is_not_reported_as_drifted() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
-        deploy_output_styles(tmp.path()).unwrap();
+        deploy_output_styles(&repo_content(), tmp.path()).unwrap();
         let styles = tmp.path().join("output-styles");
         let target = styles.join(OUTPUT_STYLES[0].file_name);
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o000)).unwrap();
@@ -242,7 +251,7 @@ mod tests {
             return;
         }
 
-        let drift = output_style_drift(&styles);
+        let drift = output_style_drift(&repo_content(), &styles);
         let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
 
         assert_eq!(drift.len(), 1);
@@ -267,7 +276,7 @@ mod tests {
     fn deploy_continues_past_an_unreadable_style() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
-        deploy_output_styles(tmp.path()).unwrap();
+        deploy_output_styles(&repo_content(), tmp.path()).unwrap();
         let styles = tmp.path().join("output-styles");
 
         let blocked = styles.join(OUTPUT_STYLES[0].file_name);
@@ -279,7 +288,7 @@ mod tests {
             return;
         }
 
-        let result = deploy_output_styles(tmp.path()).unwrap();
+        let result = deploy_output_styles(&repo_content(), tmp.path()).unwrap();
         let _ = std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o600));
 
         assert_eq!(
@@ -306,7 +315,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&drifted).unwrap(),
-            OUTPUT_STYLES[1].content,
+            OUTPUT_STYLES[1].content(&repo_content()),
             "the write the result claims must have actually landed"
         );
     }
@@ -322,7 +331,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
 
-        let result = deploy_output_styles(&cfg).unwrap();
+        let result = deploy_output_styles(&repo_content(), &cfg).unwrap();
 
         // All three bundled styles must be deployed on a first run.
         assert_eq!(
@@ -347,7 +356,8 @@ mod tests {
             );
             let content = std::fs::read_to_string(&target).unwrap();
             assert_eq!(
-                content, style.content,
+                content,
+                style.content(&repo_content()),
                 "deployed content of {} must match the bundled constant",
                 style.file_name
             );
@@ -369,11 +379,11 @@ mod tests {
         let cfg = tmp.path().to_path_buf();
 
         // First call populates the directory.
-        deploy_output_styles(&cfg).unwrap();
+        deploy_output_styles(&repo_content(), &cfg).unwrap();
 
         // Second call must leave files untouched — assert via result fields,
         // not mtime (mtime checks are racy on coarse-grained filesystems).
-        let result = deploy_output_styles(&cfg).unwrap();
+        let result = deploy_output_styles(&repo_content(), &cfg).unwrap();
 
         assert!(
             result.deployed.is_empty(),
@@ -410,7 +420,7 @@ mod tests {
         let target = styles_dir.join(first.file_name);
         std::fs::write(&target, "stale content that does not match the bundle").unwrap();
 
-        let result = deploy_output_styles(&cfg).unwrap();
+        let result = deploy_output_styles(&repo_content(), &cfg).unwrap();
 
         // The stale file must be refreshed (deployed).
         assert!(
@@ -422,7 +432,8 @@ mod tests {
         // Content must now match the bundle.
         let content = std::fs::read_to_string(&target).unwrap();
         assert_eq!(
-            content, first.content,
+            content,
+            first.content(&repo_content()),
             "refreshed file content must match bundled constant"
         );
     }
@@ -447,7 +458,7 @@ mod tests {
         let target = styles_dir.join(first.file_name);
         std::fs::write(&target, b"\xff\xfe invalid utf-8 bytes \x80\x81").unwrap();
 
-        let result = deploy_output_styles(&cfg).unwrap();
+        let result = deploy_output_styles(&repo_content(), &cfg).unwrap();
 
         // The file with non-UTF-8 content must be treated as stale and refreshed.
         assert!(
@@ -459,7 +470,8 @@ mod tests {
         // After refresh, content must match the bundled constant.
         let refreshed = std::fs::read_to_string(&target).unwrap();
         assert_eq!(
-            refreshed, first.content,
+            refreshed,
+            first.content(&repo_content()),
             "after refresh, content must match bundled constant"
         );
     }

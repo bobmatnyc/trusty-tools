@@ -66,7 +66,7 @@ duplicates:
   `[pm]`, default `false`
   (`crates/trusty-mpm/src/core/prompt_self_improvement.rs`, `enabled_for`).
 - When on, `append_to_pm_prompt` appends a fixed addendum
-  (`crates/trusty-mpm/src/assets/instructions/sections/prompt-self-improvement.md`)
+  (`content/instructions/sections/prompt-self-improvement.md`)
   asking for a `## Prompt feedback` section, capped implicitly at 5 lines by
   instruction and explicitly at 4 KiB by the extractor
   (`MAX_FEEDBACK_BYTES`, `crates/trusty-mpm/src/core/prompt_feedback.rs:60-67`).

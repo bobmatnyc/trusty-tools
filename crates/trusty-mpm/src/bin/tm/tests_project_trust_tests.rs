@@ -1,7 +1,7 @@
 //! `tm project trust` / `--revoke` coverage (issue #3033 security fix).
 //!
 //! Why: split into its own file (rather than growing `tests.rs` or
-//! `tests_behavior_a.rs`, both already near their SLOC caps) mirroring the
+//! `tests_behavior_a_tests.rs`, both already near their SLOC caps) mirroring the
 //! established `tests_behavior_*_tests.rs` split convention — files ending in
 //! `_tests.rs` get the 1500-SLOC test-file cap.
 //! What: CLI parse round-trips for `ProjectAction::Trust`, plus a behavioral

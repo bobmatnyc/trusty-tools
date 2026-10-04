@@ -25,7 +25,7 @@
 //! re-issuing the command does not reset the agent's own deadline. The status
 //! line carries `remaining=<secs>` and, when pending, the exact `rerun=` command.
 //!
-//! Test: the sibling `tests.rs`; `cli_parses_wait_*` in `tests_behavior_a.rs`.
+//! Test: the sibling `tests.rs`; `cli_parses_wait_*` in `tests_behavior_a_tests.rs`.
 
 pub(crate) mod budget;
 pub(crate) mod condition;

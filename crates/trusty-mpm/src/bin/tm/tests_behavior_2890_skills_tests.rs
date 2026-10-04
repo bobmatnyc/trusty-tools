@@ -1,7 +1,7 @@
 //! End-to-end deploy proof for issue #2890's two new bundled skills —
 //! companion file, following the existing `tests_behavior_a/b/c/d/e`/
 //! `tests_behavior_reset_agents`/`tests_behavior_skill_tiers` split
-//! convention (kept separate from `tests_behavior_a.rs` so that file stays
+//! convention (kept separate from `tests_behavior_a_tests.rs` so that file stays
 //! under the 500-SLOC production cap; this file is itself capped at 1500
 //! SLOC as a test file).
 //!
@@ -20,16 +20,14 @@
 //! What: `code_critic_skills_land_in_deployed_dot_claude_skills` calls the
 //! exact two-step path `tm install` uses (`install_to` then
 //! `deploy_all_skill_tiers`, matching `install_then_deploy_deploys_skills`
-//! in `tests_behavior_a.rs`) against a temp framework root, then reads back
+//! in `tests_behavior_a_tests.rs`) against a temp framework root, then reads back
 //! `<dest>/code-review-standards/SKILL.md` and
 //! `<dest>/contract-driven-testing/SKILL.md` from the deployed directory and
 //! asserts their content is byte-identical to the `include_str!`-embedded
 //! constants.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::{CODE_REVIEW_STANDARDS, CONTRACT_DRIVEN_TESTING};
-
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn code_critic_skills_land_in_deployed_dot_claude_skills() {
@@ -38,7 +36,7 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including the two new skill files) under the framework root.
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -81,7 +79,7 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
     );
     assert_eq!(
         std::fs::read_to_string(&code_review_standards_deployed).unwrap(),
-        CODE_REVIEW_STANDARDS,
+        crate::commands::install::test_skill("skills/code-review-standards.md"),
     );
 
     let contract_driven_testing_deployed = paths
@@ -95,6 +93,6 @@ fn code_critic_skills_land_in_deployed_dot_claude_skills() {
     );
     assert_eq!(
         std::fs::read_to_string(&contract_driven_testing_deployed).unwrap(),
-        CONTRACT_DRIVEN_TESTING,
+        crate::commands::install::test_skill("skills/contract-driven-testing.md"),
     );
 }

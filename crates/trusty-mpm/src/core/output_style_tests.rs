@@ -13,6 +13,7 @@
 use super::*;
 use crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID;
 use crate::core::config::MpmConfig;
+use crate::core::content_source::test_support::rc;
 
 // ── Registry resolution ──────────────────────────────────────────────
 
@@ -21,11 +22,14 @@ fn resolve_style_resolves_all_three_ids() {
     for id in ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"] {
         let style = resolve_style(id).unwrap_or_else(|_| panic!("id {id} should resolve"));
         assert_eq!(style.id, id);
-        assert!(!style.content.trim().is_empty(), "{id} content non-empty");
+        assert!(
+            !style.content(rc()).trim().is_empty(),
+            "{id} content non-empty"
+        );
         // The frontmatter name must match the registry id, or Claude Code
         // silently falls back to the default style.
         assert!(
-            style.content.contains(&format!("name: {id}")),
+            style.content(rc()).contains(&format!("name: {id}")),
             "frontmatter name for {id} must match its registry id"
         );
     }
@@ -188,7 +192,7 @@ fn detect_from_output_unparseable_fails_safe() {
 #[test]
 fn strip_frontmatter_removes_block() {
     let style = resolve_style("trusty-mpm").unwrap();
-    let body = strip_frontmatter(style.content);
+    let body = strip_frontmatter(style.content(rc()));
     assert!(
         !body.contains("name: trusty-mpm"),
         "frontmatter name line must be stripped from the injected body"
@@ -210,7 +214,7 @@ fn strip_frontmatter_passthrough() {
 fn inject_prepends_style_block() {
     let style = resolve_style("trusty-mpm-teacher").unwrap();
     let prompt = "# PM Floor\n\noriginal prompt body".to_string();
-    let injected = inject_style_into_prompt(style, &prompt);
+    let injected = inject_style_into_prompt(rc(), style, &prompt);
 
     // The injected heading and the style body appear FIRST.
     assert!(injected.starts_with(INJECTED_STYLE_HEADING));
@@ -226,7 +230,7 @@ fn inject_prepends_style_block() {
 fn inject_preserves_prompt() {
     let style = resolve_style("trusty-mpm").unwrap();
     let prompt = "UNIQUE_FLOOR_MARKER".to_string();
-    let injected = inject_style_into_prompt(style, &prompt);
+    let injected = inject_style_into_prompt(rc(), style, &prompt);
     assert!(injected.contains("UNIQUE_FLOOR_MARKER"));
 }
 
@@ -237,7 +241,7 @@ fn maybe_inject_skips_when_native_supported() {
     // Modern Claude Code → native key handles it → prompt is unchanged.
     let cfg = MpmConfig::default();
     let prompt = "PM_PROMPT_BODY".to_string();
-    let out = maybe_inject_active_style(&cfg, None, prompt.clone(), true);
+    let out = maybe_inject_active_style(rc(), &cfg, None, prompt.clone(), true);
     assert_eq!(out, prompt, "no injection when native support is present");
     assert!(!out.contains(INJECTED_STYLE_HEADING));
 }
@@ -247,7 +251,7 @@ fn maybe_inject_injects_when_native_unsupported() {
     // Old Claude Code → inject the active (default) style into the prompt.
     let cfg = MpmConfig::default();
     let prompt = "PM_PROMPT_BODY".to_string();
-    let out = maybe_inject_active_style(&cfg, None, prompt, false);
+    let out = maybe_inject_active_style(rc(), &cfg, None, prompt, false);
     assert!(out.contains(INJECTED_STYLE_HEADING));
     assert!(out.contains("# Trusty Multi-Agent PM"));
     assert!(out.contains("PM_PROMPT_BODY"));
@@ -257,7 +261,7 @@ fn maybe_inject_injects_when_native_unsupported() {
 fn maybe_inject_uses_configured_style() {
     let mut cfg = MpmConfig::default();
     cfg.style.active = Some("trusty-mpm-research".to_string());
-    let out = maybe_inject_active_style(&cfg, None, "PROMPT".to_string(), false);
+    let out = maybe_inject_active_style(rc(), &cfg, None, "PROMPT".to_string(), false);
     assert!(out.contains("# Trusty Multi-Agent PM — Research Mode"));
 }
 
@@ -266,6 +270,7 @@ fn maybe_inject_explicit_overrides_config() {
     let mut cfg = MpmConfig::default();
     cfg.style.active = Some("trusty-mpm-research".to_string());
     let out = maybe_inject_active_style(
+        rc(),
         &cfg,
         Some("trusty-mpm-teacher"),
         "PROMPT".to_string(),
@@ -281,7 +286,7 @@ fn maybe_inject_unknown_falls_back_to_default() {
     // than failing the launch.
     let mut cfg = MpmConfig::default();
     cfg.style.active = Some("does-not-exist".to_string());
-    let out = maybe_inject_active_style(&cfg, None, "PROMPT".to_string(), false);
+    let out = maybe_inject_active_style(rc(), &cfg, None, "PROMPT".to_string(), false);
     assert!(out.contains(INJECTED_STYLE_HEADING));
     // Default professional style body, not teaching/research.
     assert!(out.contains("# Trusty Multi-Agent PM"));

@@ -13,7 +13,7 @@
 //!   failure #381 was.
 
 use super::*;
-use crate::core::bundled_pm_package::bundled_fallback_package;
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_overrides::{
     FILE_INSTRUCTIONS, FILE_WORKFLOW, OVERRIDE_DIR_NAME, PromptSource,
     resolve_pm_prompt_with_roster,
@@ -44,7 +44,7 @@ fn block(section: SectionId, body: &str) -> String {
 
 /// Resolve the PM prompt for `project` against the fixed roster.
 fn resolve(project: &Path) -> (String, PromptSource) {
-    resolve_pm_prompt_with_roster(project, || Some(ROSTER.to_string()))
+    resolve_pm_prompt_with_roster(rc(), project, || Some(ROSTER.to_string()))
 }
 
 /// The reasons reported by a scan, in order.
@@ -374,7 +374,7 @@ fn over(section: SectionId, body: &str) -> SectionOverride {
 fn with_overrides_of_nothing_is_the_identity() {
     // The property the two existing goldens rest on: a project with no
     // `CLAUDE.md` composes exactly the package it always did.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let (result, rejected) = package.with_overrides(&[]);
     assert_eq!(&result, package);
     assert_eq!(rejected, vec![]);
@@ -385,7 +385,7 @@ fn floor_sections_refuse_every_named_section_override() {
     // The structural guarantee: the package's `customization_tier` is the only
     // authority, and it says `fixed` for every floor section. No list in the
     // reader is consulted, so none can drift out of sync with this.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     // The loop set is derived from `is_floor()`, never hand-listed: #4573 added
     // a fourth floor section, and a hand-listed set would have kept passing
     // while the new one went untested — the exact drift shape that let the
@@ -411,7 +411,7 @@ fn content_sections_accept_a_project_override() {
     // #4286 flipped which sections these are: `core` became the one protected
     // section and the four former floor sections joined the overridable set.
     // #8533: every section but `core` — including the nine split out of it.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     for section in SectionId::CANONICAL
         .into_iter()
         .filter(|id| *id != SectionId::Core)
@@ -452,7 +452,7 @@ fn content_sections_accept_a_project_override() {
 fn agent_delegation_override_keeps_the_generated_roster() {
     // The #4196 shape in override form: a project must be able to rewrite the
     // routing doctrine WITHOUT being able to suppress the live agent roster.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let (result, rejected) = package.with_overrides(&[over(
         SectionId::AgentDelegation,
         "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER",
@@ -472,7 +472,7 @@ fn agent_delegation_override_keeps_the_generated_roster() {
 
 #[test]
 fn one_bad_override_does_not_discard_a_good_one() {
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let (result, rejected) = package.with_overrides(&[
         over(SectionId::Core, "SUBVERTED"),
         over(SectionId::Workflow, "CUSTOM_WORKFLOW"),
@@ -495,7 +495,7 @@ fn one_bad_override_does_not_discard_a_good_one() {
 
 #[test]
 fn application_order_is_canonical_not_authoring_order() {
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let forwards = package.with_overrides(&[
         over(SectionId::Core, "C"),
         over(SectionId::Workflow, "W"),
@@ -513,7 +513,7 @@ fn application_order_is_canonical_not_authoring_order() {
 fn an_empty_override_body_is_rejected_by_the_applier_too() {
     // Belt to the scanner's braces: even if an empty body reached this far it
     // would keep the bundled section rather than blank it.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "  \n ")]);
     assert_eq!(&result, package);
     assert_eq!(
@@ -529,7 +529,7 @@ fn a_section_with_no_text_block_has_nothing_to_override() {
     // Contrived package: Workflow's only block is generated, so there is no
     // authored text for an override to replace. Rejected rather than injected
     // at some arbitrary position.
-    let mut package = bundled_fallback_package().expect("manifest parses").clone();
+    let mut package = crate::core::content_source::test_support::rc_package().clone();
     for b in &mut package.blocks {
         if b.section == SectionId::Workflow {
             b.body = BlockBody::Generated {
@@ -552,7 +552,7 @@ fn an_override_that_would_leave_a_section_silent_is_rejected() {
     // Contrived package: Workflow's only text block is `optional`, so applying
     // the override would produce a section that composes to nothing whenever it
     // is dropped. Rejected — the bundled section is kept instead.
-    let mut package = bundled_fallback_package().expect("manifest parses").clone();
+    let mut package = crate::core::content_source::test_support::rc_package().clone();
     for b in &mut package.blocks {
         if b.section == SectionId::Workflow {
             b.optional = true;
@@ -573,7 +573,7 @@ fn an_undeclared_section_is_rejected_and_the_package_is_reverted() {
     // Contrived package whose taxonomy is missing Workflow: the override has
     // nowhere declared to land, and the final validation then refuses the whole
     // thing — degrading to the package as supplied, never to a broken one.
-    let mut package = bundled_fallback_package().expect("manifest parses").clone();
+    let mut package = crate::core::content_source::test_support::rc_package().clone();
     package.sections.retain(|s| s.id != SectionId::Workflow);
 
     let (result, rejected) = package.with_overrides(&[over(SectionId::Workflow, "X")]);
@@ -602,7 +602,7 @@ fn an_override_that_cannot_validate_is_discarded_and_the_package_reverts() {
     //
     // Before #4286 this used a Memory block placed after the floor, tripping
     // `OverridableAfterFloor`; that rule died with the floor.
-    let mut package = bundled_fallback_package().expect("manifest parses").clone();
+    let mut package = crate::core::content_source::test_support::rc_package().clone();
     for section in &mut package.sections {
         if section.id == SectionId::NonOverridableRules {
             section.customization_tier = CustomizationTier::Fixed;
@@ -942,7 +942,7 @@ fn the_authority_tables_survive_every_override_except_an_enforcement_block() {
     assert!(prompt.contains("TWO PHASES."));
     assert_authority_intact(&prompt, "unrelated WORKFLOW named-section override");
 
-    // #4286: the two arms that used to sit here — a legacy `WORKFLOW.md`
+    // #4286: the two arms that used to sit here — a legacy `rc().required("sections/workflow.md").md`
     // forcing the string assembly, and `PM_INSTRUCTIONS_DEPLOYED.md` discarding
     // every bundled section — are gone, because neither file is read any more.
     // The strongest surviving form of the same claim is that a project carrying
@@ -973,7 +973,7 @@ fn the_authority_tables_survive_every_override_except_an_enforcement_block() {
     // The roster-absent degradation is the one remaining path to the string
     // assembly, and it must carry the tables too.
     let no_roster = TempDir::new().unwrap();
-    let (bare, source) = resolve_pm_prompt_with_roster(no_roster.path(), || None);
+    let (bare, source) = resolve_pm_prompt_with_roster(rc(), no_roster.path(), || None);
     assert_eq!(source, PromptSource::Legacy);
     assert_authority_intact(&bare, "roster-absent string assembly");
 }
@@ -988,7 +988,7 @@ fn no_floor_text_points_at_content_outside_the_floor() {
     // Any phrasing that binds the PM to another SECTION by name is that same
     // shape, because only the floor is guaranteed present. Assert the class, not
     // the one sentence that was fixed.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     // The four former-floor sections, named explicitly. They are no longer a
     // tier grouping (#4286 removed the floor), but they are still the sections
     // that carry this content, and projecting them alone is what stops the
@@ -1130,7 +1130,7 @@ fn the_direct_action_budget_states_both_halves_in_the_floor() {
     // is gone, the user override stays, and the budget generalizes from file
     // changes to actions. Assert it on the floor projected alone, so this
     // cannot pass because a project-tier section happens to restate it.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     // The four former-floor sections, named explicitly. They are no longer a
     // tier grouping (#4286 removed the floor), but they are still the sections
     // that carry this content, and projecting them alone is what stops the
@@ -1531,12 +1531,16 @@ const FOLDED_ROUTING_MAPPINGS_SKILL: &[(&str, &str)] = &[
     ("| haiku |", "the per-agent default-model column"),
 ];
 
-/// The bundled `tm-delegation-patterns` skill body, as shipped.
-const DELEGATION_PATTERNS_SKILL: &str = include_str!("../assets/skills/tm-delegation-patterns.md");
+/// The bundled `tm-delegation-patterns` skill body, as shipped (#9012: read
+/// from the checkout's content).
+fn delegation_patterns_skill() -> &'static str {
+    rc().skill("skills/tm-delegation-patterns.md")
+        .expect("tm-delegation-patterns skill")
+}
 
 #[test]
 fn the_surviving_routing_table_covers_every_folded_mapping() {
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let delegation = package.authored_run(&[SectionId::AgentDelegation]);
 
     for (needle, what) in FOLDED_ROUTING_MAPPINGS_PROMPT {
@@ -1555,13 +1559,13 @@ fn the_relocated_routing_detail_is_carried_by_the_delegation_skill() {
     // deleted them with nothing failing.
     for (needle, what) in FOLDED_ROUTING_MAPPINGS_SKILL {
         assert!(
-            DELEGATION_PATTERNS_SKILL.contains(needle),
+            delegation_patterns_skill().contains(needle),
             "tm-delegation-patterns lost {what}; missing {needle:?}"
         );
     }
 
     // The prompt must name the call, or the relocated detail is unreachable.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     assert!(
         package
             .authored_run(&[SectionId::AgentDelegation])
@@ -1575,7 +1579,7 @@ fn routing_lives_on_exactly_one_surface() {
     // The point of the collapse: a reader asking "which agent handles what"
     // must find one table, not six. `core.md` keeps a pointer, never a table.
     // #8533: the pointer moved out of `core` into its own section.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let core = package.authored_run(&[SectionId::AgentRouting]);
 
     for retired in [
@@ -1612,7 +1616,7 @@ fn the_direct_action_budget_is_stated_once_and_pointed_at_elsewhere() {
     // The rule was stated four times. Only `enforcement.md` states it; the
     // other three sections point at it by its exact subsection title, so the
     // pointer cannot rot into a dangling reference unnoticed.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     const TITLE: &str = "The direct-action budget (P1 and P5 only)";
 
     let enforcement = package.authored_run(&[SectionId::Enforcement]);
@@ -1655,7 +1659,7 @@ fn every_skill_pointer_names_the_call_rather_than_decorating() {
     // table and forbidden-phrase list, with a second copy in `workflow`.
     //
     // Every pointer must therefore read as an instruction naming the call.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
     let prompt = package.authored_run(&SectionId::CANONICAL);
 
     assert!(
@@ -1688,7 +1692,7 @@ fn the_qa_evidence_contract_is_stated_once_in_the_skill() {
     // routing table and the forbidden phrases beside a pointer to the skill
     // that already held all three, and `workflow` restated nearly all of it
     // again with no pointer at all.
-    let package = bundled_fallback_package().expect("manifest parses");
+    let package = crate::core::content_source::test_support::rc_package();
 
     for (section, id) in [
         ("core", SectionId::Core),
@@ -1728,7 +1732,7 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
     // home rather than being deleted — the style must still STATE the rule, and
     // the skill must still carry what stops it degenerating into a phrase list.
     for style in crate::core::bundle::OUTPUT_STYLES {
-        let body = style.content;
+        let body = style.content(rc());
         let id = style.id;
 
         assert!(
@@ -1766,7 +1770,9 @@ fn the_prose_rules_ban_categories_not_phrase_lists() {
     // What the skill now owns: the non-exhaustive marker on the sycophancy
     // examples, the significance-framing TEMPLATE, and the illustration-only
     // framing on the observed instances.
-    let skill = crate::core::bundle::TM_PROSE_STYLE;
+    let skill = rc()
+        .skill("skills/tm-prose-style.md")
+        .expect("tm-prose-style skill");
     assert!(
         skill.contains("Non-exhaustive"),
         "tm-prose-style: the sycophancy examples must be marked non-exhaustive"
@@ -1788,8 +1794,7 @@ fn the_prose_rules_live_in_the_output_style_not_core() {
     // second resident copy of text the output style already delivers — the
     // duplication this issue removed.
     // #8533: the pointer moved with its neighbours out of `core`.
-    let core = bundled_fallback_package()
-        .expect("manifest parses")
+    let core = crate::core::content_source::test_support::rc_package()
         .authored_run(&[SectionId::MessagesReportsSessions]);
 
     assert!(

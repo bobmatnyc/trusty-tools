@@ -273,9 +273,10 @@ fn pm_guard_refuses_a_traversal_past_a_branch_prefix_7557() {
 
 /// 🔴 REGRESSION (#8879, owner ruling 268): a script the command runs is
 /// judged by its body. A Keychain read moved into a script refuses; a body the
-/// guard cannot read in full — symlinked, over the 256 KiB bound, not UTF-8,
+/// guard cannot read in full — over the 256 KiB bound, not UTF-8,
 /// permission-denied, missing, a computed path — refuses (fail closed); a
-/// clean script allows.
+/// clean script allows, and so does a symlink to it (#9037: judged by its
+/// target).
 #[test]
 fn pm_guard_refuses_a_script_whose_body_reads_a_credential_8879() {
     use std::os::unix::fs::PermissionsExt;
@@ -301,7 +302,6 @@ fn pm_guard_refuses_a_script_whose_body_reads_a_credential_8879() {
         "bash probe.sh",
         "./probe.sh",
         "python3 read.py",
-        "bash link.sh",
         "bash big.sh",
         "bash latin1.sh",
         "bash missing.sh",
@@ -317,6 +317,7 @@ fn pm_guard_refuses_a_script_whose_body_reads_a_credential_8879() {
     for command in [
         "bash clean.sh",
         "./clean.sh",
+        "bash link.sh",
         "printf 'echo hi' > later.sh; bash later.sh",
     ] {
         let stdout = run_bash(command, cwd.path());

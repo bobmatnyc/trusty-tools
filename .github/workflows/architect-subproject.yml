@@ -18,7 +18,7 @@ on:
     branches: [main]
     paths:
       - "python/trusty-architect/**"
-      - "crates/trusty-mpm/src/assets/skills/tm-architect-setup.md"
+      - "content/skills/tm-architect-setup.md"
       - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"
@@ -34,7 +34,7 @@ on:
     branches: [main]
     paths:
       - "python/trusty-architect/**"
-      - "crates/trusty-mpm/src/assets/skills/tm-architect-setup.md"
+      - "content/skills/tm-architect-setup.md"
       - "crates/trusty-mpm/src/assets/architect/**"
       - "Cargo.toml"
       - "scripts/check_architect_subproject.sh"

@@ -1,25 +1,21 @@
-//! Compile-time embedded framework artifacts.
+//! Compiled-in framework artifacts: the hook policy files and the output-style
+//! registry.
 //!
-//! Why: `trusty-mpm install` must deploy a working set of default artifacts
-//! (optimizer/overseer policy, skill catalog; the agent roster is runtime
-//! content since #9011, see [`crate::core::content_source`])
-//! without depending on files shipped alongside the binary — embedding them
-//! at compile time keeps the installer a single self-contained executable.
-//! (Issue #3374: the former `CLAUDE_STUB` user-instruction-stub artifact was
-//! removed — it was never read back by any consumer; the project `CLAUDE.md`
-//! actually delivered to users is [`crate::core::instruction_pipeline`]'s
-//! `CLAUDE_MD_STUB`. #4286 split A likewise removed the bundled
-//! `FRAMEWORK_INSTRUCTIONS`/`instructions/INSTRUCTIONS.md` artifact — its
-//! content never reached the compiled prompt: `tm install`/`tm launch` always
-//! overwrite that same on-disk path with
-//! [`crate::core::instruction_pipeline::assemble_system_prompt`]'s output in
-//! the same call, and [`crate::core::instruction_pipeline::build_instructions`]
-//! already treats the file as optional.)
-//! What: exposes each default artifact under `crates/trusty-mpm-core/assets/`
-//! as a `pub const &str` via `include_str!`, plus a [`BundledArtifact`] table
-//! describing the relative install path of each one.
-//! Test: `cargo test -p trusty-mpm-core bundle` asserts every constant is
-//! non-empty and that [`ALL`] enumerates each artifact exactly once.
+//! Why: `tm install` deploys the optimizer/overseer policy as part of a
+//! working framework root, and that policy is code-adjacent config, not
+//! instructional content. Everything instructional — the agent roster (#9011),
+//! skills, PM instruction sections, output-style bodies, SM instructions and
+//! the bundled docs (#9012) — is runtime content read through
+//! [`crate::core::content_source`] (ADR-0064). (#3374 removed the former
+//! `CLAUDE_STUB` artifact; #4286 split A removed the bundled
+//! `instructions/INSTRUCTIONS.md` stub.)
+//! What: the two hook policies as `pub const &str` via `include_str!`, the
+//! [`BundledArtifact`] table naming their install paths, and the
+//! [`OUTPUT_STYLES`] registry (id, file name, content path — the body is read
+//! from content).
+//! Test: `bundle_table_is_complete`, `every_bundled_style_reads_from_content`.
+
+use crate::core::framework_content::FrameworkContent;
 
 /// Default token-optimizer policy installed to `hooks/optimizer.toml`.
 pub const OPTIMIZER_TOML: &str = include_str!("../assets/hooks/optimizer.toml");
@@ -30,224 +26,22 @@ pub const OPTIMIZER_TOML: &str = include_str!("../assets/hooks/optimizer.toml");
 /// installing it is inert until an operator flips the flag.
 pub const OVERSEER_TOML: &str = include_str!("../assets/hooks/overseer.toml");
 
-/// `code-review-standards` skill — the full adversarial review rubric
-/// (severity taxonomy, 80% confidence filter, verdict protocol) that
-/// `code-critic` declares in its `skills:` frontmatter (issue #2890, DOC-42).
-///
-/// Why: DOC-28 (self-awareness incident) taught that a skill file existing
-/// under `src/assets/skills/` is not sufficient for it to ship — it must also
-/// be registered as a [`crate::core::bundle::BundledArtifact`] in [`ALL`] or
-/// `deploy_all_skill_tiers` never sees it (the exact historical bug that left
-/// `tm-doctor.md` orphaned; see `bundle_tm_skills.rs`'s module doc).
-/// What: embedded markdown skill file deployed to
-/// `skills/code-review-standards.md`.
-/// Test: `bundle_table_is_complete`, `code_critic_declared_skills_are_in_bundle`.
-pub const CODE_REVIEW_STANDARDS: &str = include_str!("../assets/skills/code-review-standards.md");
-
-/// `contract-driven-testing` skill — the three-level test pyramid derived
-/// from Code Contracts that `code-critic` declares in its `skills:`
-/// frontmatter (issue #2890, DOC-42).
-///
-/// Why: see [`CODE_REVIEW_STANDARDS`] — registration in [`ALL`] is what
-/// actually makes a bundled skill installable, not the presence of the file.
-/// What: embedded markdown skill file deployed to
-/// `skills/contract-driven-testing.md`.
-/// Test: `bundle_table_is_complete`, `code_critic_declared_skills_are_in_bundle`.
-pub const CONTRACT_DRIVEN_TESTING: &str =
-    include_str!("../assets/skills/contract-driven-testing.md");
-
-// --- Issue #2911: `documentation-style` bundled skill (SLD-grounded
-// per-artifact-type documentation conventions) — own module, kept separate
-// from the batch-1 groups since it lands independently of epic #2902.
-#[path = "bundle_skills_documentation_style.rs"]
-mod skills_documentation_style_inner;
-pub use skills_documentation_style_inner::{
-    DOCUMENTATION_STYLE, DOCUMENTATION_STYLE_BLOCK_INLINE, DOCUMENTATION_STYLE_CLASS,
-    DOCUMENTATION_STYLE_FILE_LEVEL, DOCUMENTATION_STYLE_METHOD_FUNCTION,
-    DOCUMENTATION_STYLE_README, DOCUMENTATION_STYLE_SPEC,
-};
-
-// --- Rust build-performance bundled skill (per Bob directive 2026-07-17) —
-// own module, declared by rust-engineer and tauri-engineer's `skills:`.
-#[path = "bundle_skills_rust_build_performance.rs"]
-mod skills_rust_build_performance_inner;
-pub use skills_rust_build_performance_inner::RUST_BUILD_PERFORMANCE;
-
-// --- Rust delivery-workflow bundled skill (issue #8192) — own module,
-// declared by rust-engineer's `skills:`; process rules, not build speed.
-#[path = "bundle_skills_rust_delivery_workflow.rs"]
-mod skills_rust_delivery_workflow_inner;
-pub use skills_rust_delivery_workflow_inner::RUST_DELIVERY_WORKFLOW;
-
-// --- `self-improvement-loop` bundled skill (issue #7723) — own module,
-// on-demand only (not declared in any agent's `skills:` frontmatter).
-#[path = "bundle_skills_self_improvement_loop.rs"]
-mod skills_self_improvement_loop_inner;
-pub use skills_self_improvement_loop_inner::SELF_IMPROVEMENT_LOOP;
-
-// --- Skill-port batch 1 (issue #2903, epic #2902): 25 upstream universal/
-// skills, split across 4 modules by category to stay under the 500-SLOC cap.
-#[path = "bundle_skills_batch1_debugging.rs"]
-mod skills_batch1_debugging_inner;
-pub use skills_batch1_debugging_inner::{
-    CONDITION_BASED_WAITING, CONDITION_BASED_WAITING_PATTERNS_AND_IMPLEMENTATION,
-    ROOT_CAUSE_TRACING, ROOT_CAUSE_TRACING_ADVANCED_TECHNIQUES, ROOT_CAUSE_TRACING_EXAMPLES,
-    ROOT_CAUSE_TRACING_INTEGRATION, ROOT_CAUSE_TRACING_TRACING_TECHNIQUES, SYSTEMATIC_DEBUGGING,
-    SYSTEMATIC_DEBUGGING_ANTI_PATTERNS, SYSTEMATIC_DEBUGGING_EXAMPLES,
-    SYSTEMATIC_DEBUGGING_TROUBLESHOOTING, SYSTEMATIC_DEBUGGING_WORKFLOW, TEST_DRIVEN_DEVELOPMENT,
-    TEST_DRIVEN_DEVELOPMENT_ANTI_PATTERNS, TEST_DRIVEN_DEVELOPMENT_EXAMPLES,
-    TEST_DRIVEN_DEVELOPMENT_INTEGRATION, TEST_DRIVEN_DEVELOPMENT_PHILOSOPHY,
-    TEST_DRIVEN_DEVELOPMENT_WORKFLOW, TEST_QUALITY_INSPECTOR,
-    TEST_QUALITY_INSPECTOR_ASSERTION_QUALITY, TEST_QUALITY_INSPECTOR_INSPECTION_CHECKLIST,
-    TEST_QUALITY_INSPECTOR_RED_FLAGS, TESTING_ANTI_PATTERNS,
-    TESTING_ANTI_PATTERNS_COMPLETENESS_ANTI_PATTERNS, TESTING_ANTI_PATTERNS_CORE_ANTI_PATTERNS,
-    TESTING_ANTI_PATTERNS_DETECTION_GUIDE, TESTING_ANTI_PATTERNS_PYTHON_EXAMPLES,
-    TESTING_ANTI_PATTERNS_TDD_CONNECTION, VERIFICATION_BEFORE_COMPLETION,
-    VERIFICATION_BEFORE_COMPLETION_GATE_FUNCTION,
-    VERIFICATION_BEFORE_COMPLETION_INTEGRATION_AND_WORKFLOWS,
-    VERIFICATION_BEFORE_COMPLETION_RED_FLAGS_AND_FAILURES,
-    VERIFICATION_BEFORE_COMPLETION_VERIFICATION_PATTERNS, WEBAPP_TESTING,
-};
-
-#[path = "bundle_skills_batch1_collab.rs"]
-mod skills_batch1_collab_inner;
-pub use skills_batch1_collab_inner::{
-    BRAINSTORMING, DATABASE_MIGRATION, DATABASE_MIGRATION_DECISION_TREES,
-    DATABASE_MIGRATION_TROUBLESHOOTING, GIT_WORKFLOW, JSON_DATA_HANDLING, REQUESTING_CODE_REVIEW,
-    REQUESTING_CODE_REVIEW_CODE_REVIEWER_TEMPLATE, REQUESTING_CODE_REVIEW_REVIEW_EXAMPLES,
-    SOFTWARE_PATTERNS, SOFTWARE_PATTERNS_ANTI_PATTERNS, SOFTWARE_PATTERNS_CODE_SMELL_SIGNALS,
-    SOFTWARE_PATTERNS_DECISION_TREES, SOFTWARE_PATTERNS_EXAMPLES,
-    SOFTWARE_PATTERNS_FOUNDATIONAL_PATTERNS, SOFTWARE_PATTERNS_SITUATIONAL_PATTERNS, WRITING_PLANS,
-    WRITING_PLANS_BEST_PRACTICES, WRITING_PLANS_PLAN_STRUCTURE_TEMPLATES,
-};
-
-#[path = "bundle_skills_batch1_security_web.rs"]
-mod skills_batch1_security_web_inner;
-pub use skills_batch1_security_web_inner::{
-    API_DESIGN_PATTERNS, API_DESIGN_PATTERNS_AUTHENTICATION, API_DESIGN_PATTERNS_GRAPHQL_PATTERNS,
-    API_DESIGN_PATTERNS_GRPC_PATTERNS, API_DESIGN_PATTERNS_REST_PATTERNS,
-    API_DESIGN_PATTERNS_VERSIONING_STRATEGIES, API_DOCUMENTATION, ENV_MANAGER,
-    ENV_MANAGER_FRAMEWORKS, ENV_MANAGER_SECURITY, ENV_MANAGER_SYNCHRONIZATION,
-    ENV_MANAGER_TROUBLESHOOTING, ENV_MANAGER_VALIDATION, SECURITY_SCANNING,
-    SECURITY_SCANNING_CI_WORKFLOWS, SECURITY_SCANNING_COMMON_FINDINGS_AND_FIXES,
-    SECURITY_SCANNING_OPEN_SOURCE_SAFETY, SECURITY_SCANNING_SUPPLY_CHAIN_AND_SBOM,
-    SECURITY_SCANNING_TOOLING_MATRIX, SECURITY_SCANNING_TRIAGE_AND_REMEDIATION,
-    WEB_PERFORMANCE_OPTIMIZATION, WEB_PERFORMANCE_OPTIMIZATION_CORE_WEB_VITALS,
-    WEB_PERFORMANCE_OPTIMIZATION_FRAMEWORK_SPECIFIC,
-    WEB_PERFORMANCE_OPTIMIZATION_MODERN_PATTERNS_2025, WEB_PERFORMANCE_OPTIMIZATION_MONITORING,
-    WEB_PERFORMANCE_OPTIMIZATION_OPTIMIZATION_TECHNIQUES, WEB_PERFORMANCE_OPTIMIZATION_QUICK_WINS,
-};
-
-#[path = "bundle_skills_batch1_process.rs"]
-mod skills_batch1_process_inner;
-pub use skills_batch1_process_inner::{
-    ARTIFACTS_BUILDER, CODE_PRODUCTION_PROCESS, CODE_PRODUCTION_PROCESS_CRITIC_ISOLATION,
-    CODE_PRODUCTION_PROCESS_SKIP_RULES, CODE_PRODUCTION_PROCESS_STAGE_ARCHITECT,
-    CODE_PRODUCTION_PROCESS_STAGE_CRITIC, CODE_PRODUCTION_PROCESS_STAGE_IMPLEMENT,
-    CODE_PRODUCTION_PROCESS_STAGE_RESEARCH, CODE_PRODUCTION_PROCESS_STAGE_SECURITY,
-    CODE_PRODUCTION_PROCESS_STAGE_TESTS, INTERNAL_COMMS, MODEL_CONTEXT_BUILDER, XLSX,
-};
-
-/// Canonical self-description doc installed to `docs/WHAT-IS-TRUSTY-MPM.md`
-/// (DOC-28 R1 — `docs/specs/trusty-mpm-self-awareness.md`).
-///
-/// Why: no single, stable, canonically-pointed-at answer to "what is
-/// trusty-mpm" existed anywhere in the bundled assets, which let a launched
-/// session conflate this Rust project with the unrelated Python `claude-mpm`
-/// package (the "self-awareness incident"). Source lives under
-/// `crates/trusty-mpm/docs/` (ordinary, human-reviewable documentation)
-/// rather than `src/assets/` so it reads naturally as a doc while still being
-/// embeddable here, exactly like every other bundled artifact.
-pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM.md");
-
-/// Architecture overview doc installed to `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
-/// (issue #2034 — bundled PM-facing reference for shipped design patterns).
-///
-/// Why: three foundational behaviours (memory over MCP, session↔worktree 1:1
-/// model, per-worktree search-index) are now shipped on main but not
-/// documented for PM audiences. This doc summarizes each pattern, its
-/// trade-offs, and its integration with the others, then cross-references
-/// the deeper specs and source code so operators and framework users can
-/// understand the design from first principles.
-pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str =
-    include_str!("../../docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md");
-
-// --- tm-skills-portfolio epic: the /tm- skill catalog — bundle_tm_skills.rs ---
-// Supersedes the Phase 1 (#770) mpm-* guidance skills (formerly
-// bundle_skills.rs), which were a mechanical port of claude-mpm's Python
-// skill catalog with unadapted tool/path references. Removed entirely.
-#[path = "bundle_tm_skills.rs"]
-mod tm_skills_inner;
-pub use tm_skills_inner::{
-    TM_ADR, TM_AGENT_ARCHITECTURE, TM_ARCHITECT_SETUP, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER,
-    TM_CLI_OPERATIONS, TM_DELEGATION_PATTERNS, TM_DOCTOR, TM_EPIC, TM_EPIC_ANTI_PATTERNS,
-    TM_EPIC_MANUAL_PROCEDURE, TM_EPIC_PHASE_TEMPLATE, TM_EPIC_TRACKER_TEMPLATE,
-    TM_GIT_FILE_TRACKING, TM_INIT, TM_ISSUES_PRUNE, TM_OVERVIEW, TM_POSTMORTEM, TM_PROSE_STYLE,
-    TM_SECRETS, TM_SESSION_MANAGEMENT, TM_SESSION_PAUSE, TM_SESSION_RESUME, TM_SLACK,
-    TM_TEACHING_TEMPLATES, TM_TICKETING, TM_TICKETING_REFERENCES_README, TM_TOOL_USAGE_GUIDE,
-    TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW, TM_WORKFLOW_REFERENCES_README,
-};
-
-// --- tm-capabilities: auto-generated harness capability catalog (issue
-// #2913) — generator lives in `crates/trusty-mpm/src/bin/tm/generate/`.
-#[path = "bundle_tm_capabilities.rs"]
-mod tm_capabilities_inner;
-pub use tm_capabilities_inner::{
-    TM_CAPABILITIES, TM_CAPABILITIES_AGENTS, TM_CAPABILITIES_CLI, TM_CAPABILITIES_DOCTOR,
-    TM_CAPABILITIES_FRAMEWORK, TM_CAPABILITIES_MCP_TOOLS, TM_CAPABILITIES_SKILLS,
-    TM_CAPABILITIES_WORKFLOWS,
-};
-
-/// Default (professional) Claude Code output style deployed to
-/// `~/.claude/output-styles/trusty-mpm.md`.
-///
-/// Why: launched sessions set `"outputStyle": "trusty-mpm"` in the project
-/// `.claude/settings.json`; Claude Code only honours that name if a matching
-/// style file exists. Bundling it lets the launch path deploy it directly,
-/// outside the framework-root [`ALL`] table (which installs under
-/// `~/.trusty-mpm/framework/`, not `~/.claude/`).
-pub const OUTPUT_STYLE: &str = include_str!("../assets/output-styles/trusty-mpm.md");
-
-/// Teaching-mode Claude Code output style (id `trusty-mpm-teacher`).
-///
-/// Why: HR-4 bundles three styles so an operator can pick a communication mode;
-/// this variant narrates the orchestration reasoning while keeping the
-/// mandatory-delegation floor intact.
-pub const OUTPUT_STYLE_TEACHER: &str =
-    include_str!("../assets/output-styles/trusty-mpm-teacher.md");
-
-/// Research-mode Claude Code output style (id `trusty-mpm-research`).
-///
-/// Why: HR-4 bundles three styles; this variant front-loads investigation and
-/// demands evidence before any change, again keeping the delegation floor.
-pub const OUTPUT_STYLE_RESEARCH: &str =
-    include_str!("../assets/output-styles/trusty-mpm-research.md");
-
-/// Fleet-supervisor Claude Code output style (id `trusty-mpm-supervisor`, #8453).
-///
-/// Why: the supervisor acts directly, so it cannot run on a style whose floor
-/// forbids direct work, and CLAUDE.md cannot override an output style. It
-/// carries the "Communication — Write Plainly" section verbatim and no
-/// delegation directive. Selected by the supervisor profile
-/// ([`crate::core::session_profile`]) and refused under the PM profile.
-pub const OUTPUT_STYLE_SUPERVISOR: &str =
-    include_str!("../assets/output-styles/trusty-mpm-supervisor.md");
-
 /// The default output-style id used when none is configured/selected.
 ///
 /// Why: callers (config resolution, settings writer) need a single source of
 /// truth for the professional default so they cannot drift.
-/// What: the frontmatter `name:` of [`OUTPUT_STYLE`].
+/// What: the frontmatter `name:` of `instructions/output-styles/trusty-mpm.md`.
 /// Test: `bundle_tests::output_style_registry_default_resolves`.
 pub const DEFAULT_OUTPUT_STYLE_ID: &str = "trusty-mpm";
 
 /// One entry in the bundled output-style registry.
 ///
 /// Why: the multi-style launch path (HR-4) must map a configured/selected style
-/// id to its bundled content and the file name it deploys to; bundling the id,
-/// file name, and content together keeps those three facts from drifting.
+/// id to its content and the file name it deploys to; keeping the id, file name
+/// and content path together keeps those three facts from drifting.
 /// What: the style id (matching the file's frontmatter `name:`), the file name
-/// written under `~/.claude/output-styles/`, and the embedded content.
+/// written under `~/.claude/output-styles/`, and the content path the body is
+/// read from at runtime (#9012).
 /// Test: `bundle_tests::output_style_registry_ids_match_frontmatter`.
 #[derive(Debug, Clone, Copy)]
 pub struct BundledStyle {
@@ -256,8 +50,21 @@ pub struct BundledStyle {
     pub id: &'static str,
     /// File name written under `~/.claude/output-styles/`.
     pub file_name: &'static str,
-    /// Embedded Markdown content of the style.
-    pub content: &'static str,
+    /// The style's file in the content bundle, relative to `instructions/`
+    /// (#9012: read at runtime, no longer compiled in).
+    pub content_path: &'static str,
+}
+
+impl BundledStyle {
+    /// The style's Markdown, from loaded content (#9012).
+    ///
+    /// Every registry path is in
+    /// [`crate::core::framework_content::REQUIRED_INSTRUCTIONS`], so a loaded
+    /// [`FrameworkContent`] always carries it.
+    /// Test: `every_bundled_style_reads_from_content`.
+    pub fn content<'a>(&self, content: &'a FrameworkContent) -> &'a str {
+        content.required(self.content_path)
+    }
 }
 
 /// All bundled output styles, default first.
@@ -274,22 +81,22 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
     BundledStyle {
         id: DEFAULT_OUTPUT_STYLE_ID,
         file_name: "trusty-mpm.md",
-        content: OUTPUT_STYLE,
+        content_path: "output-styles/trusty-mpm.md",
     },
     BundledStyle {
         id: "trusty-mpm-teacher",
         file_name: "trusty-mpm-teacher.md",
-        content: OUTPUT_STYLE_TEACHER,
+        content_path: "output-styles/trusty-mpm-teacher.md",
     },
     BundledStyle {
         id: "trusty-mpm-research",
         file_name: "trusty-mpm-research.md",
-        content: OUTPUT_STYLE_RESEARCH,
+        content_path: "output-styles/trusty-mpm-research.md",
     },
     BundledStyle {
         id: crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID,
         file_name: "trusty-mpm-supervisor.md",
-        content: OUTPUT_STYLE_SUPERVISOR,
+        content_path: "output-styles/trusty-mpm-supervisor.md",
     },
 ];
 

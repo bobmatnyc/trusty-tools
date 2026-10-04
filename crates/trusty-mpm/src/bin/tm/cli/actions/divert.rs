@@ -3,7 +3,7 @@
 //! Why: `tm hook --divert-check` blocks an oversized read and names a command
 //! for the agent to run instead. This is that command's argument surface.
 //! What: [`DivertAction`] — currently just `bulk-read`.
-//! Test: `cli_parses_divert_bulk_read` in `tests_behavior_a.rs`.
+//! Test: `cli_parses_divert_bulk_read` in `tests_behavior_a_tests.rs`.
 
 use std::path::PathBuf;
 

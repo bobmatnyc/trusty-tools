@@ -275,9 +275,9 @@ This routing logic is **internal to trusty-review**, not yet shared.
 > replaced those four files with one markdown file per section under
 > `assets/instructions/sections/*.md`, composed from an authored JSON
 > manifest,
-> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json)
 > (schema v2,
-> [`:2`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L2)),
+> [`:2`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json#L2)),
 > compiled in via
 > [`bundled_pm_package.rs:98`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/core/bundled_pm_package.rs#L98).
 > None of the four named files exist as bundled assets anymore — a missing

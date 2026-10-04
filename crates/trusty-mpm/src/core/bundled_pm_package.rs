@@ -9,8 +9,9 @@
 //! no instance under it — while other tickets recorded "the composed instructions
 //! payload is generated from the instruction package JSON" as settled fact. #4318
 //! makes that true: the manifest is now
-//! `assets/instructions/pm-instruction-package.json`, embedded here at compile
-//! time, and this module only parses and composes it.
+//! `content/instructions/pm-instruction-package.json` — runtime content since
+//! #9012, read from the loaded [`FrameworkContent`] — and this module only
+//! parses and composes it.
 //!
 //! What the swap changed, and what it did not:
 //!
@@ -18,10 +19,9 @@
 //!   second place where block order or a join can be edited, so the manifest and
 //!   the delivered prompt cannot disagree.
 //! * NEW — `file` bodies (schema v2). The manifest names its prose by path and
-//!   resolves it through the compile-time
-//!   [`crate::core::instruction_pipeline::SECTION_SOURCES`] table, so the bulk
-//!   text keeps living in reviewable markdown, the build stays hermetic, and a
-//!   renamed section is a compile error rather than an empty block.
+//!   resolves it through the section files of the same content source
+//!   (#9012), so the bulk text keeps living in reviewable markdown and a
+//!   renamed section is a validation error rather than an empty block.
 //! * NEW — inline `text` bodies now carry authored RULES, not just the
 //!   roster-precedence note: the clickable-links, banned-word and
 //!   opportunistic-fix rules are authored in the manifest itself (owner order,
@@ -50,7 +50,7 @@
 //!
 //! NO SPLIT-BRAIN, which is the thing #4318 could most easily have broken. Once a
 //! rule may be authored in the manifest, rebuilding the legacy multi-section
-//! strings from the `include_str!` constants would deliver that rule to
+//! strings from the raw section files would deliver that rule to
 //! package-composed sessions and withhold it from configurations 2 and 3 and from
 //! `assemble_system_prompt`. So those callers no longer rebuild from constants —
 //! [`crate::core::instruction_pipeline::pm_instructions`],
@@ -60,13 +60,14 @@
 //! manifest through [`InstructionPackage::authored_run`]. Editing the manifest
 //! moves every composer together; it cannot move one.
 //!
-//! FAILURE BEHAVIOUR. The manifest is embedded, and
-//! `bundled_manifest_parses_and_validates` proves it parses, validates and
-//! composes — so a shipped build cannot reach the error path. If it somehow did,
-//! [`bundled_fallback_package`] returns `Err` and `resolve_pm_prompt_with_roster`
-//! logs it loudly and degrades to the legacy assembly built from the retained
-//! `include_str!` constants: a prompt missing only the manifest-authored inline
-//! rules, never a truncated one.
+//! FAILURE BEHAVIOUR. `bundled_manifest_parses_and_validates` proves the
+//! repository's manifest parses, validates and composes. Content ships apart
+//! from the binary (#9012), so a content release can carry a manifest this
+//! binary cannot parse — a new section id, a new key. [`parse_bundled_package`]
+//! runs inside [`FrameworkContent::load`], which refuses such a source with
+//! `AgentContentError::Invalid` naming `tm content update` or a tm upgrade. A
+//! loaded [`FrameworkContent`] therefore always holds a valid package, and
+//! nothing here degrades to a prompt missing the manifest-authored rules.
 //!
 //! What guards CONTENT is `pm_prompt_golden_tests.rs`: a committed snapshot of the
 //! fully composed prompt for all three configurations. Every edit to a section
@@ -74,62 +75,70 @@
 //!
 //! Test: `bundled_pm_package_tests.rs`.
 
-use std::sync::LazyLock;
+use std::collections::BTreeMap;
 
 use crate::core::claude_md_sections::{Rejection, SectionOverride};
+use crate::core::framework_content::FrameworkContent;
 use crate::core::instruction_package::{
     CompositionError, CompositionInputs, InstructionPackage, SectionId,
 };
 
 /// Stable identity of the package this module ships.
 ///
-/// Checked against the loaded manifest, so pointing [`PM_PACKAGE_JSON`] at the
-/// wrong JSON file is a named error rather than a differently-shaped prompt.
+/// Checked against the loaded manifest, so a content source carrying the wrong
+/// JSON file is a named error rather than a differently-shaped prompt.
 pub(crate) const PACKAGE_ID: &str = "trusty-mpm.pm.bundled-fallback";
 
-/// The authored manifest, embedded at compile time.
+/// The authored manifest's path, relative to the content bundle's
+/// `instructions/` (#9012: runtime content, no longer compiled in).
 ///
-/// Why: embedding means the delivered system prompt never depends on what is on
-/// disk at launch, and a manifest deleted or renamed in a refactor is a build
-/// failure rather than a silently degraded prompt.
-/// What: the raw bytes of `assets/instructions/pm-instruction-package.json`.
 /// Test: `bundled_manifest_parses_and_validates`.
-pub(crate) const PM_PACKAGE_JSON: &str =
-    include_str!("../assets/instructions/pm-instruction-package.json");
+pub(crate) const PM_PACKAGE_PATH: &str = "pm-instruction-package.json";
 
-/// The parsed manifest, or the parse/validation failure, computed once.
+/// Parses and validates the manifest among `instructions` (#9012).
 ///
-/// Parsing on every session launch would be wasted work, and re-parsing is the
-/// kind of thing that quietly becomes a per-message cost. `LazyLock` also means
-/// the failure is computed once and reported identically everywhere.
-static BUNDLED: LazyLock<Result<InstructionPackage, String>> = LazyLock::new(|| {
-    let package = InstructionPackage::from_json(PM_PACKAGE_JSON).map_err(|err| err.to_string())?;
+/// Why: content ships apart from the binary, so the manifest is checked where
+/// the content is loaded; a source this binary cannot compose from is refused
+/// there rather than discovered mid-launch.
+/// What: [`PM_PACKAGE_PATH`] parsed, its `package_id` checked against
+/// [`PACKAGE_ID`], its `file` bodies bound to the `sections/**` entries of
+/// `instructions` (keys relative to `instructions/`), then validated. `Err`
+/// carries the rendered parse or validation error.
+/// Test: `a_source_whose_package_does_not_parse_is_an_error`,
+/// `bundled_manifest_parses_and_validates`.
+pub(crate) fn parse_bundled_package(
+    instructions: &BTreeMap<String, String>,
+) -> Result<InstructionPackage, String> {
+    let json = instructions
+        .get(PM_PACKAGE_PATH)
+        .ok_or_else(|| format!("`{PM_PACKAGE_PATH}` is absent"))?;
+    let mut package = InstructionPackage::from_json(json).map_err(|err| err.to_string())?;
     if package.package_id != PACKAGE_ID {
         return Err(format!(
             "manifest declares package_id `{}`, expected `{PACKAGE_ID}`",
             package.package_id
         ));
     }
+    package.sources = instructions
+        .iter()
+        .filter(|(path, _)| path.starts_with("sections/"))
+        .map(|(path, body)| (path.clone(), body.clone()))
+        .collect();
     package.validate().map_err(|err| err.to_string())?;
     Ok(package)
-});
+}
 
-/// The bundled-fallback instruction package.
+/// The bundled-fallback instruction package of `content`.
 ///
-/// Why: this is the single entry point to "what the DEFAULT PM prompt is made
-/// of". It returns a `Result` (#4318) because the answer now comes from a parsed
-/// artifact rather than from Rust code that could not fail — and a parse failure
-/// must be reportable rather than papered over with a partial package.
-///
-/// What: the manifest parsed and structurally validated once, borrowed. `Err`
-/// carries the rendered parse or validation error. Unreachable for the shipped
-/// manifest; see the module docs for the degradation path.
-///
+/// Why: the single entry point to "what the DEFAULT PM prompt is made of".
+/// What: a copy of the package [`FrameworkContent::load`] parsed and validated
+/// (see [`parse_bundled_package`]); total, because a source whose manifest
+/// does not parse is never loaded.
 /// Test: `bundled_manifest_parses_and_validates`,
 /// `shipped_sections_build_and_validate`,
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`.
-pub(crate) fn bundled_fallback_package() -> Result<&'static InstructionPackage, &'static str> {
-    BUNDLED.as_ref().map_err(String::as_str)
+pub(crate) fn bundled_fallback_package(content: &FrameworkContent) -> InstructionPackage {
+    content.pm_package().clone()
 }
 
 /// The authored bytes of `sections`, projected out of the bundled manifest.
@@ -138,14 +147,10 @@ pub(crate) fn bundled_fallback_package() -> Result<&'static InstructionPackage, 
 /// whole multi-section runs as one string and cannot call `compose`. Routing them
 /// through the manifest is what keeps a manifest-authored rule from reaching only
 /// the packaged path — see the module docs' split-brain note.
-/// What: [`InstructionPackage::authored_run`] over the bundled manifest, or `None`
-/// when the manifest is unreadable so the caller can fall back to its retained
-/// `include_str!` constants.
+/// What: [`InstructionPackage::authored_run`] over the bundled manifest.
 /// Test: `pm_instructions_is_the_pm_body_sections`, `base_pm_is_its_three_tail_sections`.
-pub(crate) fn authored_run(sections: &[SectionId]) -> Option<String> {
-    bundled_fallback_package()
-        .ok()
-        .map(|package| package.authored_run(sections))
+pub(crate) fn authored_run(content: &FrameworkContent, sections: &[SectionId]) -> String {
+    content.pm_package().authored_run(sections)
 }
 
 /// The pinned blocks of `section`, joined with a paragraph break (#8533).
@@ -154,17 +159,15 @@ pub(crate) fn authored_run(sections: &[SectionId]) -> Option<String> {
 /// package's block model, and must still keep the feature statement a pinned
 /// block carries.
 /// What: the trimmed authored text of every pinned block owned by `section`, in
-/// block order; empty when there is none or the manifest is unreadable.
+/// block order; empty when there is none.
 /// Test: `a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path`.
-pub(crate) fn pinned_run(section: SectionId) -> String {
-    let Ok(package) = bundled_fallback_package() else {
-        return String::new();
-    };
+pub(crate) fn pinned_run(content: &FrameworkContent, section: SectionId) -> String {
+    let package = content.pm_package();
     package
         .blocks
         .iter()
         .filter(|b| b.section == section && b.pinned)
-        .filter_map(|b| match b.body.authored() {
+        .filter_map(|b| match b.body.authored(&package.sources) {
             Some(Ok(text)) => Some(text.trim()),
             _ => None,
         })
@@ -189,23 +192,19 @@ pub(crate) fn pinned_run(section: SectionId) -> String {
 /// derived stack profile), `roster` (the rendered `## Delegation Authority` block,
 /// required) and `addendum` (`.trusty-mpm/INSTRUCTIONS.md`, if any). All are
 /// trimmed by the composer. Declined overrides come back alongside the result so
-/// the caller can report them. A manifest that failed to parse surfaces as
-/// [`CompositionError::Manifest`] with no rejections.
+/// the caller can report them.
 ///
 /// Test: `composed_package_is_byte_identical_to_the_legacy_bundled_fallback`,
 /// `composed_prompt_carries_the_live_roster_and_the_precedence_note`,
 /// `roster_is_required_and_never_droppable`, `golden_claude_md_override_prompt`.
 pub(crate) fn compose_bundled_fallback_with_overrides(
+    content: &FrameworkContent,
     stack: &str,
     roster: &str,
     addendum: Option<&str>,
     overrides: &[SectionOverride],
 ) -> (Result<String, CompositionError>, Vec<Rejection>) {
-    let bundled = match bundled_fallback_package() {
-        Ok(package) => package,
-        Err(err) => return (Err(CompositionError::Manifest(err.to_string())), Vec::new()),
-    };
-    let (package, rejected) = bundled.with_overrides(overrides);
+    let (package, rejected) = bundled_fallback_package(content).with_overrides(overrides);
     let composed = package.compose(&CompositionInputs {
         agent_roster: roster.to_string(),
         stack_profile: Some(stack.to_string()),

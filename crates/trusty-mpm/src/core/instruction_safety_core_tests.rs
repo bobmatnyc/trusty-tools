@@ -3,8 +3,8 @@
 //! remove a member from the composed prompt.
 
 use super::*;
-use crate::core::bundled_pm_package::bundled_fallback_package;
 use crate::core::claude_md_sections::{Rejection, section_token};
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_overrides::resolve_pm_prompt_with_roster;
 use crate::core::instruction_overrides::{SectionState, section_statuses};
 use crate::core::instruction_package::{BlockBody, CustomizationTier};
@@ -12,17 +12,22 @@ use tempfile::TempDir;
 
 const ROSTER: &str = "## Delegation Authority\n\n### ticketing\n\nHandles ticketing work.";
 
-/// The two docs that name the safety core, as shipped.
-const DOCS: [(&str, &str); 2] = [
-    (
-        "tm-workflow.md",
-        include_str!("../assets/skills/tm-workflow.md"),
-    ),
-    (
-        "sections/README.md",
-        include_str!("../assets/instructions/sections/README.md"),
-    ),
-];
+/// The two docs that name the safety core, as shipped (#9012: read from the
+/// checkout's content).
+fn docs() -> [(&'static str, &'static str); 2] {
+    [
+        (
+            "tm-workflow.md",
+            rc().skill("skills/tm-workflow.md")
+                .expect("tm-workflow skill"),
+        ),
+        (
+            "sections/README.md",
+            rc().instruction("sections/README.md")
+                .expect("sections README"),
+        ),
+    ]
+}
 
 /// A project whose root `CLAUDE.md` is exactly `text`.
 fn project_with_claude_md(text: &str) -> TempDir {
@@ -38,7 +43,7 @@ fn marker(token: &str, body: &str) -> String {
 
 /// The prompt a launch in `dir` composes, with a fixed roster.
 fn prompt_for(dir: &TempDir) -> String {
-    resolve_pm_prompt_with_roster(dir.path(), || Some(ROSTER.to_string())).0
+    resolve_pm_prompt_with_roster(rc(), dir.path(), || Some(ROSTER.to_string())).0
 }
 
 /// The safety-core members `prompt` lacks, against the fixed test roster.
@@ -48,7 +53,7 @@ fn missing(prompt: &str) -> Vec<&'static str> {
 
 /// The prompt a roster-absent launch in `dir` composes (no agent deployed).
 fn roster_absent_prompt_for(dir: &TempDir) -> String {
-    resolve_pm_prompt_with_roster(dir.path(), || None).0
+    resolve_pm_prompt_with_roster(rc(), dir.path(), || None).0
 }
 
 /// A project override body's tail that leaves the comment fold open.
@@ -56,7 +61,7 @@ const UNCLOSED_TAIL: &str = "\n<!-- TODO";
 
 #[test]
 fn the_manifest_pins_exactly_the_safety_core() {
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
 
     let fixed: Vec<SectionId> = package
         .sections
@@ -81,7 +86,7 @@ fn the_manifest_pins_exactly_the_safety_core() {
         .blocks
         .iter()
         .filter(|b| b.pinned)
-        .map(|b| match b.body.authored() {
+        .map(|b| match b.body.authored(&package.sources) {
             Some(Ok(text)) => (b.section, text),
             other => panic!("a pinned block must be authored, got {other:?}"),
         })
@@ -169,7 +174,7 @@ fn the_docs_name_every_safety_core_member() {
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/specs/SPEC-PMINSTR-01-p1-p2-instruction-restructure.md");
     let spec = std::fs::read_to_string(&spec_path).expect("the workspace spec of record");
-    let docs = DOCS
+    let docs = docs()
         .into_iter()
         .chain([("SPEC-PMINSTR-01 §11.5", spec.as_str())]);
     for (name, doc) in docs {
@@ -183,7 +188,7 @@ fn the_docs_name_every_safety_core_member() {
 
 #[test]
 fn a_safety_core_override_is_declined_for_each_core_section() {
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     for member in SAFETY_CORE
         .iter()
         .filter(|m| m.kind == SafetyCoreKind::FixedSection)
@@ -400,9 +405,9 @@ fn every_bundled_block_closes_its_own_comments_and_fences() {
     // block leaves a comment or fence open for the next one to depend on — the
     // `core.md`-opens-with-a-comment case. A block that did would now lose the
     // text after its opener instead of hiding a neighbour's.
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     for (index, block) in package.blocks.iter().enumerate() {
-        let Some(Ok(body)) = block.body.authored() else {
+        let Some(Ok(body)) = block.body.authored(&package.sources) else {
             continue;
         };
         let folded = crate::core::instruction_fold::fold_delivered_prompt(&format!(
@@ -443,7 +448,7 @@ fn the_roster_absent_path_keeps_every_core_member_but_the_roster() {
         );
         assert!(!prompt.contains("## Delegation Authority"));
     }
-    let pinned = crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation);
+    let pinned = crate::core::bundled_pm_package::pinned_run(rc(), SectionId::AgentDelegation);
     let selection = SAFETY_CORE
         .iter()
         .find(|m| m.name == "Agent selection")

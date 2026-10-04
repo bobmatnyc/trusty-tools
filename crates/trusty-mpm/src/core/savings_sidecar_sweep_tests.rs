@@ -44,7 +44,14 @@ fn project_with_compiled_prompt(under: &Path, name: &str, scope: &str) -> PathBu
     let project = under.join(name);
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(&project, scope);
     std::fs::create_dir_all(compiled.parent().expect("session dir")).expect("session dir");
-    let body = "x".repeat(crate::core::savings_instructions::min_plausible_compiled_bytes().max(1));
+    let body = "x".repeat(
+        crate::core::savings_instructions::min_plausible_compiled_bytes(
+            crate::core::savings_instructions::SectionBytes::of(
+                crate::core::content_source::test_support::rc(),
+            ),
+        )
+        .max(1),
+    );
     std::fs::write(&compiled, &body).expect("compiled prompt");
     compiled
 }
