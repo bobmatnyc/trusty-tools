@@ -172,6 +172,153 @@ fn assert_no_branded_word(text: &str) {
     }
 }
 
+/// Restores a set of process env vars to their captured values on drop.
+///
+/// Why: `ProcessPmBridge::run_tcode` builds its `Command` internally, so a
+/// test can only shape the child's environment by shaping its own (the child
+/// inherits it). Every mutation must be undone, panics included.
+/// What: `capture` records each named var's current value (or absence);
+/// `Drop` writes them back in reverse order.
+/// Test: `tcode_child_env_is_hermetic_under_an_ambient_live_palace`.
+struct EnvRestore {
+    saved: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+}
+
+impl EnvRestore {
+    fn capture(names: impl IntoIterator<Item = std::ffi::OsString>) -> Self {
+        let saved = names
+            .into_iter()
+            .map(|n| {
+                let v = std::env::var_os(&n);
+                (n, v)
+            })
+            .collect();
+        Self { saved }
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..).rev() {
+            // SAFETY: every `EnvRestore` user holds `ENV_LOCK`, and
+            // `HermeticChildEnv` additionally holds `HOME_LOCK`.
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(&name, v),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+    }
+}
+
+/// #9139: an environment for the spawned `tcode` that cannot reach the live
+/// trusty-memory palace.
+///
+/// Why: `run_tcode` hands the child the full ambient environment. In a `tm`
+/// shell that carries `TRUSTY_MEMORY_PALACE=trusty-tools`, and the live
+/// memory socket is reachable, so a smoke turn writes into the live palace.
+/// The INSTALLED `tcode` predates trusty-code's own harness guard and does not
+/// read `TRUSTY_TEST_HARNESS`, so what protects the live palace is the
+/// explicit temp socket (nothing listens on it) and temp HOME / data dir.
+/// What: while alive, every `TRUSTY_*` and `XDG_*` var is removed from the
+/// process env, then `HOME`, `TRUSTY_DATA_DIR_OVERRIDE` and
+/// `TRUSTY_MEMORY_SOCKET` point under a fresh tempdir and
+/// `TRUSTY_TEST_HARNESS=1` is set. `install` reads each override back and
+/// panics on a mismatch or a pre-existing socket, so a failed setup stops the
+/// test instead of running against ambient state. The caller must already hold
+/// `ENV_LOCK`; `install` takes `HOME_LOCK` itself, in the crate's
+/// `ENV_LOCK`-then-`HOME_LOCK` order.
+/// Test: `tcode_child_env_is_hermetic_under_an_ambient_live_palace`.
+struct HermeticChildEnv {
+    _restore: EnvRestore,
+    _home_guard: std::sync::MutexGuard<'static, ()>,
+    root: tempfile::TempDir,
+}
+
+impl HermeticChildEnv {
+    fn install() -> Self {
+        let home_guard = crate::test_env::HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir()
+            .expect("#9139: no temp dir for the hermetic tcode env; refusing to use ambient state");
+        let home = root.path().join("home");
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&home).expect("#9139: cannot create temp HOME");
+        std::fs::create_dir_all(&data).expect("#9139: cannot create temp data dir");
+        let socket = root.path().join("no-memory.sock");
+        assert!(!socket.exists(), "#9139: temp memory socket must not exist");
+
+        let scrubbed: Vec<std::ffi::OsString> = std::env::vars_os()
+            .map(|(k, _)| k)
+            .filter(|k| {
+                let k = k.to_string_lossy();
+                k.starts_with("TRUSTY_") || k.starts_with("XDG_")
+            })
+            .collect();
+        let mut captured = scrubbed.clone();
+        for name in [
+            "HOME",
+            "PATH",
+            "TRUSTY_DATA_DIR_OVERRIDE",
+            "TRUSTY_MEMORY_SOCKET",
+            "TRUSTY_TEST_HARNESS",
+        ] {
+            if !captured.iter().any(|c| c == name) {
+                captured.push(name.into());
+            }
+        }
+        let restore = EnvRestore::capture(captured);
+
+        let overrides: [(&str, &std::path::Path); 3] = [
+            ("HOME", &home),
+            ("TRUSTY_DATA_DIR_OVERRIDE", &data),
+            ("TRUSTY_MEMORY_SOCKET", &socket),
+        ];
+        // SAFETY: caller holds `ENV_LOCK` and this fn holds `HOME_LOCK`.
+        unsafe {
+            for name in &scrubbed {
+                std::env::remove_var(name);
+            }
+            for (name, value) in overrides {
+                std::env::set_var(name, value);
+            }
+            std::env::set_var("TRUSTY_TEST_HARNESS", "1");
+        }
+        for (name, value) in overrides {
+            assert_eq!(
+                std::env::var_os(name).as_deref(),
+                Some(value.as_os_str()),
+                "#9139: {name} did not take the hermetic value; refusing to run"
+            );
+        }
+        Self {
+            _restore: restore,
+            _home_guard: home_guard,
+            root,
+        }
+    }
+
+    /// The tempdir every override points under.
+    fn root(&self) -> &std::path::Path {
+        self.root.path()
+    }
+
+    /// Put `dir` first on `PATH` (restored on drop, `PATH` is captured).
+    fn prepend_path(&self, dir: &std::path::Path) {
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(
+            std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&old)),
+        )
+        .expect("#9139: PATH entry contains a separator");
+        // SAFETY: see `install`.
+        unsafe {
+            std::env::set_var("PATH", joined);
+        }
+    }
+}
+
 /// Real end-to-end run through `ProcessPmBridge::run_tcode` -> the tool
 /// layer's `scrub_branding`: skipped unless `tcode` is on PATH. Asserts a
 /// non-error result whose SCRUBBED text carries no backend-identity token —
@@ -194,9 +341,11 @@ async fn tcode_route_smoke() {
         eprintln!("tcode not on PATH; skipping tcode_route_smoke");
         return;
     }
-    let tmp = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(tmp.path().join(".claude/agents")).unwrap();
-    let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
+    // #9139: the child must not inherit the ambient palace / memory socket.
+    let hermetic = HermeticChildEnv::install();
+    let project = hermetic.root().join("project");
+    std::fs::create_dir_all(project.join(".claude/agents")).unwrap();
+    let bridge = ProcessPmBridge::from_project(project);
     let result = bridge
         .run(
             BridgeRoute::Tcode,
@@ -215,6 +364,73 @@ async fn tcode_route_smoke() {
     }
 }
 
+/// #9139 regression guard: the environment `run_tcode` hands its child is
+/// hermetic even when the ambient one names the live palace.
+///
+/// Why: `tcode_route_smoke` spawned the installed `tcode` with the ambient
+/// env (`TRUSTY_MEMORY_PALACE=trusty-tools`, a reachable live memory socket),
+/// so smoke turns could land in the live palace. A fake `tcode` that dumps its
+/// environment makes the leak observable without any real binary or daemon.
+/// What: seeds a live-looking palace, socket and a `TRUSTY_*` sentinel, runs
+/// the fake `tcode` through `ProcessPmBridge` under `HermeticChildEnv`, and
+/// asserts the child saw none of them, plus a temp HOME, data dir and memory
+/// socket (nothing listening) and `TRUSTY_TEST_HARNESS=1`. Without the
+/// isolation the child sees the seeded values and this fails.
+/// Test: this test.
+#[cfg(unix)]
+#[tokio::test]
+async fn tcode_child_env_is_hermetic_under_an_ambient_live_palace() {
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let seeds = [
+        ("TRUSTY_MEMORY_PALACE", "trusty-tools"),
+        ("TRUSTY_MEMORY_SOCKET", "/ambient/live-memory.sock"),
+        ("TRUSTY_9139_SENTINEL", "ambient"),
+    ];
+    // Declared before the hermetic env so it drops after it.
+    let _ambient = EnvRestore::capture(seeds.iter().map(|(k, _)| (*k).into()));
+    // SAFETY: ENV_LOCK held for the whole body.
+    unsafe {
+        for (k, v) in seeds {
+            std::env::set_var(k, v);
+        }
+    }
+
+    let fake_dir = tempfile::tempdir().unwrap();
+    let dump = fake_dir.path().join("child-env.txt");
+    crate::test_env::write_executable_script(
+        fake_dir.path(),
+        "tcode",
+        &format!("#!/bin/sh\nenv > '{}'\necho '{{}}'\n", dump.display()),
+    );
+
+    let hermetic = HermeticChildEnv::install();
+    hermetic.prepend_path(fake_dir.path());
+    let bridge = ProcessPmBridge::from_project(hermetic.root().join("project"));
+    let _ = bridge.run(BridgeRoute::Tcode, None, "status").await;
+
+    let seen = std::fs::read_to_string(&dump).expect("fake tcode must have run and dumped its env");
+    let var = |name: &str| {
+        seen.lines()
+            .find_map(|l| l.strip_prefix(&format!("{name}=")))
+            .map(str::to_owned)
+    };
+    assert_eq!(var("TRUSTY_MEMORY_PALACE"), None, "live palace leaked");
+    assert_eq!(var("TRUSTY_9139_SENTINEL"), None, "ambient TRUSTY_* leaked");
+    assert_eq!(var("TRUSTY_TEST_HARNESS").as_deref(), Some("1"));
+    let root = hermetic.root().to_string_lossy().into_owned();
+    for name in ["HOME", "TRUSTY_DATA_DIR_OVERRIDE", "TRUSTY_MEMORY_SOCKET"] {
+        let value = var(name).unwrap_or_else(|| panic!("{name} missing from child env"));
+        assert!(value.starts_with(&root), "{name}={value} is outside {root}");
+    }
+    let socket = var("TRUSTY_MEMORY_SOCKET").unwrap();
+    assert!(
+        !std::path::Path::new(&socket).exists(),
+        "nothing may listen on the child's memory socket"
+    );
+}
+
 /// Real end-to-end run through `ProcessPmBridge::run_tm` -> `scrub_branding`:
 /// skipped unless `tm` is on PATH. Holds `ENV_LOCK` for the same reason as
 /// `tcode_route_smoke`.
@@ -227,8 +443,14 @@ async fn tm_route_smoke() {
         eprintln!("tm not on PATH; skipping tm_route_smoke");
         return;
     }
-    let tmp = tempfile::tempdir().unwrap();
-    let bridge = ProcessPmBridge::from_project(tmp.path().to_path_buf());
+    // #9139: `tm serve --stdio` + `session_new` must never reach the live
+    // daemon. Under the hermetic env the daemon socket is a temp path with
+    // nothing listening, so a spawn or handshake failure surfaces as `Err`
+    // (reported below), never as a fallback to ambient state.
+    let hermetic = HermeticChildEnv::install();
+    let project = hermetic.root().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let bridge = ProcessPmBridge::from_project(project);
     let result = bridge
         .run(BridgeRoute::Tm, None, "report session status")
         .await;
