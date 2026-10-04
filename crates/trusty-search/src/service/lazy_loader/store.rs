@@ -113,15 +113,16 @@ mod age_gate_8275_tests;
 /// `registry.list()` and so never sees one, and only a query naming the id
 /// verbatim would ever load it. A client that discovers indexes by listing
 /// never names it, so it stayed invisible until a human restarted the daemon.
-/// What: [`Self::Deferred`] is policy — `TRUSTY_WARMBOOT_MAX_INDEXES` chose not
-/// to load it, and loading it on first query is the correct, complete
-/// behaviour. [`Self::TimedOut`] is a failure the daemon absorbed, and is what
+/// What: [`Self::Deferred`] is policy — `TRUSTY_WARMBOOT_MAX_INDEXES` or the
+/// `TRUSTY_WARMBOOT_MAX_AGE_HOURS` age gate (#8275) chose not to load it, and
+/// loading it on first query is the correct, complete behaviour. [`Self::TimedOut`] is a failure the daemon absorbed, and is what
 /// the recovery pass drains. The reason is assigned by the store itself, never
 /// passed in by a caller, so an entry cannot be mislabelled at a call site.
 /// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColdReason {
-    /// Not in the top-N by recency at boot — lazy BY DESIGN (#993). Never
+    /// Not in the top-N by recency at boot, or older than the warm-boot age
+    /// gate (#8275) — lazy BY DESIGN (#993). Never
     /// proactively retried; a first query is what it is waiting for.
     Deferred,
     /// Parked after its eager warm-boot restore timed out (#4087). The restore

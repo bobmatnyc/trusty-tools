@@ -113,8 +113,6 @@ impl SearchAppState {
             // PR #1103: in-memory rate-limit gate replacing the sync disk read
             // that `search_handler` previously did on every warm query.
             last_queried_write_cache: Arc::new(DashMap::new()),
-            // #8275: sweeps across indexes do not count as recent use.
-            query_burst_gate: Arc::default(),
             // Issue #1621: empty until indexes register; populated by the
             // warm-boot restore + `POST /indexes` paths.
             watcher_manager: crate::service::watcher_manager::WatcherManager::with_registry(
