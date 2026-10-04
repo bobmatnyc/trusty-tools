@@ -31,7 +31,9 @@
 //! **Root guard.** The walk deletes any real `slot-<u32>` directory two levels
 //! under the root, so a root that is `/`, the home directory, or an ancestor of
 //! home, or that does not resolve, is refused before anything is read
-//! ([`SweepOutcome::Refused`]). The pool has no root marker to check instead.
+//! ([`SweepOutcome::Refused`]); identity, not only the path, is compared, and
+//! the walk uses the canonical root the check resolved. The pool has no root
+//! marker to check instead.
 //!
 //! **Cancellation.** The sweep checks its cancel signal before each slot and
 //! each leftover tree, so a shutdown waits on at most one removal.
@@ -227,11 +229,14 @@ pub fn sweep(
     measure: &mut dyn FnMut(&Path) -> Option<f32>,
     cancelled: &dyn Fn() -> bool,
 ) -> SweepOutcome {
-    match check_pool_root(pool_root, home) {
+    // #8451: the walk uses the canonical root the check resolved, so the check
+    // and the deletion see one path.
+    let pool_root = match check_pool_root(pool_root, home) {
         RootCheck::Missing => return SweepOutcome::NoPool,
         RootCheck::Refused(why) => return SweepOutcome::Refused(why),
-        RootCheck::Safe => {}
-    }
+        RootCheck::Safe(canon) => canon,
+    };
+    let pool_root = pool_root.as_path();
     let threshold = f32::from(threshold_pct);
     let Some(usage) = measure(pool_root) else {
         return SweepOutcome::Unmeasurable;
@@ -247,12 +252,14 @@ pub fn sweep(
     };
     report.usage_after = measure(pool_root);
     for slot in slots {
+        // #8451: threshold first, so a cancel with nothing left to evict is not
+        // reported as a sweep stopped early.
+        if report.usage_after.is_none_or(|usage| usage < threshold) {
+            break;
+        }
         // #8451: stop at a slot boundary so shutdown waits on one removal at most.
         if report.cancelled || cancelled() {
             report.cancelled = true;
-            break;
-        }
-        if report.usage_after.is_none_or(|usage| usage < threshold) {
             break;
         }
         match evict_one(&slot, store) {
@@ -271,8 +278,17 @@ enum RootCheck {
     Missing,
     /// Unsafe to sweep, and why.
     Refused(String),
-    /// Safe to sweep.
-    Safe,
+    /// Safe to sweep; carries the canonical root the check resolved.
+    Safe(PathBuf),
+}
+
+/// A file's `(device, inode)`, or `None` when its metadata cannot be read.
+type FileId = (u64, u64);
+
+/// The real [`FileId`] reader; follows symlinks.
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
 }
 
 /// Whether `root` is safe to sweep, given the operator's `home`.
@@ -283,11 +299,26 @@ enum RootCheck {
 /// root that fails to canonicalize for any other reason is refused, as is a
 /// canonical root that is `/`, or that equals or contains the canonical home.
 /// A home that does not canonicalize is refused too: the root cannot be
-/// checked against it.
+/// checked against it. A path comparison can miss an alias (a case-insensitive
+/// volume, a Unicode-normalization variant), so the root is also refused when
+/// it has the same `(dev, ino)` as home or any ancestor of home; a root whose
+/// metadata cannot be read is refused, an unreadable ancestor is skipped.
 /// Test: `the_filesystem_root_is_refused`, `the_home_directory_is_refused`,
 /// `an_ancestor_of_home_is_refused`, `an_unresolvable_root_is_refused`,
-/// `an_unresolvable_home_is_refused`.
+/// `an_unresolvable_home_is_refused`, `an_inode_alias_of_an_ancestor_of_home_is_refused`,
+/// `a_root_with_unreadable_metadata_is_refused`,
+/// `a_case_variant_of_home_is_refused`, `a_symlink_to_home_is_refused`,
+/// `a_symlink_to_the_filesystem_root_is_refused`, `a_dot_suffixed_home_is_refused`.
 fn check_pool_root(root: &Path, home: &Path) -> RootCheck {
+    check_pool_root_with(root, home, &file_id)
+}
+
+/// [`check_pool_root`] with the metadata reader injected.
+fn check_pool_root_with(
+    root: &Path,
+    home: &Path,
+    id_of: &dyn Fn(&Path) -> Option<FileId>,
+) -> RootCheck {
     let canon = match std::fs::canonicalize(root) {
         Ok(canon) => canon,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return RootCheck::Missing,
@@ -320,7 +351,20 @@ fn check_pool_root(root: &Path, home: &Path) -> RootCheck {
             root.display()
         ));
     }
-    RootCheck::Safe
+    // #8451: the same directory under another spelling has the same (dev, ino).
+    let Some(root_id) = id_of(&canon) else {
+        return RootCheck::Refused(format!(
+            "{} has unreadable metadata, so it cannot be checked against home",
+            root.display()
+        ));
+    };
+    if home.ancestors().any(|dir| id_of(dir) == Some(root_id)) {
+        return RootCheck::Refused(format!(
+            "{} is the same directory as home or an ancestor of it",
+            root.display()
+        ));
+    }
+    RootCheck::Safe(canon)
 }
 
 /// Why [`evict_one`] did not evict.

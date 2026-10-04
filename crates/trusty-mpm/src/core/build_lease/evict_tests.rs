@@ -21,11 +21,13 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let pool = tmp.path().join("pool");
+    // #8451: sweep paths are canonical; /var is a symlink to /private/var on macOS.
+    let base = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+    let pool = base.join("pool");
     std::fs::create_dir_all(&pool).expect("pool root");
-    let home = tmp.path().join("home");
+    let home = base.join("home");
     std::fs::create_dir_all(&home).expect("home");
-    let store = SlotDir::at(tmp.path().join("store")).expect("lease store");
+    let store = SlotDir::at(base.join("store")).expect("lease store");
     Fixture {
         _tmp: tmp,
         pool,
@@ -435,6 +437,154 @@ fn an_unresolvable_home_is_refused() {
         "{why}"
     );
     assert!(slot.is_dir());
+}
+
+/// A symlink to home resolves to home and is refused.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_symlink_to_home_is_refused() {
+    let f = fixture();
+    let slot = make_slot(&f.home, "o/r", 0, HOUR);
+    let link = f.pool.join("link-to-home");
+    std::os::unix::fs::symlink(&f.home, &link).expect("symlink");
+    let why = refusal(&f, &link, &f.home, Some(99.0));
+    assert!(why.contains("home directory or an ancestor"), "{why}");
+    assert!(slot.is_dir());
+}
+
+/// A symlink to `/` resolves to the filesystem root and is refused.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_symlink_to_the_filesystem_root_is_refused() {
+    let f = fixture();
+    let link = f.pool.join("link-to-root");
+    std::os::unix::fs::symlink("/", &link).expect("symlink");
+    let why = refusal(&f, &link, &f.home, None);
+    assert!(why.contains("filesystem root"), "{why}");
+}
+
+/// `home/.` is home under another spelling.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_dot_suffixed_home_is_refused() {
+    let f = fixture();
+    let slot = make_slot(&f.home, "o/r", 0, HOUR);
+    let why = refusal(&f, &f.home.join("."), &f.home, Some(99.0));
+    assert!(why.contains("home directory or an ancestor"), "{why}");
+    assert!(slot.is_dir());
+}
+
+/// A path-equal check can miss an alias the volume resolves to the same
+/// directory; the `(dev, ino)` comparison must refuse it. The injected reader
+/// makes the root and an ancestor of home share an id, with no path overlap.
+#[test]
+fn an_inode_alias_of_an_ancestor_of_home_is_refused() {
+    let f = fixture();
+    let base = f.pool.parent().expect("tempdir").to_path_buf();
+    let shared: FileId = (7, 42);
+    let id_of = |p: &Path| -> Option<FileId> {
+        if p == f.pool || p == base {
+            Some(shared)
+        } else {
+            Some((7, 1))
+        }
+    };
+    match check_pool_root_with(&f.pool, &f.home, &id_of) {
+        RootCheck::Refused(why) => assert!(why.contains("same directory"), "{why}"),
+        _ => panic!("an inode alias of an ancestor of home was not refused"),
+    }
+    // An unreadable ancestor is skipped, not refused.
+    let skip = |p: &Path| -> Option<FileId> { (p == f.pool).then_some(shared) };
+    assert!(matches!(
+        check_pool_root_with(&f.pool, &f.home, &skip),
+        RootCheck::Safe(_)
+    ));
+}
+
+/// A root whose own metadata cannot be read cannot be compared, so it is refused.
+#[test]
+fn a_root_with_unreadable_metadata_is_refused() {
+    let f = fixture();
+    let blind = |_: &Path| -> Option<FileId> { None };
+    match check_pool_root_with(&f.pool, &f.home, &blind) {
+        RootCheck::Refused(why) => assert!(why.contains("unreadable metadata"), "{why}"),
+        _ => panic!("a root with unreadable metadata was not refused"),
+    }
+}
+
+/// On a case-insensitive volume `HOME` names home; it is refused. Elsewhere
+/// there is no such alias, so the test prints why and returns.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_case_variant_of_home_is_refused() {
+    let f = fixture();
+    let base = f.pool.parent().expect("tempdir").to_path_buf();
+    let variant = base.join("HOME");
+    if !variant.is_dir() {
+        eprintln!("skipped: the temp volume is case-sensitive, so HOME is not home");
+        return;
+    }
+    let slot = make_slot(&f.home, "o/r", 0, HOUR);
+    let why = refusal(&f, &variant, &f.home, Some(99.0));
+    assert!(
+        why.contains("home") || why.contains("same directory"),
+        "{why}"
+    );
+    assert!(slot.is_dir());
+}
+
+/// The sweep walks and measures the canonical root, not the spelling it was given.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn the_sweep_walks_the_canonical_root() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    let link = f.home.join("pool-link");
+    std::os::unix::fs::symlink(&f.pool, &link).expect("symlink");
+    let mut seen = Vec::new();
+    let mut gone = false;
+    let report = swept(sweep(
+        &link,
+        &f.home,
+        &f.store,
+        85,
+        &mut |p: &Path| {
+            seen.push(p.to_path_buf());
+            let reading = if gone { 10.0 } else { 99.0 };
+            gone = !slot.exists();
+            Some(reading)
+        },
+        &|| false,
+    ));
+    assert_eq!(report.evicted, vec![slot]);
+    assert!(
+        seen.iter().all(|p| p == &f.pool),
+        "measured a non-canonical path: {seen:?}"
+    );
+}
+
+/// A cancel that reaches a volume already under the threshold left nothing
+/// unevicted, so the sweep is not reported as stopped early.
+#[test]
+#[serial_test::serial(build_slot_fds)]
+fn a_cancel_below_the_threshold_is_not_reported() {
+    let f = fixture();
+    let slot = make_slot(&f.pool, "o/r", 0, HOUR);
+    let mut reads = 0;
+    let report = swept(sweep(
+        &f.pool,
+        &f.home,
+        &f.store,
+        85,
+        // Over at the entry check, under once the leftovers are done.
+        &mut |_: &Path| {
+            reads += 1;
+            Some(if reads == 1 { 99.0 } else { 10.0 })
+        },
+        &|| true,
+    ));
+    assert!(!report.cancelled, "{report:?}");
+    assert!(report.evicted.is_empty() && slot.is_dir());
 }
 
 /// A cancel that fires once the first slot is gone stops the sweep at the next
