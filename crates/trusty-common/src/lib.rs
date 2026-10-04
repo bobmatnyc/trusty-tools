@@ -1147,6 +1147,15 @@ pub mod palace_alias;
 /// github_path::tests`.
 pub mod github_path;
 
+/// Where a URL's userinfo ends, and the URL without it (#9124).
+///
+/// Why: a credential embedded in a git remote (`https://user:<token>@host/…`)
+/// must never become part of a derived owner, repo, palace id or path.
+/// What: [`url_userinfo::strip_userinfo`] and [`url_userinfo::userinfo_end`].
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// url_userinfo::tests`.
+pub mod url_userinfo;
+
 /// The one resolver for trusty-mpm's managed workspace layout (#5203, #5204).
 ///
 /// Why: the managed workspace root and the session-worktree base name are shared
