@@ -107,6 +107,7 @@ use std::path::{Component, Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
+use super::heredoc::{blank_spans, data_bodies};
 use super::substitutions::{Substitution, blank_inert_heredocs, segment_substitutions};
 use super::{MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, split_shell_segments};
 use crate::commands::hook_rewrite::first_command_token;
@@ -227,7 +228,82 @@ fn classify_destructive_delete_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<DeleteTarget> {
+    // #7190: a lone stdin consumer of a quoted here-document reads its body
+    // as data, so only its operator line is judged.
+    let masked = lone_inert_heredoc(command);
+    let command = masked.as_deref().unwrap_or(command);
     classify_at_depth(command, cwd, env, 0, &Cell::new(0))
+}
+
+/// Programs that read a quoted here-document body on stdin as data (#7190).
+const STDIN_DATA_CONSUMERS: &[&str] = &["python3", "python", "node", "ruby", "cat"];
+
+/// `command` with its here-document body blanked, when the whole command is
+/// one stdin consumer fed one quoted here-document; otherwise `None` (#7190).
+///
+/// Why: `python3 - <<'PY'` with `print('It\'s time to find it')` in its body
+/// was refused: the body does not lex, and the fallback matched the word
+/// `find`. The shell never runs a quoted body, so the verb is text. Owner
+/// rulings on #7190 bound the mask: a body captured and re-run (`eval
+/// $(cat <<'X'…)`, `read x <<'X'; eval "$x"`, `source /dev/stdin`, a pipe to
+/// a shell) stays live, so the mask applies only where no capture can exist.
+/// What: exactly one data here-document, its delimiter quoted and one that
+/// [`super::heredoc::delimiter_word`] accepts (#9150), its operator line the
+/// first line, and nothing after its terminator line. The operator
+/// line carries no `|`, `;`, `&`, `$`, backtick, parenthesis or backslash, and
+/// lexes to a [`STDIN_DATA_CONSUMERS`] program with no prefix assignment or
+/// wrapper: an interpreter takes at most `-`, and `cat` at most one `>`/`>>`
+/// redirect to a literal path. The body bytes become spaces, newlines kept.
+/// Residual (accepted with the #7190 class-3 residual): an interpreter body
+/// can still run a delete itself (`os.system`), as `python3 -c` and a lexable
+/// body already can on the pre-change guard.
+/// Test: `allows_a_quoted_heredoc_body_fed_to_an_interpreter_7190`,
+/// `keeps_every_captured_or_shell_run_heredoc_body_live_7190`.
+pub(crate) fn lone_inert_heredoc(command: &str) -> Option<String> {
+    let bodies = data_bodies(command);
+    let [body] = bodies.as_slice() else {
+        return None;
+    };
+    let (line_start, line_end) = body.operator_line;
+    if body.expands || !command[..line_start].trim().is_empty() {
+        return None;
+    }
+    let line = &command[line_start..line_end];
+    if line.contains(['|', ';', '&', '$', '`', '(', ')', '\\']) {
+        return None;
+    }
+    let argv = shlex::split(line)?;
+    let (program, rest) = argv.split_first()?;
+    if !STDIN_DATA_CONSUMERS.contains(&program.as_str()) {
+        return None;
+    }
+    let (heredocs, others): (Vec<&String>, Vec<&String>) =
+        rest.iter().partition(|t| t.starts_with("<<"));
+    if heredocs.len() != 1 || heredocs[0].starts_with("<<<") {
+        return None;
+    }
+    // #7190: the terminator line is all that may follow the body. A delimiter
+    // the shell reads whole (`<<'A B'`) never gets here: #9150's scan refuses
+    // it and claims no body.
+    let word = &heredocs[0][2..];
+    let word = word.strip_prefix('-').unwrap_or(word);
+    if command[body.span.1..].trim() != word {
+        return None;
+    }
+    let plain =
+        |path: &str| !path.is_empty() && !path.contains(['*', '?', '[', ']', '{', '}', '~']);
+    let consumes = match (program.as_str(), others.as_slice()) {
+        (_, []) => true,
+        ("cat", [op, path]) => matches!(op.as_str(), ">" | ">>") && plain(path),
+        ("cat", [glued]) => glued
+            .strip_prefix(">>")
+            .or_else(|| glued.strip_prefix('>'))
+            .is_some_and(plain),
+        ("cat", _) => false,
+        (_, [dash]) => *dash == "-",
+        _ => false,
+    };
+    consumes.then(|| blank_spans(command, &[body.span]))
 }
 
 /// Calls to [`classify_at_depth`] one command may make before it denies as
@@ -1238,6 +1314,59 @@ mod tests {
         for command in [
             "sudo --bogus bash -c 'r\"\"m -rf ~'",
             "timeout 5 env -S 'r\"\"m -rf /'",
+        ] {
+            assert_eq!(class_of(command), Some(DeleteTarget::Root), "{command}");
+        }
+    }
+
+    /// 🔴 REGRESSION (#7190): a quoted here-document body fed to an
+    /// interpreter or `cat` is data, so a delete verb in a string that does
+    /// not lex is no command. Denied (unresolved) on origin/main.
+    #[test]
+    fn allows_a_quoted_heredoc_body_fed_to_an_interpreter_7190() {
+        for command in [
+            "python3 - <<'PY'\nprint('It\\'s time to find it')\nPY",
+            "python3 <<\"PY\"\nprint('it's time to find it')\nPY",
+            "node - <<'JS'\nconsole.log('can't find rm')\nJS\n",
+            "cat > /tmp/s/x.py <<'EOF'\nassert x, 'it's not found: find it'\nEOF",
+            "cat >>notes.py <<-'EOF'\n\tprint('won't unlink it')\n\tEOF",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+    }
+
+    /// #7190 bound (owner rulings 2026-09-14/15): every body a shell runs, a
+    /// capture re-runs, an expansion reaches or a later segment can use keeps
+    /// the scan, and so does any operator line the mask cannot read whole.
+    #[test]
+    fn keeps_every_captured_or_shell_run_heredoc_body_live_7190() {
+        for command in [
+            "eval $(cat <<'PY'\nrm -rf /\nPY\n)",
+            "eval \"$(cat <<'PY'\nrm -rf /\nPY\n)\"",
+            "bash <<'EOF'\nrm -rf /\nEOF",
+            "read x <<'PY'\nrm -rf /\nPY\neval \"$x\"",
+            "source /dev/stdin <<'PY'\nrm -rf /\nPY",
+            "cat <<'PY' | \"bash\"\nrm -rf /\nPY",
+            "cat <<'PY' > x.sh\nrm -rf /\nPY\nsh x.sh",
+            "mapfile -t a <<'PY'\nrm -rf /\nPY\n\"${a[@]}\"",
+            "python3 - <<PY\n$(rm -rf /)\nPY",
+            "X=1 python3 - <<'PY'\nprint('it's find')\nPY",
+            "python3 -c x <<'PY'\nprint('it's find')\nPY",
+            "python3 - <<'PY' 2>/dev/null\nprint('it's find')\nPY",
+            "sudo python3 - <<'PY'\nprint('it's find')\nPY",
+            "cat > $OUT <<'PY'\nprint('it's find')\nPY",
+            "cat <<'A' <<'B'\nprint('it's find')\nA\nx\nB",
+            "rm -rf / ; python3 - <<'PY'\nprint('it's find')\nPY",
+        ] {
+            assert!(class_of(command).is_some(), "{command}");
+        }
+        // Red-team round: bash and zsh keep a quoted delimiter whole (`A B`,
+        // `E>F`), so the delete after that terminator runs. Allowed at a30ff02fbc;
+        // #9150's scan now refuses the delimiter, so no mask applies.
+        for command in [
+            "cat <<'A B'\nhello\nA B\nrm -rf /\nA",
+            "python3 - <<\"E>F\"\nprint(1)\nE>F\nrm -rf ~\nE",
+            "cat > x.py <<'E<F'\nx\nE<F\nrm -rf $HOME\nE",
         ] {
             assert_eq!(class_of(command), Some(DeleteTarget::Root), "{command}");
         }

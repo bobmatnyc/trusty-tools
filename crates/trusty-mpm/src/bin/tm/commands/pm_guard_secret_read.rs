@@ -240,7 +240,7 @@
 //! `cat $(printf '\056env')`, `cat $(echo LmVudg== | base64 -d)` — never
 //! appears as literal path text, so no word scan can see it (see
 //! `DOCUMENTED_RESIDUALS`). #8931 closes that class for a file READ at the
-//! entry point: [`evaluate_secret_file_read`] chains
+//! entry point: [`evaluate_secret_file_read_in`] chains
 //! `pm_guard_secret_substitution_read`, which refuses a file operand whose
 //! substitution it cannot resolve; a GLOB whose only
 //! literal is the TAIL of an `.env.<name>` file
@@ -397,6 +397,10 @@ use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
 use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
+// #8093, #8110, #8520, #8660: narrow grants and refusal hints, split out at the cap.
+use crate::commands::pm_guard_secret_handling::{
+    URL_FETCHERS, body_written_to_a_file, is_tokeninfo_url, refusal_hint, same_class_copy,
+};
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -436,14 +440,16 @@ pub(crate) enum Scan {
 /// stable answer: `ls` and `stat` report metadata, `file` reports a type,
 /// `test`/`[` answer a predicate, and `rm` deletes. None of them can put a
 /// credential in the transcript, and an agent needs all five to manage a
-/// secret file it must never read.
+/// secret file it must never read. `cd` and `pushd` (#8110) change directory
+/// and open no file, so a source directory named `secrets` stays enterable.
 /// What: matched against the BASENAME of the segment's resolved program, after
 /// `strip_wrapper_prefix` removes leading env assignments and `sudo`/`nice`
 /// noise. Anything not on this list, and not a [`SAFE_GIT_SUBCOMMANDS`] git
 /// call, denies.
 /// Test: `allows_only_the_safe_handling_verbs`,
 /// `denies_every_bypass_the_earlier_rounds_missed`.
-pub(crate) const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
+pub(crate) const SAFE_HANDLING_VERBS: &[&str] =
+    &["ls", "stat", "rm", "test", "[", "file", "cd", "pushd"];
 
 /// `git` subcommands that may name a secret-bearing file.
 ///
@@ -590,18 +596,21 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
 /// `evaluate_process_env_dump_command` (#8756: a launchd or pm2 job's) through
 /// [`evaluate_nested_secret_rules`], which also reads every substitution body
 /// (#8756 round 2), and every other tool to [`evaluate_secret_file_read_tool`].
+/// `cwd` is the hook's working directory, which lets the #8093 copy grant look
+/// at what stands at its destination; `None` judges the destination by name.
 /// Test: `the_unified_entry_point_routes_both_surfaces`,
 /// `the_unified_entry_point_refuses_a_printed_credential`.
-pub(crate) fn evaluate_secret_file_read(
+pub(crate) fn evaluate_secret_file_read_in(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
+    cwd: Option<&Path>,
 ) -> Option<String> {
     if tool_name == "Bash" {
         let command = tool_input
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        return evaluate_secret_file_read_command(command)
+        return evaluate_secret_file_read_command_in(command, cwd)
             .or_else(|| evaluate_credential_print_command(command))
             // #7648, #8756: a pod's or a launchd/pm2 job's env dump prints its
             // keys, naming no file; round 2 reads every substitution body too.
@@ -636,6 +645,20 @@ pub(crate) fn evaluate_secret_file_read(
 /// `allows_a_heredoc_body_of_code_that_names_no_secret`,
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
+    evaluate_secret_file_read_command_in(command, None)
+}
+
+/// [`evaluate_secret_file_read_in`] with no working directory, for the tests.
+#[cfg(test)]
+pub(crate) fn evaluate_secret_file_read(
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+) -> Option<String> {
+    evaluate_secret_file_read_in(tool_name, tool_input, None)
+}
+
+/// [`evaluate_secret_file_read_command`] run from `cwd` (#8093).
+fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Option<String> {
     let (argv_text, bodies) = split_heredoc_bodies(command);
     let segments = split_shell_segments(&argv_text);
     // #8723: prose is read as prose only in a one-segment command; a pipe or a
@@ -658,11 +681,19 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
             || terraform_only_consumes_state(trimmed, &named)
             || key_only_consumed(trimmed, &named)
             || listed_or_searched(&argv_text, trimmed, &named)
+            // #8093: a lone copy that lands on a name this rule also refuses.
+            || (lone && same_class_copy(trimmed, &named, cwd))
         // #9001
         {
             continue;
         }
-        return Some(deny_reason(first, &describe_command(trimmed)));
+        // #8520, #8660: the refusal names the supported route for its shape.
+        let reason = deny_reason(first, &describe_command(trimmed));
+        return Some(reason + refusal_hint(first, trimmed));
+    }
+    // #7833: a body `cat` only writes to a file is data, never read back here.
+    if body_written_to_a_file(command) {
+        return None;
     }
     for body in &bodies {
         if let Some(first) = secret_files_named_in_program_text(body).first() {
@@ -775,9 +806,17 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
     // ref-creating position are REF names — neither is a path operand list, and
     // both withdraw the same one arm.
     let position = word_position_start(segment, &argv);
+    // #8110: a fetcher's Google OAuth2 `tokeninfo` URL prints no credential.
+    let fetcher = strip_wrapper_prefix(&argv).filter(|&at| {
+        argv.get(at)
+            .is_some_and(|p| URL_FETCHERS.contains(&command_basename(p).as_str()))
+    });
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at || text_payloads.contains(&index) {
+            continue;
+        }
+        if fetcher.is_some_and(|at| index > at) && is_tokeninfo_url(token) {
             continue;
         }
         let words = if program_at.contains(&index) {
@@ -1885,13 +1924,11 @@ mod tests {
     /// this guard reads, and the workaround is to write that prose with the
     /// Edit tool, which this class does not inspect. The trailing-dot and
     /// `worktree add` halves of #7533 are unaffected and stay fixed.
+    /// #7833: a quoted body `cat` writes to a file is never globbed, so the
+    /// fragment there allows (`guard_7833_a_quoted_body_cat_writes_to_a_file_is_data`).
     #[test]
     fn denies_a_markdown_emphasis_fragment_7533() {
-        for command in [
-            "echo '**A pipe confirms nothing at all.**'",
-            "echo **A",
-            "cat <<'EOF' > note.md\n**A pipe confirms nothing at all.**\nEOF",
-        ] {
+        for command in ["echo '**A pipe confirms nothing at all.**'", "echo **A"] {
             assert!(
                 eval(command).is_some(),
                 "the emphasis fragment reaches `id_rsa` and must deny: `{command}`"
@@ -3306,8 +3343,7 @@ mod tests {
     const KNOWN_FP_PROGRAM_TEXT_CORPUS: &[&str] = &[
         // shlex splits a `${…}` holding a space, leaving an unbalanced `${a`.
         "node -e 'console.log(`${a + b}`)'",
-        // The same split inside a here-document body line.
-        "cat > run.sh <<'EOF'\nfirst=${line%% *}\nEOF",
+        // #7833: the same split in a body `cat` writes to a file is data now.
         // One line past 64 brace readings falls back to raw text, whose lone
         // code `{` reaches the expander unbalanced.
         "python3 -c 'rows = [{\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}, {\"a\": 1, \"b\": 2}]'",

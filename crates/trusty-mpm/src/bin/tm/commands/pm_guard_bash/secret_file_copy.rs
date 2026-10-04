@@ -158,10 +158,12 @@ use trusty_mpm::core::project_aliases::is_worktree_path;
 use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 
 use super::bash_tokens::RedirectRole;
+use super::heredoc::split_heredoc_bodies;
 use super::{
     PathEnv, redirect_role, resolve_target_path, split_shell_segments, tokenize, unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
+use crate::commands::pm_guard_secret_handling::body_written_to_a_file;
 // #7266 fix round: the READ guard's own target predicate, so "a name the read
 // guard refuses" has ONE definition that both rules read.
 use crate::commands::pm_guard_secret_read::is_secret_read_target;
@@ -220,6 +222,9 @@ const SECRET_BEARING_FILE_PATTERNS: &[&str] = &[
     "*.tfvars.json",
     "*.tfstate",
     "*.tfstate.backup",
+    // #8093: a dated backup (`terraform.tfstate.20260915-pre.backup`) is the
+    // same state, so the read rule refuses it and a copy may land on it.
+    "*.tfstate.*",
     ".env",
     ".env.local",
     ".env.*",
@@ -698,6 +703,14 @@ fn evaluate_secret_file_copy_command_in(
     cwd: &Path,
     env: &PathEnv,
 ) -> Option<String> {
+    // #7833: a body `cat` only writes to a file is data, not a source operand.
+    let blanked;
+    let command = if body_written_to_a_file(command) {
+        blanked = split_heredoc_bodies(command).0;
+        blanked.as_str()
+    } else {
+        command
+    };
     let mut effective_cwd = cwd.to_path_buf();
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
@@ -1305,6 +1318,7 @@ mod tests {
             ("*.tfvars.json", "prod.tfvars.json"),
             ("*.tfstate", "terraform.tfstate"),
             ("*.tfstate.backup", "terraform.tfstate.backup"),
+            ("*.tfstate.*", "terraform.tfstate.20260915-pre.backup"),
             (".env", ".env"),
             (".env.local", ".env.local"),
             (".env.*", ".env.production"),
@@ -1461,6 +1475,7 @@ mod tests {
             ("*.tfvars.json", "*.tfvars.json"),
             ("*.tfstate", "*.tfstate"),
             ("*.tfstate.backup", "*.tfstate.*"),
+            ("*.tfstate.*", "*.tfstate.*"),
             (".env", "*.env"),
             (".env.local", "*.local"),
             (".env.*", ".env*"),

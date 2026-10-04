@@ -255,3 +255,58 @@ fn every_gh_api_delete_arm_fails_closed_8875() {
         );
     }
 }
+
+/// 🔴 REGRESSION (#9006): a Python here-document that edits a local file,
+/// with a line that does not lex and subscript pairs such as `d[k] x[0]`,
+/// names no secrets or delete and is no `gh api` call. Denied on origin/main.
+#[test]
+fn a_python_subscript_pair_is_no_gh_api_call_9006() {
+    for command in [
+        "python3 - <<'EOF'\n\
+         p = 'docs/notes.md'\n\
+         s = open(p).read()\n\
+         print('it's d[k] x[0]')\n\
+         open(p, 'w').write(s.replace('old', 'new'))\n\
+         EOF",
+        "python3 - <<'EOF'\n\
+         p = 'src/x_tests.rs'\n\
+         print('it's the `cd` in d[k] x[0]')\n\
+         s = open(p).read().replace('\"cd $WT && x\"', '\"cd $WT && y\"')\n\
+         open(p, 'w').write(s)\n\
+         EOF",
+    ] {
+        assert_eq!(evaluate_gh_api_secret_delete(command), None, "{command}");
+        assert_eq!(bash(command), None, "{command}");
+    }
+}
+
+/// #9006 bound: a glob that can still spell `gh`, `api` or `curl` — `g?`,
+/// `g[h]`, `*`, a case-folded `G?`, or syntax the glob reader does not model —
+/// keeps the deny, in a body that does not lex and in one that does.
+#[test]
+fn a_glob_that_can_spell_gh_still_denies_9006() {
+    assert_rule_denies(&[
+        "python3 - <<'EOF'\nprint('it's')\nos.system('g? api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<'EOF'\nprint('it's')\nos.system('g[h] a?i -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<'EOF'\nprint('it's')\nos.system('* api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<'EOF'\nprint('it's')\nos.system('G? api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "python3 - <<'EOF'\nprint('it's')\nos.system('g?<1-9> api -X DELETE repos/o/r/actions/secrets/X')\nEOF",
+        "/opt/homebrew/bin/g[h] api -X DELETE repos/o/r/actions/secrets/X",
+        "g? secret delete NAME",
+        "c?rl -X DELETE https://api.github.com/repos/o/r/actions/secrets/X",
+    ]);
+    // The glob reader itself, on the bytes the matcher folds.
+    for (pattern, name, can) in [
+        ("g?", "gh", true),
+        ("*h", "gh", true),
+        ("g[!x]", "gh", true),
+        ("d[k]", "gh", false),
+        ("x[0]", "api", false),
+        ("a*i", "api", true),
+        ("x?y?z", "gh", false),
+        ("g[h", "gh", true),
+        ("<1-9>", "gh", true),
+    ] {
+        assert_eq!(glob_could_match(pattern, name), can, "{pattern} vs {name}");
+    }
+}

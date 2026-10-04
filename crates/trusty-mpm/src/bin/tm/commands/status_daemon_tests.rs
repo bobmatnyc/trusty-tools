@@ -16,11 +16,24 @@ use trusty_mpm::client::HealthSnapshot;
 
 use super::*;
 
-/// A pid no process on this host owns, standing in for the daemon that died.
+/// The pid of a child that has exited and been reaped, standing in for the
+/// daemon that died.
 ///
 /// Why: `libc::kill(pid, 0)` must report it dead so `read_lock_at` treats the
-/// record as stale. The max pid on Darwin is 99998, so this is unallocatable.
-const DEAD_PID: u32 = 4_294_967_000;
+/// record as stale. #9153: the old constant `4_294_967_000` cast to pid_t
+/// -296, so `kill` probed process GROUP 296 and read alive on a Linux runner.
+/// What: spawns `true`, waits for it, returns its pid. A reaped pid can in
+/// theory be reused, but the kernel hands out pids in increasing order and
+/// wraps only after `pid_max` allocations, so reuse within the microseconds
+/// before the probe needs the whole pid space to cycle.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn `true`");
+    let pid = child.id();
+    child.wait().expect("reap `true`");
+    pid
+}
 
 /// The pid the live `/health` server reports — the one both commands must name.
 const LIVE_PID: u32 = 424_242;
@@ -140,7 +153,7 @@ async fn status_reports_the_live_daemon_when_the_listing_fails() {
         trusty_mpm::core::daemon_identity::render_lock(
             &trusty_mpm::core::daemon_identity::DaemonLock {
                 product: trusty_mpm::core::daemon_identity::LOCK_PRODUCT.to_string(),
-                pid: DEAD_PID,
+                pid: dead_pid(),
                 addr: url.clone(),
                 started_at: String::new(),
                 socket_path: String::new(),

@@ -43,6 +43,29 @@ fn a_secret_named_in_a_mysql_statement_still_denies_9001() {
     ]);
 }
 
+/// 🔴 REGRESSION (#9006, #9001 case 2): a SQL wildcard in a `mysql -e`
+/// statement that can reach no shell is SQL, not a `.env.*` glob. Denied on
+/// origin/main.
+#[test]
+fn a_sql_wildcard_in_a_mysql_statement_is_no_path_9006() {
+    allowed(&[
+        "mysql -e 'GRANT ALL ON `appdb`.* TO \"u\"@\"%\"'",
+        "mariadb --execute 'SHOW GRANTS; GRANT SELECT ON `db`.* TO r'",
+        "mysql -u root -e 'REVOKE ALL ON db.* FROM u'",
+    ]);
+    // A shell escape in any case or spelling, a joined flag, or a secret the
+    // statement names keeps the argv scan.
+    denied(&[
+        "mysql -e 'SYSTEM cat .*; GRANT ALL ON `db`.* TO u'",
+        "mysql -e 'pager cat .*'",
+        "mysql -e '\\P cat .*'",
+        "mysql -e 'edit .*'",
+        "mysql -e'GRANT ALL ON `db`.* TO u'",
+        "mysql --execute='GRANT ALL ON `db`.* TO u'",
+        "mysql -e 'GRANT ALL ON `db`.* TO u' .env",
+    ]);
+}
+
 /// Case 3: a gh issue/pr search string reads no file.
 #[test]
 fn a_gh_search_string_names_no_file_9001() {

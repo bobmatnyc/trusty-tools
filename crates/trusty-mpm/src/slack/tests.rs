@@ -528,6 +528,23 @@ fn stop_via_pid_file_stale_pid_is_not_running() {
     assert!(!path.exists(), "stale PID file should be removed");
 }
 
+/// #9153: `kill(0, SIGTERM)` would hit our own process group and a pid above
+/// `i32::MAX` wraps into another group; both are refused before any signal.
+#[cfg(unix)]
+#[test]
+fn stop_via_pid_file_group_shaped_pid_is_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    for pid in ["0", "4294967000"] {
+        std::fs::write(&path, pid).expect("write pid");
+        match stop_via_pid_file(&path) {
+            StopOutcome::Failed(msg) => assert!(msg.contains("not a single process"), "{msg}"),
+            other => panic!("pid {pid}: expected Failed, got {other:?}"),
+        }
+        assert!(!path.exists(), "the refused PID file should be removed");
+    }
+}
+
 #[tokio::test]
 async fn build_slack_client_bounds_a_stalled_connection() {
     // Why (#2517): the bot's Slack-API `reqwest::Client` used to be a bare
