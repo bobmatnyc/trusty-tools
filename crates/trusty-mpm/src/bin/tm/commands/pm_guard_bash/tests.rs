@@ -5,6 +5,7 @@
 use super::*;
 // #7234: the rules now ask `unresolved_target`, so the narrower `$NAME` half is
 // no longer imported by `mod.rs` and is reached here directly.
+use super::main_checkout::main_checkout_head_move;
 use super::path_tokens::unexpanded_shell_variable;
 
 #[test]
@@ -1487,7 +1488,7 @@ fn wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules() {
             resolved.is_some(),
             "the main-checkout HEAD-move rule must see through: {command}"
         );
-        assert_eq!(resolved.expect("resolved").0, "merge");
+        assert_eq!(resolved.expect("resolved").expect("placed").0, "merge");
     }
 
     // --- Rule 3: destructive delete of a worktree root. --------------------
@@ -1542,6 +1543,38 @@ fn unclassifiable_command_flags_ansi_c_quoting() {
             Some(ANSI_C_QUOTING_REASON),
             "ANSI-C quoting must be refused: {command}"
         );
+    }
+}
+
+/// Why (#9127 fold-in): bash expands `{git,-C,<main>,commit}` into a git
+/// command while every rule reads one unknown program word, the same blind
+/// spot as `$'…'` quoting, refused the same way.
+/// Test: itself.
+#[test]
+fn brace_expanded_program_word_is_unclassifiable() {
+    for command in [
+        "{git,-C,/m,commit,-a}",
+        "({git,commit})",
+        "true && {git,commit}",
+        "if true; then {git,commit}; fi",
+        "env {git,commit}",
+        "/usr/bin/{git,x} commit",
+        "sh -c '{git,commit}'",
+    ] {
+        assert!(
+            unclassifiable_command(command).is_some_and(|r| r.contains("brace expansion")),
+            "brace expansion must be refused: {command}"
+        );
+    }
+    for command in [
+        "mkdir -p src/{a,b}",
+        "cp f{,.bak}",
+        "{ git commit; }",
+        "echo ${HOME}",
+        "git add src/{a,b}.rs",
+        "git commit -m '{a,b}'",
+    ] {
+        assert_eq!(unclassifiable_command(command), None, "{command}");
     }
 }
 

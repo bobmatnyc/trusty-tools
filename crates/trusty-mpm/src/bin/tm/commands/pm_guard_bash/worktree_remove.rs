@@ -80,7 +80,7 @@ use super::main_checkout::git_verb_target_dir_with_tail;
 use super::worktree_remove_rechecks::{
     CHECK_DISPATCH_IDENTITY, CHECK_WORKTREE_SCOPE, recheck_deny,
 };
-use super::{PathEnv, resolve_target_path, unresolved_target};
+use super::{PathEnv, resolve_target_path, shell_groups, unresolved_target};
 
 /// Deny reason for an agent-side `git worktree remove` (#5791, ADR-0057).
 ///
@@ -182,7 +182,8 @@ pub(crate) enum WorktreeRemoveVerdict {
 /// the policy is exhaustively unit testable and the caller context stays
 /// resolved in `pm_guard_fanout`.
 /// What: allows outright when the caller is not a subagent or no composition
-/// segment is a `git worktree remove`. Otherwise the ADR-0057 identity test
+/// segment is a `git worktree remove`. A subagent's removal in a command the
+/// shared walker cannot place is denied (#9127). Otherwise the ADR-0057 identity test
 /// decides: a genuine `version-control` dispatch aimed at a path under a
 /// harness worktree root yields [`WorktreeRemoveVerdict::ReCheck`], and every
 /// other caller — including a payload that claims the name without an
@@ -196,6 +197,10 @@ pub(crate) fn evaluate_worktree_remove_command(
 ) -> WorktreeRemoveVerdict {
     if !caller_is_subagent {
         return WorktreeRemoveVerdict::Allow;
+    }
+    // #9127 critic r4 HIGH: an unplaced `eval "cd …"` must not move the base.
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, is_worktree_remove) {
+        return WorktreeRemoveVerdict::Deny(reason);
     }
     let Some((target_dir, tail)) = worktree_remove_segment(command, cwd) else {
         return WorktreeRemoveVerdict::Allow;
@@ -275,10 +280,13 @@ pub(crate) fn evaluate_worktree_remove_command(
 /// What: `Some((effective directory, argv tail from `worktree` onward))`.
 /// Test: `denies_a_remove_hidden_in_a_composed_command`.
 fn worktree_remove_segment(command: &str, cwd: &Path) -> Option<(PathBuf, Vec<String>)> {
-    git_verb_target_dir_with_tail(command, cwd, &PathEnv::from_process(), |verb, tail| {
-        verb == "worktree" && tail.first().map(String::as_str) == Some("remove")
-    })
-    .map(|(_, dir, tail)| (dir, tail))
+    git_verb_target_dir_with_tail(command, cwd, &PathEnv::from_process(), is_worktree_remove)
+        .map(|(_, dir, tail)| (dir, tail))
+}
+
+/// Whether a git subcommand, given its argv tail, is `worktree remove`.
+fn is_worktree_remove(verb: &str, tail: &[String]) -> bool {
+    verb == "worktree" && tail.first().map(String::as_str) == Some("remove")
 }
 
 /// The absolute path a `git worktree remove` tail names.
@@ -1165,6 +1173,40 @@ mod tests {
                 "expected deny for: {command}"
             );
         }
+    }
+
+    /// 🔴 REGRESSION (#9127 critic r4 HIGH): an unplaced `eval "cd …"` moved
+    /// the base the removal path resolves against, so the re-checks ran on a
+    /// tree zsh never touches while it deletes the one under the cwd.
+    #[test]
+    fn denies_a_remove_behind_an_eval_it_cannot_place() {
+        for (command, identity) in [
+            (
+                "command -p eval \"cd /elsewhere\"; git worktree remove --force \
+                 .claude/worktrees/agent-x",
+                version_control(),
+            ),
+            (
+                "command eval \"cd /elsewhere\"; git worktree remove .claude/worktrees/agent-x",
+                engineer(),
+            ),
+        ] {
+            let reason = deny_reason(evaluate_worktree_remove_command(
+                command,
+                true,
+                identity,
+                Path::new("/repo"),
+            ));
+            assert!(reason.contains("cannot place it"), "{command}: {reason}");
+        }
+        // A placed `cd` keeps the ADR-0057 re-check path.
+        let target = recheck_target(evaluate_worktree_remove_command(
+            "cd /repo && git worktree remove --force .claude/worktrees/agent-x",
+            true,
+            version_control(),
+            Path::new("/elsewhere"),
+        ));
+        assert_eq!(target, PathBuf::from(WT));
     }
 
     /// #8439: an unknown git global option cannot hide the removal.

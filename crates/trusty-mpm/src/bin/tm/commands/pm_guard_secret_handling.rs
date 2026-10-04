@@ -156,7 +156,8 @@ fn directory_of(operand: &str) -> &Path {
 /// `evaluate_secret_file_read_tool` judges a Write's `file_path` and never its
 /// `content`.
 /// What: [`lone_inert_heredoc`] accepts the command, so its delimiter is a
-/// quoted plain word, its operator line is first and carries no `|`, `;`,
+/// quoted word the #9150 allowlist reads as the shell does, its operator line
+/// is first and carries no `|`, `;`,
 /// `&` or `$`, and nothing follows the terminator. The operator line must
 /// also be `cat` with a `>`/`>>` redirect to a file that is not a device
 /// ([`writes_to_a_device`]): a body `cat` prints, an interpreter runs, or an
@@ -166,8 +167,10 @@ fn directory_of(operand: &str) -> &Path {
 /// Residual, shared with the Write tool: a file a tool runs with no command
 /// naming it (`.git/hooks/*`, an rc file such as `~/.zshenv` given as an
 /// absolute path, `conftest.py` under pytest, `build.rs` under cargo) runs the
-/// body unjudged. A relative destination inside `/dev`, or a symlink to a
-/// device made beforehand, is not seen.
+/// body unjudged. A relative destination inside `/dev`, or a destination
+/// pre-placed as a symlink to `/dev/stdout`, is not seen: this function has no
+/// cwd to resolve the destination from, and its caller in
+/// `pm_guard_secret_read` sits at its line cap (#7833).
 /// Test: `guard_7833_a_quoted_body_cat_writes_to_a_file_is_data`.
 pub(crate) fn body_written_to_a_file(command: &str) -> bool {
     if lone_inert_heredoc(command).is_none() {

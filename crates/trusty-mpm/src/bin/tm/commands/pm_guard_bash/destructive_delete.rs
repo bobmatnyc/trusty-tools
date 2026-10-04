@@ -247,9 +247,9 @@ const STDIN_DATA_CONSUMERS: &[&str] = &["python3", "python", "node", "ruby", "ca
 /// rulings on #7190 bound the mask: a body captured and re-run (`eval
 /// $(cat <<'X'…)`, `read x <<'X'; eval "$x"`, `source /dev/stdin`, a pipe to
 /// a shell) stays live, so the mask applies only where no capture can exist.
-/// What: exactly one data here-document, its delimiter quoted and, unquoted,
-/// only `[A-Za-z0-9_]+`, its operator line the first line, and nothing after
-/// its terminator line, which must be that word. The operator
+/// What: exactly one data here-document, its delimiter quoted and one that
+/// [`super::heredoc::delimiter_word`] accepts (#9150), its operator line the
+/// first line, and nothing after its terminator line. The operator
 /// line carries no `|`, `;`, `&`, `$`, backtick, parenthesis or backslash, and
 /// lexes to a [`STDIN_DATA_CONSUMERS`] program with no prefix assignment or
 /// wrapper: an interpreter takes at most `-`, and `cat` at most one `>`/`>>`
@@ -282,15 +282,12 @@ pub(crate) fn lone_inert_heredoc(command: &str) -> Option<String> {
     if heredocs.len() != 1 || heredocs[0].starts_with("<<<") {
         return None;
     }
-    // #7190: bash and zsh keep a quoted delimiter whole (`<<'A B'`), but the
-    // body scan cuts it at a space, `<` or `>` and so ends the body later than
-    // the shell does. Only a plain word ends both on one line, and that
-    // terminator line is all that may follow the body.
+    // #7190: the terminator line is all that may follow the body. A delimiter
+    // the shell reads whole (`<<'A B'`) never gets here: #9150's scan refuses
+    // it and claims no body.
     let word = &heredocs[0][2..];
     let word = word.strip_prefix('-').unwrap_or(word);
-    let plain_word =
-        |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
-    if !plain_word(word) || command[body.span.1..].trim() != word {
+    if command[body.span.1..].trim() != word {
         return None;
     }
     let plain =
@@ -1364,7 +1361,8 @@ mod tests {
             assert!(class_of(command).is_some(), "{command}");
         }
         // Red-team round: bash and zsh keep a quoted delimiter whole (`A B`,
-        // `E>F`), so the delete after that terminator runs. Allowed at a30ff02fbc.
+        // `E>F`), so the delete after that terminator runs. Allowed at a30ff02fbc;
+        // #9150's scan now refuses the delimiter, so no mask applies.
         for command in [
             "cat <<'A B'\nhello\nA B\nrm -rf /\nA",
             "python3 - <<\"E>F\"\nprint(1)\nE>F\nrm -rf ~\nE",

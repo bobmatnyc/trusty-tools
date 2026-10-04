@@ -85,6 +85,8 @@ mod read_only_programs;
 mod read_only_scratchpad;
 mod secret_file_copy;
 mod sed_awk;
+// #9127: `( … )`, `{ …; }` and reserved words peeled off for the git-verb walker.
+mod shell_groups;
 mod shell_lex;
 // #8756: one substitution scanner for the forbidden-verb and secret rules.
 mod substitutions;
@@ -126,10 +128,12 @@ pub(crate) use destructive_delete::{
 pub(crate) use floor_d4::evaluate_d4_floor;
 pub(crate) use force_push::{GitProbe, LiveGit};
 pub(crate) use head_switch::evaluate_main_checkout_head_switch;
-pub(crate) use linked_worktree_head_move::deny_linked_worktree_head_move;
+pub(crate) use linked_worktree_head_move::{
+    deny_linked_worktree_head_move, deny_main_checkout_head_move,
+};
 pub(crate) use main_checkout::{
     CommitVerdict, docs_commit_deny_reason, evaluate_main_checkout_commit_command,
-    evaluate_main_checkout_destructive_command, head_move_deny_reason, main_checkout_head_move,
+    evaluate_main_checkout_destructive_command,
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
@@ -255,21 +259,29 @@ const MAX_WRAPPER_DEPTH: usize = 8;
 /// is what stops a future rule from inheriting the same hole.
 /// What: `Some(reason)` when any segment, at any wrapper depth, carries
 /// `$'…'`/`$"…"` quoting the lexer mangles ([`shell_lex::has_live_ansi_c_quoting`]),
+/// a program word bash builds by brace expansion
+/// ([`shell_groups::has_brace_expanded_program`], #9127),
 /// a wrapper whose inner command will not lex
 /// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
-/// [`MAX_WRAPPER_DEPTH`]. `None` — the ordinary case — leaves every rule to
-/// classify the command as before.
+/// [`MAX_WRAPPER_DEPTH`], or a here-document delimiter the body scanner cannot
+/// read as the shell does (#9150). `None` — the ordinary case — leaves every
+/// rule to classify the command as before.
 /// Test: `unclassifiable_command_flags_ansi_c_quoting`,
 /// `unclassifiable_command_flags_an_unlexable_wrapper`,
 /// `unclassifiable_command_denies_past_the_depth_cap`,
 /// `unclassifiable_command_allows_ordinary_commands`, and end to end in
-/// `tests/tm_hook_pm_guard.rs`.
+/// `tests/tm_hook_pm_guard.rs` and
+/// `a_quoted_heredoc_delimiter_with_a_word_break_denies`.
 pub(crate) fn unclassifiable_command(command: &str) -> Option<&'static str> {
     unclassifiable_at(command, 0)
 }
 
 /// Depth-aware core of [`unclassifiable_command`].
 fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
+    // #9150: no rule can tell which lines run past an unreadable delimiter.
+    if heredoc::HeredocBodies::scan(command).is_unscannable() {
+        return Some(heredoc::HEREDOC_DELIMITER_REASON);
+    }
     for raw in split_shell_segments_raw(command) {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -277,6 +289,10 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
         }
         if shell_lex::has_live_ansi_c_quoting(trimmed) {
             return Some(ANSI_C_QUOTING_REASON);
+        }
+        // #9127: `{git,-C,<main>,commit}` is a different program once expanded.
+        if shell_groups::has_brace_expanded_program(trimmed) {
+            return Some(shell_groups::BRACE_EXPANSION_REASON);
         }
         match shell_lex::wrapped_command(trimmed) {
             shell_lex::WrappedCommand::Unlexable => return Some(UNLEXABLE_WRAPPER_REASON),
@@ -1112,3 +1128,7 @@ mod false_positive_9001_tests;
 // bound every relaxation.
 #[cfg(test)]
 mod guard_tokenizer_tests;
+
+// #9127: a rule reading the shell-group walk must refuse what it cannot place.
+#[cfg(test)]
+mod step_reader_scan_tests;
