@@ -564,8 +564,7 @@ pub(crate) async fn create_index_report(
     // artifact is adopted and hides itself with its own `.gitignore`. A store
     // that would land in the repository is refused, never redirected. #8147:
     // `colocated: false` never adopts the in-repo corpus.
-    let layout =
-        super::create_layout::registration_layout(&req.id, &req.root_path, req.colocated)?;
+    let layout = super::create_layout::registration_layout(&req.id, &req.root_path, req.colocated)?;
     let colocated = layout == crate::service::storage_layout::StorageLayout::Colocated;
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
