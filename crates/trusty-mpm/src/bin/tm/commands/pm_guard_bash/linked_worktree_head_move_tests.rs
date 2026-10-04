@@ -125,6 +125,28 @@ fn classify_denies_an_unresolved_target() {
     assert!(reason.contains("#8161"), "{reason}");
 }
 
+/// 🔴 REGRESSION (#9127 critic r4 HIGH): an unplaced `eval "cd <repo>"`
+/// moved the reset out of the parked tree and it was allowed; zsh never runs
+/// that `cd`, so the reset lands on the parked tree.
+#[test]
+fn classify_refuses_an_eval_it_cannot_place() {
+    for (command, subagent) in [
+        (
+            format!("command -p eval \"cd {REPO}\"; git reset --keep FETCH_HEAD"),
+            false,
+        ),
+        (format!("noglob eval \"cd {REPO}\"; git merge x"), true),
+    ] {
+        let Some(LinkedHeadMoveCheck::Deny(reason)) = classify(&command, PARKED, subagent) else {
+            panic!("`{command}` must be refused unplaced");
+        };
+        assert!(reason.contains("cannot place it"), "{command}: {reason}");
+    }
+    // A placed `cd` out of the tree keeps its answer.
+    let placed = format!("cd {REPO} && git reset --keep FETCH_HEAD");
+    assert_eq!(classify(&placed, PARKED, false), None);
+}
+
 #[test]
 fn tree_holders_in_refuses_an_answer_without_the_echo() {
     // #8161 critic round: an old daemon answers 200 with no echo — not idle.
