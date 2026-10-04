@@ -124,12 +124,10 @@ nothing here restates it.
 
 `tm pr open` applies your half itself, in one `gh pr edit` after the PR exists:
 the component labels for every crate the diff touches, and the milestone and
-project(s) of the issue the body's first `Refs #N` names. Both are derived, so
-there is nothing for you to type and no flag to pass. Every step is best-effort
-— a `gh` that refuses one of them prints a warning and the PR still opens, and a
-missing `Refs #N` or a docs-only diff prints the line saying which half was
-skipped. Read those lines: a warning is yours to fix on the PR, a "no project or
-milestone" line on a `Refs`-less PR is the correct outcome.
+project(s) of the issue the body's first `Refs #N` names. You pass no flag.
+Each step is best-effort: a refused step prints a warning and the PR still
+opens. A warning is yours to fix on the PR; a "no project or milestone" line on
+a `Refs`-less or docs-only PR is the correct outcome.
 
 🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
 yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
@@ -143,10 +141,24 @@ When scope or claims change mid-flight, edit the PR body — a stale body is a
 defect, and fixing it is yours, not ticketing's.
 
 Default to review: `tm pr open` opens the PR and `tm pr merge <n> --auto` arms
-auto-merge, re-validating the PR body and passing it as the squash commit
-message so the landing commit is the body you wrote, not a concatenation of the
-branch's raw commit messages (#6808). On a host without `tm`, use the
-fallback below. Never merge on your own initiative.
+auto-merge, passing the re-validated PR body as the squash commit message
+(#6808). On a host without `tm`, use the fallback below. Never merge on your
+own initiative.
+
+🔴 **Merge gate (#8614).** A failing check blocks the merge whatever branch
+protection requires; a branch-caused one is never waived. `tm pr merge`
+refuses, with or without `--auto`, on a failed check, on no registered check,
+and on a running check it would not wait for (only `--auto` waits, on required
+checks). It reads required checks from branch protection and rulesets; a failed
+read refuses. `--allow-failing <check>` (exact name, repeatable) waives a
+non-required check and records it in the squash body. Pass it only for a check
+the brief waives by name as pre-existing or unrelated. `--allow-no-checks`
+suits a repo with no CI. Report a refusal as a blocker; never route around it
+with raw `gh pr merge` or `--admin`. Your merge report cites the brief clause
+that authorized it and flags a base with no required checks as a risk.
+
+🔴 **Read `gh repo view --json autoMergeAllowed` before planning a merge, and
+report it (#8640).** `false` means `--auto` fails: merge once checks settle.
 
 🔴 **A 5xx or timeout from a mutating `gh` call is not proof the call failed
 (#8013).** Before retrying `gh pr merge`, `gh pr create`, or any `gh api -X
@@ -156,20 +168,18 @@ already landed: stop, do not re-run the merge, and finish only the step that
 actually failed (deleting the branch, for example). Retry the original call
 only when the state read shows it did not land.
 
-Never pass `--delete-branch`: a worktree holds the base branch (#7104 —
-`fatal: '<base>' is already used by worktree at <path>`) or the head branch
-(#8391 — `failed to delete local branch <head>: ... used by worktree at
-<path>`), and the flag fails post-merge either way though the squash landed.
+Never pass `--delete-branch`: a worktree holds the base branch (#7104) or the
+head branch (#8391), and the flag fails post-merge either way (`... is already
+used by worktree at <path>`) though the squash landed.
 `gh` deletes the local branch before the remote one, so a head-held failure
 leaves the remote ref stranded too.
 
-Use `tm pr merge <n>` — exits 0 on this failure (#7945:
-`crates/trusty-mpm/src/bin/tm/commands/pr/merge.rs:436`) — then `tm pr cleanup
-<n>`, which clears the remote ref, worktree, and local branch
-(`crates/trusty-mpm/src/core/pr_cleanup/mod.rs:315,325,589`).
-`--no-delete-branch` lives at `crates/trusty-mpm/src/bin/tm/cli/actions/pr.rs:207`.
+Use `tm pr merge <n>`: it exits 0 on this failure (#7945) and then runs
+`tm pr cleanup <n>` itself (see "Post-Merge Cleanup").
 
-Fallback without `tm`: (1) `gh pr merge <n> --squash --auto --subject
+Fallback without `tm`, which has no merge gate: (1) once `statusCheckRollup`
+shows no failed or running check the brief does not waive, `gh pr merge <n>
+--squash --subject
 "<title> (#<n>)" --body-file <file>`. Take `<title>` and the body in `<file>`
 from the live PR (`gh pr view <n> --json title,body`), never from a brief
 (#8420); (2) confirm
@@ -187,9 +197,9 @@ advanced first (`crates/trusty-mpm/src/core/pr_cleanup/landed.rs:122`).
 When the PM relays operator authorization to merge directly (e.g. an
 admin-merge), that IS operator authority — comply. Do not demand direct user
 confirmation or treat the PM as a third party (BASE-AGENT's "PM Authority &
-Escalation"). Authorization never buys a bad merge: `--admin` bypasses only
-the bot/review gate, never red or pending CI. Genuine doubt goes back to the
-PM, not a frozen pipeline.
+Escalation"). The merge gate still applies: `--admin` bypasses only the
+bot/review gate, never a failing or running check. Genuine doubt goes back to
+the PM, not a frozen pipeline.
 
 Default to main-based PRs; use stacked PRs only on explicit request.
 
@@ -203,9 +213,9 @@ or report, not a note for later.
 | Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check and means `gh` was never called; exit 3 (`EXIT_PARTIAL`, #7869) means the PR exists but some metadata (assignee, labels, milestone, project) failed — the printed line names the PR, its URL and the missing field(s); finish by hand rather than hunting with `gh pr list --head`; `--dry-run` prints the argv instead of running it |
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment, same tier as a failing test; `tm pr open` runs this itself, so this covers only the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
-| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main/protection" --jq '.required_status_checks.contexts'` — derive the repo, never type a slug) | N/A — a live read, never hand-copied; a stale copy cost one PR its merge (#5836) |
+| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main" --jq '.protection.required_status_checks.contexts'` — derive the repo, never type a slug; `/protection` answers 404 on an unprotected branch) | N/A — a live read, never hand-copied; a stale copy cost one PR its merge (#5836) |
 | Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears every listed PR to merge; exit 1 names the first stop reason (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero; `--json` gives a machine-readable read; full procedure in `tm-workflow.md`'s "Merge-Queue Ownership" section |
-| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
+| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false`, a failed check, or a running check the brief does not waive: do not merge |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict rather than asserting whose red it is |
 | After the task PR's `state: MERGED` is confirmed | `git worktree remove /absolute/repo/.claude/worktrees/task-name` (verified literal path) | A guard refusal is reported; preserve the tree until ownership, clean state and merged status are established |
 
@@ -338,21 +348,17 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
 
 ## Safety Rules
 
-- **Never merge over red.** `--admin` bypasses the bot/review approval gate and
-  nothing else; a failing or pending required check still means do not merge,
-  whoever authorized it.
-- **A third-party suite that never settles is not a gate.** When a check is not
-  in the repo's required contexts and has sat pending with no runner, merge on
-  the required set and say which check you ignored and why. Waiting on it is how
-  a green PR sits for hours.
+- **Never merge over red**, whoever authorized it — see "Merge gate".
+- **A third-party suite that never settles still blocks `tm pr merge`.** Report
+  it by name. Merge over it only with `--allow-failing <check>` when the brief
+  waives that check.
 - **Diff with three dots, always** — `git diff origin/main...HEAD`. Two dots
   compares against whatever `main` happens to be right now and reports every
   commit that landed on main since you branched as if it were yours.
-- **Never force-push over a lease you do not hold alone.** `--force-with-lease`
+- **Rebase pushes use `--force-with-lease`, never `--force`.** It
   checks the remote ref, not who else has the branch checked out — a sibling
   worktree is invisible to it. Confirm you are the sole writer before
   rewriting, and never force-push a shared branch without explicit instruction.
-- Use `--force-with-lease` instead of `--force` when rebasing
 - Archive old branches after 6 months; never delete unmerged work
 - Verify the active account before pushing (`gh auth status`)
 - Use only that account. Never switch `gh` accounts, tokens, or credentials to
@@ -362,7 +368,6 @@ The line is whether a `cargo publish` is bound to the tag: if it is, that is
 - A `BEHIND` block with green CI is not a permission problem: run
   `gh pr update-branch`, or merge the already-green head (see CI Waits); if it
   still won't merge, hand it to the PM.
-- Test thoroughly after conflict resolution before merging
 - **After any post-rebase edit, `git status --porcelain` must read empty
   before you run the gate.** A push ships the committed ref, not the working
   tree, so an edit the gate saw but never committed never reaches CI (#7739).

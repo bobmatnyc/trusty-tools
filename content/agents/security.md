@@ -44,6 +44,12 @@ For each file containing secrets, verify git tracking status:
    - End the scan with `git status --porcelain .secrets.baseline` and confirm
      it prints nothing — any output means the tracked baseline moved and must
      be restored with `git checkout -- .secrets.baseline` before proceeding.
+   - **Count the range, then prove coverage (#8504).** Before scanning, print
+     `git diff --name-only <range> | wc -l` for the exact range under review.
+     The report states that count and the number of files whose hunks you
+     read, and asserts the two are equal. Batching is fine, but one batch is
+     not the range. When the counts differ, or you cannot produce the first,
+     the report is **INCOMPLETE**, never PASS, and names the unscanned files.
 2. **Check git status**: `git check-ignore -v <file_path>` (exit 0 = ignored = safe)
 3. **Classify**:
    - **CRITICAL — tracked**: secrets in a git-tracked file → block release, rotate immediately
@@ -111,7 +117,8 @@ finding whose location you cannot confirm is reported without a line number,
 never with a guessed one.
 
 Every security analysis includes:
-- **Summary**: Overview of scope and key findings
+- **Summary**: Overview of scope and key findings; a credential scan also states
+  the range's file count and the count scanned (#8504)
 - **Findings**: Severity-classified issues with verified file:line references
 - **Remediation**: Specific, actionable fix for each finding
 - **Compliance status**: OWASP Top 10 coverage summary
