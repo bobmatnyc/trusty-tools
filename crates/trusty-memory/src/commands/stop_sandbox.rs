@@ -9,13 +9,14 @@
 //! asks the kernel for the peer pid: the process serving that socket owns the
 //! data dir. [`stop_target`] then signals that pid alone, and only when the
 //! process table shows it as a `trusty-memory` daemon. Any doubt is an error.
-//! `service stop` refuses outright under an override
+//! `service install`, `start` and `stop` refuse outright under an override
 //! ([`refuse_live_unit_under_override`]).
 //! Test: `stop_under_a_data_dir_override_never_reaches_the_live_unit`,
 //! `sandbox_stop_without_proof_of_ownership_fails_and_signals_nothing`,
 //! `sandbox_stop_signals_only_the_socket_owner`,
 //! `stop_target_resolves_the_override_socket_owner_by_peer_pid`,
-//! `service_stop_is_refused_under_a_data_dir_override`.
+//! `service_stop_is_refused_under_a_data_dir_override`,
+//! `service_install_start_and_stop_are_refused_under_a_data_dir_override`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -133,10 +134,11 @@ pub(crate) fn stop_target(
 /// set (#9140).
 ///
 /// Why: the unit is the live install's, whatever data dir this process
-/// resolves; `service stop` boots it out with no data-dir check at all.
+/// resolves; `service install`/`start`/`stop` act on it with no data-dir check (#9140).
 /// What: any `TRUSTY_DATA_DIR_OVERRIDE` value, blank included, is a refusal
 /// naming `command`.
-/// Test: `service_stop_is_refused_under_a_data_dir_override`.
+/// Test: `service_stop_is_refused_under_a_data_dir_override`,
+/// `service_install_start_and_stop_are_refused_under_a_data_dir_override`.
 pub(crate) fn refuse_live_unit_under_override(command: &str) -> Result<()> {
     if std::env::var_os(DATA_DIR_OVERRIDE_ENV).is_some() {
         bail!(

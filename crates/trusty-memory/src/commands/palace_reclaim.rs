@@ -9,8 +9,9 @@
 //! candidate with its path, size, mtime, palace and reason. Drawer counts and
 //! fixture turns are read from a private copy of each `kg.redb`
 //! ([`super::store_snapshot::with_store_copy`]), so no live store is opened,
-//! locked or written. This module has no delete path; an apply step is a later
-//! change that must consume a reviewed manifest.
+//! locked or written. This module has no delete path; the apply and the
+//! trash purge (#9140 ruling f0) live in `palace_reclaim_apply.rs` and
+//! re-use [`scan`], so the reviewed list and the apply share one source.
 //! Test: `reclaim_scan_lists_every_class_and_writes_nothing`,
 //! `reclaim_scan_keeps_recent_and_nonempty_palaces`,
 //! `fixture_turns_match_only_the_fixture_prompt_set` (in
@@ -19,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use trusty_common::memory_core::palace::Drawer;
 use trusty_common::memory_core::store::INCOMPATIBLE_SUFFIX;
 
@@ -53,7 +54,8 @@ pub(crate) const FIXTURE_PROMPTS: &[&str] = &[
 ];
 
 /// Why a path is on the list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+// #9140: `Deserialize` + `Hash` so the apply can read the reviewed list back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReclaimClass {
     /// A redb 2.x store quarantined at open (`*.v2-incompatible`).
@@ -71,7 +73,7 @@ pub enum ReclaimClass {
 }
 
 /// One candidate for reclamation.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReclaimItem {
     pub class: ReclaimClass,
     pub palace: Option<String>,
@@ -297,7 +299,8 @@ pub(crate) fn tree_bytes(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-fn mtime_unix(path: &Path) -> Option<i64> {
+/// A path's own mtime in Unix seconds; a symlink is not followed.
+pub(crate) fn mtime_unix(path: &Path) -> Option<i64> {
     let modified = std::fs::symlink_metadata(path).ok()?.modified().ok()?;
     let secs = modified
         .duration_since(std::time::UNIX_EPOCH)
@@ -380,8 +383,8 @@ impl ReclaimReport {
 
 /// `trusty-memory palace reclaim` — print the dry run for the live data root.
 ///
-/// Why (#9140): the operator entry point. There is no apply flag: ruling b9
-/// keeps deletion out of this build entirely.
+/// Why (#9140): the operator entry point for the dry run. `--apply` and
+/// `--purge-trash` (ruling f0) are separate handlers in `palace_reclaim_apply`.
 /// What: resolves the palace root, runs [`scan`], prints text or JSON.
 /// Test: `reclaim_scan_lists_every_class_and_writes_nothing` covers `scan`.
 pub fn handle_reclaim(json: bool) -> Result<()> {
@@ -400,4 +403,4 @@ pub fn handle_reclaim(json: bool) -> Result<()> {
 
 #[cfg(test)]
 #[path = "palace_reclaim_tests.rs"]
-mod tests;
+pub(crate) mod tests;

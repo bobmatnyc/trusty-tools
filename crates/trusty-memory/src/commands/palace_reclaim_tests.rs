@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
 
-const DAY: i64 = 86_400;
+pub(crate) const DAY: i64 = 86_400;
 
 /// Create palace `name` under `root` holding `drawers`, then drop every handle.
-fn seed_palace(root: &Path, name: &str, drawers: &[Drawer]) -> PathBuf {
+pub(crate) fn seed_palace(root: &Path, name: &str, drawers: &[Drawer]) -> PathBuf {
     let registry = PalaceRegistry::with_max_open(4);
     let palace = Palace {
         id: PalaceId::new(name),
@@ -34,14 +34,14 @@ fn seed_palace(root: &Path, name: &str, drawers: &[Drawer]) -> PathBuf {
     root.join(name)
 }
 
-fn drawer(content: &str, tags: &[&str]) -> Drawer {
+pub(crate) fn drawer(content: &str, tags: &[&str]) -> Drawer {
     let mut d = Drawer::new(uuid::Uuid::new_v4(), content);
     d.tags = tags.iter().map(|t| t.to_string()).collect();
     d
 }
 
 /// Backdate `palace.json` and `last_used` so the palace reads as idle.
-fn backdate(dir: &Path, now: i64, days: i64) {
+pub(crate) fn backdate(dir: &Path, now: i64, days: i64) {
     let then = now - days * DAY;
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(then as u64);
     std::fs::File::options()

@@ -213,3 +213,24 @@ fn service_stop_is_refused_under_a_data_dir_override() {
     let _unset = OverrideGuard::set(None);
     refuse_live_unit_under_override("service stop").expect("allowed without an override");
 }
+
+/// Why (#9140): `service install` and `service start` bootstrap the live
+/// unit just as `service stop` boots it out, so each is refused under an
+/// override; `service logs` only reads and is not. Drives the guard
+/// `handle_service` calls, never `launchctl`.
+#[test]
+fn service_install_start_and_stop_are_refused_under_a_data_dir_override() {
+    use crate::commands::service::{refuse_live_unit_action, ServiceAction};
+    let _env = crate::commands::env_test_lock().blocking_lock();
+    let data = tempfile::tempdir().expect("tempdir");
+    let _override = OverrideGuard::set(Some(data.path().as_os_str()));
+    for (action, name) in [
+        (ServiceAction::Install, "service install"),
+        (ServiceAction::Start, "service start"),
+        (ServiceAction::Stop, "service stop"),
+    ] {
+        let err = refuse_live_unit_action(&action).expect_err(name);
+        assert!(err.to_string().contains(name), "{err}");
+    }
+    refuse_live_unit_action(&ServiceAction::Logs).expect("logs only reads");
+}
