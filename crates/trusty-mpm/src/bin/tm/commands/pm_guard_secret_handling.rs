@@ -40,12 +40,18 @@ const SHELL_REWRITE_BYTES: &[char] = &['$', '`', '*', '?', '[', ']', '{', '}', '
 /// lexically), both [`is_secret_read_target`], and every word in `named` cut
 /// from one of them. A long flag, a third operand, a redirect, an expansion or
 /// another directory keeps the deny. The #7122 worktree-destination rule
-/// judges the same command on its own. Residual: the destination is judged by
-/// name, so a symlink or FIFO already standing under a secret-class name is
-/// followed; making one needs a command this rule refuses, or the #8879
-/// interpreter residual.
-/// Test: `allows_a_same_class_copy_8093`, `denies_a_copy_out_of_the_class_8093`.
-pub(crate) fn same_class_copy(segment: &str, named: &[String]) -> bool {
+/// judges the same command on its own. `cwd` is the hook's working directory
+/// when `segment` is the whole command; with it, or with an absolute
+/// destination, the destination is resolved, and anything already standing
+/// there other than a regular file keeps the deny, since `cp` writes through a
+/// symlink and into a directory.
+/// Residual: tests prove the refusal for an existing directory and a symlink
+/// to a directory. A relative destination with no `cwd` (a `cd` earlier in the
+/// command, a wrapper before `cp`) is judged by name only, and nothing made
+/// after the hook runs is seen.
+/// Test: `allows_a_same_class_copy_8093`, `denies_a_copy_out_of_the_class_8093`,
+/// `denies_a_same_class_copy_onto_a_directory_or_symlink_8093`.
+pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path>) -> bool {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return false;
     }
@@ -86,7 +92,27 @@ pub(crate) fn same_class_copy(segment: &str, named: &[String]) -> bool {
         .iter()
         .flat_map(|op| secret_files_named_in(op, Scan::Argv))
         .collect();
-    named.iter().all(|word| cut.contains(word))
+    if !named.iter().all(|word| cut.contains(word)) {
+        return false;
+    }
+    // A wrapper (`env -C`) may move a relative destination off `cwd`.
+    let dest = Path::new(dest);
+    let resolved = match cwd {
+        _ if dest.is_absolute() => Some(dest.to_path_buf()),
+        Some(cwd) if start == 0 => Some(cwd.join(dest)),
+        _ => None,
+    };
+    resolved.is_none_or(|path| lands_on_a_file(&path))
+}
+
+/// Whether `cp` writing `path` writes that name itself: nothing stands there,
+/// or a regular file does (#8093). A symlink, a directory or an unreadable
+/// entry answers `false`.
+fn lands_on_a_file(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.file_type().is_file(),
+        Err(err) => err.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 /// The directory part of an operand as written, `.` when it has none.

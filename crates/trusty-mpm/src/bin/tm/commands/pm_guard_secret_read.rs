@@ -240,7 +240,7 @@
 //! `cat $(printf '\056env')`, `cat $(echo LmVudg== | base64 -d)` — never
 //! appears as literal path text, so no word scan can see it (see
 //! `DOCUMENTED_RESIDUALS`). #8931 closes that class for a file READ at the
-//! entry point: [`evaluate_secret_file_read`] chains
+//! entry point: [`evaluate_secret_file_read_in`] chains
 //! `pm_guard_secret_substitution_read`, which refuses a file operand whose
 //! substitution it cannot resolve; a GLOB whose only
 //! literal is the TAIL of an `.env.<name>` file
@@ -596,18 +596,21 @@ const TRANSPARENT_SOURCE_EXTENSIONS: &[&str] = &[
 /// `evaluate_process_env_dump_command` (#8756: a launchd or pm2 job's) through
 /// [`evaluate_nested_secret_rules`], which also reads every substitution body
 /// (#8756 round 2), and every other tool to [`evaluate_secret_file_read_tool`].
+/// `cwd` is the hook's working directory, which lets the #8093 copy grant look
+/// at what stands at its destination; `None` judges the destination by name.
 /// Test: `the_unified_entry_point_routes_both_surfaces`,
 /// `the_unified_entry_point_refuses_a_printed_credential`.
-pub(crate) fn evaluate_secret_file_read(
+pub(crate) fn evaluate_secret_file_read_in(
     tool_name: &str,
     tool_input: Option<&serde_json::Value>,
+    cwd: Option<&Path>,
 ) -> Option<String> {
     if tool_name == "Bash" {
         let command = tool_input
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        return evaluate_secret_file_read_command(command)
+        return evaluate_secret_file_read_command_in(command, cwd)
             .or_else(|| evaluate_credential_print_command(command))
             // #7648, #8756: a pod's or a launchd/pm2 job's env dump prints its
             // keys, naming no file; round 2 reads every substitution body too.
@@ -642,6 +645,20 @@ pub(crate) fn evaluate_secret_file_read(
 /// `allows_a_heredoc_body_of_code_that_names_no_secret`,
 /// `denies_a_secret_named_inside_a_heredoc_body`.
 pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String> {
+    evaluate_secret_file_read_command_in(command, None)
+}
+
+/// [`evaluate_secret_file_read_in`] with no working directory, for the tests.
+#[cfg(test)]
+pub(crate) fn evaluate_secret_file_read(
+    tool_name: &str,
+    tool_input: Option<&serde_json::Value>,
+) -> Option<String> {
+    evaluate_secret_file_read_in(tool_name, tool_input, None)
+}
+
+/// [`evaluate_secret_file_read_command`] run from `cwd` (#8093).
+fn evaluate_secret_file_read_command_in(command: &str, cwd: Option<&Path>) -> Option<String> {
     let (argv_text, bodies) = split_heredoc_bodies(command);
     let segments = split_shell_segments(&argv_text);
     // #8723: prose is read as prose only in a one-segment command; a pipe or a
@@ -664,8 +681,9 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
             || terraform_only_consumes_state(trimmed, &named)
             || key_only_consumed(trimmed, &named)
             || listed_or_searched(&argv_text, trimmed, &named)
-            // #8093: a copy that lands on a name this rule also refuses.
-            || same_class_copy(trimmed, &named)
+            // #8093: a copy that lands on a name this rule also refuses. Only
+            // a lone segment runs in the hook's working directory.
+            || same_class_copy(trimmed, &named, cwd.filter(|_| lone))
         // #9001
         {
             continue;

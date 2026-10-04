@@ -431,3 +431,33 @@ fn pm_guard_still_denies_the_b2_bounds() {
     assert_denied("grep -c API_KEY .env");
     assert_denied("terraform apply -var-file=/repo/infra/terraform/local/terraform.tfvars");
 }
+
+/// 🔴 REGRESSION (#8093 critic MEDIUM): the binary resolves a relative copy
+/// destination against the payload's `cwd`, so a symlink standing there
+/// keeps the deny while a new name keeps the grant.
+#[cfg(unix)]
+#[test]
+fn pm_guard_denies_a_same_class_copy_through_a_symlink_8093() {
+    let tree = tempfile::tempdir().expect("tempdir");
+    let outside = tree.path().join("outside");
+    std::fs::create_dir(&outside).expect("outside dir");
+    std::os::unix::fs::symlink(&outside, tree.path().join("terraform.tfstate.link"))
+        .expect("symlink");
+    let verdict = |command: &str| {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "cwd": tree.path(),
+        });
+        let home = guard_home();
+        run_pm_guard(&payload.to_string(), home.path())
+    };
+    let symlink = verdict("cp terraform.tfstate terraform.tfstate.link");
+    assert!(
+        symlink.contains("\"deny\""),
+        "expected DENY, got: {symlink}"
+    );
+    let fresh = verdict("cp terraform.tfstate terraform.tfstate.bak");
+    assert_eq!(fresh.trim(), "", "expected ALLOW, got: {fresh}");
+}

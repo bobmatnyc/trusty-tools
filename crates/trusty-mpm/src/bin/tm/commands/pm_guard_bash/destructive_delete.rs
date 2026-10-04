@@ -247,8 +247,9 @@ const STDIN_DATA_CONSUMERS: &[&str] = &["python3", "python", "node", "ruby", "ca
 /// rulings on #7190 bound the mask: a body captured and re-run (`eval
 /// $(cat <<'X'…)`, `read x <<'X'; eval "$x"`, `source /dev/stdin`, a pipe to
 /// a shell) stays live, so the mask applies only where no capture can exist.
-/// What: exactly one data here-document, its delimiter quoted, its operator
-/// line the first line, and nothing after its terminator line. The operator
+/// What: exactly one data here-document, its delimiter quoted and, unquoted,
+/// only `[A-Za-z0-9_]+`, its operator line the first line, and nothing after
+/// its terminator line, which must be that word. The operator
 /// line carries no `|`, `;`, `&`, `$`, backtick, parenthesis or backslash, and
 /// lexes to a [`STDIN_DATA_CONSUMERS`] program with no prefix assignment or
 /// wrapper: an interpreter takes at most `-`, and `cat` at most one `>`/`>>`
@@ -267,10 +268,6 @@ fn lone_inert_heredoc(command: &str) -> Option<String> {
     if body.expands || !command[..line_start].trim().is_empty() {
         return None;
     }
-    // The terminator line is all that may follow the body.
-    if command[body.span.1..].trim().lines().count() != 1 {
-        return None;
-    }
     let line = &command[line_start..line_end];
     if line.contains(['|', ';', '&', '$', '`', '(', ')', '\\']) {
         return None;
@@ -283,6 +280,17 @@ fn lone_inert_heredoc(command: &str) -> Option<String> {
     let (heredocs, others): (Vec<&String>, Vec<&String>) =
         rest.iter().partition(|t| t.starts_with("<<"));
     if heredocs.len() != 1 || heredocs[0].starts_with("<<<") {
+        return None;
+    }
+    // #7190: bash and zsh keep a quoted delimiter whole (`<<'A B'`), but the
+    // body scan cuts it at a space, `<` or `>` and so ends the body later than
+    // the shell does. Only a plain word ends both on one line, and that
+    // terminator line is all that may follow the body.
+    let word = &heredocs[0][2..];
+    let word = word.strip_prefix('-').unwrap_or(word);
+    let plain_word =
+        |w: &str| !w.is_empty() && w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    if !plain_word(word) || command[body.span.1..].trim() != word {
         return None;
     }
     let plain =
@@ -1354,6 +1362,15 @@ mod tests {
             "rm -rf / ; python3 - <<'PY'\nprint('it's find')\nPY",
         ] {
             assert!(class_of(command).is_some(), "{command}");
+        }
+        // Red-team round: bash and zsh keep a quoted delimiter whole (`A B`,
+        // `E>F`), so the delete after that terminator runs. Allowed at a30ff02fbc.
+        for command in [
+            "cat <<'A B'\nhello\nA B\nrm -rf /\nA",
+            "python3 - <<\"E>F\"\nprint(1)\nE>F\nrm -rf ~\nE",
+            "cat > x.py <<'E<F'\nx\nE<F\nrm -rf $HOME\nE",
+        ] {
+            assert_eq!(class_of(command), Some(DeleteTarget::Root), "{command}");
         }
     }
 }

@@ -3,7 +3,9 @@
 //! Every command goes through `evaluate_secret_file_read`, the entry
 //! `pm_guard` calls, so an allow is an allow from every secret rule.
 
-use crate::commands::pm_guard_secret_read::evaluate_secret_file_read;
+use crate::commands::pm_guard_secret_read::{
+    evaluate_secret_file_read, evaluate_secret_file_read_in,
+};
 
 /// The unified secret verdict for a Bash `command`.
 fn secret(command: &str) -> Option<String> {
@@ -63,6 +65,45 @@ fn denies_a_copy_out_of_the_class_8093() {
         "cp \"$(cat .env)\" .env.bak",
         "mv terraform.tfstate terraform.tfstate.old && cat terraform.tfstate.old",
     ]);
+}
+
+/// 🔴 REGRESSION (#8093 critic MEDIUM): `cp` writes into a directory and
+/// through a symlink, so a destination that already stands as either is no
+/// same-class sibling. Allowed at a30ff02fbc.
+#[cfg(unix)]
+#[test]
+fn denies_a_same_class_copy_onto_a_directory_or_symlink_8093() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cwd = tmp.path();
+    let outside = cwd.join("outside");
+    std::fs::create_dir(&outside).expect("outside dir");
+    std::fs::create_dir(cwd.join("terraform.tfstate.dir")).expect("dir dest");
+    std::os::unix::fs::symlink(&outside, cwd.join("terraform.tfstate.link")).expect("symlink");
+    std::fs::write(cwd.join("terraform.tfstate.old"), "{}").expect("file dest");
+    let in_cwd = |command: &str| {
+        let input = serde_json::json!({ "command": command });
+        evaluate_secret_file_read_in("Bash", Some(&input), Some(cwd))
+    };
+    let absolute = format!(
+        "cp {0}/terraform.tfstate {0}/terraform.tfstate.dir",
+        cwd.display()
+    );
+    for command in [
+        "cp terraform.tfstate terraform.tfstate.dir",
+        "cp terraform.tfstate terraform.tfstate.link",
+        absolute.as_str(),
+    ] {
+        assert!(in_cwd(command).is_some(), "expected DENY: {command}");
+    }
+    // The absolute destination needs no cwd.
+    assert!(secret(&absolute).is_some(), "expected DENY: {absolute}");
+    // A regular file, or nothing, at the destination keeps the grant.
+    for command in [
+        "cp terraform.tfstate terraform.tfstate.old",
+        "cp terraform.tfstate terraform.tfstate.new",
+    ] {
+        assert_eq!(in_cwd(command), None, "{command}");
+    }
 }
 
 /// 🔴 REGRESSION (#8110): an OAuth2 introspection URL, a source directory and
