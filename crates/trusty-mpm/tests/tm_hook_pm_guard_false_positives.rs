@@ -437,17 +437,28 @@ fn pm_guard_still_denies_the_b2_bounds() {
     assert_denied("cp terraform.tfstate /tmp/x.txt");
     assert_denied("grep -c API_KEY .env");
     assert_denied("terraform apply -var-file=/repo/infra/terraform/local/terraform.tfvars");
-    // #8093: a compound or wrapped copy gets no grant.
-    let tree = tempfile::tempdir().expect("tempdir");
-    let state = tree.path().join("terraform.tfstate");
-    std::fs::write(&state, "{}").expect("state");
-    assert_denied(&format!("true; cp {0} {0}.old", state.display()));
-    assert_denied(&format!("command cp {0} {0}.old", state.display()));
+    // #8093: a compound or wrapped copy gets no grant. The payload names a cwd
+    // holding the source, and the bare copy there allows, so each deny is the
+    // wrapper bound and not a missing-cwd or missing-file path.
+    let copy_cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::write(copy_cwd.path().join("terraform.tfstate"), "{}").expect("state");
+    for command in [
+        "true; cp terraform.tfstate terraform.tfstate.old",
+        "command cp terraform.tfstate terraform.tfstate.old",
+    ] {
+        let stdout = pm_guard_stdout_in(command, copy_cwd.path());
+        assert!(stdout.contains("\"deny\""), "expected DENY: {command}");
+    }
+    let control = "cp terraform.tfstate terraform.tfstate.old";
+    let stdout = pm_guard_stdout_in(control, copy_cwd.path());
+    assert_eq!(stdout.trim(), "", "expected ALLOW, got: {stdout}");
     // #8093 critic HIGH: a path-qualified `cp` can be any binary of that name.
     // Each one exists, as `ln -s /bin/cat cp` leaves it, so the #8879 rule
     // judges a compiled program and lets it run; only the copy grant decides.
     #[cfg(unix)]
     {
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tree.path().join("terraform.tfstate"), "{}").expect("state");
         for dir in ["", "bin/", "x/"] {
             std::fs::create_dir_all(tree.path().join(dir)).expect("dir");
             std::os::unix::fs::symlink("/bin/cat", tree.path().join(format!("{dir}cp")))
@@ -491,7 +502,6 @@ fn pm_guard_denies_a_same_class_copy_through_a_symlink_8093() {
 }
 
 /// The guard's stdout for a Bash `command` whose payload names `cwd` (#8093).
-#[cfg(unix)]
 fn pm_guard_stdout_in(command: &str, cwd: &std::path::Path) -> String {
     let payload = serde_json::json!({
         "hook_event_name": "PreToolUse",
