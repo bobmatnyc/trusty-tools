@@ -43,6 +43,7 @@ fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateI
         skip_kg: None,
         skip_vector: None,
         defer_embed: None,
+        colocated: None,
         extra_skip_dirs: None,
         data_file_max_bytes: None,
         allow_sensitive_path: false,

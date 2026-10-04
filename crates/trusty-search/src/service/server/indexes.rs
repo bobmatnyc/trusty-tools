@@ -402,8 +402,8 @@ pub(crate) async fn create_index_report(
     // that tree, so there is no wrong answer to prevent — see
     // `create_index_reaps_stale_cold_entry_for_recreated_id`. A resident handle
     // IS serving, which is the whole difference.
-    let registered_root = state.registry.get(&id).map(|h| h.root_path.clone());
-    if let Some(registered_root) = registered_root {
+    if let Some(registered) = state.registry.get(&id) {
+        let registered_root = registered.root_path.clone();
         if !identifies_same_root(&registered_root, &req.root_path) {
             tracing::warn!(
                 "create_index: refusing to re-register '{}' at {} — that id already \
@@ -418,6 +418,8 @@ pub(crate) async fn create_index_report(
                 &req.root_path,
             ));
         }
+        // #8147: `colocated: false` never silently joins a colocated index.
+        super::create_layout::refuse_layout_change(&req, Some(&*registered)).await?;
         return Ok(serde_json::json!({
             "id": req.id,
             "created": false,
@@ -497,6 +499,9 @@ pub(crate) async fn create_index_report(
             return Err(super::root_overlap::overlap_check_failed_response(&failure));
         }
     }
+    // #8147: before the embedder check, so a warming embedder's `503` never
+    // hides a layout `409` the caller cannot retry past.
+    super::create_layout::refuse_layout_change(&req, None).await?;
     // Why (issue: 10s readiness timeout): the embedder may still be loading
     // when the daemon accepts its first request. Reject hybrid-index creation
     // with `503 Service Unavailable` so the caller (`trusty-search index`)
@@ -557,8 +562,10 @@ pub(crate) async fn create_index_report(
     // protects an in-tree store, and editing the tracked `.gitignore` left an
     // uncommitted change that `reset --hard` reverted. An existing colocated
     // artifact is adopted and hides itself with its own `.gitignore`. A store
-    // that would land in the repository is refused, never redirected.
-    let layout = super::create_layout::registration_layout(&req.id, &req.root_path)?;
+    // that would land in the repository is refused, never redirected. #8147:
+    // `colocated: false` never adopts the in-repo corpus.
+    let layout =
+        super::create_layout::registration_layout(&req.id, &req.root_path, req.colocated)?;
     let colocated = layout == crate::service::storage_layout::StorageLayout::Colocated;
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
