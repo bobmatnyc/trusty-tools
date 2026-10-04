@@ -10,9 +10,9 @@
 //! `>( … )` and backtick bodies of one segment that are live shell syntax.
 //! [`command_substitutions`] does the same for a whole command: every segment
 //! [`split_shell_segments`] yields (so an `sh -c` string is read too), plus
-//! the `$( … )` and backticks of an unquoted-delimiter here-document body,
-//! which the shell expands. Callers recurse into each body themselves, which
-//! is what reaches a nested substitution.
+//! the `$( … )` and backticks of every unquoted-delimiter here-document body,
+//! which the shell expands whoever runs it (#9155). Callers recurse into each
+//! body themselves, which is what reaches a nested substitution.
 //! Test: `substitutions_list_each_live_body_once`,
 //! `substitutions_read_an_expanding_heredoc_body_only`,
 //! `inert_heredoc_bodies_leave_the_argv_text`; the forbidden-verb callers in
@@ -20,7 +20,7 @@
 
 use std::ops::Range;
 
-use super::heredoc::{DataBody, blank_spans, data_bodies};
+use super::heredoc::{HeredocBodies, blank_spans};
 use super::shell_lex::QuoteScan;
 use super::{is_evaluator, split_shell_segments};
 
@@ -175,40 +175,49 @@ fn escaped(bytes: &[u8], i: usize) -> bool {
 ///
 /// What: data here-document bodies leave the argv text first, so a
 /// quoted-delimiter body — literal text — contributes nothing; each remaining
-/// segment contributes its [`segment_substitutions`]; an unquoted-delimiter
-/// body contributes every `$(` and backtick in it, quotes included, since the
-/// body's quotes are literal characters.
-/// Test: `substitutions_read_an_expanding_heredoc_body_only`.
+/// segment contributes its [`segment_substitutions`]; every unquoted-delimiter
+/// body, a shell-run one included (#9155), contributes every `$(` and
+/// backtick in it, quotes included, since the body's quotes are literal
+/// characters. A body found twice is listed once.
+/// Test: `substitutions_read_an_expanding_heredoc_body_only`,
+/// `substitutions_read_a_shell_run_expanding_heredoc_body_9155`.
 pub(crate) fn command_substitutions(command: &str) -> Vec<Substitution> {
-    let owned = data_bodies(command);
-    let bodies: Vec<&DataBody> = owned.iter().collect();
-    let spans: Vec<(usize, usize)> = bodies.iter().map(|b| b.span).collect();
+    let heredocs = HeredocBodies::scan(command);
+    let spans: Vec<(usize, usize)> = heredocs.data().iter().map(|b| b.span).collect();
     let argv_text = blank_spans(command, &spans);
-    let mut found: Vec<Substitution> = split_shell_segments(&argv_text)
+    let found: Vec<Substitution> = split_shell_segments(&argv_text)
         .iter()
         .flat_map(|segment| segment_substitutions(segment.trim()))
         .collect();
-    found.extend(expanding_substitutions(command, &bodies));
-    found
+    with_expanded(found, command, heredocs.expanding())
 }
 
-/// The `$( … )` and backtick bodies an unquoted-delimiter here-document body
-/// among `bodies` runs, quotes included, since its quotes are literal.
-fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitution> {
-    bodies
-        .iter()
-        .filter(|b| b.expands)
-        .flat_map(|body| {
-            scan_bodies(
-                &command[body.span.0..body.span.1],
-                true,
-                |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
-                |_| true,
-            )
-            .into_iter()
-            .map(|(_, body)| body)
-        })
-        .collect()
+/// `found` extended with the `$( … )` and backtick bodies each `expanding`
+/// here-document body runs, read with the body's quotes as literal text, and
+/// any body already listed dropped (#9155).
+///
+/// Why: a body that stays in the argv text (one a program runs as code) is
+/// also read by the argv scan, so without the drop each of its substitutions
+/// would be judged twice per level, which nested bodies multiply.
+fn with_expanded(
+    mut found: Vec<Substitution>,
+    command: &str,
+    expanding: &[(usize, usize)],
+) -> Vec<Substitution> {
+    for &(start, end) in expanding {
+        let bodies = scan_bodies(
+            &command[start..end],
+            true,
+            |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
+            |_| true,
+        );
+        for (_, body) in bodies {
+            if !found.contains(&body) {
+                found.push(body);
+            }
+        }
+    }
+    found
 }
 
 /// `command` with each here-document body that is stdin text blanked, and the
@@ -218,12 +227,17 @@ fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitut
 /// (`git commit -F - <<'EOF'`) as a live substitution and denied it. A body is
 /// kept when its operator line runs it as code ([`runs_as_code`]) or names one
 /// of `runners` — a program that runs its stdin as shell text.
-/// What: blanks the other data bodies ([`blank_spans`]); an unquoted-delimiter
-/// body's `$( … )` and backticks are returned, since the shell runs them.
-/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`.
+/// What: blanks the other data bodies ([`blank_spans`]). Every
+/// unquoted-delimiter body's `$( … )` and backticks are returned, read with
+/// the body's quotes as literal text, whether the body was blanked or kept:
+/// the shell expands them before any program reads the body (#9155). A kept
+/// body stays in the argv text too, so the verb scan still sees what runs.
+/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`,
+/// `blank_inert_heredocs_returns_every_expanding_body_9155`.
 pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, Vec<Substitution>) {
-    let bodies = data_bodies(command);
-    let inert: Vec<&DataBody> = bodies
+    let heredocs = HeredocBodies::scan(command);
+    let spans: Vec<(usize, usize)> = heredocs
+        .data()
         .iter()
         .filter(|b| {
             let line = &command[b.operator_line.0..b.operator_line.1];
@@ -232,11 +246,12 @@ pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, 
                     .split_whitespace()
                     .any(|w| runners.contains(&w.rsplit('/').next().unwrap_or(w)))
         })
+        .map(|b| b.span)
         .collect();
-    let spans: Vec<(usize, usize)> = inert.iter().map(|b| b.span).collect();
+    // #9155: every expanding body, not only the blanked ones, reaches the floor.
     (
         blank_spans(command, &spans),
-        expanding_substitutions(command, &inert),
+        with_expanded(Vec::new(), command, heredocs.expanding()),
     )
 }
 
@@ -251,7 +266,8 @@ pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, 
 /// keeping every byte offset and newline.
 /// Test: `inert_heredoc_bodies_leave_the_argv_text`.
 pub(crate) fn without_inert_heredoc_bodies(command: &str) -> String {
-    let inert: Vec<(usize, usize)> = data_bodies(command)
+    let inert: Vec<(usize, usize)> = HeredocBodies::scan(command)
+        .data()
         .iter()
         .filter(|b| !runs_as_code(&command[b.operator_line.0..b.operator_line.1]))
         .map(|b| b.span)
@@ -317,6 +333,38 @@ mod tests {
         );
         assert!(command_substitutions("cat <<'EOF'\n$(a)\nEOF").is_empty());
         assert_eq!(command_substitutions("bash -c 'echo $(a)'"), closed(&["a"]));
+    }
+
+    /// #9155: a body a shell or interpreter runs still expands, so its
+    /// single-quoted `$(…)` and backtick are listed, each once; a quoted
+    /// delimiter lists nothing.
+    #[test]
+    fn substitutions_read_a_shell_run_expanding_heredoc_body_9155() {
+        assert_eq!(
+            command_substitutions("bash <<X\necho '$(a)' `b` $(c)\nX"),
+            closed(&["b", "c", "a"])
+        );
+        assert!(command_substitutions("bash <<'X'\necho '$(a)'\nX").is_empty());
+    }
+
+    /// #9155: the kept (code-run) body stays in the argv text, and its
+    /// single-quoted substitution is returned beside it; a quoted delimiter
+    /// returns nothing; an inert body is blanked and still returns its own.
+    #[test]
+    fn blank_inert_heredocs_returns_every_expanding_body_9155() {
+        for kept in [
+            "python3 - <<PY\nprint('$(a)')\nPY",
+            "bash <<X\necho '$(a)'\nX",
+        ] {
+            let (argv, found) = blank_inert_heredocs(kept, &[]);
+            assert_eq!(argv, kept);
+            assert_eq!(found, closed(&["a"]), "{kept:?}");
+        }
+        let (_, found) = blank_inert_heredocs("python3 - <<'PY'\nprint('$(a)')\nPY", &[]);
+        assert!(found.is_empty());
+        let (argv, found) = blank_inert_heredocs("cat <<EOF\n'$(a)'\nEOF", &[]);
+        assert!(!argv.contains("$(a)"));
+        assert_eq!(found, closed(&["a"]));
     }
 
     /// A body `cat` or `git` reads is blanked; one `ssh` or a shell runs stays.

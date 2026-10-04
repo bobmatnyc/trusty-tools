@@ -147,6 +147,25 @@ fn data_bodies_record_whether_the_delimiter_was_quoted() {
     }
 }
 
+/// #9155: every unquoted-delimiter body is recorded as expanding, a body a
+/// shell runs included; a quoted one is not.
+#[test]
+fn heredoc_bodies_record_every_expanding_body_9155() {
+    for (command, expanding) in [
+        ("cat <<EOF\n$(date)\nEOF", 1),
+        ("bash <<X\necho '$(date)'\nX", 1),
+        ("python3 - <<PY\nprint('$(date)')\nPY", 1),
+        ("bash <<'X'\necho '$(date)'\nX", 0),
+        ("cat <<'EOF'\n$(date)\nEOF", 0),
+    ] {
+        let bodies = HeredocBodies::scan(command);
+        assert_eq!(bodies.expanding().len(), expanding, "{command:?}");
+    }
+    let command = "bash <<X\necho '$(date)'\nX";
+    let (start, end) = HeredocBodies::scan(command).expanding()[0];
+    assert_eq!(&command[start..end], "echo '$(date)'\n");
+}
+
 /// #9150: a delimiter word outside the `[A-Za-z0-9_.-]` allowlist — a
 /// quoted or escaped break byte, a substitution, a `\` the shell keeps, a
 /// quote or `\` left open — makes the scan unscannable and claim nothing,

@@ -65,6 +65,8 @@ pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
     data: Vec<DataBody>,
+    /// #9155: every body whose delimiter was unquoted, data or shell source.
+    expanding: Vec<(usize, usize)>,
     /// #9150: a delimiter word this scan cannot split as the shell does.
     unscannable: bool,
 }
@@ -165,6 +167,7 @@ impl HeredocBodies {
         let mut spans = Vec::new();
         let mut frames = Vec::new();
         let mut data = Vec::new();
+        let mut expanding = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
@@ -198,6 +201,10 @@ impl HeredocBodies {
                     body_span(command, &lines, line, &delimiter).ok_or(Abandon::NoConfidence)?;
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
+                    if !delimiter.quoted {
+                        // #9155: the shell expands this body whoever runs it.
+                        expanding.push(body.span);
+                    }
                     if framing {
                         // #7266: a body its operator line does not hand to a
                         // shell is data, so no word in it is a path the
@@ -221,6 +228,7 @@ impl HeredocBodies {
             spans,
             frames,
             data,
+            expanding,
             unscannable: false,
         })
     }
@@ -231,6 +239,7 @@ impl HeredocBodies {
             spans: Vec::new(),
             frames: Vec::new(),
             data: Vec::new(),
+            expanding: Vec::new(),
             unscannable: false,
         }
     }
@@ -244,6 +253,24 @@ impl HeredocBodies {
             .iter()
             .find(|span| span.0 == idx && !self.data.iter().any(|d| d.span == **span))
             .map(|span| span.1)
+    }
+
+    /// The data bodies: those whose operator line hands them to something
+    /// other than a shell (#8756).
+    pub(super) fn data(&self) -> &[DataBody] {
+        &self.data
+    }
+
+    /// Every body whose delimiter was unquoted, in order (#9155).
+    ///
+    /// Why: the shell expands `$( … )` and backticks in such a body before any
+    /// program reads it, so a `'` there is a literal character, not quoting.
+    /// [`Self::data`] omits a body a shell runs (`bash <<X`), which hid a
+    /// single-quoted `$(rm -rf /)` from the delete floor.
+    /// What: the span of every unquoted-delimiter body, data or shell source.
+    /// Test: `heredoc_bodies_record_every_expanding_body_9155`.
+    pub(super) fn expanding(&self) -> &[(usize, usize)] {
+        &self.expanding
     }
 
     /// Whether byte `idx` is here-document body content.

@@ -457,13 +457,20 @@ fn classify_at_depth(
 }
 
 /// The substitution bodies `text` runs: those of its argv text with each
-/// stdin-text here-document body blanked, then those an unquoted-delimiter
-/// body expands (#8735 round 2 — a backtick in `git commit -F - <<'EOF'` is
-/// text).
+/// stdin-text here-document body blanked, then those every unquoted-delimiter
+/// body expands, quotes read as literal text (#8735 round 2 — a backtick in
+/// `git commit -F - <<'EOF'` is text; #9155 — `python3 - <<PY` with
+/// `print('$(rm -rf /)')` runs the `rm`). A body found twice is listed once.
+/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`,
+/// `denies_a_single_quoted_substitution_in_an_expanding_body_9155`.
 fn substitution_bodies(text: &str) -> Vec<Substitution> {
     let (argv_text, expanded) = blank_inert_heredocs(text, HEREDOC_RUNNERS);
     let mut bodies = segment_substitutions(&argv_text);
-    bodies.extend(expanded);
+    for body in expanded {
+        if !bodies.contains(&body) {
+            bodies.push(body);
+        }
+    }
     bodies
 }
 
@@ -1287,6 +1294,36 @@ mod tests {
                 class_of(command).is_some_and(DeleteTarget::is_floor),
                 "{command}"
             );
+        }
+    }
+
+    /// #9155: an unquoted-delimiter body is expanded by the shell before any
+    /// program reads it, so a single-quoted substitution in a body an
+    /// interpreter or shell runs still reaches the floor. Each deny row was
+    /// allowed at dcd33f9591. A quoted delimiter, or a body with no
+    /// substitution, still allows.
+    #[test]
+    fn denies_a_single_quoted_substitution_in_an_expanding_body_9155() {
+        for command in [
+            "python3 - <<PY\nprint('$(rm -rf /)')\nPY",
+            "bash <<X\necho '$(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('`rm -rf /`')\nPY",
+            "node - <<JS\nconsole.log('$(rm -rf /)')\nJS",
+            "bash <<X\ncat <<'Y'\n'$(rm -rf ~)'\nY\nX",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+        for command in [
+            "python3 - <<'PY'\nprint('$(rm -rf /)')\nPY",
+            "bash <<'X'\necho '$(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('it is rm -rf / in prose')\nPY",
+            "python3 - <<PY\nprint('hello')\nPY",
+            "python3 - <<PY\nprint('\\$(rm -rf /)')\nPY",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
         }
     }
 

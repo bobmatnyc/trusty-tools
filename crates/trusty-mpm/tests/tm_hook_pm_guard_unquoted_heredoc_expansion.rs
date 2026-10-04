@@ -48,13 +48,17 @@ fn a_single_quoted_substitution_in_an_unquoted_heredoc_body_denies() {
 }
 
 /// No-false-deny control: behind a quoted delimiter the body is literal text,
-/// so the same `$(…)` never runs and the command allows.
+/// so the same `$(…)` never runs and the command allows. An unquoted body
+/// whose single-quoted string holds no substitution expands to itself, and
+/// allows too.
 #[test]
 fn a_single_quoted_substitution_in_a_quoted_heredoc_body_allows() {
     let fx = Fixture::new();
     for command in [
         "python3 - <<'PY'\nprint('$(rm -rf /)')\nPY",
         "node - <<'JS'\nconsole.log('$(rm -rf /)')\nJS",
+        // #9155: the false-deny control for the expanding-body scan.
+        "python3 - <<PY\nprint('hello, it is rm day')\nPY",
     ] {
         let out = run(&fx, &bash_payload(&fx, command), &[], Some("pm"));
         assert!(!out.contains("\"deny\""), "{command:?}: {out}");
