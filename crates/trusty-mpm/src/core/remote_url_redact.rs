@@ -45,6 +45,7 @@ fn ends_authority(c: char) -> bool {
 /// `redact_url_strips_an_x_access_token`, `redact_url_leaves_a_clean_url_alone`,
 /// `redact_url_redacts_every_url_in_free_text`,
 /// `redact_url_masks_a_password_holding_a_raw_slash`,
+/// `redact_url_masks_a_password_holding_a_raw_query_or_fragment_char`,
 /// `redact_url_masks_query_string_tokens`.
 pub fn redact_url(text: &str) -> Cow<'_, str> {
     let userinfo = redact_userinfo(text);
@@ -60,9 +61,10 @@ pub fn redact_url(text: &str) -> Cow<'_, str> {
 /// What: for each `://`, the authority runs to the first [`ends_authority`]
 /// char; when it holds an `@`, everything before the LAST `@` (the userinfo,
 /// as a URL parser splits it) is replaced. When it holds none but has a `:`,
-/// the userinfo may be `user:pa/ss` — git accepts a raw `/` in a password,
-/// which ends the authority early — so it runs to the first `@` in the rest of
-/// the URL. That over-redacts `host:port/path@x`, which is the safe direction.
+/// the userinfo may be `user:pa/ss` — git accepts a raw `/`, `?` or `#` in a
+/// password, which ends the authority early — so it runs to the last `@` in
+/// the rest of the URL. That over-redacts `host:port/path@x`, which is the
+/// safe direction.
 fn redact_userinfo(text: &str) -> Cow<'_, str> {
     if !text.contains("://") || !text.contains('@') {
         return Cow::Borrowed(text);
@@ -99,13 +101,16 @@ fn redact_userinfo(text: &str) -> Cow<'_, str> {
 }
 
 /// Where a `user:pa/ss@host` userinfo ends in `tail`, when `authority` (the
-/// prefix of `tail` up to its first `/`) holds a `:` and no `@`.
+/// prefix of `tail` up to its first `/`, `?` or `#`) holds a `:` and no `@`.
+///
+/// #9124 delta critic: a raw `?` or `#` in the password ends the authority as
+/// a raw `/` does, so the search runs to the end of the URL, not to its query
+/// or fragment, and takes the LAST `@`. That over-redacts a path, query or
+/// fragment holding an `@`, which is the safe direction.
 fn slashed_userinfo_end(tail: &str, authority: &str) -> Option<usize> {
     let colon = authority.find(':')?;
-    let url_end = tail
-        .find(|c: char| ends_url(c) || matches!(c, '?' | '#'))
-        .unwrap_or(tail.len());
-    tail.get(colon..url_end)?.find('@').map(|i| colon + i)
+    let url_end = tail.find(ends_url).unwrap_or(tail.len());
+    tail.get(colon..url_end)?.rfind('@').map(|i| colon + i)
 }
 
 /// The query pass of [`redact_url`]: the value after each `?key=` / `&key=`

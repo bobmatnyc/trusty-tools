@@ -340,8 +340,10 @@ fn slug_as_url(origin: &str) -> String {
 /// the daemon proved.
 /// What: [`super::worktree_repo_slug::parse_repo_slug`] with `aliases`, then
 /// the same slug-to-URL step the daemon uses. An origin that parse refuses —
-/// an unresolvable alias among them — is an `Err` naming why.
-/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`.
+/// an unresolvable alias among them — is an `Err` naming why, with the origin
+/// redacted (#9124).
+/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`,
+/// `proof_origin_refusals_never_quote_the_origin_token`.
 pub(crate) fn proof_origin(
     origin: &str,
     aliases: &super::ssh_host_alias::SshHostAliases,

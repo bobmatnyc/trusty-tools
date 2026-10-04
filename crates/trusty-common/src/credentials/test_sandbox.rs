@@ -87,7 +87,8 @@ fn has_url_userinfo(value: &str) -> bool {
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Live sandboxes in this process. Only [`CredentialSandbox`] moves it, and
-/// this module exists only under `credential-test-sandbox`, so a production
+/// this module exists only in a test build or under `credential-test-sandbox`,
+/// so a production
 /// build has no way to raise it.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 

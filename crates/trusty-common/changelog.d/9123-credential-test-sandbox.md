@@ -9,4 +9,6 @@ Added
   take. While a sandbox is live, `default_store()` skips the OS keychain and
   `env_local_value()` returns `None`; a build without the feature cannot turn
   either tier off. `assert_secret_eq` prints only a redacted preview on
-  mismatch (#9123).
+  mismatch. The crate's own unit tests use the sandbox too: the
+  `resolved_secret_values` scrub test now resolves one synthetic key instead
+  of every real secret on the machine (#9123).

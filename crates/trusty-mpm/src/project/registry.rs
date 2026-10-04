@@ -257,7 +257,9 @@ impl ProjectRegistry {
     /// entry points can never drift on what "implicit registration" means).
     ///
     /// `log_prefix` names the caller in the `warn!`/`info!`/`debug!` lines so
-    /// a daemon log line still identifies which pass produced it.
+    /// a daemon log line still identifies which pass produced it. No line
+    /// carries a URL's credentials (#9124).
+    /// Test: `implicit_registration_never_logs_a_credentialed_url`.
     async fn register_implicit_from_record(
         &self,
         record: &SessionRecord,
@@ -267,9 +269,11 @@ impl ProjectRegistry {
         let Some(repo_url) = &record.repo_url else {
             return;
         };
+        // #9124: a remote URL may embed `user:token@`; every arm logs this.
+        let shown = crate::core::remote_url_redact::redact_url(repo_url);
         let Some(name) = derive_name_from_url(repo_url) else {
             warn!(
-                repo_url = %repo_url,
+                repo_url = %shown,
                 "{log_prefix}: could not derive project name from URL; skipping"
             );
             return;
@@ -300,8 +304,6 @@ impl ProjectRegistry {
         if let Err(e) = self.register(project).await {
             warn!(name = %name, "{log_prefix}: failed to register: {e}");
         } else {
-            // #9124: a remote URL may embed `user:token@`.
-            let shown = crate::core::remote_url_redact::redact_url(repo_url);
             info!(name = %name, repo_url = %shown, "{log_prefix}: registered project from session history");
         }
     }

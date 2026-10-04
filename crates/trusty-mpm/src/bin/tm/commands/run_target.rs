@@ -504,7 +504,9 @@ pub(crate) fn accounts_preflight(explicit: Option<&str>, origin: &str) -> anyhow
 
 /// `Ok` for a chosen (or ambient) account; an operator-facing refusal naming
 /// the resolver's error — for a broken table, the file and the parse error.
-/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`.
+/// The origin is shown redacted (#9124).
+/// Test: `preflight_refuses_a_broken_accounts_table_naming_the_file`,
+/// `preflight_refusal_never_quotes_the_origin_token`.
 pub(crate) fn preflight_verdict(
     origin: &str,
     resolved: Result<Option<trusty_mpm::core::gh_org_accounts::ResolvedAccount>, String>,

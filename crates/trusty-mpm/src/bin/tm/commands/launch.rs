@@ -163,13 +163,8 @@ pub(crate) async fn launch(
         super::origin_plan::OriginPlan::ManagedClone(u)
         | super::origin_plan::OriginPlan::RefuseNonGitHub(u) => u.to_string(),
     };
-    let gh = trusty_common::github_path::parse_github_path(&origin_url).ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not parse a GitHub owner/repo from origin remote: {:?}\n\
-             Run `tm connect` to start a session in the live checkout instead.",
-            trusty_mpm::core::remote_url_redact::redact_url(&origin_url) // #9124
-        )
-    })?;
+    let gh = trusty_common::github_path::parse_github_path(&origin_url)
+        .ok_or_else(|| unparseable_origin_refusal(&origin_url))?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
 
     // 3. Compute the canonical managed project directory
@@ -707,6 +702,17 @@ pub(crate) async fn connect(
     Ok(())
 }
 
+/// The refusal for an origin remote that names no GitHub owner/repo (#1590).
+/// #9124: the origin is shown with its credentials redacted.
+/// Test: `launch_refusal_never_quotes_the_origin_token`.
+fn unparseable_origin_refusal(origin_url: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "could not parse a GitHub owner/repo from origin remote: {:?}\n\
+         Run `tm connect` to start a session in the live checkout instead.",
+        trusty_mpm::core::remote_url_redact::redact_url(origin_url)
+    )
+}
+
 /// Write the PM prompt file `tm connect` hands `claude` (#8286).
 ///
 /// Why: a write failure used to connect without `--append-system-prompt-file`,
@@ -925,6 +931,20 @@ fn session_matches_workdir(session_workdir: &str, target: &str, project_dir: Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #9124: the unparseable-origin refusal reaches the terminal; it never
+    /// quotes the origin's token.
+    #[test]
+    fn launch_refusal_never_quotes_the_origin_token() {
+        const TOKEN: &str = "ghp_9124LaunchSyntheticToken00000";
+        let origin = format!("https://octo:{TOKEN}@gitlab.example/acme/widget.git");
+        let msg = unparseable_origin_refusal(&origin).to_string();
+        assert!(!msg.contains(TOKEN), "the token reached the refusal");
+        assert!(
+            msg.contains("https://***@gitlab.example/acme/widget.git"),
+            "{msg}"
+        );
+    }
 
     /// #8286: `tm launch` refuses, naming the file and the cause, instead of
     /// launching "without prompt".

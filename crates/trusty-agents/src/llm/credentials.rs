@@ -224,38 +224,34 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Helper: clear every registry-provider + ctrl/PM credential env var
-    /// before exercising precedence rules. SAFETY: env-mutation tests below
-    /// are guarded by `#[serial]` AND `crate::test_env::ENV_LOCK` to prevent
-    /// CI data races (#274). The `#[serial]` attribute serializes against any
-    /// other `#[serial]` test in the binary; ENV_LOCK additionally serializes
-    /// against the rest of the crate's env-touching tests that don't use
-    /// serial_test.
+    /// What [`clear_all`] hands back. Field order is drop order: the sandbox
+    /// restores `$HOME` before the `$HOME` lock is released.
+    struct Cleared {
+        sandbox: trusty_common::credentials::test_sandbox::CredentialSandbox,
+        _home: crate::test_env::HomeLockGuard,
+    }
+
+    /// Helper: every credential tier empty before exercising precedence
+    /// rules. Callers are `#[serial]` and hold `crate::test_env::ENV_LOCK`
+    /// (#274).
     ///
-    /// #3464: forces the process-global `.env.local` `OnceLock` loader to
-    /// have already fired (via `force_env_local_loaded`) BEFORE clearing —
-    /// otherwise, on a machine/CI runner with a real `.env.local` (this
-    /// repo's own worktree layout resolves that search up to the shared main
-    /// checkout root), whichever test's `resolve_key` call happens to be the
-    /// very first in the process can have it fire mid-test, silently
-    /// re-populating a var this function just removed. Also clears every
-    /// registry provider's env var (not just the three `pick_credentials`
-    /// names), since `other_configured_providers()` checks all of them.
-    fn clear_all() {
-        crate::test_env::force_env_local_loaded();
-        crate::test_env::clear_all_credential_env_vars();
+    /// #9123: was `force_env_local_loaded` + `clear_all_credential_env_vars`,
+    /// which loaded the developer's real `.env.local` and left the real
+    /// `$HOME` store and keychain in reach. The credential sandbox empties
+    /// every tier — env, `.env.local`, store and keychain — and moves `$HOME`
+    /// to a temp dir, so it also takes the `$HOME` lock.
+    fn clear_all() -> Cleared {
+        let home = crate::test_env::lock_home();
+        Cleared {
+            sandbox: trusty_common::credentials::test_sandbox::CredentialSandbox::enter(),
+            _home: home,
+        }
     }
 
     /// Why: since #3248, `pick_credentials()` also consults the shared secure
-    /// store, not just process env — a dev machine with real credentials
-    /// stashed via `tagent config keys set` (openrouter/anthropic) would make
-    /// a hard-coded `is_none()` flaky. Mirrors the same self-consistency
-    /// pattern `crate::api::server::models`'s `zero_credentials_configured_is_stable`
-    /// test uses for the identical risk: assert `pick_credentials` agrees with
-    /// what `resolve_key` reports right now (with `runner = None`, the
-    /// claude-code branch never fires regardless of store contents, since it
-    /// additionally requires `runner_is_claude_code`), rather than a fixed
-    /// absence.
+    /// store, not just process env. This test used to compare against
+    /// `resolve_key` on the developer's real store; #9123 runs it in the
+    /// credential sandbox, where every tier is empty, so absence is fixed.
     /// Test: itself.
     #[test]
     #[serial]
@@ -263,10 +259,9 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
-        let expect_some = trusty_common::credentials::resolve_key("openrouter").is_some()
-            || trusty_common::credentials::resolve_key("anthropic").is_some();
-        assert_eq!(pick_credentials(None).is_some(), expect_some);
+        let _cleared = clear_all();
+        // #9123: inside the sandbox no tier holds a key, so nothing resolves.
+        assert_eq!(pick_credentials(None), None);
     }
 
     /// Why: the entire point of #3248 — a credential configured ONLY in the
@@ -286,19 +281,10 @@ mod tests {
         let _env_guard = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _home_guard = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let cleared = clear_all();
+        let home = cleared.sandbox.home();
 
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK held for the entire test body.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-        }
-
-        let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+        let store = trusty_common::credentials::FileKeyStore::at(&home);
         trusty_common::credentials::KeyStore::set(
             &store,
             "openrouter",
@@ -307,14 +293,6 @@ mod tests {
         .expect("seed store");
 
         assert_eq!(pick_credentials(None), Some(LlmCredentials::OpenRouter));
-
-        // SAFETY: HOME_LOCK still held.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     #[test]
@@ -323,7 +301,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
         }
@@ -339,7 +317,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-test");
         }
@@ -358,7 +336,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test");
         }
@@ -384,7 +362,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test");
             std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
@@ -411,7 +389,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test");
             std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
@@ -432,7 +410,7 @@ mod tests {
         let _g = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let _cleared = clear_all();
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-test");
             std::env::set_var("OPENROUTER_API_KEY", "sk-or-v1-test");
@@ -576,19 +554,10 @@ mod tests {
         let _env_guard = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _home_guard = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        clear_all();
+        let cleared = clear_all();
+        let home = cleared.sandbox.home();
 
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK held for the entire test body.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-        }
-
-        let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
+        let store = trusty_common::credentials::FileKeyStore::at(&home);
         trusty_common::credentials::KeyStore::set(
             &store,
             "fireworks",
@@ -609,14 +578,6 @@ mod tests {
             "the three providers pick_credentials already checks must never \
              appear here: {other:?}"
         );
-
-        // SAFETY: HOME_LOCK still held.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     /// Why: when NOTHING is configured anywhere, the diagnostic must be
@@ -628,26 +589,8 @@ mod tests {
         let _env_guard = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _home_guard = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        clear_all();
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK held for the entire test body.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-        }
+        let _cleared = clear_all();
 
         assert_eq!(other_configured_providers(), Vec::<&'static str>::new());
-
-        // SAFETY: HOME_LOCK still held.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 }

@@ -12,15 +12,18 @@
 //! (or that enters `CredentialSandbox`) is a credential test. It is safe when
 //! it carries the unkeyed `#[serial]` — the group the sandbox holds; a keyed
 //! group does not exclude it — and reaches `CredentialSandbox::enter`, itself
-//! or through a helper fn in the same file. A mutation propagates through
-//! same-file callers too, so a helper that clears a credential makes its
-//! calling test a credential test. Every other credential test must be named
+//! or through a helper fn. A mutation propagates through callers too, so a
+//! helper that clears a credential makes its calling test a credential test.
+//! Helpers are followed within a file and across files — by a `module::name`
+//! path, a `use` that names the helper or globs its module, or `use super::*`
+//! from a child test file. Every other credential test must be named
 //! in [`KNOWN_UNSANDBOXED`]: an unnamed one fails, and a named one that is now
 //! sandboxed or gone fails until its entry is removed, so the list only
 //! shrinks. Failure messages carry file and fn names only.
 //! Test: `every_credential_test_is_serial_and_sandboxed`,
 //! `the_credential_test_scan_judges_each_shape`,
 //! `a_helper_that_mutates_a_credential_flags_its_test`,
+//! `a_helper_in_another_file_flags_its_test`,
 //! `the_ratchet_judges_by_test_name`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +35,8 @@ use super::scan_tests::{Lexed, eat, is_ident, lex, matching, names_word, skip_ws
 const MUTATIONS: &[&str] = &[
     "set_var",
     "remove_var",
+    // #9123: folds the developer's real `.env.local` into the environment.
+    "load_env_local_once",
     "EnvVarGuard",
     "with_env",
     "in_sandbox",
@@ -45,11 +50,14 @@ const SANDBOX: &str = "CredentialSandbox";
 const MARKERS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "API_KEY", "_KEY"];
 
 /// `(file under crates/, the credential tests in it that are not both
-/// `#[serial]` and sandboxed)`, by name. Every entry predates #9123's guard
-/// and none is one of the issue's rows; many are hermetic by other means (an
-/// injected `MemoryKeyStore`, a pinned `$HOME`, a keyed serial group). About
-/// half entered when helper mutations began to count. Remove a name when you
-/// move its test onto the sandbox; the scan fails until you do.
+/// `#[serial]` and sandboxed)`, by name. Every entry predates #9123's guard.
+/// One is an issue row: `resolve_token_full_chain_coverage`, hermetic by its
+/// own means (`$HOME` and the token file pinned to a temp dir, the App
+/// variables unset, every assertion redacted). Many others are
+/// hermetic the same way (an injected `MemoryKeyStore`, a pinned `$HOME`, a
+/// keyed serial group). About half entered when helper mutations began to
+/// count. Remove a name when you move its test onto the sandbox; the scan
+/// fails until you do.
 const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
     (
         "trusty-agents/src/agents/tests/mod.rs",
@@ -131,17 +139,6 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "trusty-agents/src/llm/credentials.rs",
-        &[
-            "pick_picks_anthropic_when_only_anthropic_set",
-            "pick_picks_claude_code_when_oauth_set",
-            "pick_picks_openrouter_when_only_openrouter_set",
-            "pick_prefers_anthropic_over_openrouter_when_both_set",
-            "pick_prefers_claude_code_only_when_runner_opts_in",
-            "pick_skips_claude_code_when_runner_not_claude_code",
-        ],
-    ),
-    (
         "trusty-agents/src/llm/helpers/tests.rs",
         &[
             "create_client_env_beats_store",
@@ -152,16 +149,15 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
     (
         "trusty-agents/src/llm/http/tests.rs",
         &[
+            // #9123 delta: `#[ignore]`d live calls; they need the real key.
+            "atlascloud_live_completion_round_trips",
+            "fireworks_live_completion_still_round_trips",
             "send_raw_completion_empty_endpoint_credential_falls_back_to_store",
             "send_raw_completion_fireworks_missing_key_errors_with_fireworks_name",
             "send_raw_completion_fireworks_resolves_key_from_store_when_env_absent",
             "send_raw_completion_missing_everywhere_errors_with_provider_name",
             "send_raw_completion_resolves_key_from_store_when_env_absent",
         ],
-    ),
-    (
-        "trusty-agents/src/llm/provider_pin.rs",
-        &["missing_credential_fails_closed_and_names_the_env_var"],
     ),
     (
         "trusty-agents/src/mcp/tests/extensions_tests.rs",
@@ -485,10 +481,6 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         &["token_resolution_from_env", "token_resolution_from_file"],
     ),
     (
-        "trusty-mpm/src/daemon/llm_overseer.rs",
-        &["debug_never_renders_the_api_key", "enabled_with_key"],
-    ),
-    (
         "trusty-mpm/src/runtime/claude_code_tests.rs",
         &[
             "build_inplace_resume_command_carries_oauth_token_when_available",
@@ -699,7 +691,13 @@ fn names_credential(body: &str) -> bool {
 
 /// The names of the fns in `items` that satisfy `seed`, plus every fn that
 /// calls one of them — directly or through another such fn in the same file.
-fn closed_under_callers(items: &[FnItem], seed: impl Fn(&FnItem) -> bool) -> BTreeSet<&str> {
+/// `calls(code, name)` decides what a call is; `seed` carries the cross-file
+/// half, a fn calling another file's helper.
+fn closed_under_callers(
+    items: &[FnItem],
+    seed: impl Fn(&FnItem) -> bool,
+    calls: fn(&str, &str) -> bool,
+) -> BTreeSet<&str> {
     let mut set: BTreeSet<&str> = items
         .iter()
         .filter(|f| seed(f))
@@ -709,7 +707,7 @@ fn closed_under_callers(items: &[FnItem], seed: impl Fn(&FnItem) -> bool) -> BTr
         let more: Vec<&str> = items
             .iter()
             .filter(|f| !set.contains(f.name.as_str()))
-            .filter(|f| set.iter().any(|r| names_word(&f.code, r)))
+            .filter(|f| set.iter().any(|r| calls(&f.code, r)))
             .map(|f| f.name.as_str())
             .collect();
         if more.is_empty() {
@@ -721,25 +719,418 @@ fn closed_under_callers(items: &[FnItem], seed: impl Fn(&FnItem) -> bool) -> BTr
 
 /// The credential tests in one file that are not both `#[serial]` and sandboxed.
 fn unsandboxed_credential_tests(text: &str) -> Vec<String> {
-    let items = fn_items(text);
-    let reach = closed_under_callers(&items, |f| names_word(&f.code, SANDBOX));
-    // #9123: a mutation propagates through same-file callers the way `reach`
-    // does, so a test that clears a credential through a helper is still a
-    // credential test — whether the helper or the test names the variable.
-    let mutates =
-        closed_under_callers(&items, |f| MUTATIONS.iter().any(|m| names_word(&f.code, m)));
-    let mutates_credential = closed_under_callers(&items, |f| {
-        mutates.contains(f.name.as_str()) && names_credential(&f.body)
-    });
-    items
-        .iter()
-        .filter(|f| f.is_test())
-        .filter(|f| {
-            let sandboxed = reach.contains(f.name.as_str());
-            let credential = sandboxed || mutates_credential.contains(f.name.as_str());
-            credential && !(sandboxed && f.is_unkeyed_serial())
+    let files = [("k/src/a.rs".to_string(), text.to_string())];
+    unsandboxed_across(&files)
+        .into_values()
+        .next()
+        .unwrap_or_default()
+}
+
+/// A non-test fn another file can call: the crate and module a path reaches it
+/// by, its name, and the file that defines it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Export {
+    krate: String,
+    module: Option<String>,
+    name: String,
+    rel: String,
+}
+
+/// What one round of the scan hands the next: every helper, in any file, that
+/// reaches the sandbox, mutates the environment, or mutates a credential.
+#[derive(Default, PartialEq, Eq)]
+struct Exports {
+    reach: BTreeSet<Export>,
+    mutates: BTreeSet<Export>,
+    mutates_credential: BTreeSet<Export>,
+}
+
+impl Exports {
+    /// The names of the exports in `self` that `before` lacks.
+    fn names_new_since(&self, before: &Exports) -> BTreeSet<String> {
+        [
+            (&self.reach, &before.reach),
+            (&self.mutates, &before.mutates),
+            (&self.mutates_credential, &before.mutates_credential),
+        ]
+        .into_iter()
+        .flat_map(|(now, then)| now.difference(then).map(|e| e.name.clone()))
+        .collect()
+    }
+}
+
+/// One scanned file.
+struct Source {
+    rel: String,
+    /// The crate identifier (`trusty_agents`) of the crate holding the file.
+    krate: String,
+    /// Test-only code: a `tests/` tree, a `*_tests.rs` / `tests.rs` /
+    /// `test_*.rs` file, or a file gated `#![cfg(test)]`.
+    test_only: bool,
+    items: Vec<FnItem>,
+    /// Each `use` item up to its `;`, comments and literals removed, and
+    /// whether it sits at the file's top level rather than in an inline `mod`.
+    uses: Vec<(String, bool)>,
+    /// The files this one declares with `#[path = "…"]`, as paths under
+    /// `crates/`.
+    path_children: Vec<String>,
+    /// Every identifier in the file's code, so an export it never names is
+    /// skipped without a per-fn search.
+    words: BTreeSet<String>,
+    /// The module name another file reaches this one by; see [`module_name`].
+    module: Option<String>,
+    /// The files a top-level `use super::…` here can name: the file that
+    /// declares this one with `#[path]`, else see [`parent_files`].
+    parents: Vec<String>,
+}
+
+impl Source {
+    fn new(rel: &str, text: &str) -> Self {
+        let code: String = lex(text)
+            .iter()
+            .map(|&(c, code)| if code { c } else { ' ' })
+            .collect();
+        let words = code
+            .split(|c: char| !is_ident(c))
+            .filter(|w| !w.is_empty())
+            .map(str::to_string)
+            .collect();
+        let base = rel.rsplit('/').next().unwrap_or(rel);
+        let test_only = rel.contains("/tests/")
+            || rel.contains("/benches/")
+            || base == "tests.rs"
+            || base.ends_with("_tests.rs")
+            || base.ends_with("_test.rs")
+            || base.starts_with("test_")
+            || code.contains("#![cfg(test)]");
+        Self {
+            rel: rel.to_string(),
+            krate: crate_ident(rel),
+            test_only,
+            items: fn_items(text),
+            uses: use_items(&code),
+            path_children: path_children(rel, text),
+            words,
+            module: module_name(rel),
+            parents: parent_files(rel),
+        }
+    }
+
+    /// Whether `f`, a fn in this file, calls `e`, a fn in another file: by a
+    /// `module::name` path into `e`'s crate, or by its bare name after a `use`
+    /// that imports it.
+    fn calls(&self, f: &FnItem, e: &Export, crates: &BTreeSet<String>) -> bool {
+        let Some(module) = &e.module else {
+            return names_word(&f.code, &e.name) && self.imports(e, crates);
+        };
+        let path = format!("{module}::{}", e.name);
+        let qualified = f.code.match_indices(&path).any(|(at, _)| {
+            let before = &f.code[..at];
+            let after = &f.code[at + path.len()..];
+            if before.chars().next_back().is_some_and(is_ident)
+                || after.chars().next().is_some_and(is_ident)
+            {
+                return false;
+            }
+            let start = before
+                .char_indices()
+                .rev()
+                .find(|&(_, c)| !(is_ident(c) || c == ':'))
+                .map_or(0, |(i, c)| i + c.len_utf8());
+            self.reaches_crate(&before[start..], e, crates)
+        });
+        qualified || (names_word(&f.code, &e.name) && self.imports(e, crates))
+    }
+
+    /// Whether a path that starts `prefix` (`trusty_common::a::`, `crate::`,
+    /// `super::`, or nothing) lands in `e`'s crate: a named workspace crate
+    /// must be `e`'s, and any other start stays in this file's crate.
+    fn reaches_crate(&self, prefix: &str, e: &Export, crates: &BTreeSet<String>) -> bool {
+        let first = prefix
+            .trim_start_matches(':')
+            .split("::")
+            .next()
+            .unwrap_or("");
+        if crates.contains(first) {
+            first == e.krate
+        } else {
+            self.krate == e.krate
+        }
+    }
+
+    /// Whether a `use` item here brings `e` into scope, by name or by glob.
+    fn imports(&self, e: &Export, crates: &BTreeSet<String>) -> bool {
+        self.uses.iter().any(|(u, top)| {
+            let path = u.trim_start_matches("use").trim_start();
+            // An inline `mod tests`'s `super` is this same file.
+            let from = e.module.as_ref().is_some_and(|m| names_word(u, m))
+                || (*top && names_word(u, "super") && self.parents.contains(&e.rel));
+            from && self.reaches_crate(path, e, crates)
+                && (names_word(u, &e.name) || u.contains('*'))
         })
-        .map(|f| f.name.clone())
+    }
+}
+
+/// The crate identifier of a path under `crates/`: its first segment with
+/// `-` read as `_`.
+fn crate_ident(rel: &str) -> String {
+    rel.split('/').next().unwrap_or(rel).replace('-', "_")
+}
+
+/// Every `use` item in `code`, from the keyword to its `;`, and whether it
+/// sits outside every brace (a file-level `use`).
+fn use_items(code: &str) -> Vec<(String, bool)> {
+    code.match_indices("use")
+        .filter(|&(at, _)| {
+            !code[..at].chars().next_back().is_some_and(is_ident)
+                && code[at + 3..].starts_with(char::is_whitespace)
+        })
+        .filter_map(|(at, _)| {
+            let before = &code[..at];
+            let top = before.matches('{').count() == before.matches('}').count();
+            code[at..]
+                .find(';')
+                .map(|end| (code[at..at + end].to_string(), top))
+        })
+        .collect()
+}
+
+/// The files `text` (at `rel`) declares with `#[path = "…"]`, resolved
+/// against `rel`'s directory.
+fn path_children(rel: &str, text: &str) -> Vec<String> {
+    let dir = rel.rsplit_once('/').map_or("", |(dir, _)| dir);
+    text.match_indices("#[path")
+        .filter_map(|(at, _)| {
+            let rest = &text[at..];
+            let open = rest.find('"')?;
+            let len = rest[open + 1..].find('"')?;
+            let target = &rest[open + 1..open + 1 + len];
+            Some(format!("{dir}/{target}"))
+        })
+        .collect()
+}
+
+/// The module name a file under `crates/` is reached by from another file:
+/// `k/src/test_env.rs` is `test_env`, `k/src/a/mod.rs` is `a`, and
+/// `trusty-x/src/lib.rs` is `trusty_x`. A binary root has none.
+fn module_name(rel: &str) -> Option<String> {
+    let (dir, file) = rel.rsplit_once('/')?;
+    match file.strip_suffix(".rs")? {
+        "mod" => dir.rsplit('/').next().map(str::to_string),
+        "lib" => dir
+            .strip_suffix("/src")
+            .map(|k| k.rsplit('/').next().unwrap_or(k).replace('-', "_")),
+        "main" | "build" => None,
+        stem => Some(stem.to_string()),
+    }
+}
+
+/// The files that may hold the parent module of `rel` when no file declares
+/// it with `#[path]`: the parent module's `mod.rs`, `<dir>.rs`, `lib.rs` or
+/// `main.rs`.
+fn parent_files(rel: &str) -> Vec<String> {
+    let Some((dir, file)) = rel.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let stem = file.trim_end_matches(".rs");
+    let mut out = Vec::new();
+    // A `mod.rs` is its directory's module, so its parent is one level up.
+    let parent_dir = if stem == "mod" {
+        dir.rsplit_once('/').map_or("", |(up, _)| up)
+    } else {
+        dir
+    };
+    if !parent_dir.is_empty() {
+        for root in ["mod", "lib", "main"] {
+            out.push(format!("{parent_dir}/{root}.rs"));
+        }
+        out.push(format!("{parent_dir}.rs"));
+    }
+    out
+}
+
+/// The fns in one file that reach the sandbox, mutate the environment, and
+/// mutate a credential, cross-file helpers included.
+struct Verdicts<'a> {
+    reach: BTreeSet<&'a str>,
+    mutates: BTreeSet<&'a str>,
+    mutates_credential: BTreeSet<&'a str>,
+}
+
+/// One file's verdicts for one round. `scan` judges its tests; `export` is
+/// what other files may inherit, built with [`calls_strictly`] so a same-file
+/// name collision (`tempfile::Builder::new()` read as a call to this file's
+/// `new`) stays in this file.
+struct Judged<'a> {
+    scan: Verdicts<'a>,
+    export: Verdicts<'a>,
+}
+
+/// Whether `code` calls a fn named `name` the way a call to a free helper or
+/// to one of `Self`'s fns reads: never `.name(`, and never `Type::name` for a
+/// type other than `Self`.
+fn calls_strictly(code: &str, name: &str) -> bool {
+    code.match_indices(name).any(|(at, _)| {
+        let (before, after) = (&code[..at], &code[at + name.len()..]);
+        if before.chars().next_back().is_some_and(is_ident)
+            || after.chars().next().is_some_and(is_ident)
+        {
+            return false;
+        }
+        let before = before.trim_end();
+        if before.ends_with('.') {
+            return false;
+        }
+        let Some(path) = before.strip_suffix("::") else {
+            return true;
+        };
+        let start = path
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| !is_ident(c))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let segment = &path[start..];
+        segment == "Self" || !segment.starts_with(|c: char| c.is_ascii_uppercase())
+    })
+}
+
+/// Judge `src` given what the previous round found in every other file.
+fn judge<'a, 'e>(src: &'a Source, ext: &'e Exports, crates: &BTreeSet<String>) -> Judged<'a> {
+    // Only the exports this file names at all, and never its own fns.
+    let relevant = |set: &'e BTreeSet<Export>| -> Vec<&'e Export> {
+        set.iter()
+            .filter(|e| e.rel != src.rel && src.words.contains(&e.name))
+            .collect()
+    };
+    let calls_any = |f: &FnItem, es: &[&Export]| es.iter().any(|e| src.calls(f, e, crates));
+    let (reach_ext, mutates_ext) = (relevant(&ext.reach), relevant(&ext.mutates));
+    let credential_ext = relevant(&ext.mutates_credential);
+    let verdicts = |calls: fn(&str, &str) -> bool| {
+        let reach = closed_under_callers(
+            &src.items,
+            |f| names_word(&f.code, SANDBOX) || calls_any(f, &reach_ext),
+            calls,
+        );
+        // #9123: a mutation propagates through callers the way `reach` does, so
+        // a test that clears a credential through a helper is still a
+        // credential test — whether the helper or the test names the variable,
+        // and (#9123 delta critic) whether the helper lives in this file or
+        // another.
+        let mutates = closed_under_callers(
+            &src.items,
+            |f| MUTATIONS.iter().any(|m| names_word(&f.code, m)) || calls_any(f, &mutates_ext),
+            calls,
+        );
+        let mutates_credential = closed_under_callers(
+            &src.items,
+            |f| {
+                (mutates.contains(f.name.as_str()) && names_credential(&f.body))
+                    || calls_any(f, &credential_ext)
+            },
+            calls,
+        );
+        Verdicts {
+            reach,
+            mutates,
+            mutates_credential,
+        }
+    };
+    Judged {
+        scan: verdicts(names_word),
+        export: verdicts(calls_strictly),
+    }
+}
+
+impl Judged<'_> {
+    /// The credential tests in `src` that are not both `#[serial]` and
+    /// sandboxed.
+    fn unsandboxed(&self, src: &Source) -> Vec<String> {
+        src.items
+            .iter()
+            .filter(|f| f.is_test())
+            .filter(|f| {
+                let sandboxed = self.scan.reach.contains(f.name.as_str());
+                let credential =
+                    sandboxed || self.scan.mutates_credential.contains(f.name.as_str());
+                credential && !(sandboxed && f.is_unkeyed_serial())
+            })
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    /// Add this file's non-test fns in each set to `out`.
+    fn export(&self, src: &Source, out: &mut Exports) {
+        let pick = |set: &BTreeSet<&str>, into: &mut BTreeSet<Export>| {
+            into.extend(
+                src.items
+                    .iter()
+                    .filter(|f| !f.is_test() && set.contains(f.name.as_str()))
+                    .map(|f| Export {
+                        krate: src.krate.clone(),
+                        module: src.module.clone(),
+                        name: f.name.clone(),
+                        rel: src.rel.clone(),
+                    }),
+            );
+        };
+        pick(&self.export.reach, &mut out.reach);
+        pick(&self.export.mutates, &mut out.mutates);
+        pick(&self.export.mutates_credential, &mut out.mutates_credential);
+    }
+}
+
+/// The unsandboxed credential tests in `files` (`(path under crates/, text)`),
+/// by file, with helpers followed across files.
+///
+/// Why: the #9123 delta critic found tests clearing every credential through
+/// `trusty-agents/src/test_env.rs` helpers, which a same-file scan never saw.
+/// What: a file's helpers are judged on their own first. Every helper found
+/// that way is exported; each round re-judges the files that name a new
+/// export, until a round adds none. A test-only file re-exports what it gains
+/// from another file, so a test helper wrapping a test helper is followed.
+/// A production file exports only its own-file verdicts: a production fn's
+/// reference to another module is not a call on a test's path, and following
+/// one let a router builder inherit `runtime::run`'s argv-to-environment
+/// writes. Paths stay in the crate they name.
+/// Test: `a_helper_in_another_file_flags_its_test`.
+fn unsandboxed_across(files: &[(String, String)]) -> BTreeMap<String, Vec<String>> {
+    let mut sources: Vec<Source> = files.iter().map(|(rel, t)| Source::new(rel, t)).collect();
+    // A `#[path]`-declared file's `super` is the file that declares it.
+    let declared_by: BTreeMap<String, String> = sources
+        .iter()
+        .flat_map(|s| s.path_children.iter().map(|c| (c.clone(), s.rel.clone())))
+        .collect();
+    for src in &mut sources {
+        if let Some(parent) = declared_by.get(&src.rel) {
+            src.parents = vec![parent.clone()];
+        }
+    }
+    let crates: BTreeSet<String> = sources.iter().map(|s| s.krate.clone()).collect();
+    let none = Exports::default();
+    let own: Vec<Judged> = sources.iter().map(|s| judge(s, &none, &crates)).collect();
+    let mut judged: Vec<Judged> = sources.iter().map(|s| judge(s, &none, &crates)).collect();
+    let mut used = Exports::default();
+    loop {
+        let mut next = Exports::default();
+        for ((src, own), now) in sources.iter().zip(&own).zip(&judged) {
+            if src.test_only { now } else { own }.export(src, &mut next);
+        }
+        if next == used {
+            break;
+        }
+        let fresh = next.names_new_since(&used);
+        for (src, slot) in sources.iter().zip(judged.iter_mut()) {
+            if fresh.iter().any(|n| src.words.contains(n)) {
+                *slot = judge(src, &next, &crates);
+            }
+        }
+        used = next;
+    }
+    sources
+        .iter()
+        .zip(&judged)
+        .map(|(src, j)| (src.rel.clone(), j.unsandboxed(src)))
+        .filter(|(_, tests)| !tests.is_empty())
         .collect()
 }
 
@@ -794,20 +1185,16 @@ fn every_credential_test_is_serial_and_sandboxed() {
         sources.len()
     );
 
-    let found: BTreeMap<String, BTreeSet<String>> = sources
-        .iter()
-        .map(|(rel, text)| {
-            let tests = unsandboxed_credential_tests(text).into_iter().collect();
-            (rel.clone(), tests)
-        })
-        .filter(|(_, tests): &(String, BTreeSet<String>)| !tests.is_empty())
+    let found: BTreeMap<String, BTreeSet<String>> = unsandboxed_across(&sources)
+        .into_iter()
+        .map(|(rel, tests)| (rel, tests.into_iter().collect()))
         .collect();
     let (unlisted, stale) = ratchet(&found, KNOWN_UNSANDBOXED);
     assert!(
         unlisted.is_empty(),
         "#9123: a credential test must be the unkeyed `#[serial]` and enter \
          `trusty_common::credentials::test_sandbox::CredentialSandbox` (itself or \
-         through a helper in the same file). Not in KNOWN_UNSANDBOXED:\n  {}",
+         through a helper). Not in KNOWN_UNSANDBOXED:\n  {}",
         unlisted.join("\n  ")
     );
     assert!(
@@ -944,4 +1331,91 @@ fn a_helper_that_mutates_a_credential_flags_its_test() {
     let generic = "fn put(k: &str) { unsafe { std::env::set_var(k, \"v\") } }\n\
                    #[test]\nfn t() { put(\"GH_TOKEN\"); }";
     assert_eq!(unsandboxed_credential_tests(generic), vec!["t".to_string()]);
+}
+
+/// Why: the #9123 delta critic found tests that clear every credential through
+/// `trusty-agents/src/test_env.rs`'s `clear_all_credential_env_vars` and
+/// `force_env_local_loaded`; a scan that follows same-file helpers only never
+/// saw them.
+/// What: helpers in `k/src/test_env.rs` and `k/src/c.rs`; callers in other
+/// files reach them by a `module::name` path, a named `use`, `use super::*`
+/// from a `#[path]` test file, and a crate-qualified path from an integration
+/// test. Each unsandboxed caller is flagged. Not flagged: a caller sandboxed
+/// through another file's helper, a same-named fn in an unrelated module or
+/// another crate, and a test reaching the helper only through a production fn
+/// in a third file.
+/// Test: this test.
+#[test]
+fn a_helper_in_another_file_flags_its_test() {
+    let file = |rel: &str, text: &str| (rel.to_string(), text.to_string());
+    let files = [
+        file(
+            "k/src/test_env.rs",
+            "pub fn clear_all() { unsafe { std::env::remove_var(\"CLAUDE_CODE_OAUTH_TOKEN\") } }\n\
+             pub fn load() { trusty_common::credentials::load_env_local_once(); }\n\
+             pub fn sandbox() -> CredentialSandbox { CredentialSandbox::enter() }",
+        ),
+        file(
+            "k/src/qualified.rs",
+            "#[test]\n#[serial(k)]\nfn by_path() { crate::test_env::clear_all(); }",
+        ),
+        file(
+            "k/src/imported.rs",
+            "use crate::test_env::{clear_all, load};\n#[test]\nfn by_use() { clear_all(); }",
+        ),
+        file(
+            "k/src/loader.rs",
+            "#[test]\n#[serial]\nfn by_loader() { crate::test_env::load(); \
+             let _ = std::env::var(\"OPENROUTER_API_KEY\"); }",
+        ),
+        file(
+            "k/src/c.rs",
+            "fn wipe() { unsafe { std::env::remove_var(\"X_API_KEY\") } }\n\
+             #[cfg(test)]\n#[path = \"c_tests.rs\"]\nmod tests;",
+        ),
+        file(
+            "k/src/c_tests.rs",
+            "use super::*;\n#[test]\nfn by_super() { wipe(); }",
+        ),
+        file(
+            "k/src/fixed.rs",
+            "#[test]\n#[serial]\nfn sandboxed() { let _s = crate::test_env::sandbox(); \
+             crate::test_env::clear_all(); }",
+        ),
+        file(
+            "k/src/unrelated.rs",
+            "#[test]\nfn other() { other::clear_all(); }",
+        ),
+        file(
+            "k/tests/it.rs",
+            "#[test]\nfn by_crate() { k::test_env::clear_all(); }",
+        ),
+        file(
+            "q/src/foreign.rs",
+            "#[test]\nfn foreign() { crate::test_env::clear_all(); }",
+        ),
+        file(
+            "k/src/prod.rs",
+            "pub fn run() { crate::test_env::clear_all(); }",
+        ),
+        file(
+            "k/src/via_prod.rs",
+            "#[test]\nfn through_prod() { crate::prod::run(); }",
+        ),
+    ];
+    let found = unsandboxed_across(&files);
+    let flagged: Vec<(&str, &str)> = found
+        .iter()
+        .flat_map(|(rel, tests)| tests.iter().map(move |t| (rel.as_str(), t.as_str())))
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![
+            ("k/src/c_tests.rs", "by_super"),
+            ("k/src/imported.rs", "by_use"),
+            ("k/src/loader.rs", "by_loader"),
+            ("k/src/qualified.rs", "by_path"),
+            ("k/tests/it.rs", "by_crate"),
+        ]
+    );
 }

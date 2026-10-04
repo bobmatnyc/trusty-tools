@@ -304,13 +304,13 @@ static LOADED: OnceLock<()> = OnceLock::new();
 /// Why (#9123): a credential test that reaches [`load_env_local_once`] first
 /// in its test binary loads the developer's real `.env.local` into the
 /// process. A test sandbox calls this before anything else so the loader can
-/// never read a real file for the rest of the process. Test-feature only, so
-/// no production caller can switch the loader off.
+/// never read a real file for the rest of the process. Test builds and the
+/// test feature only, so no production caller can switch the loader off.
 /// What: sets the latch [`load_env_local_once`] checks. `true` when this call
 /// set it — nothing has been or will be loaded — and `false` when a load
 /// already ran, in which case the caller must clear what it loaded.
 /// Test: `credentials::test_sandbox::tests::the_sandbox_reads_no_env_local`.
-#[cfg(feature = "credential-test-sandbox")]
+#[cfg(any(test, feature = "credential-test-sandbox"))]
 pub(crate) fn skip_env_local_load() -> bool {
     LOADED.set(()).is_ok()
 }

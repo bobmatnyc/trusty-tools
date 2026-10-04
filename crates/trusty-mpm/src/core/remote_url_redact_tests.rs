@@ -73,6 +73,27 @@ fn redact_url_masks_a_password_holding_a_raw_slash() {
     assert_eq!(out, "https://***@github.com/acme/widget.git");
 }
 
+/// Why (#9124 delta critic): a raw `?` or `#` in a password ends the authority
+/// too, and the old search stopped at the query or fragment, so the password
+/// survived whole.
+/// Test: this test.
+#[test]
+fn redact_url_masks_a_password_holding_a_raw_query_or_fragment_char() {
+    for url in [
+        "https://octo:ab#cd9124Secret@github.com/x",
+        "https://octo:ab?cd9124Secret@github.com/x",
+        "https://octo:a?b#c@d9124Secret@github.com/x?page=2#top",
+    ] {
+        let out = redact_url(url);
+        assert!(!out.contains("9124Secret"), "a password survived");
+        assert!(!out.contains("octo"), "the user survived");
+        assert!(out.starts_with("https://***@github.com/x"), "{out}");
+    }
+    // An `@` in a later query is over-redacted: the safe direction.
+    let query = "https://host:8443/p?who=a@b";
+    assert_eq!(redact_url(query), "https://***@b");
+}
+
 /// Why: GitLab's `private_token`, OAuth's `access_token` and friends carry the
 /// credential in the query string, not the userinfo.
 /// Test: this test.
