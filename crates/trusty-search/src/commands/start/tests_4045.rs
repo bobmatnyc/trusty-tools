@@ -131,6 +131,9 @@ async fn warm_boot_registers_one_corpus_under_exactly_one_id() {
     unsafe {
         std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
         std::env::set_var("TRUSTY_DISABLE_WATCHER", "1");
+        // #8275: these fixtures carry no recency stamp; lift the age gate so
+        // the boot still restores them eagerly.
+        std::env::set_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV, "0");
     }
 
     // Two roots, one corpus file. The hard link gives them a shared
@@ -189,6 +192,7 @@ async fn warm_boot_registers_one_corpus_under_exactly_one_id() {
     unsafe {
         std::env::remove_var("TRUSTY_DATA_DIR");
         std::env::remove_var("TRUSTY_DISABLE_WATCHER");
+        std::env::remove_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV);
     }
 
     // The invariant, stated over the whole registry rather than over the

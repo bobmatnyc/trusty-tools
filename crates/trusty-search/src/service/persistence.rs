@@ -227,7 +227,11 @@ pub struct PersistedIndex {
     /// Why: `TRUSTY_WARMBOOT_MAX_INDEXES` ranks indexes by recency to decide which
     /// to warm-boot eagerly. Sort key = `max(last_queried_unix, last_indexed_unix)`.
     /// `None` means never queried (first-run / pre-upgrade).
-    /// What: updated fire-and-forget in `search_handler` (rate-limited ≤ 60 s).
+    /// What: updated fire-and-forget by `recency_stamp::stamp_last_queried` on a
+    /// per-index search (rate-limited ≤ 60 s). A query text that reaches several
+    /// indexes within a few seconds stamps none of them, and the global fan-out
+    /// never stamps (#8275). Warm-boot skips an entry older than
+    /// `TRUSTY_WARMBOOT_MAX_AGE_HOURS`.
     /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_queried_unix: Option<u64>,

@@ -63,6 +63,46 @@ pub fn select_warmboot_entries(
     (sorted, cold)
 }
 
+/// Warm-boot's split: drop stale entries first, then apply the recency cap.
+///
+/// Why (#8275): the cap alone loaded the top N by recency however old the
+/// stamp, so indexes untouched for days filled the boot set and the daemon
+/// reached 8.7 GB six minutes after a restart. Filtering before the cut means
+/// a stale index never takes a slot from a fresh one. Warm-boot only: the
+/// residency sweep keeps calling [`select_warmboot_entries`] directly.
+/// What: with `max_age = None` this is exactly [`select_warmboot_entries`].
+/// Otherwise an entry is stale when its [`warmboot_sort_key`] is `0` (never
+/// queried or indexed) or older than `now_unix - max_age`. Stale entries go
+/// cold; the fresh rest go through the cap. A cold entry still lazy-loads on
+/// its first query.
+/// Test: `age_gate_keeps_only_the_fresh_entries_under_the_cap`,
+/// `age_gate_zero_means_no_limit`, `age_gate_treats_never_queried_as_stale`
+/// in `age_gate_8275_tests`.
+pub fn select_fresh_warmboot_entries(
+    entries: Vec<PersistedIndex>,
+    max_n: Option<usize>,
+    max_age: Option<std::time::Duration>,
+    now_unix: u64,
+) -> (Vec<PersistedIndex>, Vec<PersistedIndex>) {
+    let Some(max_age) = max_age else {
+        return select_warmboot_entries(entries, max_n);
+    };
+    let total = entries.len();
+    let cutoff = now_unix.saturating_sub(max_age.as_secs());
+    let (fresh, mut stale): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| {
+        let key = warmboot_sort_key(e);
+        key > 0 && key >= cutoff
+    });
+    let (eager, mut cold) = select_warmboot_entries(fresh, max_n);
+    cold.append(&mut stale);
+    debug_assert_eq!(eager.len() + cold.len(), total, "age gate lost an entry");
+    (eager, cold)
+}
+
+#[cfg(test)]
+#[path = "age_gate_8275_tests.rs"]
+mod age_gate_8275_tests;
+
 /// Why an entry is parked in the cold store (#4250).
 ///
 /// Why: the store held both populations in one `DashMap` with nothing to tell

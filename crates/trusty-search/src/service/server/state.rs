@@ -437,6 +437,9 @@ pub struct SearchAppState {
     /// interval has elapsed or the field was never written.
     /// Test: `last_queried_cache_rate_limits_disk_writes` in `tests_search.rs`.
     pub last_queried_write_cache: Arc<DashMap<crate::core::registry::IndexId, u64>>,
+    /// Groups per-index searches by query text so a sweep across indexes does
+    /// not stamp `last_queried_unix` on any of them (#8275).
+    pub query_burst_gate: Arc<crate::service::recency_stamp::QueryBurstGate>,
     /// Embedder functional-health tracker (issue #1003).
     ///
     /// Why: the sidecar process can be alive (so `is_embedder_ready()` returns

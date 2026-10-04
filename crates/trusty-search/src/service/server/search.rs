@@ -16,7 +16,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::core::{classifier::QueryClassifier, indexer::SearchQuery, registry::IndexId};
-use crate::service::lazy_loader::LAST_QUERIED_WRITE_INTERVAL_SECS;
 
 use super::helpers::file_is_within_root;
 use super::state::{DaemonEvent, SearchAppState};
@@ -741,48 +740,10 @@ pub(crate) async fn search_report(
             ));
         }
     }
-    // Issue #993: rate-limited write of last_queried_unix (max once per
-    // LAST_QUERIED_WRITE_INTERVAL_SECS) so the LRU sort key stays current for
-    // future selective warm-boots without hammering indexes.toml on every query.
-    //
-    // PR #1103 PERF: the previous code called `persistence::read_last_queried_unix`
-    // here, which opens + parses indexes.toml synchronously on the async handler
-    // for EVERY query to a warm index. Replace with the in-memory
-    // `last_queried_write_cache` DashMap so the hot path does zero disk I/O.
-    // The background write task below updates the map after a successful write so
-    // the rate-limit semantics are fully preserved.
-    {
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Consult the in-memory cache — no disk read.
-        let stale = state
-            .last_queried_write_cache
-            .get(&index_id)
-            .map(|prev| now_unix.saturating_sub(*prev) >= LAST_QUERIED_WRITE_INTERVAL_SECS)
-            .unwrap_or(true); // absent = never written for this session → write now
-        if stale {
-            let id_str = index_id.0.clone();
-            // Update the in-memory cache immediately so concurrent queries within
-            // the same interval don't all race to spawn a write task.
-            state
-                .last_queried_write_cache
-                .insert(index_id.clone(), now_unix);
-            // Review MEDIUM: `spawn_blocking`, not `spawn`. This body takes the
-            // process-wide registry `std::sync::Mutex` (#4871) and then does
-            // synchronous file I/O — parking an async worker thread on a lock
-            // another blocking writer holds. On the blocking pool that is what
-            // the pool is for; on a worker it starves the runtime.
-            tokio::task::spawn_blocking(move || {
-                if let Err(e) =
-                    crate::service::persistence::update_last_queried_unix(&id_str, now_unix)
-                {
-                    tracing::debug!("last_queried_unix update failed for '{id_str}': {e}");
-                }
-            });
-        }
-    }
+    // Issue #993: rate-limited write of last_queried_unix so the LRU sort key
+    // stays current for future selective warm-boots. #8275: the stamp is held
+    // briefly and dropped when the same query text is sweeping other indexes.
+    crate::service::recency_stamp::stamp_last_queried(state, &index_id, &query.text);
     // Use the same domain-aware classifier as `CodeIndexer::search` so the
     // intent reported back to the caller matches what was used for routing.
     let intent = QueryClassifier::classify_with_domain(&query.text, &handle.domain_terms);

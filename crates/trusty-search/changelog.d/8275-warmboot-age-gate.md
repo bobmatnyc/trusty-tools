@@ -1,0 +1,3 @@
+Changed
+- Warm-boot no longer loads indexes that have not been used recently. An index whose last query is older than `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (default 24), or that was never queried, goes to the cold store and loads on its first query. The filter runs before the `TRUSTY_WARMBOOT_MAX_INDEXES` cut, so a stale index never takes a fresh one's slot. `0` disables the gate (#8275).
+- A query that sweeps several indexes no longer marks them as recently used. A per-index search's `last_queried_unix` stamp is held for 5 s and dropped when the same query text reaches another index in that time. The global `POST /search` fan-out still never stamps (#8275).
