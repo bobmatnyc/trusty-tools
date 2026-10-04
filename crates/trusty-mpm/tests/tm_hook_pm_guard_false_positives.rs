@@ -346,6 +346,21 @@ fn pm_guard_still_denies_the_markdown_emphasis_fragment_7533() {
     assert_denied("git worktree add .worktrees/x config/credentials");
 }
 
+/// The guard's stdout, trimmed, for a `gcp-ops` agent's Bash `command` (#8110).
+fn gcp_ops_stdout(command: &str) -> String {
+    let home = guard_home();
+    let payload = serde_json::json!({
+        "agent_id": "agent-8110",
+        "agent_type": "gcp-ops",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+    });
+    run_pm_guard(&payload.to_string(), home.path())
+        .trim()
+        .to_string()
+}
+
 /// #9001 case 3: the reported shapes allow through the real binary.
 #[test]
 fn pm_guard_allows_the_9001_false_positives() {
@@ -368,4 +383,51 @@ fn pm_guard_still_denies_the_9001_bounds() {
     assert_denied("for k in .env.*; do gh issue list --search \"$k\"; cat \"$k\"; done");
     assert_denied("gh api -X DELETE repos/o/r/actions/secrets/NAME");
     assert_denied(r"grep -c $'\x1b' /tmp/x.log");
+}
+
+/// 🔴 REGRESSION (#7190, #9006, #8110, #8093): each reported shape allows
+/// through the real binary. Every row was denied on origin/main.
+#[test]
+fn pm_guard_allows_the_b2_false_positives() {
+    assert_allowed("python3 - <<'PY'\nprint('It\\'s time to find it')\nPY");
+    assert_allowed(
+        "python3 - <<'EOF'\np = 'docs/notes.md'\ns = open(p).read()\n\
+         print('it's d[k] x[0]')\nopen(p, 'w').write(s.replace('old', 'new'))\nEOF",
+    );
+    // The PM may not fetch at all (P-network), so the #8110 row is a gcp-ops
+    // agent's, as reported.
+    assert_eq!(
+        gcp_ops_stdout(
+            "curl -s -H \"Authorization: Bearer $TOK\" https://oauth2.googleapis.com/tokeninfo"
+        ),
+        ""
+    );
+    assert_allowed("cd crates/trusty-common/src/secrets && ls");
+    assert_allowed("git checkout feat/7521-secrets-token");
+    assert_allowed(
+        // Absolute, so the #7122 worktree-destination rule never sees a
+        // worktree when the suite itself runs inside one.
+        "cp /srv/infra/terraform/local/terraform.tfstate \
+         /srv/infra/terraform/local/terraform.tfstate.20260915-pre-490-rollout.backup",
+    );
+}
+
+/// #7190, #9006, #8110, #8093, #8520, #8660: the deny bounding each fix still
+/// holds through the real binary.
+#[test]
+fn pm_guard_still_denies_the_b2_bounds() {
+    assert_denied("eval \"$(cat <<'PY'\nrm -rf /\nPY\n)\"");
+    assert_denied("read x <<'PY'\nrm -rf /\nPY\neval \"$x\"");
+    assert_denied(
+        "G=g H=h python3 - <<'EOF'\nprint('it\\'s')\n\
+         os.system(\"$G$H api -X DELETE repos/o/r/actions/secrets/X\")\nEOF",
+    );
+    let metadata = gcp_ops_stdout(
+        "curl http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+    );
+    assert!(metadata.contains("issue #7266"), "{metadata}");
+    assert_denied("cat terraform.tfstate.20260915-pre-490-rollout.backup");
+    assert_denied("cp terraform.tfstate /tmp/x.txt");
+    assert_denied("grep -c API_KEY .env");
+    assert_denied("terraform apply -var-file=/repo/infra/terraform/local/terraform.tfvars");
 }

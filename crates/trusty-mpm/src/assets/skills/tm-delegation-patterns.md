@@ -45,6 +45,14 @@ Documentation.
 **Chain**: Research → Code Analysis → Engineer → `local-ops` (start/PM2/Docker)
 → `local-ops` (verify: logs + health check) → `qa` → Documentation.
 
+**A brief that changes local Terraform names who applies it (#8660).** The
+state and `terraform.tfvars` of a local root live only in the main checkout,
+and pm-guard refuses any command that names them. The engineer writes the
+config in its worktree; the apply runs from the main checkout, by the operator
+or by `local-ops` dispatched there, where `terraform apply` reads
+`./terraform.tfvars` itself. A worktree agent may run
+`terraform plan|apply -state=<main checkout state>` and names no vars file.
+
 ## Bug Fix
 
 **Chain**: Research (reproduce/investigate) → Code Analysis → Engineer (fix)

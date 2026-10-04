@@ -1,17 +1,20 @@
 //! Main checkouts the operator lists in `~/.trusty-mpm/config.toml`
-//! `[pm_guard] runtime_checkouts` for a narrower rule (#8524).
+//! `[pm_guard]` for a narrower rule (#8524, #7905).
 //!
-//! Why: the main-checkout rules treat every checkout alike, and a cron host's
-//! runtime checkout cannot live with that: launchd jobs read it in place, so a
-//! worktree cannot move the ref they read. The list lives in the operator
-//! config, a trust anchor no agent may write, so a local HEAD move or a file an
-//! agent writes cannot grant it.
-//! What: [`listed`] matches a checkout root against the list by canonical path.
+//! Why: the main-checkout rules treat every checkout alike, and two kinds of
+//! checkout cannot live with that. A cron host's runtime checkout is read in
+//! place by launchd jobs, so a worktree cannot move the ref they read (#8524).
+//! A documents repository whose own CLAUDE.md forbids worktrees can never
+//! commit a utility script by either route (#7905). Both lists live in the
+//! operator config, a trust anchor no agent may write, so a local HEAD move or
+//! a file an agent writes cannot grant either one — the gap the in-repo
+//! declaration on `wip/7905-documents-only-declaration` never closed.
+//! What: [`listed`] matches a checkout root against a list by canonical path.
 //! [`reset_keep_is_exempt`] lifts the destructive rule for exactly one shape,
 //! owner ruling 2026-09-28 (Option C): a lone `git reset --keep [<rev>]` in a
 //! `runtime_checkouts` entry whose tracked content already equals `<rev>`.
-//! Every unreadable step answers "not listed" or "not exempt", so the rule
-//! fails closed.
+//! [`is_documents_repo`] reports a `documents_repos` entry. Every unreadable
+//! step answers "not listed" or "not exempt", so the rules fail closed.
 //! Test: the `#[cfg(test)]` suite below; `pm_guard_allows_reset_keep_in_a_listed_runtime_checkout`
 //! in `tests/tm_hook_pm_guard_operator_checkouts.rs` runs the binary.
 
@@ -28,14 +31,25 @@ use crate::commands::hook_rewrite::first_command_token;
 /// Whether `root` is one of `list`, compared by canonical path.
 ///
 /// What: `false` when `root` cannot be canonicalized; a list entry that cannot
-/// be canonicalized matches nothing.
-/// Test: `listed_matches_by_canonical_path_only`.
+/// be canonicalized matches nothing, and neither does a relative entry (#7905),
+/// which would otherwise resolve against whatever directory the hook runs in.
+/// Test: `listed_matches_by_canonical_path_only`,
+/// `listed_ignores_a_relative_entry_7905`.
 fn listed(root: &Path, list: &[PathBuf]) -> bool {
     let Ok(real) = root.canonicalize() else {
         return false;
     };
     list.iter()
+        .filter(|entry| entry.is_absolute())
         .any(|entry| entry.canonicalize().is_ok_and(|e| e == real))
+}
+
+/// Whether the main checkout `root` is an operator-listed documents repository
+/// (#7905), in which every staged or written path counts as a document.
+///
+/// Test: `listed_matches_by_canonical_path_only`.
+pub(crate) fn is_documents_repo(root: &Path) -> bool {
+    listed(root, &MpmConfig::load_default().pm_guard.documents_repos)
 }
 
 /// Lift the destructive rule for one `git reset --keep` segment (#8524).

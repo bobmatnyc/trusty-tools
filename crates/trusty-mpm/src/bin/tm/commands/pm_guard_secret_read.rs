@@ -397,6 +397,10 @@ use crate::commands::pm_guard_secret_nested::evaluate_nested_secret_rules;
 // #8869: a key consumer and a GET secret listing are granted beside the verbs.
 use crate::commands::pm_guard_secret_consumers::{key_only_consumed, listed_or_searched};
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;
+// #8093, #8110, #8520, #8660: narrow grants and refusal hints, split out at the cap.
+use crate::commands::pm_guard_secret_handling::{
+    URL_FETCHERS, is_tokeninfo_url, refusal_hint, same_class_copy,
+};
 
 /// Which kind of text a word scan is reading (#7266 round 9).
 ///
@@ -436,14 +440,16 @@ pub(crate) enum Scan {
 /// stable answer: `ls` and `stat` report metadata, `file` reports a type,
 /// `test`/`[` answer a predicate, and `rm` deletes. None of them can put a
 /// credential in the transcript, and an agent needs all five to manage a
-/// secret file it must never read.
+/// secret file it must never read. `cd` and `pushd` (#8110) change directory
+/// and open no file, so a source directory named `secrets` stays enterable.
 /// What: matched against the BASENAME of the segment's resolved program, after
 /// `strip_wrapper_prefix` removes leading env assignments and `sudo`/`nice`
 /// noise. Anything not on this list, and not a [`SAFE_GIT_SUBCOMMANDS`] git
 /// call, denies.
 /// Test: `allows_only_the_safe_handling_verbs`,
 /// `denies_every_bypass_the_earlier_rounds_missed`.
-pub(crate) const SAFE_HANDLING_VERBS: &[&str] = &["ls", "stat", "rm", "test", "[", "file"];
+pub(crate) const SAFE_HANDLING_VERBS: &[&str] =
+    &["ls", "stat", "rm", "test", "[", "file", "cd", "pushd"];
 
 /// `git` subcommands that may name a secret-bearing file.
 ///
@@ -658,11 +664,15 @@ pub(crate) fn evaluate_secret_file_read_command(command: &str) -> Option<String>
             || terraform_only_consumes_state(trimmed, &named)
             || key_only_consumed(trimmed, &named)
             || listed_or_searched(&argv_text, trimmed, &named)
+            // #8093: a copy that lands on a name this rule also refuses.
+            || same_class_copy(trimmed, &named)
         // #9001
         {
             continue;
         }
-        return Some(deny_reason(first, &describe_command(trimmed)));
+        // #8520, #8660: the refusal names the supported route for its shape.
+        let reason = deny_reason(first, &describe_command(trimmed));
+        return Some(reason + refusal_hint(first, trimmed));
     }
     for body in &bodies {
         if let Some(first) = secret_files_named_in_program_text(body).first() {
@@ -775,9 +785,17 @@ fn secret_words_in_segment(segment: &str, lone: bool) -> Vec<String> {
     // ref-creating position are REF names — neither is a path operand list, and
     // both withdraw the same one arm.
     let position = word_position_start(segment, &argv);
+    // #8110: a fetcher's Google OAuth2 `tokeninfo` URL prints no credential.
+    let fetcher = strip_wrapper_prefix(&argv).filter(|&at| {
+        argv.get(at)
+            .is_some_and(|p| URL_FETCHERS.contains(&command_basename(p).as_str()))
+    });
     let mut out: Vec<String> = Vec::new();
     for (index, token) in argv.iter().enumerate() {
         if Some(index) == pattern_at || text_payloads.contains(&index) {
+            continue;
+        }
+        if fetcher.is_some_and(|at| index > at) && is_tokeninfo_url(token) {
             continue;
         }
         let words = if program_at.contains(&index) {

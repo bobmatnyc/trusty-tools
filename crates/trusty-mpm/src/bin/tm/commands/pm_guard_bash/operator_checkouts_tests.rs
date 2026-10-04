@@ -1,4 +1,4 @@
-//! Unit tests for [`super`] — the operator-listed runtime checkout rule (#8524).
+//! Unit tests for [`super`] — the operator-listed checkout rules (#8524, #7905).
 
 use super::*;
 
@@ -117,4 +117,21 @@ fn listed_matches_by_canonical_path_only() {
         Path::new("/nonexistent"),
         std::slice::from_ref(&repo)
     ));
+}
+
+/// 🔴 REGRESSION (#7905): a relative entry resolves against whatever directory
+/// the hook happens to run in, so it lists nothing — even one that would
+/// canonicalize onto the checkout from here. Matched on origin/main.
+#[test]
+fn listed_ignores_a_relative_entry_7905() {
+    let (_dir, repo) = checkout();
+    let here = std::env::current_dir().expect("cwd");
+    let up = "../".repeat(here.components().count());
+    let relative = PathBuf::from(format!(
+        "{up}{}",
+        repo.strip_prefix("/").expect("absolute").display()
+    ));
+    assert!(relative.canonicalize().is_ok(), "fixture reaches the repo");
+    assert!(!listed(&repo, &[relative]));
+    assert!(!listed(&repo, &[PathBuf::from("")]));
 }

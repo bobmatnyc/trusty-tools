@@ -220,6 +220,9 @@ const SECRET_BEARING_FILE_PATTERNS: &[&str] = &[
     "*.tfvars.json",
     "*.tfstate",
     "*.tfstate.backup",
+    // #8093: a dated backup (`terraform.tfstate.20260915-pre.backup`) is the
+    // same state, so the read rule refuses it and a copy may land on it.
+    "*.tfstate.*",
     ".env",
     ".env.local",
     ".env.*",
@@ -1305,6 +1308,7 @@ mod tests {
             ("*.tfvars.json", "prod.tfvars.json"),
             ("*.tfstate", "terraform.tfstate"),
             ("*.tfstate.backup", "terraform.tfstate.backup"),
+            ("*.tfstate.*", "terraform.tfstate.20260915-pre.backup"),
             (".env", ".env"),
             (".env.local", ".env.local"),
             (".env.*", ".env.production"),
@@ -1461,6 +1465,7 @@ mod tests {
             ("*.tfvars.json", "*.tfvars.json"),
             ("*.tfstate", "*.tfstate"),
             ("*.tfstate.backup", "*.tfstate.*"),
+            ("*.tfstate.*", "*.tfstate.*"),
             (".env", "*.env"),
             (".env.local", "*.local"),
             (".env.*", ".env*"),

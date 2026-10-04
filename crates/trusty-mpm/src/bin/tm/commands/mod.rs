@@ -183,6 +183,8 @@ pub(crate) mod pm_guard_secret_nested;
 pub(crate) mod pm_guard_secret_consumers;
 // #9001: a `for` loop whose words reach only `echo` and a gh search.
 pub(crate) mod pm_guard_secret_search_loop;
+// #8093, #8110, #8520, #8660: same-class copies, tokeninfo URLs, refusal hints.
+pub(crate) mod pm_guard_secret_handling;
 // #8879: the credential rules over the body of a script a command runs.
 pub(crate) mod pm_guard_secret_script;
 pub(crate) mod pm_guard_secret_script_read;
