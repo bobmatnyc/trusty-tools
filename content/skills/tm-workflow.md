@@ -3,7 +3,7 @@ name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
 metadata:
-  version: "2.1.0"
+  version: "2.1.1"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -265,9 +265,11 @@ applied and which gates run at all. Pick the rung from the project's `CLAUDE.md`
 then read the stage off where you are in the delivery chain.
 
 A consequence for branch protection: a full-corpus CI job is a publish gate, so a
-project may leave it off the required pre-merge contexts and merge while it is
-still pending. A **failing** check blocks the merge at every stage — only
-*pending* is tolerated.
+project may leave it off the required pre-merge contexts. `tm pr merge` still
+refuses while it runs (#8614); merge before it settles only when the brief
+waives it by name, via `--allow-failing <check>`. A **failing** check blocks the
+merge at every stage. The PM may waive a pre-existing or unrelated failure of a
+non-required check; a branch-caused failure is never waived.
 
 🔴 **Widening by stage is never licence to skip.** Choosing the narrower scope is
 a claim about blast radius that you must be able to prove. It is never licence to
@@ -579,7 +581,12 @@ gated is the ref pushed.
    instead when that happens.
 5. `security` scans the gitleaks output and the diff for API keys, passwords,
    private keys, and tokens, and returns either clean or the list of blocked
-   items.
+   items. Its report states `git diff --name-only --diff-filter=d <range> |
+   wc -l` and the files covered (#8504). Files covered are the files whose
+   text hunks it read, plus the files with no text hunk (pure rename,
+   mode-only, binary), listed separately with each binary named for manual
+   review. Counts that differ make the scan INCOMPLETE, never clean:
+   re-dispatch it over the unscanned files.
 6. **Block the push if secrets are detected.** A leaked credential in git history
    survives the commit being reverted.
 
@@ -716,9 +723,11 @@ else.
    change-specific gates pass; <gate name> blocked by canonical issue #N
    ```
 
-   Never report "all tests pass" while a gate is red, whoever caused it. Merge
-   disposition then follows branch protection and the risk tier; a red required
-   check is never merged around.
+   Never report "all tests pass" while a gate is red, whoever caused it. A
+   branch-caused failure blocks the merge whatever branch protection requires
+   (#8614). A pre-existing failure of a non-required check merges only when the
+   brief waives it by name (`tm pr merge <PR> --allow-failing <check>`). A red
+   required check is never merged around.
 
 ## The trusty-review Gate
 
@@ -740,9 +749,38 @@ landing on `main`.
 
 ```bash
 tm pr merge <PR>                                  # validated body becomes the squash commit (#6808)
+tm pr merge <PR> --auto                           # arm auto-merge; waits only on running required checks
 tm pr cleanup <PR>                                # remote ref, worktree, local branch
-gh pr merge <PR> --squash                         # fallback on a host without `tm` — no --delete-branch
+gh pr merge <PR> --squash                         # fallback on a host without `tm` — no --delete-branch, no checks gate
 ```
+
+🔴 **The checks gate (#8614).** `tm pr merge` refuses, with or without
+`--auto`, while any check has failed, while no check has registered (unless
+`--auto` and a check is required), or while a check it would not wait for is
+still running. Only `--auto` waits, and only on
+required checks. It reads the required checks from the base branch's
+protection and its rulesets; a failed read refuses. Two escapes exist:
+
+- `--allow-failing <check>` (exact name, repeatable) waives one non-required
+  check, failing or running. It never waives a required check. The waiver
+  heads the squash commit body. Pass it only for a check the brief waives by
+  name as pre-existing or unrelated, never for a branch-caused failure.
+- `--allow-no-checks` merges a PR on a repository with no CI.
+
+A refusal is a blocker to report. Never route around it with raw
+`gh pr merge` or `--admin`; an admin-merge authorization covers the review gate
+only. The version-control report names the brief clause that authorized the
+merge, and flags a base branch with no required checks as a risk. Before the
+raw-`gh` fallback, one `statusCheckRollup` read must list at least one check
+(or the brief says the repo has no CI) and show no failed or running check
+outside the brief's waivers.
+
+🔴 **Never assume auto-merge is available (#8640).** `version-control` reads
+`gh repo view --json autoMergeAllowed` before planning a merge and reports it
+up front. When it is `false`, `--auto` fails with `Auto merge is not allowed
+for this repository (enablePullRequestAutoMerge)`, and the merge is a direct
+`tm pr merge <PR>` once every check has settled. A brief that orders `--auto`
+does not change that answer.
 
 `--delete-branch` fails post-merge whenever a worktree holds the base branch
 (#7104) or the head branch (#8391) — every `isolation: "worktree"` delivery
@@ -842,8 +880,10 @@ gh label create trusty-mpm \
 PR creation and every later PR edit go to `version-control` — branch push,
 `gh pr create`, the body, the issue-closing link, reviewers, `gh pr checks`, and
 the merge. Give it: work summary, files changed, test status, the trusty-review
-verdict, the canonical issue context from `ticketing`, and the shipped defaults
-above. The PM constructs the brief; it never runs `gh pr` itself (P7 / CB#6).
+verdict, the canonical issue context from `ticketing`, the shipped defaults
+above, and every check it may merge over, by exact name and reason (see "The
+checks gate"). The PM constructs the brief; it never runs `gh pr` itself (P7 /
+CB#6).
 
 ## Customizing the Workflow
 
