@@ -61,9 +61,8 @@ the PM for it; do not go look it up with `gh issue`.
 
 ## PR Workflow
 
-Write the PR body from the material the PM supplies, using `Skill(skill="tm-workflow")`'s
-"Minimal PR Body" section for the required fields — do not re-derive the field
-list here. Put `Refs owner/repo#N` on its own line after a blank line; use a
+Write the PR body from the PM's material; the required fields are in
+`Skill(skill="tm-workflow")`'s "Minimal PR Body" section — do not re-derive them. Put `Refs owner/repo#N` on its own line after a blank line; use a
 closing keyword — `Closes`, `Fixes`, `Resolves` — only on a project whose
 `CLAUDE.md` permits a merge to auto-close the issue. End the body with the
 trusty-mpm attribution footer.
@@ -106,9 +105,8 @@ valid whole section, and omitting the heading is not. It also checks the
 attribution footer (a missing one exits 2; it never appends one) and attaches
 `--assignee @me --label trusty-mpm --label ws/<session>` itself — you never
 type them. Before spawning `gh` it runs `scripts/check_changelog_fragment.sh`
-(`--docs-only` skips this for a PR touching no crate source); a rung 1
-(docs-only) branch needs `--docs-only` passed explicitly or the gate refuses
-it. A failed check exits 2 without calling `gh` — fix the finding and re-run.
+(`--docs-only` skips it for a PR touching no crate source); a rung 1
+(docs-only) branch must pass `--docs-only` or the gate refuses. A failed check exits 2 before `gh` runs; fix it and re-run.
 `--issue N` emits `Refs #N` — this repo's fix PRs never use `--closes`, which
 would emit `Closes #N` instead. Hand-assembled `gh pr create` is the fallback
 only on a host where `tm` is not on PATH.
@@ -124,8 +122,9 @@ nothing here restates it.
 the component labels for every crate the diff touches, and the milestone and
 project(s) of the issue the body's first `Refs #N` names. You pass no flag.
 Each step is best-effort: a refused step prints a warning and the PR still
-opens. A warning is yours to fix on the PR. A "no component label" line on a
-docs-only PR, or "no project or milestone" on a `Refs`-less one, is correct.
+opens. A warning is yours to fix on the PR. "no component label: no workspace crate
+owns the changed paths" (docs-only PR) and "no project or milestone" (`Refs`-less
+PR) are correct; "no component label: the diff could not be read" is a fault.
 
 🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
 yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
@@ -146,8 +145,8 @@ own initiative.
 🔴 **Merge gate (#8614).** A failing check blocks the merge whatever branch
 protection requires; a branch-caused one is never waived. `tm pr merge`
 refuses, with or without `--auto`, on a failed check, on no registered check
-(unless `--auto` and a check is required), and on a running check it would not wait for (only `--auto` waits, on required
-checks). It reads required checks from branch protection and rulesets; a failed
+(unless `--auto` and a check is required), and on a running check it would
+not wait for (only `--auto` waits, on required checks). It reads required checks from branch protection and rulesets; a failed
 read refuses. `--allow-failing <check>` (exact name, repeatable) waives a
 non-required check and records it in the squash body. Pass it only for a check
 the brief waives by name as pre-existing or unrelated. `--allow-no-checks`
@@ -208,7 +207,7 @@ or report, not a note for later.
 
 | Step | Command | Nonzero exit means |
 |---|---|---|
-| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check and means `gh` was never called; exit 3 (`EXIT_PARTIAL`, #7869) means the PR exists but some metadata (assignee, labels, milestone, project) failed — the printed line names the PR, its URL and the missing field(s); finish by hand rather than hunting with `gh pr list --head`; `--dry-run` prints the argv instead of running it |
+| Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check and means `gh` was never called; exit 3 (`EXIT_PARTIAL`, #7869) means the PR exists but some metadata (assignee, labels, milestone, project) failed — the printed line names the PR, its URL and the missing field(s); finish by hand rather than hunting with `gh pr list --head`; `--dry-run` prints the argv, exits 0, and never calls `gh` |
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment, same tier as a failing test; `tm pr open` runs this itself, so this covers only the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require — fix before opening |
 | Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api "repos/$(gh repo view --json nameWithOwner -q .nameWithOwner)/branches/main" --jq '.protection.required_status_checks.contexts'` — derive the repo, never type a slug; `/protection` answers 404 on an unprotected branch) | N/A — a live read, never hand-copied; a stale copy cost one PR its merge (#5836) |

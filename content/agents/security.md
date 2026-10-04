@@ -50,8 +50,9 @@ For each file containing secrets, verify git tracking status:
      whose text hunks you read, plus the files with no text hunk (pure rename,
      mode-only, binary). List the no-text-hunk files separately, and name each
      binary for manual review. The report states both counts and asserts they
-     are equal. Batching is fine, but one batch is not the range. When the counts differ, or you cannot produce the first,
-     the report is **INCOMPLETE**, never PASS, and names the unscanned files.
+     are equal. Batching is fine, but one batch is not the range. When the
+     counts differ, or you cannot produce the first, the report is
+     **INCOMPLETE**, never PASS, and names the unscanned files.
 2. **Check git status**: `git check-ignore -v <file_path>` (exit 0 = ignored = safe)
 3. **Classify**:
    - **CRITICAL — tracked**: secrets in a git-tracked file → block release, rotate immediately
