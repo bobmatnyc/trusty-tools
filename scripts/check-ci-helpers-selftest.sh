@@ -1233,7 +1233,8 @@ assert_eq "test-pointers.yml: no job-level if: anywhere" "0" \
 # after it individually gated `if: steps.relevance.outputs.relevant !=
 # 'false'`. Asserted on its own terms rather than folded into the loop above,
 # which checks for a single no-op step this workflow does not have.
-cap_wf=".github/workflows/capabilities-drift.yml"
+# CAP_WF lets a mutation proof point the assertions at a scratch copy.
+cap_wf="${CAP_WF:-.github/workflows/capabilities-drift.yml}"
 cap_gate="$(job_block "${cap_wf}" "capabilities-drift")"
 assert_eq "capabilities-drift.yml: pull_request trigger has no paths filter" "0" \
   "$(grep -cE '^    paths(-ignore)?:' <<<"$(pr_trigger_block "${cap_wf}")" || true)"
@@ -1272,8 +1273,16 @@ assert_eq "capabilities-drift.yml: three step gates widen by credential_scan (#9
   "$(grep -cE "\|\| steps\.relevance\.outputs\.credential_scan == 'true'$" "${cap_wf}" || true)"
 assert_eq "capabilities-drift.yml: the credential-scan step gate widens the same way" "1" \
   "$(grep -cE "\|\| steps\.relevance\.outputs\.credential_scan == 'true'\)$" "${cap_wf}" || true)"
+# The relevance leg of each widened gate: the first line of the folded scalar,
+# and the `&& (` line of the scan step. Without these a gate could keep its
+# `credential_scan` clause while its `relevant` leg is replaced.
+assert_eq "capabilities-drift.yml: the relevance leg of each folded step gate" "3" \
+  "$(grep -cE "^ +steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
+assert_eq "capabilities-drift.yml: the relevance leg of the credential-scan step gate" "1" \
+  "$(grep -cE "&& \(steps\.relevance\.outputs\.relevant != 'false'$" "${cap_wf}" || true)"
+# Anchored at line start so a commented-out or `: echo` write does not count.
 assert_eq "capabilities-drift.yml relevance step emits credential_scan" "2" \
-  "$(grep -cE 'echo "credential_scan=(true|false)" >> "\$GITHUB_OUTPUT"' "${cap_wf}" || true)"
+  "$(grep -cE '^ +echo "credential_scan=(true|false)" >> "\$GITHUB_OUTPUT"$' "${cap_wf}" || true)"
 # Structural, not string-matched on the old wording (#5407): no JOB the check
 # reports from may decide anything from the activity type. `concurrency:` may
 # still name `github.event.action` — that decides what gets cancelled, never
