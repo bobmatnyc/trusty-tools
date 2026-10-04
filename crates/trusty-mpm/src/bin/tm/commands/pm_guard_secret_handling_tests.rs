@@ -83,14 +83,25 @@ fn denies_a_compound_or_wrapped_same_class_copy_8093() {
         "cp terraform.tfstate terraform.tfstate.old && echo done",
         "command cp terraform.tfstate terraform.tfstate.old",
         "cd infra/terraform/local && cp terraform.tfstate terraform.tfstate.pre-apply",
+        // #8093 critic HIGH: a path-qualified program can be any binary named
+        // `cp` (`ln -s /bin/cat cp; ./cp .env .env.bak` prints the file).
+        "./cp terraform.tfstate terraform.tfstate.old",
+        "/tmp/x/cp terraform.tfstate terraform.tfstate.old",
+        "bin/cp terraform.tfstate terraform.tfstate.old",
     ] {
         assert!(
             secret_in(command, tmp.path()).is_some(),
             "expected DENY: {command}"
         );
     }
+    for lone in [
+        "cp terraform.tfstate terraform.tfstate.old",
+        // A leading backslash only skips an alias; the shell still runs `cp`.
+        "\\cp terraform.tfstate terraform.tfstate.old",
+    ] {
+        assert_eq!(secret_in(lone, tmp.path()), None, "{lone}");
+    }
     let lone = "cp terraform.tfstate terraform.tfstate.old";
-    assert_eq!(secret_in(lone, tmp.path()), None, "{lone}");
     // With no cwd a relative operand cannot be inspected.
     assert!(secret(lone).is_some(), "expected DENY with no cwd: {lone}");
 }
@@ -118,6 +129,34 @@ fn denies_a_same_class_copy_through_a_hard_link_8093() {
         );
     }
     let control = "cp plain.tfstate plain.tfstate.new";
+    assert_eq!(secret_in(control, cwd), None, "{control}");
+}
+
+/// #8093 critic MEDIUM: the source must itself be a lone regular file. A
+/// symlink named like a state file can point at a key elsewhere, and a missing
+/// source cannot be inspected.
+///
+/// The symlink's target is a regular file with one link, so a check that
+/// followed the link (`fs::metadata`) would grant the copy. Only
+/// `symlink_metadata`, which reads the link itself, refuses it.
+#[cfg(unix)]
+#[test]
+fn denies_a_same_class_copy_from_a_symlink_or_missing_source_8093() {
+    let tmp = tree_with(&["outside/id_rsa", "plain.tfstate"]);
+    let cwd = tmp.path();
+    std::os::unix::fs::symlink(cwd.join("outside/id_rsa"), cwd.join("terraform.tfstate"))
+        .expect("symlinked source");
+    for command in [
+        "cp terraform.tfstate terraform.tfstate.old",
+        // Nothing stands at `.env`: there is no file to inspect.
+        "cp .env .env.bak",
+    ] {
+        assert!(
+            secret_in(command, cwd).is_some(),
+            "expected DENY: {command}"
+        );
+    }
+    let control = "cp plain.tfstate plain.tfstate.old";
     assert_eq!(secret_in(control, cwd), None, "{control}");
 }
 

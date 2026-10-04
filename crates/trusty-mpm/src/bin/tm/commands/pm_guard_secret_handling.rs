@@ -36,7 +36,8 @@ const SHELL_REWRITE_BYTES: &[char] = &['$', '`', '*', '?', '[', ']', '{', '}', '
 /// so it cannot carry a key from `~/.ssh` into a repository that a docs-only
 /// commit and a push would then publish.
 /// What: `true` only for a whole command that is `cp [-pnifv…] [--] <src>
-/// <dst>` with no wrapper, no other segment and no nested command, both
+/// <dst>` with no wrapper, no other segment and no nested command, the
+/// program word exactly `cp` (a path such as `./cp` gets no grant), both
 /// operands literal and in the same directory (compared lexically), both
 /// [`is_secret_read_target`], and every word in `named` cut from one of them.
 /// A long flag, a third operand, a redirect, an expansion or another
@@ -53,7 +54,8 @@ const SHELL_REWRITE_BYTES: &[char] = &['$', '`', '*', '?', '[', ']', '{', '}', '
 /// Test: `allows_a_same_class_copy_8093`, `denies_a_copy_out_of_the_class_8093`,
 /// `denies_a_same_class_copy_onto_a_directory_or_symlink_8093`,
 /// `denies_a_compound_or_wrapped_same_class_copy_8093`,
-/// `denies_a_same_class_copy_through_a_hard_link_8093`.
+/// `denies_a_same_class_copy_through_a_hard_link_8093`,
+/// `denies_a_same_class_copy_from_a_symlink_or_missing_source_8093`.
 pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path>) -> bool {
     if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
         return false;
@@ -63,9 +65,9 @@ pub(crate) fn same_class_copy(segment: &str, named: &[String], cwd: Option<&Path
     };
     // #8093: a wrapper (`command`, `env -C`, `sudo`) may run another `cp` or
     // move the working directory, so only a bare `cp` is read.
-    if strip_wrapper_prefix(&argv) != Some(0)
-        || argv.first().map(|p| command_basename(p)).as_deref() != Some("cp")
-    {
+    // #8093: the lexer has removed every backslash, so the word must be `cp`
+    // itself; `./cp` or `bin/cp` can be `cat` under that name.
+    if strip_wrapper_prefix(&argv) != Some(0) || argv.first().map(String::as_str) != Some("cp") {
         return false;
     }
     let mut operands: Vec<&str> = Vec::new();
@@ -149,15 +151,23 @@ fn directory_of(operand: &str) -> &Path {
 /// Why: the #7266 body scan read `print(r.key)` and `rows.append({"id"…` in a
 /// script an agent was writing as secret file names. `cat` with a quoted
 /// delimiter writes the body verbatim and prints nothing, so no byte of any
-/// file reaches the transcript; a later run of the written script is judged
-/// by the #8879 script-body rule.
+/// file reaches the transcript. Writing it grants nothing new: the Write tool
+/// already puts the same bytes at the same path, because
+/// `evaluate_secret_file_read_tool` judges a Write's `file_path` and never its
+/// `content`.
 /// What: [`lone_inert_heredoc`] accepts the command, so its delimiter is a
 /// quoted plain word, its operator line is first and carries no `|`, `;`,
 /// `&` or `$`, and nothing follows the terminator. The operator line must
-/// also be `cat` with a `>`/`>>` redirect: a body `cat` prints, an
-/// interpreter runs, or an unquoted delimiter expands keeps the scan. The
-/// operator line's own argv keeps its scan, so `cat > .env <<'EOF'` denies.
-/// The #7266 read rule skips its body scan and the copy rule blanks the body.
+/// also be `cat` with a `>`/`>>` redirect to a file that is not a device
+/// ([`writes_to_a_device`]): a body `cat` prints, an interpreter runs, or an
+/// unquoted delimiter expands keeps the scan. The operator line's own argv
+/// keeps its scan, so `cat > .env <<'EOF'` denies. The #7266 read rule skips
+/// its body scan and the copy rule blanks the body.
+/// Residual, shared with the Write tool: a file a tool runs with no command
+/// naming it (`.git/hooks/*`, an rc file such as `~/.zshenv` given as an
+/// absolute path, `conftest.py` under pytest, `build.rs` under cargo) runs the
+/// body unjudged. A relative destination inside `/dev`, or a symlink to a
+/// device made beforehand, is not seen.
 /// Test: `guard_7833_a_quoted_body_cat_writes_to_a_file_is_data`.
 pub(crate) fn body_written_to_a_file(command: &str) -> bool {
     if lone_inert_heredoc(command).is_none() {
@@ -165,7 +175,45 @@ pub(crate) fn body_written_to_a_file(command: &str) -> bool {
     }
     let line = command.trim_start().lines().next().unwrap_or_default();
     // `lone_inert_heredoc` passed `cat` only with a redirect beside `<<WORD`.
-    shlex::split(line).is_some_and(|argv| argv.len() > 2 && argv[0] == "cat")
+    let Some(argv) = shlex::split(line) else {
+        return false;
+    };
+    if argv.len() <= 2 || argv[0] != "cat" {
+        return false;
+    }
+    let redirect: Vec<&str> = argv[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !t.starts_with("<<"))
+        .collect();
+    let dest = match redirect.as_slice() {
+        [">" | ">>", path] => Some(*path),
+        [glued] => glued.strip_prefix(">>").or_else(|| glued.strip_prefix('>')),
+        _ => None,
+    };
+    // #8093: `/dev/stdout` and its kin print the body to the transcript.
+    dest.is_some_and(|dest| !writes_to_a_device(dest))
+}
+
+/// Whether `dest` may name a file under `/dev` or `/proc` (#8093).
+///
+/// What: folds `.` and `..` lexically. An absolute path, or a relative one
+/// whose `..` climbs past its start and so may reach `/`, answers `true` when
+/// its first remaining component is `dev` or `proc`.
+fn writes_to_a_device(dest: &str) -> bool {
+    use std::path::Component;
+    let mut parts = Vec::new();
+    let mut rooted = false;
+    for component in Path::new(dest).components() {
+        match component {
+            Component::RootDir => rooted = true,
+            // An unmatched `..` may climb to `/` from an unknown cwd.
+            Component::ParentDir => rooted |= parts.pop().is_none(),
+            Component::Normal(part) => parts.push(part),
+            Component::CurDir | Component::Prefix(_) => {}
+        }
+    }
+    rooted && matches!(parts.first().and_then(|p| p.to_str()), Some("dev" | "proc"))
 }
 
 /// Programs whose URL operand the #8110 grant reads (#8110).

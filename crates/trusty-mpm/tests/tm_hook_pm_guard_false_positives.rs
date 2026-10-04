@@ -443,9 +443,30 @@ fn pm_guard_still_denies_the_b2_bounds() {
     std::fs::write(&state, "{}").expect("state");
     assert_denied(&format!("true; cp {0} {0}.old", state.display()));
     assert_denied(&format!("command cp {0} {0}.old", state.display()));
+    // #8093 critic HIGH: a path-qualified `cp` can be any binary of that name.
+    // Each one exists, as `ln -s /bin/cat cp` leaves it, so the #8879 rule
+    // judges a compiled program and lets it run; only the copy grant decides.
+    #[cfg(unix)]
+    {
+        for dir in ["", "bin/", "x/"] {
+            std::fs::create_dir_all(tree.path().join(dir)).expect("dir");
+            std::os::unix::fs::symlink("/bin/cat", tree.path().join(format!("{dir}cp")))
+                .expect("cat named cp");
+        }
+        let absolute = format!("{}/x/cp", tree.path().display());
+        for program in ["./cp", absolute.as_str(), "bin/cp"] {
+            let command = format!("{program} terraform.tfstate terraform.tfstate.bak");
+            let stdout = pm_guard_stdout_in(&command, tree.path());
+            assert!(stdout.contains("\"deny\""), "expected DENY: {command}");
+        }
+        let control = "cp terraform.tfstate terraform.tfstate.bak";
+        let stdout = pm_guard_stdout_in(control, tree.path());
+        assert_eq!(stdout.trim(), "", "expected ALLOW, got: {stdout}");
+    }
     // #7833: a body the shell prints or runs keeps its scan.
     assert_denied("cat <<'EOF'\nprint(open('.env').read())\nEOF");
     assert_denied("cat > /tmp/s.py <<'EOF' && python3 /tmp/s.py\nopen('.env')\nEOF");
+    assert_denied("cat > /dev/stdout <<'EOF'\nprint(open('.env').read())\nEOF");
 }
 
 /// 🔴 REGRESSION (#8093 critic MEDIUM): the binary resolves a relative copy
@@ -460,21 +481,24 @@ fn pm_guard_denies_a_same_class_copy_through_a_symlink_8093() {
     std::os::unix::fs::symlink(&outside, tree.path().join("terraform.tfstate.link"))
         .expect("symlink");
     std::fs::write(tree.path().join("terraform.tfstate"), "{}").expect("source");
-    let verdict = |command: &str| {
-        let payload = serde_json::json!({
-            "hook_event_name": "PreToolUse",
-            "tool_name": "Bash",
-            "tool_input": { "command": command },
-            "cwd": tree.path(),
-        });
-        let home = guard_home();
-        run_pm_guard(&payload.to_string(), home.path())
-    };
-    let symlink = verdict("cp terraform.tfstate terraform.tfstate.link");
+    let symlink = pm_guard_stdout_in("cp terraform.tfstate terraform.tfstate.link", tree.path());
     assert!(
         symlink.contains("\"deny\""),
         "expected DENY, got: {symlink}"
     );
-    let fresh = verdict("cp terraform.tfstate terraform.tfstate.bak");
+    let fresh = pm_guard_stdout_in("cp terraform.tfstate terraform.tfstate.bak", tree.path());
     assert_eq!(fresh.trim(), "", "expected ALLOW, got: {fresh}");
+}
+
+/// The guard's stdout for a Bash `command` whose payload names `cwd` (#8093).
+#[cfg(unix)]
+fn pm_guard_stdout_in(command: &str, cwd: &std::path::Path) -> String {
+    let payload = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "cwd": cwd,
+    });
+    let home = guard_home();
+    run_pm_guard(&payload.to_string(), home.path())
 }

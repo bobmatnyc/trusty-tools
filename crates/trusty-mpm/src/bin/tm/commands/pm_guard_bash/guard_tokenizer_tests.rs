@@ -144,6 +144,15 @@ fn guard_7833_a_quoted_body_cat_writes_to_a_file_is_data() {
         "cat <<'EOF' > .env\nAPI_KEY=1\nEOF",
         "cat > $OUT <<'EOF'\nopen('.env')\nEOF",
         "cat - .env > /tmp/s.py <<'EOF'\nx\nEOF",
+        // #8093 critic LOW: a device destination prints the body.
+        "cat > /dev/stdout <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat >/dev/stderr <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat <<'EOF' > /dev/fd/1\nprint(open('.env').read())\nEOF",
+        "cat >> /dev/tty <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat > /proc/self/fd/1 <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat > //dev/./stdout <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat > /tmp/../dev/stdout <<'EOF'\nprint(open('.env').read())\nEOF",
+        "cat > ../../../../../../../dev/stdout <<'EOF'\nprint(open('.env').read())\nEOF",
     ] {
         assert!(refusal(command).is_some(), "expected DENY: {command}");
     }
