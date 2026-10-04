@@ -33,7 +33,7 @@ Added
   retired override file, naming every file found and the migration. The prompt
   resolver logs the same signal on every session launch, so a leftover file can
   never drop a project's rules silently (#4286).
-- `crates/trusty-mpm/src/assets/instructions/sections/README.md` documenting how
+- `content/instructions/sections/README.md` documenting how
   framework instructions compose, the customization tiers, why there is no
   floor, and what must not be reintroduced (#4286).
 

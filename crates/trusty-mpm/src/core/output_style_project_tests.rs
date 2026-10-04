@@ -1,6 +1,7 @@
 //! Tests for project-local output styles (#8533).
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::TempDir;
 
 fn project_with_style(id: &str) -> TempDir {
@@ -20,7 +21,7 @@ fn a_project_style_file_resolves_by_id() {
     let dir = project_with_style("fixture-voice");
     let style = resolve_style_in_project(dir.path(), "fixture-voice").expect("resolves");
     assert_eq!(style.id(), "fixture-voice");
-    assert!(style.content().contains("Project voice."));
+    assert!(style.text(rc()).contains("Project voice."));
     assert!(matches!(style, ActiveStyle::Project { .. }));
     // A bundled id keeps meaning the shipped style.
     let bundled = resolve_style_in_project(dir.path(), "trusty-mpm").expect("bundled");
@@ -136,6 +137,7 @@ fn an_unreadable_style_file_warns_and_keeps_the_prompt() {
 
     let prompt = "BASE PROMPT\n\n## Memory & Instruction Sources".to_string();
     let injected = super::super::apply_output_style_to_prompt_with_native(
+        rc(),
         dir.path(),
         None,
         prompt.clone(),
@@ -191,10 +193,11 @@ fn a_project_style_keeps_the_floor_with_and_without_native_support() {
         "[style]\nactive = \"fixture-voice\"\n",
     )
     .expect("project config");
-    let floor = super::super::style_floor();
+    let floor = super::super::style_floor(rc());
     let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
     let apply = |native| {
         super::super::apply_output_style_to_prompt_with_native(
+            rc(),
             dir.path(),
             None,
             "PROMPT".to_string(),
@@ -213,7 +216,7 @@ fn a_project_style_keeps_the_floor_with_and_without_native_support() {
     // Native, the settings naming the current composite: Claude Code delivers
     // the prose and the floor, so the prompt carries no second floor.
     let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
-    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    let id = super::super::native_style_id(rc(), dir.path(), &style).expect("composite");
     std::fs::write(
         dir.path().join(".claude").join("settings.json"),
         serde_json::json!({ "outputStyle": id }).to_string(),
@@ -241,8 +244,8 @@ fn a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt() {
     )
     .expect("project config");
     let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
-    let composite = super::super::native_style_id(dir.path(), &style).expect("composite");
-    let floor = super::super::style_floor();
+    let composite = super::super::native_style_id(rc(), dir.path(), &style).expect("composite");
+    let floor = super::super::style_floor(rc());
     let sep = crate::core::instruction_pipeline::SECTION_SEPARATOR;
     let claude = dir.path().join(".claude");
     let write = |file: &str, value: serde_json::Value| {
@@ -250,6 +253,7 @@ fn a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt() {
     };
     let apply = || {
         super::super::apply_output_style_to_prompt_with_native(
+            rc(),
             dir.path(),
             None,
             "PROMPT".to_string(),
@@ -296,7 +300,7 @@ fn a_composite_id_is_neither_listed_nor_selectable() {
     // #8533: selecting the generated composite would append a second floor.
     let dir = project_with_style("fixture-voice");
     let (style, _) = resolve_or_default(dir.path(), Some("fixture-voice"));
-    let id = super::super::native_style_id(dir.path(), &style).expect("composite");
+    let id = super::super::native_style_id(rc(), dir.path(), &style).expect("composite");
     assert_eq!(id, "fixture-voice.tm-floor");
     assert_eq!(project_style_ids(dir.path()), vec!["fixture-voice"]);
     assert!(matches!(
@@ -310,6 +314,7 @@ fn a_bundled_style_gets_no_second_floor_on_either_path() {
     let dir = TempDir::new().expect("tempdir");
     let apply = |native| {
         super::super::apply_output_style_to_prompt_with_native(
+            rc(),
             dir.path(),
             Some(crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID),
             "PROMPT".to_string(),
@@ -342,7 +347,7 @@ fn a_symlinked_style_file_is_refused_and_the_default_used() {
 
     let (style, warning) = resolve_or_default(dir.path(), Some("linked-voice"));
     assert_eq!(style.id(), crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID);
-    assert!(!style.content().contains("PRIVATE-TEXT-8533"));
+    assert!(!style.text(rc()).contains("PRIVATE-TEXT-8533"));
     let warning = warning.expect("a refused style is never a silent fallback");
     assert!(warning.contains("symlink"), "{warning}");
 }

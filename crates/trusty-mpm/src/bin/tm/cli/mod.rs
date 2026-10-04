@@ -700,7 +700,7 @@ pub(crate) enum Command {
     ///   exit 2                  — usage error or an unrecoverable probe error.
     ///
     /// Test: `commands::wait::tests`; `cli_parses_wait_*` in
-    /// `tests_behavior_a.rs`.
+    /// `tests_behavior_a_tests.rs`.
     Wait(WaitArgs),
     /// Run a heavy build under a machine-wide build slot (#8261).
     ///

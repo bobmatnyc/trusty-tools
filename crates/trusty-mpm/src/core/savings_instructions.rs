@@ -100,6 +100,36 @@ use crate::core::savings::{
 };
 use crate::core::savings_sidecar::{log_no_fold_once, stage_row};
 
+/// The PM section sources' byte figures a fold is measured against (#9012).
+///
+/// Why: the sections are runtime content, so the sizes come from the content
+/// source the prompt was composed from, not from compiled-in constants.
+/// What: `total` — every canonical section file's length summed; `min` — the
+/// smallest one, the floor below which a compiled prompt cannot be an
+/// assembly of them.
+/// Test: `folded_source_bytes_counts_the_bundled_sections`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SectionBytes {
+    /// Every canonical section file's length, summed.
+    pub(crate) total: usize,
+    /// The smallest canonical section file's length.
+    pub(crate) min: usize,
+}
+
+impl SectionBytes {
+    /// The figures for `content`'s canonical section files.
+    pub(crate) fn of(content: &crate::core::framework_content::FrameworkContent) -> Self {
+        let lens: Vec<usize> = crate::core::instruction_pipeline::SECTION_FILES
+            .iter()
+            .map(|path| content.instruction(path).map_or(0, str::len))
+            .collect();
+        Self {
+            total: lens.iter().sum(),
+            min: lens.iter().copied().min().unwrap_or(0),
+        }
+    }
+}
+
 /// Append one `instruction-compression` row for a session whose compiled prompt
 /// came out smaller than the sources that fed it.
 ///
@@ -126,6 +156,7 @@ use crate::core::savings_sidecar::{log_no_fold_once, stage_row};
 /// `a_recording_compiled_write_reaches_the_named_framework_root`.
 pub(crate) fn record_instruction_compression_in_with(
     framework_root: &Path,
+    sections: SectionBytes,
     dest: &Path,
     prompt: &str,
     roster_source: impl FnOnce(&Path) -> usize,
@@ -133,6 +164,7 @@ pub(crate) fn record_instruction_compression_in_with(
     // #7209: the row's key is the Claude Code session id, not the directory name.
     record_instruction_compression_to(
         framework_root,
+        sections,
         dest,
         prompt,
         claude_code_session_id(),
@@ -208,6 +240,7 @@ fn roster_source_bytes_from(dirs: &[std::path::PathBuf]) -> usize {
 /// `a_prompt_that_folds_nothing_warns_once_and_writes_no_row`.
 fn record_instruction_compression_to(
     framework_root: &Path,
+    sections: SectionBytes,
     dest: &Path,
     prompt: &str,
     claude_session_id: Option<String>,
@@ -225,16 +258,16 @@ fn record_instruction_compression_to(
         );
         return;
     };
-    let source_bytes = folded_source_bytes(&harness_root, roster_source(&harness_root));
+    let source_bytes = folded_source_bytes(sections, &harness_root, roster_source(&harness_root));
     let compiled_bytes = prompt.len();
     // #7491: a compiled prompt this small is not a fold, it is a stub,
     // a truncated write, or a stale file at the compiled-prompt path.
-    if compiled_bytes < min_plausible_compiled_bytes() {
+    if compiled_bytes < min_plausible_compiled_bytes(sections) {
         tracing::warn!(
             compiled_prompt = %dest.display(),
             compiled_bytes,
             source_bytes,
-            floor = min_plausible_compiled_bytes(),
+            floor = min_plausible_compiled_bytes(sections),
             "the compiled prompt is smaller than the smallest instruction section \
              it is assembled from, so it cannot be a real compiled prompt; writing \
              no instruction-compression savings row rather than a near-100% one"
@@ -306,9 +339,21 @@ pub(crate) fn rederive_from_compiled_prompt(
     let Ok(prompt) = std::fs::read_to_string(compiled_prompt) else {
         return false;
     };
+    // #9012: the section sizes come from content; with none, nothing is measured.
+    let Some((_, harness_root)) = session_and_root(compiled_prompt) else {
+        return false;
+    };
+    let content = match crate::core::content_source::framework_content_for(&harness_root) {
+        Ok(content) => content,
+        Err(err) => {
+            tracing::debug!(%err, "no instructional content; not re-deriving the savings row");
+            return false;
+        }
+    };
     let ledger = savings_log_in(framework_root);
     record_instruction_compression_to(
         framework_root,
+        SectionBytes::of(&content),
         compiled_prompt,
         &prompt,
         Some(claude_session_id.to_string()),
@@ -376,11 +421,12 @@ fn session_and_root(dest: &Path) -> Option<(String, std::path::PathBuf)> {
 /// Test: `folded_source_bytes_counts_the_bundled_sections`,
 /// `folded_source_bytes_adds_an_override_body`,
 /// `the_roster_dedup_counts_as_folded_source`.
-fn folded_source_bytes(project_dir: &Path, roster_source_bytes: usize) -> usize {
-    let bundled: usize = crate::core::instruction_pipeline::SECTION_SOURCES
-        .iter()
-        .map(|(_, body)| body.len())
-        .sum();
+fn folded_source_bytes(
+    sections: SectionBytes,
+    project_dir: &Path,
+    roster_source_bytes: usize,
+) -> usize {
+    let bundled = sections.total;
     let overrides: usize = crate::core::claude_md_sections::scan_project(project_dir)
         .overrides
         .iter()
@@ -404,12 +450,15 @@ fn folded_source_bytes(project_dir: &Path, roster_source_bytes: usize) -> usize 
 /// machine's roster, exactly as at launch.
 /// Test: `the_fold_measurement_is_none_before_any_session_compiles`,
 /// `the_fold_measurement_reads_the_newest_compiled_prompt`.
-pub(crate) fn measure_project_fold(project_dir: &Path) -> Option<(usize, usize)> {
+pub(crate) fn measure_project_fold(
+    project_dir: &Path,
+    sections: SectionBytes,
+) -> Option<(usize, usize)> {
     let prompt = crate::core::savings_sidecar::compiled_prompts_in(project_dir)
         .into_iter()
         .next()?;
     let compiled_bytes = std::fs::metadata(&prompt).ok()?.len() as usize;
-    Some((ambient_source_bytes(project_dir), compiled_bytes))
+    Some((ambient_source_bytes(project_dir, sections), compiled_bytes))
 }
 
 /// [`folded_source_bytes`] with this machine's roster resolved.
@@ -422,10 +471,10 @@ pub(crate) fn measure_project_fold(project_dir: &Path) -> Option<(usize, usize)>
 /// What: the bundled sections, the project's override bodies, and the undeduped
 /// roster for `project_dir`'s tiers.
 /// Test: `the_fold_measurement_reads_the_newest_compiled_prompt`.
-pub(crate) fn ambient_source_bytes(project_dir: &Path) -> usize {
+pub(crate) fn ambient_source_bytes(project_dir: &Path, sections: SectionBytes) -> usize {
     // #7746: delegates to the seamed variant below with the ambient roster
     // resolver, so this production entry point is unchanged.
-    source_bytes_with(project_dir, ambient_roster_source_bytes)
+    source_bytes_with(project_dir, sections, ambient_roster_source_bytes)
 }
 
 /// [`ambient_source_bytes`] with an explicit roster-byte resolver (the test
@@ -435,9 +484,10 @@ pub(crate) fn ambient_source_bytes(project_dir: &Path) -> usize {
 /// Test: `a_recording_compiled_write_reaches_the_named_framework_root`.
 pub(crate) fn source_bytes_with(
     project_dir: &Path,
+    sections: SectionBytes,
     roster_source: impl FnOnce(&Path) -> usize,
 ) -> usize {
-    folded_source_bytes(project_dir, roster_source(project_dir))
+    folded_source_bytes(sections, project_dir, roster_source(project_dir))
 }
 
 /// The smallest byte count a real compiled PM prompt can have.
@@ -454,12 +504,8 @@ pub(crate) fn source_bytes_with(
 /// sections change.
 /// Test: `a_stub_compiled_prompt_writes_no_row`,
 /// `the_row_reports_the_compiled_prompts_own_size`.
-pub(crate) fn min_plausible_compiled_bytes() -> usize {
-    crate::core::instruction_pipeline::SECTION_SOURCES
-        .iter()
-        .map(|(_, body)| body.len())
-        .min()
-        .unwrap_or(0)
+pub(crate) fn min_plausible_compiled_bytes(sections: SectionBytes) -> usize {
+    sections.min
 }
 
 /// Build the row, or decline to.

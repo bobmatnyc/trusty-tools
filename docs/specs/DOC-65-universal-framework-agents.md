@@ -19,7 +19,7 @@ spec_refs:
 **Owner:** Engineering (trusty-mpm) / Bob Matsuoka
 **Last-updated:** 2026-08-08
 **DOC-N claim:** `DOC-65`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md), verified free on `origin/main` (`d6e13326`): no filename or self-label claim under `docs/specs/**` (highest cataloged is `DOC-64`, README's own "next free" hint says `DOC-65`); no open pull requests at all (`gh pr list --state open` → empty); `scripts/check_doc_numbers.sh` clean (96 docs / 90 claims, 0 violations) before this file is added.
-**Builds on:** [ADR-0025](../adr/0025-collapse-agent-and-skill-tier-hierarchies.md) and its 2026-08-03 addendum ("Manifest-Based Project Configuration and the Four-Category Agent Model", §B1–B6) — the deployment/sourcing/precedence model this document maps its catalog onto, cited not restated. [DOC-61](./DOC-61-canonical-agent-standard.md) — the compose-chain source format (`extends:` inheritance, frontmatter merge, per-product builders) every agent cataloged here is built from, cited not restated. `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md` — the hand-authored routing prose this document formalizes into a governed spec artifact without duplicating its table.
+**Builds on:** [ADR-0025](../adr/0025-collapse-agent-and-skill-tier-hierarchies.md) and its 2026-08-03 addendum ("Manifest-Based Project Configuration and the Four-Category Agent Model", §B1–B6) — the deployment/sourcing/precedence model this document maps its catalog onto, cited not restated. [DOC-61](./DOC-61-canonical-agent-standard.md) — the compose-chain source format (`extends:` inheritance, frontmatter merge, per-product builders) every agent cataloged here is built from, cited not restated. `content/instructions/sections/agent-delegation.md` — the hand-authored routing prose this document formalizes into a governed spec artifact without duplicating its table.
 **Related issues:** **#4755** (this spec), **#4760** (the framework manifest this document was updated for), **#5202** (workflow/ticketing/version-control ownership) — scheduled in the 1.3.5 release line
 
 > **Source-ownership amendment (2026-09-03):** The MPM asset paths below are
@@ -551,7 +551,7 @@ not an extension of an existing one.** Reasoning:
   `deployed_agent_dirs`, `roster_from_dirs`, `resolve_roster`,
   `deployed_roster_section`, `is_foundation_file` — the roster resolver
   every consumer (PM prompt, `tm session start`, `tm doctor`) shares.
-- `crates/trusty-mpm/src/assets/instructions/sections/agent-delegation.md`
+- `content/instructions/sections/agent-delegation.md`
   — the hand-authored routing table this document formalizes without
   duplicating.
 - `crates/trusty-code/src/assets/mod.rs` — `DEFAULT_AGENTS`,

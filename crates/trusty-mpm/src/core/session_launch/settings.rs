@@ -142,7 +142,10 @@ pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
 /// Test: `deploy_output_style_writes_file`, `deploy_output_style_overwrites`,
 /// `deploy_output_style_writes_all_styles`,
 /// `deploy_output_style_writes_under_project_root`.
-pub(super) fn deploy_output_style(root: &Path) -> Result<PathBuf, PrepError> {
+pub(super) fn deploy_output_style(
+    content: &crate::core::framework_content::FrameworkContent,
+    root: &Path,
+) -> Result<PathBuf, PrepError> {
     let style_dir = root.join(".claude").join("output-styles");
     std::fs::create_dir_all(&style_dir).map_err(|source| PrepError::Io {
         path: style_dir.clone(),
@@ -152,7 +155,8 @@ pub(super) fn deploy_output_style(root: &Path) -> Result<PathBuf, PrepError> {
     let mut default_path: Option<PathBuf> = None;
     for style in crate::core::bundle::OUTPUT_STYLES {
         let style_path = style_dir.join(style.file_name);
-        std::fs::write(&style_path, style.content).map_err(|source| PrepError::Io {
+        // #9012: the style body is runtime content.
+        std::fs::write(&style_path, style.content(content)).map_err(|source| PrepError::Io {
             path: style_path.clone(),
             source,
         })?;

@@ -15,7 +15,7 @@
 #
 # What: builds+runs `tm generate capabilities --check`, which regenerates
 #   every derived file to memory and diffs it against the committed copies
-#   under `crates/trusty-mpm/src/assets/skills/tm-capabilities*` — never
+#   under `content/skills/tm-capabilities*` — never
 #   writes. `references/workflows.md` is hand-authored and is not part of the
 #   generated set, so it is never diffed by this check.
 #

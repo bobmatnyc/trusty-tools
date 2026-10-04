@@ -38,9 +38,10 @@
 use std::path::Path;
 
 use crate::core::claude_md_sections::ProjectOverrides;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::instruction_package::SectionId;
 use crate::core::instruction_pipeline::{
-    AGENT_DELEGATION, SECTION_SEPARATOR, base_pm, pm_instructions,
+    SECTION_SEPARATOR, agent_delegation, base_pm, pm_instructions,
 };
 
 /// Directory under the project root that holds the override files.
@@ -286,9 +287,11 @@ const MEMORY_OVERRIDE_HEADING: &str = "## Memory Behavior (project override)";
 /// `stack_profile_present_when_detected`, `stack_profile_neutral_when_undetected`,
 /// the robustness tests, and (in `claude_md_sections_tests.rs`)
 /// `a_legacy_file_cannot_shadow_a_named_override_because_it_is_not_read`.
-pub fn resolve_pm_prompt(project_dir: &Path) -> String {
+// #9012: every composer reads the section files from `content`, loaded once by
+// the caller (no global cache).
+pub fn resolve_pm_prompt(content: &FrameworkContent, project_dir: &Path) -> String {
     let profile = crate::core::session_profile::resolve_ambient(project_dir);
-    resolve_pm_prompt_for(project_dir, profile)
+    resolve_pm_prompt_for(content, project_dir, profile)
 }
 
 /// [`resolve_pm_prompt`] for a profile the caller already resolved (#8453).
@@ -298,10 +301,11 @@ pub fn resolve_pm_prompt(project_dir: &Path) -> String {
 /// What: [`resolve_pm_prompt_with_roster_for`] with the live roster scan.
 /// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
 pub fn resolve_pm_prompt_for(
+    content: &FrameworkContent,
     project_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
 ) -> String {
-    let (prompt, source) = resolve_pm_prompt_with_roster_for(project_dir, profile, || {
+    let (prompt, source) = resolve_pm_prompt_with_roster_for(content, project_dir, profile, || {
         crate::core::delegation_authority::deployed_roster_section(project_dir)
     });
     // `info!`, deliberately: this is the operator-visible record of WHICH
@@ -348,8 +352,11 @@ pub(crate) enum PromptSource {
 /// Test: `resolve_pm_prompt_takes_the_package_path_when_a_roster_is_deployed`,
 /// `the_roster_alone_selects_the_composer`, `no_retired_file_can_divert_the_composer`.
 #[cfg(test)] // #8453: production composes through `resolve_pm_prompt_for`.
-pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, PromptSource) {
-    resolve_pm_prompt_with_roster(project_dir, || {
+pub(crate) fn resolve_pm_prompt_with_source(
+    content: &FrameworkContent,
+    project_dir: &Path,
+) -> (String, PromptSource) {
+    resolve_pm_prompt_with_roster(content, project_dir, || {
         crate::core::delegation_authority::deployed_roster_section(project_dir)
     })
 }
@@ -379,11 +386,12 @@ pub(crate) fn resolve_pm_prompt_with_source(project_dir: &Path) -> (String, Prom
 /// `a_retired_instructions_file_cannot_feed_the_project_addendum`,
 /// `gate_is_deterministic_across_repeated_runs`.
 pub(crate) fn resolve_pm_prompt_with_roster(
+    content: &FrameworkContent,
     project_dir: &Path,
     roster_source: impl FnOnce() -> Option<String>,
 ) -> (String, PromptSource) {
     let profile = crate::core::session_profile::resolve_ambient(project_dir);
-    resolve_pm_prompt_with_roster_for(project_dir, profile, roster_source)
+    resolve_pm_prompt_with_roster_for(content, project_dir, profile, roster_source)
 }
 
 /// [`resolve_pm_prompt_with_roster`] for an already-resolved profile (#8453).
@@ -393,6 +401,7 @@ pub(crate) fn resolve_pm_prompt_with_roster(
 /// composition, unchanged.
 /// Test: `a_supervisor_project_needs_no_claude_md_override_blocks`.
 pub(crate) fn resolve_pm_prompt_with_roster_for(
+    content: &FrameworkContent,
     project_dir: &Path,
     profile: crate::core::session_profile::SessionProfile,
     roster_source: impl FnOnce() -> Option<String>,
@@ -410,7 +419,7 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
             );
         }
         return (
-            crate::core::session_profile::supervisor_prompt(),
+            crate::core::session_profile::supervisor_prompt(content),
             PromptSource::Supervisor,
         );
     }
@@ -439,6 +448,7 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
     if let Some(roster) = roster.as_deref() {
         let (composed, rejected) =
             crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides(
+                content,
                 &stack,
                 roster,
                 // #4286: `.trusty-mpm/INSTRUCTIONS.md` was the only production
@@ -456,10 +466,11 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
         }
         match composed {
             Ok(prompt) => return (prompt, PromptSource::Package),
-            // Unreachable for the shipped assets — `shipped_assets_build_and_
-            // validate` proves it — so this is a loud last resort, never a
-            // routine fallback. The string assembly below composes the same
-            // configuration, so degrading still delivers a correct prompt.
+            // #9012: the package was validated when `content` loaded, and
+            // `with_overrides` declines any override that would invalidate it,
+            // so this arm is a composition-INPUT defect (a required generator
+            // left empty), never a manifest one. The string assembly below
+            // projects the same validated package, manifest rules included.
             Err(err) => tracing::error!(
                 %err,
                 "bundled PM instruction package failed to compose; \
@@ -483,11 +494,12 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
     };
 
     let delegation = delegation_with_named_override(
+        content,
         named_section(SectionId::AgentDelegation).as_deref(),
         roster.as_deref(),
     );
     let workflow = named_section(SectionId::Workflow)
-        .unwrap_or_else(|| crate::core::instruction_pipeline::workflow_section().to_string());
+        .unwrap_or_else(|| crate::core::instruction_pipeline::workflow_section(content));
     let memory_override = named_section(SectionId::Memory);
 
     let unapplied = ProjectOverrides {
@@ -506,7 +518,7 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
     };
     crate::core::claude_md_sections::warn_unapplied(&unapplied);
     (
-        assemble_sections(stack, memory_override, workflow, delegation, None),
+        assemble_sections(content, stack, memory_override, workflow, delegation, None),
         PromptSource::Legacy,
     )
 }
@@ -527,6 +539,7 @@ pub(crate) fn resolve_pm_prompt_with_roster_for(
 /// `composed_package_is_byte_identical_to_the_legacy_bundled_fallback` in
 /// `bundled_pm_package_tests.rs`.
 pub(crate) fn assemble_sections(
+    content: &FrameworkContent,
     stack: String,
     memory_override: Option<String>,
     workflow: String,
@@ -539,7 +552,7 @@ pub(crate) fn assemble_sections(
     // ending in an unclosed `<!--` or fence cannot hide the text after it.
     use crate::core::instruction_fold::{fold_block, fold_parts};
     let fold = |s: &str| fold_block(s.trim());
-    let mut sections: Vec<String> = vec![fold(pm_instructions()), fold(&stack)];
+    let mut sections: Vec<String> = vec![fold(&pm_instructions(content)), fold(&stack)];
 
     // MEMORY override slots in right after PM_INSTRUCTIONS as a delimited block.
     if let Some(memory) = memory_override {
@@ -555,7 +568,7 @@ pub(crate) fn assemble_sections(
     }
 
     // Non-overridable floor, always last.
-    sections.push(fold(base_pm()));
+    sections.push(fold(&base_pm(content)));
 
     join_sections(sections)
 }
@@ -589,7 +602,7 @@ pub(crate) fn assemble_sections(
 /// The note is a Markdown blockquote stating the roster wins on WHICH agents
 /// exist, and to re-route rather than retry on an unknown-agent-type error. Since
 /// #4318 its prose is authored in the instruction manifest
-/// (`assets/instructions/pm-instruction-package.json`) as the delegation section's
+/// (`content/instructions/pm-instruction-package.json`) as the delegation section's
 /// second block, not as a Rust literal — so its position relative to the doctrine
 /// and the roster is *declared*, and both composers read the same bytes without a
 /// second copy. [`crate::core::instruction_pipeline::delegation_doctrine`]
@@ -623,14 +636,17 @@ pub(crate) fn assemble_sections(
 /// agent tiers exactly once whichever composition path it takes.
 /// Test: `bundled_delegation_appends_deployed_roster`, `no_overrides_uses_bundled`,
 /// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
-pub(crate) fn delegation_with_roster(roster: Option<&str>) -> Vec<String> {
+pub(crate) fn delegation_with_roster(
+    content: &FrameworkContent,
+    roster: Option<&str>,
+) -> Vec<String> {
     match roster {
         Some(roster) => vec![
-            crate::core::instruction_pipeline::delegation_doctrine().to_string(),
+            crate::core::instruction_pipeline::delegation_doctrine(content),
             roster.trim().to_string(),
         ],
         None => vec![
-            AGENT_DELEGATION.trim().to_string(),
+            agent_delegation(content).trim().to_string(),
             AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
         ],
     }
@@ -677,6 +693,7 @@ pub(crate) const AGENT_SELECTION_WITHOUT_ROSTER: &str = "> **Agent selection.** 
 /// (`claude_md_sections_tests.rs`),
 /// `the_roster_absent_path_keeps_every_core_member_but_the_roster`.
 pub(crate) fn delegation_with_named_override(
+    content: &FrameworkContent,
     named_override: Option<&str>,
     roster: Option<&str>,
 ) -> Vec<String> {
@@ -686,7 +703,7 @@ pub(crate) fn delegation_with_named_override(
         Some(body) => match roster {
             Some(roster) => vec![
                 body.trim().to_string(),
-                crate::core::bundled_pm_package::pinned_run(SectionId::AgentDelegation),
+                crate::core::bundled_pm_package::pinned_run(content, SectionId::AgentDelegation),
                 roster.trim().to_string(),
             ],
             None => vec![
@@ -694,7 +711,7 @@ pub(crate) fn delegation_with_named_override(
                 AGENT_SELECTION_WITHOUT_ROSTER.to_string(),
             ],
         },
-        None => delegation_with_roster(roster),
+        None => delegation_with_roster(content, roster),
     }
 }
 

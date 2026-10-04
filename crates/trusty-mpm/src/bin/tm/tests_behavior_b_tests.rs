@@ -2,7 +2,7 @@
 //! repair subcommands, and regression tests for issue #382
 //! (compose_session_instructions).
 //!
-//! Why: companion to `tests_behavior_a.rs`; extracting the second half of
+//! Why: companion to `tests_behavior_a_tests.rs`; extracting the second half of
 //! the behavioral suite keeps both files well under the 500-line cap.
 //! What: `cli_parses_attach_*`, `cli_parses_connect_*`,
 //! `cli_parses_daemon_custom_addr`, services subcommand parse tests,
@@ -513,6 +513,7 @@ fn compose_session_instructions_display_matches_live_prompt() {
             .expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        crate::commands::install::test_content_ref(),
         project,
         Some(roster),
     );
@@ -557,6 +558,7 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
             .expect("compose succeeds");
 
     let live_prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+        crate::commands::install::test_content_ref(),
         project,
         Some(roster),
     );

@@ -3,7 +3,7 @@
 //! Why: tests live in dedicated files so main.rs stays thin. This file
 //! covers short-id / banner / formatter tests and the first half of the
 //! CLI parse round-trips. Install / hook / session / services / compose
-//! tests live in `tests_behavior_a.rs` and `tests_behavior_b_tests.rs`; the
+//! tests live in `tests_behavior_a_tests.rs` and `tests_behavior_b_tests.rs`; the
 //! managed session-manager verb surface (`session new`/`ls`/`activity`/
 //! `send`/`answer`/`attach`/lifecycle aliases/`prune*`/`catchup`) lives in
 //! `tests_behavior_d_tests.rs` (split out under the #1916 line-cap rebalance).

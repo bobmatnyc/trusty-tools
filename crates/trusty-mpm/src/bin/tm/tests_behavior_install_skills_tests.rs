@@ -1,7 +1,7 @@
-//! `tm install`'s skill-deploy behavior test, split out of `tests_behavior_a.rs`
+//! `tm install`'s skill-deploy behavior test, split out of `tests_behavior_a_tests.rs`
 //! (#7102).
 //!
-//! Why: `tests_behavior_a.rs` sat exactly at the 500-SLOC production cap, and
+//! Why: `tests_behavior_a_tests.rs` sat exactly at the 500-SLOC production cap, and
 //! #7102 adds an assertion to `install_then_deploy_deploys_skills` — that a
 //! bundled skill must NOT land in the operator's `~/.claude/skills`. That file's
 //! own comments already route each deep skill assertion into a `_tests.rs`
@@ -14,7 +14,7 @@
 //! writes fails here rather than in production.
 //! Test: this file IS the test.
 
-use crate::commands::install::{install_to_with, skill_report_lines, test_roster};
+use crate::commands::install::{install_to_with, skill_report_lines, test_content, test_roster};
 
 #[test]
 fn install_then_deploy_deploys_skills() {
@@ -25,7 +25,7 @@ fn install_then_deploy_deploys_skills() {
     // `skill_install_tiers::deploy_install_skill_tiers`).
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
     let result = trusty_mpm::core::skill_install_tiers::deploy_install_skill_tiers(&paths)
         .unwrap()
         .stats;

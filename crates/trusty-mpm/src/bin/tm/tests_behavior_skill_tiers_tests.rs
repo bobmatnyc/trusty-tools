@@ -1,7 +1,7 @@
 //! `tm install`'s skill deploy step must honor the same multi-tier
 //! precedence as session launch — companion file, following the existing
 //! `tests_behavior_a/b/c/d/e`/`tests_behavior_reset_agents` split convention
-//! (kept separate from `tests_behavior_a.rs` so that file stays under the
+//! (kept separate from `tests_behavior_a_tests.rs` so that file stays under the
 //! 500-SLOC production cap; this file is itself capped at 1500 SLOC as a
 //! test file).
 //!
@@ -24,13 +24,13 @@
 //! byte-identical.
 //! Test: this IS the test module.
 
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn install_skill_step_preserves_user_tier_override() {
     let dir = tempfile::tempdir().unwrap();
     let paths = trusty_mpm::core::paths::FrameworkPaths::under(dir.path());
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // The user authors their own override in the user-custom tier BEFORE any
     // deploy runs, so both calls below see the collision.

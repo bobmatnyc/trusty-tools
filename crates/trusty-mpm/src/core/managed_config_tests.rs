@@ -13,6 +13,7 @@
 //! that last one visible.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::TempDir;
 
 /// The production entry point, with a stable hook binary pinned for every case
@@ -257,7 +258,8 @@ fn manual_static_verify_full_roster() {
             crate::core::content_source::test_support::repo_agents_dir(),
             &fw.agents,
         ),
-        (manifest.join("src/assets/skills"), &fw.skills),
+        // #9012: the skills are the checkout's content.
+        (manifest.join("../../content/skills"), &fw.skills),
     ] {
         for entry in std::fs::read_dir(&src).unwrap() {
             let entry = entry.unwrap();
@@ -331,14 +333,14 @@ fn manual_static_verify_full_roster() {
 /// before the deploy under test ever saw it. Writing the current stamp is the
 /// supported way to say "this source is the bundle", and it is what an
 /// installed machine's source dir looks like in steady state.
-/// What: writes `<fw.skills>/.bundle-stamp` with `skill_bundle_stamp()`.
+/// What: writes `<fw.skills>/.bundle-stamp` with `skill_bundle_stamp(rc())`.
 /// Test: used by every `#4873` case below; its necessity is proven by
 /// `pinning_the_stamp_preserves_a_seeded_skill_source`.
 fn pin_skill_source_stamp(fw: &FrameworkPaths) {
     std::fs::create_dir_all(&fw.skills).unwrap();
     std::fs::write(
         fw.skills.join(crate::core::skill_source::STAMP_FILE_NAME),
-        crate::core::skill_source::skill_bundle_stamp(),
+        crate::core::skill_source::skill_bundle_stamp(rc()),
     )
     .unwrap();
 }
@@ -373,7 +375,11 @@ fn pinning_the_stamp_preserves_a_seeded_skill_source() {
     pin_skill_source_stamp(&fw);
     seed_skill(&fw, "probe-skill", "---\nname: probe-skill\n---\n\nV1\n");
 
-    crate::core::skill_source::ensure_skill_source_fresh(&fw).unwrap();
+    crate::core::skill_source::ensure_skill_source_fresh(
+        &fw,
+        crate::core::content_source::test_support::rc(),
+    )
+    .unwrap();
 
     assert_eq!(
         std::fs::read_to_string(fw.skills.join("probe-skill.md")).unwrap(),

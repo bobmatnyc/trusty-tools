@@ -141,7 +141,9 @@ name = "trusty-common"
 # field on the `#[non_exhaustive]` `CallerIdentity`, and the
 # `ResolutionPath::TmuxSession` variant on the `#[non_exhaustive]` enum. No
 # public item was removed or changed shape.
-version = "0.53.3"
+# 0.53.4 (Refs #9012): patch — 0.53.1 is the published source this PR's
+# `content::dev` / `content::tests` edits diverge from; 0.53.3 is on main.
+version = "0.53.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

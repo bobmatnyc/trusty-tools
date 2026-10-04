@@ -291,7 +291,16 @@ pub fn reinstall_assets(
 ) -> ReinstallReport {
     let mut report = ReinstallReport::default();
 
-    match crate::core::skill_source::ensure_skill_source_fresh(paths) {
+    // #9012: the skills are runtime content, resolved like a launch resolves them.
+    let content = match project_dir {
+        Some(dir) => crate::core::content_source::framework_content_for(dir),
+        None => crate::core::content_source::framework_content(),
+    };
+    let refreshed = content.map_err(|err| err.to_string()).and_then(|content| {
+        crate::core::skill_source::ensure_skill_source_fresh(paths, &content)
+            .map_err(|err| err.to_string())
+    });
+    match refreshed {
         Ok(refreshed) => report.skill_source_refreshed = refreshed,
         Err(err) => report.notes.push(format!(
             "warning: could not refresh the bundled skill source at {} ({err}) — \

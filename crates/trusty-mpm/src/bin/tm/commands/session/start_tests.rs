@@ -743,7 +743,11 @@ fn inplace_prompt_file_stamps_the_profile_it_composed_for() {
     let project = tempfile::TempDir::new().expect("tmp project");
     let dir = tempfile::TempDir::new().expect("tmp prompt dir");
     let prompt = super::inplace_prompt_file(project.path(), dir.path()).expect("written");
-    let cli = trusty_mpm::core::session_launch::cli_launch(project.path(), None);
+    let cli = trusty_mpm::core::session_launch::cli_launch(
+        crate::commands::install::test_content_ref(),
+        project.path(),
+        None,
+    );
     assert_eq!(
         prompt.stamp,
         trusty_mpm::core::session_profile::launch_env(cli.profile)

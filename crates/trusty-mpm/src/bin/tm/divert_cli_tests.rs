@@ -1,6 +1,6 @@
 //! CLI parsing for the bulk-read diversion pair (#6887).
 //!
-//! Why: split out of `tests_behavior_a.rs`, which sits 6 SLOC under the
+//! Why: split out of `tests_behavior_a_tests.rs`, which sits 6 SLOC under the
 //! 500-SLOC production cap — the same companion-file convention
 //! `install_policy_tests.rs` and `tests_behavior_2903_skills_tests.rs` follow.
 //! What: asserts `tm hook --divert-check` and `tm divert bulk-read` parse. The

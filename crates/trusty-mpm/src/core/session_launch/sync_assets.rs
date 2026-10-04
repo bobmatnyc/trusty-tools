@@ -241,7 +241,15 @@ pub fn sync_session_assets(
     skill_deploy.unchanged.extend(project_skills.unchanged);
 
     // Non-fatal, mirroring `prepare_session_inner`'s own treatment of this step.
-    let output_style_synced = deploy_output_style(project_dir).is_ok();
+    // #9012: the style bodies are runtime content; with none nothing is synced.
+    let output_style_synced = match crate::core::content_source::framework_content_for(project_dir)
+    {
+        Ok(content) => deploy_output_style(&content, project_dir).is_ok(),
+        Err(err) => {
+            tracing::warn!("output styles not synced: {err}");
+            false
+        }
+    };
 
     Ok(SyncAssetsReport {
         agents_deployed: deploy.deployed,

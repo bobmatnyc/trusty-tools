@@ -26,16 +26,20 @@ use crate::cli::Cli;
 /// checks) — never re-parses them, just counts from the same source data
 /// each reference renderer reads.
 /// Test: `entry_render_has_frontmatter`, `entry_render_mentions_provenance`.
-pub(crate) fn render(roster: &trusty_mpm::core::content_source::AgentRoster) -> String {
+pub(crate) fn render(
+    roster: &trusty_mpm::core::content_source::AgentRoster,
+    content: &trusty_mpm::core::content_source::FrameworkContent,
+) -> String {
     let cli_count = Cli::command().get_subcommands().count();
     let mcp_count = trusty_mpm::mcp::tools::tool_catalog().len();
     let agent_count = roster
         .iter()
         .filter(|(name, _)| !name.starts_with("BASE-"))
         .count();
-    let skill_count = trusty_mpm::core::bundle::ALL
-        .iter()
-        .filter(|a| super::skills::is_top_level_skill(a.rel_path))
+    // #9012: the skills are runtime content.
+    let skill_count = content
+        .skills()
+        .filter(|(rel_path, _)| super::skills::is_top_level_skill(rel_path))
         .count();
     let doctor_count = super::doctor::DOCTOR_CHECKS.len();
 
@@ -44,7 +48,8 @@ pub(crate) fn render(roster: &trusty_mpm::core::content_source::AgentRoster) -> 
 name: tm-capabilities
 description: Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill.
 user-invocable: false
-version: "1.1.0"
+metadata:
+  version: "1.1.0"
 category: pm-reference
 tags: [reference, generated, cli, mcp, agents, skills, doctor, framework]
 effort: low
@@ -113,7 +118,10 @@ mod tests {
 
     #[test]
     fn entry_render_has_frontmatter() {
-        let rendered = render(crate::commands::install::test_roster_ref());
+        let rendered = render(
+            crate::commands::install::test_roster_ref(),
+            crate::commands::install::test_content_ref(),
+        );
         assert!(
             rendered.starts_with("---\nname: tm-capabilities\n"),
             "{rendered}"
@@ -123,7 +131,10 @@ mod tests {
 
     #[test]
     fn entry_render_mentions_provenance() {
-        let rendered = render(crate::commands::install::test_roster_ref());
+        let rendered = render(
+            crate::commands::install::test_roster_ref(),
+            crate::commands::install::test_content_ref(),
+        );
         assert!(rendered.contains("AUTO-GENERATED"), "{rendered}");
         assert!(rendered.contains("tm generate capabilities"), "{rendered}");
     }
@@ -131,8 +142,14 @@ mod tests {
     #[test]
     fn entry_render_is_deterministic() {
         assert_eq!(
-            render(crate::commands::install::test_roster_ref()),
-            render(crate::commands::install::test_roster_ref())
+            render(
+                crate::commands::install::test_roster_ref(),
+                crate::commands::install::test_content_ref()
+            ),
+            render(
+                crate::commands::install::test_roster_ref(),
+                crate::commands::install::test_content_ref()
+            )
         );
     }
 }

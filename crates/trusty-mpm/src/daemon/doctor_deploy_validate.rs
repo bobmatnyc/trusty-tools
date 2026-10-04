@@ -88,7 +88,7 @@ mod tests {
         let default_style = crate::core::bundle::OUTPUT_STYLES[0];
         std::fs::write(
             style_dir.join(default_style.file_name),
-            default_style.content,
+            default_style.content(crate::core::content_source::test_support::rc()),
         )
         .unwrap();
         std::fs::write(

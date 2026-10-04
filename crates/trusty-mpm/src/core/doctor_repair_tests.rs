@@ -10,6 +10,7 @@
 //! Test: this file.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use std::fs;
 
 /// A settings file carrying one tm hook entry and one foreign (claude-mpm) one.
@@ -557,7 +558,7 @@ fn legacy_sources_is_empty_on_a_clean_home() {
 
 /// Deploy every bundled style into `<home>/.claude/output-styles/`.
 fn deploy_styles(home: &Path) {
-    crate::core::output_style_deployer::deploy_output_styles(&home.join(".claude")).unwrap();
+    crate::core::output_style_deployer::deploy_output_styles(rc(), &home.join(".claude")).unwrap();
 }
 
 /// The path of one bundled style under `<home>/.claude/output-styles/`.
@@ -582,7 +583,7 @@ fn output_style_repair_is_empty_when_in_sync() {
     let home = tempfile::tempdir().unwrap();
     deploy_styles(home.path());
     assert!(
-        repair_output_style(home.path(), None, RepairMode::DryRun).is_empty(),
+        repair_output_style(rc(), home.path(), None, RepairMode::DryRun).is_empty(),
         "an in-sync tier produces no step, so `--fix` prints nothing about it"
     );
 }
@@ -594,7 +595,7 @@ fn output_style_repair_plans_the_drifted_file() {
     let target = style_path(home.path(), 0);
     fs::write(&target, "stale text").unwrap();
 
-    let steps = repair_output_style(home.path(), None, RepairMode::DryRun);
+    let steps = repair_output_style(rc(), home.path(), None, RepairMode::DryRun);
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(steps[0].check, "output_style_staleness");
     assert_eq!(steps[0].path, target);
@@ -608,7 +609,7 @@ fn output_style_repair_dry_run_writes_nothing() {
     let target = style_path(home.path(), 0);
     fs::write(&target, "stale text").unwrap();
 
-    repair_output_style(home.path(), None, RepairMode::DryRun);
+    repair_output_style(rc(), home.path(), None, RepairMode::DryRun);
 
     assert_eq!(
         fs::read_to_string(&target).unwrap(),
@@ -628,7 +629,7 @@ fn output_style_repair_applies_and_reports_from_disk() {
     fs::write(&drifted, "stale text").unwrap();
     fs::remove_file(&missing).unwrap();
 
-    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
+    let steps = repair_output_style(rc(), home.path(), None, RepairMode::Apply);
 
     assert_eq!(steps.len(), 2, "{steps:?}");
     assert!(
@@ -637,14 +638,14 @@ fn output_style_repair_applies_and_reports_from_disk() {
     );
     assert_eq!(
         fs::read_to_string(&drifted).unwrap(),
-        crate::core::bundle::OUTPUT_STYLES[0].content
+        crate::core::bundle::OUTPUT_STYLES[0].content(rc())
     );
     assert_eq!(
         fs::read_to_string(&missing).unwrap(),
-        crate::core::bundle::OUTPUT_STYLES[1].content
+        crate::core::bundle::OUTPUT_STYLES[1].content(rc())
     );
     assert!(
-        repair_output_style(home.path(), None, RepairMode::DryRun).is_empty(),
+        repair_output_style(rc(), home.path(), None, RepairMode::DryRun).is_empty(),
         "the repair must actually clear the finding it reported"
     );
 }
@@ -666,12 +667,12 @@ fn output_style_repair_rewrites_the_managed_tier() {
     let managed_styles = managed.path().join("output-styles");
     fs::create_dir_all(&managed_styles).unwrap();
     for style in crate::core::bundle::OUTPUT_STYLES {
-        fs::write(managed_styles.join(style.file_name), style.content).unwrap();
+        fs::write(managed_styles.join(style.file_name), style.content(rc())).unwrap();
     }
     let stale = managed_styles.join(crate::core::bundle::OUTPUT_STYLES[0].file_name);
     fs::write(&stale, "stale managed copy").unwrap();
 
-    let steps = repair_output_style(home.path(), Some(managed.path()), RepairMode::Apply);
+    let steps = repair_output_style(rc(), home.path(), Some(managed.path()), RepairMode::Apply);
 
     assert_eq!(steps.len(), 1, "only the managed copy drifted: {steps:?}");
     assert!(steps[0].changed(), "{steps:?}");
@@ -681,11 +682,11 @@ fn output_style_repair_rewrites_the_managed_tier() {
     );
     assert_eq!(
         fs::read_to_string(&stale).unwrap(),
-        crate::core::bundle::OUTPUT_STYLES[0].content,
+        crate::core::bundle::OUTPUT_STYLES[0].content(rc()),
         "the managed copy must be rewritten from the bundled asset"
     );
     assert!(
-        repair_output_style(home.path(), Some(managed.path()), RepairMode::DryRun).is_empty(),
+        repair_output_style(rc(), home.path(), Some(managed.path()), RepairMode::DryRun).is_empty(),
         "the repair must actually clear the finding it reported"
     );
 }
@@ -717,7 +718,7 @@ fn one_unreadable_style_does_not_fail_a_sibling_that_was_written() {
         return;
     }
 
-    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
+    let steps = repair_output_style(rc(), home.path(), None, RepairMode::Apply);
     let _ = fs::set_permissions(&blocked, fs::Permissions::from_mode(0o600));
 
     let drifted_step = steps
@@ -731,7 +732,7 @@ fn one_unreadable_style_does_not_fail_a_sibling_that_was_written() {
     );
     assert_eq!(
         fs::read_to_string(&drifted).unwrap(),
-        crate::core::bundle::OUTPUT_STYLES[0].content,
+        crate::core::bundle::OUTPUT_STYLES[0].content(rc()),
         "and the report must match what is on disk"
     );
 
@@ -766,7 +767,7 @@ fn output_style_repair_refuses_an_unreadable_file() {
         return;
     }
 
-    let steps = repair_output_style(home.path(), None, RepairMode::Apply);
+    let steps = repair_output_style(rc(), home.path(), None, RepairMode::Apply);
     let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o600));
 
     assert_eq!(steps.len(), 1, "{steps:?}");

@@ -17,12 +17,12 @@
 	 * against repository source, never against a README sentence.
 	 *
 	 *   - the disambiguation, the roster, and the `outputStyle` check —
-	 *     `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`
+	 *     `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`
 	 *   - `tm launch` deploying the full sequence then attaching, and every
 	 *     other verb named here — `crates/trusty-mpm/src/bin/tm/cli/mod.rs`
 	 *   - tmux session naming and the 1:1 worktree map —
 	 *     `crates/trusty-mpm/src/session_manager/naming.rs` and
-	 *     `crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
+	 *     `content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
 	 *   - `CLAUDE_CONFIG_DIR` excluding the real `~/.claude` —
 	 *     `crates/trusty-mpm/src/core/managed_config.rs`
 	 *   - which daemons launchd supervises and which run their own verb —
@@ -56,7 +56,7 @@
 	 */
 	import { GITHUB_URL } from '$lib/site';
 
-	const IDENTITY_DOC = `${GITHUB_URL}/blob/main/crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`;
+	const IDENTITY_DOC = `${GITHUB_URL}/blob/main/content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`;
 
 	const description =
 		'Moving off the Python claude-mpm and onto trusty-mpm (tm): what installs, what carries over, and what genuinely behaves differently — the daemon fleet, tmux-hosted sessions, and per-project agent deployment.';

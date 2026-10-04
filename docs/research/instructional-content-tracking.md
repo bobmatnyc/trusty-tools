@@ -21,7 +21,8 @@ Owner rulings this research answers (2026-09-22):
 
 | Tree | Contents | Consumer |
 |---|---|---|
-| `crates/trusty-mpm/src/assets/skills/` | 23 top-level skills + `references/*.md`, `sm_instructions/` | `trusty-mpm` binary |
+| `crates/trusty-mpm/src/assets/skills/` | 23 top-level skills + `references/*.md` | `trusty-mpm` binary |
+| `crates/trusty-mpm/src/assets/sm_instructions/` | the four SM instruction files — a sibling of `skills/`, not nested in it (corrected per the 2026-09-23 ruling on #8387) | `trusty-mpm` SM prompt composer |
 | `crates/trusty-mpm/src/assets/instructions/sections/` | 11 PM instruction sections (`core.md`, `agent-delegation.md`, …) + `README.md` | `trusty-mpm` PM prompt composer |
 | `crates/trusty-mpm/src/assets/output-styles/` | `trusty-mpm.md`, `trusty-mpm-research.md`, `trusty-mpm-teacher.md` | `trusty-mpm` output-style deploy |
 | `crates/trusty-mpm/src/assets/framework-manifest.toml` | catalog authority: which agent/skill bundles, its deploy category, its markers | `trusty-mpm` manifest parser |
@@ -325,6 +326,12 @@ needs to release faster than `trusty-tools` reviews PRs, or ships to
 consumers that must never clone this repo — revisit if that need appears.
 
 ### First three PR-sized steps
+
+   > **Superseded (owner ruling 2026-09-22, #8387):** ADR-0064's per-class
+   > layout won over the `content/trusty-mpm/` tree below, and
+   > `framework-manifest.toml` stayed in the crate. As landed (#9011, #9012):
+   > `content/{agents,skills,instructions}/`, with output styles, SM
+   > instructions and the bundled docs as subfolders of `instructions/`.
 
 1. **Move, don't redesign.** `git mv crates/trusty-mpm/src/assets/{skills,instructions,output-styles,framework-manifest.toml} content/trusty-mpm/`
    and `git mv crates/trusty-agents-common/src/assets/agents content/agents`

@@ -56,8 +56,8 @@ bad() {
 # it above the default scan floor of 5.
 fixture() {
   local root="${TMPROOT}/$1"
-  local sections="${root}/crates/trusty-mpm/src/assets/instructions/sections"
-  local styles="${root}/crates/trusty-mpm/src/assets/output-styles"
+  local sections="${root}/content/instructions/sections"
+  local styles="${root}/content/instructions/output-styles"
   mkdir -p "${sections}" "${styles}"
   # 1000 bytes each: a round baseline makes every percentage in the cases below
   # exact rather than approximate.
@@ -129,8 +129,8 @@ root="$(fixture total_over)"
 baseline="${TMPROOT}/total_over.tsv"
 run_gate "${root}" "${baseline}" --update
 for f in "${root}/CLAUDE.md" \
-  "${root}/crates/trusty-mpm/src/assets/instructions/sections/"*.md \
-  "${root}/crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md"; do
+  "${root}/content/instructions/sections/"*.md \
+  "${root}/content/instructions/output-styles/trusty-mpm.md"; do
   grow "${f}" 60
 done
 want_case total_over fail "${root}" "${baseline}" "more than 5% over baseline"
@@ -141,7 +141,7 @@ want_case total_over fail "${root}" "${baseline}" "more than 5% over baseline"
 root="$(fixture file_over)"
 baseline="${TMPROOT}/file_over.tsv"
 run_gate "${root}" "${baseline}" --update
-grow "${root}/crates/trusty-mpm/src/assets/instructions/sections/core.md" 150
+grow "${root}/content/instructions/sections/core.md" 150
 want_case file_over fail "${root}" "${baseline}" "more than 10% over baseline"
 
 # --- unlisted ----------------------------------------------------------------
@@ -149,14 +149,14 @@ root="$(fixture unlisted)"
 baseline="${TMPROOT}/unlisted.tsv"
 run_gate "${root}" "${baseline}" --update
 head -c 900 /dev/zero | tr '\0' 'z' \
-  >"${root}/crates/trusty-mpm/src/assets/instructions/sections/brand-new.md"
+  >"${root}/content/instructions/sections/brand-new.md"
 want_case unlisted fail "${root}" "${baseline}" "absent from the baseline"
 
 # --- vanished ----------------------------------------------------------------
 root="$(fixture vanished)"
 baseline="${TMPROOT}/vanished.tsv"
 run_gate "${root}" "${baseline}" --update
-rm "${root}/crates/trusty-mpm/src/assets/instructions/sections/search.md"
+rm "${root}/content/instructions/sections/search.md"
 want_case vanished fail "${root}" "${baseline}" "which the scan did not find"
 
 # --- scan_floor --------------------------------------------------------------
@@ -174,7 +174,7 @@ if [ -z "${only}" ] || [ "${only}" = "update" ]; then
   root="$(fixture update)"
   baseline="${TMPROOT}/update.tsv"
   run_gate "${root}" "${baseline}" --update
-  grow "${root}/crates/trusty-mpm/src/assets/instructions/sections/core.md" 400
+  grow "${root}/content/instructions/sections/core.md" 400
   if run_gate "${root}" "${baseline}"; then
     bad update "a 40% growth must fail before --update records it"
   elif ! run_gate "${root}" "${baseline}" --update; then

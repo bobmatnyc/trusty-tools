@@ -284,7 +284,10 @@ fn client_prompt_spec(
     action: &str,
 ) -> anyhow::Result<crate::runtime::launch_spec::LaunchSpec> {
     let project = std::path::Path::new(workdir);
-    let prompt = crate::core::session_launch::build_system_prompt_for(project);
+    // #9012: the PM instructions are runtime content; none refuses the launch.
+    let content = crate::core::content_source::framework_content_for(project)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let prompt = crate::core::session_launch::build_system_prompt_for(&content, project);
     let file = crate::core::model_inject::write_pm_prompt_file_in(dir, &prompt, project, action)?;
     Ok(client_claude_spec(project, config_root, Some(&file)))
 }

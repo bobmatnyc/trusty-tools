@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 use super::{ActiveStyle, PROJECT_STYLES_DIR, strip_frontmatter};
 use crate::core::agent_manifest::{ManifestError, atomic_write};
-use crate::core::bundle::OUTPUT_STYLE;
 use crate::core::claude_config::ClaudeConfigReader;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::instruction_fold::{fold_block, step_fence};
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 
@@ -43,12 +43,14 @@ pub const COMPOSITE_STYLE_SUFFIX: &str = ".tm-floor";
 ///
 /// Why: one source for the floor text — an edit to the bundled style reaches
 /// every project style on the next launch.
-/// What: each section runs from its heading to the next `#` or `##` heading.
+/// What: each section runs from its heading to the next `#` or `##` heading,
+/// cut from the `trusty-mpm` style in `content` (#9012: runtime content).
 /// Test: `the_floor_is_cut_from_the_bundled_style`.
-pub fn style_floor() -> String {
+pub fn style_floor(content: &FrameworkContent) -> String {
+    let professional = crate::core::bundle::OUTPUT_STYLES[0].content(content);
     let sections: Vec<&str> = FLOOR_SECTIONS
         .iter()
-        .filter_map(|heading| section(OUTPUT_STYLE, heading))
+        .filter_map(|heading| section(professional, heading))
         .collect();
     format!("{STYLE_FLOOR_HEADING}\n\n{}", sections.join("\n\n"))
 }
@@ -83,10 +85,10 @@ fn section<'a>(doc: &'a str, heading: &str) -> Option<&'a str> {
 /// sections.
 ///
 /// Test: `the_bundled_styles_get_no_appended_floor`.
-pub fn floor_for(style: &ActiveStyle) -> Option<String> {
+pub fn floor_for(content: &FrameworkContent, style: &ActiveStyle) -> Option<String> {
     match style {
         ActiveStyle::Bundled(_) => None,
-        ActiveStyle::Project { .. } => Some(style_floor()),
+        ActiveStyle::Project { .. } => Some(style_floor(content)),
     }
 }
 
@@ -102,9 +104,9 @@ pub fn floor_for(style: &ActiveStyle) -> Option<String> {
 /// heading spoofing the floor adds nothing and removes nothing.
 /// Test: `a_project_style_is_delivered_as_its_prose_plus_the_floor_once`,
 /// `the_floor_survives_an_unclosed_comment_or_fence_and_a_spoofed_heading`.
-pub fn delivered_style_text(style: &ActiveStyle) -> String {
-    let body = strip_frontmatter(style.content()).trim();
-    let Some(floor) = floor_for(style) else {
+pub fn delivered_style_text(content: &FrameworkContent, style: &ActiveStyle) -> String {
+    let body = strip_frontmatter(style.text(content)).trim();
+    let Some(floor) = floor_for(content, style) else {
         return body.to_string();
     };
     let prose = fold_block(body);
@@ -148,7 +150,7 @@ fn frontmatter(content: &str) -> &str {
 /// frontmatter lines kept, its `name:` replaced), then [`delivered_style_text`]
 /// — the project prose, then the floor.
 /// Test: `a_bare_claude_launch_loads_the_project_prose_then_the_floor`.
-pub fn composite_style_text(style: &ActiveStyle) -> Option<String> {
+pub fn composite_style_text(framework: &FrameworkContent, style: &ActiveStyle) -> Option<String> {
     let ActiveStyle::Project { id, content, .. } = style else {
         return None;
     };
@@ -165,7 +167,7 @@ pub fn composite_style_text(style: &ActiveStyle) -> Option<String> {
     Some(format!(
         "---\n{}\n---\n\n{}\n",
         front.join("\n"),
-        delivered_style_text(style)
+        delivered_style_text(framework, style)
     ))
 }
 
@@ -185,8 +187,12 @@ pub fn composite_style_text(style: &ActiveStyle) -> Option<String> {
 /// Test: `a_bare_claude_launch_loads_the_project_prose_then_the_floor`,
 /// `a_symlinked_composite_is_refused`,
 /// `the_composite_is_replaced_by_rename_never_written_through`.
-pub fn native_style_id(project_dir: &Path, style: &ActiveStyle) -> std::io::Result<String> {
-    let Some(text) = composite_style_text(style) else {
+pub fn native_style_id(
+    content: &FrameworkContent,
+    project_dir: &Path,
+    style: &ActiveStyle,
+) -> std::io::Result<String> {
+    let Some(text) = composite_style_text(content, style) else {
         return Ok(style.id().to_string());
     };
     let path = composite_path(project_dir, style.id());
@@ -239,8 +245,12 @@ fn project_output_style(project_dir: &Path) -> Option<String> {
 /// at [`composite_path`] reads as [`composite_style_text`].
 /// Test: `a_project_style_keeps_the_floor_with_and_without_native_support`,
 /// `a_local_setting_naming_the_raw_style_keeps_the_floor_in_the_prompt`.
-pub fn composite_is_active(project_dir: &Path, style: &ActiveStyle) -> bool {
-    let Some(text) = composite_style_text(style) else {
+pub fn composite_is_active(
+    content: &FrameworkContent,
+    project_dir: &Path,
+    style: &ActiveStyle,
+) -> bool {
+    let Some(text) = composite_style_text(content, style) else {
         return false;
     };
     // #8533: the effective value across both project layers, not settings.json alone.

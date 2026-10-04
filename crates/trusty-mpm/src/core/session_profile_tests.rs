@@ -1,7 +1,8 @@
 //! Tests for the supervisor instruction profile (#8453).
 
 use super::*;
-use crate::core::bundle::{DEFAULT_OUTPUT_STYLE_ID, OUTPUT_STYLE, OUTPUT_STYLE_SUPERVISOR};
+use crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID;
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for;
 use crate::core::instruction_overrides::{PromptSource, resolve_pm_prompt_with_roster};
 use std::ffi::OsString;
@@ -42,14 +43,14 @@ fn heading(section: &'static str) -> &'static str {
 /// delegation directive.
 fn dropped_pm_markers() -> Vec<&'static str> {
     let mut markers: Vec<&'static str> = [
-        include_str!("../assets/instructions/sections/agent-delegation.md"),
-        include_str!("../assets/instructions/sections/agent-routing.md"),
-        include_str!("../assets/instructions/sections/delegation-mechanics.md"),
-        include_str!("../assets/instructions/sections/pm-allowlist.md"),
-        include_str!("../assets/instructions/sections/phases.md"),
-        include_str!("../assets/instructions/sections/qa-gate.md"),
-        include_str!("../assets/instructions/sections/git-file-tracking.md"),
-        include_str!("../assets/instructions/sections/enforcement.md"),
+        rc().required("sections/agent-delegation.md"),
+        rc().required("sections/agent-routing.md"),
+        rc().required("sections/delegation-mechanics.md"),
+        rc().required("sections/pm-allowlist.md"),
+        rc().required("sections/phases.md"),
+        rc().required("sections/qa-gate.md"),
+        rc().required("sections/git-file-tracking.md"),
+        rc().required("sections/enforcement.md"),
     ]
     .into_iter()
     .map(heading)
@@ -100,7 +101,7 @@ fn a_project_only_switch_stays_pm() {
     let config = MpmConfig::default();
     assert_eq!(resolve(tmp.path(), &config), SessionProfile::Pm);
     assert_eq!(resolve_ambient(tmp.path()), SessionProfile::Pm);
-    let (_, source) = resolve_pm_prompt_with_roster(tmp.path(), || Some(ROSTER.into()));
+    let (_, source) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(ROSTER.into()));
     assert_eq!(source, PromptSource::Package);
     let root = TempDir::new().expect("framework root");
     let style = crate::core::output_style::select_style_under(root.path(), tmp.path(), None);
@@ -181,7 +182,7 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
     // prompt — never the supervisor text, never a partial or empty prompt —
     // even for an allow-listed project.
     let clean = TempDir::new().expect("tempdir");
-    let (pm_prompt, _) = resolve_pm_prompt_with_roster(clean.path(), || Some(ROSTER.into()));
+    let (pm_prompt, _) = resolve_pm_prompt_with_roster(rc(), clean.path(), || Some(ROSTER.into()));
 
     let malformed = project_with("profile = \"supervisor\"\nnot toml at all [[[\n");
     let unknown_key = project_with("profile = \"supervisor\"\nprofle = \"x\"\n");
@@ -195,7 +196,7 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
         let profile = resolve(dir.path(), &allowing(&[dir.path()]));
         assert_eq!(profile, SessionProfile::Pm, "{label}");
         let (prompt, source) =
-            resolve_pm_prompt_with_roster_for(dir.path(), profile, || Some(ROSTER.into()));
+            resolve_pm_prompt_with_roster_for(rc(), dir.path(), profile, || Some(ROSTER.into()));
         assert_eq!(source, PromptSource::Package, "{label}");
         assert_eq!(prompt, pm_prompt, "{label}: the full PM prompt");
     }
@@ -203,7 +204,7 @@ fn a_malformed_config_falls_back_to_the_pm_profile() {
 
 #[test]
 fn the_supervisor_prompt_is_never_empty() {
-    let prompt = supervisor_prompt();
+    let prompt = supervisor_prompt(rc());
     assert!(prompt.starts_with("# Trusty Fleet Supervisor"), "{prompt}");
     for (name, body) in SUPERVISOR_SECTIONS {
         assert!(!body.trim().is_empty(), "{name}");
@@ -215,7 +216,7 @@ fn the_supervisor_prompt_is_never_empty() {
 #[test]
 fn every_kept_item_reaches_the_supervisor_prompt() {
     // The Keep list of #8453, one marker per item.
-    let prompt = supervisor_prompt();
+    let prompt = supervisor_prompt(rc());
     for (item, marker) in [
         ("identity", "You are a direct-action supervisor"),
         ("hard limits", "## Hard Limits"),
@@ -242,6 +243,7 @@ fn no_pm_delegation_text_reaches_a_supervisor_session() {
     let markers = dropped_pm_markers();
     for native in [true, false] {
         let delivered = crate::core::session_launch::build_system_prompt_for_profile(
+            rc(),
             tmp.path(),
             None,
             native,
@@ -258,14 +260,20 @@ fn no_pm_delegation_text_reaches_a_supervisor_session() {
         );
     }
     assert_eq!(
-        leaked(OUTPUT_STYLE_SUPERVISOR, &markers),
+        leaked(
+            rc().required("output-styles/trusty-mpm-supervisor.md"),
+            &markers
+        ),
         Vec::<&str>::new()
     );
 
     // The markers are real: every one of them reaches a PM session.
     let pm = TempDir::new().expect("tempdir");
-    let (pm_prompt, _) = resolve_pm_prompt_with_roster(pm.path(), || Some(ROSTER.into()));
-    let pm_session = format!("{OUTPUT_STYLE}\n{pm_prompt}");
+    let (pm_prompt, _) = resolve_pm_prompt_with_roster(rc(), pm.path(), || Some(ROSTER.into()));
+    let pm_session = format!(
+        "{}\n{pm_prompt}",
+        rc().required("output-styles/trusty-mpm.md")
+    );
     assert_eq!(leaked(&pm_session, &markers), markers);
 }
 
@@ -280,9 +288,9 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
     )
     .unwrap();
     let supervisor = SessionProfile::Supervisor;
-    let (plain, source) = resolve_pm_prompt_with_roster_for(tmp.path(), supervisor, || None);
+    let (plain, source) = resolve_pm_prompt_with_roster_for(rc(), tmp.path(), supervisor, || None);
     assert_eq!(source, PromptSource::Supervisor);
-    assert_eq!(plain, supervisor_prompt());
+    assert_eq!(plain, supervisor_prompt(rc()));
 
     std::fs::write(
         tmp.path().join("CLAUDE.md"),
@@ -290,8 +298,8 @@ fn a_supervisor_project_needs_no_claude_md_override_blocks() {
          <!-- TRUSTY-MPM: IDENTITY END -->\n",
     )
     .unwrap();
-    let (with_block, _) = resolve_pm_prompt_with_roster_for(tmp.path(), supervisor, || None);
-    assert_eq!(with_block, supervisor_prompt());
+    let (with_block, _) = resolve_pm_prompt_with_roster_for(rc(), tmp.path(), supervisor, || None);
+    assert_eq!(with_block, supervisor_prompt(rc()));
 }
 
 #[test]
@@ -334,8 +342,14 @@ fn the_supervisor_style_carries_write_plainly_verbatim() {
         let end = rest[1..].find("\n## ").map_or(rest.len(), |at| at + 1);
         rest[..end].trim().to_string()
     };
-    assert_eq!(section(OUTPUT_STYLE_SUPERVISOR), section(OUTPUT_STYLE));
-    assert!(OUTPUT_STYLE_SUPERVISOR.contains(&format!("\nname: {SUPERVISOR_OUTPUT_STYLE_ID}\n")));
+    assert_eq!(
+        section(rc().required("output-styles/trusty-mpm-supervisor.md")),
+        section(rc().required("output-styles/trusty-mpm.md"))
+    );
+    assert!(
+        rc().required("output-styles/trusty-mpm-supervisor.md")
+            .contains(&format!("\nname: {SUPERVISOR_OUTPUT_STYLE_ID}\n"))
+    );
 }
 
 #[test]
@@ -429,7 +443,7 @@ fn the_launch_stamp_names_the_profile() {
 fn cli_launch_stamps_the_profile_its_prompt_was_composed_for() {
     // A temp project is on no operator's allowlist: a PM prompt and a PM stamp.
     let tmp = supervisor_project();
-    let cli = crate::core::session_launch::cli_launch(tmp.path(), None);
+    let cli = crate::core::session_launch::cli_launch(rc(), tmp.path(), None);
     assert_eq!(cli.profile, SessionProfile::Pm);
     assert!(
         cli.env.contains(&launch_env(SessionProfile::Pm)),

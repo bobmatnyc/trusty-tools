@@ -423,7 +423,7 @@ fn install_claude_hooks_at_with_pm_guard(
 /// updated (new or changed), `false` when already configured. #9018: honours
 /// `[pm_guard] enabled` from the user config, stripping a guard entry when off.
 /// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
-/// `tests_behavior_a.rs`.
+/// `tests_behavior_a_tests.rs`.
 pub(crate) fn write_project_hooks_for_dir(
     project_dir: &std::path::Path,
     exe_override: Option<&std::path::Path>,
@@ -628,17 +628,7 @@ pub(crate) fn install_one(
 
     let exists = dest.exists();
     match artifact.install {
-        InstallPolicy::Overwrite => {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(dest, artifact.contents)?;
-            Ok(if exists {
-                format!("\u{2713} {} (refreshed)", artifact.rel_path)
-            } else {
-                format!("\u{2713} {}", artifact.rel_path)
-            })
-        }
+        InstallPolicy::Overwrite => overwrite_one(dest, artifact.rel_path, artifact.contents),
         InstallPolicy::SeedOnce => {
             if exists && !force {
                 return Ok(format!(
@@ -659,24 +649,50 @@ pub(crate) fn install_one(
     }
 }
 
+/// Write `contents` to `dest`, replacing any existing file, and return the
+/// report line naming `rel_path`.
+///
+/// Why (#9012): the [`InstallPolicy::Overwrite`](trusty_mpm::core::bundle::InstallPolicy::Overwrite)
+/// write, shared with the runtime-content files (skills, docs) that are not
+/// `'static` and so cannot be a [`BundledArtifact`](trusty_mpm::core::bundle::BundledArtifact).
+/// Test: `overwrite_artifact_refreshes_modified_file_without_force`.
+fn overwrite_one(dest: &std::path::Path, rel_path: &str, contents: &str) -> anyhow::Result<String> {
+    let exists = dest.exists();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, contents)?;
+    Ok(if exists {
+        format!("\u{2713} {rel_path} (refreshed)")
+    } else {
+        format!("\u{2713} {rel_path}")
+    })
+}
+
 /// Write every bundled artifact under `paths`, returning a per-file report.
 ///
 /// Why: separating the filesystem work from argument parsing and stdout makes
 /// the installer unit-testable against a `tempfile::TempDir`.
-/// What: resolves the agent roster from content (#9011) and hands it to
-/// [`install_to_with`]. With no content resolvable this fails before writing
-/// anything, and the error names `tm content install`.
+/// What: resolves the agent roster (#9011) and the skills and bundled docs
+/// (#9012) from content and hands them to [`install_to_with`]. With no content
+/// resolvable this fails before writing anything, and the error names
+/// `tm content install`.
 /// Test: `install_writes_all_artifacts`,
 /// `install_without_content_fails_naming_tm_content_install`.
 pub(crate) fn install_to(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
 ) -> anyhow::Result<Vec<String>> {
-    install_to_resolving(paths, force, trusty_mpm::core::content_source::agent_roster)
+    install_to_resolving(
+        paths,
+        force,
+        trusty_mpm::core::content_source::agent_roster,
+        trusty_mpm::core::content_source::framework_content,
+    )
 }
 
-/// [`install_to`] with the roster resolver given, so a test can point it at
-/// an empty cache.
+/// [`install_to`] with the content resolvers given, so a test can point them
+/// at an empty cache.
 pub(crate) fn install_to_resolving(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
@@ -684,28 +700,57 @@ pub(crate) fn install_to_resolving(
         trusty_mpm::core::content_source::AgentRoster,
         trusty_mpm::core::content_source::AgentContentError,
     >,
+    content: impl FnOnce() -> Result<
+        trusty_mpm::core::content_source::FrameworkContent,
+        trusty_mpm::core::content_source::AgentContentError,
+    >,
 ) -> anyhow::Result<Vec<String>> {
-    // #9011: resolve before writing anything, so a missing roster leaves the
-    // framework tree untouched.
-    install_to_with(paths, force, &roster()?)
+    // #9011/#9012: resolve before writing anything, so missing content leaves
+    // the framework tree untouched.
+    let roster = roster()?;
+    let content = content()?;
+    install_to_with(paths, force, &roster, &content)
 }
 
-/// [`install_to`] with the roster given.
+/// The bundled docs `tm install` writes under `<framework>/docs/`, as content
+/// paths relative to `instructions/` (#9012: runtime content).
+const BUNDLED_DOCS: [&str; 2] = [
+    "docs/WHAT-IS-TRUSTY-MPM.md",
+    "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+];
+
+/// [`install_to`] with the roster and content given.
 ///
-/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact, resolves its
-/// destination under `paths.framework` and delegates the policy-driven write
-/// to [`install_one`]; then writes every roster file into
-/// `<framework>/agents/` (agents are framework-owned, so always overwritten).
+/// What: for each [`trusty_mpm::core::bundle::ALL`] artifact (the hook
+/// policies), resolves its destination under `paths.framework` and delegates
+/// the policy-driven write to [`install_one`]; then writes every content skill
+/// into `<framework>/skills/`, the bundled docs into `<framework>/docs/`
+/// (#9012; a content source without them fails, naming the missing path), and
+/// every roster file into `<framework>/agents/`. Content is framework-owned,
+/// so always overwritten.
 /// Test: `install_writes_all_artifacts`.
 pub(crate) fn install_to_with(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
     roster: &trusty_mpm::core::content_source::AgentRoster,
+    content: &trusty_mpm::core::content_source::FrameworkContent,
 ) -> anyhow::Result<Vec<String>> {
+    // #9012: check the docs first, so a source without them writes nothing.
+    let docs = BUNDLED_DOCS
+        .iter()
+        .map(|rel| Ok((*rel, content.require_instruction(rel)?)))
+        .collect::<Result<Vec<_>, trusty_mpm::core::content_source::AgentContentError>>()?;
     let mut report = Vec::new();
     for artifact in trusty_mpm::core::bundle::ALL {
         let dest = paths.framework.join(artifact.rel_path);
         report.push(install_one(&dest, artifact, force)?);
+    }
+    for (rel_path, contents) in content.skills().chain(docs.iter().copied()) {
+        report.push(overwrite_one(
+            &paths.framework.join(rel_path),
+            rel_path,
+            contents,
+        )?);
     }
     for name in roster.materialize(&paths.framework.join("agents"))? {
         report.push(format!("\u{2713} agents/{name}"));
@@ -720,6 +765,32 @@ pub(crate) fn test_roster() -> trusty_mpm::core::content_source::AgentRoster {
     let content =
         trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
     trusty_mpm::core::content_source::AgentRoster::load(&content).expect("repo roster")
+}
+
+/// The checkout's skills and instructions, for bin-target tests that install
+/// (#9012).
+#[cfg(test)]
+pub(crate) fn test_content() -> trusty_mpm::core::content_source::FrameworkContent {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let content =
+        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+    trusty_mpm::core::content_source::FrameworkContent::load(&content).expect("repo content")
+}
+
+/// [`test_content`], loaded once per test binary (#9012).
+#[cfg(test)]
+pub(crate) fn test_content_ref() -> &'static trusty_mpm::core::content_source::FrameworkContent {
+    static CONTENT: std::sync::OnceLock<trusty_mpm::core::content_source::FrameworkContent> =
+        std::sync::OnceLock::new();
+    CONTENT.get_or_init(test_content)
+}
+
+/// One skill file's text from the checkout's content (#9012).
+#[cfg(test)]
+pub(crate) fn test_skill(path: &str) -> &'static str {
+    test_content_ref()
+        .skill(path)
+        .unwrap_or_else(|| panic!("{path} must be in the content tree"))
 }
 
 /// [`test_roster`], loaded once per test binary, for classifier tests.

@@ -216,14 +216,24 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
     )
     .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
 
-    // WI-2 follow-up (#1553): deploy bundled output styles from compile-time
-    // constants — no framework installation required.  These are always
-    // framework-owned (never user-editable), so the deployer overwrites stale
-    // copies and skips files whose checksum already matches (idempotent).
-    let styles = crate::core::output_style_deployer::deploy_output_styles(claude_config_dir)
-        .map_err(|e| {
-            anyhow::anyhow!("failed to deploy output styles into managed config dir: {e}")
-        })?;
+    // WI-2 follow-up (#1553): deploy the output styles — no framework
+    // installation required. These are always framework-owned (never
+    // user-editable), so the deployer overwrites stale copies and skips files
+    // whose checksum already matches (idempotent). #9012: the bodies are
+    // runtime content; with none, a note names the remedy and nothing is
+    // written, like the missing agent/skill sources above.
+    let content = match crate::core::content_source::framework_content() {
+        Ok(content) => content,
+        Err(err) => {
+            eprintln!("note: output styles not deployed: {err}");
+            return Ok(());
+        }
+    };
+    let styles =
+        crate::core::output_style_deployer::deploy_output_styles(&content, claude_config_dir)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to deploy output styles into managed config dir: {e}")
+            })?;
     // #5866: the deployer now records a per-style IO failure and keeps going,
     // so the batch verdict this caller owes its own callers is read from
     // `failed` rather than from the return status.
@@ -942,7 +952,8 @@ mod tests {
             );
             let content = std::fs::read_to_string(&target).unwrap();
             assert_eq!(
-                content, style.content,
+                content,
+                style.content(&crate::core::content_source::test_support::repo_content()),
                 "deployed output style {} must match bundled content",
                 style.file_name
             );
@@ -963,8 +974,11 @@ mod tests {
         ensure_global_config_dir(&managed_root, &claude_config).unwrap();
 
         // Second call to the deployer directly must report all files unchanged.
-        let result =
-            crate::core::output_style_deployer::deploy_output_styles(&claude_config).unwrap();
+        let result = crate::core::output_style_deployer::deploy_output_styles(
+            &crate::core::content_source::test_support::repo_content(),
+            &claude_config,
+        )
+        .unwrap();
         assert!(
             result.deployed.is_empty(),
             "second deploy must not overwrite any style file (idempotent); \

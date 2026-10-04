@@ -40,7 +40,7 @@ pub(crate) const SUB_AGENT_ENV: &str = trusty_common::claude_config::CLAUDE_MPM_
 /// Claude Code restart is required (it is read per-invocation).
 /// What: the literal env var name `"TRUSTY_MPM_DISABLE_HOOKS"`. Presence
 /// (any value) causes the hook handler to short-circuit immediately.
-/// Test: `hook_disable_env_short_circuits` in `tests_behavior_a.rs`.
+/// Test: `hook_disable_env_short_circuits` in `tests_behavior_a_tests.rs`.
 pub(crate) const DISABLE_HOOKS_ENV: &str = "TRUSTY_MPM_DISABLE_HOOKS";
 
 /// Catalog status message shown when the catalog has never been synced.
@@ -501,7 +501,7 @@ fn pretooluse_bash_rewrite(
 /// backoff on the hot path of every tool call.
 /// Test: `cli_parses_hook` covers parse routing; the guard branches are
 /// exercised via `hook_guard_short_circuits` and
-/// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`. The rewrite
+/// `hook_disable_env_short_circuits` in `tests_behavior_a_tests.rs`. The rewrite
 /// decision logic itself is covered by `commands::hook_rewrite`'s unit
 /// tests; `hook_rewrites_plain_bash_command_on_pretooluse` and
 /// `hook_stays_silent_for_non_bash_tool_on_pretooluse` in the

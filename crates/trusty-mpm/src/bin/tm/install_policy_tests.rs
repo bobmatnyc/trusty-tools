@@ -1,6 +1,6 @@
 //! `InstallPolicy` behavior tests (issue #3381).
 //!
-//! Why: split out of `tests_behavior_a.rs` to stay under the 500-SLOC
+//! Why: split out of `tests_behavior_a_tests.rs` to stay under the 500-SLOC
 //! production-file cap — this basename ends in `_tests.rs` so it gets the
 //! 1500-SLOC test-file cap instead.
 //! What: pins the real two-way contract `install_to()`/`install_one()` now
@@ -9,7 +9,7 @@
 //! without `--force`.
 //! Test: this file.
 
-use crate::commands::install::{install_one, install_to_with, test_roster};
+use crate::commands::install::{install_one, install_to_with, test_content, test_roster};
 
 #[test]
 fn overwrite_artifact_refreshes_modified_file_without_force() {
@@ -23,7 +23,7 @@ fn overwrite_artifact_refreshes_modified_file_without_force() {
     std::fs::create_dir_all(&paths.hooks).unwrap();
     std::fs::write(&optimizer, "custom").unwrap();
 
-    let report = install_to_with(&paths, false, &test_roster()).unwrap();
+    let report = install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
     assert!(
         report
             .iter()
@@ -105,7 +105,7 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
     const SENTINEL: &str = "SENTINEL-NOT-WRITTEN-BY-THE-BUNDLE-PASS";
     std::fs::write(&compiled, SENTINEL).unwrap();
 
-    install_to_with(&paths, true, &test_roster()).unwrap();
+    install_to_with(&paths, true, &test_roster(), &test_content()).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(&compiled).unwrap(),
@@ -118,11 +118,15 @@ fn bundle_install_pass_never_touches_the_compiled_prompt() {
     // full assembled prompt, never a stub (regression guard for #383).
     trusty_mpm::core::instruction_pipeline::write_compiled_prompt_to(
         &compiled,
-        &trusty_mpm::core::instruction_pipeline::assemble_system_prompt(),
+        &trusty_mpm::core::instruction_pipeline::assemble_system_prompt(
+            crate::commands::install::test_content_ref(),
+        ),
     )
     .unwrap();
     assert_eq!(
         std::fs::read_to_string(&compiled).unwrap(),
-        trusty_mpm::core::instruction_pipeline::assemble_system_prompt()
+        trusty_mpm::core::instruction_pipeline::assemble_system_prompt(
+            crate::commands::install::test_content_ref()
+        )
     );
 }
