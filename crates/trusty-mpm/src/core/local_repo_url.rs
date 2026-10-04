@@ -23,19 +23,34 @@ use std::path::Path;
 /// value they can each carry rather than a string one of them formats. Typed
 /// so a caller can match on it instead of substring-matching a message.
 /// What: carries the rejected `repo_url`; its `Display` names ADR-0055, the
-/// supported form, and the two-step remedy.
-/// Test: `non_local_repo_url_message_names_adr_0055_and_the_remedy`.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// supported form, and the two-step remedy, and shows the URL with its
+/// credentials redacted (#9124).
+/// Test: `non_local_repo_url_message_names_adr_0055_and_the_remedy`,
+/// `non_local_repo_url_message_redacts_the_url_credentials`.
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "repo_url {repo_url:?} is not an existing local directory. trusty-mpm no longer clones a \
+    "repo_url {:?} is not an existing local directory. trusty-mpm no longer clones a \
      repository or creates a worktree for a session (ADR-0055): the only supported form is an \
      ABSOLUTE path to a directory that already exists on the daemon host. Clone the repository \
      yourself, then pass that path — e.g. `git clone <url> <dir>` followed by \
-     `tm session new <dir>`."
+     `tm session new <dir>`.",
+    crate::core::remote_url_redact::redact_url(.repo_url) // #9124
 )]
 pub struct NonLocalRepoUrl {
     /// The `repo_url` as the caller supplied it.
     pub repo_url: String,
+}
+
+// #9124: derived `Debug` printed the raw field; `{:?}` reaches logs and panics.
+impl std::fmt::Debug for NonLocalRepoUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NonLocalRepoUrl")
+            .field(
+                "repo_url",
+                &crate::core::remote_url_redact::redact_url(&self.repo_url),
+            )
+            .finish()
+    }
 }
 
 /// Whether `s` names an EXISTING local directory usable as a session workspace
@@ -103,5 +118,28 @@ mod tests {
             msg.contains("tm session new"),
             "message must name the two-step remedy: {msg}"
         );
+    }
+
+    /// #9124 delta critic: the refusal reaches the client and the daemon log,
+    /// so a credentialed `repo_url` is shown redacted. The field keeps the raw
+    /// value for a caller that matches on it.
+    #[test]
+    fn non_local_repo_url_message_redacts_the_url_credentials() {
+        const TOKEN: &str = "ghp_9124LocalRepoSyntheticToken00";
+        let url = format!("https://octo:{TOKEN}@github.com/owner/repo.git");
+        let err = require_local_repo_url(&url).expect_err("a remote URL is not local");
+        let msg = err.to_string();
+        assert!(!msg.contains(TOKEN), "the token reached the message");
+        // #9124: `Debug` redacts too; the field keeps the raw value.
+        assert!(
+            !format!("{err:?}").contains(TOKEN),
+            "the token reached Debug"
+        );
+        assert_eq!(err.repo_url, url);
+        assert!(
+            msg.contains("https://***@github.com/owner/repo.git"),
+            "{msg}"
+        );
+        assert_eq!(err.repo_url, url);
     }
 }

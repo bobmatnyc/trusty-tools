@@ -58,11 +58,8 @@ pub fn daemon_credential_for(base_url: &str) -> Option<String> {
 #[cfg(test)]
 mod http_credential_tests {
     use super::*;
-
-    /// Serializes every test in this module that mutates [`DAEMON_TOKEN_ENV`]
-    /// — mirrors `crate::task::mock_llm::MOCK_LLM_ENV_LOCK`'s established
-    /// pattern for env-mutating tests in this crate.
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use serial_test::serial;
+    use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 
     /// #5439's credential-exfiltration guard: the local token authenticates a
     /// caller to the LOCAL daemon and must never leave loopback, however the
@@ -71,13 +68,13 @@ mod http_credential_tests {
     /// This is the arm that fails open if the gate is dropped — with a token
     /// available in the environment, a non-loopback base URL must still
     /// resolve to `None`.
-    #[tokio::test]
-    async fn credential_is_withheld_from_a_non_loopback_url() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
-        unsafe {
-            std::env::set_var(DAEMON_TOKEN_ENV, "a".repeat(64));
-        }
+    /// #9123: inside the credential sandbox, so the token file the resolver
+    /// falls back to is the sandbox's empty data dir, never the real one.
+    #[test]
+    #[serial]
+    fn credential_is_withheld_from_a_non_loopback_url() {
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.set(DAEMON_TOKEN_ENV, "a".repeat(64));
         let remote = [
             "http://example.test:7882",
             "https://10.0.0.5:7882",
@@ -91,66 +88,49 @@ mod http_credential_tests {
             "http://127.0.0.1:7882@attacker.example/rpc",
             "http://localhost@attacker.example",
             "http://user:pass@attacker.example",
-        ]
-        .map(daemon_credential_for);
-        let local = daemon_credential_for("http://127.0.0.1:7882");
-        unsafe {
-            std::env::remove_var(DAEMON_TOKEN_ENV);
+        ];
+        for url in remote {
+            assert_secret_eq(
+                daemon_credential_for(url).as_deref(),
+                None,
+                &format!("{url} must get no credential"),
+            );
         }
-        for (url, resolved) in [
-            "example.test",
-            "10.0.0.5",
-            "192.168.1.4",
-            "127.0.0.1:7882@attacker.example",
-            "127.0.0.1:7882@attacker.example/rpc",
-            "localhost@attacker.example",
-            "user:pass@attacker.example",
-        ]
-        .iter()
-        .zip(remote.iter())
-        {
-            assert_eq!(resolved.as_deref(), None, "{url} must get no credential");
-        }
-        assert_eq!(
-            local.as_deref(),
+        assert_secret_eq(
+            daemon_credential_for("http://127.0.0.1:7882").as_deref(),
             Some("a".repeat(64).as_str()),
-            "loopback must get the credential"
+            "loopback must get the credential",
         );
     }
 
     /// The env override must beat the token file, so a client that cannot read
     /// the daemon's data directory can still be pointed at a credential.
-    #[tokio::test]
-    async fn credential_env_override_wins_for_a_loopback_url() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
-        unsafe {
-            std::env::set_var(DAEMON_TOKEN_ENV, "b".repeat(64));
-        }
-        let resolved = daemon_credential_for("http://localhost:7882");
-        unsafe {
-            std::env::remove_var(DAEMON_TOKEN_ENV);
-        }
-        assert_eq!(resolved.as_deref(), Some("b".repeat(64).as_str()));
+    /// #9123: sandboxed as above.
+    #[test]
+    #[serial]
+    fn credential_env_override_wins_for_a_loopback_url() {
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.set(DAEMON_TOKEN_ENV, "b".repeat(64));
+        assert_secret_eq(
+            daemon_credential_for("http://localhost:7882").as_deref(),
+            Some("b".repeat(64).as_str()),
+            "the env override must win",
+        );
     }
 
     /// A blank override must be ignored rather than becoming an empty
     /// credential — an empty bearer is a malformed header, not "no header".
-    #[tokio::test]
-    async fn blank_credential_override_falls_through() {
-        let _guard = ENV_LOCK.lock().await;
-        // SAFETY: test-only env mutation; serialized by `ENV_LOCK`.
-        unsafe {
-            std::env::set_var(DAEMON_TOKEN_ENV, "   ");
-        }
-        let resolved = daemon_credential_for("http://127.0.0.1:7882");
-        unsafe {
-            std::env::remove_var(DAEMON_TOKEN_ENV);
-        }
-        assert_ne!(
-            resolved.as_deref(),
-            Some(""),
-            "a blank override must not become an empty credential"
+    /// #9123: the sandbox's data dir holds no token file, so falling through
+    /// lands on `None`, not on whatever the real daemon wrote.
+    #[test]
+    #[serial]
+    fn blank_credential_override_falls_through() {
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.set(DAEMON_TOKEN_ENV, "   ");
+        assert_secret_eq(
+            daemon_credential_for("http://127.0.0.1:7882").as_deref(),
+            None,
+            "a blank override must fall through to the (absent) token file",
         );
     }
 }

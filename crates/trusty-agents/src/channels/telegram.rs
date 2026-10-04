@@ -204,7 +204,7 @@ mod tests {
     /// The token on the wire is the one `credential_ref` resolves, and the
     /// default resolves the same registry key when the binding names none.
     #[tokio::test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     async fn telegram_adapter_send_uses_the_credential_the_binding_names() {
         let _bot = EnvVarGuard::set("TELEGRAM_BOT_TOKEN", "7427:not-a-real-token");
 
@@ -303,7 +303,7 @@ mod tests {
     /// family — and an unresolvable one is an error the caller must act on, not
     /// an empty token it can poll with.
     #[test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     fn telegram_poll_token_refuses_a_credential_outside_the_family() {
         let _bot = EnvVarGuard::set("TELEGRAM_BOT_TOKEN", "7427:not-a-real-token");
         assert_eq!(poll_token(None).unwrap().expose(), "7427:not-a-real-token");

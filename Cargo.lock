@@ -9970,8 +9970,10 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serial_test",
  "tokio",
  "tracing",
+ "trusty-common",
  "trusty-cto-db",
  "trusty-gworkspace",
 ]

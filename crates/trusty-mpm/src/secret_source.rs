@@ -277,6 +277,12 @@ mod tests;
 #[path = "secret_source_scan_tests.rs"]
 mod scan_tests;
 
+// #9123: fails CI on a credential TEST anywhere in the workspace that is not
+// `#[serial]` and sandboxed; reuses `scan_tests`' lexer.
+#[cfg(test)]
+#[path = "credential_test_scan_tests.rs"]
+mod credential_test_scan;
+
 // #9121/#9123: the env guard and redacting assert every credential test uses.
 #[cfg(test)]
 #[path = "secret_source_test_env.rs"]

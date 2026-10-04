@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serial_test::serial;
 use trusty_common::credentials::MemoryKeyStore;
+use trusty_common::credentials::test_sandbox::CredentialSandbox;
 use trusty_common::inference::registry::{ProviderCapabilities, ProviderId, capabilities};
 use trusty_common::inference::test_support::ScriptedAdapter;
 use trusty_common::inference::{
@@ -84,18 +85,13 @@ fn credentialed_over(store: MemoryKeyStore, model: &str) -> OpenRouterClassifier
     }
 }
 
-/// Clear every credential/model env var the resolver consults, so a credentialed
-/// test sees only its injected store.
-fn clear_credential_env() {
-    for var in [
-        CLASSIFIER_MODEL_ENV,
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-    ] {
-        // SAFETY: every caller is guarded by `#[serial(inference_env)]`.
-        unsafe { std::env::remove_var(var) };
-    }
+/// Enter the credential sandbox with the model env var cleared too, so a
+/// credentialed test sees only its injected store (#9123). Callers are the
+/// unkeyed `#[serial]` the sandbox requires.
+fn credential_sandbox() -> CredentialSandbox {
+    let mut sandbox = CredentialSandbox::enter();
+    sandbox.remove(CLASSIFIER_MODEL_ENV);
+    sandbox
 }
 
 /// An adapter that records the requests it is asked to serve.
@@ -231,9 +227,9 @@ fn parse_state_unknown_for_garbage() {
 /// promised not to move — it must stay `openai/gpt-4o-mini`.
 /// Test: itself.
 #[test]
-#[serial(inference_env)]
+#[serial]
 fn model_defaults_when_env_unset() {
-    clear_credential_env();
+    let _sandbox = credential_sandbox();
     assert_eq!(resolve_classifier_model(), DEFAULT_CLASSIFIER_MODEL);
     assert_eq!(DEFAULT_CLASSIFIER_MODEL, "openai/gpt-4o-mini");
 }
@@ -242,17 +238,14 @@ fn model_defaults_when_env_unset() {
 /// blank value must not shadow the default with an empty slug.
 /// Test: itself.
 #[test]
-#[serial(inference_env)]
+#[serial]
 fn model_reads_env_override() {
-    clear_credential_env();
-    // SAFETY: guarded by `#[serial(inference_env)]`.
-    unsafe { std::env::set_var(CLASSIFIER_MODEL_ENV, "vendor/some-model") };
+    let mut sandbox = credential_sandbox();
+    sandbox.set(CLASSIFIER_MODEL_ENV, "vendor/some-model");
     assert_eq!(resolve_classifier_model(), "vendor/some-model");
 
-    // SAFETY: guarded by `#[serial(inference_env)]`.
-    unsafe { std::env::set_var(CLASSIFIER_MODEL_ENV, "   ") };
+    sandbox.set(CLASSIFIER_MODEL_ENV, "   ");
     assert_eq!(resolve_classifier_model(), DEFAULT_CLASSIFIER_MODEL);
-    clear_credential_env();
 }
 
 // ── classify ─────────────────────────────────────────────────────────────────
@@ -343,9 +336,9 @@ async fn classify_sends_one_user_turn() {
 /// migration introduced.
 /// Test: itself.
 #[tokio::test]
-#[serial(inference_env)]
+#[serial]
 async fn classify_missing_credential_maps_to_missing_api_key() {
-    clear_credential_env();
+    let _sandbox = credential_sandbox();
     let classifier = credentialed_over(MemoryKeyStore::new(), DEFAULT_CLASSIFIER_MODEL);
     let err = classifier
         .classify("pane")

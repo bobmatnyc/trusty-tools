@@ -302,13 +302,12 @@ async fn list_skills_falls_back_to_legacy_when_tag_registry_empty() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn web_search_without_api_key_returns_graceful_error() {
-    // Ensure no key is set for this scope.
-    // SAFETY: removing an env var in a test; other tests do not rely on
-    // BRAVE_API_KEY being set. The graceful-error path is what we assert.
-    unsafe {
-        std::env::remove_var("BRAVE_API_KEY");
-    }
+    // #9123: the sandbox removes BRAVE_API_KEY (and every other credential)
+    // and restores it afterwards; `#[serial]` keeps the window private.
+    let _home_guard = crate::test_env::lock_home();
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
     let tool = BraveSearchTool::from_env();
     use tools::ToolExecutor;
     let out = tool

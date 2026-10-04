@@ -61,6 +61,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{inproject, inproject_hygiene};
+use crate::core::remote_url_redact::redact_url;
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// How many working-tree entries a skipped-refresh notice lists before it
@@ -97,9 +98,9 @@ pub enum ColdStartError {
     RemoteMismatch {
         /// The managed checkout that was inspected.
         path: PathBuf,
-        /// The `remote.origin.url` found there.
+        /// The `remote.origin.url` found there, userinfo redacted (#9124).
         found: String,
-        /// The clone URL the caller asked for.
+        /// The clone URL the caller asked for, userinfo redacted (#9124).
         requested: String,
     },
 
@@ -112,7 +113,7 @@ pub enum ColdStartError {
     NoOrigin {
         /// The managed checkout that was inspected.
         path: PathBuf,
-        /// The clone URL the caller asked for.
+        /// The clone URL the caller asked for, userinfo redacted (#9124).
         requested: String,
     },
 
@@ -129,7 +130,7 @@ pub enum ColdStartError {
     OriginUnreadable {
         /// The managed checkout that was inspected.
         path: PathBuf,
-        /// The clone URL the caller asked for.
+        /// The clone URL the caller asked for, userinfo redacted (#9124).
         requested: String,
         /// What git reported.
         reason: String,
@@ -284,23 +285,27 @@ pub fn ensure_managed_checkout_at(
 /// `existing_checkout_with_an_unreadable_remote_fails_loud`,
 /// `equivalent_remote_spellings_match`,
 /// `an_ssh_alias_origin_checkout_matches_its_github_remote`,
-/// `an_unreadable_ssh_config_never_turns_an_alias_into_a_match`.
+/// `an_unreadable_ssh_config_never_turns_an_alias_into_a_match`,
+/// `a_remote_mismatch_never_carries_the_requested_token`.
 fn verify_remote_matches(
     base_path: &Path,
     requested: &str,
     aliases: &SshHostAliases,
 ) -> Result<(), ColdStartError> {
+    // #9124: either URL may embed `user:token@`. The error carries them
+    // redacted, so neither its Display nor its Debug can log the token.
+    let shown = |url: &str| redact_url(url).into_owned();
     let found = inproject::get_origin_url(base_path).map_err(|reason| {
         ColdStartError::OriginUnreadable {
             path: base_path.to_path_buf(),
-            requested: requested.to_string(),
+            requested: shown(requested),
             reason,
         }
     })?;
     let Some(found) = found else {
         return Err(ColdStartError::NoOrigin {
             path: base_path.to_path_buf(),
-            requested: requested.to_string(),
+            requested: shown(requested),
         });
     };
     if canonical_remote_with(&found, aliases) == canonical_remote_with(requested, aliases) {
@@ -308,8 +313,8 @@ fn verify_remote_matches(
     }
     Err(ColdStartError::RemoteMismatch {
         path: base_path.to_path_buf(),
-        found,
-        requested: requested.to_string(),
+        found: shown(&found),
+        requested: shown(requested),
     })
 }
 

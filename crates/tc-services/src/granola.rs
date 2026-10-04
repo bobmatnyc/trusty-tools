@@ -447,19 +447,17 @@ mod tests {
     /// recoverable `GranolaOutcome::Err` — never panic.
     ///
     /// Why: CI and consumers without a key must keep running.
-    /// What: Removes `GRANOLA_API_KEY`, calls `execute`, asserts the outcome
-    /// is an error naming the tool. Restores the env var afterwards.
+    /// What: Inside the credential sandbox (no `GRANOLA_API_KEY`), calls
+    /// `execute`, asserts the outcome is an error naming the tool. The sandbox
+    /// restores the env var on drop.
     /// Test: `cargo test -p tc-services execute_errors_when_api_key_missing`.
     #[tokio::test]
+    #[serial_test::serial]
     async fn execute_errors_when_api_key_missing() {
-        // Save and clear GRANOLA_API_KEY. SAFETY: env mutation in tests is
-        // serialised by the harness running this single test; we restore the
-        // previous value before returning.
-        let prev = std::env::var(ENV_GRANOLA_API_KEY).ok();
-        // SAFETY: single-threaded test scope, env access is acceptable.
-        unsafe {
-            std::env::remove_var(ENV_GRANOLA_API_KEY);
-        }
+        // #9123: the sandbox clears GRANOLA_API_KEY (and every other
+        // credential) and restores it on drop, even when an assert fails.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+        assert!(std::env::var_os(ENV_GRANOLA_API_KEY).is_none());
 
         let service = GranolaService::new("granola_list").expect("schema builds");
         let outcome = service.execute(json!({})).await;
@@ -472,14 +470,6 @@ mod tests {
             "error message must name the tool: {}",
             outcome.message()
         );
-
-        // Restore.
-        // SAFETY: same single-threaded test scope.
-        unsafe {
-            if let Some(v) = prev {
-                std::env::set_var(ENV_GRANOLA_API_KEY, v);
-            }
-        }
     }
 
     /// `build_request` must reject a `*_get*` call with no `id` argument.

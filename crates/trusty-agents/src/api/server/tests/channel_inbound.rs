@@ -8,7 +8,7 @@
 //! What: `seed_home` writes a `config.toml` and an assistant roster into a
 //! tempdir and points `$HOME` at it; `crate::test_env::lock_home` serializes
 //! that against every other `$HOME`-reading test, and
-//! `#[serial_test::serial(channel_credentials)]` serializes the stub
+//! `#[serial_test::serial]` serializes the stub
 //! provider's environment switch against the adapter tests that count
 //! registered providers.
 //! Test: this module IS the test.
@@ -142,7 +142,7 @@ impl InboundDispatch for RecordingDispatch {
 /// Pre-change this test does not compile: there is no `channel_inbound` module
 /// to inject through, and no stub provider for the channel to declare.
 #[tokio::test]
-#[serial_test::serial(channel_credentials)]
+#[serial_test::serial]
 async fn an_injected_event_wakes_only_the_routed_assistant() {
     let _home_guard = crate::test_env::lock_home();
     let _home = seed_home(STUB_CONFIG);
@@ -194,7 +194,7 @@ async fn an_injected_event_wakes_only_the_routed_assistant() {
 /// Pre-change the narrowing is untested, and reverting
 /// `receive_inbound_at`'s `allowed` gate fails this: cto-assistant wakes too.
 #[tokio::test]
-#[serial_test::serial(channel_credentials)]
+#[serial_test::serial]
 async fn a_telegram_bots_owners_are_the_only_assistants_it_wakes() {
     let _home_guard = crate::test_env::lock_home();
     let home = seed_home_with("", &["izzie", "cto-assistant"]);
@@ -284,7 +284,7 @@ async fn a_telegram_bots_owners_are_the_only_assistants_it_wakes() {
 /// from an error, or a test that only ever sees success cannot tell a working
 /// route from one that dispatches unconditionally.
 #[tokio::test]
-#[serial_test::serial(channel_credentials)]
+#[serial_test::serial]
 async fn an_injection_into_a_disabled_channel_wakes_nobody() {
     let _home_guard = crate::test_env::lock_home();
     let _home =
@@ -315,7 +315,7 @@ async fn an_injection_into_a_disabled_channel_wakes_nobody() {
 /// the caller's choosing. A tokenless daemon must refuse it, and a wrong bearer
 /// must be refused as flatly as a missing one.
 #[tokio::test]
-#[serial_test::serial(channel_credentials)]
+#[serial_test::serial]
 async fn an_unauthenticated_injection_is_refused() {
     let _home_guard = crate::test_env::lock_home();
     let _home = seed_home(STUB_CONFIG);
@@ -374,7 +374,7 @@ async fn an_unauthenticated_injection_is_refused() {
 /// Pre-change this fails at the send: `stub` resolves to no adapter, so the
 /// binding cannot even be saved.
 #[tokio::test]
-#[serial_test::serial(channel_credentials)]
+#[serial_test::serial]
 async fn a_stub_channel_sends_and_reads_back_over_http() {
     let _home_guard = crate::test_env::lock_home();
     let home = seed_home(STUB_CONFIG);

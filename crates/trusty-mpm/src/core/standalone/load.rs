@@ -128,7 +128,11 @@ fn clone_repo(url: &str, project_dir: &Path) -> anyhow::Result<()> {
         .status()
         .context("failed to spawn git clone")?;
     if !status.success() {
-        anyhow::bail!("git clone failed for '{url}'");
+        // #9124: a remote URL may embed `user:token@`.
+        anyhow::bail!(
+            "git clone failed for '{}'",
+            crate::core::remote_url_redact::redact_url(url)
+        );
     }
     Ok(())
 }

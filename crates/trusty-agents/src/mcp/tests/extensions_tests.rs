@@ -111,7 +111,7 @@ fn stdio_parts_only_answer_for_stdio() {
 /// rather than `#[serial]` because nextest gives every test its own PROCESS
 /// (#4162) and the env var is process-global within this one.
 #[test]
-#[serial(mcp_auth_env)]
+#[serial]
 fn auth_resolves_from_the_environment() {
     let mut server = stdio("bearer", "bearer-bin");
     extensions::set(
@@ -139,7 +139,7 @@ fn auth_resolves_from_the_environment() {
 /// The reason names the VARIABLE, never the value — it is the only actionable
 /// thing to tell a user, and the secret must not reach a status string.
 #[test]
-#[serial(mcp_auth_env)]
+#[serial]
 fn a_missing_credential_names_the_variable() {
     let mut server = stdio("bearer", "bearer-bin");
     extensions::set(

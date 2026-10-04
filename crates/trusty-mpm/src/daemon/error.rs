@@ -193,12 +193,17 @@ pub enum DaemonError {
     /// "no project is registered for this repo at all".
     /// What: carries the `repo_url` that failed to resolve; maps to HTTP 404
     /// (there is genuinely no project resource for this identity).
-    /// Test: `error_status_codes_map`, and
-    /// `validate_deliverable_scope_unknown_project_is_404`.
-    #[error("no registered project matches repo_url {repo_url:?}; cannot scope deliverable")]
+    /// Test: `error_status_codes_map`,
+    /// `validate_deliverable_scope_unknown_project_is_404`, and
+    /// `project_not_found_message_redacts_the_url_credentials`.
+    // #9124: the message reaches the HTTP body and the log; never a token.
+    #[error(
+        "no registered project matches repo_url {:?}; cannot scope deliverable",
+        crate::core::remote_url_redact::redact_url(.repo_url)
+    )]
     ProjectNotFoundForRepoUrl {
         /// The `repo_url` that did not resolve to any registered project.
-        repo_url: String,
+        repo_url: crate::core::remote_url_redact::RedactedUrl,
     },
 
     /// A requested Deliverable status change is not a legal transition (#2380).
@@ -610,6 +615,24 @@ mod tests {
         assert!(
             !msg.contains("deliverable not found"),
             "must not read as a deliverable-not-found error: {msg}"
+        );
+    }
+
+    /// #9124 delta critic: the message is the 404 body and a log line, so a
+    /// credentialed `repo_url` is shown redacted.
+    #[test]
+    fn project_not_found_message_redacts_the_url_credentials() {
+        const TOKEN: &str = "ghp_9124DaemonErrorSyntheticToken0";
+        let e = DaemonError::ProjectNotFoundForRepoUrl {
+            repo_url: format!("https://octo:{TOKEN}@github.com/acme/widget.git").into(),
+        };
+        // #9124: `Debug` redacts too; the field keeps the raw value.
+        assert!(!format!("{e:?}").contains(TOKEN), "the token reached Debug");
+        let msg = e.to_string();
+        assert!(!msg.contains(TOKEN), "the token reached the message");
+        assert!(
+            msg.contains("https://***@github.com/acme/widget.git"),
+            "{msg}"
         );
     }
 }

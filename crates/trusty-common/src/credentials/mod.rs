@@ -80,6 +80,26 @@ mod redact;
 pub mod registry;
 mod resolver;
 mod secret;
+// #9123: test-only; mutates the process environment, so never in production.
+// This crate's own unit tests use it too (#9123 delta critic).
+#[cfg(any(test, feature = "credential-test-sandbox"))]
+pub mod test_sandbox;
+
+/// Whether a credential test sandbox is live in this process (#9123): the
+/// keychain tier and the `.env.local` reads answer nothing while it is. Always
+/// `false` outside a test build or `credential-test-sandbox`, so no production
+/// build can switch a tier off.
+/// Test: `credentials::test_sandbox::tests::the_sandbox_hides_env_local_and_the_keychain`.
+pub(crate) fn sandbox_active() -> bool {
+    #[cfg(any(test, feature = "credential-test-sandbox"))]
+    {
+        test_sandbox::is_active()
+    }
+    #[cfg(not(any(test, feature = "credential-test-sandbox")))]
+    {
+        false
+    }
+}
 
 pub use authority::{FromCredential, resolve, resolve_client, resolve_client_with, resolve_with};
 // #8236: the daemon-safe store tier — bounded, single-flight, negative-cached.

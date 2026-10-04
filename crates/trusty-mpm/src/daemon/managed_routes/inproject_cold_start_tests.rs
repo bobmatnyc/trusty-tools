@@ -213,6 +213,37 @@ fn different_hosts_do_not_match() {
     );
 }
 
+/// 🔴 #9124: a refused checkout whose requested URL carries a token names the
+/// URL with its userinfo redacted, in both Display and Debug.
+/// Test: itself.
+#[test]
+fn a_remote_mismatch_never_carries_the_requested_token() {
+    const TOKEN: &str = "ghp_9124SyntheticNotARealToken0000";
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let origin = init_origin(&tmp.path().join("origin")).to_path_buf();
+    let base = tmp.path().join("base");
+    clone_to(&origin, &base);
+
+    let requested = format!("https://x-access-token:{TOKEN}@github.com/someone/else.git");
+    let err = ensure_managed_checkout_at(&base, &requested, None)
+        .expect_err("a different remote must be refused");
+
+    let shown = err.to_string();
+    let debug = format!("{err:?}");
+    assert!(
+        !shown.contains(TOKEN),
+        "the error message carries the token"
+    );
+    assert!(
+        !debug.contains(TOKEN),
+        "the error's Debug carries the token"
+    );
+    assert!(
+        shown.contains("https://***@github.com/someone/else.git"),
+        "the message no longer names the requested repository"
+    );
+}
+
 /// DECIDED BEHAVIOR: an existing checkout whose origin names a different
 /// repository is an error, not an auto-fix.
 ///

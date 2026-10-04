@@ -324,9 +324,8 @@ mod tests {
     /// Why: THE core fail-closed guarantee. A pinned provider with no
     /// resolvable credential must name the provider AND the env var that would
     /// fix it, and must never silently borrow another provider's key.
-    /// What: sandboxes `$HOME` (so the secure store is a tempdir, never the
-    /// real one) and clears every credential env var, mirroring
-    /// `llm::credentials`' own store-sandboxing tests.
+    /// What: inside the credential sandbox (#9123): no credential env var, a
+    /// temp `$HOME` store, no keychain and no `.env.local`.
     /// Test: itself.
     #[test]
     #[serial]
@@ -334,27 +333,12 @@ mod tests {
         let _env = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _home = crate::test_env::HOME_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        crate::test_env::force_env_local_loaded();
-        crate::test_env::clear_all_credential_env_vars();
-
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let prev_home = std::env::var_os("HOME");
-        // SAFETY: HOME_LOCK held for the entire test body.
-        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let _home = crate::test_env::lock_home();
+        // #9123: every credential tier empty, `$HOME` a temp dir.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
 
         let err = resolve("izzie", Some("atlascloud")).expect_err("must fail closed");
         let msg = err.to_string();
-
-        // SAFETY: HOME_LOCK still held.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
 
         assert!(
             matches!(err, ProviderPinError::MissingCredential { .. }),
@@ -381,8 +365,9 @@ mod tests {
         let _env = crate::test_env::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        crate::test_env::force_env_local_loaded();
-        crate::test_env::clear_all_credential_env_vars();
+        let _home = crate::test_env::lock_home();
+        // #9123: no credential anywhere, so the keyless answer is not borrowed.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
         assert_eq!(resolve("a", Some("bedrock")), Ok(Some(ProviderId::Bedrock)));
         assert_eq!(resolve("a", Some("local")), Ok(Some(ProviderId::Local)));
     }

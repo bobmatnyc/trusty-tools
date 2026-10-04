@@ -153,7 +153,7 @@ pub(super) async fn validate_deliverable_scope(
         .unwrap_or_default();
     let Some(project) = resolve_project_for_deliverable_scope(repo_url, &projects) else {
         return Err(DaemonError::ProjectNotFoundForRepoUrl {
-            repo_url: repo_url.to_string(),
+            repo_url: repo_url.into(),
         }
         .into_response());
     };

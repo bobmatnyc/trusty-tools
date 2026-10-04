@@ -15,6 +15,7 @@ use super::account_clone::{AccountCloneEnv, account_clone_env};
 use super::{ensure_worktrees_gitignored, migrate_old_layout_aside};
 use crate::core::gh_account_registry::RegistryPin;
 use crate::core::gh_org_accounts::{OrgAccounts, OrgAccountsError};
+use crate::core::remote_url_redact::redact_url;
 
 /// Ensure a base clone exists at `base_path`, cloning from `origin_url` if not.
 ///
@@ -101,7 +102,8 @@ pub fn ensure_base_clone(
 /// leaves the filesystem exactly as it was.
 /// Test: `a_mapped_org_clones_as_the_mapped_account`,
 /// `a_pinned_project_clones_as_the_pin_not_the_map`,
-/// `a_broken_accounts_table_refuses_the_clone_and_touches_nothing`
+/// `a_broken_accounts_table_refuses_the_clone_and_touches_nothing`,
+/// `a_credentialed_origin_never_reaches_the_log_or_the_error` (#9124)
 /// (`inproject/base_clone_tests.rs`).
 pub(crate) fn ensure_base_clone_with(
     origin_url: &str,
@@ -152,8 +154,9 @@ pub(crate) fn ensure_base_clone_with(
         crate::core::provisioning_stage::ProvisioningStage::CloningRepo,
     );
 
+    // #9124: `origin_url` may carry `user:token@`; the log gets it redacted.
     info!(
-        url = %origin_url,
+        url = %redact_url(origin_url),
         dest = %base_path.display(),
         "inproject: cloning base repo"
     );
@@ -185,10 +188,12 @@ pub(crate) fn ensure_base_clone_with(
         .map_err(|e| format!("inproject: git clone failed to spawn: {e}"))?;
 
     if !out.status.success() {
+        // #9124: git's stderr can quote the URL it was given.
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
-            "inproject: git clone failed ({}): {stderr}",
-            out.status
+            "inproject: git clone failed ({}): {}",
+            out.status,
+            redact_url(&stderr)
         ));
     }
     info!(dest = %base_path.display(), "inproject: base clone complete");

@@ -101,3 +101,62 @@ fn a_broken_accounts_table_refuses_the_clone_and_touches_nothing() {
     assert_eq!(entries.len(), 1, "nothing was migrated aside: {entries:?}");
     assert!(!tmp.path().join("never").exists(), "the parent was created");
 }
+
+/// 🔴 #9124: an origin carrying `x-access-token:<token>@` never reaches the
+/// daemon log or the clone error. Both used to quote it verbatim.
+///
+/// The clone dials `127.0.0.1:9`, where nothing listens, so it fails at once
+/// without the network. It runs inside the credential sandbox with no system
+/// git config, so no credential helper or global config is in reach. No
+/// assertion prints a captured line: on a regression that line holds the token.
+#[test]
+#[serial_test::serial]
+fn a_credentialed_origin_never_reaches_the_log_or_the_error() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use trusty_common::log_buffer::{LogBuffer, LogBufferLayer};
+
+    const TOKEN: &str = "ghp_9124SyntheticNotARealToken0000";
+    let origin = format!("https://x-access-token:{TOKEN}@127.0.0.1:9/acme/widget.git");
+    let mut sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+    sandbox.set("GIT_CONFIG_NOSYSTEM", "1");
+    sandbox.set("GIT_TERMINAL_PROMPT", "0");
+    let base = sandbox.root().join("acme/widget");
+
+    crate::test_support::enable_event_capture();
+    let buffer = LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(LogBufferLayer::new(buffer.clone()));
+    let err = tracing::subscriber::with_default(subscriber, || {
+        ensure_base_clone_with(
+            &origin,
+            &base,
+            None,
+            || Ok(None),
+            || Ok(OrgAccounts::default()),
+            |_| panic!("an unmapped origin builds no account credential"),
+        )
+    })
+    .expect_err("nothing listens on 127.0.0.1:9");
+
+    let lines = buffer.tail(64);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("inproject: cloning base repo")),
+        "the clone announcement was not captured ({} lines)",
+        lines.len()
+    );
+    assert!(
+        lines.iter().all(|l| !l.contains(TOKEN)),
+        "a daemon log line carries the origin's token"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("https://***@127.0.0.1:9/acme/widget.git")),
+        "the clone announcement does not name the redacted origin"
+    );
+    assert!(
+        !err.contains(TOKEN),
+        "the clone error carries the origin's token"
+    );
+}

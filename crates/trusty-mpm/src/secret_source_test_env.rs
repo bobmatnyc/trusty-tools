@@ -7,13 +7,10 @@
 //! Telegram token reached test output (#9121, #9123).
 //! What: [`EnvVarGuard`] sets or removes one variable and restores it on drop;
 //! callers are `#[serial]`. [`assert_secret_eq`] compares a resolved value and,
-//! on failure, prints only `trusty_common::credentials::redact_secret`'s
-//! non-reversible preview — modelled on trusty-common `resolver.rs`'s
-//! `assert_resolved`.
+//! on failure, prints only a non-reversible preview; it re-exports
+//! `trusty_common::credentials::test_sandbox::assert_secret_eq` (#9123).
 //! Test: `a_failed_secret_assert_never_prints_the_value`,
 //! `env_var_guard_restores_the_prior_state`.
-
-use trusty_common::credentials::redact_secret;
 
 /// Sets or removes one environment variable until it drops, then restores it.
 ///
@@ -57,28 +54,10 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// Render a resolved credential for a failure message without disclosing it.
-fn describe(value: Option<&str>) -> String {
-    match value {
-        None => "None".to_string(),
-        Some(v) => format!("Some({})", redact_secret(v)),
-    }
-}
-
 /// Assert a resolved credential equals `expected`, redacting `actual` on
-/// failure.
-///
-/// Why: `actual` may hold a real credential the test reached by accident;
-/// only the `expected` side is a test literal and safe to print verbatim.
+/// failure. #9123: the one shared implementation in trusty-common.
 /// Test: `a_failed_secret_assert_never_prints_the_value`.
-#[track_caller]
-pub(crate) fn assert_secret_eq(actual: Option<&str>, expected: Option<&str>, what: &str) {
-    assert!(
-        actual == expected,
-        "{what}: expected {expected:?}, got {} (actual value redacted)",
-        describe(actual)
-    );
-}
+pub(crate) use trusty_common::credentials::test_sandbox::assert_secret_eq;
 
 #[cfg(test)]
 mod tests {

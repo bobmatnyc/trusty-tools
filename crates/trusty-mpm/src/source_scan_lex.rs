@@ -11,10 +11,10 @@
 //! `the_step_scan_flags_an_unrefused_reader`.
 
 /// One source char and whether it is code (`true`) or inside a literal.
-pub(super) type Lexed = (char, bool);
+pub(crate) type Lexed = (char, bool);
 
 /// Whether `c` can be part of a Rust identifier.
-pub(super) fn is_ident(c: char) -> bool {
+pub(crate) fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
@@ -38,7 +38,7 @@ pub(super) fn code_only(text: &str) -> String {
 
 /// `text` without comments, each char tagged code or literal, so a `//` or a
 /// brace inside a string or char literal is never read as syntax (#9121).
-pub(super) fn lex(text: &str) -> Vec<Lexed> {
+pub(crate) fn lex(text: &str) -> Vec<Lexed> {
     let s: Vec<char> = text.chars().collect();
     let mut out = Vec::with_capacity(s.len());
     let mut i = 0;
@@ -180,7 +180,7 @@ fn test_module_end(src: &[Lexed], at: usize) -> Option<usize> {
 }
 
 /// `at + needle.len()` when the code at `at` spells `needle`.
-fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
+pub(crate) fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
     let mut i = at;
     for want in needle.chars() {
         match src.get(i) {
@@ -191,7 +191,7 @@ fn eat(src: &[Lexed], at: usize, needle: &str) -> Option<usize> {
     Some(i)
 }
 
-pub(super) fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
+pub(crate) fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
     while src
         .get(i)
         .is_some_and(|&(c, code)| code && c.is_whitespace())
@@ -203,7 +203,7 @@ pub(super) fn skip_ws(src: &[Lexed], mut i: usize) -> usize {
 
 /// The index past the `close` balancing the `open` at `at`. Literal chars
 /// never count, so a `"}"` inside a test module cannot end it early.
-pub(super) fn matching(src: &[Lexed], at: usize, open: char, close: char) -> Option<usize> {
+pub(crate) fn matching(src: &[Lexed], at: usize, open: char, close: char) -> Option<usize> {
     let mut depth = 0usize;
     for (i, &(c, code)) in src.iter().enumerate().skip(at) {
         if code && c == open {

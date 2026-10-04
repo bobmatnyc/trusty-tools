@@ -9,6 +9,7 @@
 use super::*;
 use serde_json::json;
 use serial_test::serial;
+use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 
 #[test]
 fn adapter_for_model_routes_anthropic() {
@@ -268,31 +269,40 @@ use std::sync::Mutex;
 static ENDPOINT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_env<F: FnOnce()>(kvs: &[(&str, Option<&str>)], f: F) {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    // Snapshot previous values to restore afterwards.
-    let prev: Vec<_> = kvs
-        .iter()
-        .map(|(k, _)| (k.to_string(), std::env::var(k).ok()))
-        .collect();
-    // SAFETY: test helper, single-threaded under ENDPOINT_ENV_LOCK.
-    unsafe {
-        for (k, v) in kvs {
-            match v {
-                Some(val) => std::env::set_var(k, val),
-                None => std::env::remove_var(k),
-            }
+    in_sandbox(kvs, &[], f);
+}
+
+/// Run `f` inside the credential sandbox with `kvs` applied and `store` seeded
+/// into the sandbox's `0600` file store.
+///
+/// Why (#9123): these tests used to clear one variable and let the resolver
+/// fall through to the developer's real `.env.local` and `$HOME` store, then
+/// `assert_eq!` on what came back. The sandbox empties the credential
+/// environment, moves `$HOME`, and latches the `.env.local` loader, so the
+/// only credentials in reach are the ones listed here.
+/// What: takes this file's lock, the crate's `ENV_LOCK` and `HOME_LOCK` (the
+/// sandbox moves `$HOME`), enters the sandbox, applies `kvs`, seeds `store`
+/// at the sandbox `$HOME`, then runs `f`. Callers are `#[serial]`.
+/// Test: every `api_endpoint` test in this file.
+fn in_sandbox<F: FnOnce()>(kvs: &[(&str, Option<&str>)], store: &[(&str, &str)], f: F) {
+    let _g = ENDPOINT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = crate::test_env::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _home_guard = crate::test_env::lock_home();
+    let mut sandbox = CredentialSandbox::enter();
+    for (k, v) in kvs {
+        match v {
+            Some(val) => sandbox.set(k, val),
+            None => sandbox.remove(k),
         }
+    }
+    let file_store = trusty_common::credentials::FileKeyStore::at(&sandbox.home());
+    for (provider, value) in store {
+        trusty_common::credentials::KeyStore::set(&file_store, provider, value)
+            .expect("seed the sandbox store");
     }
     f();
-    // SAFETY: same lock still held.
-    unsafe {
-        for (k, v) in prev {
-            match v {
-                Some(val) => std::env::set_var(&k, val),
-                None => std::env::remove_var(&k),
-            }
-        }
-    }
 }
 
 #[test]
@@ -312,7 +322,11 @@ fn anthropic_api_endpoint_direct_when_key_set() {
                 ep.base_url
             );
             assert_eq!(ep.auth_header_name, "x-api-key");
-            assert_eq!(ep.auth_header_value, "sk-ant-test123");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-test123"),
+                "the env key must reach the header",
+            );
             assert!(
                 ep.extra_headers
                     .iter()
@@ -469,7 +483,11 @@ fn oauth_token_present_with_api_key_uses_api_key() {
             let ep = AnthropicAdapter.api_endpoint(true);
             assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
             assert_eq!(ep.auth_header_name, "x-api-key");
-            assert_eq!(ep.auth_header_value, "sk-ant-real-key");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-real-key"),
+                "the API key, not the OAuth token, must reach the header",
+            );
             assert!(
                 ep.base_url.contains("api.anthropic.com"),
                 "expected api.anthropic.com, got: {}",
@@ -494,7 +512,11 @@ fn api_key_used_when_no_oauth_token() {
             let ep = AnthropicAdapter.api_endpoint(true);
             assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
             assert_eq!(ep.auth_header_name, "x-api-key");
-            assert_eq!(ep.auth_header_value, "sk-ant-only-key");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-only-key"),
+                "the API key must reach the header",
+            );
         },
     );
 }
@@ -537,7 +559,11 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
             let ep = AnthropicAdapter.api_endpoint(true);
             assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
             assert_eq!(ep.auth_header_name, "x-api-key");
-            assert_eq!(ep.auth_header_value, "sk-ant-fallback");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-fallback"),
+                "an empty OAuth token must leave the API key in the header",
+            );
         },
     );
 }
@@ -550,11 +576,9 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
 // silently produced an empty bearer/x-api-key value and a 401 — even though
 // `pick_credentials`/the startup banner correctly reported the credential as
 // configured (they already consulted the shared resolver since #3431). These
-// tests seed a `FileKeyStore` directly (env absent, `$HOME` sandboxed to a
-// tempdir) and assert the resolved VALUE reaches the built `ApiEndpoint`, not
-// just that construction doesn't panic. Locks both `ENDPOINT_ENV_LOCK` (this
-// file's existing env-var lock) and `crate::test_env::{ENV_LOCK,HOME_LOCK}`
-// since these tests are the first in this file to also mutate `$HOME`. Each
+// tests seed the sandbox's `FileKeyStore` through `in_sandbox` (#9123) and
+// assert the resolved VALUE reaches the built `ApiEndpoint`, not just that
+// construction doesn't panic. Each
 // is also `#[serial]`: `llm::http::tests` and `llm::inference_client::tests`
 // mutate the same credential env vars from `#[tokio::test]`s that rely on
 // `#[serial]` alone (they cannot hold a `std::sync::Mutex` guard across
@@ -564,208 +588,71 @@ fn empty_oauth_token_with_api_key_uses_api_key() {
 #[test]
 #[serial]
 fn openrouter_endpoint_resolves_key_from_store_when_env_absent() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-
-    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
-    unsafe {
-        std::env::remove_var("OPENROUTER_API_KEY");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "openrouter",
-        "sk-or-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = openrouter_endpoint();
-    assert_eq!(
-        ep.auth_header_value, "Bearer sk-or-FAKE-store-value",
-        "a store-only openrouter key must reach the built ApiEndpoint"
+    in_sandbox(
+        &[("OPENROUTER_API_KEY", None)],
+        &[("openrouter", "sk-or-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = openrouter_endpoint();
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer sk-or-FAKE-store-value"),
+                "a store-only openrouter key must reach the built ApiEndpoint",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_openrouter {
-            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
-            None => std::env::remove_var("OPENROUTER_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
 #[serial]
 fn openrouter_endpoint_env_beats_store() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-
-    let prev_openrouter = std::env::var_os("OPENROUTER_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: locks held for the whole body.
-    unsafe {
-        std::env::set_var("OPENROUTER_API_KEY", "sk-or-FAKE-env-value");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "openrouter",
-        "sk-or-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = openrouter_endpoint();
-    assert_eq!(
-        ep.auth_header_value, "Bearer sk-or-FAKE-env-value",
-        "process env must win over the store"
+    in_sandbox(
+        &[("OPENROUTER_API_KEY", Some("sk-or-FAKE-env-value"))],
+        &[("openrouter", "sk-or-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = openrouter_endpoint();
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer sk-or-FAKE-env-value"),
+                "process env must win over the store",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_openrouter {
-            Some(v) => std::env::set_var("OPENROUTER_API_KEY", v),
-            None => std::env::remove_var("OPENROUTER_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
 #[serial]
 fn anthropic_direct_endpoint_resolves_key_from_store_when_env_absent() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-
-    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: locks held for the whole body.
-    unsafe {
-        std::env::remove_var("ANTHROPIC_API_KEY");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "anthropic",
-        "sk-ant-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = AnthropicAdapter.api_endpoint(true);
-    assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
-    assert_eq!(ep.auth_header_name, "x-api-key");
-    assert_eq!(
-        ep.auth_header_value, "sk-ant-FAKE-store-value",
-        "a store-only anthropic key must reach the built ApiEndpoint"
+    in_sandbox(
+        &[("ANTHROPIC_API_KEY", None)],
+        &[("anthropic", "sk-ant-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = AnthropicAdapter.api_endpoint(true);
+            assert_eq!(ep.auth_source, AuthSource::AnthropicApiKey);
+            assert_eq!(ep.auth_header_name, "x-api-key");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-FAKE-store-value"),
+                "a store-only anthropic key must reach the built ApiEndpoint",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_anthropic {
-            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
 #[serial]
 fn anthropic_direct_endpoint_env_beats_store() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-
-    let prev_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: locks held for the whole body.
-    unsafe {
-        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-FAKE-env-value");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "anthropic",
-        "sk-ant-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = AnthropicAdapter.api_endpoint(true);
-    assert_eq!(
-        ep.auth_header_value, "sk-ant-FAKE-env-value",
-        "process env must win over the store"
+    in_sandbox(
+        &[("ANTHROPIC_API_KEY", Some("sk-ant-FAKE-env-value"))],
+        &[("anthropic", "sk-ant-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = AnthropicAdapter.api_endpoint(true);
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("sk-ant-FAKE-env-value"),
+                "process env must win over the store",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_anthropic {
-            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
-            None => std::env::remove_var("ANTHROPIC_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 // --- Fireworks credential resolution (#2410 epic #2400 Step 3) ---
@@ -777,118 +664,50 @@ fn anthropic_direct_endpoint_env_beats_store() {
 // adapter reuses the shared resolver rather than a bespoke lookup.
 
 #[test]
+#[serial]
 fn fireworks_api_endpoint_resolves_key_from_store_when_env_absent() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
-    unsafe {
-        std::env::remove_var("FIREWORKS_API_KEY");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "fireworks",
-        "fw-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = FireworksAdapter {
-        model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
-    }
-    .api_endpoint(false);
-    assert_eq!(ep.auth_source, AuthSource::Fireworks);
-    assert!(ep.base_url.contains("fireworks.ai"), "{}", ep.base_url);
-    assert_eq!(
-        ep.auth_header_value, "Bearer fw-FAKE-store-value",
-        "a store-only fireworks key must reach the built ApiEndpoint"
+    in_sandbox(
+        &[("FIREWORKS_API_KEY", None)],
+        &[("fireworks", "fw-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = FireworksAdapter {
+                model_id: "accounts/fireworks/models/llama-v3p1-8b-instruct".to_string(),
+            }
+            .api_endpoint(false);
+            assert_eq!(ep.auth_source, AuthSource::Fireworks);
+            assert!(ep.base_url.contains("fireworks.ai"), "{}", ep.base_url);
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer fw-FAKE-store-value"),
+                "a store-only fireworks key must reach the built ApiEndpoint",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_fireworks {
-            Some(v) => std::env::set_var("FIREWORKS_API_KEY", v),
-            None => std::env::remove_var("FIREWORKS_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
+#[serial]
 fn fireworks_api_endpoint_env_beats_store() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    // #3464: see `crate::test_env::force_env_local_loaded`'s docs.
-    crate::test_env::force_env_local_loaded();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    let prev_fireworks = std::env::var_os("FIREWORKS_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: locks held for the whole body.
-    unsafe {
-        std::env::set_var("FIREWORKS_API_KEY", "fw-FAKE-env-value");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "fireworks",
-        "fw-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = FireworksAdapter {
-        model_id: "x".to_string(),
-    }
-    .api_endpoint(false);
-    assert_eq!(
-        ep.auth_header_value, "Bearer fw-FAKE-env-value",
-        "process env must win over the store"
+    in_sandbox(
+        &[("FIREWORKS_API_KEY", Some("fw-FAKE-env-value"))],
+        &[("fireworks", "fw-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = FireworksAdapter {
+                model_id: "x".to_string(),
+            }
+            .api_endpoint(false);
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer fw-FAKE-env-value"),
+                "process env must win over the store",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_fireworks {
-            Some(v) => std::env::set_var("FIREWORKS_API_KEY", v),
-            None => std::env::remove_var("FIREWORKS_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
+#[serial]
 fn fireworks_api_endpoint_base_url_override() {
-    // `with_env` acquires `ENDPOINT_ENV_LOCK` itself — do not lock it again
-    // here (this Mutex is not reentrant).
     with_env(
         &[
             ("FIREWORKS_API_KEY", Some("fw-test")),
@@ -903,7 +722,11 @@ fn fireworks_api_endpoint_base_url_override() {
             }
             .api_endpoint(false);
             assert_eq!(ep.base_url, "http://127.0.0.1:1/inference/v1");
-            assert_eq!(ep.auth_header_value, "Bearer fw-test");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer fw-test"),
+                "the env key must reach the header",
+            );
         },
     );
 }
@@ -988,60 +811,29 @@ fn atlascloud_parse_usage_shape() {
 }
 
 #[test]
+#[serial]
 fn atlascloud_api_endpoint_resolves_key_from_store_when_env_absent() {
-    let _g = ENDPOINT_ENV_LOCK.lock().unwrap();
-    crate::test_env::force_env_local_loaded();
-    let _env_guard = crate::test_env::ENV_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let _home_guard = crate::test_env::HOME_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    let prev_key = std::env::var_os("ATLASCLOUD_API_KEY");
-    let prev_home = std::env::var_os("HOME");
-    // SAFETY: ENDPOINT_ENV_LOCK + ENV_LOCK + HOME_LOCK held for the whole body.
-    unsafe {
-        std::env::remove_var("ATLASCLOUD_API_KEY");
-    }
-
-    let tmp = tempfile::TempDir::new().expect("tempdir");
-    unsafe {
-        std::env::set_var("HOME", tmp.path());
-    }
-    let store = trusty_common::credentials::FileKeyStore::at(tmp.path());
-    trusty_common::credentials::KeyStore::set(
-        &store,
-        "atlascloud",
-        "ac-FAKE-store-value", // pragma: allowlist secret
-    )
-    .expect("seed store");
-
-    let ep = AtlasCloudAdapter {
-        model_id: "openai/gpt-5.6-sol".to_string(),
-    }
-    .api_endpoint(false);
-    assert_eq!(ep.auth_source, AuthSource::AtlasCloud);
-    assert!(ep.base_url.contains("atlascloud.ai"), "{}", ep.base_url);
-    assert_eq!(
-        ep.auth_header_value, "Bearer ac-FAKE-store-value",
-        "a store-only atlascloud key must reach the built ApiEndpoint"
+    in_sandbox(
+        &[("ATLASCLOUD_API_KEY", None)],
+        &[("atlascloud", "ac-FAKE-store-value")], // pragma: allowlist secret
+        || {
+            let ep = AtlasCloudAdapter {
+                model_id: "openai/gpt-5.6-sol".to_string(),
+            }
+            .api_endpoint(false);
+            assert_eq!(ep.auth_source, AuthSource::AtlasCloud);
+            assert!(ep.base_url.contains("atlascloud.ai"), "{}", ep.base_url);
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer ac-FAKE-store-value"),
+                "a store-only atlascloud key must reach the built ApiEndpoint",
+            );
+        },
     );
-
-    // SAFETY: locks still held.
-    unsafe {
-        match prev_key {
-            Some(v) => std::env::set_var("ATLASCLOUD_API_KEY", v),
-            None => std::env::remove_var("ATLASCLOUD_API_KEY"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
 }
 
 #[test]
+#[serial]
 fn atlascloud_api_endpoint_base_url_override() {
     with_env(
         &[
@@ -1054,7 +846,11 @@ fn atlascloud_api_endpoint_base_url_override() {
             }
             .api_endpoint(false);
             assert_eq!(ep.base_url, "http://127.0.0.1:1/v1");
-            assert_eq!(ep.auth_header_value, "Bearer ac-test");
+            assert_secret_eq(
+                Some(&ep.auth_header_value),
+                Some("Bearer ac-test"),
+                "the env key must reach the header",
+            );
         },
     );
 }

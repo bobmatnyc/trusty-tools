@@ -553,12 +553,15 @@ fn unset_token_env_refusal(pin: &RegistryPin, var: &str) -> String {
 /// `tm projects register <name> --repo-url <url> --gh-account <login>
 /// --gh-config-dir <dir>` with the record's own name and URL filled in.
 /// Test: `an_account_only_pin_fails_closed_naming_the_account`,
-/// `an_account_only_pin_refuses_a_token_for_another_account`.
+/// `an_account_only_pin_refuses_a_token_for_another_account`,
+/// `the_account_only_refusal_redacts_the_record_url`.
 fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -> String {
     let (name, url) = pin
         .record
         .as_ref()
         .map_or(("<name>", "<url>"), |(n, u)| (n.as_str(), u.as_str()));
+    // #9124: the refusal reaches the daemon log; never the record's token.
+    let url = crate::core::remote_url_redact::redact_url(url);
     let checked = if failures.is_empty() {
         String::new()
     } else {

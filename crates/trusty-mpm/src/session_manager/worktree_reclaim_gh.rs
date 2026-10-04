@@ -340,21 +340,27 @@ fn slug_as_url(origin: &str) -> String {
 /// the daemon proved.
 /// What: [`super::worktree_repo_slug::parse_repo_slug`] with `aliases`, then
 /// the same slug-to-URL step the daemon uses. An origin that parse refuses —
-/// an unresolvable alias among them — is an `Err` naming why.
-/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`.
+/// an unresolvable alias among them — is an `Err` naming why, with the origin
+/// redacted (#9124).
+/// Test: `a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host`,
+/// `proof_origin_refusals_never_quote_the_origin_token`.
 pub(crate) fn proof_origin(
     origin: &str,
     aliases: &super::ssh_host_alias::SshHostAliases,
 ) -> Result<String, String> {
     super::worktree_repo_slug::parse_repo_slug(origin, aliases)
         .map(|slug| slug_as_url(&slug))
-        .map_err(|refusal| match refusal {
-            super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
-                "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry renames \
-                 SSH alias '{alias}'"
-            ),
-            super::worktree_repo_slug::SlugRefusal::NoRepository => {
-                format!("cannot tell which gh host serves {origin}: it names no repository")
+        .map_err(|refusal| {
+            // #9124: the refusal is logged; never the origin's token.
+            let origin = crate::core::remote_url_redact::redact_url(origin);
+            match refusal {
+                super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
+                    "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry \
+                     renames SSH alias '{alias}'"
+                ),
+                super::worktree_repo_slug::SlugRefusal::NoRepository => {
+                    format!("cannot tell which gh host serves {origin}: it names no repository")
+                }
             }
         })
 }

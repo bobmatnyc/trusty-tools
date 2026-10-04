@@ -195,3 +195,24 @@ fn cli_account_token_stdin_requires_an_account() {
     .expect("parses");
     assert!(cli.account_token_stdin);
 }
+
+/// #9124: neither the SSH transport notice nor the pin refusal quotes the
+/// origin's token.
+#[test]
+fn account_notices_never_quote_the_origin_token() {
+    const TOKEN: &str = "ghp_9124AccountSyntheticToken0000";
+    let ssh = format!("ssh://octo:{TOKEN}@github.com/acme/widget.git");
+    let notice = transport_notice(&ssh, "octo");
+    assert!(!notice.contains(TOKEN), "the token reached the notice");
+    assert!(
+        notice.contains("ssh://***@github.com/acme/widget.git"),
+        "{notice}"
+    );
+
+    let unnamed = format!("https://u:{TOKEN}@host/");
+    let err = pin_targets(&[], &unnamed)
+        .expect_err("an origin naming no repository names no project")
+        .to_string();
+    assert!(!err.contains(TOKEN), "the token reached the refusal");
+    assert!(err.contains("https://***@host/"), "{err}");
+}

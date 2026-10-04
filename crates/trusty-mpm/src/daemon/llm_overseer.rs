@@ -453,6 +453,13 @@ fn build_chat_messages(history: &[ChatMessage]) -> Vec<Value> {
 mod tests {
     use super::*;
 
+    /// #9123: `LlmOverseer::new` resolves its key through the shared resolver,
+    /// so every test that builds one runs `#[serial]` inside the credential
+    /// sandbox — no real `.env.local`, store or keychain in reach.
+    fn sandbox() -> trusty_common::credentials::test_sandbox::CredentialSandbox {
+        trusty_common::credentials::test_sandbox::CredentialSandbox::enter()
+    }
+
     #[test]
     fn parse_verdict_block() {
         // A reply containing BLOCK yields a Block decision carrying the reply.
@@ -528,9 +535,11 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn disabled_without_key() {
         // With an env var that does not exist, the overseer is disabled and
         // every method falls through to the safe default.
+        let _sandbox = sandbox();
         let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_NO_SUCH_KEY_VAR");
         assert!(!overseer.is_enabled());
         let ctx = OverseerContext::new(
@@ -543,32 +552,24 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn enabled_with_key() {
-        // SAFETY: tests in this module run single-threaded for this var.
-        unsafe {
-            std::env::set_var("TRUSTY_MPM_TEST_LLM_KEY", "sk-test-123");
-        }
+        let mut sandbox = sandbox();
+        sandbox.set("TRUSTY_MPM_TEST_LLM_KEY", "sk-test-123");
         let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_TEST_LLM_KEY");
         assert!(overseer.is_enabled());
-        unsafe {
-            std::env::remove_var("TRUSTY_MPM_TEST_LLM_KEY");
-        }
     }
 
     /// Why (#8236 item 9): the derived `Debug` rendered `api_key` verbatim, so
     /// one `{:?}` in a log or a panic disclosed the live key.
     /// Test: this test.
     #[test]
+    #[serial_test::serial]
     fn debug_never_renders_the_api_key() {
-        // SAFETY: tests in this module run single-threaded for this var.
-        unsafe {
-            std::env::set_var("TRUSTY_MPM_TEST_DEBUG_KEY", "sk-or-v1-FAKEFAKEFAKE");
-        }
+        let mut sandbox = sandbox();
+        sandbox.set("TRUSTY_MPM_TEST_DEBUG_KEY", "sk-or-v1-FAKEFAKEFAKE");
         let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_TEST_DEBUG_KEY");
         let rendered = format!("{overseer:?}");
-        unsafe {
-            std::env::remove_var("TRUSTY_MPM_TEST_DEBUG_KEY");
-        }
 
         assert!(
             !rendered.contains("sk-or-v1-FAKEFAKEFAKE"),
@@ -583,7 +584,9 @@ mod tests {
     /// failure arms are pinned in `secret_source_tests.rs`.
     /// Test: this test.
     #[test]
+    #[serial_test::serial]
     fn overseer_stays_disabled_when_the_credential_is_unresolvable() {
+        let _sandbox = sandbox();
         let overseer = LlmOverseer::new("test-model", "TRUSTY_MPM_TEST_UNREGISTERED_KEY");
         assert!(
             !overseer.is_enabled(),
@@ -641,7 +644,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn chat_without_key_is_not_configured() {
+        let _sandbox = sandbox();
         // With no API key the overseer reports NotConfigured rather than
         // attempting a network call. The overseer is built on a blocking
         // thread because constructing its blocking `reqwest` client stands up

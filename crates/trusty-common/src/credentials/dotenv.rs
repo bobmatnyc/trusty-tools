@@ -281,7 +281,6 @@ pub fn user_env_local_path(home: &Path) -> Option<PathBuf> {
 /// tested because `OnceLock` fires exactly once per test binary — see
 /// module docs for why precedence tests use [`load_env_from_path`] instead.
 pub fn load_env_local_once() {
-    static LOADED: OnceLock<()> = OnceLock::new();
     LOADED.get_or_init(|| {
         if let Ok(cwd) = std::env::current_dir()
             && let Some(path) = find_workspace_env_local(&cwd)
@@ -294,6 +293,26 @@ pub fn load_env_local_once() {
             let _ = dotenvy::from_path(&path);
         }
     });
+}
+
+/// The once-per-process latch [`load_env_local_once`] and the test sandbox's
+/// `skip_env_local_load` share.
+static LOADED: OnceLock<()> = OnceLock::new();
+
+/// Mark the one-time `.env.local` load as done without reading any file.
+///
+/// Why (#9123): a credential test that reaches [`load_env_local_once`] first
+/// in its test binary loads the developer's real `.env.local` into the
+/// process. A test sandbox calls this before anything else so the loader can
+/// never read a real file for the rest of the process. Test builds and the
+/// test feature only, so no production caller can switch the loader off.
+/// What: sets the latch [`load_env_local_once`] checks. `true` when this call
+/// set it — nothing has been or will be loaded — and `false` when a load
+/// already ran, in which case the caller must clear what it loaded.
+/// Test: `credentials::test_sandbox::tests::the_sandbox_reads_no_env_local`.
+#[cfg(any(test, feature = "credential-test-sandbox"))]
+pub(crate) fn skip_env_local_load() -> bool {
+    LOADED.set(()).is_ok()
 }
 
 /// Read a single variable's value from a specific `.env.local` file **without**
@@ -329,12 +348,23 @@ pub fn read_var_from_env_local(path: &Path, var: &str) -> Option<String> {
 /// What: searches upward from the current working directory via
 /// [`find_workspace_env_local`] and delegates to [`read_var_from_env_local`];
 /// `None` when there is no `.env.local` or it does not bind `var`.
-/// Test: covered structurally via `read_var_from_env_local` (the cwd-search wrap
-/// is not independently unit tested — it depends on the real cwd, exactly like
+/// Test: covered via `env_local_value_from` (the cwd itself is not
+/// independently unit tested — it is the real cwd, exactly like
 /// [`load_env_local_once`]).
 pub fn env_local_value(var: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
-    let path = find_workspace_env_local(&cwd)?;
+    env_local_value_from(&cwd, var)
+}
+
+/// [`env_local_value`] searching upward from `start`; `None` while a
+/// credential test sandbox is live, so a sandboxed test never reads the
+/// developer's real `.env.local` (#9123).
+/// Test: `credentials::test_sandbox::tests::the_sandbox_hides_env_local_and_the_keychain`.
+pub(crate) fn env_local_value_from(start: &Path, var: &str) -> Option<String> {
+    if super::sandbox_active() {
+        return None;
+    }
+    let path = find_workspace_env_local(start)?;
     read_var_from_env_local(&path, var)
 }
 

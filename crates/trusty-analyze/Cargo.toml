@@ -211,7 +211,9 @@ http-body-util = { workspace = true }
 # docgen (#5205 follow-up): `tests/generated_docs.rs` renders the MCP tool
 # section of README.md / CLAUDE.md from the descriptor functions. Test-facing
 # only, so the feature is enabled here rather than on the production dep.
-trusty-common     = { workspace = true, features = ["docgen"] }
+# #9123: `credential-test-sandbox` is the shared credential test sandbox; it
+# mutates the process environment, so it is dev-only.
+trusty-common     = { workspace = true, features = ["docgen", "credential-test-sandbox"] }
 # #8341: the `trusty-console`, `trusty-installer`, `tga` and `trusty-audit`
 # dev-dependencies were REMOVED. They existed for the #6287 combined-PR proof —
 # one live socket, four consumers agreeing — which now lives in

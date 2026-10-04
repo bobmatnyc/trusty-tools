@@ -564,3 +564,58 @@ async fn registry_auto_register_skips_already_registered() {
     );
     assert_eq!(p.default_branch, "develop");
 }
+
+/// #9124 delta critic: the arm that cannot name a project logged the raw
+/// `repo_url`, so `https://u:<token>@host/` put the token in the daemon log.
+/// What: one session whose URL names no project (the `warn!` arm) and one that
+/// registers (the `info!` arm), both carrying a synthetic token; every captured
+/// line must omit it, and each arm must have logged, so the check is not
+/// vacuous.
+/// Test: this test.
+#[tokio::test]
+async fn implicit_registration_never_logs_a_credentialed_url() {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    const TOKEN: &str = "ghp_9124RegistrySyntheticToken0000";
+    crate::test_support::enable_event_capture();
+    let dir = TempDir::new().expect("tempdir");
+    let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+    let sessions = [
+        make_session_with_repo(&format!("https://u:{TOKEN}@host/"), None),
+        make_session_with_repo(
+            &format!("https://octo:{TOKEN}@github.com/acme/widget.git"),
+            None,
+        ),
+    ];
+
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    registry
+        .auto_register_from_sessions(&sessions)
+        .with_subscriber(subscriber)
+        .await;
+
+    let lines = buffer.tail(64);
+    assert!(
+        lines.iter().all(|l| !l.contains(TOKEN)),
+        "a log line carried the token ({} lines)",
+        lines.len()
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("could not derive project name")),
+        "the warn arm did not log ({} lines)",
+        lines.len()
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("registered project from session history")),
+        "the info arm did not log ({} lines)",
+        lines.len()
+    );
+}

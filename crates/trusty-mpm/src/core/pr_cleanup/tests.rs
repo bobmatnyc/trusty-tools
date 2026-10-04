@@ -839,6 +839,35 @@ async fn cleanup_refuses_when_the_checkout_origin_cannot_be_read() {
     );
 }
 
+/// #9124: an origin that names no repository is quoted in the refusal, which
+/// reaches the log; its token never is.
+#[tokio::test]
+async fn cleanup_refusal_never_quotes_the_origin_token() {
+    const TOKEN: &str = "ghp_9124CleanupSyntheticToken0000";
+    let origin = format!("https://octo:{TOKEN}@github.com/\n");
+    let gh = gh_merged();
+    let git = Scripted::new()
+        .on(ORIGIN_QUERY, &origin)
+        .on("git ls-remote", "");
+    let report = run(
+        &gh,
+        &git,
+        &FakeClaims::none(),
+        &FakeLanding::nothing_merged(),
+        &clean,
+        &req(false),
+    )
+    .await;
+
+    let rendered = report.render();
+    assert!(!rendered.contains(TOKEN), "the token reached the refusal");
+    assert!(report.failed(), "the cleanup must refuse");
+    assert!(
+        rendered.contains("https://***@github.com/") && rendered.contains("names no"),
+        "the refusal must name the redacted origin: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn cleanup_clean_path_with_the_remote_branch_already_gone() {
     let gh = gh_merged();
