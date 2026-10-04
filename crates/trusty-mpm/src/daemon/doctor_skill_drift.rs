@@ -99,7 +99,14 @@ pub(super) fn check_skill_staleness(
     // legitimate reference; the latter is precisely what #4604 proved untrustworthy.
     let source = paths.skill_source_dir();
     let submodule = (source != paths.skills).then_some(source);
-    let reference = skill_reference(submodule.as_deref());
+    // #9012: the bundled skills are runtime content; none is an empty
+    // reference, which `report` grades Unknown.
+    let content = match project_dir {
+        Some(dir) => crate::core::content_source::framework_content_for(dir),
+        None => crate::core::content_source::framework_content(),
+    }
+    .ok();
+    let reference = skill_reference(submodule.as_deref(), content.as_ref());
     report(&reference, paths, project_dir)
 }
 

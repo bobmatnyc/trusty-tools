@@ -11,12 +11,6 @@
 //! Test: catalog_sync.rs carries unit tests with a FakeGitBackend;
 //! `bundle_cache_tests.rs` covers the content cache.
 
-/// Whether this binary still compiles in the content ADR-0064 PHASE_1 moves
-/// out. `false` since #9011 dropped the embedded agent roster and harness docs:
-/// nothing installed now loses them, so `tm doctor` WARNs and `tm content
-/// status` exits non-zero. #9012 deletes the constant and its parameters.
-pub const BUILTIN_CONTENT_EMBEDDED: bool = false;
-
 pub mod bundle_cache;
 pub mod catalog_sync;
 mod catalog_url;

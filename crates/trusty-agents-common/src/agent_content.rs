@@ -77,6 +77,21 @@ pub enum AgentContentError {
         /// The bundle path or roster file name that is absent.
         path: String,
     },
+    /// A required file is present but this binary cannot use it (#9012): a
+    /// manifest that does not parse or validate, typically one a newer content
+    /// release extended with a section or key this binary does not know.
+    #[error(
+        "the content from {origin} has an unusable `{path}` ({reason}); run \
+         `tm content update`, or upgrade tm if that content is newer than this binary"
+    )]
+    Invalid {
+        /// Where the content came from (see [`describe_source`]).
+        origin: String,
+        /// The bundle path of the unusable file.
+        path: String,
+        /// The parse or validation failure.
+        reason: String,
+    },
     /// Writing a materialized roster failed.
     #[error("could not write {}: {source}", path.display())]
     Write {

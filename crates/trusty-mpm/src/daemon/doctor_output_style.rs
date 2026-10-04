@@ -510,6 +510,22 @@ pub(crate) fn check_output_style_staleness(
     let exempt_custom = resolve_effective_style_id(project_dir, home).map(|id| format!("{id}.md"));
     let managed = paths.managed_claude_config_dir();
 
+    // #9012: the bundled bodies are runtime content; with none there is no
+    // reference, so staleness is unknown, never clean.
+    let content = match project_dir {
+        Some(dir) => crate::core::content_source::framework_content_for(dir),
+        None => crate::core::content_source::framework_content(),
+    };
+    let content = match content {
+        Ok(content) => content,
+        Err(err) => {
+            return DoctorCheck::new(
+                "output_style_staleness",
+                CheckStatus::Unknown,
+                format!("no bundled output styles to compare against: {err}"),
+            );
+        }
+    };
     let mut parts: Vec<String> = Vec::new();
     for tier in output_style_tiers(home, Some(&managed)) {
         let styles_dir = tier.styles_dir();
@@ -519,7 +535,7 @@ pub(crate) fn check_output_style_staleness(
         // already `Fail`ed by `check_output_style` and must not be double-reported as
         // drift, and an unreadable one is not evidence of staleness.
         let drifted: Vec<&str> =
-            crate::core::output_style_deployer::output_style_drift(&styles_dir)
+            crate::core::output_style_deployer::output_style_drift(&content, &styles_dir)
                 .into_iter()
                 .filter(|(_, state)| {
                     *state == crate::core::output_style_deployer::StyleDrift::Drifted

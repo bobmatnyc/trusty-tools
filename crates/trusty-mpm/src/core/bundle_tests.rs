@@ -7,6 +7,44 @@
 //! the [`crate::core::bundle::ALL`] table.
 //! Test: this file is the test coverage; run with `cargo test -p trusty-mpm bundle`.
 use super::*;
+use crate::core::content_source::test_support::rc;
+
+/// A skill file's text from the checkout's content (#9012: skills are runtime
+/// content, no longer compiled-in constants).
+fn skill_text(path: &str) -> &'static str {
+    rc().skill(path)
+        .unwrap_or_else(|| panic!("{path} must be in the content tree"))
+}
+
+/// An instruction file's text from the checkout's content (#9012).
+fn instruction_text(path: &str) -> &'static str {
+    rc().instruction(path)
+        .unwrap_or_else(|| panic!("instructions/{path} must be in the content tree"))
+}
+
+/// Every artifact `tm install` writes: the compiled-in hook policies, then the
+/// content's skills and bundled docs (#9012: runtime content), in the shape the
+/// pre-#9012 `ALL` table had so the registration tests keep their meaning.
+fn deployed() -> Vec<BundledArtifact> {
+    let docs = [
+        "docs/WHAT-IS-TRUSTY-MPM.md",
+        "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+    ]
+    .into_iter()
+    .map(|rel| (rel, instruction_text(rel)));
+    ALL.iter()
+        .copied()
+        .chain(
+            rc().skills()
+                .chain(docs)
+                .map(|(rel_path, contents)| BundledArtifact {
+                    rel_path,
+                    contents,
+                    install: InstallPolicy::Overwrite,
+                }),
+        )
+        .collect()
+}
 
 #[test]
 fn constants_are_non_empty() {
@@ -15,52 +53,136 @@ fn constants_are_non_empty() {
     assert!(!OPTIMIZER_TOML.trim().is_empty());
     assert!(!OVERSEER_TOML.trim().is_empty());
     // Increment 3 agents
-    assert!(!CODE_REVIEW_STANDARDS.trim().is_empty());
-    assert!(!CONTRACT_DRIVEN_TESTING.trim().is_empty());
-    assert!(!OUTPUT_STYLE.trim().is_empty());
-    assert!(!OUTPUT_STYLE_TEACHER.trim().is_empty());
-    assert!(!OUTPUT_STYLE_RESEARCH.trim().is_empty());
-    assert!(!TM_DOCTOR.trim().is_empty());
+    assert!(
+        !skill_text("skills/code-review-standards.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/contract-driven-testing.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !instruction_text("output-styles/trusty-mpm.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !instruction_text("output-styles/trusty-mpm-teacher.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !instruction_text("output-styles/trusty-mpm-research.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(!skill_text("skills/tm-doctor.md").trim().is_empty());
     // /tm- portfolio (tm-skills-portfolio epic)
-    assert!(!TM_CIRCUIT_BREAKER.trim().is_empty());
-    assert!(!TM_VERIFICATION_PROTOCOLS.trim().is_empty());
-    assert!(!TM_TOOL_USAGE_GUIDE.trim().is_empty());
-    assert!(!TM_GIT_FILE_TRACKING.trim().is_empty());
-    assert!(!TM_ADR.trim().is_empty());
-    assert!(!TM_WORKFLOW.trim().is_empty());
-    assert!(!TM_AGENT_ARCHITECTURE.trim().is_empty());
-    assert!(!TM_POSTMORTEM.trim().is_empty());
-    assert!(!TM_PROSE_STYLE.trim().is_empty());
-    assert!(!TM_BUG_REPORTING.trim().is_empty());
-    assert!(!TM_TEACHING_TEMPLATES.trim().is_empty());
-    assert!(!TM_TICKETING.trim().is_empty());
-    assert!(!TM_DELEGATION_PATTERNS.trim().is_empty());
-    assert!(!TM_SESSION_MANAGEMENT.trim().is_empty());
-    assert!(!TM_SESSION_PAUSE.trim().is_empty());
-    assert!(!TM_SESSION_RESUME.trim().is_empty());
-    assert!(!TM_INIT.trim().is_empty());
-    assert!(!TM_OVERVIEW.trim().is_empty());
-    assert!(!TM_ISSUES_PRUNE.trim().is_empty());
-    assert!(!TM_CLI_OPERATIONS.trim().is_empty());
-    assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
+    assert!(!skill_text("skills/tm-circuit-breaker.md").trim().is_empty());
+    assert!(
+        !skill_text("skills/tm-verification-protocols.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-tool-usage-guide.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-git-file-tracking.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(!skill_text("skills/tm-adr.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-workflow.md").trim().is_empty());
+    assert!(
+        !skill_text("skills/tm-agent-architecture.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(!skill_text("skills/tm-postmortem.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-prose-style.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-bug-reporting.md").trim().is_empty());
+    assert!(
+        !skill_text("skills/tm-teaching-templates.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(!skill_text("skills/tm-ticketing.md").trim().is_empty());
+    assert!(
+        !skill_text("skills/tm-delegation-patterns.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-session-management.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(!skill_text("skills/tm-session-pause.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-session-resume.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-init.md").trim().is_empty());
+    assert!(!skill_text("skills/tm.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-issues-prune.md").trim().is_empty());
+    assert!(!skill_text("skills/tm-cli-operations.md").trim().is_empty());
+    assert!(
+        !instruction_text("docs/WHAT-IS-TRUSTY-MPM.md")
+            .trim()
+            .is_empty()
+    );
     // --- BEGIN issue #2911: documentation-style bundled skill (append-only) ---
-    assert!(!DOCUMENTATION_STYLE.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_SPEC.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_README.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_FILE_LEVEL.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_CLASS.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_METHOD_FUNCTION.trim().is_empty());
-    assert!(!DOCUMENTATION_STYLE_BLOCK_INLINE.trim().is_empty());
+    assert!(
+        !skill_text("skills/documentation-style.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/spec.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/readme.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/file-level.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/class.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/method-function.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/documentation-style/references/block-inline.md")
+            .trim()
+            .is_empty()
+    );
     // --- END issue #2911 ---
-    assert!(!RUST_BUILD_PERFORMANCE.trim().is_empty());
+    assert!(
+        !skill_text("skills/rust-build-performance.md")
+            .trim()
+            .is_empty()
+    );
 }
 
 #[test]
 fn tm_skills_are_in_bundle() {
     // The /tm- portfolio (tm-skills-portfolio epic) must be present in ALL so
     // `trusty-mpm install` deploys every skill offline.
-    let skill_paths: Vec<&str> = ALL
-        .iter()
+    let skill_paths: Vec<&str> = deployed()
+        .into_iter()
         .filter(|a| a.rel_path.starts_with("skills/tm-") || a.rel_path == "skills/tm.md")
         .map(|a| a.rel_path)
         .collect();
@@ -115,7 +237,7 @@ fn tm_skills_are_in_bundle() {
 /// Test: this IS the test.
 #[test]
 fn retired_pr_workflow_skill_is_not_bundled() {
-    let paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
+    let paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     assert!(
         !paths.iter().any(|p| p.contains("tm-pr-workflow")),
         "tm-pr-workflow was retired into tm-workflow (#5202); re-registering it \
@@ -134,7 +256,7 @@ fn tm_capabilities_is_in_bundle() {
     // must be present in ALL so `trusty-mpm install` deploys them offline —
     // the same "registration here is what makes deploy_all_skill_tiers ship
     // it" lesson as the code-critic bundled-skills fix (issue #2890).
-    let paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
+    let paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     for expected in &[
         "skills/tm-capabilities.md",
         "skills/tm-capabilities/references/cli.md",
@@ -154,20 +276,48 @@ fn tm_capabilities_has_frontmatter() {
     // The entry file must carry the standard bundled-skill frontmatter shape
     // (name/description/user-invocable), same convention as every other
     // skill in ALL.
-    assert!(TM_CAPABILITIES.starts_with("---\nname: tm-capabilities\n"));
-    assert!(TM_CAPABILITIES.contains("user-invocable: false"));
+    assert!(skill_text("skills/tm-capabilities.md").starts_with("---\nname: tm-capabilities\n"));
+    assert!(skill_text("skills/tm-capabilities.md").contains("user-invocable: false"));
 }
 
 #[test]
 fn tm_capabilities_constants_are_non_empty() {
-    assert!(!TM_CAPABILITIES.trim().is_empty());
-    assert!(!TM_CAPABILITIES_CLI.trim().is_empty());
-    assert!(!TM_CAPABILITIES_MCP_TOOLS.trim().is_empty());
-    assert!(!TM_CAPABILITIES_AGENTS.trim().is_empty());
-    assert!(!TM_CAPABILITIES_SKILLS.trim().is_empty());
-    assert!(!TM_CAPABILITIES_DOCTOR.trim().is_empty());
-    assert!(!TM_CAPABILITIES_FRAMEWORK.trim().is_empty());
-    assert!(!TM_CAPABILITIES_WORKFLOWS.trim().is_empty());
+    assert!(!skill_text("skills/tm-capabilities.md").trim().is_empty());
+    assert!(
+        !skill_text("skills/tm-capabilities/references/cli.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/mcp-tools.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/agents.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/skills.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/doctor.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/framework.md")
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        !skill_text("skills/tm-capabilities/references/workflows.md")
+            .trim()
+            .is_empty()
+    );
 }
 
 /// The heading of the one section that states the labels/project/milestone
@@ -187,14 +337,14 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     // this consolidation removed — #6939 and #7073 hand-edited two copies in
     // step, which worked only for as long as someone remembered to.
     assert!(
-        TM_TICKETING.contains(STANDARD_HEADING),
+        skill_text("skills/tm-ticketing.md").contains(STANDARD_HEADING),
         "`tm-ticketing.md` must hold the section `{STANDARD_HEADING}`"
     );
     let stated: Vec<&str> = [
-        ("tm-ticketing.md", TM_TICKETING),
+        ("tm-ticketing.md", skill_text("skills/tm-ticketing.md")),
         ("ticketing.md", agent("ticketing.md")),
         ("version-control.md", agent("version-control.md")),
-        ("tm-workflow.md", TM_WORKFLOW),
+        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
     ]
     .into_iter()
     .filter(|(_, body)| body.contains(STANDARD_RULE))
@@ -212,7 +362,7 @@ fn the_labels_project_milestone_standard_is_stated_once() {
     for (file, body) in [
         ("ticketing.md", agent("ticketing.md")),
         ("version-control.md", agent("version-control.md")),
-        ("tm-workflow.md", TM_WORKFLOW),
+        ("tm-workflow.md", skill_text("skills/tm-workflow.md")),
     ] {
         assert!(
             body.contains(name),
@@ -236,30 +386,63 @@ fn tm_skills_have_frontmatter() {
     // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`
     // and must not leak unadapted claude-mpm references.
     let skills = [
-        ("tm-circuit-breaker", TM_CIRCUIT_BREAKER),
-        ("tm-verification-protocols", TM_VERIFICATION_PROTOCOLS),
-        ("tm-tool-usage-guide", TM_TOOL_USAGE_GUIDE),
-        ("tm-git-file-tracking", TM_GIT_FILE_TRACKING),
-        ("tm-adr", TM_ADR),
-        ("tm-workflow", TM_WORKFLOW),
-        ("tm-agent-architecture", TM_AGENT_ARCHITECTURE),
-        ("tm-postmortem", TM_POSTMORTEM),
-        ("tm-prose-style", TM_PROSE_STYLE),
-        ("tm-bug-reporting", TM_BUG_REPORTING),
-        ("tm-teaching-templates", TM_TEACHING_TEMPLATES),
-        ("tm-ticketing", TM_TICKETING),
-        ("tm-delegation-patterns", TM_DELEGATION_PATTERNS),
-        ("tm-session-management", TM_SESSION_MANAGEMENT),
-        ("tm-session-pause", TM_SESSION_PAUSE),
-        ("tm-session-resume", TM_SESSION_RESUME),
-        ("tm-init", TM_INIT),
-        ("tm", TM_OVERVIEW),
-        ("tm-issues-prune", TM_ISSUES_PRUNE),
-        ("tm-cli-operations", TM_CLI_OPERATIONS),
-        ("tm-slack", TM_SLACK),
-        ("tm-secrets", TM_SECRETS),
-        ("tm-architect-setup", TM_ARCHITECT_SETUP),
-        ("tm-epic", TM_EPIC),
+        (
+            "tm-circuit-breaker",
+            skill_text("skills/tm-circuit-breaker.md"),
+        ),
+        (
+            "tm-verification-protocols",
+            skill_text("skills/tm-verification-protocols.md"),
+        ),
+        (
+            "tm-tool-usage-guide",
+            skill_text("skills/tm-tool-usage-guide.md"),
+        ),
+        (
+            "tm-git-file-tracking",
+            skill_text("skills/tm-git-file-tracking.md"),
+        ),
+        ("tm-adr", skill_text("skills/tm-adr.md")),
+        ("tm-workflow", skill_text("skills/tm-workflow.md")),
+        (
+            "tm-agent-architecture",
+            skill_text("skills/tm-agent-architecture.md"),
+        ),
+        ("tm-postmortem", skill_text("skills/tm-postmortem.md")),
+        ("tm-prose-style", skill_text("skills/tm-prose-style.md")),
+        ("tm-bug-reporting", skill_text("skills/tm-bug-reporting.md")),
+        (
+            "tm-teaching-templates",
+            skill_text("skills/tm-teaching-templates.md"),
+        ),
+        ("tm-ticketing", skill_text("skills/tm-ticketing.md")),
+        (
+            "tm-delegation-patterns",
+            skill_text("skills/tm-delegation-patterns.md"),
+        ),
+        (
+            "tm-session-management",
+            skill_text("skills/tm-session-management.md"),
+        ),
+        ("tm-session-pause", skill_text("skills/tm-session-pause.md")),
+        (
+            "tm-session-resume",
+            skill_text("skills/tm-session-resume.md"),
+        ),
+        ("tm-init", skill_text("skills/tm-init.md")),
+        ("tm", skill_text("skills/tm.md")),
+        ("tm-issues-prune", skill_text("skills/tm-issues-prune.md")),
+        (
+            "tm-cli-operations",
+            skill_text("skills/tm-cli-operations.md"),
+        ),
+        ("tm-slack", skill_text("skills/tm-slack.md")),
+        ("tm-secrets", skill_text("skills/tm-secrets.md")),
+        (
+            "tm-architect-setup",
+            skill_text("skills/tm-architect-setup.md"),
+        ),
+        ("tm-epic", skill_text("skills/tm-epic.md")),
     ];
     for (name, content) in skills {
         assert!(
@@ -291,7 +474,32 @@ fn output_style_has_matching_frontmatter_name() {
     // Claude Code matches the `outputStyle` settings key against the
     // `name:` in the style file's frontmatter; a mismatch silently falls
     // back to the operator's default style.
-    assert!(OUTPUT_STYLE.contains("name: trusty-mpm"));
+    assert!(instruction_text("output-styles/trusty-mpm.md").contains("name: trusty-mpm"));
+}
+
+/// #9012: every registry style's body is runtime content — a required
+/// instruction file whose frontmatter `name:` is the registry id.
+#[test]
+fn every_bundled_style_reads_from_content() {
+    for style in OUTPUT_STYLES {
+        assert!(
+            crate::core::framework_content::REQUIRED_INSTRUCTIONS.contains(&style.content_path),
+            "{} must be a required instruction, or a load would not guarantee it",
+            style.content_path
+        );
+        assert_eq!(
+            style.content_path,
+            format!("output-styles/{}", style.file_name),
+            "a style deploys under the file name its content carries"
+        );
+        let body = style.content(rc());
+        assert!(
+            body.contains(&format!("\nname: {}\n", style.id)),
+            "{} must declare name: {}",
+            style.content_path,
+            style.id
+        );
+    }
 }
 
 #[test]
@@ -321,7 +529,7 @@ fn the_pm_styles_are_every_style_but_the_supervisor_style() {
     );
     assert!(OUTPUT_STYLES.iter().any(|s| s.id
         == crate::core::session_profile::SUPERVISOR_OUTPUT_STYLE_ID
-        && s.content == OUTPUT_STYLE_SUPERVISOR));
+        && s.content(rc()) == instruction_text("output-styles/trusty-mpm-supervisor.md")));
 }
 
 #[test]
@@ -329,9 +537,13 @@ fn output_style_registry_ids_match_frontmatter() {
     // Each registry id MUST equal the file's frontmatter `name:`, or Claude Code
     // silently falls back to the operator's default style.
     for style in OUTPUT_STYLES {
-        assert!(!style.content.trim().is_empty(), "{} non-empty", style.id);
         assert!(
-            style.content.contains(&format!("name: {}", style.id)),
+            !style.content(rc()).trim().is_empty(),
+            "{} non-empty",
+            style.id
+        );
+        assert!(
+            style.content(rc()).contains(&format!("name: {}", style.id)),
             "{} frontmatter name must match registry id",
             style.id
         );
@@ -349,16 +561,16 @@ fn output_styles_carry_identity_protocol_and_load_marker() {
     const HEADING: &str = "## Identity & Self-Awareness Protocol (Non-Overridable)";
     for style in OUTPUT_STYLES {
         assert!(
-            style.content.contains(HEADING),
+            style.content(rc()).contains(HEADING),
             "{} is missing the Identity & Self-Awareness Protocol section",
             style.id
         );
         let marker_pos = style
-            .content
+            .content(rc())
             .find(MARKER)
             .unwrap_or_else(|| panic!("{} is missing the load marker", style.id));
-        let heading_pos = style.content.find(HEADING).expect("heading present");
-        let between = &style.content[marker_pos + MARKER.len()..heading_pos];
+        let heading_pos = style.content(rc()).find(HEADING).expect("heading present");
+        let between = &style.content(rc())[marker_pos + MARKER.len()..heading_pos];
         assert_eq!(
             between.trim(),
             "",
@@ -366,8 +578,8 @@ fn output_styles_carry_identity_protocol_and_load_marker() {
             style.id
         );
         // Forbidden shell-probe list must be greppable for regressions.
-        assert!(style.content.contains("pip3 show"));
-        assert!(style.content.contains("which claude-mpm"));
+        assert!(style.content(rc()).contains("pip3 show"));
+        assert!(style.content(rc()).contains("which claude-mpm"));
     }
 }
 
@@ -378,7 +590,10 @@ fn output_style_registry_default_resolves() {
         .iter()
         .find(|s| s.id == DEFAULT_OUTPUT_STYLE_ID)
         .expect("default style must be in the registry");
-    assert_eq!(default.content, OUTPUT_STYLE);
+    assert_eq!(
+        default.content(rc()),
+        instruction_text("output-styles/trusty-mpm.md")
+    );
     assert_eq!(default.file_name, "trusty-mpm.md");
 }
 
@@ -515,12 +730,12 @@ fn bundle_table_is_complete() {
     //   Architect setup skill, shipped ahead of `tm fleet`. 190 + 1 = 191.
     // Issue #9011 (-43): the 43 `agents/*.md` rows left the table — the agent
     //   roster is runtime content (`content/agents`). 191 - 43 = 148.
-    assert_eq!(ALL.len(), 148);
-    let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
+    assert_eq!(deployed().len(), 148);
+    let mut paths: Vec<&str> = deployed().into_iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
     assert_eq!(paths.len(), 148, "artifact paths must be unique");
-    for artifact in ALL {
+    for artifact in deployed() {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
     }
@@ -545,7 +760,9 @@ fn overseer_toml_is_in_bundle() {
     // `ALL` must include the overseer policy so `trusty-mpm install`
     // deploys it.
     assert!(
-        ALL.iter().any(|a| a.rel_path == "hooks/overseer.toml"),
+        deployed()
+            .into_iter()
+            .any(|a| a.rel_path == "hooks/overseer.toml"),
         "overseer.toml must be a bundled artifact"
     );
 }
@@ -831,8 +1048,8 @@ fn base_agent_guidance_sections_survive_composition() {
 fn no_mpm_guidance_skills_remain_in_bundle() {
     // The tm-skills-portfolio epic removed the 11 Phase 1 (#770) mpm-*
     // guidance skills in favor of the /tm- portfolio; assert none linger.
-    let mpm_skill_paths: Vec<&str> = ALL
-        .iter()
+    let mpm_skill_paths: Vec<&str> = deployed()
+        .into_iter()
         .filter(|a| a.rel_path.starts_with("skills/mpm-"))
         .map(|a| a.rel_path)
         .collect();
@@ -847,7 +1064,9 @@ fn no_example_skill_remains_in_bundle() {
     // A4 (tm-skills-portfolio epic): the example-skill.md placeholder must
     // never reappear in ALL.
     assert!(
-        !ALL.iter().any(|a| a.rel_path == "skills/example-skill.md"),
+        !deployed()
+            .into_iter()
+            .any(|a| a.rel_path == "skills/example-skill.md"),
         "example-skill.md must not be present in ALL"
     );
 }
@@ -859,11 +1078,13 @@ fn tm_doctor_skill_is_wired_into_bundle() {
     // never shipped. Assert both are now true, and that it carries valid
     // frontmatter naming the skill `tm-doctor`.
     assert!(
-        ALL.iter().any(|a| a.rel_path == "skills/tm-doctor.md"),
+        deployed()
+            .into_iter()
+            .any(|a| a.rel_path == "skills/tm-doctor.md"),
         "tm-doctor.md must be present in the ALL bundle table"
     );
-    assert!(TM_DOCTOR.starts_with("---\n"));
-    assert!(TM_DOCTOR.contains("name: tm-doctor"));
+    assert!(skill_text("skills/tm-doctor.md").starts_with("---\n"));
+    assert!(skill_text("skills/tm-doctor.md").contains("name: tm-doctor"));
 }
 
 #[test]
@@ -878,19 +1099,23 @@ fn code_critic_declared_skills_are_in_bundle() {
     // function reads from the framework-root `skills/` directory, which is
     // populated exclusively from `ALL` entries at `tm install` time.
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/code-review-standards.md"),
         "code-review-standards.md must be present in the ALL bundle table"
     );
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/contract-driven-testing.md"),
         "contract-driven-testing.md must be present in the ALL bundle table"
     );
-    assert!(CODE_REVIEW_STANDARDS.starts_with("---\n"));
-    assert!(CODE_REVIEW_STANDARDS.contains("name: code-review-standards"));
-    assert!(CONTRACT_DRIVEN_TESTING.starts_with("---\n"));
-    assert!(CONTRACT_DRIVEN_TESTING.contains("name: contract-driven-testing"));
+    assert!(skill_text("skills/code-review-standards.md").starts_with("---\n"));
+    assert!(skill_text("skills/code-review-standards.md").contains("name: code-review-standards"));
+    assert!(skill_text("skills/contract-driven-testing.md").starts_with("---\n"));
+    assert!(
+        skill_text("skills/contract-driven-testing.md").contains("name: contract-driven-testing")
+    );
     // The agent's declared `skills:` frontmatter must name both of these,
     // so the DOC-42 co-deployment mechanism has something real to resolve —
     // issue #2903 extended the declaration with four more batch-1 skills
@@ -913,7 +1138,7 @@ fn code_review_standards_flags_github_token_protected_branch_pushes_8016() {
     // matter how green its first (nothing-to-publish) run looked.
     assert!(
         contains_prose_anchor(
-            CODE_REVIEW_STANDARDS,
+            skill_text("skills/code-review-standards.md"),
             "GitHub never allows the Actions identity as a restriction or \
              ruleset bypass actor"
         ),
@@ -933,7 +1158,7 @@ fn code_review_standards_flags_format_interpolated_structured_payloads_7624() {
     // permissive default indistinguishable from a real pass.
     assert!(
         contains_prose_anchor(
-            CODE_REVIEW_STANDARDS,
+            skill_text("skills/code-review-standards.md"),
             "builds a JSON/YAML/TOML/SQL payload by `format!` interpolating \
              a caller-supplied value into a string literal"
         ),
@@ -996,7 +1221,7 @@ fn skill_port_batch1_skills_are_in_bundle() {
     assert_eq!(BATCH1_ENTRIES.len(), 25);
     for rel_path in BATCH1_ENTRIES {
         assert!(
-            ALL.iter().any(|a| &a.rel_path == rel_path),
+            deployed().into_iter().any(|a| &a.rel_path == rel_path),
             "{rel_path} must be present in the ALL bundle table"
         );
     }
@@ -1033,12 +1258,12 @@ fn skill_port_batch1_references_land_on_disk() {
         ),
     ] {
         assert!(
-            ALL.iter().any(|a| a.rel_path == entry),
+            deployed().into_iter().any(|a| a.rel_path == entry),
             "{entry} must be present in the ALL bundle table"
         );
         for rel_path in refs {
             assert!(
-                ALL.iter().any(|a| &a.rel_path == rel_path),
+                deployed().into_iter().any(|a| &a.rel_path == rel_path),
                 "{rel_path} must be present in the ALL bundle table"
             );
         }
@@ -1050,8 +1275,8 @@ fn what_is_trusty_mpm_is_in_bundle() {
     // DOC-28 R1 acceptance: the canonical self-description doc must be a
     // bundled artifact so `tm install` deploys it to every framework root,
     // not just the trusty-tools repo's own source tree.
-    let artifact = ALL
-        .iter()
+    let artifact = deployed()
+        .into_iter()
         .find(|a| a.rel_path == "docs/WHAT-IS-TRUSTY-MPM.md")
         .expect("WHAT-IS-TRUSTY-MPM.md must be a bundled artifact");
     assert_eq!(
@@ -1059,7 +1284,10 @@ fn what_is_trusty_mpm_is_in_bundle() {
         InstallPolicy::Overwrite,
         "the doc is framework-owned and must track upgrades"
     );
-    assert_eq!(artifact.contents, WHAT_IS_TRUSTY_MPM);
+    assert_eq!(
+        artifact.contents,
+        instruction_text("docs/WHAT-IS-TRUSTY-MPM.md")
+    );
 }
 
 #[test]
@@ -1067,14 +1295,15 @@ fn what_is_trusty_mpm_disambiguates_claude_mpm() {
     // DOC-28 R1 acceptance: the doc must contain the literal substrings that
     // prove it identifies the project (Rust, tm, tcode) and explicitly
     // disambiguates it from the unrelated Python claude-mpm package.
-    assert!(WHAT_IS_TRUSTY_MPM.contains("Rust"));
-    assert!(WHAT_IS_TRUSTY_MPM.contains("tm"));
-    assert!(WHAT_IS_TRUSTY_MPM.contains("tcode"));
-    assert!(WHAT_IS_TRUSTY_MPM.contains("claude-mpm"));
+    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("Rust"));
+    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("tm"));
+    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("tcode"));
+    assert!(instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("claude-mpm"));
     // The claude-mpm substring must appear inside an explicit disambiguation
     // sentence, not incidentally — assert it co-occurs with "NOT" nearby.
     assert!(
-        WHAT_IS_TRUSTY_MPM.contains("NOT") && WHAT_IS_TRUSTY_MPM.contains("claude-mpm"),
+        instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("NOT")
+            && instruction_text("docs/WHAT-IS-TRUSTY-MPM.md").contains("claude-mpm"),
         "doc must explicitly disambiguate from claude-mpm, not mention it incidentally"
     );
 }
@@ -1119,7 +1348,7 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
     // trigger is what cannot be deferred: an agent handing back with CI pending
     // is the moment the PM must act, and a PM that never learns to act does not
     // know to load anything.
-    let pm_prompt = assemble_system_prompt();
+    let pm_prompt = assemble_system_prompt(rc());
     assert!(
         pm_prompt.contains("## Parked-Subagent Re-Engagement (issues #2833, #4792)"),
         "assembled PM system prompt is missing the Parked-Subagent \
@@ -1143,7 +1372,7 @@ fn idle_park_mitigation_2833_guidance_survives_composition() {
 
     // …and the mechanics must actually BE in the skill, or the pointer above is
     // a dangling reference. Asserted against the real bundled asset.
-    let skill = TM_DELEGATION_PATTERNS;
+    let skill = skill_text("skills/tm-delegation-patterns.md");
     assert!(
         skill.contains("30-second blind poll") && skill.contains("counter-failure"),
         "tm-delegation-patterns must carry the PM-side anti-spam-monitoring \
@@ -1184,7 +1413,7 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
         "A worktree agent's tree must still exist first",
     ] {
         assert!(
-            contains_prose_anchor(TM_DELEGATION_PATTERNS, needle),
+            contains_prose_anchor(skill_text("skills/tm-delegation-patterns.md"), needle),
             "tm-delegation-patterns' PM Re-Engagement section is missing the \
              #8004 worktree-survival check: {needle:?}"
         );
@@ -1196,7 +1425,7 @@ fn pm_re_engagement_checks_worktree_survival_before_resuming_8004() {
 /// ruling or a released HOLD skipped the worktree-survival check.
 #[test]
 fn resident_re_engagement_routes_every_resume_to_the_worktree_check_8004() {
-    let section = include_str!("../assets/instructions/sections/subagent-re-engagement.md");
+    let section = instruction_text("sections/subagent-re-engagement.md");
     for needle in [
         "Before any `SendMessage` resume",
         "\"PM Re-Engagement\"",
@@ -1285,18 +1514,19 @@ fn documentation_style_skill_is_in_bundle() {
     // under `src/assets/skills/` is not sufficient, only `ALL` registration
     // makes `deploy_all_skill_tiers` ship it.
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/documentation-style.md"),
         "documentation-style.md must be present in the ALL bundle table"
     );
-    assert!(DOCUMENTATION_STYLE.starts_with("---\n"));
-    assert!(DOCUMENTATION_STYLE.contains("name: documentation-style"));
+    assert!(skill_text("skills/documentation-style.md").starts_with("---\n"));
+    assert!(skill_text("skills/documentation-style.md").contains("name: documentation-style"));
     // SLD self-compliance (DOC-38 §2.5): the entry SKILL.md carries
     // `spec_refs:` frontmatter pointing at the grammar section it defers to,
     // with `anchor` equal to `id` per DOC-38's self-check rule.
-    assert!(DOCUMENTATION_STYLE.contains("spec_refs:"));
-    assert!(DOCUMENTATION_STYLE.contains("id: SPEC-SLD-02~draft"));
-    assert!(DOCUMENTATION_STYLE.contains("anchor: SPEC-SLD-02~draft"));
+    assert!(skill_text("skills/documentation-style.md").contains("spec_refs:"));
+    assert!(skill_text("skills/documentation-style.md").contains("id: SPEC-SLD-02~draft"));
+    assert!(skill_text("skills/documentation-style.md").contains("anchor: SPEC-SLD-02~draft"));
 }
 
 #[test]
@@ -1307,7 +1537,8 @@ fn documentation_style_references_land_on_disk() {
     // (landing under a deployed `.claude/skills/documentation-style/references/`)
     // is proven end-to-end in `tests_behavior_2911_documentation_style_tests.rs`.
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/documentation-style.md")
     );
     for rel_path in [
@@ -1319,7 +1550,7 @@ fn documentation_style_references_land_on_disk() {
         "skills/documentation-style/references/block-inline.md",
     ] {
         assert!(
-            ALL.iter().any(|a| a.rel_path == rel_path),
+            deployed().into_iter().any(|a| a.rel_path == rel_path),
             "{rel_path} must be present in the ALL bundle table"
         );
     }
@@ -1351,12 +1582,15 @@ fn rust_build_performance_skill_is_in_bundle() {
     // a source file existing under `src/assets/skills/` is not sufficient,
     // only `ALL` registration makes `deploy_all_skill_tiers` ship it.
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/rust-build-performance.md"),
         "rust-build-performance.md must be present in the ALL bundle table"
     );
-    assert!(RUST_BUILD_PERFORMANCE.starts_with("---\n"));
-    assert!(RUST_BUILD_PERFORMANCE.contains("name: rust-build-performance"));
+    assert!(skill_text("skills/rust-build-performance.md").starts_with("---\n"));
+    assert!(
+        skill_text("skills/rust-build-performance.md").contains("name: rust-build-performance")
+    );
 }
 
 #[test]
@@ -1364,12 +1598,15 @@ fn rust_delivery_workflow_skill_is_in_bundle() {
     // Issue #8192: same reachability contract as the sibling above — the asset
     // file under `src/assets/skills/` only ships once `ALL` names it.
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/rust-delivery-workflow.md"),
         "rust-delivery-workflow.md must be present in the ALL bundle table"
     );
-    assert!(RUST_DELIVERY_WORKFLOW.starts_with("---\n"));
-    assert!(RUST_DELIVERY_WORKFLOW.contains("name: rust-delivery-workflow"));
+    assert!(skill_text("skills/rust-delivery-workflow.md").starts_with("---\n"));
+    assert!(
+        skill_text("skills/rust-delivery-workflow.md").contains("name: rust-delivery-workflow")
+    );
 }
 
 #[test]
@@ -1413,7 +1650,7 @@ fn rust_delivery_workflow_states_each_delivery_rule() {
         ("test scope widens by stage", "Test Scope Widens by Stage"),
     ] {
         assert!(
-            RUST_DELIVERY_WORKFLOW.contains(needle),
+            skill_text("skills/rust-delivery-workflow.md").contains(needle),
             "`rust-delivery-workflow.md` must state that {fact} (#8192)"
         );
     }
@@ -1426,12 +1663,13 @@ fn self_improvement_loop_skill_is_in_bundle() {
     // sufficient, only `ALL` registration makes `deploy_all_skill_tiers`
     // ship it (the historical orphaned-tm-doctor.md bug).
     assert!(
-        ALL.iter()
+        deployed()
+            .into_iter()
             .any(|a| a.rel_path == "skills/self-improvement-loop.md"),
         "self-improvement-loop.md must be present in the ALL bundle table"
     );
-    assert!(SELF_IMPROVEMENT_LOOP.starts_with("---\n"));
-    assert!(SELF_IMPROVEMENT_LOOP.contains("name: self-improvement-loop"));
+    assert!(skill_text("skills/self-improvement-loop.md").starts_with("---\n"));
+    assert!(skill_text("skills/self-improvement-loop.md").contains("name: self-improvement-loop"));
 }
 
 #[test]
@@ -1441,7 +1679,7 @@ fn self_improvement_loop_skill_carries_the_moved_anchors() {
     // trigger and the skill name in `BASE-AGENT.md`; this test asserts the
     // ten anchors that section used to carry directly, against the skill
     // they moved into.
-    let flat = SELF_IMPROVEMENT_LOOP.replace('\n', " ");
+    let flat = skill_text("skills/self-improvement-loop.md").replace('\n', " ");
     for (fact, needle) in [
         (
             "the section exists",
@@ -1545,27 +1783,27 @@ fn tm_init_surfaces_build_performance_pointer_for_rust_projects() {
     // pointer must not assert a benefit the in-flight sccache measurement
     // has not established.
     assert!(
-        TM_INIT.contains("Cargo.toml"),
+        skill_text("skills/tm-init.md").contains("Cargo.toml"),
         "tm-init must key the Build Performance pointer off the same \
          Cargo.toml marker rust-engineer deploys on"
     );
     assert!(
-        TM_INIT.contains("Build Performance"),
+        skill_text("skills/tm-init.md").contains("Build Performance"),
         "tm-init is missing the Build Performance section instruction for \
          Rust projects"
     );
     assert!(
-        TM_INIT.contains("rust-build-performance"),
+        skill_text("skills/tm-init.md").contains("rust-build-performance"),
         "tm-init's Build Performance pointer must reference the bundled \
          rust-build-performance skill"
     );
     assert!(
-        TM_INIT.contains("cargo build --timings"),
+        skill_text("skills/tm-init.md").contains("cargo build --timings"),
         "tm-init must direct a new Rust project toward measuring a baseline \
          with --timings, not toward a compiler-flag or cache guess"
     );
     assert!(
-        TM_INIT.contains("Never assert that `sccache`"),
+        skill_text("skills/tm-init.md").contains("Never assert that `sccache`"),
         "tm-init must not let a scaffolded CLAUDE.md assert an unmeasured \
          sccache speedup — the skill's own §6 caveats (no default hit on \
          incremental path-crate builds) must be preserved, not silently \
@@ -1582,7 +1820,7 @@ fn output_styles_keep_claude_code_coding_instructions() {
     // normal coding behaviour, so all three must opt back in.
     let frontmatter = |style: &BundledStyle| {
         style
-            .content
+            .content(rc())
             .split("---")
             .nth(1)
             .unwrap_or_else(|| panic!("{} must open with a YAML frontmatter block", style.id))
@@ -1664,7 +1902,7 @@ fn output_styles_state_every_pm_prose_rule() {
         for needle in PROSE_RULE_ANCHORS {
             // #7709: whitespace-insensitive, so a rewrap is not a regression.
             assert!(
-                contains_prose_anchor(style.content, needle),
+                contains_prose_anchor(style.content(rc()), needle),
                 "{} is missing prose rule anchor {needle:?} (#2647, #7423)",
                 style.id
             );
@@ -1672,7 +1910,9 @@ fn output_styles_state_every_pm_prose_rule() {
         // The superseded lighter rule set must be FOLDED IN, not left alongside
         // the mirrored rules as a second overlapping statement of the same thing.
         assert!(
-            !style.content.contains("**Tone**: Professional, neutral"),
+            !style
+                .content(rc())
+                .contains("**Tone**: Professional, neutral"),
             "{}: the old Communication block must be folded into the mirrored \
              prose rules, not duplicated beside them",
             style.id
@@ -1697,7 +1937,7 @@ fn prose_rule_anchors_survive_a_markdown_rewrap_7709() {
     }
 
     for style in pm_output_styles() {
-        let rewrapped = rewrap(style.content, 3);
+        let rewrapped = rewrap(style.content(rc()), 3);
         // A reflow-broken anchor must still match…
         for needle in PROSE_RULE_ANCHORS {
             assert!(
@@ -1745,7 +1985,7 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
     for style in OUTPUT_STYLES {
         for needle in RESIDENT {
             assert!(
-                style.content.contains(needle),
+                style.content(rc()).contains(needle),
                 "{} is missing the borrowed-metaphor ban {needle:?}",
                 style.id
             );
@@ -1769,7 +2009,7 @@ fn the_borrowed_metaphor_ban_reaches_both_prose_channels() {
         "Scope: PM and agent prose.",
     ] {
         assert!(
-            TM_PROSE_STYLE.contains(needle),
+            skill_text("skills/tm-prose-style.md").contains(needle),
             "tm-prose-style must carry the borrowed-metaphor category statement {needle:?}"
         );
     }
@@ -1789,7 +2029,7 @@ fn the_honest_ban_reaches_both_prose_channels() {
     for style in OUTPUT_STYLES {
         for needle in RESIDENT {
             assert!(
-                style.content.contains(needle),
+                style.content(rc()).contains(needle),
                 "{} is missing the \"honest\" ban {needle:?}",
                 style.id
             );
@@ -1815,7 +2055,7 @@ fn the_honest_ban_reaches_both_prose_channels() {
         "plainly, candidly, bluntly,",
     ] {
         assert!(
-            TM_PROSE_STYLE.contains(needle),
+            skill_text("skills/tm-prose-style.md").contains(needle),
             "tm-prose-style must carry the \"honest\" ban's detail {needle:?}"
         );
     }
@@ -1844,7 +2084,7 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
     for style in OUTPUT_STYLES {
         for needle in RESIDENT {
             assert!(
-                style.content.contains(needle),
+                style.content(rc()).contains(needle),
                 "{} is missing the ASD-STE-100 construction layer {needle:?}",
                 style.id
             );
@@ -1852,7 +2092,9 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
         // The superseded bullet was FOLDED IN, not left beside the layer as a
         // second statement of "one idea per sentence" in different words.
         assert!(
-            !style.content.contains("Short sentences, one idea each"),
+            !style
+                .content(rc())
+                .contains("Short sentences, one idea each"),
             "{}: the old short-sentence bullet must be folded into the \
              ASD-STE-100 layer, not duplicated beside it",
             style.id
@@ -1879,7 +2121,7 @@ fn the_asd_ste_100_layer_reaches_both_prose_channels() {
         "No noun cluster longer than three words.",
     ] {
         assert!(
-            TM_PROSE_STYLE.contains(needle),
+            skill_text("skills/tm-prose-style.md").contains(needle),
             "tm-prose-style must carry the ASD-STE-100 detail {needle:?}"
         );
     }
@@ -1893,11 +2135,11 @@ fn the_default_output_style_stays_within_its_resident_budget() {
     // in `tm-prose-style`, which loads on demand.
     const BUDGET_BYTES: usize = 8_000;
     assert!(
-        OUTPUT_STYLE.len() <= BUDGET_BYTES,
+        instruction_text("output-styles/trusty-mpm.md").len() <= BUDGET_BYTES,
         "output style `{DEFAULT_OUTPUT_STYLE_ID}` is {} bytes, over the \
          {BUDGET_BYTES}-byte resident budget — move examples into \
          `tm-prose-style` rather than growing it",
-        OUTPUT_STYLE.len()
+        instruction_text("output-styles/trusty-mpm.md").len()
     );
 }
 
@@ -1910,12 +2152,12 @@ fn output_styles_name_the_todowrite_fallback() {
     // #8453: a PM section; the supervisor style carries no TodoWrite mandate.
     for style in pm_output_styles() {
         assert!(
-            style.content.contains("where the harness exposes it"),
+            style.content(rc()).contains("where the harness exposes it"),
             "{}: the TodoWrite section must make the tool conditional (#2799)",
             style.id
         );
         assert!(
-            style.content.contains("prose task list"),
+            style.content(rc()).contains("prose task list"),
             "{}: the TodoWrite section must name the prose fallback (#2799)",
             style.id
         );
@@ -2273,7 +2515,7 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
         "Never delete an untracked path to clear the abort without diffing it",
     ] {
         assert!(
-            GIT_WORKFLOW.contains(needle),
+            skill_text("skills/git-workflow.md").contains(needle),
             "git-workflow skill is missing the #7558 pre-pull untracked-collision \
              guidance: {needle:?}"
         );
@@ -2286,8 +2528,8 @@ fn git_workflow_skill_states_the_pre_pull_untracked_collision_check_7558() {
 /// `version-control` body must point at that section.
 #[test]
 fn deployed_git_workflow_skill_carries_the_actions_spend_checks_8630() {
-    let deployed = ALL
-        .iter()
+    let deployed = deployed()
+        .into_iter()
         .find(|a| a.rel_path == "skills/git-workflow.md")
         .expect("git-workflow must be in the ALL bundle table")
         .contents;
@@ -2328,14 +2570,15 @@ fn tm_workflow_points_at_the_pre_pull_untracked_collision_check_7558() {
         "#7558",
     ] {
         assert!(
-            TM_WORKFLOW.contains(needle),
+            skill_text("skills/tm-workflow.md").contains(needle),
             "tm-workflow is missing the #7558 cross-reference to the pre-pull \
              untracked-collision check: {needle:?}"
         );
     }
     // A pointer, not a duplicate: the procedure itself stays in one place.
     assert!(
-        !TM_WORKFLOW.contains("git show origin/<base>:<path> | diff - <path>"),
+        !skill_text("skills/tm-workflow.md")
+            .contains("git show origin/<base>:<path> | diff - <path>"),
         "tm-workflow must cross-reference the check, not restate its commands (#7558)"
     );
 }
@@ -2357,7 +2600,7 @@ fn verification_skill_reads_128_plus_signal_as_terminated_not_failed_7561() {
         "The one exception is `137`",
     ] {
         assert!(
-            VERIFICATION_BEFORE_COMPLETION.contains(needle),
+            skill_text("skills/verification-before-completion.md").contains(needle),
             "verification-before-completion skill is missing the #7561 \
              signal-exit reading: {needle:?}"
         );
@@ -2377,7 +2620,8 @@ fn version_control_gate_requires_a_clean_tree_before_push_7739() {
         "version-control.md is missing the #7739 clean-tree-before-gate rule"
     );
     assert!(
-        TM_WORKFLOW.contains("git status --porcelain") && TM_WORKFLOW.contains("#7739"),
+        skill_text("skills/tm-workflow.md").contains("git status --porcelain")
+            && skill_text("skills/tm-workflow.md").contains("#7739"),
         "tm-workflow.md is missing the #7739 clean-tree-before-gate rule"
     );
 }
@@ -2507,7 +2751,7 @@ fn local_ops_honours_diagnose_only_briefs_8027() {
 #[test]
 fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
     assert!(
-        !TM_SESSION_RESUME.contains("tm session catchup"),
+        !skill_text("skills/tm-session-resume.md").contains("tm session catchup"),
         "tm-session-resume.md still cites the deprecated singular `tm session catchup`; \
          the live verb is `tm sessions catchup` (#2116)"
     );
@@ -2521,7 +2765,7 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
         "#8017",
     ] {
         assert!(
-            TM_SESSION_RESUME.contains(needle),
+            skill_text("skills/tm-session-resume.md").contains(needle),
             "tm-session-resume.md is missing the #8017 CLI-fallback correction: {needle:?}"
         );
     }
@@ -2536,11 +2780,11 @@ fn session_resume_skill_cites_live_verbs_and_paged_forms_8017() {
 #[test]
 fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
     assert!(
-        !TM_SESSION_RESUME.contains("tmux select-window"),
+        !skill_text("skills/tm-session-resume.md").contains("tmux select-window"),
         "tm-session-resume.md must not tell a resumed PM to select the recorded window"
     );
     assert!(
-        TM_SESSION_RESUME.contains("\"tmux_session\""),
+        skill_text("skills/tm-session-resume.md").contains("\"tmux_session\""),
         "tm-session-resume.md must list the `tmux_session` resolved_via value"
     );
 }

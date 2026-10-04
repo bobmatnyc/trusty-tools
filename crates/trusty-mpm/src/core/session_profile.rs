@@ -116,55 +116,32 @@ pub struct SupervisorConfig {
 ///
 /// Why: one markdown file per kept item of #8453, so a review diff names the
 /// item it changes; the order here is the order delivered.
-/// What: `(name, authored text)`; `name` matches the file stem under
-/// `assets/instructions/supervisor/`.
+/// What: `(name, content path)`; `name` matches the file stem under
+/// `content/instructions/supervisor/`, and the path is relative to the content
+/// bundle's `instructions/` (#9012: runtime content, no longer compiled in).
 /// Test: `golden_supervisor_prompt`, `every_kept_item_reaches_the_supervisor_prompt`.
 pub const SUPERVISOR_SECTIONS: [(&str, &str); 8] = [
-    (
-        "identity",
-        include_str!("../assets/instructions/supervisor/identity.md"),
-    ),
-    (
-        "hard-limits",
-        include_str!("../assets/instructions/supervisor/hard-limits.md"),
-    ),
-    (
-        "relay-protocol",
-        include_str!("../assets/instructions/supervisor/relay-protocol.md"),
-    ),
-    (
-        "evidence-labels",
-        include_str!("../assets/instructions/supervisor/evidence-labels.md"),
-    ),
-    (
-        "decisions",
-        include_str!("../assets/instructions/supervisor/decisions.md"),
-    ),
-    (
-        "monitoring",
-        include_str!("../assets/instructions/supervisor/monitoring.md"),
-    ),
-    (
-        "tool-priority",
-        include_str!("../assets/instructions/supervisor/tool-priority.md"),
-    ),
-    (
-        "prose-style",
-        include_str!("../assets/instructions/supervisor/prose-style.md"),
-    ),
+    ("identity", "supervisor/identity.md"),
+    ("hard-limits", "supervisor/hard-limits.md"),
+    ("relay-protocol", "supervisor/relay-protocol.md"),
+    ("evidence-labels", "supervisor/evidence-labels.md"),
+    ("decisions", "supervisor/decisions.md"),
+    ("monitoring", "supervisor/monitoring.md"),
+    ("tool-priority", "supervisor/tool-priority.md"),
+    ("prose-style", "supervisor/prose-style.md"),
 ];
 
 /// The composed supervisor instructions.
 ///
 /// Why: the text a supervisor session receives in place of the PM prompt.
-/// What: each [`SUPERVISOR_SECTIONS`] body folded on its own (authoring
-/// comments removed, as the PM composer does), trimmed, and joined with a
-/// blank line. Pure and deterministic.
+/// What: each [`SUPERVISOR_SECTIONS`] body, read from `content`, folded on its
+/// own (authoring comments removed, as the PM composer does), trimmed, and
+/// joined with a blank line. Pure and deterministic for one content source.
 /// Test: `golden_supervisor_prompt`, `the_supervisor_prompt_is_never_empty`.
-pub fn supervisor_prompt() -> String {
+pub fn supervisor_prompt(content: &crate::core::framework_content::FrameworkContent) -> String {
     SUPERVISOR_SECTIONS
         .iter()
-        .map(|(_, body)| crate::core::instruction_fold::fold_block(body.trim()))
+        .map(|(_, path)| crate::core::instruction_fold::fold_block(content.required(path).trim()))
         .filter(|body| !body.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")

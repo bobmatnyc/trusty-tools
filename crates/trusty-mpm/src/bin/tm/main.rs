@@ -56,10 +56,10 @@ mod test_support;
 mod tests;
 
 #[cfg(test)]
-#[path = "tests_behavior_a.rs"]
+#[path = "tests_behavior_a_tests.rs"]
 mod tests_behavior_a;
 
-// #6887: the divert CLI pair, split out so `tests_behavior_a.rs` stays capped.
+// #6887: the divert CLI pair, split out so `tests_behavior_a_tests.rs` stays capped.
 #[cfg(test)]
 #[path = "divert_cli_tests.rs"]
 mod divert_cli_tests;
@@ -130,7 +130,7 @@ mod tests_behavior_reset_agents;
 mod tests_behavior_skill_tiers;
 
 // #7102: `install_then_deploy_deploys_skills`, split out so
-// `tests_behavior_a.rs` stays under the 500-SLOC cap.
+// `tests_behavior_a_tests.rs` stays under the 500-SLOC cap.
 #[cfg(test)]
 #[path = "tests_behavior_install_skills_tests.rs"]
 mod tests_behavior_install_skills;

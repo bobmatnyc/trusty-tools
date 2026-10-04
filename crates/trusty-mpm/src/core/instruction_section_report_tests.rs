@@ -1,10 +1,9 @@
 //! Tests for the per-section report and the #8533 override guarantees.
 
 use super::*;
-use crate::core::bundled_pm_package::{
-    bundled_fallback_package, compose_bundled_fallback_with_overrides,
-};
+use crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides;
 use crate::core::claude_md_sections::scan_project;
+use crate::core::content_source::test_support::rc;
 use crate::core::instruction_overrides::resolve_pm_prompt_with_roster;
 use tempfile::TempDir;
 
@@ -28,7 +27,7 @@ fn project(blocks: &[(&str, &str)]) -> TempDir {
 fn compose(dir: &TempDir) -> String {
     let scanned = scan_project(dir.path());
     let (composed, _) =
-        compose_bundled_fallback_with_overrides(STACK, ROSTER, None, &scanned.overrides);
+        compose_bundled_fallback_with_overrides(rc(), STACK, ROSTER, None, &scanned.overrides);
     composed.expect("composes")
 }
 
@@ -73,7 +72,7 @@ fn identity_and_a_former_core_section_report_overridden() {
         );
     }
 
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), true);
     assert_eq!(
         state_of(&rows, SectionId::Identity),
@@ -99,7 +98,7 @@ fn a_core_override_reports_declined() {
     assert!(!prompt.contains("No rules apply."));
     assert!(prompt.contains("## Memory & Instruction Sources"));
 
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), true);
     assert!(
         matches!(state_of(&rows, SectionId::Core), SectionState::CoreDeclined(ref r) if r.contains("admits no project override")),
@@ -158,7 +157,7 @@ fn every_overridable_section_replaced_keeps_roster_memory_and_search() {
         "replaced package text survived"
     );
 
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), true);
     for row in &rows {
         let expected = if row.section == SectionId::Core {
@@ -194,7 +193,7 @@ fn the_roster_absent_path_reports_what_it_cannot_place() {
         ("IDENTITY", IDENTITY_BODY),
         ("WORKFLOW", "Project workflow."),
     ]);
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), false);
     assert!(matches!(
         state_of(&rows, SectionId::Identity),
@@ -209,7 +208,7 @@ fn the_roster_absent_path_reports_what_it_cannot_place() {
 #[test]
 fn render_flags_an_override_missing_from_the_prompt() {
     let dir = project(&[("PHASES", "Only research.")]);
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), true);
     let rendered = render_section_report(&rows, "a prompt without the override", Some(ROSTER));
     assert!(
@@ -221,7 +220,7 @@ fn render_flags_an_override_missing_from_the_prompt() {
 #[test]
 fn a_named_delegation_override_keeps_the_agent_selection_note_on_the_legacy_path() {
     let section =
-        super::super::delegation_with_named_override(Some("Project routing."), Some(ROSTER))
+        super::super::delegation_with_named_override(rc(), Some("Project routing."), Some(ROSTER))
             .join("\n\n");
     assert!(section.starts_with("Project routing."));
     assert!(section.contains("Agent(subagent_type="), "{section}");
@@ -249,8 +248,9 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
     )
     .expect("project config");
 
-    let (prompt, _) = resolve_pm_prompt_with_roster(dir.path(), || Some(ROSTER.to_string()));
+    let (prompt, _) = resolve_pm_prompt_with_roster(rc(), dir.path(), || Some(ROSTER.to_string()));
     let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
+        rc(),
         dir.path(),
         None,
         prompt,
@@ -258,7 +258,7 @@ fn fixture_project_overrides_identity_a_core_section_and_the_style() {
     );
     // The injected block is the project prose, then the floor (owner ruling
     // 2026-09-25), then the prompt.
-    let floor = crate::core::output_style::style_floor();
+    let floor = crate::core::output_style::style_floor(rc());
     let body = styled
         .split_once(&format!(
             "{floor}{}",
@@ -297,7 +297,7 @@ fn render_flags_a_safety_core_member_missing_from_the_prompt() {
     // checking the prompt. A core member absent from it is now named.
     let dir = project(&[("AGENT-DELEGATION", "Project routing.")]);
     let prompt = compose(&dir);
-    let package = bundled_fallback_package().expect("manifest");
+    let package = crate::core::content_source::test_support::rc_package();
     let rows = section_statuses(package, dir.path(), true);
     let clean = render_section_report(&rows, &prompt, Some(ROSTER));
     assert!(!clean.contains("NOT FOUND"), "{clean}");

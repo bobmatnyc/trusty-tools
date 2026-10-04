@@ -333,7 +333,10 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     // #8286: `tm run` launches a PM, so it carries the PM prompt file and
     // refuses when that file cannot be written. One profile resolution gives
     // the prompt and the stamp (#8453).
-    let cli = crate::core::session_launch::cli_launch(&repo_path, None);
+    // #9012: the PM instructions are runtime content; none refuses `tm run`.
+    let content = crate::core::content_source::framework_content_for(&repo_path)
+        .context("cannot compose the PM instructions")?;
+    let cli = crate::core::session_launch::cli_launch(&content, &repo_path, None);
     let prompt_file = crate::core::model_inject::write_pm_prompt_file_in(
         &std::env::temp_dir(),
         &cli.prompt,

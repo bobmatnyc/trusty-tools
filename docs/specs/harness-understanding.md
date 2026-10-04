@@ -6,7 +6,7 @@
 **Last-updated:** 2026-06-20
 **Spec ID:** `SPEC-HARNESS-UNDERSTANDING-01~draft` (DOC-21)
 **Builds on:** DOC-14 — Session Manager (SM) Agent (`docs/specs/session-manager-agent.md`); DOC-17 — Autonomous Multi-Session Managed Harness Runner (`docs/specs/harness-runner-vision.md`); DOC-20 — Chat-Core (`docs/specs/chat-core.md`)
-**Cross-ref:** `crates/trusty-agents-common/src/harness_doc.rs`, `content/instructions/harness_understanding/`, `crates/trusty-mpm/src/core/sm/prompt.rs`, `crates/trusty-mpm/src/assets/sm_instructions/`, issues **#1510**, **#862**, **#875**
+**Cross-ref:** `crates/trusty-agents-common/src/harness_doc.rs`, `content/instructions/harness_understanding/`, `crates/trusty-mpm/src/core/sm/prompt.rs`, `content/instructions/sm_instructions/`, issues **#1510**, **#862**, **#875**
 
 > **Scope note.** This is a behavior-contract spec for the *canonical harness-understanding instruction set* shared by trusty-agents-common and consumed by trusty-mpm's session-manager (SM) prompt today and a future t-code overseer tomorrow. It defines the harness mental model, per-harness signals, the intervention decision protocol, a deterministic LLM-free fallback, SM-specific wiring, and the forward-looking t-code-as-overseer contract.
 

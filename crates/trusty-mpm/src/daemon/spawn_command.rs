@@ -115,7 +115,10 @@ pub(crate) fn gui_spawn_line(
     workdir: &std::path::Path,
     prompt_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let cli = crate::core::session_launch::cli_launch(workdir, None);
+    // #9012: the PM instructions are runtime content; none refuses the spawn.
+    let content = crate::core::content_source::framework_content_for(workdir)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let cli = crate::core::session_launch::cli_launch(&content, workdir, None);
     let file = crate::core::model_inject::write_pm_prompt_file_in(
         prompt_dir,
         &cli.prompt,

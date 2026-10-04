@@ -23,13 +23,7 @@
 //! `include_str!`-embedded constants.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::{
-    DOCUMENTATION_STYLE, DOCUMENTATION_STYLE_BLOCK_INLINE, DOCUMENTATION_STYLE_CLASS,
-    DOCUMENTATION_STYLE_FILE_LEVEL, DOCUMENTATION_STYLE_METHOD_FUNCTION,
-    DOCUMENTATION_STYLE_README, DOCUMENTATION_STYLE_SPEC,
-};
-
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn documentation_style_lands_in_deployed_dot_claude_skills() {
@@ -38,7 +32,7 @@ fn documentation_style_lands_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including the 7 documentation-style entries) under the framework root.
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -70,15 +64,39 @@ fn documentation_style_lands_in_deployed_dot_claude_skills() {
     let skill_dir = paths.claude_skills_dir().join("documentation-style");
     assert_eq!(
         std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
-        DOCUMENTATION_STYLE,
+        crate::commands::install::test_skill("skills/documentation-style.md"),
     );
     for (file_name, expected) in [
-        ("spec.md", DOCUMENTATION_STYLE_SPEC),
-        ("readme.md", DOCUMENTATION_STYLE_README),
-        ("file-level.md", DOCUMENTATION_STYLE_FILE_LEVEL),
-        ("class.md", DOCUMENTATION_STYLE_CLASS),
-        ("method-function.md", DOCUMENTATION_STYLE_METHOD_FUNCTION),
-        ("block-inline.md", DOCUMENTATION_STYLE_BLOCK_INLINE),
+        (
+            "spec.md",
+            crate::commands::install::test_skill("skills/documentation-style/references/spec.md"),
+        ),
+        (
+            "readme.md",
+            crate::commands::install::test_skill("skills/documentation-style/references/readme.md"),
+        ),
+        (
+            "file-level.md",
+            crate::commands::install::test_skill(
+                "skills/documentation-style/references/file-level.md",
+            ),
+        ),
+        (
+            "class.md",
+            crate::commands::install::test_skill("skills/documentation-style/references/class.md"),
+        ),
+        (
+            "method-function.md",
+            crate::commands::install::test_skill(
+                "skills/documentation-style/references/method-function.md",
+            ),
+        ),
+        (
+            "block-inline.md",
+            crate::commands::install::test_skill(
+                "skills/documentation-style/references/block-inline.md",
+            ),
+        ),
     ] {
         let ref_path = skill_dir.join("references").join(file_name);
         assert!(

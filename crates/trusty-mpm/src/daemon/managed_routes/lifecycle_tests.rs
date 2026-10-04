@@ -17,6 +17,7 @@
 //! Test: this file IS the test module.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 // #8545: moved here from `lifecycle.rs`, which imported them only for these tests.
 use super::super::deployment_check::{carrier_reachable, warn_if_no_persona_carrier};
 
@@ -571,7 +572,7 @@ fn ensure_deployment_complete_ok_when_already_complete() {
     let default_style = crate::core::bundle::OUTPUT_STYLES[0];
     std::fs::write(
         style_dir.join(default_style.file_name),
-        default_style.content,
+        default_style.content(rc()),
     )
     .unwrap();
 

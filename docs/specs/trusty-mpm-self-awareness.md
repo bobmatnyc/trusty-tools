@@ -7,8 +7,8 @@
 **Spec ID:** `SPEC-SELFAWARE-01~draft` … `SPEC-SELFAWARE-04~draft` (DOC-28)
 **Builds on:** DOC-21 — Harness Understanding (`docs/specs/harness-understanding.md`);
 [Three-Harness Architecture](../architecture/harnesses.md)
-**Cross-ref:** `crates/trusty-mpm/README.md`, `crates/trusty-mpm/src/assets/output-styles/{trusty-mpm,trusty-mpm-research,trusty-mpm-teacher}.md`,
-`crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md`, `crates/trusty-mpm/src/core/bundle.rs`,
+**Cross-ref:** `crates/trusty-mpm/README.md`, `content/instructions/output-styles/{trusty-mpm,trusty-mpm-research,trusty-mpm-teacher}.md`,
+`content/instructions/sm_instructions/BASE_SM.md`, `crates/trusty-mpm/src/core/bundle.rs`,
 `crates/trusty-mpm/src/core/bundle_all.rs`, `crates/trusty-mpm/src/core/output_style_deployer.rs`,
 `crates/trusty-mpm/src/core/session_launch/settings.rs`, `crates/trusty-mpm/src/core/instruction_overrides.rs`,
 `crates/trusty-mpm/src/core/doctor.rs`, `crates/trusty-mpm/src/daemon/doctor.rs`,
@@ -38,8 +38,8 @@ confirmed, distinct ways:
   `ls crates/trusty-mpm/docs/` → `No such file or directory`). The identity of trusty-mpm is
   scattered across `crates/trusty-mpm/README.md` (lines 1–12, the "Harness role" paragraph),
   `docs/architecture/harnesses.md` (§"trusty-mpm — the Meta-Harness", lines 80–115), the
-  output-style assets (`crates/trusty-mpm/src/assets/output-styles/*.md`), and
-  `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md`. None of these is positioned as *the*
+  output-style assets (`content/instructions/output-styles/*.md`), and
+  `content/instructions/sm_instructions/BASE_SM.md`. None of these is positioned as *the*
   answer to "what is this framework" — none is a single, stable, machine-and-human-readable
   self-description a session can be pointed at.
 - **F3 — Conflation with Python claude-mpm.** Because no asset in F2 explicitly disambiguates,
@@ -106,7 +106,7 @@ This spec defines four requirements (R1–R4) that close these four gaps.
 
 - **Inputs:** none at runtime — this is a static bundled asset, analogous to the entries in
   `crate::core::bundle::OUTPUT_STYLES` and `crate::core::bundle::ALL`.
-- **Outputs:** a Markdown file, `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`, embedded at
+- **Outputs:** a Markdown file, `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`, embedded at
   compile time via `include_str!` and registered as a new `BundledArtifact` in
   `crates/trusty-mpm/src/core/bundle_all.rs`'s `ALL` table with
   `rel_path: "docs/WHAT-IS-TRUSTY-MPM.md"` and `install: InstallPolicy::Overwrite` (the doc is
@@ -116,7 +116,7 @@ This spec defines four requirements (R1–R4) that close these four gaps.
   this doc is not user-editable.
 - **Preconditions:** none — the doc has no dependency on project state.
 - **Postconditions:**
-  - The file exists in the source tree at `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` and is
+  - The file exists in the source tree at `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` and is
     indexed like any other repo file by `trusty-search` when the trusty-tools repo itself is
     indexed (self-hosting case).
   - After `tm install` (or any code path that walks `bundle::ALL`, e.g.
@@ -156,7 +156,7 @@ between `crates/trusty-mpm/README.md` (human docs) and `crates/trusty-mpm/src/as
 
 ### Acceptance Criteria
 
-- `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` exists and is non-empty.
+- `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` exists and is non-empty.
 - `cargo test -p trusty-mpm bundle` (extending `bundle_tests.rs`'s `bundle_table_is_complete`)
   asserts `ALL` contains an entry with `rel_path == "docs/WHAT-IS-TRUSTY-MPM.md"`.
 - A test analogous to `install_writes_all_artifacts` asserts that after `install_to`, the file
@@ -169,7 +169,7 @@ between `crates/trusty-mpm/README.md` (human docs) and `crates/trusty-mpm/src/as
 
 | Module | Role |
 |--------|------|
-| `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` (new) | The canonical self-description source text. |
+| `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` (new) | The canonical self-description source text. |
 | `crates/trusty-mpm/src/core/bundle_all.rs` | Registers the doc as a `BundledArtifact` in `ALL`. |
 | `crates/trusty-mpm/src/bin/tm/commands/install.rs` (`install_to`) | Writes the doc to `~/.trusty-mpm/framework/docs/` on `tm install`. |
 | `crates/trusty-mpm/src/core/paths.rs` (`FrameworkPaths`) | Resolves the `~/.trusty-mpm/framework` root the doc installs under. |
@@ -206,11 +206,11 @@ between `crates/trusty-mpm/README.md` (human docs) and `crates/trusty-mpm/src/as
 A new subsection, **"Identity & Self-Awareness Protocol,"** added verbatim (parameterized only by
 which SM/PM voice needs it) to two locations:
 
-1. `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md` — appended as a new `##` section
+1. `content/instructions/sm_instructions/BASE_SM.md` — appended as a new `##` section
    after "## Trusty Tool Priority (Non-Overridable)" (i.e. still inside the non-overridable
    floor, so it cannot be silently dropped by an override file per the file's own stated
    invariant, lines 40–54).
-2. `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md` (and mirrored, trimmed, into
+2. `content/instructions/output-styles/trusty-mpm.md` (and mirrored, trimmed, into
    `trusty-mpm-research.md` / `trusty-mpm-teacher.md`) — appended as a new `##` section after
    "## Allowed Tools".
 
@@ -226,7 +226,7 @@ identity:
    `memory_recall` before answering. The active palace carries an `is_fact` triple identifying
    this framework (see docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then consult the canonical doc.** Read `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md`
-   (or, inside the trusty-tools repo itself, `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` via
+   (or, inside the trusty-tools repo itself, `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` via
    `trusty-search`/direct read) for the authoritative description and the claude-mpm
    disambiguation.
 3. **Never shell-probe for identity.** `pip3 show`, `pip show`, `which claude-mpm`, or grepping
@@ -263,8 +263,8 @@ delegation-only prohibition.
 
 | Module | Role |
 |--------|------|
-| `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md` | Adds the non-overridable SM-side identity protocol section. |
-| `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md`, `trusty-mpm-research.md`, `trusty-mpm-teacher.md` | Adds the PM-side identity protocol section to each bundled style. |
+| `content/instructions/sm_instructions/BASE_SM.md` | Adds the non-overridable SM-side identity protocol section. |
+| `content/instructions/output-styles/trusty-mpm.md`, `trusty-mpm-research.md`, `trusty-mpm-teacher.md` | Adds the PM-side identity protocol section to each bundled style. |
 | `crates/trusty-mpm/src/core/instruction_overrides.rs` (`resolve_pm_prompt`) | Existing assembler that guarantees the floor section survives project overrides; extended tests assert the new section too. |
 
 ---
@@ -291,7 +291,7 @@ delegation-only prohibition.
 - **Postconditions:** `get_prompt_context()`'s "Facts" section contains a line whose object text
   states trusty-mpm's identity and points at the R1 doc path, e.g.:
   `- trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm
-  project; see crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md or
+  project; see content/instructions/docs/WHAT-IS-TRUSTY-MPM.md or
   ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md`.
 - **Error conditions:** if the seed was never run (fresh trusty-memory install with an empty KG),
   `get_prompt_context()` degrades to its existing behavior (omits the "Facts" section entirely,
@@ -308,7 +308,7 @@ run once per trusty-memory install/upgrade (analogous to how `kg_bootstrap`
 re-seedable step in `palace_ops.rs:133`'s comment "can re-run `kg_bootstrap` manually if
 needed"). Two triggering points, either sufficient on its own:
 
-1. **Manual/operator step**, documented in `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` itself
+1. **Manual/operator step**, documented in `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` itself
    (R1) under a "Memory seeding" subsection: run `kg_assert` (via the trusty-memory MCP tool or
    `mcp__trusty-memory__kg_assert`) once after installing/upgrading trusty-memory, with the
    subject/predicate/object given above.
@@ -350,7 +350,7 @@ scoped to a trusty-tools-specific palace.
 |--------|------|
 | `crates/trusty-memory/src/prompt_facts.rs` | Existing `HOT_PREDICATES`/`gather_hot_triples`/`build_prompt_context` — unchanged, reused. |
 | `crates/trusty-memory/src/tools/kg_ops.rs` (`handle_kg_assert`) | Existing tool handler used to write the seed triple — unchanged, reused. |
-| `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` (R1) | Documents the manual seed step and the exact `kg_assert` arguments. |
+| `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` (R1) | Documents the manual seed step and the exact `kg_assert` arguments. |
 | `crates/trusty-mpm/src/core/session_launch/mod.rs` (`prepare_session`) | Future automatic-seed hook site (§7 Phase 2, deferred). |
 
 ---
@@ -471,7 +471,7 @@ a fast, no-tooling way to sanity-check a live session mid-conversation.
 | `crates/trusty-mpm/src/core/doctor.rs` (`DoctorCheck`, `DoctorReport`) | Existing types, reused unchanged. |
 | `crates/trusty-mpm/src/core/bundle.rs` (`OUTPUT_STYLES`) | Existing registry of valid style ids/files, read by the new check. |
 | `crates/trusty-mpm/src/core/session_launch/settings.rs` (`write_output_style`) | Existing writer whose output the new check validates; unchanged. |
-| `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md`, output-style assets | Carry the load marker in the non-overridable floor. |
+| `content/instructions/sm_instructions/BASE_SM.md`, output-style assets | Carry the load marker in the non-overridable floor. |
 
 ---
 
@@ -479,10 +479,10 @@ a fast, no-tooling way to sanity-check a live session mid-conversation.
 
 | Phase | Scope | Files touched |
 |-------|-------|----------------|
-| **Phase 1 — R1 doc + bundling** | Write `WHAT-IS-TRUSTY-MPM.md`; register in `bundle_all.rs`; add bundle test. | `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` (new), `crates/trusty-mpm/src/core/bundle_all.rs`, `crates/trusty-mpm/src/core/bundle_tests.rs` |
-| **Phase 2 — R2 instruction text** | Add the Identity & Self-Awareness Protocol section (+ R4's load marker line) to `BASE_SM.md` and all three output styles; extend `instruction_overrides.rs` tests. | `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md`, `crates/trusty-mpm/src/assets/output-styles/{trusty-mpm,trusty-mpm-research,trusty-mpm-teacher}.md`, `crates/trusty-mpm/src/core/instruction_overrides.rs` (tests only) |
+| **Phase 1 — R1 doc + bundling** | Write `WHAT-IS-TRUSTY-MPM.md`; register in `bundle_all.rs`; add bundle test. | `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` (new), `crates/trusty-mpm/src/core/bundle_all.rs`, `crates/trusty-mpm/src/core/bundle_tests.rs` |
+| **Phase 2 — R2 instruction text** | Add the Identity & Self-Awareness Protocol section (+ R4's load marker line) to `BASE_SM.md` and all three output styles; extend `instruction_overrides.rs` tests. | `content/instructions/sm_instructions/BASE_SM.md`, `content/instructions/output-styles/{trusty-mpm,trusty-mpm-research,trusty-mpm-teacher}.md`, `crates/trusty-mpm/src/core/instruction_overrides.rs` (tests only) |
 | **Phase 3 — R4(a) doctor check** | Add `check_output_style` to `run_doctor`; update `DoctorReport` test expectations. | `crates/trusty-mpm/src/daemon/doctor.rs` |
-| **Phase 4 — R3 memory seed** | Document the manual `kg_assert` seed step in the R1 doc; write the integration test proving cross-palace visibility. | `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`, `crates/trusty-memory/src/tools/tests.rs` |
+| **Phase 4 — R3 memory seed** | Document the manual `kg_assert` seed step in the R1 doc; write the integration test proving cross-palace visibility. | `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`, `crates/trusty-memory/src/tools/tests.rs` |
 | **Phase 5 (deferred, future work)** | Automatic idempotent seed call from `prepare_session`. | `crates/trusty-mpm/src/core/session_launch/mod.rs` |
 
 Each phase is independently mergeable; Phases 1–4 have no ordering dependency between them

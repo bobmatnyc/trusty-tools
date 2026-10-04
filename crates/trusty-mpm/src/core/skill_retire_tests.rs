@@ -9,6 +9,7 @@
 //! Test: this file.
 
 use super::*;
+use crate::core::content_source::test_support::repo_content;
 use crate::core::skill_deployer::deploy_skills;
 use crate::core::skill_tiers::deploy_all_skill_tiers;
 use std::fs;
@@ -45,7 +46,7 @@ fn paths_under(tmp: &TempDir) -> FrameworkPaths {
 fn bundled_stems_covers_a_known_skill() {
     // The compiled-in table is the reference this module trusts; if it ever
     // stops yielding stems, every deployed skill would look retired at once.
-    let stems = bundled_skill_stems();
+    let stems = bundled_skill_stems(&repo_content());
     assert!(!stems.is_empty());
     assert!(
         stems.contains("tm-workflow"),
@@ -256,7 +257,7 @@ fn live_stems_include_the_user_tier() {
     )
     .unwrap();
 
-    let stems = live_skill_stems(&paths, &paths.claude_skills_dir()).unwrap();
+    let stems = live_skill_stems(&paths, &repo_content(), &paths.claude_skills_dir()).unwrap();
 
     assert!(stems.contains("my-own-skill"), "{stems:?}");
     // And the compiled-in bundle is always in there too.
@@ -272,7 +273,7 @@ fn live_stems_include_project_custom_stems_in_the_target() {
     fs::create_dir_all(&hand_placed).unwrap();
     fs::write(hand_placed.join("SKILL.md"), "hand-placed").unwrap();
 
-    let stems = live_skill_stems(&paths, &dest).unwrap();
+    let stems = live_skill_stems(&paths, &repo_content(), &dest).unwrap();
     assert!(stems.contains("my-project-skill"), "{stems:?}");
 }
 
@@ -291,7 +292,7 @@ fn live_stems_are_none_when_a_source_cannot_be_read() {
     fs::write(user.join("my-own-skill.md"), "authored by me").unwrap();
     fs::set_permissions(&user, fs::Permissions::from_mode(0o000)).unwrap();
 
-    let stems = live_skill_stems(&paths, &paths.claude_skills_dir());
+    let stems = live_skill_stems(&paths, &repo_content(), &paths.claude_skills_dir());
 
     // Restore before asserting so a failure still leaves a removable temp dir.
     fs::set_permissions(&user, fs::Permissions::from_mode(0o755)).unwrap();
@@ -316,7 +317,7 @@ fn live_stems_survive_a_missing_source_directory() {
     let paths = paths_under(&tmp);
     assert!(!paths.user_skill_source_dir().exists());
 
-    let stems = live_skill_stems(&paths, &paths.claude_skills_dir())
+    let stems = live_skill_stems(&paths, &repo_content(), &paths.claude_skills_dir())
         .expect("a missing source tier must not abort the sweep");
     assert!(stems.contains("tm-workflow"), "{stems:?}");
 }

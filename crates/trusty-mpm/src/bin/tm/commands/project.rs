@@ -9,7 +9,7 @@
 //! a project's `[session] plugins` opt-ins. // #7892: it no longer gates MCP
 //! servers; those follow the Claude Code standard.
 //! Test: `cli_parses_project_*` in `tests.rs`, `project_init_scaffolds_dotdir`/
-//! `project_init_keeps_existing_config` in `tests_behavior_a.rs`,
+//! `project_init_keeps_existing_config` in `tests_behavior_a_tests.rs`,
 //! `project_trust_grants_and_revokes` in `tests_project_trust_tests.rs`.
 
 use crate::cli::ProjectAction;

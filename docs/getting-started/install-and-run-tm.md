@@ -396,6 +396,6 @@ See [claude-mpm vs trusty-mpm — Differences & Install](./claude-mpm-vs-trusty-
 ## Next Steps
 
 - **Run your first session:** `cd ~/your-project && tm`
-- **Understand the architecture:** Read [trusty-mpm architecture overview](../../crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)
+- **Understand the architecture:** Read [trusty-mpm architecture overview](../../content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)
 - **Learn about sessions & worktrees:** See the architecture doc above.
 - **Explore the broader ecosystem:** Read the [root README](../../README.md) for trusty-search, trusty-memory, and trusty-analyze.

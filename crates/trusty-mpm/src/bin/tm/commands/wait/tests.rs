@@ -961,7 +961,7 @@ fn exit_codes_are_the_documented_contract() {
 
 // ── clap surface ─────────────────────────────────────────────────────────────
 //
-// These live here rather than in `tests_behavior_a.rs` because the SLOC cap
+// These live here rather than in `tests_behavior_a_tests.rs` because the SLOC cap
 // classifies that file as PRODUCTION (its basename is not `tests.rs`) and it is
 // already at the 500-SLOC line.
 

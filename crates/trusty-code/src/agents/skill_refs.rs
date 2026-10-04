@@ -192,8 +192,8 @@ mod tests {
 
     #[test]
     fn referenced_copies_match_trusty_mpm_skills() {
-        let mpm_skills =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../trusty-mpm/src/assets/skills");
+        // #9012: trusty-mpm's skills moved to the workspace content tree.
+        let mpm_skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/skills");
         for (relative, content) in REFERENCED_SKILL_FILES {
             let skill = relative.trim_end_matches("/SKILL.md");
             let source = std::fs::read_to_string(mpm_skills.join(format!("{skill}.md")))

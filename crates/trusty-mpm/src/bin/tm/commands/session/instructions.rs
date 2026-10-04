@@ -227,12 +227,16 @@ fn compose_session_instructions_with_roster_and_init(
     // divergence this function was written to prevent. Routing through
     // `build_system_prompt_for` keeps display, stash, and launch identical
     // regardless of Claude Code version.
+    // #9012: the PM instructions are runtime content; none refuses here.
+    let content = trusty_mpm::core::content_source::framework_content_for(project_dir)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let resolved_prompt = match roster {
         Some(roster) => trusty_mpm::core::session_launch::build_system_prompt_for_with_roster(
+            &content,
             project_dir,
             Some(roster),
         ),
-        None => trusty_mpm::core::session_launch::build_system_prompt_for(project_dir),
+        None => trusty_mpm::core::session_launch::build_system_prompt_for(&content, project_dir),
     };
     // #4832: the harness ROOT, not `project_dir` — a worktree must never grow
     // its own `.trusty-mpm/`.

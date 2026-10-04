@@ -11,6 +11,7 @@
 //! Test: this file IS the test module.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::TempDir;
 
 /// A minimal source agent, and a base it extends.
@@ -50,7 +51,7 @@ fn seeded(base: &std::path::Path) -> FrameworkPaths {
         paths
             .skills
             .join(crate::core::skill_source::STAMP_FILE_NAME),
-        crate::core::skill_source::skill_bundle_stamp(),
+        crate::core::skill_source::skill_bundle_stamp(rc()),
     )
     .unwrap();
     paths

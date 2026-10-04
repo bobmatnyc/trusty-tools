@@ -2,7 +2,8 @@
 name: verification-before-completion
 description: "Run verification commands and confirm output before claiming success"
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: high
 ---

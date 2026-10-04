@@ -19,13 +19,17 @@
 //!
 //! The three `_with_*` seams exist so a test can pin a decision that otherwise
 //! reads machine-global state — the output-style probe (#1409) and the live
-//! agent-tier scan (#5544). Production calls the bare entry point.
+//! agent-tier scan (#5544). Production calls the bare entry point. Every
+//! composer takes the loaded [`FrameworkContent`] (#9012): the sections and
+//! styles are runtime content, loaded once by the launch and passed down.
 //! Test: `build_system_prompt_for_applies_project_override`,
 //! `build_system_prompt_for_no_override_matches_bundled_sections`,
 //! `prepare_session_stash_reflects_override`,
 //! `compose_session_instructions_display_matches_live_prompt`.
 
 use std::path::Path;
+
+use crate::core::framework_content::FrameworkContent;
 
 /// Build the `--append-system-prompt` text for `project_dir`, applying any
 /// project-level instruction overrides.
@@ -35,14 +39,13 @@ use std::path::Path;
 /// `claude` must reflect them, and it must be resolved with the same
 /// [`crate::core::instruction_overrides::resolve_pm_prompt`] function the
 /// inspectable stash uses so the two never diverge (the #382 concern). This is
-/// the launch-site entry point; it always returns a usable prompt — there is no
-/// home-directory dependency because the prompt is composed from compiled-in
-/// bundled assets plus the project's own override files.
+/// the launch-site entry point; it always returns a usable prompt for the
+/// `content` the caller loaded (#9012) plus the project's own override files.
 /// What: delegates to [`build_system_prompt_for_with_style`] with no explicit
 /// style override.
 /// Test: `build_system_prompt_for_applies_project_override`.
-pub fn build_system_prompt_for(project_dir: &Path) -> String {
-    build_system_prompt_for_with_style(project_dir, None)
+pub fn build_system_prompt_for(content: &FrameworkContent, project_dir: &Path) -> String {
+    build_system_prompt_for_with_style(content, project_dir, None)
 }
 
 /// [`build_system_prompt_for`] with an explicit output-style override.
@@ -61,11 +64,12 @@ pub fn build_system_prompt_for(project_dir: &Path) -> String {
 /// `build_system_prompt_for_applies_project_override` (which asserts the PM
 /// prompt is preserved regardless of the version gate).
 pub fn build_system_prompt_for_with_style(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit_style: Option<&str>,
 ) -> String {
     let native = crate::core::output_style::claude_supports_native_output_style();
-    build_system_prompt_for_with_style_and_native(project_dir, explicit_style, native)
+    build_system_prompt_for_with_style_and_native(content, project_dir, explicit_style, native)
 }
 
 /// [`build_system_prompt_for_with_style`] with the `native_supported` decision
@@ -81,12 +85,19 @@ pub fn build_system_prompt_for_with_style(
 /// What: resolve → style-inject → #7688 addendum.
 /// Test: `prepare_session_stash_reflects_override`.
 pub fn build_system_prompt_for_with_style_and_native(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> String {
     let profile = crate::core::session_profile::resolve_ambient(project_dir);
-    build_system_prompt_for_profile(project_dir, explicit_style, native_supported, profile)
+    build_system_prompt_for_profile(
+        content,
+        project_dir,
+        explicit_style,
+        native_supported,
+        profile,
+    )
 }
 
 /// [`build_system_prompt_for_with_style_and_native`] for a profile the caller
@@ -94,13 +105,16 @@ pub fn build_system_prompt_for_with_style_and_native(
 /// all come from one resolution.
 /// Test: `a_supervisor_launch_gets_the_supervisor_prompt_style_and_model`.
 pub fn build_system_prompt_for_profile(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit_style: Option<&str>,
     native_supported: bool,
     profile: crate::core::session_profile::SessionProfile,
 ) -> String {
-    let prompt = crate::core::instruction_overrides::resolve_pm_prompt_for(project_dir, profile);
+    let prompt =
+        crate::core::instruction_overrides::resolve_pm_prompt_for(content, project_dir, profile);
     let styled = crate::core::output_style::apply_output_style_to_prompt_for(
+        content,
         project_dir,
         explicit_style,
         prompt,
@@ -108,7 +122,7 @@ pub fn build_system_prompt_for_profile(
         profile,
     );
     // #7688: the flag-gated addendum; a no-op when the flag is off.
-    crate::core::prompt_self_improvement::append_to_pm_prompt(project_dir, styled)
+    crate::core::prompt_self_improvement::append_to_pm_prompt(content, project_dir, styled)
 }
 
 /// [`build_system_prompt_for`] with the deployed-agent roster supplied by the
@@ -131,11 +145,19 @@ pub fn build_system_prompt_for_profile(
 /// directories they own.
 /// Test: `compose_session_instructions_display_matches_live_prompt` and its
 /// `_with_override` sibling (`tests_behavior_b_tests.rs`).
-pub fn build_system_prompt_for_with_roster(project_dir: &Path, roster: Option<String>) -> String {
-    let (prompt, _source) =
-        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(project_dir, || roster);
+pub fn build_system_prompt_for_with_roster(
+    content: &FrameworkContent,
+    project_dir: &Path,
+    roster: Option<String>,
+) -> String {
+    let (prompt, _source) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster(
+        content,
+        project_dir,
+        || roster,
+    );
     let native = crate::core::output_style::claude_supports_native_output_style();
     let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
+        content,
         project_dir,
         None,
         prompt,
@@ -144,7 +166,38 @@ pub fn build_system_prompt_for_with_roster(project_dir: &Path, roster: Option<St
     // #7688: the roster seam composes the same delivered prompt, so it owes the
     // same addendum — otherwise `tm session instructions` would print a prompt
     // the session did not receive.
-    crate::core::prompt_self_improvement::append_to_pm_prompt(project_dir, styled)
+    crate::core::prompt_self_improvement::append_to_pm_prompt(content, project_dir, styled)
+}
+
+/// Build the project-agnostic `--append-system-prompt` text (no overrides).
+///
+/// Why: every `claude` session launched by trusty-mpm must be a configured PM
+/// instance. trusty-mpm owns its PM instructions: they are assembled IN MEMORY
+/// from the compile-time bundled sections and passed to
+/// `claude --append-system-prompt-file`. Nothing is read back from an installed
+/// `INSTRUCTIONS.md` to produce them (#4752 retired that path — see the note
+/// below). This variant is kept for callers that do not know the project
+/// directory (e.g. tests); prefer [`build_system_prompt_for`] at launch sites so
+/// project-level overrides apply. Moved here from `session_launch/mod.rs` by
+/// #9012 (SLOC cap), beside the other composers.
+/// What: returns [`crate::core::instruction_pipeline::assemble_system_prompt`]
+/// over `content` (#9012), trimmed; `None` only when that is empty.
+///
+/// #4752: this used to read `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
+/// and regenerate it on disk when missing. That file is retired — nothing writes
+/// it, `tm install` deletes a stale copy, and the compiled prompt is now
+/// per-project — so the round-trip could only ever have returned either bundled
+/// content it already had in memory, or a stale leftover. Composing directly
+/// removes the last dependency on the retired path and the home directory.
+/// Test: `build_system_prompt_includes_trusty_block`.
+pub fn build_system_prompt(content: &FrameworkContent) -> Option<String> {
+    let composed = crate::core::instruction_pipeline::assemble_system_prompt(content);
+    let trimmed = composed.trim_end();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// What a CLI launch (`tm launch`, `tm connect`) needs from the profile.
@@ -167,10 +220,14 @@ pub struct CliLaunch {
 }
 
 /// Resolve the profile once for a CLI launch in `project_dir`; see [`CliLaunch`].
-pub fn cli_launch(project_dir: &Path, git_remote: Option<&str>) -> CliLaunch {
+pub fn cli_launch(
+    content: &FrameworkContent,
+    project_dir: &Path,
+    git_remote: Option<&str>,
+) -> CliLaunch {
     let profile = crate::core::session_profile::resolve_ambient(project_dir);
     let native = crate::core::output_style::claude_supports_native_output_style();
-    let prompt = build_system_prompt_for_profile(project_dir, None, native, profile);
+    let prompt = build_system_prompt_for_profile(content, project_dir, None, native, profile);
     let mut env = crate::core::mcp_session_env::session_mcp_env(project_dir, git_remote);
     env.push(crate::core::session_profile::launch_env(profile));
     CliLaunch {

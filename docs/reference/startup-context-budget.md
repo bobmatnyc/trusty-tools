@@ -36,9 +36,9 @@ refuses the growth at the only moment it is still cheap to refuse.
 5% over it, or any single file more than 10%. The sources:
 
 - `CLAUDE.md` — the project's own instructions, by far the largest single row.
-- `crates/trusty-mpm/src/assets/instructions/sections/*.md` — the framework
+- `content/instructions/sections/*.md` — the framework
   prompt's composed sections.
-- `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md` — the active
+- `content/instructions/output-styles/trusty-mpm.md` — the active
   output style.
 
 `README.md` inside the sections directory is measured too. The glob is taken

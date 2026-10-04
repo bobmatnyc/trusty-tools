@@ -1,6 +1,6 @@
 //! CLI parse and report-line tests for `tm install --reset-agents`
 //! (issue #2504) — kept in their own `_tests.rs`-suffixed file (1500-SLOC
-//! test cap) rather than growing `tests_behavior_a.rs`, which sits close to
+//! test cap) rather than growing `tests_behavior_a_tests.rs`, which sits close to
 //! the 500-SLOC production cap despite living in `src/bin/tm/`, following the
 //! existing `tests_behavior_a/b/c/d/e` split convention.
 //!

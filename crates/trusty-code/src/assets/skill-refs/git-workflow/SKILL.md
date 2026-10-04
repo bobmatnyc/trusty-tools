@@ -2,7 +2,8 @@
 name: git-workflow
 description: "Essential Git patterns for effective version control, eliminating redundant Git guidance per agent."
 user-invocable: false
-version: "1.0.0"
+metadata:
+  version: "1.0.0"
 category: agent-reference
 effort: low
 ---

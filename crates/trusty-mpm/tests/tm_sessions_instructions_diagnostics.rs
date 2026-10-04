@@ -261,6 +261,12 @@ fn instructions_reports_section_status_and_project_style() {
     assert!(!stderr.contains("NOT FOUND"), "{stderr}");
     // #8533 owner ruling 2026-09-25: the project style keeps the floor, once,
     // whether or not the host's Claude Code delivers the style natively.
-    let floor = trusty_mpm::core::output_style::style_floor();
+    // #9012: the floor is cut from the checkout's content.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let content = trusty_mpm::core::framework_content::FrameworkContent::load(
+        &trusty_agents_common::agent_content::checkout_content(&root).expect("repo content"),
+    )
+    .expect("repo framework content");
+    let floor = trusty_mpm::core::output_style::style_floor(&content);
     assert_eq!(stdout.matches(floor.as_str()).count(), 1, "{stdout}");
 }

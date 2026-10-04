@@ -96,7 +96,7 @@ whether a generic `engineer` agent is acceptable for language-specific code
 work:
 
 - **Section A (early, permissive, wins in practice).**
-  `crates/trusty-mpm/src/assets/instructions/PM_INSTRUCTIONS.md:70`, inside the
+  `content/instructions/PM_INSTRUCTIONS.md:70`, inside the
   `## Agent Routing` quick-reference table (heading at line 63):
 
   ```
@@ -247,17 +247,17 @@ Prohibitions table itself survives, because it doesn't; it isn't in
 
 > **Accuracy note (2026-08-01).** `PM_INSTRUCTIONS.md` and `BASE_PM.md` as
 > monolithic files are gone (#4183); the current bundled manifest is
-> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json)
 > (schema v2), whose `sections[]` each carry an explicit
 > `customization_tier`. The Prohibitions table now lives under the heading
 > `## Prohibitions (CANONICAL -- single source of truth)` inside
-> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11)
+> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/sections/core.md#L11)
 > — and the `core` section is tagged
-> [`"customization_tier": "project"`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L14-L16),
+> [`"customization_tier": "project"`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json#L14-L16),
 > not `fixed`. This finding's recommendation — promote Prohibitions to
 > `fixed` — was **not** adopted; only three sections ship `fixed`:
 > `identity`, `non-overridable-rules`, `framework-guaranteed-conventions`
-> ([`pm-instruction-package.json:8-10,42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L8-L10)).
+> ([`pm-instruction-package.json:8-10,42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json#L8-L10)).
 > The gap this finding describes is real and current, not merely historical
 > — tracked by
 > [#4573](https://github.com/bobmatnyc/trusty-tools/issues/4573)
@@ -1135,7 +1135,7 @@ description):**
 **The canonical model this ruling states:**
 
 - All instructions originate in
-  `crates/trusty-mpm/src/assets/instructions/sections/` — there is no
+  `content/instructions/sections/` — there is no
   separate "BASE_PM" tier alongside it.
 - Project overrides are named sections in `CLAUDE.md` (§9.2).
 - Non-overridable rules are **not retired** by this ruling — only the

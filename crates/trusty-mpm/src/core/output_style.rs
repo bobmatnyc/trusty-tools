@@ -21,6 +21,7 @@ use std::path::Path;
 
 use crate::core::bundle::{BundledStyle, DEFAULT_OUTPUT_STYLE_ID, OUTPUT_STYLES};
 use crate::core::config::MpmConfig;
+use crate::core::framework_content::FrameworkContent;
 
 /// The first Claude Code version that honours the native `outputStyle` settings
 /// key, as `(major, minor, patch)`.
@@ -318,8 +319,12 @@ pub const INJECTED_STYLE_HEADING: &str =
 /// original `prompt`. The original prompt is preserved verbatim so the PM floor
 /// and overrides are untouched — the style is purely additive and placed first.
 /// Test: `inject_prepends_style_block`, `inject_preserves_prompt`.
-pub fn inject_style_into_prompt(style: &BundledStyle, prompt: &str) -> String {
-    inject_style_text(style.content, prompt)
+pub fn inject_style_into_prompt(
+    content: &FrameworkContent,
+    style: &BundledStyle,
+    prompt: &str,
+) -> String {
+    inject_style_text(style.content(content), prompt)
 }
 
 /// [`inject_style_into_prompt`] for a style's raw text, bundled or project (#8533).
@@ -355,6 +360,7 @@ fn inject_body(body: &str, prompt: &str) -> String {
 /// Test: `maybe_inject_*` in `output_style_tests.rs` drive the gate via the
 /// injected `native_supported` flag.
 pub fn maybe_inject_active_style(
+    content: &FrameworkContent,
     config: &MpmConfig,
     explicit: Option<&str>,
     prompt: String,
@@ -377,7 +383,7 @@ pub fn maybe_inject_active_style(
             }
         }
     };
-    inject_style_into_prompt(style, &prompt)
+    inject_style_into_prompt(content, style, &prompt)
 }
 
 /// Convenience: resolve the active style id for a project, reading the user
@@ -394,12 +400,13 @@ pub fn maybe_inject_active_style(
 /// Test: side-effecting (loads real config, spawns `claude`); the pure core is
 /// covered by `maybe_inject_*`.
 pub fn apply_output_style_to_prompt(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
 ) -> String {
     let native = claude_supports_native_output_style();
-    apply_output_style_to_prompt_with_native(project_dir, explicit, prompt, native)
+    apply_output_style_to_prompt_with_native(content, project_dir, explicit, prompt, native)
 }
 
 /// Apply the output-style injection decision with the `native_supported` flag
@@ -426,6 +433,7 @@ pub fn apply_output_style_to_prompt(
 /// stash/launch invariant under both flag values is covered by
 /// `prepare_session_stash_reflects_override` in `session_launch/tests.rs`.
 pub fn apply_output_style_to_prompt_with_native(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
@@ -435,12 +443,13 @@ pub fn apply_output_style_to_prompt_with_native(
     // manifest tier included.
     let root = crate::core::paths::FrameworkPaths::default().root;
     let selected = select_style_under(&root, project_dir, explicit);
-    apply_selected_style(project_dir, &selected, prompt, native_supported)
+    apply_selected_style(content, project_dir, &selected, prompt, native_supported)
 }
 
 /// [`apply_output_style_to_prompt_with_native`] for an already-resolved
 /// profile (#8453): the launch passes the one value it resolved.
 pub fn apply_output_style_to_prompt_for(
+    content: &FrameworkContent,
     project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
@@ -449,12 +458,13 @@ pub fn apply_output_style_to_prompt_for(
 ) -> String {
     let root = crate::core::paths::FrameworkPaths::default().root;
     let selected = project::select_style_under_for(&root, project_dir, explicit, profile);
-    apply_selected_style(project_dir, &selected, prompt, native_supported)
+    apply_selected_style(content, project_dir, &selected, prompt, native_supported)
 }
 
 /// The injection decision for a selected style; see
 /// [`apply_output_style_to_prompt_with_native`].
 fn apply_selected_style(
+    content: &FrameworkContent,
     project_dir: &Path,
     selected: &SelectedStyle,
     prompt: String,
@@ -464,15 +474,15 @@ fn apply_selected_style(
         // #8533: Claude Code reads the style file `outputStyle` names. When that
         // is the current composite, the floor is already in it; otherwise the
         // floor heads the appended prompt.
-        return match floor_for(&selected.style) {
-            Some(floor) if !composite_is_active(project_dir, &selected.style) => format!(
+        return match floor_for(content, &selected.style) {
+            Some(floor) if !composite_is_active(content, project_dir, &selected.style) => format!(
                 "{floor}{sep}{prompt}",
                 sep = crate::core::instruction_pipeline::SECTION_SEPARATOR,
             ),
             _ => prompt,
         };
     }
-    inject_body(&delivered_style_text(&selected.style), &prompt)
+    inject_body(&delivered_style_text(content, &selected.style), &prompt)
 }
 
 // #8533: the floor appended to a project style (owner ruling 2026-09-25).

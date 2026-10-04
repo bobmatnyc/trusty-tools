@@ -10,6 +10,12 @@
 //! Test: this file.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
+
+/// The checkout's section byte figures (#9012).
+fn sections() -> SectionBytes {
+    SectionBytes::of(rc())
+}
 
 /// A price stand-in: Sonnet's published input rate, as the shared table carries
 /// it. Used so the arithmetic below is hand-checkable.
@@ -34,7 +40,7 @@ fn no_roster(_project_dir: &std::path::Path) -> usize {
 /// [`min_plausible_compiled_bytes`], so a four-byte stand-in no longer stands in
 /// for a compiled prompt. This is the smallest fixture the contract accepts.
 fn plausible_prompt() -> String {
-    "x".repeat(min_plausible_compiled_bytes().max(1))
+    "x".repeat(min_plausible_compiled_bytes(sections()).max(1))
 }
 
 /// Why (#6958, required acceptance): the common case is a project that
@@ -205,6 +211,7 @@ fn a_malformed_compiled_prompt_path_records_no_row() {
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &plausible,
         Some("c-7514".to_string()),
@@ -236,7 +243,7 @@ fn a_malformed_compiled_prompt_path_records_no_row() {
 /// Why: a fixture below the floor would make every assertion about the floor
 /// rather than about the property under test.
 fn plausible_prompt_above_the_floor() -> String {
-    "x".repeat(min_plausible_compiled_bytes() + 137)
+    "x".repeat(min_plausible_compiled_bytes(sections()) + 137)
 }
 
 /// Why: the bundled sections are the floor of the source set, and a count that
@@ -245,13 +252,13 @@ fn plausible_prompt_above_the_floor() -> String {
 #[test]
 fn folded_source_bytes_counts_the_bundled_sections() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let bundled: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let bundled: usize = crate::core::instruction_pipeline::SECTION_FILES
         .iter()
-        .map(|(_, body)| body.len())
+        .map(|path| rc().required(path).len())
         .sum();
     assert!(bundled > 0, "the bundled corpus must not be empty");
     assert_eq!(
-        folded_source_bytes(dir.path(), 0),
+        folded_source_bytes(sections(), dir.path(), 0),
         bundled,
         "a project with no CLAUDE.md contributes only the bundled sections"
     );
@@ -264,7 +271,7 @@ fn folded_source_bytes_counts_the_bundled_sections() {
 #[test]
 fn folded_source_bytes_adds_an_override_body() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let baseline = folded_source_bytes(dir.path(), 0);
+    let baseline = folded_source_bytes(sections(), dir.path(), 0);
     let body = "Ship it. Skip the ceremony.";
     std::fs::write(
         dir.path().join("CLAUDE.md"),
@@ -274,7 +281,7 @@ fn folded_source_bytes_adds_an_override_body() {
     )
     .expect("write CLAUDE.md");
 
-    let with_override = folded_source_bytes(dir.path(), 0);
+    let with_override = folded_source_bytes(sections(), dir.path(), 0);
     assert_eq!(
         with_override,
         baseline + body.len(),
@@ -327,6 +334,7 @@ fn the_row_is_keyed_by_the_claude_session_id() {
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &plausible_prompt(),
         Some("claude-abc-123".to_string()),
@@ -366,6 +374,7 @@ fn no_claude_id_stages_the_row_instead_of_writing_an_unfoldable_one() {
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &plausible_prompt(),
         None,
@@ -401,6 +410,7 @@ fn a_staged_row_becomes_foldable_at_the_first_hook_invocation() {
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &plausible_prompt(),
         None,
@@ -441,10 +451,11 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
     let project = tempfile::tempdir().expect("temp project");
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "m1");
-    let bulky = "x".repeat(folded_source_bytes(project.path(), 0) + 1);
+    let bulky = "x".repeat(folded_source_bytes(sections(), project.path(), 0) + 1);
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &bulky,
         None,
@@ -464,7 +475,7 @@ fn a_prompt_that_folds_nothing_warns_once_and_writes_no_row() {
         !crate::core::savings_sidecar::log_no_fold_once(
             framework_root.path(),
             project.path(),
-            folded_source_bytes(project.path(), 0),
+            folded_source_bytes(sections(), project.path(), 0),
             bulky.len(),
         ),
         "the producer must already have logged for this project and byte pair"
@@ -512,7 +523,7 @@ fn rederiving_a_prompt_that_folds_nothing_appends_nothing() {
     // #7616: the re-derivation resolves this machine's roster onto the source
     // side, so a fixture sized against the bundled sections alone would now
     // FOLD and take the other branch.
-    let bulky = "x".repeat(ambient_source_bytes(project.path()) + 1);
+    let bulky = "x".repeat(ambient_source_bytes(project.path(), sections()) + 1);
     std::fs::write(&dest, &bulky).expect("compiled prompt");
     let ledger = crate::core::savings::savings_log_in(framework_root.path());
 
@@ -534,7 +545,7 @@ fn the_row_reports_the_compiled_prompts_own_size() {
     let framework_root = tempfile::tempdir().expect("temp framework root");
     let dest = compiled_prompt_dest(project.path(), "local");
     // A known size, comfortably above the floor and below the source set.
-    let staged_bytes = min_plausible_compiled_bytes() + 137;
+    let staged_bytes = min_plausible_compiled_bytes(sections()) + 137;
     std::fs::write(&dest, "x".repeat(staged_bytes)).expect("compiled prompt");
     let on_disk = std::fs::metadata(&dest).expect("compiled prompt").len() as usize;
     assert_eq!(
@@ -664,7 +675,7 @@ fn no_override_composition(project: &std::path::Path) -> (String, usize) {
         .expect("the undeduped roster renders too");
 
     let (prompt, _) =
-        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(project, || {
+        crate::core::instruction_overrides::resolve_pm_prompt_with_roster(rc(), project, || {
             Some(delivered.clone())
         });
     (prompt, read.len())
@@ -684,7 +695,7 @@ fn a_no_override_project_folds_below_its_authored_sources() {
     let project = tempfile::tempdir().expect("temp project");
     let (prompt, roster_read) = no_override_composition(project.path());
 
-    let sources = folded_source_bytes(project.path(), roster_read);
+    let sources = folded_source_bytes(sections(), project.path(), roster_read);
     let compiled = prompt.len();
 
     assert!(
@@ -708,14 +719,13 @@ fn the_no_override_fold_clears_the_prose_floor() {
     let project = tempfile::tempdir().expect("temp project");
     let (prompt, roster_read) = no_override_composition(project.path());
 
-    let sources = folded_source_bytes(project.path(), roster_read);
+    let sources = folded_source_bytes(sections(), project.path(), roster_read);
     let saved = sources.saturating_sub(prompt.len());
 
-    let prose_floor: usize = crate::core::instruction_pipeline::SECTION_SOURCES
+    let prose_floor: usize = crate::core::instruction_pipeline::SECTION_FILES
         .iter()
-        .map(|(_, body)| {
-            body.len() - crate::core::instruction_fold::fold_delivered_prompt(body).len()
-        })
+        .map(|path| rc().required(path))
+        .map(|body| body.len() - crate::core::instruction_fold::fold_delivered_prompt(body).len())
         .sum();
 
     assert!(prose_floor > 0, "the prose fold must recover something");
@@ -745,6 +755,7 @@ fn the_no_override_row_basis_carries_the_measured_bytes() {
 
     record_instruction_compression_to(
         framework_root.path(),
+        sections(),
         &dest,
         &prompt,
         Some("claude-7616".to_string()),
@@ -753,7 +764,7 @@ fn the_no_override_row_basis_carries_the_measured_bytes() {
     );
 
     let written = std::fs::read_to_string(&ledger).expect("a row must be written");
-    let sources = folded_source_bytes(project.path(), roster_read);
+    let sources = folded_source_bytes(sections(), project.path(), roster_read);
     assert!(
         written.contains(&format!(
             "sources {sources} B - compiled {} B",
@@ -816,9 +827,9 @@ fn roster_source_bytes_are_zero_without_a_roster() {
 #[test]
 fn the_roster_dedup_counts_as_folded_source() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let baseline = folded_source_bytes(dir.path(), 0);
+    let baseline = folded_source_bytes(sections(), dir.path(), 0);
     assert_eq!(
-        folded_source_bytes(dir.path(), 1_234),
+        folded_source_bytes(sections(), dir.path(), 1_234),
         baseline + 1_234,
         "the roster the composer read must land on the source side"
     );
@@ -831,7 +842,7 @@ fn the_roster_dedup_counts_as_folded_source() {
 #[test]
 fn the_fold_measurement_is_none_before_any_session_compiles() {
     let project = tempfile::tempdir().expect("temp project");
-    assert!(measure_project_fold(project.path()).is_none());
+    assert!(measure_project_fold(project.path(), sections()).is_none());
 }
 
 /// Why (#7616): the check must measure THIS launch's prompt, so it reads the
@@ -843,10 +854,11 @@ fn the_fold_measurement_reads_the_newest_compiled_prompt() {
     let dest = compiled_prompt_dest(project.path(), "local");
     std::fs::write(&dest, "x".repeat(4_096)).expect("compiled prompt");
 
-    let (sources, compiled) = measure_project_fold(project.path()).expect("a measurement");
+    let (sources, compiled) =
+        measure_project_fold(project.path(), sections()).expect("a measurement");
     assert_eq!(compiled, 4_096);
     assert!(
-        sources >= min_plausible_compiled_bytes(),
+        sources >= min_plausible_compiled_bytes(sections()),
         "the source side must carry the bundled corpus"
     );
 }
@@ -867,11 +879,12 @@ fn n_composes_under_one_session_id_append_exactly_one_row() {
     let ledger = savings_log_in(&root);
     // Far below the source set so the fold is genuinely positive, and at or above
     // the #7491 plausibility floor so the producer does not refuse it.
-    let prompt = "x".repeat(min_plausible_compiled_bytes().max(1));
+    let prompt = "x".repeat(min_plausible_compiled_bytes(sections()).max(1));
 
     for _ in 0..26 {
         record_instruction_compression_to(
             &root,
+            sections(),
             &dest,
             &prompt,
             Some("claude-7658".to_string()),

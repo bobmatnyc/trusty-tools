@@ -51,7 +51,7 @@ During migration, users may pause work under claude-mpm (Python tool) and resume
 |------|---------|
 | `crates/trusty-mpm/src/core/claude_mpm_registry.rs` (NEW) | Read machine-wide claude-mpm registry at `~/.claude-mpm/session-registry.db` (SQLite); filter to surviving paths with live pause files. Dependency: `rusqlite`. Mark all code `// CUTOVER BRIDGE — remove post-migration (#<tracking-issue>)`. |
 | `crates/trusty-mpm/src/bin/tm/commands/session/resume.rs` | Implement native session-finding (both local formats + machine-wide claude-mpm via registry) and rendering logic. |
-| `crates/trusty-mpm/src/assets/skills/mpm-session-resume.md` | Skill file (bundled via `core/bundle_skills.rs:98`); today pure bash, CWD-only. Update to delegate to `tm session resume --all-projects`. |
+| `content/skills/mpm-session-resume.md` | Skill file (bundled via `core/bundle_skills.rs:98`); today pure bash, CWD-only. Update to delegate to `tm session resume --all-projects`. |
 | `crates/trusty-mpm/src/daemon/api.rs` | Existing pause/resume handler (line ~961); no changes needed for session discovery. |
 
 ### Locked Decisions

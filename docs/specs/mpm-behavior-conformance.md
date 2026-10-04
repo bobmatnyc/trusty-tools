@@ -65,13 +65,13 @@ Each row in §2 is one **primary behavior** (`BHV-NN`). The columns are:
 > 2026-07-01. #4183 replaced those four monolithic files with one markdown
 > file per section under `assets/instructions/sections/*.md`, composed from
 > an authored JSON manifest
-> ([`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json),
+> ([`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json),
 > schema v2). The Prohibitions heading now lives at
-> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/sections/core.md#L11)
+> [`sections/core.md:11`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/sections/core.md#L11)
 > (`core` section, tier `project`); the non-overridable floor is now the
 > `non-overridable-rules` and `framework-guaranteed-conventions` sections
 > (both tier `fixed`,
-> [`pm-instruction-package.json:42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json#L42-L44)),
+> [`pm-instruction-package.json:42-44,48-50`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json#L42-L44)),
 > appended last by `instruction_pipeline.rs`/`instruction_overrides.rs`,
 > which still exist and still own this assembly — only their internal
 > section sourcing changed. `BASE_SM.md` (SM-side) is unaffected by #4183
@@ -92,16 +92,16 @@ silence.
 - `crates/trusty-mpm/src/core/instruction_pipeline.rs` — concatenation order
   `PM_INSTRUCTIONS → WORKFLOW → AGENT_DELEGATION → BASE_PM` (lines 67–72);
   `install_system_prompt()` / `install_system_prompt_to()` (lines 84, 100).
-- `crates/trusty-mpm/src/assets/instructions/PM_INSTRUCTIONS.md` — `## Prohibitions
+- `content/instructions/PM_INSTRUCTIONS.md` — `## Prohibitions
   (CANONICAL — single source of truth)` (line 11), `## Workflow (5-phase)`
   (line 143).
-- `crates/trusty-mpm/src/assets/instructions/WORKFLOW.md` — `## Mandatory
+- `content/instructions/WORKFLOW.md` — `## Mandatory
   5-Phase Sequence` (line 5): Research (conditional) → Code Analysis Review
   (mandatory) → Implementation → QA (mandatory, blocking gate) → Documentation.
-- `crates/trusty-mpm/src/assets/instructions/AGENT_DELEGATION.md`,
-  `crates/trusty-mpm/src/assets/instructions/BASE_PM.md` (non-overridable
+- `content/instructions/AGENT_DELEGATION.md`,
+  `content/instructions/BASE_PM.md` (non-overridable
   floor: `> Always appended to PM prompt. Cannot be overridden.`).
-- `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md` — SM-side floor
+- `content/instructions/sm_instructions/BASE_SM.md` — SM-side floor
   mirror (`## Non-Overridable Rules`, `## Trusty Tool Priority
   (Non-Overridable)`).
 
@@ -129,12 +129,12 @@ failing to resolve.
 **Canonical source:** [DOC-28](./trusty-mpm-self-awareness.md) R1–R4 in full.
 
 **Implementing code:**
-- `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md` — the R1 canonical doc; opens
+- `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` — the R1 canonical doc; opens
   "trusty-mpm is a **Rust** crate at `crates/trusty-mpm/`… **`tm`**…".
-- `crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md:40-41` — load
+- `content/instructions/sm_instructions/BASE_SM.md:40-41` — load
   marker `<!-- trusty-mpm-instructions-loaded: v1 -->` immediately followed by
   `## Identity & Self-Awareness Protocol (Non-Overridable)`.
-- `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md:78-79`,
+- `content/instructions/output-styles/trusty-mpm.md:78-79`,
   `trusty-mpm-research.md:100-101`, `trusty-mpm-teacher.md:98-99` — same
   marker + heading pair mirrored into all three bundled styles.
 - `crates/trusty-mpm/src/daemon/doctor_output_style.rs` — `check_output_style()`
@@ -145,8 +145,8 @@ failing to resolve.
 
 **Observable verification:**
 ```
-grep -n "trusty-mpm-instructions-loaded" crates/trusty-mpm/src/assets/sm_instructions/BASE_SM.md \
-  crates/trusty-mpm/src/assets/output-styles/*.md
+grep -n "trusty-mpm-instructions-loaded" content/instructions/sm_instructions/BASE_SM.md \
+  content/instructions/output-styles/*.md
 cargo test -p trusty-mpm --lib -- doctor_output_style
 cargo test -p trusty-mpm --lib -- run_doctor_produces_seven_checks
 ```
@@ -223,7 +223,7 @@ agents compose via a base-first `extends:` frontmatter chain
   `BASE-RESEARCH.md`) + 36 concrete agents, incl. `rust-engineer.md`
   (frontmatter `extends: base-engineer`) → `BASE-ENGINEER.md` (frontmatter
   `extends: base-agent`) → `BASE-AGENT.md`.
-- `crates/trusty-mpm/src/assets/skills/` — **12 real guidance skills** (the
+- `content/skills/` — **12 real guidance skills** (the
   11 consts in `bundle_skills.rs` + `tm-doctor.md`) plus one placeholder,
   `example-skill.md`, that is not part of the real catalog.
 

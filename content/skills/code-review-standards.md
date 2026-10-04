@@ -1,0 +1,281 @@
+---
+name: code-review-standards
+description: Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference.
+user-invocable: false
+metadata:
+  version: "1.0.0"
+category: agent-reference
+tags: [code-review, severity, verdict, quality-gate, code-critic]
+effort: low
+---
+
+# Code Review Standards
+
+The full rubric behind `code-critic`'s adversarial review. This is the
+reference the agent loads before reviewing any diff — the agent body stays
+lean; the standard lives here.
+
+## Reviewer Framing
+
+Before reviewing any code, ask: *"What would someone who has seen this exact
+type of code fail in production know to check that a first-time implementer
+wouldn't think to look for?"* Generic checklist-walking produces generic
+findings; experience-grounded scrutiny produces the findings that matter.
+
+Review the code against the **spec**, not against the implementer's stated
+intent. If dispatch context includes implementer reasoning — "I did X
+because…", commit messages, design notes — ignore it. An LLM critic that sees
+the implementer's reasoning tends to agree with it (anchoring bias); a critic
+that sees only the spec and the code judges whether the code actually meets
+the spec, which is the job.
+
+## Severity Taxonomy
+
+| Severity | Definition | Examples |
+|---|---|---|
+| **CRITICAL** | Security vulnerability, data loss, production crash, broken contract | SQL injection, unbounded recursion on user input, `unwrap()` on a fallible I/O call in library code, a postcondition that no longer holds |
+| **HIGH** | Significant correctness issue, missing error handling, likely regression | Unhandled error path, off-by-one in a boundary condition, race condition in concurrent code, silently swallowed exception |
+| **MEDIUM** | Code smell, missing test coverage, maintainability concern | Duplicated logic across >2 call sites, a public function with no tests, a 200-line function doing five unrelated things |
+| **LOW** | Style preference, naming, minor inefficiency | Inconsistent brace style, a variable name that could be clearer, an allocation that could be avoided but isn't on a hot path |
+
+**Guard rail — style preferences never outrank LOW.** Whitespace, naming
+aesthetics, brace placement, import ordering, and other pure style
+preferences are **LOW at most**, never MEDIUM, HIGH, or CRITICAL, regardless
+of how strongly the reviewer feels about them. Inflating a style nit to HIGH
+to make the review look more rigorous is itself a review defect.
+
+## The 80% Confidence Filter
+
+For every candidate finding, ask: *can I assert this is a real issue with
+more than 80% confidence?* If not:
+- Downgrade the severity, or
+- Drop the finding entirely.
+
+A review full of speculative "this might be a problem" findings is worse than
+a shorter review of confirmed issues — it forces the reader to re-triage the
+critic's own uncertainty. When genuinely uncertain, say so explicitly in the
+Notes section rather than asserting a severity you can't back up.
+
+## Finding Disposition
+
+Every finding ends in exactly one of three states, and the review STATES which
+one. **The default is the framework's existing rule: a review finding is
+fixed in the surfacing PR, or dropped.** `Promote` is the narrow third exit
+that rule leaves implicit — work that is genuinely separable, not a home for
+every LOW or MEDIUM finding that doesn't obviously fit the first two.
+
+1. **`Fix here`** — corrected in the surfacing PR. The default for correctness,
+   security, acceptance criteria, regression coverage, and any small in-scope
+   repair.
+2. **`Parent`** — kept with the work already in flight, as a PR comment or a
+   checklist item on the parent issue. No durable artifact is created.
+3. **`Promote`** — reserved for a defect that is genuinely separable work
+   someone would schedule on its own, never the default landing spot for a
+   LOW finding that just doesn't feel worth fixing right now. The critic only
+   *recommends* `Promote` — it does not file the issue itself and does not
+   instruct anyone else to file one. Whether it is filed is decided by the
+   Ticket-Promotion Gate in `tm-ticketing`, and the PM or user makes the
+   prioritization call. Do not re-derive that gate's criteria here.
+
+**An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
+and zero HIGH findings; the MEDIUM/LOW observations that remain default to
+`Fix here` or `Parent`. `Promote` on an approved review is a recommendation for
+someone else to decide, never an instruction to file.
+
+## Fail-Open Check
+
+Run this over every failure branch the diff adds or touches. Relocated here
+from the always-loaded PM prompt (#4574) — the PM dispatches the check; a
+reviewer runs it.
+
+The shape: an operation can fail, the failure is downgraded to a warning, a
+default, or a `false` — and state advances anyway. The loss is permanent, and
+every alarm that should have caught it reports healthy. A finding here is
+CRITICAL or HIGH by construction: silent data loss, or a broken contract.
+
+1. **Does anything advance past the failure?** A cursor, watermark, index,
+   "done" marker, or success return that moves forward when the operation
+   failed puts the lost item outside every future window. **Fail closed** —
+   hold the state, propagate the error.
+   - A third outcome is also acceptable: **reported degradation** — the
+     failure is carried to the caller in the response body (e.g. a
+     `{"connected": false, "reason": ...}` field), and that field is under
+     test. This is distinct from silently failing open; the caller can see
+     and act on the degraded state. Contrast within one branch:
+     `knowledge_pipeline.rs::search_socket` discards its error via `.ok()`
+     (undocumented fail-open) while `knowledge_pipeline/indexing.rs` turns
+     the same missing-socket case into an explicit, tested response field
+     (reported degradation).
+2. **Name the alarm, then break it.** Identify which check is supposed to catch
+   this loss, then ask whether it can report healthy while the loss occurs.
+   Aggregates, tallies and summaries hide single-item failures by construction.
+3. **Compare sibling branches.** Asymmetry between arms of one state machine is
+   the tell. The arm that fails open is usually the bug.
+4. **Demand an error-arm test.** These ship green because no test ever entered
+   the failure path. Green CI over an untested failure path is evidence of
+   nothing. Require a regression test that FAILS against the pre-fix commit.
+5. **Review the fix harder than the bug.** A fix for this shape is the highest
+   risk place for it to reappear. Never merge one on the author's own gate.
+
+## CI Push-Permission Check
+
+A workflow granted `contents: write` that pushes to a branch protected by a
+push restriction or ruleset cannot use `GITHUB_TOKEN` for that push — GitHub
+never allows the Actions identity as a restriction or ruleset bypass actor.
+Flag it as unworkable even if the workflow merged green, since a first run
+with nothing to publish never exercises the push (#8016).
+
+## Structured Test Payload Check
+
+Flag a test helper that builds a JSON/YAML/TOML/SQL payload by `format!`
+interpolating a caller-supplied value into a string literal, instead of the
+format's own builder or serializer (e.g. `serde_json::json!`). A value
+containing the format's own escape or delimiter characters malforms the
+payload, and the system under test then answers the malformed input with a
+permissive default that reads exactly like a real pass (#7550, #7624).
+
+## Check Block Transient-State Coverage
+
+A Terraform `check` block validated only against the final steady-state plan
+misses failures that appear only during resource replacement. Two observed
+failures: `timecmp` raised on the empty `expire_time` a not-yet-issued
+certificate reports, and `timestamp()` deferred an entire plan to "could not
+be evaluated" where `plantimestamp()` was needed. Both passed a green
+steady-state plan and broke mid-replacement.
+
+Require a check block to be reviewed against the transient states a resource
+passes through during creation and replacement, not only the field values
+present once everything has settled (#8144).
+
+## Check Block Red-Path Coverage
+
+A check block on a scoped data source has two independent failure paths: an
+assertion failure (the read succeeds, the value is wrong) and a read failure
+(the host is unreachable). Terraform converts a read failure to a warning
+automatically, but that behavior is only proven by testing it. An
+`https_listener` check validated on a 404 response only left the
+unreachable-host path — the one carrying load during certificate
+provisioning — untested until a late review caught it.
+
+Require evidence for both paths, the happy-path assertion failure and the
+error-path read failure, before accepting a check block's coverage claim
+(#8143).
+
+## Lifecycle-Guard Escape-Path Verification
+
+An acceptance record marked a documented `prevent_destroy` recovery path MET
+on the strength of prose, without running it. The documented recovery was
+wrong in two independent ways when tried: re-creating a certificate under the
+same name returned 409, and destroying it while still attached to the target
+proxy returned 400 `resourceInUse`.
+
+For any change adding `prevent_destroy` or another lifecycle guard, require
+the acceptance record to state how the documented escape path was actually
+exercised — the command run and its result. Prose alone marks the criterion
+unverified, never MET (#8132).
+
+## Liveness Criteria Require a Sampled Check
+
+A single HTTPS request checked right after a managed certificate reports
+ACTIVE can still fail on a transient TLS handshake error. One failing request
+reports a false red; one lucky success reports a false green over an endpoint
+that is mostly failing.
+
+Require a liveness acceptance criterion — "the certificate is live", "the
+endpoint answers" — to cite a sample with a stated count, N/M requests over T
+seconds, never a single request (#8131).
+
+## Review Process
+
+1. Work the rubric top-to-bottom: CRITICAL first, then HIGH, MEDIUM, LOW.
+2. For each finding:
+   - Cite the exact file + line number.
+   - Quote the offending code snippet.
+   - Explain why it is a problem — what actually breaks in production, not a
+     generic "this is bad practice."
+   - Provide the fix: concrete code or a specific, actionable change. Never
+     stop at "this needs to be fixed."
+   - Assign the disposition: `Fix here`, `Parent`, or `Promote`.
+   - A file-size finding quotes this project's own line-cap script in
+     path-list mode (in trusty-tools: `scripts/check_line_cap.sh <path>`),
+     never a hand-rolled `grep -c`/`wc -l` count — the enforced counter can
+     exclude regions (e.g. inline `#[cfg(test)] mod` bodies) a generic count
+     does not (#7819).
+3. Apply the 80% confidence filter to every candidate finding.
+4. Compute the verdict from the finding set (see Verdict Protocol below).
+
+## Output Format
+
+```
+## Verdict: <APPROVE|WARN|BLOCK>
+
+## Findings
+
+| Severity | File | Line | Issue | Fix | Disposition |
+|----------|------|------|-------|-----|-------------|
+| CRITICAL | path/to/file.ext | 42 | <one-line description> | <concrete fix> | Fix here |
+| HIGH     | path/to/file.ext | 87 | ... | ... | Parent |
+| LOW      | path/to/file.ext | 96 | ... | ... | Promote |
+
+## Required Changes (only if WARN or BLOCK)
+
+1. <numbered list of changes required before re-review>
+
+## Notes (optional, for context the PM should know)
+
+<caveats, scope assumptions, things explicitly not flagged and why>
+```
+
+**Every row carries exactly one Disposition token — `Fix here`, `Parent`, or
+`Promote`.** A findings table with a blank or missing Disposition cell is an
+incomplete review: a reader of the posted verdict must be able to tell, per
+finding, which of the three was chosen without asking anyone.
+
+A zero-finding APPROVE omits the Findings table entirely and states: "No
+issues found at >80% confidence. APPROVED for next pipeline stage." It has no
+rows, so there are no dispositions to state. A clean APPROVE is a valid,
+correct, and complete outcome — do not manufacture findings to look thorough.
+
+## Verdict Protocol
+
+- **APPROVE** — zero CRITICAL, zero HIGH findings. Proceeds to the next
+  pipeline stage.
+- **WARN** — zero CRITICAL, one or more HIGH findings. Code proceeds, but
+  findings must be tracked: attach the finding table to the next handoff
+  (typically Documentation) rather than discarding it.
+- **BLOCK** — any CRITICAL finding. Halt immediately. Surface the verdict and
+  finding table to the user verbatim and await explicit direction
+  (fix-and-retry, override, abandon). Never auto-re-delegate back to the
+  implementer without that direction.
+
+## What NOT To Do
+
+- Do not inflate severity to appear rigorous. Calibrate strictly to the
+  taxonomy above.
+- Do not flag unchanged code unless it contains a CRITICAL security issue.
+- Do not consolidate findings into vague summaries — every finding needs
+  file + line + fix, individually.
+- Do not skip the 80% confidence filter to manufacture findings where none
+  exist.
+- Do not flag style preferences (whitespace, naming aesthetic, import order)
+  as HIGH or CRITICAL — see the guard rail above. LOW at most.
+- Do not leave a finding without a disposition. "Noted" is not one of the
+  three.
+- Do not default LOW/MEDIUM polish to `Promote` because it's easier than
+  deciding — the default is `Fix here` or dropped; `Promote` is for defects
+  that are genuinely separable, schedulable work, not a catch-all.
+- Do not file an issue yourself, under any disposition, and do not instruct
+  anyone else to file one. `Promote` is a recommendation to the PM — never an
+  action the critic takes.
+- A zero-finding APPROVE is correct and complete. Do not feel pressure to
+  find issues that aren't there.
+
+## Handoff Protocol
+
+- **APPROVE** → report verdict to the PM; PM proceeds to the next stage
+  (typically Security). Any `Promote` rows go to the PM as recommendations,
+  not as filed issues.
+- **WARN** → report verdict + findings to the PM; PM proceeds AND attaches
+  the finding table, dispositions included, to the Documentation handoff.
+- **BLOCK** → report verdict + findings to the PM; PM halts the pipeline and
+  surfaces to the user. Do not auto-route back to the implementer.

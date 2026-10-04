@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use super::{StyleError, resolve_style};
 use crate::core::bundle::{BundledStyle, DEFAULT_OUTPUT_STYLE_ID, OUTPUT_STYLES};
 use crate::core::config::MpmConfig;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::session_profile::SessionProfile;
 
 /// Project-relative directory holding project output styles.
@@ -68,7 +69,7 @@ pub enum ProjectStyleError {
 /// Test: `a_project_style_file_resolves_by_id`.
 #[derive(Debug, Clone)]
 pub enum ActiveStyle {
-    /// A style shipped in the binary.
+    /// A style from the registry; its body is runtime content (#9012).
     Bundled(&'static BundledStyle),
     /// A style file authored in the project.
     Project {
@@ -90,10 +91,11 @@ impl ActiveStyle {
         }
     }
 
-    /// The style's full text, frontmatter included.
-    pub fn content(&self) -> &str {
+    /// The style's full text, frontmatter included. A bundled style's text
+    /// comes from `framework` (#9012); a project style carries its own.
+    pub fn text<'a>(&'a self, framework: &'a FrameworkContent) -> &'a str {
         match self {
-            ActiveStyle::Bundled(style) => style.content,
+            ActiveStyle::Bundled(style) => style.content(framework),
             ActiveStyle::Project { content, .. } => content,
         }
     }

@@ -12,7 +12,7 @@ TELUI (`docs/specs/telui-telegram-ui.md`, the Telegram adapter); DOC-18 — Meta
 (`docs/specs/metacoding-vision.md`, the ONB-3 control surfaces).
 **Cross-ref:** the shared client module (`crates/trusty-mpm/src/client/`), the typed
 managed `DaemonClient` methods (PR #1491), the SM tool prompt asset
-(`crates/trusty-mpm/src/assets/sm_instructions/SM_TOOLS.md`), and issues **#1283**
+(`content/instructions/sm_instructions/SM_TOOLS.md`), and issues **#1283**
 (chat-core nucleus), **#1433** (TELUI), **#1272** (STUI).
 
 > **Scope note.** This is a **behavior-contract** spec for the **chat-core nucleus** —

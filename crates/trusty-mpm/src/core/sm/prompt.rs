@@ -9,9 +9,9 @@
 //! BLOCKING verification gate; the tool/verb surface; and the non-overridable
 //! framework floor. Assembling them ad-hoc at each call site would invite the
 //! same ordering/content drift the PM pipeline was built to prevent.
-//! What: [`assemble_sm_prompt`] embeds the four bundled assets via `include_str!`
-//! at compile time and joins them with the shared harness-understanding content
-//! (a [`HarnessDoc`] loaded from instructional content since #9011) in the fixed order
+//! What: [`assemble_sm_prompt`] joins the four SM instruction files (runtime
+//! content since #9012, read from a [`FrameworkContent`]) with the shared
+//! harness-understanding content (a [`HarnessDoc`], content since #9011) in the fixed order
 //! SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM,
 //! BASE_SM **always last** as the non-overridable floor. [`resolve_sm_prompt`]
 //! layers optional per-file overrides from an override directory
@@ -33,26 +33,23 @@ use crate::core::instruction_pipeline::SECTION_SEPARATOR;
 use trusty_agents_common::harness_doc::HarnessDoc;
 
 use crate::core::content_source::{self, AgentContentError};
+use crate::core::framework_content::FrameworkContent;
 
-// `pub(crate)` is deliberate: these bundled defaults are consumed only through
+// `pub(crate)` is deliberate: these content paths are read only through
 // `assemble_sm_prompt` / `resolve_sm_prompt`, which own the ordering and the
-// BASE_SM-last floor invariant. Any caller needing the raw section content goes
-// through those functions; exposing the constants beyond the crate would let a
-// caller reassemble the prompt out of order and silently bypass the floor.
+// BASE_SM-last floor invariant. #9012: they name runtime content (relative to
+// the bundle's `instructions/`), no longer `include_str!` constants.
 
-/// SM identity + Prohibitions table (SP1-SP7) + Allowlist (bundled at compile
-/// time). Mirrors `PM_INSTRUCTIONS`.
-pub(crate) const SM_INSTRUCTIONS: &str =
-    include_str!("../../assets/sm_instructions/SM_INSTRUCTIONS.md");
-/// The 6-phase delegation loop + BLOCKING verification gate (bundled). Mirrors
-/// `WORKFLOW`.
-pub(crate) const SM_WORKFLOW: &str = include_str!("../../assets/sm_instructions/SM_WORKFLOW.md");
-/// The SM's tool/verb surface: session control + memory + goals (bundled).
-/// Mirrors `AGENT_DELEGATION`.
-pub(crate) const SM_TOOLS: &str = include_str!("../../assets/sm_instructions/SM_TOOLS.md");
-/// Non-overridable SM framework floor (bundled). Placed last so it can never be
+/// SM identity + Prohibitions table (SP1-SP7) + Allowlist. Mirrors `PM_INSTRUCTIONS`.
+pub(crate) const SM_INSTRUCTIONS: &str = "sm_instructions/SM_INSTRUCTIONS.md";
+/// The 6-phase delegation loop + BLOCKING verification gate. Mirrors `WORKFLOW`.
+pub(crate) const SM_WORKFLOW: &str = "sm_instructions/SM_WORKFLOW.md";
+/// The SM's tool/verb surface: session control + memory + goals. Mirrors
+/// `AGENT_DELEGATION`.
+pub(crate) const SM_TOOLS: &str = "sm_instructions/SM_TOOLS.md";
+/// Non-overridable SM framework floor. Placed last so it can never be
 /// overridden. Mirrors `BASE_PM`.
-pub(crate) const BASE_SM: &str = include_str!("../../assets/sm_instructions/BASE_SM.md");
+pub(crate) const BASE_SM: &str = "sm_instructions/BASE_SM.md";
 
 /// Override-directory name segment under the trusty-mpm home (`~/.trusty-mpm`).
 ///
@@ -94,15 +91,15 @@ pub const FILE_SM_HARNESS: &str = "SM_HARNESS.md";
 /// `resolve_with_no_overrides_matches_assembled_sections` (exact equality).
 ///
 /// [`assemble_system_prompt`]: crate::core::instruction_pipeline::assemble_system_prompt
-pub fn assemble_sm_prompt(harness: &HarnessDoc) -> String {
+pub fn assemble_sm_prompt(content: &FrameworkContent, harness: &HarnessDoc) -> String {
     let harness = harness.harness_understanding();
     let harness_trimmed = harness.trim();
     vec![
-        SM_INSTRUCTIONS.trim(),
+        content.required(SM_INSTRUCTIONS).trim(),
         harness_trimmed,
-        SM_WORKFLOW.trim(),
-        SM_TOOLS.trim(),
-        BASE_SM.trim(),
+        content.required(SM_WORKFLOW).trim(),
+        content.required(SM_TOOLS).trim(),
+        content.required(BASE_SM).trim(),
     ]
     .into_iter()
     .filter(|s| !s.is_empty())
@@ -192,17 +189,21 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// `tools_override_replaces`, `base_sm_floor_is_never_overridable`,
 /// `missing_content_fails_the_prompt`, and the robustness tests.
 pub fn resolve_sm_prompt(dir: &Path) -> Result<String, AgentContentError> {
-    resolve_sm_prompt_with(dir, content_source::harness_doc)
+    // #9012: BASE_SM is never overridable, so the SM files must resolve.
+    let content = content_source::framework_content()?;
+    resolve_sm_prompt_with(dir, &content, content_source::harness_doc)
 }
 
-/// [`resolve_sm_prompt`] with the harness-doc loader given; it runs only when
-/// no non-empty `SM_HARNESS.md` override is present.
+/// [`resolve_sm_prompt`] with the content given and the harness-doc loader
+/// given; the loader runs only when no non-empty `SM_HARNESS.md` override is
+/// present.
 pub fn resolve_sm_prompt_with(
     dir: &Path,
+    content: &FrameworkContent,
     harness: impl FnOnce() -> Result<HarnessDoc, AgentContentError>,
 ) -> Result<String, AgentContentError> {
     let instructions = read_override(dir, FILE_SM_INSTRUCTIONS)
-        .unwrap_or_else(|| SM_INSTRUCTIONS.trim().to_string());
+        .unwrap_or_else(|| content.required(SM_INSTRUCTIONS).trim().to_string());
 
     // The harness section uses the shared trusty-agents-common content, with
     // an optional override via SM_HARNESS.md in the override directory.
@@ -211,9 +212,10 @@ pub fn resolve_sm_prompt_with(
         None => harness()?.harness_understanding().trim().to_string(),
     };
 
-    let workflow =
-        read_override(dir, FILE_SM_WORKFLOW).unwrap_or_else(|| SM_WORKFLOW.trim().to_string());
-    let tools = read_override(dir, FILE_SM_TOOLS).unwrap_or_else(|| SM_TOOLS.trim().to_string());
+    let workflow = read_override(dir, FILE_SM_WORKFLOW)
+        .unwrap_or_else(|| content.required(SM_WORKFLOW).trim().to_string());
+    let tools = read_override(dir, FILE_SM_TOOLS)
+        .unwrap_or_else(|| content.required(SM_TOOLS).trim().to_string());
 
     // BASE_SM is the non-overridable floor: always the bundled one, always last.
     // Order: SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM
@@ -222,7 +224,7 @@ pub fn resolve_sm_prompt_with(
         harness,
         workflow,
         tools,
-        BASE_SM.trim().to_string(),
+        content.required(BASE_SM).trim().to_string(),
     ]
     .into_iter()
     .map(|s| s.trim().to_string())
@@ -245,7 +247,10 @@ pub fn resolve_sm_prompt_with(
 pub fn resolve_sm_prompt_default() -> Result<String, AgentContentError> {
     match sm_override_dir() {
         Some(dir) => resolve_sm_prompt(&dir),
-        None => Ok(assemble_sm_prompt(&content_source::harness_doc()?)),
+        None => Ok(assemble_sm_prompt(
+            &content_source::framework_content()?,
+            &content_source::harness_doc()?,
+        )),
     }
 }
 
@@ -260,9 +265,14 @@ mod tests {
         crate::core::content_source::test_support::repo_harness_doc()
     }
 
-    /// [`resolve_sm_prompt`] against the checkout's harness docs.
+    /// The checkout's SM instruction files (#9012).
+    fn content() -> FrameworkContent {
+        crate::core::content_source::test_support::repo_content()
+    }
+
+    /// [`resolve_sm_prompt`] against the checkout's content and harness docs.
     fn resolve(dir: &Path) -> String {
-        resolve_sm_prompt_with(dir, || Ok(harness())).expect("prompt")
+        resolve_sm_prompt_with(dir, &content(), || Ok(harness())).expect("prompt")
     }
 
     /// Write `<dir>/<name>` with `content`, creating `dir` if needed.
@@ -277,7 +287,7 @@ mod tests {
         // section -- prohibitions, allowlist, harness model, 6-phase loop,
         // verification gate, and the BASE_SM floor -- must be present and joined
         // with the `---` rule.
-        let prompt = assemble_sm_prompt(&harness());
+        let prompt = assemble_sm_prompt(&content(), &harness());
         // Identity + prohibitions table (SP1-SP7) + allowlist.
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("| SP1 |"));
@@ -310,7 +320,7 @@ mod tests {
     fn assemble_sm_prompt_base_floor_is_last() {
         // Why: BASE_SM is the non-overridable floor; it must be the final
         // section so nothing can displace it.
-        let prompt = assemble_sm_prompt(&harness());
+        let prompt = assemble_sm_prompt(&content(), &harness());
         let base = prompt.find("# BASE_SM Framework Floor").expect("base_sm");
         let tools = prompt
             .find("# SM Tools -- the verbs you may call")
@@ -334,7 +344,7 @@ mod tests {
         // the BASE_SM floor, so it must survive into the assembled prompt
         // verbatim, along with the forbidden shell-probe list a reviewer can
         // grep for regressions.
-        let prompt = assemble_sm_prompt(&harness());
+        let prompt = assemble_sm_prompt(&content(), &harness());
         assert!(prompt.contains("## Identity & Self-Awareness Protocol (Non-Overridable)"));
         assert!(prompt.contains("pip3 show"));
         assert!(prompt.contains("which claude-mpm"));
@@ -369,9 +379,11 @@ mod tests {
         // heading in the bundled BASE_SM floor.
         const MARKER: &str = "<!-- trusty-mpm-instructions-loaded: v1 -->";
         const HEADING: &str = "## Identity & Self-Awareness Protocol (Non-Overridable)";
-        let marker_pos = BASE_SM.find(MARKER).expect("marker present in BASE_SM");
-        let heading_pos = BASE_SM.find(HEADING).expect("heading present in BASE_SM");
-        let between = &BASE_SM[marker_pos + MARKER.len()..heading_pos];
+        let content = content();
+        let base_sm = content.required(BASE_SM);
+        let marker_pos = base_sm.find(MARKER).expect("marker present in BASE_SM");
+        let heading_pos = base_sm.find(HEADING).expect("heading present in BASE_SM");
+        let between = &base_sm[marker_pos + MARKER.len()..heading_pos];
         assert_eq!(
             between.trim(),
             "",
@@ -381,7 +393,7 @@ mod tests {
 
     #[test]
     fn assemble_sm_prompt_contains_harness_section() {
-        let prompt = assemble_sm_prompt(&harness());
+        let prompt = assemble_sm_prompt(&content(), &harness());
         // The harness understanding section contains the Claude Code working glyph
         // and the tcode event prefix as canonical markers (DOC-21).
         assert!(
@@ -591,7 +603,7 @@ mod tests {
         // before joining with the `---` rule (Finding 3). Assert exact equality.
         let tmp = TempDir::new().unwrap();
         let resolved = resolve(tmp.path());
-        let assembled = assemble_sm_prompt(&harness());
+        let assembled = assemble_sm_prompt(&content(), &harness());
         assert_eq!(
             resolved, assembled,
             "no-override resolve must be byte-identical to assemble"
@@ -648,7 +660,7 @@ mod tests {
 
         let cache = TempDir::new().unwrap();
         let overrides = TempDir::new().unwrap();
-        let err = resolve_sm_prompt_with(overrides.path(), || {
+        let err = resolve_sm_prompt_with(overrides.path(), &content(), || {
             HarnessDoc::load(&resolve_content_in(cache.path(), DevOverride::Off)?)
         })
         .expect_err("no content, no override");
@@ -656,7 +668,7 @@ mod tests {
 
         // A non-empty override needs no content read at all.
         write_override(overrides.path(), FILE_SM_HARNESS, "# operator harness");
-        let prompt = resolve_sm_prompt_with(overrides.path(), || {
+        let prompt = resolve_sm_prompt_with(overrides.path(), &content(), || {
             panic!("an SM_HARNESS.md override must not read content")
         })
         .expect("override supplies the harness");

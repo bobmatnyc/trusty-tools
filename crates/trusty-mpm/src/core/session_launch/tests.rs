@@ -10,6 +10,7 @@ use super::settings::{
     write_output_style, write_project_hooks, write_status_line,
 };
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::tempdir;
 
 /// Why: env-mutating tests previously restored the var by hand at the end of the
@@ -95,7 +96,7 @@ fn build_system_prompt_includes_trusty_block() {
     // `INSTRUCTIONS.md` from the bundled assets on first run — and that
     // prompt must include the trusty tool-priority block so a launched
     // session knows to prefer `memory_recall` and `search`.
-    let prompt = build_system_prompt().expect("trusty block is always present");
+    let prompt = build_system_prompt(rc()).expect("trusty block is always present");
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(prompt.contains("mcp__trusty-memory__memory_recall"));
     assert!(prompt.contains("mcp__trusty-search__search"));
@@ -147,7 +148,7 @@ fn build_system_prompt_for_applies_project_override() {
     std::fs::create_dir_all(&override_dir).unwrap();
     std::fs::write(override_dir.join("INSTRUCTIONS.md"), "RETIRED_MARKER\n").unwrap();
 
-    let prompt = build_system_prompt_for(project);
+    let prompt = build_system_prompt_for(rc(), project);
     assert!(prompt.contains("PROJECT_OVERRIDE_MARKER"));
     assert!(
         !prompt.contains("RETIRED_MARKER"),
@@ -163,7 +164,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     // bundled sections and the BASE_PM floor last.
     let tmp = tempdir().unwrap();
     pin_prompt_feedback_off(tmp.path());
-    let prompt = build_system_prompt_for(tmp.path());
+    let prompt = build_system_prompt_for(rc(), tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
     let base = prompt.find("## Prohibitions (CANONICAL").expect("base");
@@ -367,7 +368,7 @@ fn prepare_session_stash_reflects_override() {
         // claude-present (native) and claude-absent (injected) environments.
         assert_eq!(
             stash,
-            build_system_prompt_for_with_style_and_native(project, None, native_supported),
+            build_system_prompt_for_with_style_and_native(rc(), project, None, native_supported),
             "stash must equal the launch prompt (native_supported={native_supported})"
         );
         // When injection fires, the stash must actually carry the injected style
@@ -435,6 +436,21 @@ fn instruction_failure_is_fatal() {
     let shown = err.to_string();
     assert!(shown.contains("/p/.trusty-mpm/framework/INSTRUCTIONS-COMPILED.md"));
     assert!(shown.contains("was NOT started"));
+}
+
+/// #9012: no instructional content means no PM instructions — fatal, like
+/// [`PrepError::Instructions`], and the message names the remedy.
+#[test]
+fn content_failure_is_fatal() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let source = crate::core::content_source::framework_content_in(
+        cache.path(),
+        crate::core::content_source::DevOverride::Off,
+    )
+    .expect_err("an empty cache serves nothing");
+    let err = PrepError::Content { source };
+    assert!(err.is_fatal());
+    assert!(err.to_string().contains("tm content install"), "{err}");
 }
 
 #[test]
@@ -1840,7 +1856,7 @@ fn deploy_output_style_writes_file() {
     // matching file exists in `~/.claude/output-styles/`; deployment must
     // create that file (and its parent dir) with the bundled content.
     let home = tempdir().unwrap();
-    let path = deploy_output_style(home.path()).expect("deploy succeeds");
+    let path = deploy_output_style(rc(), home.path()).expect("deploy succeeds");
 
     assert_eq!(
         path,
@@ -1850,7 +1866,7 @@ fn deploy_output_style_writes_file() {
             .join("trusty-mpm.md")
     );
     let written = std::fs::read_to_string(&path).expect("style file readable");
-    assert_eq!(written, crate::core::bundle::OUTPUT_STYLE);
+    assert_eq!(written, rc().required("output-styles/trusty-mpm.md"));
     assert!(written.contains("name: trusty-mpm"));
 }
 
@@ -1859,13 +1875,13 @@ fn deploy_output_style_overwrites() {
     // Why: framework upgrades to the style must propagate on the next
     // launch, so deployment always overwrites any existing file.
     let home = tempdir().unwrap();
-    let first = deploy_output_style(home.path()).expect("first deploy succeeds");
+    let first = deploy_output_style(rc(), home.path()).expect("first deploy succeeds");
     std::fs::write(&first, "stale operator content").unwrap();
 
-    let second = deploy_output_style(home.path()).expect("second deploy succeeds");
+    let second = deploy_output_style(rc(), home.path()).expect("second deploy succeeds");
     assert_eq!(first, second);
     let written = std::fs::read_to_string(&second).unwrap();
-    assert_eq!(written, crate::core::bundle::OUTPUT_STYLE);
+    assert_eq!(written, rc().required("output-styles/trusty-mpm.md"));
 }
 
 #[test]
@@ -1874,14 +1890,14 @@ fn deploy_output_style_writes_all_styles() {
     // ALL of them must land in ~/.claude/output-styles/ for the selection to
     // resolve in Claude Code.
     let home = tempdir().unwrap();
-    deploy_output_style(home.path()).expect("deploy succeeds");
+    deploy_output_style(rc(), home.path()).expect("deploy succeeds");
 
     let dir = home.path().join(".claude").join("output-styles");
     for style in crate::core::bundle::OUTPUT_STYLES {
         let path = dir.join(style.file_name);
         assert!(path.exists(), "{} must be deployed", style.file_name);
         let written = std::fs::read_to_string(&path).expect("style file readable");
-        assert_eq!(written, style.content, "{} content matches", style.id);
+        assert_eq!(written, style.content(rc()), "{} content matches", style.id);
     }
     // Sanity: exactly the four bundled styles are written (#8453 added the
     // supervisor style).

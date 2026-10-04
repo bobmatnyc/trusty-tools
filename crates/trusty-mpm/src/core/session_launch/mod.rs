@@ -77,7 +77,7 @@ mod sync_assets;
 // unchanged.
 mod system_prompt;
 pub use system_prompt::{
-    CliLaunch, build_system_prompt_for, build_system_prompt_for_profile,
+    CliLaunch, build_system_prompt, build_system_prompt_for, build_system_prompt_for_profile,
     build_system_prompt_for_with_roster, build_system_prompt_for_with_style,
     build_system_prompt_for_with_style_and_native, cli_launch,
 };
@@ -517,6 +517,15 @@ pub enum PrepError {
         /// The underlying IO error.
         source: std::io::Error,
     },
+    /// No instructional content resolved, so the PM instructions cannot be
+    /// composed at all (#9012). Fatal for the same reason
+    /// [`Self::Instructions`] is; the message names `tm content install`.
+    /// Test: `content_failure_is_fatal`.
+    #[error("cannot compose the PM instructions: {source}")]
+    Content {
+        /// The content resolution or load failure.
+        source: crate::core::content_source::AgentContentError,
+    },
 }
 
 impl PrepError {
@@ -531,7 +540,8 @@ impl PrepError {
     /// Test: `instruction_failure_is_fatal`,
     /// `deploy_and_io_failures_stay_non_fatal`.
     pub fn is_fatal(&self) -> bool {
-        matches!(self, Self::Instructions { .. })
+        // #9012: no content means no instructions — the same condition.
+        matches!(self, Self::Instructions { .. } | Self::Content { .. })
     }
 }
 
@@ -626,6 +636,11 @@ pub(super) fn prepare_session_inner(
     // #8453: resolved ONCE per launch; the composer, the style, the model and
     // the settings below all take this value, and it is returned for the stamp.
     let profile = crate::core::session_profile::resolve(project_dir, &config);
+    // #9012: the PM sections, output styles and skills are runtime content,
+    // loaded ONCE per launch. With none the launch is refused (fatal), naming
+    // `tm content install`, before anything is provisioned.
+    let content = crate::core::content_source::framework_content_for(project_dir)
+        .map_err(|source| PrepError::Content { source })?;
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
@@ -794,7 +809,7 @@ pub(super) fn prepare_session_inner(
     // `skill_source::ensure_skill_source_fresh`). Non-fatal: a refresh
     // failure falls back to whatever is already on disk, matching pre-#1917
     // behaviour rather than blocking the session.
-    if let Err(err) = crate::core::skill_source::ensure_skill_source_fresh(fw) {
+    if let Err(err) = crate::core::skill_source::ensure_skill_source_fresh(fw, &content) {
         tracing::warn!("failed to refresh skill source directory: {err}");
     }
 
@@ -879,20 +894,23 @@ pub(super) fn prepare_session_inner(
     // is built so the prompt seam sees it in place; a composite that cannot be
     // written names the default style, which carries its own floor.
     let mut style_notice = selected_style.warning;
-    let active_style_id =
-        match crate::core::output_style::native_style_id(project_dir, &selected_style.style) {
-            Ok(id) => id,
-            Err(err) => {
-                let warning = format!(
-                    "output style '{}': cannot write its composite with the trusty-mpm floor \
+    let active_style_id = match crate::core::output_style::native_style_id(
+        &content,
+        project_dir,
+        &selected_style.style,
+    ) {
+        Ok(id) => id,
+        Err(err) => {
+            let warning = format!(
+                "output style '{}': cannot write its composite with the trusty-mpm floor \
                      ({err}); using `{OUTPUT_STYLE}` for native launches",
-                    selected_style.style.id()
-                );
-                tracing::warn!("{warning}");
-                style_notice.get_or_insert(warning);
-                OUTPUT_STYLE.to_string()
-            }
-        };
+                selected_style.style.id()
+            );
+            tracing::warn!("{warning}");
+            style_notice.get_or_insert(warning);
+            OUTPUT_STYLE.to_string()
+        }
+    };
 
     // Set the Claude Code output style so the launched session's status bar
     // reads `style:<active_style_id>`. A failure here is non-fatal: the session
@@ -921,6 +939,7 @@ pub(super) fn prepare_session_inner(
     // through the single seam keeps them identical regardless of Claude version
     // (issue #381 / the #382 concern).
     let resolved_prompt = build_system_prompt_for_profile(
+        &content,
         project_dir,
         effective_style.as_deref(),
         native_supported,
@@ -1115,7 +1134,7 @@ pub(super) fn prepare_session_inner(
     // `$HOME/.claude/output-styles/`. Refreshing the real home tier is owned by
     // `tm install` and `tm catalog apply`, which still resolve
     // `FrameworkPaths::default()`.
-    let output_style = match deploy_output_style(&fw.claude_home_dir()) {
+    let output_style = match deploy_output_style(&content, &fw.claude_home_dir()) {
         Ok(path) => Some(path),
         Err(err) => {
             tracing::warn!("failed to deploy trusty-mpm output style file: {err}");
@@ -1133,7 +1152,7 @@ pub(super) fn prepare_session_inner(
     // PM delegation persona). Non-fatal: a failure here only leaves that one
     // carrier degraded — the home-tier deploy and the standalone `tm run`
     // driver (which passes no `--setting-sources` flag) are unaffected.
-    if let Err(err) = deploy_output_style(project_dir) {
+    if let Err(err) = deploy_output_style(&content, project_dir) {
         tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
     }
 
@@ -1227,6 +1246,7 @@ pub(super) fn prepare_session_inner(
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
     // #7514: record the fold against THIS preparation's framework root.
     crate::core::instruction_pipeline::write_compiled_prompt_recording_in(
+        &content,
         &fw.root,
         &compiled,
         &resolved_prompt,
@@ -1256,34 +1276,4 @@ pub(super) fn prepare_session_inner(
         memory_reachable,
         profile,
     })
-}
-
-/// Build the project-agnostic `--append-system-prompt` text (no overrides).
-///
-/// Why: every `claude` session launched by trusty-mpm must be a configured PM
-/// instance. trusty-mpm owns its PM instructions: they are assembled IN MEMORY
-/// from the compile-time bundled sections and passed to
-/// `claude --append-system-prompt-file`. Nothing is read back from an installed
-/// `INSTRUCTIONS.md` to produce them (#4752 retired that path — see the note
-/// below). This variant is kept for callers that do not know the project
-/// directory (e.g. tests); prefer [`build_system_prompt_for`] at launch sites so
-/// project-level overrides apply.
-/// What: returns [`crate::core::instruction_pipeline::assemble_system_prompt`],
-/// trimmed. `Option` is retained for API compatibility and is always `Some`.
-///
-/// #4752: this used to read `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md`
-/// and regenerate it on disk when missing. That file is retired — nothing writes
-/// it, `tm install` deletes a stale copy, and the compiled prompt is now
-/// per-project — so the round-trip could only ever have returned either bundled
-/// content it already had in memory, or a stale leftover. Composing directly
-/// removes the last dependency on the retired path and the home directory.
-/// Test: `build_system_prompt_includes_trusty_block`.
-pub fn build_system_prompt() -> Option<String> {
-    let composed = crate::core::instruction_pipeline::assemble_system_prompt();
-    let trimmed = composed.trim_end();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }

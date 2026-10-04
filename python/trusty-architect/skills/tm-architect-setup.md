@@ -2,7 +2,8 @@
 name: tm-architect-setup
 description: Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect.
 user-invocable: true
-version: "0.1.0"
+metadata:
+  version: "0.1.0"
 category: pm-reference
 tags: [architect, fleet, setup, pm-recommended]
 effort: medium

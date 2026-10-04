@@ -7,11 +7,12 @@
 //! meaningless. The skip arm is proved with a reader that panics if called, so
 //! "no git command runs against `origin/main`" is an assertion rather than a
 //! claim.
-//! What: real temp git repos seeded from the live [`bundle::ALL`] table — no
+//! What: real temp git repos seeded from the checkout's content (#9012) — no
 //! mocked git — plus two fold-level cases driven through [`super::report`].
 //! Test: this file IS the test module.
 
 use super::*;
+use crate::core::content_source::test_support::repo_content;
 
 /// The identity gate's own input, built by hand.
 fn identity(owner: &str, repo: &str) -> GithubPath {
@@ -31,7 +32,7 @@ fn git(dir: &Path, args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// A temp repo whose `crates/trusty-mpm/src/assets/skills` tree is committed at
+/// A temp repo whose `content/skills` tree is committed at
 /// `origin/main` and whose `origin` remote is `bobmatnyc/trusty-tools`.
 ///
 /// `mutate` gets the chance to edit the tree before it is committed, so one
@@ -58,16 +59,13 @@ fn seeded_repo(mutate: impl Fn(&Path)) -> Option<(tempfile::TempDir, std::path::
     );
 
     let assets = path.join(ASSET_DIR);
-    for artifact in bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-    {
-        let key = artifact.rel_path.trim_start_matches("skills/");
+    for (rel_path, contents) in repo_content().skills() {
+        let key = rel_path.trim_start_matches("skills/");
         let dest = assets.join(key);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).expect("create asset parent");
         }
-        std::fs::write(&dest, artifact.contents).expect("write asset");
+        std::fs::write(&dest, contents).expect("write asset");
     }
     mutate(&path);
 
@@ -129,7 +127,7 @@ fn lag_warns_and_names_the_one_differing_asset() {
         check.message
     );
     assert!(
-        check.message.contains("cargo install --path"),
+        check.message.contains("git merge --ff-only origin/main"),
         "the warning must carry the remedy; got: {}",
         check.message
     );
@@ -207,7 +205,10 @@ fn lag_skips_without_any_remote() {
 fn lag_is_unknown_when_the_source_is_unreadable() {
     let tt = identity(REPO_OWNER, REPO_NAME);
     let check = report(Some(&tt), &|| {
-        RepoAssets::Unreadable("the fixture refused the read".to_string())
+        (
+            RepoAssets::Unreadable("the fixture refused the read".to_string()),
+            None,
+        )
     });
     assert_eq!(check.status, CheckStatus::Unknown, "{}", check.message);
     assert_ne!(check.status, CheckStatus::Ok, "{}", check.message);
@@ -269,7 +270,7 @@ fn lag_reads_the_committed_tree() {
         RepoAssets::Read { hashes, .. } => {
             assert_eq!(
                 hashes.len(),
-                bundled_key_stamps().len(),
+                bundled_key_stamps(&repo_content()).len(),
                 "every seeded asset must come back"
             );
             assert!(
@@ -287,23 +288,15 @@ fn lag_reads_the_committed_tree() {
 /// subset of the assets it claims to audit.
 #[test]
 fn bundled_key_stamps_covers_every_skill_entry() {
-    let expected = bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-        .count();
-    let stamps = bundled_key_stamps();
+    let content = repo_content();
+    let expected = content.skills().count();
+    let stamps = bundled_key_stamps(&content);
     assert_eq!(stamps.len(), expected);
-    assert!(expected > 0, "the bundle must embed skills at all");
+    assert!(expected > 0, "the content must carry skills at all");
     // The construction is `skill_bundle_stamp`'s own, per entry.
-    let sample = bundle::ALL
-        .iter()
-        .find(|a| a.rel_path.starts_with("skills/"))
-        .expect("at least one skill entry");
-    let key = sample.rel_path.trim_start_matches("skills/");
-    assert_eq!(
-        stamps.get(key),
-        Some(&asset_stamp(sample.rel_path, sample.contents))
-    );
+    let (rel_path, contents) = content.skills().next().expect("at least one skill entry");
+    let key = rel_path.trim_start_matches("skills/");
+    assert_eq!(stamps.get(key), Some(&asset_stamp(rel_path, contents)));
 }
 
 /// The build id renders as an instant an operator can compare against a commit.

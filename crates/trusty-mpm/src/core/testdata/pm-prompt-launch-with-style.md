@@ -55,7 +55,7 @@ identity:
    (docs/specs/trusty-mpm-self-awareness.md §5).
 2. **Then the canonical doc** —
    `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md`, or in the trusty-tools
-   repo `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`.
+   repo `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md`.
 3. **Never shell-probe for identity.** `pip3 show`, `pip show`,
    `which claude-mpm`, grepping `site-packages`/`dist-info` are FORBIDDEN — they
    interrogate the Python ecosystem and cannot see this Rust binary.

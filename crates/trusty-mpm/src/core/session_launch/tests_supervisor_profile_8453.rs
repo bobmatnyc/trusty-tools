@@ -9,6 +9,7 @@
 
 use super::tests::EnvVarGuard;
 use super::*;
+use crate::core::content_source::test_support::rc;
 use crate::core::session_profile::{SUPERVISOR_MODEL, SessionProfile};
 use tempfile::tempdir;
 
@@ -77,7 +78,7 @@ fn a_supervisor_launch_gets_the_supervisor_prompt_style_and_model() {
     );
     assert_eq!(settings["model"], SUPERVISOR_MODEL);
     assert!(
-        stash.contains(&crate::core::session_profile::supervisor_prompt()),
+        stash.contains(&crate::core::session_profile::supervisor_prompt(rc())),
         "{stash}"
     );
     assert!(!stash.contains("STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY"));

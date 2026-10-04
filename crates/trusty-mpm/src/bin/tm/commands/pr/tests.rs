@@ -359,7 +359,7 @@ fn body_headings_are_named_verbatim_in_the_assets() {
             "version-control.md is missing {heading:?}"
         );
         assert!(
-            trusty_mpm::core::bundle::TM_WORKFLOW.contains(&heading),
+            crate::commands::install::test_skill("skills/tm-workflow.md").contains(&heading),
             "tm-workflow.md is missing {heading:?}"
         );
     }

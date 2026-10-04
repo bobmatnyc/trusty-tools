@@ -7,6 +7,7 @@
 //! `claude_md_sections.rs` already uses.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use std::fs;
 use tempfile::TempDir;
 
@@ -44,7 +45,7 @@ fn bundled_delegation_appends_deployed_roster() {
     // in reality but appear NOWHERE in any bundled asset, so a section that
     // accounts for exactly those two can only come from the live scan.
     // Against the pre-fix code this assertion fails: `resolve_pm_prompt`
-    // returned the static `AGENT_DELEGATION.md` verbatim.
+    // returned the static `rc().required("sections/agent-delegation.md").md` verbatim.
     //
     // #4513 changed HOW the live scan reaches the prompt for these two. They
     // are deployed into `<project>/.claude/agents`, a tier Claude Code loads
@@ -55,7 +56,7 @@ fn bundled_delegation_appends_deployed_roster() {
     deploy_agent(tmp.path(), "ticketing");
     deploy_agent(tmp.path(), "memory-manager");
 
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(
         prompt.contains("## Delegation Authority"),
@@ -125,7 +126,7 @@ fn no_overrides_uses_bundled() {
     // No `.trusty-mpm/` dir at all → the bundled four sections are present
     // and BASE_PM is the last section.
     let tmp = TempDir::new().unwrap();
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# PM Workflow Configuration"));
@@ -153,7 +154,7 @@ fn a_retired_instructions_file_no_longer_reaches_the_prompt() {
         FILE_INSTRUCTIONS,
         "# Project Rules\n\nALWAYS_RUN_MAKE_CHECK\n",
     );
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(
         !prompt.contains("ALWAYS_RUN_MAKE_CHECK"),
@@ -175,7 +176,7 @@ fn a_retired_workflow_file_no_longer_replaces_the_workflow_section() {
         FILE_WORKFLOW,
         "# Custom Workflow\n\nTWO_PHASE_ONLY\n",
     );
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(!prompt.contains("TWO_PHASE_ONLY"));
     assert!(
@@ -196,7 +197,7 @@ fn a_retired_delegation_file_no_longer_suppresses_the_live_roster() {
         FILE_AGENT_DELEGATION,
         "# Custom Routing\n\nROUTE_ALL_TO_ENGINEER\n",
     );
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(!prompt.contains("ROUTE_ALL_TO_ENGINEER"));
     assert!(prompt.contains("# Agent Delegation Routing"));
@@ -222,7 +223,7 @@ fn a_retired_memory_file_no_longer_slots_a_memory_block() {
         FILE_MEMORY,
         "Recall from the `team` palace before any task.\n",
     );
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(!prompt.contains(MEMORY_OVERRIDE_HEADING));
     assert!(!prompt.contains("Recall from the `team` palace"));
@@ -240,7 +241,7 @@ fn a_retired_deployed_file_no_longer_replaces_the_body() {
         FILE_PM_DEPLOYED,
         "# Wholly Custom PM\n\nDO_EXACTLY_THIS\n",
     );
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
 
     assert!(!prompt.contains("DO_EXACTLY_THIS"));
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
@@ -262,9 +263,10 @@ fn every_retired_file_present_at_once_changes_nothing() {
     let without = TempDir::new().unwrap();
 
     let (with_prompt, _) =
-        resolve_pm_prompt_with_roster(with.path(), || Some("## Delegation Authority".into()));
-    let (without_prompt, _) =
-        resolve_pm_prompt_with_roster(without.path(), || Some("## Delegation Authority".into()));
+        resolve_pm_prompt_with_roster(rc(), with.path(), || Some("## Delegation Authority".into()));
+    let (without_prompt, _) = resolve_pm_prompt_with_roster(rc(), without.path(), || {
+        Some("## Delegation Authority".into())
+    });
 
     assert_eq!(
         with_prompt, without_prompt,
@@ -289,7 +291,7 @@ fn a_named_memory_override_is_slotted_on_the_roster_absent_path() {
     )
     .unwrap();
 
-    let (prompt, source) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (prompt, source) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
     assert_eq!(source, PromptSource::Legacy, "no roster -> string assembly");
 
     assert!(prompt.contains(MEMORY_OVERRIDE_HEADING));
@@ -307,7 +309,7 @@ fn a_named_memory_override_is_slotted_on_the_roster_absent_path() {
 #[test]
 fn unaddressable_sections_are_reported_unapplied_on_the_roster_absent_path() {
     // COVERAGE RESTORED (#4286). The string assembly can address only
-    // WORKFLOW, MEMORY and AGENT-DELEGATION. Overrides for any other section
+    // rc().required("sections/workflow.md"), MEMORY and AGENT-DELEGATION. Overrides for any other section
     // are handed to `warn_unapplied` rather than dropped in silence — that
     // call is still live, and its test went with the #4399 cluster.
     //
@@ -325,7 +327,7 @@ fn unaddressable_sections_are_reported_unapplied_on_the_roster_absent_path() {
     )
     .unwrap();
 
-    let (prompt, source) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (prompt, source) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
     assert_eq!(source, PromptSource::Legacy);
 
     assert!(
@@ -402,7 +404,7 @@ fn missing_override_dir_uses_bundled() {
     // A `.trusty-mpm/` directory that does not exist is not an error.
     let tmp = TempDir::new().unwrap();
     assert!(!tmp.path().join(OVERRIDE_DIR_NAME).exists());
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
@@ -419,7 +421,7 @@ fn a_directory_in_a_retired_files_place_is_not_detected_and_not_fatal() {
     fs::create_dir(dir.join(FILE_WORKFLOW)).unwrap();
 
     assert!(detect_legacy_overrides(tmp.path()).is_empty());
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
@@ -435,7 +437,7 @@ fn an_empty_retired_file_is_still_detected() {
     write_override(tmp.path(), FILE_WORKFLOW, "   \n\t\n");
 
     assert_eq!(detect_legacy_overrides(tmp.path()).len(), 1);
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains("# PM Workflow Configuration"));
     assert!(prompt.contains("## Prohibitions (CANONICAL"));
 }
@@ -445,7 +447,7 @@ fn separators_are_consistent() {
     // The resolved prompt uses the same `---` rule the bundled assembler
     // uses, so the two never visually diverge.
     let tmp = TempDir::new().unwrap();
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains(SECTION_SEPARATOR));
 }
 
@@ -458,7 +460,7 @@ fn stack_profile_present_when_detected() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
 
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains(STACK_PROFILE_HEADING));
     assert!(prompt.contains("`rust-engineer`"));
 
@@ -475,7 +477,7 @@ fn stack_profile_neutral_when_undetected() {
     // is told NOT to assume any stack rather than inheriting a default.
     use crate::core::stack_profile::STACK_PROFILE_HEADING;
     let tmp = TempDir::new().unwrap();
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     assert!(prompt.contains(STACK_PROFILE_HEADING));
     assert!(prompt.contains("Do NOT assume any stack"));
 }
@@ -499,7 +501,7 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
 
     // No overrides at all: conventions present via the bundled floor.
     let tmp = TempDir::new().unwrap();
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     for marker in MARKERS {
         assert!(
             prompt.contains(marker),
@@ -523,7 +525,7 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
     )
     .unwrap();
     let (prompt2, _) =
-        resolve_pm_prompt_with_roster(tmp2.path(), || Some("## Delegation Authority".into()));
+        resolve_pm_prompt_with_roster(rc(), tmp2.path(), || Some("## Delegation Authority".into()));
     for marker in MARKERS {
         assert!(
             prompt2.contains(marker),
@@ -541,7 +543,7 @@ fn framework_guaranteed_conventions_survive_every_override_combination() {
     for name in LEGACY_OVERRIDE_FILES {
         write_override(tmp3.path(), name, "RETIRED_CONTENT\n");
     }
-    let prompt3 = resolve_pm_prompt(tmp3.path());
+    let prompt3 = resolve_pm_prompt(rc(), tmp3.path());
     for marker in MARKERS {
         assert!(
             prompt3.contains(marker),
@@ -592,7 +594,7 @@ fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
     ];
 
     let tmp = TempDir::new().unwrap();
-    let prompt = resolve_pm_prompt(tmp.path());
+    let prompt = resolve_pm_prompt(rc(), tmp.path());
     for marker in RULE {
         assert!(
             prompt.contains(marker),
@@ -614,7 +616,7 @@ fn one_surface_rule_lives_in_core_and_survives_an_override_attempt() {
     )
     .unwrap();
     let (prompt2, _) =
-        resolve_pm_prompt_with_roster(tmp2.path(), || Some("## Delegation Authority".into()));
+        resolve_pm_prompt_with_roster(rc(), tmp2.path(), || Some("## Delegation Authority".into()));
 
     assert!(
         prompt2.contains("CUSTOM_WORKFLOW"),
@@ -655,8 +657,9 @@ fn resolved_log_lines(project: &Path, times: usize) -> Vec<String> {
     );
     tracing::subscriber::with_default(subscriber, || {
         for _ in 0..times {
-            let _ =
-                resolve_pm_prompt_with_roster(project, || Some("## Delegation Authority".into()));
+            let _ = resolve_pm_prompt_with_roster(rc(), project, || {
+                Some("## Delegation Authority".into())
+            });
         }
     });
     buffer.tail(64)

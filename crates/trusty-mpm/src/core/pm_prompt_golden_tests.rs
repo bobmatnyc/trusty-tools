@@ -33,6 +33,7 @@
 //! Regenerate with `UPDATE_GOLDEN=1 cargo test -p trusty-mpm golden`. Review the
 //! resulting `git diff` before committing it; that diff IS the deliverable.
 
+use crate::core::content_source::test_support::rc;
 use std::path::{Path, PathBuf};
 
 use crate::core::bundled_pm_package::compose_bundled_fallback_with_overrides;
@@ -114,9 +115,10 @@ fn assert_golden(name: &str, actual: &str) {
 fn golden_bundled_fallback_prompt() {
     // Configuration 1: what every project with no `.trusty-mpm/` override
     // receives, composed through `InstructionPackage`.
-    let composed = compose_bundled_fallback_with_overrides(FIXED_STACK, FIXED_ROSTER, None, &[])
-        .0
-        .expect("package composes");
+    let composed =
+        compose_bundled_fallback_with_overrides(rc(), FIXED_STACK, FIXED_ROSTER, None, &[])
+            .0
+            .expect("package composes");
     assert_golden("pm-prompt-bundled-fallback.md", &composed);
 }
 
@@ -134,7 +136,7 @@ fn golden_roster_absent_assembly_prompt() {
     // receives the same Core/Memory/Search/Workflow and floor text as everyone
     // else, rather than being frozen on a divergent copy.
     let tmp = TempDir::new().expect("tempdir");
-    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (prompt, _) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
     assert_golden("pm-prompt-roster-absent.md", &prompt);
 }
 
@@ -162,7 +164,8 @@ fn golden_claude_md_override_prompt() {
     )
     .expect("write CLAUDE.md");
 
-    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let (prompt, _) =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
     assert_golden("pm-prompt-claude-md-override.md", &prompt);
 }
 
@@ -174,8 +177,10 @@ fn golden_pm_launch_prompt_with_output_style() {
     // Code without native `outputStyle` support takes), so it pins the PM
     // instructions and the PM output style in one byte-exact comparison.
     let tmp = TempDir::new().expect("tempdir");
-    let (prompt, _) = resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+    let (prompt, _) =
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
     let styled = crate::core::output_style::apply_output_style_to_prompt_with_native(
+        rc(),
         tmp.path(),
         Some(crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID),
         prompt,
@@ -195,11 +200,15 @@ fn golden_supervisor_prompt() {
     )
     .expect("write config");
     let (prompt, _) = crate::core::instruction_overrides::resolve_pm_prompt_with_roster_for(
+        rc(),
         tmp.path(),
         crate::core::session_profile::SessionProfile::Supervisor,
         || Some(FIXED_ROSTER.to_string()),
     );
-    assert_eq!(prompt, crate::core::session_profile::supervisor_prompt());
+    assert_eq!(
+        prompt,
+        crate::core::session_profile::supervisor_prompt(rc())
+    );
     assert_golden("supervisor-prompt.md", &prompt);
 }
 
@@ -233,13 +242,14 @@ fn the_memory_section_claims_no_per_prompt_context_hook() {
     // Asserted over all three compositions because the two composers deliver
     // this section independently; one of them silently keeping the old claim is
     // exactly the split-brain the goldens above exist to catch.
-    let bundled = compose_bundled_fallback_with_overrides(FIXED_STACK, FIXED_ROSTER, None, &[])
-        .0
-        .expect("package composes");
+    let bundled =
+        compose_bundled_fallback_with_overrides(rc(), FIXED_STACK, FIXED_ROSTER, None, &[])
+            .0
+            .expect("package composes");
     let tmp = TempDir::new().expect("tempdir");
-    let (roster_absent, _) = resolve_pm_prompt_with_roster(tmp.path(), || None);
+    let (roster_absent, _) = resolve_pm_prompt_with_roster(rc(), tmp.path(), || None);
     let (with_roster, _) =
-        resolve_pm_prompt_with_roster(tmp.path(), || Some(FIXED_ROSTER.to_string()));
+        resolve_pm_prompt_with_roster(rc(), tmp.path(), || Some(FIXED_ROSTER.to_string()));
 
     for (label, prompt) in [
         ("bundled fallback", &bundled),

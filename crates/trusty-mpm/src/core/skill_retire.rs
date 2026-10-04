@@ -54,7 +54,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::core::agent_manifest::Result as ManifestResult;
-use crate::core::bundle;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deploy_tiers::skill_deploy_tiers;
 use crate::core::skill_drift::{deployed_path, key_stem};
@@ -98,20 +98,20 @@ pub struct RetiredSkill {
     pub reason: Option<String>,
 }
 
-/// Every skill stem this binary itself embeds.
+/// Every skill stem the loaded content carries (#9012).
 ///
-/// Why: the compiled-in table is the one source that cannot lag the binary
-/// running it — the same reasoning [`crate::core::skill_drift::skill_reference`]
+/// Why: the verified content source is the authority on which skills are
+/// bundled — the same reasoning [`crate::core::skill_drift::skill_reference`]
 /// gives for never trusting the `~/.trusty-mpm/framework/skills/` extraction
 /// cache as an authority.
-/// What: the first path segment of every `skills/…` entry in [`bundle::ALL`],
-/// with `.md` stripped — so both `skills/<stem>.md` and
+/// What: the first path segment of every `skills/…` file of `content`, with
+/// `.md` stripped — so both `skills/<stem>.md` and
 /// `skills/<stem>/references/<file>.md` yield `<stem>`.
 /// Test: `bundled_stems_covers_a_known_skill`.
-pub fn bundled_skill_stems() -> BTreeSet<String> {
-    bundle::ALL
-        .iter()
-        .filter_map(|a| a.rel_path.strip_prefix("skills/"))
+pub fn bundled_skill_stems(content: &FrameworkContent) -> BTreeSet<String> {
+    content
+        .skills()
+        .filter_map(|(rel, _)| rel.strip_prefix("skills/"))
         .filter_map(|rel| rel.split('/').next())
         .map(|first| first.strip_suffix(".md").unwrap_or(first).to_string())
         .collect()
@@ -133,8 +133,12 @@ pub fn bundled_skill_stems() -> BTreeSet<String> {
 /// would misread live skills as retired, so the caller must skip the sweep.
 /// Test: `live_stems_include_the_user_tier`,
 /// `live_stems_are_none_when_a_source_cannot_be_read`.
-pub fn live_skill_stems(paths: &FrameworkPaths, dest: &Path) -> Option<BTreeSet<String>> {
-    let mut live = bundled_skill_stems();
+pub fn live_skill_stems(
+    paths: &FrameworkPaths,
+    content: &FrameworkContent,
+    dest: &Path,
+) -> Option<BTreeSet<String>> {
+    let mut live = bundled_skill_stems(content);
     let catalog_skills = crate::content::catalog_root_for(&paths.root)
         .join("repo")
         .join(".claude")
@@ -396,9 +400,22 @@ pub fn retire_orphaned_skills(
     paths: &FrameworkPaths,
     project_dir: Option<&Path>,
 ) -> Vec<RetiredSkill> {
+    // #9012: without content the bundled half of the live set is unknown, and
+    // an incomplete live set would misread live skills as retired — skip.
+    let content = match project_dir {
+        Some(dir) => crate::core::content_source::framework_content_for(dir),
+        None => crate::core::content_source::framework_content(),
+    };
+    let content = match content {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!(%error, "no instructional content — skipping retirement sweep");
+            return Vec::new();
+        }
+    };
     let mut all = Vec::new();
     for tier in skill_deploy_tiers(paths, project_dir) {
-        let Some(live) = live_skill_stems(paths, &tier.dir) else {
+        let Some(live) = live_skill_stems(paths, &content, &tier.dir) else {
             continue;
         };
         match retire_orphans_in(tier.label, &tier.dir, &live) {

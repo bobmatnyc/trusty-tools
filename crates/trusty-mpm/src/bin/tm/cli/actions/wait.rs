@@ -11,7 +11,7 @@
 //! What: [`WaitFor`] selects the verb (`run`/`file`/`check`); [`WaitArgs`]
 //! carries the per-verb selector plus the budget knobs (`--timeout`,
 //! `--interval`, `--slice`).
-//! Test: `cli_parses_wait_*` in `tests_behavior_a.rs`; the semantics live in
+//! Test: `cli_parses_wait_*` in `tests_behavior_a_tests.rs`; the semantics live in
 //! `commands::wait`.
 
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ pub(crate) enum WaitFor {
 /// long a SINGLE invocation may block before returning "pending"; `--interval`
 /// is the poll spacing, floored per verb so a wait cannot become a blind-poll
 /// storm.
-/// Test: `cli_parses_wait_*` in `tests_behavior_a.rs`.
+/// Test: `cli_parses_wait_*` in `tests_behavior_a_tests.rs`.
 #[derive(Debug, clap::Args)]
 pub(crate) struct WaitArgs {
     /// Condition to poll: `run`, `file`, or `check`.

@@ -9,28 +9,30 @@ use super::ContentError;
 /// `scripts/package_content.sh` packages them.
 ///
 /// Why: ADR-0064 decision 5 (iii) — run from inside the checkout, `tm` reads
-/// the working tree, not the installed cache. The agents and harness docs
-/// live under `content/` (#9011); the rest stay in-crate until PHASE_1 (#8387)
-/// moves them. This table mirrors the packager's `LEGACY_SOURCES`, so a bundle path
-/// (`skills/tm/SKILL.md`) names the same file in both modes.
+/// the working tree, not the installed cache. Every destination lives under
+/// `content/` since PHASE_1 (#9011 agents and harness docs, #9012 skills,
+/// instructions, output styles and SM instructions). This table mirrors the
+/// packager's `LEGACY_SOURCES`, so a bundle path (`skills/tm/SKILL.md`) names
+/// the same file in both modes.
 /// What: every destination is one of the three content classes (`agents`,
 /// `skills`, `instructions`) or a subfolder of one; a nested row such as
 /// `instructions/output-styles` serves that subfolder from its own source, and
 /// wins over its parent class for paths under it (owner ruling 2026-10-01,
-/// #8378). PHASE_1 changes the right-hand column to `content/<destination>`.
+/// #8378). Each right-hand column is `content/<destination>`.
 /// Test: `dev_class_table_matches_the_packager`,
 /// `packaged_destinations_lie_under_the_three_content_classes`.
 pub const DEV_CLASS_SOURCES: &[(&str, &str)] = &[
     ("agents", "content/agents"),
-    ("skills", "crates/trusty-mpm/src/assets/skills"),
-    ("instructions", "crates/trusty-mpm/src/assets/instructions"),
+    // #9012: skills, instructions, output styles and SM instructions moved here.
+    ("skills", "content/skills"),
+    ("instructions", "content/instructions"),
     (
         "instructions/output-styles",
-        "crates/trusty-mpm/src/assets/output-styles",
+        "content/instructions/output-styles",
     ),
     (
         "instructions/sm_instructions",
-        "crates/trusty-mpm/src/assets/sm_instructions",
+        "content/instructions/sm_instructions",
     ),
     (
         "instructions/harness_understanding",

@@ -47,8 +47,7 @@ fn content_row_is_ok_for_a_verified_bundle() {
 }
 
 /// After ADR-0064 PHASE_1 nothing else serves, so nothing installed is WARN.
-/// #9011 dropped the embedded agents, so this is the live arm: it reads the
-/// real `BUILTIN_CONTENT_EMBEDDED` through `check_content`.
+/// #9012 dropped the last embedded content, so this is the only arm.
 #[test]
 fn content_row_warns_when_nothing_is_installed_after_phase_1() {
     let cache = tempfile::tempdir().unwrap();
@@ -71,4 +70,21 @@ fn content_row_fails_on_a_tampered_bundle() {
     let row = check_content(None, Some(cache.path()));
     assert_eq!(row.status, CheckStatus::Fail);
     assert!(row.message.contains("UNHEALTHY"), "{}", row.message);
+}
+
+/// #9012: a verified-or-serving source whose PM package this binary cannot
+/// parse is FAIL, naming the remedy, not OK.
+#[test]
+fn content_row_fails_when_the_pm_package_does_not_parse() {
+    use crate::core::framework_content::tests::{
+        fake_checkout_with_package, package_with_an_unknown_section,
+    };
+    let checkout = tempfile::tempdir().unwrap();
+    fake_checkout_with_package(checkout.path(), &package_with_an_unknown_section());
+    let project = checkout.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let row = check_content(Some(&project), Some(cache.path()));
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(row.message.contains("tm content update"), "{}", row.message);
 }

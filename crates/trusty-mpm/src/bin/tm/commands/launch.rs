@@ -320,7 +320,11 @@ pub(crate) async fn launch(
     let mpm_cfg = trusty_mpm::core::config::MpmConfig::load_effective_default(Some(&managed_path));
     // #8453: one profile resolution for the prompt, the stamp and the model; a
     // supervisor launches on the Opus tier alias.
-    let cli = trusty_mpm::core::session_launch::cli_launch(&managed_path, Some(&origin_url));
+    // #9012: the PM instructions are runtime content; none refuses here.
+    let content = trusty_mpm::core::content_source::framework_content_for(&managed_path)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let cli =
+        trusty_mpm::core::session_launch::cli_launch(&content, &managed_path, Some(&origin_url));
     let pm_model = trusty_mpm::core::session_profile::launch_model(cli.profile, &mpm_cfg);
 
     // Build the `--append-system-prompt` text from the managed clone (where the
@@ -588,7 +592,10 @@ pub(crate) async fn connect(
     //     `--append-system-prompt-file` (issue #2230). #8286: a write failure
     //     refuses the connect before the daemon registers anything.
     // #8453: the prompt and the launch stamp come from one profile resolution.
-    let cli = trusty_mpm::core::session_launch::cli_launch(&path, None);
+    // #9012: the PM instructions are runtime content; none refuses here.
+    let content = trusty_mpm::core::content_source::framework_content_for(&path)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let cli = trusty_mpm::core::session_launch::cli_launch(&content, &path, None);
     let prompt_path = connect_prompt_file(&std::env::temp_dir(), &cli.prompt, &path)?;
 
     // 2. Register the session with the daemon via the connect endpoint. When

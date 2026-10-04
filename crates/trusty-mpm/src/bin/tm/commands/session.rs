@@ -184,11 +184,15 @@ pub(crate) async fn session(
             // source of truth for what Claude received (issue #382).
             let (resolved_prompt, _output, _stash) = compose_session_instructions(&path)?;
             print!("{resolved_prompt}");
+            // #9012: the section report reads the same content the prompt did.
+            let content = trusty_mpm::core::content_source::framework_content_for(&path)
+                .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
             // #8533: per-section package / overridden / declined, checked
             // against the prompt just printed, then the style it launches with.
             eprint!(
                 "\n{}{}",
                 trusty_mpm::core::instruction_overrides::section_report_for(
+                    &content,
                     &path,
                     &resolved_prompt
                 ),

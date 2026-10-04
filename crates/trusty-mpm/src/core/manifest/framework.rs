@@ -47,6 +47,7 @@ use super::schema::{
     AgentCategories, AgentSet, ContentSource, GatedAgent, HarnessManifest, SkillCategories,
 };
 use crate::core::content_source::AgentRoster;
+use crate::core::framework_content::FrameworkContent;
 
 /// The nested walk's declared depth, re-exported beside [`StackDetection`].
 ///
@@ -301,20 +302,21 @@ fn gated_lists(categories: &AgentCategories) -> [(&'static str, &Vec<GatedAgent>
     ]
 }
 
-/// Every bundled skill stem the binary can actually deploy.
+/// Every skill stem `content` carries as a catalog entry (#9012).
 ///
 /// Why: the skill roster gets the same guarantee the agent roster does — a
-/// bundled skill nobody declared is a hard error, not a silent default.
-/// What: the top-level `skills/<stem>.md` entries of [`crate::core::bundle::ALL`].
-/// A nested `skills/<name>/references/*.md` is a skill's own reference material,
-/// not a catalog entry, and is excluded — the same predicate
-/// `tm generate capabilities` uses for its skill count.
+/// bundled skill nobody declared is a hard error in the test gate, not a silent
+/// default.
+/// What: the top-level `skills/<stem>.md` files of `content` (runtime content
+/// since #9012). A nested `skills/<name>/references/*.md` is a skill's own
+/// reference material, not a catalog entry, and is excluded — the same
+/// predicate `tm generate capabilities` uses for its skill count.
 /// Test: `bundled_skill_stems_excludes_reference_files`.
-pub fn bundled_skill_stems() -> BTreeSet<String> {
-    crate::core::bundle::ALL
-        .iter()
-        .filter_map(|artifact| {
-            let rest = artifact.rel_path.strip_prefix("skills/")?;
+pub fn bundled_skill_stems(content: &FrameworkContent) -> BTreeSet<String> {
+    content
+        .skills()
+        .filter_map(|(rel_path, _)| {
+            let rest = rel_path.strip_prefix("skills/")?;
             if rest.contains('/') {
                 return None;
             }
@@ -367,13 +369,44 @@ pub fn parse_framework_skills(
     Ok(skills)
 }
 
-/// The validated skill roster declared by the bundled framework manifest.
+/// The skill roster declared by the bundled framework manifest, as the runtime
+/// reads it.
 ///
-/// Why/What/Test: [`parse_framework_skills`] over [`FRAMEWORK_MANIFEST_TOML`]
-/// and the real [`bundled_skill_stems`] catalog. Test:
-/// `bundled_skill_roster_is_valid`.
+/// Why (#9012): skills are runtime content on their own release cadence, so a
+/// content release may carry a skill this binary's manifest does not name;
+/// ADR-0064 decision 6 forbids a hard gate on that, as #9011 ruled for agents.
+/// What: [`parse_framework_skills`] over [`FRAMEWORK_MANIFEST_TOML`] and the
+/// skills the manifest itself declares — its shape is checked, the content is
+/// not. [`framework_skill_categories_for`] is the strict partition check.
+/// Test: `bundled_skill_roster_is_valid`.
 pub fn framework_skill_categories() -> Result<SkillCategories, FrameworkManifestError> {
-    parse_framework_skills(FRAMEWORK_MANIFEST_TOML, &bundled_skill_stems())
+    parse_framework_skills(FRAMEWORK_MANIFEST_TOML, &declared_skill_stems()?)
+}
+
+/// Every skill stem the bundled framework manifest declares (#9012).
+///
+/// Why: "which skills does tm ship" must be answerable without content — the
+/// `legacy_sources` doctor row counts leftover copies even on a machine with
+/// nothing installed — and the compiled-in manifest is the binary's own list.
+/// What: the manifest's `[skill_categories] universal` stems.
+/// Test: `bundled_skill_roster_is_valid`.
+pub fn declared_skill_stems() -> Result<BTreeSet<String>, FrameworkManifestError> {
+    Ok(HarnessManifest::from_toml(FRAMEWORK_MANIFEST_TOML)
+        .map_err(|err| FrameworkManifestError::Malformed(err.to_string()))?
+        .skill_categories
+        .ok_or(FrameworkManifestError::MissingSkillCategories)?
+        .universal
+        .into_iter()
+        .collect())
+}
+
+/// [`framework_skill_categories`] validated against `content`'s skills: the
+/// strict partition check, for tests and tooling (#9012).
+/// Test: `bundled_skill_roster_is_valid`.
+pub fn framework_skill_categories_for(
+    content: &FrameworkContent,
+) -> Result<SkillCategories, FrameworkManifestError> {
+    parse_framework_skills(FRAMEWORK_MANIFEST_TOML, &bundled_skill_stems(content))
 }
 
 /// The categories declared by the bundled framework manifest, as the runtime

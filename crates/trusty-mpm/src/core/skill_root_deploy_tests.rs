@@ -69,7 +69,11 @@ fn assert_resolved(agents_dir: &Path, skills_root: &Path) {
 fn default_root_deploy_resolves_skill_paths_that_exist() {
     let base = tempfile::tempdir().unwrap();
     let fw = FrameworkPaths::under(base.path());
-    crate::core::skill_source::ensure_skill_source_fresh(&fw).unwrap();
+    crate::core::skill_source::ensure_skill_source_fresh(
+        &fw,
+        crate::core::content_source::test_support::rc(),
+    )
+    .unwrap();
     crate::core::skill_install_tiers::deploy_install_skill_tiers(&fw).unwrap();
 
     let out = crate::core::agent_source::autodeploy_agents_for(
@@ -97,7 +101,11 @@ fn managed_root_override_deploy_resolves_skill_paths_that_exist() {
     fw.agents = root.join("framework").join("agents");
     fw.skills = root.join("framework").join("skills");
     crate::core::agent_source::ensure_agent_source_fresh(&fw.agents).unwrap();
-    crate::core::skill_source::ensure_skill_source_fresh(&fw).unwrap();
+    crate::core::skill_source::ensure_skill_source_fresh(
+        &fw,
+        crate::core::content_source::test_support::rc(),
+    )
+    .unwrap();
 
     crate::core::standalone::global_config::ensure_global_config_dir_with_exe(
         &root,
@@ -116,7 +124,11 @@ fn managed_project_sync_resolves_skill_paths_that_exist() {
     std::fs::create_dir_all(&repo).unwrap();
     let fw = FrameworkPaths::for_managed_project(base.path().join(".trusty-mpm"), &repo);
     crate::core::agent_source::ensure_agent_source_fresh(&fw.agents).unwrap();
-    crate::core::skill_source::ensure_skill_source_fresh(&fw).unwrap();
+    crate::core::skill_source::ensure_skill_source_fresh(
+        &fw,
+        crate::core::content_source::test_support::rc(),
+    )
+    .unwrap();
     crate::core::skill_install_tiers::deploy_install_skill_tiers(&fw).unwrap();
 
     crate::core::session_launch::sync_session_assets(&fw, &repo).unwrap();

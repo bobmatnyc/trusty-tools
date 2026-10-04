@@ -14,11 +14,11 @@
 //! zero (or stale) skills at session-launch time — no error, no warning,
 //! nothing (#1917). Session preparation must not depend on a prior manual
 //! `tm install` having populated this directory correctly.
-//! What: [`skill_bundle_stamp`] fingerprints the compiled-in `skills/*` slice
-//! of [`bundle::ALL`] via sha256 — `bundle_all.rs` has no existing
-//! version/checksum concept, so this is the marker this module introduces.
-//! [`materialize_skill_artifacts`] writes every bundled skill file into
-//! `paths.skills`, pruning any `.md` file on disk the table no longer lists
+//! What: [`skill_bundle_stamp`] fingerprints the skills of the loaded content
+//! (#9012: runtime content, no longer the compiled-in `bundle::ALL` slice) via
+//! sha256 — the marker this module introduces.
+//! [`materialize_skill_artifacts`] writes every content skill file into
+//! `paths.skills`, pruning any `.md` file on disk the content no longer lists
 //! (renamed/removed skills). Since issue #2903 this includes multi-file
 //! skills' nested `<stem>/references/<file>.md` artifacts, materialized under
 //! a matching nested directory (not flattened) and pruned recursively via
@@ -43,8 +43,8 @@
 use std::collections::HashSet;
 
 use crate::core::agent_manifest::{atomic_write, checksum};
-use crate::core::bundle;
 use crate::core::error::Result;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::paths::FrameworkPaths;
 
 /// Marker file recording the last-materialized bundle stamp, written
@@ -52,29 +52,24 @@ use crate::core::paths::FrameworkPaths;
 ///
 /// #4873: `pub(crate)` so a test can pin a hand-seeded skill source as
 /// already-current and stop [`ensure_skill_source_fresh`] materializing the
-/// real compiled-in bundle over it.
+/// content's skills over it.
 pub(crate) const STAMP_FILE_NAME: &str = ".bundle-stamp";
 
-/// Compute a stable sha256 fingerprint over every `skills/*` entry in the
-/// compiled-in [`bundle::ALL`] table.
+/// Compute a stable sha256 fingerprint over every skill file of `content`.
 ///
-/// Why: this fingerprint is how [`ensure_skill_source_fresh`] detects "this
-/// binary embeds different skill content than what is on disk" without
+/// Why: this fingerprint is how [`ensure_skill_source_fresh`] detects "the
+/// installed content carries different skills than what is on disk" without
 /// depending on file mtimes, which a plain backup/restore can shuffle.
-/// What: concatenates `<rel_path>\0<contents>\n` for every table entry whose
-/// `rel_path` starts with `"skills/"`, in table order (stable — see
-/// `bundle_tests::bundle_table_is_complete`), and returns the sha256 hex
-/// digest via [`checksum`].
+/// What: concatenates `<bundle path>\0<contents>\n` for every skill of
+/// `content`, in bundle-path order (#9012: was the compiled-in table order),
+/// and returns the sha256 hex digest via [`checksum`].
 /// Test: `skill_bundle_stamp_is_stable_across_calls`.
-pub fn skill_bundle_stamp() -> String {
+pub fn skill_bundle_stamp(content: &FrameworkContent) -> String {
     let mut buf = String::new();
-    for artifact in bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-    {
-        buf.push_str(artifact.rel_path);
+    for (rel_path, contents) in content.skills() {
+        buf.push_str(rel_path);
         buf.push('\0');
-        buf.push_str(artifact.contents);
+        buf.push_str(contents);
         buf.push('\n');
     }
     checksum(&buf)
@@ -111,19 +106,17 @@ pub fn skill_bundle_stamp() -> String {
 /// Test: `materialize_skill_artifacts_writes_all_skills`,
 /// `materialize_skill_artifacts_prunes_files_not_in_table`,
 /// `materialize_skill_artifacts_does_not_shadow_guard_on_reference_filename`.
-pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>> {
+pub fn materialize_skill_artifacts(
+    paths: &FrameworkPaths,
+    content: &FrameworkContent,
+) -> Result<Vec<String>> {
     std::fs::create_dir_all(&paths.skills)?;
 
     let mut written = Vec::new();
     let mut keep: HashSet<String> = HashSet::new();
-    for artifact in bundle::ALL
-        .iter()
-        .filter(|a| a.rel_path.starts_with("skills/"))
-    {
-        let basename = artifact
-            .rel_path
-            .strip_prefix("skills/")
-            .unwrap_or(artifact.rel_path);
+    // #9012: the skills are runtime content.
+    for (rel_path, contents) in content.skills() {
+        let basename = rel_path.strip_prefix("skills/").unwrap_or(rel_path);
 
         // A multi-file skill's `references/*.md` siblings (issue #2903) embed
         // as nested rel_paths (`<stem>/references/<file>.md`); the mcp-shadow
@@ -161,7 +154,7 @@ pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        atomic_write(&dest, artifact.contents)?;
+        atomic_write(&dest, contents)?;
         keep.insert(basename.to_string());
         written.push(basename.to_string());
     }
@@ -220,8 +213,8 @@ fn prune_orphaned_skill_files(
     Ok(())
 }
 
-/// Ensure `paths.skills` reflects the binary's currently-embedded skill
-/// bundle, re-materializing it when missing or stale.
+/// Ensure `paths.skills` reflects the skills of `content`, re-materializing
+/// it when missing or stale.
 ///
 /// Why: this is the self-healing entry point session preparation calls
 /// before deploying skills (#1917) — it removes the dependency on a prior,
@@ -241,7 +234,10 @@ fn prune_orphaned_skill_files(
 /// `ensure_skill_source_fresh_is_noop_when_current`,
 /// `ensure_skill_source_fresh_prunes_renamed_files`,
 /// `ensure_skill_source_fresh_skips_submodule_source`.
-pub fn ensure_skill_source_fresh(paths: &FrameworkPaths) -> Result<bool> {
+pub fn ensure_skill_source_fresh(
+    paths: &FrameworkPaths,
+    content: &FrameworkContent,
+) -> Result<bool> {
     if paths.skill_source_dir() != paths.skills {
         return Ok(false);
     }
@@ -249,13 +245,13 @@ pub fn ensure_skill_source_fresh(paths: &FrameworkPaths) -> Result<bool> {
     crate::core::home_write_fence::check(&paths.skills);
 
     let stamp_path = paths.skills.join(STAMP_FILE_NAME);
-    let current = skill_bundle_stamp();
+    let current = skill_bundle_stamp(content);
     let on_disk = std::fs::read_to_string(&stamp_path).ok();
     if on_disk.as_deref() == Some(current.as_str()) {
         return Ok(false);
     }
 
-    materialize_skill_artifacts(paths)?;
+    materialize_skill_artifacts(paths, content)?;
     atomic_write(&stamp_path, &current)?;
     Ok(true)
 }
@@ -263,12 +259,16 @@ pub fn ensure_skill_source_fresh(paths: &FrameworkPaths) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::content_source::test_support::repo_content;
 
     #[test]
     fn skill_bundle_stamp_is_stable_across_calls() {
-        // The fingerprint is a pure function of the compiled-in table, so two
-        // calls in the same process must agree.
-        assert_eq!(skill_bundle_stamp(), skill_bundle_stamp());
+        // The fingerprint is a pure function of the content's skills, so two
+        // calls over the same content must agree.
+        assert_eq!(
+            skill_bundle_stamp(&repo_content()),
+            skill_bundle_stamp(&repo_content())
+        );
     }
 
     #[test]
@@ -276,21 +276,17 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
 
-        let written = materialize_skill_artifacts(&paths).unwrap();
-        let expected: Vec<&str> = bundle::ALL
-            .iter()
-            .filter(|a| a.rel_path.starts_with("skills/"))
-            .map(|a| a.rel_path.strip_prefix("skills/").unwrap())
+        let repo = repo_content();
+        let written = materialize_skill_artifacts(&paths, &repo).unwrap();
+        let expected: Vec<(&str, &str)> = repo
+            .skills()
+            .map(|(rel, body)| (rel.strip_prefix("skills/").unwrap(), body))
             .collect();
         assert_eq!(written.len(), expected.len());
-        for name in expected {
+        for (name, body) in expected {
             let content = std::fs::read_to_string(paths.skills.join(name))
                 .unwrap_or_else(|e| panic!("missing {name}: {e}"));
-            let artifact = bundle::ALL
-                .iter()
-                .find(|a| a.rel_path == format!("skills/{name}"))
-                .unwrap();
-            assert_eq!(content, artifact.contents);
+            assert_eq!(content, body);
         }
     }
 
@@ -303,7 +299,7 @@ mod tests {
         // longer lists (e.g. an old `mpm-*.md` under the framework source).
         std::fs::write(paths.skills.join("mpm-old-skill.md"), "stale\n").unwrap();
 
-        materialize_skill_artifacts(&paths).unwrap();
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
 
         assert!(!paths.skills.join("mpm-old-skill.md").exists());
         assert!(paths.skills.join("tm-doctor.md").exists());
@@ -319,7 +315,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
 
-        materialize_skill_artifacts(&paths).unwrap();
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
 
         let workflow = paths
             .skills
@@ -332,7 +328,9 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&workflow).unwrap(),
-            crate::core::bundle::SYSTEMATIC_DEBUGGING_WORKFLOW
+            repo_content()
+                .skill("skills/systematic-debugging/references/workflow.md")
+                .unwrap()
         );
     }
 
@@ -351,7 +349,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
 
-        materialize_skill_artifacts(&paths).unwrap();
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
 
         let mcp_tools_ref = paths
             .skills
@@ -366,7 +364,9 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&mcp_tools_ref).unwrap(),
-            crate::core::bundle::TM_CAPABILITIES_MCP_TOOLS
+            repo_content()
+                .skill("skills/tm-capabilities/references/mcp-tools.md")
+                .unwrap()
         );
     }
 
@@ -382,7 +382,7 @@ mod tests {
         std::fs::create_dir_all(&stale_refs).unwrap();
         std::fs::write(stale_refs.join("old.md"), "stale\n").unwrap();
 
-        materialize_skill_artifacts(&paths).unwrap();
+        materialize_skill_artifacts(&paths, &repo_content()).unwrap();
 
         assert!(
             !paths.skills.join("removed-skill").exists(),
@@ -396,7 +396,7 @@ mod tests {
         let paths = FrameworkPaths::under(tmp.path());
         assert!(!paths.skills.exists());
 
-        let refreshed = ensure_skill_source_fresh(&paths).unwrap();
+        let refreshed = ensure_skill_source_fresh(&paths, &repo_content()).unwrap();
 
         assert!(refreshed, "a missing source dir must trigger a refresh");
         assert!(paths.skills.join("tm-doctor.md").exists());
@@ -407,12 +407,12 @@ mod tests {
     fn ensure_skill_source_fresh_is_noop_when_current() {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = FrameworkPaths::under(tmp.path());
-        assert!(ensure_skill_source_fresh(&paths).unwrap());
+        assert!(ensure_skill_source_fresh(&paths, &repo_content()).unwrap());
 
         let marker = paths.skills.join("tm-doctor.md");
         let before = std::fs::metadata(&marker).unwrap().modified().unwrap();
 
-        let refreshed = ensure_skill_source_fresh(&paths).unwrap();
+        let refreshed = ensure_skill_source_fresh(&paths, &repo_content()).unwrap();
 
         assert!(!refreshed, "an already-current source dir must be a no-op");
         let after = std::fs::metadata(&marker).unwrap().modified().unwrap();
@@ -430,7 +430,7 @@ mod tests {
         std::fs::write(paths.skills.join("mpm-old-skill.md"), "stale\n").unwrap();
         std::fs::write(paths.skills.join(STAMP_FILE_NAME), "stale-stamp").unwrap();
 
-        let refreshed = ensure_skill_source_fresh(&paths).unwrap();
+        let refreshed = ensure_skill_source_fresh(&paths, &repo_content()).unwrap();
 
         assert!(refreshed, "a stale stamp must trigger a refresh");
         assert!(!paths.skills.join("mpm-old-skill.md").exists());
@@ -452,7 +452,7 @@ mod tests {
         paths.trusty_mpm_root = Some(submodule_root.path().to_path_buf());
         assert_eq!(paths.skill_source_dir(), submodule_skills);
 
-        let refreshed = ensure_skill_source_fresh(&paths).unwrap();
+        let refreshed = ensure_skill_source_fresh(&paths, &repo_content()).unwrap();
 
         assert!(!refreshed);
         assert!(

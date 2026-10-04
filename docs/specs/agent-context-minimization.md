@@ -335,7 +335,7 @@ tools: Read, Grep, mcp__trusty-memory
 
 **Are `tm-*` skills needed by agents at all?** No — they are PM-only by
 construction. Every `tm-*` skill under
-`crates/trusty-mpm/src/assets/skills/tm-*.md` documents PM-side orchestration
+`content/skills/tm-*.md` documents PM-side orchestration
 (delegation matrices, circuit-breaker enforcement, session pause/resume,
 ticketing *authority*, workflow *ownership*) — none is referenced by any
 agent asset's `skills:` field (`git grep -n "^skills:.*tm-" --

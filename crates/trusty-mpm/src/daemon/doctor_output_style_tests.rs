@@ -8,6 +8,7 @@
 //! Test: this module IS the test suite for `super`.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 
 /// Write `<dir>/.claude/settings.json` with the given raw JSON text.
 fn write_settings(dir: &Path, json: &str) {
@@ -29,7 +30,11 @@ fn deploy_default_style(home: &Path) {
     let styles_dir = home.join(".claude").join("output-styles");
     std::fs::create_dir_all(&styles_dir).unwrap();
     let default = OUTPUT_STYLES[0];
-    std::fs::write(styles_dir.join(default.file_name), default.content).unwrap();
+    std::fs::write(
+        styles_dir.join(default.file_name),
+        default.content(crate::core::content_source::test_support::rc()),
+    )
+    .unwrap();
 }
 
 /// A `FrameworkPaths` rooted under `home`, so the managed-config tier the
@@ -45,7 +50,7 @@ fn deploy_all_styles(home: &Path) {
     let styles_dir = home.join(".claude").join("output-styles");
     std::fs::create_dir_all(&styles_dir).unwrap();
     for style in OUTPUT_STYLES {
-        std::fs::write(styles_dir.join(style.file_name), style.content).unwrap();
+        std::fs::write(styles_dir.join(style.file_name), style.content(rc())).unwrap();
     }
 }
 
@@ -474,7 +479,7 @@ fn staleness_warns_on_managed_config_drift() {
     std::fs::create_dir_all(&managed_styles).unwrap();
     let first = &OUTPUT_STYLES[0];
     for style in OUTPUT_STYLES {
-        std::fs::write(managed_styles.join(style.file_name), style.content).unwrap();
+        std::fs::write(managed_styles.join(style.file_name), style.content(rc())).unwrap();
     }
     std::fs::write(
         managed_styles.join(first.file_name),

@@ -158,7 +158,7 @@ mod tests {
     // every declared skill resolves, the resident cost stays bounded, and no
     // foundation layer silently adds to a leaf agent's list.
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use trusty_agents_common::agents::builder::compose_agent;
     use trusty_agents_common::agents::metadata::agent_metadata_from_str;
 
@@ -167,7 +167,8 @@ mod tests {
     }
 
     fn skills_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/skills")
+        // #9012: the skills are the checkout's content.
+        crate::core::content_source::test_support::repo_root().join("content/skills")
     }
 
     /// Every bundled non-foundation agent stem, sorted.

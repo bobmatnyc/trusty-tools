@@ -62,7 +62,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Bumped only when the bundle layout or manifest keys change incompatibly.
 SCHEMA_MAJOR=1
 
-# PR-D (#8387): set to "content" once the tree lives at content/<class>/.
+# #9012: every LEGACY_SOURCES row now reads content/<destination>, so the
+# table alone names the tree; --source-root still overrides it.
 DEFAULT_SOURCE_ROOT=""
 
 # <destination in the bundle>=<source directory, relative to the repo root>,
@@ -71,10 +72,10 @@ DEFAULT_SOURCE_ROOT=""
 # this table and `dev_class_table_matches_the_packager` pins the two.
 LEGACY_SOURCES="
 agents=content/agents
-skills=crates/trusty-mpm/src/assets/skills
-instructions=crates/trusty-mpm/src/assets/instructions
-instructions/output-styles=crates/trusty-mpm/src/assets/output-styles
-instructions/sm_instructions=crates/trusty-mpm/src/assets/sm_instructions
+skills=content/skills
+instructions=content/instructions
+instructions/output-styles=content/instructions/output-styles
+instructions/sm_instructions=content/instructions/sm_instructions
 instructions/harness_understanding=content/instructions/harness_understanding
 "
 

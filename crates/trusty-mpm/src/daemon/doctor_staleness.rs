@@ -115,9 +115,9 @@ pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
 /// also the exact set the deployers write, so the check and the deploy agree
 /// by construction.
 /// What: the number of entries whose name resolves to a stem in
-/// [`crate::core::manifest::framework::bundled_skill_stems`] — the catalog the
-/// framework manifest already validates the bundle against, so no second
-/// derivation of "what tm ships" enters the codebase. Both on-disk forms
+/// [`crate::core::manifest::framework::declared_skill_stems`] — the catalog the
+/// framework manifest declares and the test gate validates the content
+/// against, so no second derivation of "what tm ships" enters the codebase. Both on-disk forms
 /// count: the `<stem>/` directory and the flat `<stem>.md`. A missing or
 /// unreadable directory is `0`. An operator's OWN skill that happens to share
 /// a bundled stem is counted too; the finding is advisory and the remediation
@@ -127,7 +127,8 @@ pub(super) fn check_legacy_instruction_sources(home: &Path) -> DoctorCheck {
 /// `legacy_sources_counts_an_unprefixed_bundled_skill`,
 /// `legacy_sources_ok_when_absent`.
 fn count_legacy_bundled_skills(skills_dir: &Path) -> usize {
-    let bundled = crate::core::manifest::framework::bundled_skill_stems();
+    // #9012: the binary's declared roster; the content is not needed.
+    let bundled = crate::core::manifest::framework::declared_skill_stems().unwrap_or_default();
     let Ok(entries) = std::fs::read_dir(skills_dir) else {
         return 0;
     };

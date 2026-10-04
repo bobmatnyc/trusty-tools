@@ -539,19 +539,24 @@ fn declared_member_cap_is_reported_to_the_caller() {
 
 #[test]
 fn bundled_skill_roster_is_valid() {
-    // The shipped `[skill_categories]` must exactly cover the bundled skills.
-    let skills = framework_skill_categories().expect("bundled skill roster must validate");
+    // The shipped `[skill_categories]` must exactly cover the content's skills
+    // (#9012: the strict partition runs against the checkout's content).
+    let content = crate::core::content_source::test_support::repo_content();
+    let skills =
+        framework_skill_categories_for(&content).expect("bundled skill roster must validate");
     assert_eq!(
         skills.universal.len(),
-        bundled_skill_stems().len(),
+        bundled_skill_stems(&content).len(),
         "every bundled skill is declared exactly once"
     );
     assert!(skills.universal.contains(&"tm".to_string()));
+    // The runtime read checks the manifest's own shape and agrees.
+    assert_eq!(framework_skill_categories().expect("runtime read"), skills);
 }
 
 #[test]
 fn bundled_skill_stems_excludes_reference_files() {
-    let stems = bundled_skill_stems();
+    let stems = bundled_skill_stems(&crate::core::content_source::test_support::repo_content());
     assert!(stems.contains("systematic-debugging"));
     assert!(
         !stems.iter().any(|s| s.contains('/')),

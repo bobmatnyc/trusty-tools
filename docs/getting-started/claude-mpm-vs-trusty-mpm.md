@@ -6,7 +6,7 @@
 
 They are unrelated codebases. trusty-mpm is not a fork, a port, or a rewrite of claude-mpm — there is no shared code, the languages differ (Rust and Python), the maintainers differ, and they ship through different channels (crates.io and Homebrew, versus PyPI). What they share is an idea: a project-manager session that delegates work to specialised agents.
 
-The similar names cause real confusion. Read [`WHAT-IS-TRUSTY-MPM.md`](../../crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md) for the canonical identity document.
+The similar names cause real confusion. Read [`WHAT-IS-TRUSTY-MPM.md`](../../content/instructions/docs/WHAT-IS-TRUSTY-MPM.md) for the canonical identity document.
 
 ---
 
@@ -35,8 +35,8 @@ Both systems use the same delegation framework. If you know claude-mpm's pattern
 
 ## For Architecture & Design Details
 
-- **[WHAT-IS-TRUSTY-MPM.md](../../crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md)** — Canonical identity doc.
-- **[ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)** — Memory over MCP/JSON-RPC, Session↔Worktree 1:1 model, per-worktree search indexes.
+- **[WHAT-IS-TRUSTY-MPM.md](../../content/instructions/docs/WHAT-IS-TRUSTY-MPM.md)** — Canonical identity doc.
+- **[ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)** — Memory over MCP/JSON-RPC, Session↔Worktree 1:1 model, per-worktree search indexes.
 - **[Root README](../../README.md)** — Orientation to the trusty-* ecosystem and its live crate map.
 
 ---

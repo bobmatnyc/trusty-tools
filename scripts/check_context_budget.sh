@@ -16,8 +16,8 @@
 #   against the committed baseline, and fails when either grew past its
 #   allowance. Sources:
 #     CLAUDE.md
-#     crates/trusty-mpm/src/assets/instructions/sections/*.md
-#     crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md
+#     content/instructions/sections/*.md
+#     content/instructions/output-styles/trusty-mpm.md
 #
 #   The glob is taken literally, `README.md` included: the baseline names every
 #   row explicitly, so what is measured is auditable in the diff rather than
@@ -93,10 +93,10 @@ sources() {
   # `find | sort` rather than a bare glob: the shell's glob order is locale
   # dependent, and a baseline that reorders itself between machines is noise in
   # every review.
-  find "${ROOT}/crates/trusty-mpm/src/assets/instructions/sections" \
+  find "${ROOT}/content/instructions/sections" \
     -maxdepth 1 -name '*.md' 2>/dev/null |
     sed "s|^${ROOT}/||" | sort
-  printf '%s\n' 'crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md'
+  printf '%s\n' 'content/instructions/output-styles/trusty-mpm.md'
 }
 
 # size_of <repo-relative path> — bytes, or empty when the file is absent.

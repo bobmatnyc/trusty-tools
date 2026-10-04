@@ -166,7 +166,10 @@ pub(crate) fn start(
         ),
     }
     let config_dir = crate::commands::launch_home::relocate_config_dir(dir, Some(home));
-    let cli = trusty_mpm::core::session_launch::cli_launch(dir, None);
+    // #9012: the PM instructions are runtime content; none refuses here.
+    let content = trusty_mpm::core::content_source::framework_content_for(dir)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let cli = trusty_mpm::core::session_launch::cli_launch(&content, dir, None);
     if !cli.profile.is_supervisor() {
         bail!("{}", pm_refusal(dir, session));
     }
