@@ -102,6 +102,8 @@ use credential_print_programs::{
 pub(super) use credential_print_programs::is_evaluator;
 // #9001 critic r2: the tmux floors reuse the evaluator and grammar readings.
 pub(super) use credential_print_programs::COMPOUND_OPENERS;
+// #9127: the git-verb walker peels the same leading keywords.
+pub(super) use credential_print_programs::KEYWORDS;
 pub(super) use credential_print_taint::is_identifier;
 // #8869: the secret-read key-consumer rule reads an fd-0 key redirect with it.
 use credential_print_passes::{MAX_PASSES, stale_after};

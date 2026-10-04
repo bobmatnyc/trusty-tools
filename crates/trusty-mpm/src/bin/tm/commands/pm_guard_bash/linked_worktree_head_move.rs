@@ -46,8 +46,10 @@ use serde_json::Value;
 use trusty_mpm::core::project_aliases::worktree_root;
 use trusty_mpm::daemon::delegation_routes::TREE_HOLDERS_MARKER;
 
-use super::main_checkout::{git_verb_targets_with_tail, starts_a_head_move};
-use super::{PathEnv, unresolved_target};
+use super::main_checkout::{
+    git_verb_targets_with_tail, head_move_deny_reason, main_checkout_head_move, starts_a_head_move,
+};
+use super::{PathEnv, shell_groups, unresolved_target};
 use crate::commands::pm_guard::{audit_denied_tool, build_pm_guard_deny_response};
 use crate::commands::pm_guard_deny_log::DenyContext;
 use crate::commands::pm_guard_dispatch::{self, SHARED_TREE_ROUTE, SharedTreeReply};
@@ -98,7 +100,8 @@ fn moves_a_linked_head(subcommand: &str, tail: &[String]) -> bool {
 /// What: one check per HEAD-moving segment, in order (#8161 critic round 2:
 /// every segment, not the first). A segment whose target is not in a linked
 /// worktree, or is a subagent's own tree, yields nothing; an unresolved target
-/// yields `Deny`; the rest yield `Query`.
+/// yields `Deny`; the rest yield `Query`. A command the shared walker cannot
+/// place yields one `Deny` when it names a HEAD-moving verb (#9127).
 /// Test: `classify_*` below.
 pub(crate) fn classify_linked_worktree_head_move(
     command: &str,
@@ -115,6 +118,10 @@ fn classify_in(
     caller_is_subagent: bool,
     env: &PathEnv,
 ) -> Vec<LinkedHeadMoveCheck> {
+    // #9127 critic r4 HIGH: an unplaced `eval "cd <wt>"` must not place it.
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, moves_a_linked_head) {
+        return vec![LinkedHeadMoveCheck::Deny(reason)];
+    }
     git_verb_targets_with_tail(command, cwd, env, moves_a_linked_head)
         .into_iter()
         .filter_map(|(verb, target, _)| classify_target(verb, target, cwd, caller_is_subagent))
@@ -165,6 +172,48 @@ pub(crate) fn linked_head_move_verdict(
         Ok(names) => Some(live_writer_deny_reason(mv, names)),
         Err(detail) => Some(unanswered_deny_reason(mv, detail)),
     }
+}
+
+/// Run the main-checkout HEAD-move rule (ADR-0048 decision 10) for one `Bash`
+/// call and print its deny.
+///
+/// Why: `pm_guard.rs` sits at the 500-SLOC cap, so its call site is one
+/// statement, as for [`deny_linked_worktree_head_move`].
+/// What: the Architect is exempt (#8878 D5). A command
+/// [`main_checkout_head_move`] cannot place is denied without a daemon query
+/// (#9127). A placed one is denied when the daemon names another live writer,
+/// asked under the checkout root and the resolved directory (#5769); a daemon
+/// that cannot answer allows. On a deny, audits it, prints it, returns `true`.
+/// Test: `main_checkout_head_move_refuses_an_eval_it_cannot_place`;
+/// end to end in `tests/tm_hook_pm_guard.rs`.
+pub(crate) async fn deny_main_checkout_head_move(
+    url: &str,
+    session_id: &str,
+    payload: &Value,
+    (command, cwd): (&str, &Path),
+    architect: &ArchitectGate<'_>,
+) -> bool {
+    if architect.is_architect() {
+        return false;
+    }
+    let reason = match main_checkout_head_move(command, cwd) {
+        None => return false,
+        Some(Err(reason)) => reason,
+        Some(Ok((verb, target, root))) => {
+            let keys = [root.as_path(), target.as_path()];
+            let live =
+                pm_guard_dispatch::live_shared_tree_writers_in(url, session_id, &keys, payload)
+                    .await;
+            if live.is_empty() {
+                return false;
+            }
+            head_move_deny_reason(&verb, &root, &live)
+        }
+    };
+    let refused = DenyContext::from_payload(url, payload);
+    audit_denied_tool(&refused, "head-move", &reason).await;
+    println!("{}", build_pm_guard_deny_response(&reason));
+    true
 }
 
 /// Run the rule for one `Bash` call and print its deny (#8161).

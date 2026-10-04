@@ -59,7 +59,7 @@ use trusty_mpm::core::project_aliases::main_checkout_root;
 use trusty_mpm::core::uncommitted_changes::has_uncommitted_changes;
 
 use super::main_checkout::git_verb_targets_with_tail;
-use super::{PathEnv, unresolved_target};
+use super::{PathEnv, shell_groups, unresolved_target};
 use crate::commands::pm_guard_write_boundary::write_lands_in_a_scratchpad_clone;
 
 /// Deny an agent's HEAD-switching git command in a dirty main checkout.
@@ -88,11 +88,14 @@ pub(crate) fn evaluate_main_checkout_head_switch(
 
 /// The policy, with the environment and the dirty-tree probe injected.
 ///
-/// What: for each segment that [`switches_head`], refuses an unresolved
+/// What: refuses a command the shared walker cannot place when it names a
+/// verb [`switches_head`] accepts, from any directory. Then, for each segment
+/// that [`switches_head`], refuses an unresolved
 /// directory outright, skips a directory outside any main checkout or inside a
 /// scratchpad clone, and otherwise asks `dirty` about the checkout root:
 /// `Some(false)` allows, `Some(true)` and `None` refuse.
-/// Test: `head_switch_denies_a_dirty_main_checkout`,
+/// Test: `head_switch_refuses_an_eval_it_cannot_place`,
+/// `head_switch_denies_a_dirty_main_checkout`,
 /// `head_switch_allows_a_clean_main_checkout`,
 /// `head_switch_fails_closed_when_the_dirty_state_is_unreadable`,
 /// `head_switch_allows_the_agents_own_worktree`,
@@ -106,6 +109,10 @@ fn evaluate_head_switch_in(
     env: &PathEnv,
     dirty: impl Fn(&Path) -> Option<bool>,
 ) -> Option<String> {
+    // #9127 critic r4 HIGH: an unplaced `eval "cd <wt>"` must not clear it.
+    if let Some(reason) = shell_groups::unplaced_git_verb_reason(command, switches_head) {
+        return Some(reason);
+    }
     for (verb, target, _) in git_verb_targets_with_tail(command, cwd, env, switches_head) {
         // #8572: before any classification of `target`. From a worktree cwd,
         // `-C $MAIN` resolves to `<worktree>/$MAIN`, which reads as the
@@ -317,6 +324,39 @@ mod tests {
             assert!(reason.contains("uncommitted work"), "{reason}");
             assert!(reason.contains("isolation: \"worktree\""), "{reason}");
             assert!(reason.contains("move HEAD, overwrite files"), "{reason}");
+        }
+    }
+
+    /// 🔴 REGRESSION (#9127 critic r4 HIGH): an unplaced `eval "cd <wt>"`
+    /// placed the switch in the worktree and it was allowed; zsh never runs
+    /// that `cd`, so the stash or checkout lands on the dirty main checkout.
+    #[test]
+    fn head_switch_refuses_an_eval_it_cannot_place() {
+        let (_dir, repo) = main_checkout();
+        let wt = repo.join(".claude/worktrees/agent-1");
+        std::fs::create_dir_all(&wt).expect("mkdir wt");
+        std::fs::write(wt.join(".git"), "gitdir: ../../.git/worktrees/agent-1").expect(".git");
+        let wt = wt.display();
+        for command in [
+            format!("command -p eval \"cd {wt}\"; git stash"),
+            format!("command -p eval \"cd {wt}\"; git checkout x"),
+            format!("noglob eval \"cd {wt}\"; git stash"),
+            format!("command eval \"cd {wt}\"; git checkout x"),
+        ] {
+            let reason = evaluate_head_switch_in(&command, &repo, &env(), |_| Some(true))
+                .unwrap_or_else(|| panic!("`{command}` must be denied"));
+            assert!(reason.contains("cannot place it"), "{command}: {reason}");
+        }
+        // Placed forms keep their answer: a bare `eval` and a plain `cd` run
+        // in place, so the switch lands in the worktree.
+        for command in [
+            format!("eval \"cd {wt}\"; git stash"),
+            format!("cd {wt} && git checkout x"),
+        ] {
+            assert!(
+                evaluate_head_switch_in(&command, &repo, &env(), |_| Some(true)).is_none(),
+                "`{command}` must be allowed"
+            );
         }
     }
 

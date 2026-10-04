@@ -19,9 +19,11 @@
 //! leading env/`sudo` noise and git global options.
 //! Test: `shell_lex::tests`.
 
-use crate::commands::hook_rewrite::strip_wrapper_prefix;
+use crate::commands::hook_rewrite::{is_env_assignment, strip_wrapper_prefix};
 // #8735: the xargs option table moved beside the other wrapper grammars.
-use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word};
+use crate::commands::program_word::{
+    COMMAND_WRAPPERS, Unresolved, XARGS_OPTS_WITH_ARG, resolve_program_word,
+};
 
 /// Shell programs that run their `-c` argument as a command string.
 ///
@@ -37,6 +39,27 @@ use crate::commands::program_word::{Unresolved, XARGS_OPTS_WITH_ARG, resolve_pro
 // here-document operator line — a body fed to one of these IS shell source, so
 // its separators must keep splitting.
 pub(super) const DASH_C_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+
+/// [`COMMAND_WRAPPERS`] words that are not a process in every shell (#9127
+/// critic r3): bash runs `command eval` in place where zsh finds no `eval`,
+/// and zsh runs `noglob eval` in place where bash finds no `noglob`. An `eval`
+/// behind one of these is [`Scope::Unplaceable`].
+const SHELL_PRECOMMANDS: &[&str] = &["command", "builtin", "noglob", "nocorrect", "exec", "time"];
+
+/// Where a wrapper's command string runs, so whether a `cd` in it persists
+/// (#9127).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Scope {
+    /// The current shell: `eval` behind nothing but assignments and at most a
+    /// bare `builtin` as its last prefix word.
+    Current,
+    /// A child process: a shell's `-c`, `env -S`, `flock -c`, `xargs`, or
+    /// `eval` behind a process wrapper (`env`, `nohup`, `sudo`, …).
+    Child,
+    /// An `eval` behind any other word, which bash and zsh run in different
+    /// places — or not at all. Fail closed.
+    Unplaceable,
+}
 
 /// Whether `segment` contains live `$'…'` or `$"…"` quoting (#6660 review).
 ///
@@ -116,34 +139,84 @@ pub(super) enum WrappedCommand {
 /// `denies_a_command_string_behind_a_wrapper_option_8735`,
 /// `denies_a_delete_in_a_command_string_behind_an_unknown_option`.
 pub(super) fn wrapped_command(segment: &str) -> WrappedCommand {
+    wrapped_command_scoped(segment).0
+}
+
+/// [`wrapped_command`], plus the [`Scope`] its string runs in (#9127): `eval`
+/// runs in the current shell, so a `cd` inside it persists; a shell's `-c`,
+/// `env -S`, `flock -c` and `xargs` start a child process, whose `cd` ends with
+/// it ([`eval_scope`] places an `eval` behind a prefix). The scope of a segment
+/// with no wrapper is [`Scope::Child`] and means nothing.
+/// Test: `grouped_steps_scopes_a_child_shell_but_not_eval`,
+/// `a_cd_inside_eval_persists_9127`.
+pub(super) fn wrapped_command_scoped(segment: &str) -> (WrappedCommand, Scope) {
     let Some(argv) = shlex::split(segment) else {
-        return WrappedCommand::None;
+        return (WrappedCommand::None, Scope::Child);
     };
-    match resolve_program_word(&argv) {
-        Ok(word) if word.lookup => WrappedCommand::None,
-        Ok(word) => {
-            // `xargs` runs its whole argv, whatever program heads it.
-            let at = word.xargs_at.unwrap_or(word.index);
-            match argv.get(at) {
-                Some(program) => inner_or_none(carried_string(program, &argv[at + 1..])),
-                None => WrappedCommand::None,
-            }
-        }
+    let carried = |at: usize| {
+        carried_string(&argv[at], &argv[at + 1..]).map(|inner| {
+            let scope = if carrier(&argv[at]) == "eval" {
+                eval_scope(&argv[..at])
+            } else {
+                Scope::Child
+            };
+            (inner, scope)
+        })
+    };
+    let found = match resolve_program_word(&argv) {
+        Ok(word) if word.lookup => None,
+        // `xargs` runs its whole argv, whatever program heads it.
+        Ok(word) => Some(word.xargs_at.unwrap_or(word.index))
+            .filter(|&at| at < argv.len())
+            .and_then(carried),
         // #8735 round 2: an option the resolver cannot measure hides the
         // program, so the first word that carries a command string stands in,
         // as `evaluator_at` does for the credential rules.
-        Err(Unresolved) => (0..argv.len())
-            .find_map(|at| carried_string(&argv[at], &argv[at + 1..]))
-            .map_or(WrappedCommand::None, |inner| inner_or_none(Some(inner))),
+        Err(Unresolved) => (0..argv.len()).find_map(carried),
+    };
+    match found {
+        Some((inner, scope)) => (inner_or_none(Some(inner)), scope),
+        None => (WrappedCommand::None, Scope::Child),
     }
+}
+
+/// The [`Scope`] of an `eval` whose words before it are `prefix` (#9127
+/// critic r3).
+///
+/// What: assignments are skipped. Nothing left, or one bare `builtin` as the
+/// last word, is [`Scope::Current`]. A first remaining word that is a
+/// [`COMMAND_WRAPPERS`] process (not in [`SHELL_PRECOMMANDS`]) is
+/// [`Scope::Child`]. Anything else — `command`, `command -p`, `builtin --`,
+/// `noglob`, a path to `builtin` — is [`Scope::Unplaceable`].
+fn eval_scope(prefix: &[String]) -> Scope {
+    let words: Vec<&str> = prefix
+        .iter()
+        .map(String::as_str)
+        .skip_while(|w| is_env_assignment(w))
+        .collect();
+    match words.as_slice() {
+        [] | ["builtin"] => Scope::Current,
+        [first, ..]
+            if COMMAND_WRAPPERS.contains(&carrier(first))
+                && !SHELL_PRECOMMANDS.contains(&carrier(first)) =>
+        {
+            Scope::Child
+        }
+        _ => Scope::Unplaceable,
+    }
+}
+
+/// `program`'s basename, a leading alias-defeating `\` dropped.
+fn carrier(program: &str) -> &str {
+    let tok = program.strip_prefix('\\').unwrap_or(program);
+    tok.rsplit('/').next().unwrap_or(tok)
 }
 
 /// The command string word `program` runs from its arguments `rest`, if it
 /// is a carrier: a shell's `-c`, `env`/`genv` `-S`, `flock -c`, `xargs`' argv
 /// or `eval`'s operands.
 fn carried_string(program: &str, rest: &[String]) -> Option<String> {
-    let tok = program.strip_prefix('\\').unwrap_or(program);
-    let base = tok.rsplit('/').next().unwrap_or(tok);
+    let base = carrier(program);
     match base {
         _ if DASH_C_SHELLS.contains(&base) => dash_c_argument(rest),
         "env" | "genv" => env_split_string(rest),

@@ -355,7 +355,8 @@ pub(crate) fn evaluator_name(program: &str) -> Option<&str> {
 }
 
 /// Shell keywords that can precede the program word.
-const KEYWORDS: &[&str] = &[
+// #9127: crate-visible so `shell_groups` peels the same words.
+pub(crate) const KEYWORDS: &[&str] = &[
     "!", "{", "}", "if", "then", "else", "elif", "do", "while", "until", "time", "coproc",
 ];
 
