@@ -3,7 +3,7 @@ name: git-workflow
 description: "Essential Git patterns for effective version control, eliminating redundant Git guidance per agent."
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 effort: low
 ---
@@ -631,9 +631,9 @@ equivalent prose rule from memory:
 | Opening every PR | `tm pr open --title <t> --body-file <path> [--issue N] [--rung 1-6] [--base main] [--docs-only]` | Exit 2 names the failed check (nine-field body, footer, changelog gate) and means `gh` was never called; `--dry-run` prints the argv instead |
 | Before `gh pr create` | `bash scripts/check_changelog_fragment.sh` | Review-gate failure if crate `src/**` changed with no fragment; `tm pr open` runs this itself before spawning `gh`, so this is only for the hand-assembled fallback |
 | Before `gh pr create` (a version was bumped) | `bash scripts/check-pr-version-bump.sh` | The version bump does not match what the PR's changes require |
-| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api repos/bobmatnyc/trusty-tools/branches/main/protection --jq '.required_status_checks.contexts'`) | N/A — always read live, never hand-copied (a stale copy cost PR #5836 a merge) |
-| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 means every listed PR is clear; exit 1 names the first stop reason per PR (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero |
-| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false` or a red/pending required check means do not merge |
+| Before evaluating any required-context gate | `bash scripts/required-checks.sh [base]` (or `gh api repos/bobmatnyc/trusty-tools/branches/main --jq '.protection.required_status_checks.contexts'`; `/protection` answers 404 on an unprotected branch) | N/A — always read live, never hand-copied (a stale copy cost PR #5836 a merge) |
+| Pre-merge, to confirm queue ownership and status in one step | `tm pr queue-check [--base main] [<pr>]` | Exit 0 clears the queue checks; `tm pr merge` still applies the checks gate. Exit 1 names the first stop reason per PR (draft, hold label, `CHANGES_REQUESTED`, an unresolved `code-critic` BLOCK, or a missing/non-`SUCCESS` required context) — do not merge on nonzero |
+| Pre-merge status read | `gh pr view <n> --json state,mergeable,statusCheckRollup` (one shot, never `--watch`) | `mergeable: false`, a failed check, or a running check the brief does not waive: do not merge. `tm pr merge` refuses on the same facts (#8614); `--allow-failing <check>` waives a named non-required check only |
 | Reporting a red gate | `bash scripts/is-branch-caused.sh <crate-dir> [--base origin/main]` | Prints PRE-EXISTING (exit 0), BRANCH-CAUSED (exit 1), or INCONCLUSIVE (exit 2) — report the verdict |
 | After each PR's `state: MERGED` is confirmed | `tm session prune-worktrees --merged-prs --force` | A spared tree is reported with its reason — leave it |
 
