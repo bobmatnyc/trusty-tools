@@ -43,7 +43,8 @@ What: three subcommands over scripts/asset-content-tests.tsv.
         bare and in scope (`use …::home::{X}`, `use …::home::*`, a home's own
         module, or `use super::*` beneath one).
     R4  (#9011) a call to a run-time content loader: `checkout_content`,
-        `AgentRoster::load` or `HarnessDoc::load` read the checkout's
+        `AgentRoster::load`, `HarnessDoc::load` or `FrameworkContent::load`
+        (#9012) read the checkout's
         `content/` tree, which no literal names. A test-code helper fn that
         reads by R1-R4 (`repo_roster()`, `stage_repo_content()`) is itself a
         loader, homed in its module, so the TESTS calling it are the readers
@@ -96,7 +97,13 @@ CFG_TEST = re.compile(r"#\[\s*cfg\s*\((?![^\]]*\bnot\s*\(\s*test)[^\]]*\btest\b"
 ASSET_DIR = re.compile(r"(?:^|/)(?:(?:([\w.-]+)/)?src/assets(?:/|$)|(content)/)")
 DETECT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "detect-docs-only.sh")
 # R4 (#9011): (home, name) of the run-time readers of the content/ tree.
-CONTENT_LOADERS = (("agent_content", "checkout_content"), ("AgentRoster", "load"), ("HarnessDoc", "load"))
+CONTENT_LOADERS = (
+    ("agent_content", "checkout_content"),
+    ("AgentRoster", "load"),
+    ("HarnessDoc", "load"),
+    # #9012: trusty-mpm's skills, instructions, styles and SM files.
+    ("FrameworkContent", "load"),
+)
 
 
 # ------------------------------------------------------------- source files

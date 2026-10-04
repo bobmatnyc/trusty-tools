@@ -2,7 +2,7 @@
 //! `universal/` skills) — companion file, following the existing
 //! `tests_behavior_a/b/c/d/e`/`tests_behavior_reset_agents`/
 //! `tests_behavior_skill_tiers`/`tests_behavior_2890_skills` split convention
-//! (kept separate so `tests_behavior_a.rs` stays under the 500-SLOC
+//! (kept separate so `tests_behavior_a_tests.rs` stays under the 500-SLOC
 //! production cap; this file is itself capped at 1500 SLOC as a test file).
 //!
 //! Why: mirrors `tests_behavior_2890_skills_tests.rs`'s rationale exactly —
@@ -17,7 +17,7 @@
 //! concerns are actually resolved.
 //! What: `skill_port_batch1_sample_lands_in_deployed_dot_claude_skills` calls
 //! `install_to` then `deploy_all_skill_tiers` (matching
-//! `install_then_deploy_deploys_skills` in `tests_behavior_a.rs` and
+//! `install_then_deploy_deploys_skills` in `tests_behavior_a_tests.rs` and
 //! `code_critic_skills_land_in_deployed_dot_claude_skills` in
 //! `tests_behavior_2890_skills_tests.rs`) against a temp framework root, then
 //! reads back a SAMPLE of the 25 batch-1 skills from the deployed directory:
@@ -29,13 +29,7 @@
 //! embedded constants.
 //! Test: this IS the test module.
 
-use trusty_mpm::core::bundle::{
-    INTERNAL_COMMS, SYSTEMATIC_DEBUGGING, SYSTEMATIC_DEBUGGING_ANTI_PATTERNS,
-    SYSTEMATIC_DEBUGGING_EXAMPLES, SYSTEMATIC_DEBUGGING_TROUBLESHOOTING,
-    SYSTEMATIC_DEBUGGING_WORKFLOW,
-};
-
-use crate::commands::install::{install_to_with, test_roster};
+use crate::commands::install::{install_to_with, test_content, test_roster};
 
 #[test]
 fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
@@ -44,7 +38,7 @@ fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
 
     // Step 1: `tm install`'s first half — write every bundled artifact
     // (including the 93 skill-port batch-1 entries) under the framework root.
-    install_to_with(&paths, false, &test_roster()).unwrap();
+    install_to_with(&paths, false, &test_roster(), &test_content()).unwrap();
 
     // Step 2: `tm install`'s second half — the SAME multi-tier orchestrator
     // that copies the framework-root skill sources into `.claude/skills/`.
@@ -91,7 +85,7 @@ fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
     );
     assert_eq!(
         std::fs::read_to_string(&internal_comms_deployed).unwrap(),
-        INTERNAL_COMMS,
+        crate::commands::install::test_skill("skills/internal-comms.md"),
     );
 
     // The multi-file skill: entry point AND every references/*.md sibling
@@ -100,13 +94,33 @@ fn skill_port_batch1_sample_lands_in_deployed_dot_claude_skills() {
     let debugging_dir = paths.claude_skills_dir().join("systematic-debugging");
     assert_eq!(
         std::fs::read_to_string(debugging_dir.join("SKILL.md")).unwrap(),
-        SYSTEMATIC_DEBUGGING,
+        crate::commands::install::test_skill("skills/systematic-debugging.md"),
     );
     for (file_name, expected) in [
-        ("anti-patterns.md", SYSTEMATIC_DEBUGGING_ANTI_PATTERNS),
-        ("examples.md", SYSTEMATIC_DEBUGGING_EXAMPLES),
-        ("troubleshooting.md", SYSTEMATIC_DEBUGGING_TROUBLESHOOTING),
-        ("workflow.md", SYSTEMATIC_DEBUGGING_WORKFLOW),
+        (
+            "anti-patterns.md",
+            crate::commands::install::test_skill(
+                "skills/systematic-debugging/references/anti-patterns.md",
+            ),
+        ),
+        (
+            "examples.md",
+            crate::commands::install::test_skill(
+                "skills/systematic-debugging/references/examples.md",
+            ),
+        ),
+        (
+            "troubleshooting.md",
+            crate::commands::install::test_skill(
+                "skills/systematic-debugging/references/troubleshooting.md",
+            ),
+        ),
+        (
+            "workflow.md",
+            crate::commands::install::test_skill(
+                "skills/systematic-debugging/references/workflow.md",
+            ),
+        ),
     ] {
         let ref_path = debugging_dir.join("references").join(file_name);
         assert!(

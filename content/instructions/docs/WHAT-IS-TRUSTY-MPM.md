@@ -1,0 +1,163 @@
+# What Is trusty-mpm?
+
+trusty-mpm is a **Rust** crate at `crates/trusty-mpm/`, distributed as a single
+binary — **`tm`** (also installable as `trusty-mpm`) — whose subcommands
+provide the background daemon, the CLI, the TUI dashboard, and the Telegram
+bot surfaces. It is the **Meta-Harness** / control plane described in
+[Three-Harness Architecture](../../../docs/architecture/harnesses.md): it
+manages multi-project Claude Code sessions, relays lifecycle hooks, and
+exposes an MCP server — it does **not** execute coding work itself, it
+delegates all coding tasks to **`trusty-code`** (`tcode`). It is **not** the
+Python `claude-mpm` package: no code relation, different language (Rust vs.
+Python), different maintainers, and a different distribution channel
+(crates.io/Homebrew vs. PyPI).
+
+This document exists because a Claude Code session asked "are you self-aware
+of the framework?" and answered incorrectly — it shell-probed
+(`pip3 show claude-mpm`, `which claude-mpm`) instead of consulting memory or a
+canonical doc, and it conflated this Rust project with the unrelated Python
+one. See [DOC-28 — trusty-mpm Self-Awareness](../../../docs/specs/trusty-mpm-self-awareness.md)
+for the full incident writeup and the behavior contract this doc is part of.
+**This is the single, stable, canonically-pointed-at answer to "what is this
+framework" — consult it (and memory) instead of shell-probing.**
+
+## The one-paragraph answer
+
+If you are a Claude Code session running under trusty-mpm and someone asks
+what framework/tool/system this is: you are working inside a project managed
+by **trusty-mpm** (binary `tm`), a **Rust** Meta-Harness / control-plane
+daemon that launches, observes, and coordinates Claude Code sessions across
+one or more projects. trusty-mpm itself never writes code — every unit of
+real implementation work is delegated to a launched session, which in turn
+runs under **`trusty-code`** (`tcode`), the per-project coding harness. If the
+question could plausibly be about the Python **`claude-mpm`** project: that is
+a *different, unrelated* tool — different repository, different language,
+different maintainers — and this doc, this session, and this repo have
+nothing to do with it.
+
+## What trusty-mpm is (and is not)
+
+| | trusty-mpm (this project) | Python `claude-mpm` |
+|---|---|---|
+| Language | Rust | Python |
+| Binary / package | `tm` / `trusty-mpm` | `claude-mpm` |
+| Distribution | crates.io, Homebrew, GitHub Releases | PyPI |
+| Role | Meta-Harness / control plane (DOC-26) | unrelated Claude Code agent-fleet + output-style layer |
+| Repository | `trusty-tools` (this repo) | a separate, unrelated repository |
+| Relationship to this repo | **is** this repo's `crates/trusty-mpm/` | **none** |
+
+trusty-mpm:
+
+- Manages multi-project sessions (`tm sessions`, `tm run`, `tm load`) and
+  their lifecycle (spawn, observe, decommission).
+- Exposes an MCP server (`mcp__trusty-mpm__*` tools) that Claude Code sessions
+  and other trusty-* tools call into.
+- Assembles and deploys the PM/SM system prompts, agents, skills, and output
+  styles that a launched session runs under.
+- Delegates **all** coding work — edits, builds, tests, research — to a
+  launched session running `trusty-code` (`tcode`); it has no "hands" of its
+  own.
+
+See [Three-Harness Architecture](../../../docs/architecture/harnesses.md) for
+the full three-harness (trusty-code / trusty-mpm / trusty-agents) delegation
+graph, and
+[DOC-26 — trusty-mpm alpha-1 control plane](../../../docs/specs/trusty-mpm-alpha-1-control-plane.md)
+for the control-plane wire protocol and session lifecycle contract. This doc
+deliberately summarizes rather than duplicates those two references — treat
+them as the deeper architectural and protocol sources of truth.
+
+## How to answer an identity question (for a running session)
+
+Per the
+[Identity & Self-Awareness Protocol](../../../docs/specs/trusty-mpm-self-awareness.md#4-r2--identityself-awareness-protocol-in-instruction-assets-specselfaware-02draft)
+(bundled into `BASE_SM.md` and every output style — see that spec for the
+exact wording):
+
+1. **Consult memory first** — call `get_prompt_context()` / `memory_recall`
+   against the active trusty-memory palace before answering.
+2. **Then consult this doc** — read it from
+   `~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md` (deployed by
+   `tm install`), or, inside the trusty-tools repo itself, from
+   `content/instructions/docs/WHAT-IS-TRUSTY-MPM.md` via `trusty-search` or a
+   direct file read.
+3. **Never shell-probe for identity** — `pip3 show`, `pip show`,
+   `which claude-mpm`, or grepping `site-packages`/`dist-info` interrogate the
+   wrong (Python) ecosystem and cannot see this Rust binary at all. These are
+   forbidden ways to answer an identity question.
+4. **State the disambiguation explicitly when relevant** — this is
+   `trusty-mpm` (binary `tm`), NOT `claude-mpm`.
+
+## Memory seeding (R3)
+
+`get_prompt_context()` surfaces `is_fact` triples from every registered
+trusty-memory palace (see `crates/trusty-memory/src/prompt_facts.rs`), but no
+identity fact exists until one is seeded.
+
+**Automatic (DOC-28 §7 Phase 2, epic #1855):** every time `tm` provisions a
+brand-new managed-session workspace, it attempts this seed once
+against the session's derived palace. The attempt is guarded by a `kg_query`
+idempotency check (skips the assert if the triple already exists) and is
+fail-open: an unreachable trusty-memory daemon, a non-2xx response, or a parse
+error is logged and swallowed, never blocking or failing provisioning. This
+only fires at provision time (a new workspace being created), not on every
+`tm session start`/`connect`/resume of an existing project directory.
+
+**Manual (fallback / any palace):** run this once per trusty-memory
+install/upgrade if you are not going through the managed-session provisioner
+(any palace — the fact is visible cross-palace):
+
+```
+kg_assert(
+  palace: "<any palace, e.g. trusty-tools or session-manager>",
+  subject: "trusty-mpm",
+  predicate: "is_fact",
+  object: "trusty-mpm (binary tm) is the Rust Meta-Harness / control plane, NOT the Python claude-mpm project; see content/instructions/docs/WHAT-IS-TRUSTY-MPM.md or ~/.trusty-mpm/framework/docs/WHAT-IS-TRUSTY-MPM.md",
+  provenance: "DOC-28 self-awareness seed"
+)
+```
+
+Via the MCP tool surface this is `mcp__trusty-memory__kg_assert` with the same
+arguments. Re-running it is safe (idempotent in effect — it re-asserts the
+same triple), and it uses the identical subject/predicate/object as the
+automatic path, so the two are interchangeable.
+
+## Verifying the instructions actually loaded
+
+`tm doctor` includes an `output_style` check: it reads the effective
+`outputStyle` value (project `.claude/settings.json` if present, else the
+global one) and confirms it resolves to a real, on-disk trusty-mpm style file
+under `~/.claude/output-styles/`. A `Fail` here (unknown/stale style id, e.g.
+a leftover `claude_mpm` value) or a missing file means the session is **not**
+running under trusty-mpm's instructions at all — run `tm run`/`tm load` to
+rewrite the setting correctly, or fix it by hand. See DOC-28 §6 for the full
+detection contract and its limitations.
+
+## Selecting a style
+
+Run `/config` and pick under **Output style**, or set the `outputStyle` key in
+a settings file directly:
+
+```json
+{
+  "outputStyle": "trusty-mpm"
+}
+```
+
+The three bundled ids are `trusty-mpm` (default), `trusty-mpm-teacher`, and
+`trusty-mpm-research`. Output style is part of the system prompt, which Claude
+Code reads once at session start, so a change takes effect after `/clear` or on
+the next session.
+
+The standalone `/output-style` command was removed in Claude Code v2.1.91 — if
+a runbook or note still tells you to run it, that guidance is stale.
+
+Every bundled style sets `keep-coding-instructions: true`. Claude Code strips
+its own built-in software-engineering instructions — how to scope a change,
+write comments, verify work — from any custom style that omits the field, since
+it defaults to `false`. These are PM-orchestration styles layered on top of
+normal coding behavior, not replacements for it, so all three opt back in.
+
+**Do not edit the bundled style files to change your own behavior.** They are
+refreshed from the compiled bundle on deploy, so local edits are overwritten. To
+get different behavior, write your own style file under `~/.claude/output-styles/`
+(or the project's `.claude/output-styles/`) and select that instead.

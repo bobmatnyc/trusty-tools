@@ -141,10 +141,10 @@ Bundle destinations and where they are read from today:
 | Destination | Source directory |
 |---|---|
 | `agents` | `content/agents/` (#9011) |
-| `skills` | `crates/trusty-mpm/src/assets/skills/` |
-| `instructions` | `crates/trusty-mpm/src/assets/instructions/` |
-| `instructions/output-styles` | `crates/trusty-mpm/src/assets/output-styles/` |
-| `instructions/sm_instructions` | `crates/trusty-mpm/src/assets/sm_instructions/` |
+| `skills` | `content/skills/` |
+| `instructions` | `content/instructions/` |
+| `instructions/output-styles` | `content/instructions/output-styles/` |
+| `instructions/sm_instructions` | `content/instructions/sm_instructions/` |
 | `instructions/harness_understanding` | `content/instructions/harness_understanding/` (#9011) |
 
 `content-v0.1.0` predates this layout: it carries `output-styles/`,
@@ -174,7 +174,7 @@ files = 43
 
 [[source]]
 path = "instructions/output-styles"
-source = "crates/trusty-mpm/src/assets/output-styles"
+source = "content/instructions/output-styles"
 files = 4
 # ... one [[source]] table per row of the table above, in that order
 ```

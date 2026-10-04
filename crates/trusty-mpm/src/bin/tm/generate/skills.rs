@@ -1,7 +1,7 @@
 //! Renders `references/skills.md` from the bundled skill catalog (source #4
 //! of the issue #2913 design-research brief).
 //!
-//! Why: `bundle::ALL` (filtered to top-level `skills/*.md` entries — nested
+//! Why: the content's `skills/` (#9012; filtered to top-level `skills/*.md` entries — nested
 //! `skills/<name>/references/*.md` siblings excluded, since those are a
 //! skill's own reference material, not separate catalog entries) is the same
 //! canonical table [`super::agents`] reads; skills use the same
@@ -23,7 +23,7 @@
 use std::fmt::Write as _;
 
 use trusty_agents_common::agents::frontmatter::parse_kv_line;
-use trusty_mpm::core::bundle::ALL;
+use trusty_mpm::core::content_source::FrameworkContent;
 use trusty_mpm::core::manifest::framework_skill_categories;
 
 /// One bundled skill's frontmatter fields relevant to the catalog.
@@ -89,7 +89,7 @@ pub(super) fn is_top_level_skill(rel_path: &str) -> bool {
 ///
 /// Why: an operator/agent choosing which skill to load needs the exact
 /// description + invocability without opening every bundled `.md` file.
-/// What: filters `ALL` to the top-level `skills/*.md` entries the manifest
+/// What: filters `content`'s skills to the top-level `skills/*.md` entries the manifest
 /// DECLARES, sorts by stem, and renders one row per skill. An unusable manifest
 /// falls back to the unfiltered bundle so a documentation regeneration degrades
 /// to "renders everything" rather than to "renders nothing"; the declaration is
@@ -97,29 +97,27 @@ pub(super) fn is_top_level_skill(rel_path: &str) -> bool {
 /// Test: `skills_render_contains_known_skill`,
 /// `skills_render_excludes_reference_files`,
 /// `skills_render_matches_the_declared_roster`.
-pub(crate) fn render() -> String {
+pub(crate) fn render(content: &FrameworkContent) -> String {
     let declared = framework_skill_categories()
         .map(|categories| categories.universal.into_iter().collect::<Vec<_>>())
         .ok();
-    let mut skills: Vec<(String, SkillMeta)> = ALL
-        .iter()
-        .filter(|a| is_top_level_skill(a.rel_path))
-        .filter(|a| match &declared {
-            Some(list) => a
-                .rel_path
+    let mut skills: Vec<(String, SkillMeta)> = content
+        .skills()
+        .filter(|(rel_path, _)| is_top_level_skill(rel_path))
+        .filter(|(rel_path, _)| match &declared {
+            Some(list) => rel_path
                 .strip_prefix("skills/")
                 .and_then(|s| s.strip_suffix(".md"))
                 .is_some_and(|stem| list.iter().any(|d| d == stem)),
             None => true,
         })
-        .map(|a| {
-            let stem = a
-                .rel_path
+        .map(|(rel_path, contents)| {
+            let stem = rel_path
                 .strip_prefix("skills/")
                 .and_then(|s| s.strip_suffix(".md"))
-                .unwrap_or(a.rel_path)
+                .unwrap_or(rel_path)
                 .to_string();
-            (stem, parse_skill_frontmatter(a.contents))
+            (stem, parse_skill_frontmatter(contents))
         })
         .collect();
     skills.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -129,7 +127,7 @@ pub(crate) fn render() -> String {
     out.push_str(
         "Generated from the bundled `framework-manifest.toml`'s \
          `[skill_categories]` roster — the authority for which skills are \
-         bundled — joined to `bundle::ALL` for each skill\'s frontmatter via a \
+         bundled — joined to the content's `skills/` for each skill\'s frontmatter via a \
          shared line parser. Every declared skill is `universal`: it deploys to \
          every project, with no detection. Regenerate with \
          `tm generate capabilities`.\n\n",
@@ -154,7 +152,7 @@ mod tests {
 
     #[test]
     fn skills_render_contains_known_skill() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_content_ref());
         assert!(rendered.contains("`tm`"), "{rendered}");
         assert!(rendered.contains("`systematic-debugging`"), "{rendered}");
     }
@@ -164,7 +162,7 @@ mod tests {
         // #4765: the rendered roster is the manifest's declaration, one row per
         // declared stem — not a second filter that could drift from it.
         let declared = framework_skill_categories().expect("bundled roster must be valid");
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_content_ref());
         assert!(
             rendered.contains(&format!("{} bundled skills.", declared.universal.len())),
             "headline count must equal the declared roster size:\n{rendered}"
@@ -179,7 +177,7 @@ mod tests {
 
     #[test]
     fn skills_render_excludes_reference_files() {
-        let rendered = render();
+        let rendered = render(crate::commands::install::test_content_ref());
         assert!(!rendered.contains("references/workflow"), "{rendered}");
     }
 
@@ -201,6 +199,9 @@ mod tests {
 
     #[test]
     fn skills_render_is_deterministic() {
-        assert_eq!(render(), render());
+        assert_eq!(
+            render(crate::commands::install::test_content_ref()),
+            render(crate::commands::install::test_content_ref())
+        );
     }
 }

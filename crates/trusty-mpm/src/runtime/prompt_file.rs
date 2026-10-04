@@ -122,8 +122,22 @@ pub(super) fn build_prompt_file_in(
         project_dir,
         &crate::core::config::MpmConfig::load(framework_root),
     );
+    // #9012: the PM instructions are runtime content; none refuses the spawn.
+    let content = match crate::core::content_source::framework_content_for(project_dir) {
+        Ok(content) => content,
+        Err(err) => {
+            return (
+                Err(RuntimeError::Spawn(format!(
+                    "cannot compose the PM instructions for {}: {err}",
+                    project_dir.display()
+                ))),
+                profile,
+            );
+        }
+    };
     let native = crate::core::output_style::claude_supports_native_output_style();
     let prompt = crate::core::session_launch::build_system_prompt_for_profile(
+        &content,
         project_dir,
         None,
         native,
@@ -137,6 +151,7 @@ pub(super) fn build_prompt_file_in(
     let scope = crate::core::harness_root::session_scope(session_id);
     let compiled = crate::core::instruction_pipeline::compiled_prompt_path(project_dir, &scope);
     if let Err(err) = crate::core::instruction_pipeline::write_compiled_prompt_recording_in(
+        &content,
         framework_root,
         &compiled,
         &prompt,

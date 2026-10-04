@@ -666,13 +666,14 @@ pub const OUTPUT_STYLE_REMEDY: &str = "tm doctor --fix --yes";
 /// `one_unreadable_style_does_not_fail_a_sibling_that_was_written`,
 /// `output_style_repair_rewrites_the_managed_tier`.
 pub fn repair_output_style(
+    content: &crate::core::framework_content::FrameworkContent,
     home: &Path,
     managed_config: Option<&Path>,
     mode: RepairMode,
 ) -> Vec<RepairStep> {
     crate::core::output_style_tiers::output_style_tiers(home, managed_config)
         .into_iter()
-        .flat_map(|tier| repair_output_style_tier(&tier.claude_dir, tier.label, mode))
+        .flat_map(|tier| repair_output_style_tier(content, &tier.claude_dir, tier.label, mode))
         .collect()
 }
 
@@ -687,6 +688,7 @@ pub fn repair_output_style(
 /// [`repair_output_style`], against `<claude_dir>/output-styles/`.
 /// Test: `repair_output_style`'s tests exercise it through the public entry.
 fn repair_output_style_tier(
+    content: &crate::core::framework_content::FrameworkContent,
     claude: &Path,
     tier: &'static str,
     mode: RepairMode,
@@ -696,7 +698,8 @@ fn repair_output_style_tier(
     };
 
     let styles_dir = claude.join("output-styles");
-    let drift = output_style_drift(&styles_dir);
+    // #9012: the style bodies are runtime content.
+    let drift = output_style_drift(content, &styles_dir);
     if drift.is_empty() {
         return Vec::new();
     }
@@ -709,7 +712,7 @@ fn repair_output_style_tier(
     // One deploy call covers every writable file; run it once, up front, so each
     // step below reports the outcome that actually happened on disk.
     let applied = match (mode, writable.is_empty()) {
-        (RepairMode::Apply, false) => Some(deploy_output_styles(claude)),
+        (RepairMode::Apply, false) => Some(deploy_output_styles(content, claude)),
         _ => None,
     };
 
@@ -806,7 +809,8 @@ pub fn refuse_legacy_sources(home: &Path) -> Vec<RepairStep> {
     if let Ok(entries) = std::fs::read_dir(&skills) {
         // #7783: the same roster `count_legacy_bundled_skills` counts against,
         // so the listing and the count can never name different sets.
-        let bundled = crate::core::manifest::framework::bundled_skill_stems();
+        // #9012: the binary's declared roster; the content is not needed.
+        let bundled = crate::core::manifest::framework::declared_skill_stems().unwrap_or_default();
         let mut legacy: Vec<PathBuf> = entries
             .flatten()
             .filter(|e| {

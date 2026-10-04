@@ -49,7 +49,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::core::bundle;
+use crate::core::framework_content::FrameworkContent;
 use crate::core::skill_manifest::{SKILL_MANIFEST_FILE, SkillManifest};
 
 /// Entry-point filename Claude Code reads inside a deployed skill directory.
@@ -139,7 +139,8 @@ pub struct SkillReference {
 /// What: when `submodule_source` is `Some` (a populated, git-tracked
 /// `agents/skills` checkout — the one source that legitimately outranks the
 /// embedded table, per `core::skill_source`) its top-level `*.md` files are the
-/// reference. Otherwise every `skills/<stem>.md` entry of [`bundle::ALL`] is —
+/// reference. Otherwise every skill file of `content` (#9012: the verified
+/// runtime content, no longer the compiled-in table) is —
 /// keyed EXACTLY as the deploy manifest keys them: a bare `<stem>` for an entry
 /// point, and `<stem>/references/<file>.md` for each reference sibling
 /// (#4622 review, HIGH-1 — dropping the nested entries made all 80 of this
@@ -151,7 +152,10 @@ pub struct SkillReference {
 /// Test: `reference_prefers_the_submodule`, `reference_falls_back_to_embedded`,
 /// `reference_includes_nested_reference_keys`,
 /// `a_pristine_bundled_deploy_is_entirely_fresh`.
-pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
+pub fn skill_reference(
+    submodule_source: Option<&Path>,
+    content: Option<&FrameworkContent>,
+) -> SkillReference {
     if let Some(dir) = submodule_source {
         let mut assets = BTreeMap::new();
         collect_submodule_assets(dir, dir, &mut assets);
@@ -166,10 +170,18 @@ pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
         }
     }
 
-    let assets = bundle::ALL
-        .iter()
-        .filter_map(|a| {
-            let rel = a.rel_path.strip_prefix("skills/")?;
+    // #9012: with no content and no submodule the reference is empty, which
+    // every caller reports as unverifiable rather than clean.
+    let Some(content) = content else {
+        return SkillReference {
+            assets: BTreeMap::new(),
+            origin: "no instructional content (run `tm content install`)".to_string(),
+        };
+    };
+    let assets = content
+        .skills()
+        .filter_map(|(rel_path, contents)| {
+            let rel = rel_path.strip_prefix("skills/")?;
             // A bare `<stem>.md` entry point is keyed by its stem; a nested
             // `<stem>/references/<file>.md` sibling is keyed by that exact
             // relative path, because that is what `skills::deployer` records.
@@ -178,12 +190,12 @@ pub fn skill_reference(submodule_source: Option<&Path>) -> SkillReference {
             } else {
                 rel.strip_suffix(".md")?.to_string()
             };
-            Some((key, a.contents.to_string()))
+            Some((key, contents.to_string()))
         })
         .collect();
     SkillReference {
         assets,
-        origin: "this binary's embedded bundled assets".to_string(),
+        origin: format!("the instructional content from {}", content.origin()),
     }
 }
 

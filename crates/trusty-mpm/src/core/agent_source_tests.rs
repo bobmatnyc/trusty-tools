@@ -12,6 +12,7 @@
 //! Test: this file.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 
 /// The real bundled agent set is materialized into a temp dir per test, so
 /// these assertions pin the actual shipped roster rather than a fixture.
@@ -37,7 +38,7 @@ fn agent_bundle_stamp_differs_from_skill_stamp() {
     // table — otherwise a skill-only change would churn the agent source.
     assert_ne!(
         agent_bundle_stamp(&roster()),
-        crate::core::skill_source::skill_bundle_stamp()
+        crate::core::skill_source::skill_bundle_stamp(rc())
     );
 }
 

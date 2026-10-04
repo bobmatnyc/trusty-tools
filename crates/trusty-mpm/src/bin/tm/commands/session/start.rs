@@ -395,7 +395,10 @@ fn inplace_prompt_file(
     dir: &std::path::Path,
 ) -> anyhow::Result<InplacePrompt> {
     // #8286: one profile resolution for the prompt and the stamp (#8453).
-    let cli = trusty_mpm::core::session_launch::cli_launch(path, None);
+    // #9012: the PM instructions are runtime content; none refuses here.
+    let content = trusty_mpm::core::content_source::framework_content_for(path)
+        .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
+    let cli = trusty_mpm::core::session_launch::cli_launch(&content, path, None);
     let file =
         trusty_mpm::core::model_inject::write_pm_prompt_file_in(dir, &cli.prompt, path, "launch")?;
     Ok(InplacePrompt {

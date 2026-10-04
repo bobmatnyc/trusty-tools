@@ -72,8 +72,10 @@ fn resolve_inputs() -> FixSkillsInputs {
     let paths = FrameworkPaths::default();
     let source = paths.skill_source_dir();
     let submodule = (source != paths.skills).then_some(source);
+    // #9012: the bundled skills are runtime content, resolved from the cwd.
+    let content = trusty_mpm::core::content_source::framework_content().ok();
     FixSkillsInputs {
-        reference: skill_reference(submodule.as_deref()),
+        reference: skill_reference(submodule.as_deref(), content.as_ref()),
         project_dir: std::env::current_dir().ok(),
         paths,
     }

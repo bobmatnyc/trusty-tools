@@ -695,7 +695,10 @@ fn apply_one(
         .iter()
         .rposition(|b| b.section == section && b.pinned);
     next.blocks.retain_mut(|block| {
-        if block.section != section || block.body.authored().is_none() || block.pinned {
+        if block.section != section
+            || block.body.authored(&package.sources).is_none()
+            || block.pinned
+        {
             return true;
         }
         if replaced {

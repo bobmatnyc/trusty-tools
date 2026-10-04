@@ -1,6 +1,7 @@
 //! Flag-resolution and addendum-shape tests for #7688.
 
 use super::*;
+use crate::core::content_source::test_support::rc;
 use tempfile::TempDir;
 
 /// Write a project config into a fresh temp project.
@@ -65,7 +66,7 @@ fn a_malformed_project_config_falls_through_to_the_host() {
 #[test]
 fn the_addendum_names_the_extraction_heading() {
     assert!(
-        PM_ADDENDUM.contains(FEEDBACK_HEADING),
+        rc().required(PM_ADDENDUM_PATH).contains(FEEDBACK_HEADING),
         "the PM addendum must name the heading the hook extracts"
     );
 }
@@ -77,14 +78,15 @@ fn the_addendum_names_the_extraction_heading() {
 #[test]
 fn the_addendum_asks_the_pm_to_pass_the_request_down() {
     assert!(
-        PM_ADDENDUM.contains("dispatch brief you send"),
+        rc().required(PM_ADDENDUM_PATH)
+            .contains("dispatch brief you send"),
         "the PM addendum must tell the PM to append the request to every brief"
     );
 }
 
 #[test]
 fn pm_addendum_is_separated_from_the_prompt_it_follows() {
-    let addendum = pm_addendum();
+    let addendum = pm_addendum(rc());
     assert!(
         addendum.starts_with(crate::core::instruction_pipeline::SECTION_SEPARATOR),
         "the addendum must open with the section separator, got {addendum:?}"
@@ -99,7 +101,7 @@ fn pm_prompt_is_unchanged_when_the_flag_is_off() {
     let tmp = project_with("prompt_self_improvement = false\n");
     let composed = "COMPOSED PROMPT".to_string();
     assert_eq!(
-        append_to_pm_prompt(tmp.path(), composed.clone()),
+        append_to_pm_prompt(rc(), tmp.path(), composed.clone()),
         composed,
         "the flag off must leave the composed prompt byte-identical"
     );
@@ -108,7 +110,7 @@ fn pm_prompt_is_unchanged_when_the_flag_is_off() {
 #[test]
 fn pm_prompt_carries_the_addendum_when_the_flag_is_on() {
     let tmp = project_with("prompt_self_improvement = true\n");
-    let got = append_to_pm_prompt(tmp.path(), "COMPOSED PROMPT".to_string());
+    let got = append_to_pm_prompt(rc(), tmp.path(), "COMPOSED PROMPT".to_string());
     assert!(
         got.starts_with("COMPOSED PROMPT"),
         "the prompt is preserved"
@@ -124,9 +126,9 @@ fn pm_prompt_carries_the_addendum_when_the_flag_is_on() {
 #[test]
 fn the_addendum_is_short() {
     assert!(
-        PM_ADDENDUM.lines().count() <= 6,
+        rc().required(PM_ADDENDUM_PATH).lines().count() <= 6,
         "the PM addendum is {} lines; keep it under 6",
-        PM_ADDENDUM.lines().count()
+        rc().required(PM_ADDENDUM_PATH).lines().count()
     );
 }
 
@@ -136,7 +138,7 @@ fn the_addendum_is_short() {
 #[test]
 fn the_addendum_carries_no_justification_paragraph() {
     assert!(
-        !PM_ADDENDUM.contains("#6935"),
+        !rc().required(PM_ADDENDUM_PATH).contains("#6935"),
         "the framework-reporting distinction belongs in the module doc, not in \
          the prompt every turn pays for"
     );

@@ -52,8 +52,20 @@ pub(super) fn check_instruction_fold(project_dir: Option<&Path>) -> DoctorCheck 
         );
     };
 
+    // #9012: the section sizes come from content; none leaves nothing to measure.
+    let content = match crate::core::content_source::framework_content_for(project) {
+        Ok(content) => content,
+        Err(err) => {
+            return DoctorCheck::new(
+                NAME,
+                CheckStatus::Warn,
+                format!("the instruction fold cannot be measured: {err}"),
+            );
+        }
+    };
+    let sections = crate::core::savings_instructions::SectionBytes::of(&content);
     let Some((source_bytes, compiled_bytes)) =
-        crate::core::savings_instructions::measure_project_fold(project)
+        crate::core::savings_instructions::measure_project_fold(project, sections)
     else {
         return DoctorCheck::new(
             NAME,
@@ -127,10 +139,11 @@ mod tests {
     /// place a prompt deliberately on either side of it without hard-coding a
     /// byte count that moves whenever a section is edited.
     fn bundled_bytes() -> usize {
-        crate::core::instruction_pipeline::SECTION_SOURCES
-            .iter()
-            .map(|(_, body)| body.len())
-            .sum()
+        // #9012: the sections are the checkout's content.
+        crate::core::savings_instructions::SectionBytes::of(
+            crate::core::content_source::test_support::rc(),
+        )
+        .total
     }
 
     #[test]

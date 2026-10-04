@@ -500,7 +500,7 @@ reachable both ways §5.1 fixes: the `trusty-analyze lsp` CLI subcommand and the
 `search_lsp_*` tools `trusty-search` fronts.
 
 **(b) The analyze skill.** There is **no bundled `analyze` skill today** — the
-bundled skills live in `crates/trusty-mpm/src/assets/skills/` (flat
+bundled skills live in `content/skills/` (flat
 `<name>.md`, with an optional `<name>/references/` directory) and mirror into
 `crates/trusty-code/src/assets/skills/<name>/SKILL.md`. This deliverable creates
 `analyze.md` there. It documents each tool of §5 and, for each, when to call it

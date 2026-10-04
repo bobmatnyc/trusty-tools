@@ -24,7 +24,7 @@ Either way, tests assert on their text. Verified read sites:
 |---|---|
 | `content/agents/*.md` | `crates/trusty-agents-common/src/agent_content.rs` (`AgentRoster::load`; tests: `agent_content_tests.rs`, trusty-mpm `bundle_tests.rs`) |
 | `content/instructions/harness_understanding/*.md` | `crates/trusty-agents-common/src/harness_doc.rs` (`HarnessDoc::load`) |
-| `crates/trusty-mpm/src/assets/skills/*.md` | `crates/trusty-mpm/src/core/bundle_tm_skills.rs`, `bundle_skills_*.rs` |
+| `content/skills/**`, `content/instructions/**` (sections, supervisor, package, output styles, SM instructions, docs) | `crates/trusty-mpm/src/core/framework_content.rs` (`FrameworkContent::load`, #9012; tests read the checkout through `content_source::test_support::rc()`) |
 
 Two consequences the rung-1 row does not cover. Editing one recompiles the
 embedding crate and every crate that depends on it — `trusty-agents-common` is

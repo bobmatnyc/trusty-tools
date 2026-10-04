@@ -61,7 +61,7 @@ fn make_checkout(root: &Path) {
         "[workspace]\nmembers = [\"crates/*\"]\n",
     )
     .expect("Cargo.toml");
-    let skill = root.join("crates/trusty-mpm/src/assets/skills/tm");
+    let skill = root.join("content/skills/tm");
     std::fs::create_dir_all(&skill).expect("skill dir");
     std::fs::write(skill.join("SKILL.md"), b"working-tree skill").expect("skill");
     std::fs::write(skill.join(".hidden"), b"x").expect("dot-file");
@@ -675,7 +675,7 @@ fn detect_outside_a_checkout_uses_the_installed_bundle() {
 fn dev_checkout_is_found_from_a_nested_directory() {
     let dir = tempfile::tempdir().expect("tempdir");
     make_checkout(dir.path());
-    let nested = dir.path().join("crates/trusty-mpm/src/assets/skills/tm");
+    let nested = dir.path().join("content/skills/tm");
     assert_eq!(find_dev_checkout(&nested), Some(dir.path().to_path_buf()));
 }
 
@@ -690,7 +690,7 @@ fn dev_checkout_is_found_from_a_nested_directory_of_a_linked_worktree() {
         "gitdir: /elsewhere/.git/worktrees/x\n",
     )
     .expect(".git file");
-    let nested = dir.path().join("crates/trusty-mpm/src/assets/skills/tm");
+    let nested = dir.path().join("content/skills/tm");
     assert_eq!(find_dev_checkout(&nested), Some(dir.path().to_path_buf()));
 }
 
@@ -875,7 +875,7 @@ fn explicit_dev_root_without_a_git_marker_is_untrusted() {
 fn dev_read_serves_only_regular_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     make_checkout(dir.path());
-    let skills = dir.path().join("crates/trusty-mpm/src/assets/skills");
+    let skills = dir.path().join("content/skills");
     std::os::unix::fs::symlink(dir.path().join("Cargo.toml"), skills.join("link.md"))
         .expect("file symlink");
     std::os::unix::fs::symlink(skills.join("tm"), skills.join("linked-dir")).expect("dir symlink");
@@ -999,11 +999,9 @@ fn packaged_destinations_lie_under_the_three_content_classes() {
 fn dev_checkout_serves_a_nested_destination_from_its_own_source() {
     let dir = tempfile::tempdir().expect("tempdir");
     make_checkout(dir.path());
-    let styles = dir
-        .path()
-        .join("crates/trusty-mpm/src/assets/output-styles");
+    let styles = dir.path().join("content/instructions/output-styles");
     std::fs::write(styles.join("tm.md"), b"style").expect("style");
-    let rules = dir.path().join("crates/trusty-mpm/src/assets/instructions");
+    let rules = dir.path().join("content/instructions");
     std::fs::write(rules.join("BASE.md"), b"base").expect("instruction");
     let content = resolve(&options(
         &dir.path().join("no-cache"),

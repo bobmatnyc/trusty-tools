@@ -13,7 +13,7 @@ agent composition (`crates/trusty-mpm/src/core/agent_builder.rs`,
 `crates/trusty-mpm/src/core/agent_deployer.rs`), catalog sync
 (`crates/trusty-mpm/src/content/catalog_sync.rs`), bundled assets
 (`crates/trusty-mpm/src/assets/agents/`,
-`crates/trusty-mpm/src/assets/output-styles/`), the claude-mpm upstream
+`content/instructions/output-styles/`), the claude-mpm upstream
 (`https://github.com/bobmatnyc/claude-mpm`), and issues **#1045** (metaharness
 epic — the runner core) and **#1272** (interactive-TUI epic — the operator
 surface, DOC-16).
@@ -71,7 +71,7 @@ correct**, plus the gaps that remain.
 > "Canonical source" — see that entry's own stale-note). #4183
 > (2026-07-28) replaced the four monolithic files below with per-section
 > files under `assets/instructions/sections/`, composed from
-> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/crates/trusty-mpm/src/assets/instructions/pm-instruction-package.json)
+> [`pm-instruction-package.json`](https://github.com/bobmatnyc/trusty-tools/blob/8abf30962863e143ed405e8d6cabe33f6b0f0b6d/content/instructions/pm-instruction-package.json)
 > (schema v2); `assemble_system_prompt()`/`resolve_pm_prompt()`/
 > `build_instructions()`/`prepare_session()` still exist and still own this
 > pipeline, just sourcing content differently. Project customization is
@@ -378,7 +378,7 @@ DOC-16 TUI without them.
   (`compose_agent`), `crates/trusty-mpm/src/core/agent_deployer.rs`
   (`deploy_agents`).
 - Bundled assets: `crates/trusty-mpm/src/assets/agents/BASE-*.md`,
-  `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md`.
+  `content/instructions/output-styles/trusty-mpm.md`.
 - Catalog sync: `crates/trusty-mpm/src/content/catalog_sync.rs`
   (`list_agents`, `list_skills`; env `TRUSTY_MPM_CATALOG_REPO` / `_REF` /
   `_TTL_HOURS`; cache `~/.trusty-mpm/catalog/repo/`).

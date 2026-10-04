@@ -14,5 +14,5 @@ This directory contains onboarding guides for engineers new to trusty-tools and 
 
 - **I want to install:** → [Install and Run trusty-mpm](install-and-run-tm.md)
 - **I'm coming from claude-mpm:** → [Differences & Install](claude-mpm-vs-trusty-mpm.md)
-- **I want to understand architecture:** → [WHAT-IS-TRUSTY-MPM.md](../../crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md) and [ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../crates/trusty-mpm/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)
+- **I want to understand architecture:** → [WHAT-IS-TRUSTY-MPM.md](../../content/instructions/docs/WHAT-IS-TRUSTY-MPM.md) and [ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)
 - **I want the full crate index:** → [Root README](../../README.md#installation)

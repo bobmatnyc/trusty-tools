@@ -113,7 +113,11 @@ fn deploy_style_file(fw: &FrameworkPaths) {
     let style_dir = fw.claude_home_dir().join(".claude").join("output-styles");
     std::fs::create_dir_all(&style_dir).unwrap();
     let default = OUTPUT_STYLES[0];
-    std::fs::write(style_dir.join(default.file_name), default.content).unwrap();
+    std::fs::write(
+        style_dir.join(default.file_name),
+        default.content(crate::core::content_source::test_support::rc()),
+    )
+    .unwrap();
 }
 
 /// A minimal, deterministic agent-manifest entry for the entries the
