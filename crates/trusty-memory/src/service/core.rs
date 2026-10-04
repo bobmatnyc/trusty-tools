@@ -841,6 +841,8 @@ impl MemoryService {
         {
             crate::tools::bm25::fuse_bm25_into_recall(&mut results, &hits, top_k);
         }
+        // #8246: same stale-snapshot demotion as the MCP recall handlers.
+        crate::tools::recall_rank::demote_stale_snapshots(&mut results, chrono::Utc::now());
         let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
         Ok(json!(payload))
     }
@@ -888,18 +890,25 @@ impl MemoryService {
         )
         .await;
         match streamed {
-            Ok(results) => json!(results
-                .into_iter()
-                .map(|r| json!({
-                    "palace_id": r.palace_id,
-                    "drawer_id": r.result.drawer.id.to_string(),
-                    "content": r.result.drawer.content(),
-                    "importance": r.result.drawer.importance,
-                    "tags": r.result.drawer.tags,
-                    "score": r.result.score,
-                    "layer": r.result.layer,
-                }))
-                .collect::<Vec<_>>()),
+            Ok(mut results) => {
+                // #8246: same demotion as `memory_recall_all`.
+                crate::tools::recall_rank::demote_stale_snapshots_across(
+                    &mut results,
+                    chrono::Utc::now(),
+                );
+                json!(results
+                    .into_iter()
+                    .map(|r| json!({
+                        "palace_id": r.palace_id,
+                        "drawer_id": r.result.drawer.id.to_string(),
+                        "content": r.result.drawer.content(),
+                        "importance": r.result.drawer.importance,
+                        "tags": r.result.drawer.tags,
+                        "score": r.result.score,
+                        "layer": r.result.layer,
+                    }))
+                    .collect::<Vec<_>>())
+            }
             Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
         }
     }

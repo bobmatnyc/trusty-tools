@@ -10,7 +10,9 @@
 //! `handle_memory_recall_all`, and their private helpers, moved verbatim except
 //! for `recall_scope`, which widened to `pub(crate)` because `memory_list`
 //! shares it. Response shaping lives next door in
-//! [`super::recall_projection`].
+//! [`super::recall_projection`]. #8246/#9143: every handler demotes stale
+//! snapshots ([`super::recall_rank`]) and the single-palace handlers merge
+//! user-scope rulings ([`super::recall_rulings`]) before the floor and cut.
 //! Test: `dispatch_recall_room_filter_scopes_results` in `tools::tests`;
 //! `stdio_serve_recall_all_bounded`; `tests/recall_query_discrimination.rs`.
 
@@ -30,6 +32,9 @@ use super::helpers::open_palace_handle;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
 use super::palace_index::{resolve_palace_or_index, PalaceScope};
+// #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
+use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across};
+use super::recall_rulings::merge_user_rulings;
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
@@ -199,6 +204,8 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // makes every query return the same drawers.
     if !vector_lane_available(state) {
         let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
+        // #8246: stale snapshots rank below current facts on every path.
+        demote_stale_snapshots(&mut results, chrono::Utc::now());
         let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
         return Ok(serialize_recall(
             &palace,
@@ -235,6 +242,19 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         // the caller's count here would undo the widened window.
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
+    // #9143: user-scope rulings join at L1, after fusion so they compete on
+    // the fused scale; #8246: then stale snapshots are demoted and re-sorted.
+    merge_user_rulings(
+        state,
+        &handle,
+        embedder.as_ref(),
+        query,
+        fetch_k,
+        min_score,
+        &mut results,
+    )
+    .await;
+    demote_stale_snapshots(&mut results, chrono::Utc::now());
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
@@ -278,6 +298,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // #4836: and the same embedder-state gate, for the same reason.
     if !vector_lane_available(state) {
         let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
+        // #8246: stale snapshots rank below current facts on every path.
+        demote_stale_snapshots(&mut results, chrono::Utc::now());
         let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
         return Ok(serialize_recall(
             &palace,
@@ -305,6 +327,18 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // `fetch_k`, not `top_k` — see the `memory_recall` sibling.
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
+    // #9143 / #8246: same rulings leg and demotion as `memory_recall`.
+    merge_user_rulings(
+        state,
+        &handle,
+        embedder.as_ref(),
+        query,
+        fetch_k,
+        min_score,
+        &mut results,
+    )
+    .await;
+    demote_stale_snapshots(&mut results, chrono::Utc::now());
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
     Ok(serialize_recall(
@@ -385,7 +419,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // time and hands back everything the query itself brought in.
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     // #4836: gated on the embedder's real state, as the per-palace paths are.
-    let results = if !vector_lane_available(state) {
+    let mut results = if !vector_lane_available(state) {
         recall_streamed(
             state,
             &palaces,
@@ -407,6 +441,8 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         .await
         .context("recall_across_palaces")?
     };
+    // #8246: the merged list gets the same snapshot demotion.
+    demote_stale_snapshots_across(&mut results, chrono::Utc::now());
 
     let payload: Vec<Value> = results
         .iter()

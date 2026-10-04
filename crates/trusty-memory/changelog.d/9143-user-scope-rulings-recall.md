@@ -1,0 +1,2 @@
+Added
+- `TRUSTY_MEMORY_RULINGS_PALACES` (comma-separated palace ids) names user-scope palaces whose ruling-tagged drawers (`bob-ruling`, `owner-ruling`, `ruling`, `bob-decision`, `decision`, `standing-rule`) join every `memory_recall` and `memory_recall_deep` at layer 1, so an owner ruling stored in one palace is recalled from any project palace. Non-ruling drawers never cross palaces; unset means no extra work (Refs [#9143](https://github.com/bobmatnyc/trusty-tools/issues/9143))

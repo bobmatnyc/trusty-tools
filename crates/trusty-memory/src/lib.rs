@@ -348,6 +348,11 @@ pub struct AppState {
     /// via `with_multi_tenant_mode_from_env` (`TRUSTY_MEMORY_MULTI_TENANT=1`);
     /// see the `authz` module docs for the full design rationale.
     pub multi_tenant_mode: bool,
+    /// User-scope palaces whose ruling-tagged drawers join every project
+    /// recall at L1 (#9143). Read from `TRUSTY_MEMORY_RULINGS_PALACES` at
+    /// construction; empty (the default) disables the leg. Override with
+    /// `with_rulings_palaces`. See `tools::recall_rulings`.
+    pub rulings_palaces: Arc<Vec<String>>,
     /// Most recent on-disk footprint of `data_root`, in bytes (issue #35).
     ///
     /// Why: `GET /health` reports `disk_bytes`. Walking the data directory on
@@ -737,6 +742,7 @@ impl AppState {
             // unexpected files are written to the OS data dir.
             error_store: None,
             multi_tenant_mode: false,
+            rulings_palaces: Arc::new(tools::recall_rulings::rulings_palaces_from_env()),
             disk_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sys_metrics: Arc::new(tokio::sync::Mutex::new(
                 trusty_common::sys_metrics::SysMetrics::new(),
