@@ -81,6 +81,10 @@ pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MEMORY;
 pub fn handle_service(action: &ServiceAction) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        // #9140: `service stop` boots out the live unit; never under an override.
+        if matches!(action, ServiceAction::Stop) {
+            super::stop::sandbox::refuse_live_unit_under_override("service stop")?;
+        }
         match action {
             ServiceAction::Install => service_install(),
             ServiceAction::Start => service_start(),
