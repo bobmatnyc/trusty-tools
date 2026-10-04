@@ -27,7 +27,7 @@ const BYPASSES: [Option<(&str, &str)>; 3] = [
 
 /// Shapes the shell delimits at the whole quoted word, so the `$(…)` after
 /// the real terminator runs. Each allowed before the #9150 fix.
-const HIDDEN_SUBSTITUTIONS: [&str; 29] = [
+const HIDDEN_SUBSTITUTIONS: [&str; 31] = [
     // The #9150 report.
     "cat <<'A B'\nx\nA B\necho \"$(rm -rf /)\"\nA",
     "cat <<'A>B'\nx\nA>B\necho \"$(rm -rf /)\"\nA",
@@ -64,6 +64,10 @@ const HIDDEN_SUBSTITUTIONS: [&str; 29] = [
     "echo ${x:-<<'EOF'}\necho \"$(rm -rf /)\"\nEOF}",
     "echo \\<<'EOF'\necho \"$(rm -rf /)\"\nEOF",
     "x=$(cat <<'EOF')\necho \"$(rm -rf /)\"\nEOF",
+    // Round 3: `A\r` does not end an `A` body, and a CRLF terminator ends
+    // only a CRLF word. The first row allowed on a753c016c9.
+    "cat <<'A'\nx\nA\r\ncat <<'X'\nA\necho \"$(rm -rf /)\"\nX",
+    "cat <<'EOF'\r\nx\r\nEOF\r\necho \"$(rm -rf /)\"\r\n",
 ];
 
 /// #9150: every shape above denies, under each bypass.
@@ -100,8 +104,29 @@ fn a_plain_quoted_heredoc_with_substitution_text_still_allows() {
         "(cat <<'EOF')\n$(rm -rf /)\nEOF\necho benign",
         "echo $((1 << 3))\necho benign",
         "cat <<'END_OF-file.1'\n$(rm -rf /)\nEND_OF-file.1\necho benign",
+        // Round 3: a CRLF body is data like its LF form (denied on a753c016c9).
+        "cat <<'EOF'\r\n$(rm -rf /)\r\nEOF\r\necho benign\r\n",
     ] {
         let out = run(&fx, &bash_payload(&fx, command), &[], Some("pm"));
         assert!(!out.contains("\"deny\""), "{command:?}: {out}");
+    }
+}
+
+/// #9150 round 3: a delimiter word the scanner refuses denies under each
+/// bypass even when its "body" holds a credential-printing command, because
+/// the unclassifiable refusal runs before the credential-print rule and the
+/// walk behind that rule strips no body for such a word.
+#[test]
+fn a_refused_delimiter_denies_a_credential_command_in_its_body() {
+    let fx = Fixture::new();
+    for bypass in BYPASSES {
+        let env: Vec<(&str, &str)> = bypass.into_iter().collect();
+        for command in [
+            "cat <<'x$y'\ngcloud auth print-access-token\nx$y",
+            "cat <<x$y\ngcloud auth print-access-token\nx$y",
+        ] {
+            let out = run(&fx, &bash_payload(&fx, command), &env, Some("pm"));
+            assert!(out.contains("\"deny\""), "{bypass:?} {command:?}: {out}");
+        }
     }
 }

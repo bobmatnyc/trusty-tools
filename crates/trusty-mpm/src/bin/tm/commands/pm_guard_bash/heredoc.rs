@@ -443,9 +443,14 @@ fn delimiters_on(
 /// or the line's end. Anything else — `$`, a backtick, `(`, `<(`, a `\` inside
 /// quotes, an empty quoted word, a quote left open — is `None`, because the
 /// shell's word there is not one this scan can compare a line with. An empty
-/// unquoted word is `Some` and opens no body.
-/// Test: `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`.
-fn delimiter_word(bytes: &[u8], start: usize) -> Option<(String, bool, usize)> {
+/// unquoted word is `Some` and opens no body. `bytes` is the operator line,
+/// newline excluded, so a CRLF line's `\r` is its last byte.
+///
+/// #9150: the credential-print walk reads its operators through this too,
+/// so both scanners split a delimiter word one way.
+/// Test: `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`,
+/// `credential_print_tests::denies_a_body_behind_a_refused_delimiter`.
+pub(super) fn delimiter_word(bytes: &[u8], start: usize) -> Option<(String, bool, usize)> {
     let mut word = String::new();
     let mut quoted = false;
     let mut j = start;
@@ -545,13 +550,13 @@ fn body_span(
 ) -> Option<Body> {
     let body_start = lines.get(from)?.0;
     for (index, (start, end)) in lines.iter().enumerate().skip(from) {
-        let text = command[*start..*end].trim_end_matches('\r');
-        let candidate = if delimiter.strip_tabs {
-            text.trim_start_matches('\t')
-        } else {
-            text
-        };
-        if candidate == delimiter.word {
+        let last = index + 1 == lines.len();
+        if is_terminator(
+            &command[*start..*end],
+            &delimiter.word,
+            delimiter.strip_tabs,
+            last,
+        ) {
             return Some(Body {
                 span: (body_start, *start),
                 frame_end: *end,
@@ -560,6 +565,25 @@ fn body_span(
         }
     }
     None
+}
+
+/// Whether `line`, newline excluded, ends a body whose delimiter is `word`.
+///
+/// What: an exact match after `<<-` strips leading tabs. A `\r` is not
+/// trimmed (#9150): bash 3.2 and zsh 5.9 keep a CRLF line's `\r` in the
+/// delimiter word and in the terminator line alike, so `EOF\r` ends an
+/// `EOF\r` body and never an `EOF` one. The one exception is the `last` line
+/// of the text, which a caller's `trim()` may have cut from `EOF\r` to `EOF`:
+/// no line follows it, so ending the body there leaves nothing hidden.
+/// Test: `heredoc_bodies_read_a_crlf_heredoc_as_the_shell_does`,
+/// `credential_print_tests::denies_a_body_behind_a_refused_delimiter`.
+pub(super) fn is_terminator(line: &str, word: &str, strip_tabs: bool, last: bool) -> bool {
+    let line = if strip_tabs {
+        line.trim_start_matches('\t')
+    } else {
+        line
+    };
+    line == word || (last && line == word.trim_end_matches('\r'))
 }
 
 #[cfg(test)]

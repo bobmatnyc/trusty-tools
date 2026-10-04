@@ -23,6 +23,7 @@
 //! `credential_print_tests::allows_script_operands_and_comments`,
 //! `heredoc_operators_skip_comments_escapes_and_expansions`.
 
+use super::super::heredoc::{delimiter_word, is_terminator};
 use super::{Heredoc, input_is_program_text};
 
 /// Placeholder a stripped here-document leaves in the command text.
@@ -66,7 +67,8 @@ struct Pending {
     op: (usize, usize),
     /// Byte range of the operator's copy in the output.
     out: (usize, usize),
-    word: String,
+    /// #9150: `None` for a word [`delimiter_word`] refuses.
+    word: Option<String>,
     strip_tabs: bool,
     quoted: bool,
     /// #9150: this operator's index in the walk's operator list.
@@ -278,9 +280,10 @@ fn code_byte(
             ops.push((i, OperatorCtx::Code));
             match read_operator(text, i) {
                 Some(p) => {
-                    let next = p.op.1;
+                    // #9150: after a refused word the walk reads that word.
+                    let (next, word_start) = (p.op.1, p.word.is_none());
                     pending.push(p);
-                    step(next, false)
+                    step(next, word_start)
                 }
                 None => step(i + 2, true),
             }
@@ -403,8 +406,13 @@ fn set_top(stack: &mut [Ctx], ctx: Ctx) {
 
 /// Read a here-document operator starting at the `<<` at byte `at`.
 ///
-/// What: `None` when no delimiter word follows, or when its quoting is
-/// unclosed on the line.
+/// What: `None` when no delimiter word follows. #9150: the word is read by
+/// the here-document scanner's own [`delimiter_word`], over the operator's
+/// line, so the two scanners share one grammar and one `\r` rule. A word it
+/// refuses still yields a [`Pending`], with no `word` and an `op` covering
+/// only the `<<`: the walk reads the word's bytes as code, the operator can
+/// still turn [`OperatorCtx::Ambiguous`], and [`consume_bodies`] strips no
+/// body from that operator on.
 fn read_operator(text: &str, at: usize) -> Option<Pending> {
     let bytes = text.as_bytes();
     let mut j = at + 2;
@@ -415,32 +423,15 @@ fn read_operator(text: &str, at: usize) -> Option<Pending> {
     while matches!(bytes.get(j), Some(b' ' | b'\t')) {
         j += 1;
     }
-    let mut word = Vec::new();
-    let mut quoted = false;
-    while let Some(&b) = bytes.get(j) {
-        match b {
-            b' ' | b'\t' | b'\n' | b'<' | b'>' | b'|' | b';' | b'&' | b'(' | b')' => break,
-            b'\'' | b'"' => {
-                quoted = true;
-                let close = text[j + 1..].find(b as char)?;
-                word.extend_from_slice(&bytes[j + 1..j + 1 + close]);
-                j += close + 2;
-            }
-            b'\\' => {
-                quoted = true;
-                word.push(*bytes.get(j + 1)?);
-                j += 2;
-            }
-            _ => {
-                word.push(b);
-                j += 1;
-            }
-        }
-    }
-    let word = String::from_utf8(word).ok()?;
-    let usable = !word.is_empty() && !word.contains('\n') && text.is_char_boundary(j);
-    usable.then_some(Pending {
-        op: (at, j),
+    let line_end = text[at..].find('\n').map_or(text.len(), |n| at + n);
+    let (word, quoted, op_end) = match delimiter_word(&bytes[..line_end], j) {
+        Some((word, _, _)) if word.is_empty() => return None,
+        Some((word, quoted, end)) => (Some(word), quoted, end),
+        // #9150: a word the scanner refuses opens a body no rule can bound.
+        None => (None, true, at + 2),
+    };
+    Some(Pending {
+        op: (at, op_end),
         out: (0, 0),
         word,
         strip_tabs,
@@ -496,18 +487,15 @@ fn consume_bodies(
     done
 }
 
-/// The end of the body and the byte after the terminator line's newline.
+/// The end of the body and the byte after the terminator line's newline;
+/// `None` with no terminator line, or for a refused word (#9150).
 fn find_terminator(text: &str, from: usize, p: &Pending) -> Option<(usize, usize)> {
+    let word = p.word.as_deref()?;
     let mut start = from;
     while start <= text.len() {
         let end = text[start..].find('\n').map_or(text.len(), |n| start + n);
-        let line = text[start..end].trim_end_matches('\r');
-        let line = if p.strip_tabs {
-            line.trim_start_matches('\t')
-        } else {
-            line
-        };
-        if line == p.word {
+        // #9150: the scanner's own match, so both read a `\r` one way.
+        if is_terminator(&text[start..end], word, p.strip_tabs, end == text.len()) {
             return Some((start, (end + 1).min(text.len())));
         }
         if end >= text.len() {

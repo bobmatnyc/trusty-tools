@@ -296,3 +296,28 @@ fn heredoc_bodies_span_two_heredocs_on_one_line() {
     assert!(bodies.contains(first), "first body claimed");
     assert!(bodies.contains(second), "second body claimed");
 }
+
+/// #9150: a CRLF here-document reads like the LF form. Bash 3.2 and zsh 5.9
+/// keep the `\r` in the delimiter word and in the terminator line, so the
+/// body is claimed, a live line after it is not, and an `A\r` line never
+/// ends an `A` body.
+#[test]
+fn heredoc_bodies_read_a_crlf_heredoc_as_the_shell_does() {
+    let plain = "cat <<'EOF'\r\na > b\r\nEOF\r\necho done\r\n";
+    let bodies = HeredocBodies::scan(plain);
+    assert!(!bodies.is_unscannable());
+    assert!(bodies.contains(plain.find('>').expect("arrow")), "body");
+    assert!(!bodies.contains(plain.find("echo").expect("echo")), "live");
+    // A segment's `trim()` cuts the final `EOF\r` to `EOF`; nothing follows.
+    let trimmed = "cat <<'EOF'\r\na > b\r\nEOF";
+    assert!(HeredocBodies::scan(trimmed).contains(trimmed.find('>').expect(">")));
+    let live = "cat <<'EOF'\r\nx\r\nEOF\r\necho \"$(rm -rf /)\"\r\n";
+    assert!(!HeredocBodies::scan(live).contains(live.find("$(").expect("$(")));
+    assert_eq!(super::super::unclassifiable_command(live), None);
+    // The shell's `A` body runs past `A\r` to the bare `A`; the line after
+    // that is live, though a `\r`-trimming scan read it as an `X` body.
+    let decoy = "cat <<'A'\nx\nA\r\ncat <<'X'\nA\necho \"$(rm -rf /)\"\nX";
+    let bodies = HeredocBodies::scan(decoy);
+    assert!(bodies.contains(decoy.find("cat <<'X'").expect("inner")));
+    assert!(!bodies.contains(decoy.find("$(").expect("$(")), "live");
+}
