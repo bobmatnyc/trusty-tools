@@ -12,8 +12,10 @@
 //! What: [`userinfo_end`] locates the `@` that ends the userinfo of the
 //! authority following a `scheme://`; [`strip_userinfo`] returns one URL with
 //! its userinfo removed, for both the `scheme://` and the scp-style
-//! `user@host:path` forms.
-//! Test: `strip_userinfo_table`, `userinfo_end_stops_at_free_text`.
+//! `user@host:path` forms. [`strip_url_secret`] removes only the secret, for a
+//! URL that is stored and cloned rather than compared (#9155).
+//! Test: `strip_userinfo_table`, `strip_url_secret_table`,
+//! `userinfo_end_stops_at_free_text`.
 
 use std::borrow::Cow;
 
@@ -67,11 +69,62 @@ pub fn strip_userinfo(url: &str) -> Cow<'_, str> {
             None => Cow::Borrowed(url),
         };
     }
-    let head = &url[..url.find('/').unwrap_or(url.len())];
-    match head.rfind('@') {
-        Some(at) if head[at..].contains(':') => Cow::Borrowed(&url[at + 1..]),
-        _ => Cow::Borrowed(url),
+    match scp_userinfo_end(url) {
+        Some(at) => Cow::Borrowed(&url[at + 1..]),
+        None => Cow::Borrowed(url),
     }
+}
+
+/// The byte index of the `@` that ends the userinfo of an scp-style
+/// `user@host:path`; `None` for a URL with a `scheme://`, or with no userinfo.
+///
+/// What: the last `@` before the first `/` that a `:` follows; a path such as
+/// `dir@x/repo` has no such `:`.
+/// Test: `strip_userinfo_table`, `strip_url_secret_table`.
+pub fn scp_userinfo_end(url: &str) -> Option<usize> {
+    if url.contains("://") {
+        return None;
+    }
+    let head = &url[..url.find('/').unwrap_or(url.len())];
+    head.rfind('@').filter(|&at| head[at..].contains(':'))
+}
+
+/// `url` with only its secret removed, for storage; borrowed and unchanged
+/// when it carries none (#9124, #9155).
+///
+/// Why: [`strip_userinfo`] serves identity, which no userinfo is part of. A
+/// stored clone URL still needs its login name: `git@github.com:o/r.git`
+/// stored as `github.com:o/r.git` makes ssh log in as the local user, and the
+/// clone fails.
+/// What: removes the `:password` of any userinfo, keeping `user@`. On an
+/// `http(s)://` URL (a `+`-prefixed scheme such as `git+https` included) it
+/// removes the whole userinfo, because a bare `user@` there is a token. A bare
+/// `user@` on any other scheme, or on an scp-style `user@host:path`, is kept.
+/// The userinfo ends where [`userinfo_end`] or [`scp_userinfo_end`] says.
+/// Test: `strip_url_secret_table`.
+pub fn strip_url_secret(url: &str) -> Cow<'_, str> {
+    let (prefix, userinfo, rest, http) = if let Some(at) = url.find("://") {
+        let tail = &url[at + 3..];
+        let Some(cut) = userinfo_end(tail) else {
+            return Cow::Borrowed(url);
+        };
+        let scheme = url[..at].rsplit('+').next().unwrap_or_default();
+        let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+        (&url[..at + 3], &tail[..cut], &tail[cut + 1..], http)
+    } else {
+        let Some(at) = scp_userinfo_end(url) else {
+            return Cow::Borrowed(url);
+        };
+        ("", &url[..at], &url[at + 1..], false)
+    };
+    let user = match userinfo.split_once(':') {
+        _ if http => "",
+        Some((user, _)) => user,
+        // A bare login name on a non-http scheme carries no secret.
+        None => return Cow::Borrowed(url),
+    };
+    let at = if user.is_empty() { "" } else { "@" };
+    Cow::Owned(format!("{prefix}{user}{at}{rest}"))
 }
 
 #[cfg(test)]
@@ -102,6 +155,34 @@ mod tests {
             ("", ""),
         ] {
             assert_eq!(strip_userinfo(url), want, "{url:?}");
+        }
+    }
+
+    /// #9155: storage keeps the login name and drops only the secret — the
+    /// `:password` on any scheme, and the whole userinfo on http(s).
+    #[test]
+    fn strip_url_secret_table() {
+        for (url, want) in [
+            ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+            ("ssh://git@h:2222/t/r", "ssh://git@h:2222/t/r"),
+            ("ssh://u:TOK@h:2222/t/r", "ssh://u@h:2222/t/r"),
+            ("ssh://:TOK@h/t/r", "ssh://h/t/r"),
+            ("git+ssh://git@h/t/r", "git+ssh://git@h/t/r"),
+            ("https://TOK@github.com/o/r", "https://github.com/o/r"),
+            ("https://u:TOK@github.com/o/r", "https://github.com/o/r"),
+            ("HTTPS://u:TOK@github.com/o/r", "HTTPS://github.com/o/r"),
+            (
+                "git+https://TOK@github.com/o/r",
+                "git+https://github.com/o/r",
+            ),
+            ("http://u:pa/ss@host/o/r", "http://host/o/r"),
+            ("u:TOK@host:o/r", "u@host:o/r"),
+            ("u:p@ss@host:o/r", "u@host:o/r"),
+            ("https://github.com/o/r", "https://github.com/o/r"),
+            ("/srv/dir@x/repo", "/srv/dir@x/repo"),
+            ("", ""),
+        ] {
+            assert_eq!(strip_url_secret(url), want, "{url:?}");
         }
     }
 

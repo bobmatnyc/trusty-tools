@@ -46,15 +46,18 @@ pub(crate) fn register_cmd(
 ///
 /// Why (#9124): `tm register https://user:<token>@host/o/r` printed the token
 /// and wrote it to `registry.json`. Nothing downstream needs it there: `tm
-/// load` runs a plain `git clone`, which asks git's credential helper for the
-/// password when the URL carries none, and a stored token would also land in
-/// the clone's `.git/config`. So the userinfo is stripped before the URL is
-/// stored, with a stderr notice, rather than the URL being refused.
-/// What: resolves the positionals, strips the URL's userinfo
-/// ([`trusty_common::url_userinfo::strip_userinfo`]), adds and saves, and
-/// returns `registered <alias> → <url>` with the URL passed through
-/// `redact_url` as well.
-/// Test: `register_never_prints_or_stores_an_embedded_token_9124`.
+/// load` runs a plain `git clone`, which asks for credentials when the URL
+/// carries none, and a stored token would also land in the clone's
+/// `.git/config`. So the secret is stripped before the URL is stored, with a
+/// stderr notice, rather than the URL being refused. #9155: only the secret
+/// goes — `git@` in `git@github.com:o/r.git` is the ssh login, and dropping it
+/// made `tm load` log in as the local user.
+/// What: resolves the positionals, takes the URL's [`storage_form`], adds and
+/// saves, and returns `registered <alias> → <url>` with the stored URL, which
+/// carries no secret: [`super::register_args::resolved_url`] already dropped
+/// any query string.
+/// Test: `register_never_prints_or_stores_an_embedded_token_9124`,
+/// `register_keeps_the_ssh_login_and_drops_only_the_secret_9155`.
 pub(crate) fn register_alias(
     paths: &ManagedPaths,
     first: &str,
@@ -65,12 +68,9 @@ pub(crate) fn register_alias(
     let (alias, raw_url) = super::register_args::resolve_register_args(first, second)?;
     let derived = second.is_none();
     // #9124: a credential embedded in the URL is never written to disk.
-    let url = trusty_common::url_userinfo::strip_userinfo(&raw_url).into_owned();
-    if url != raw_url {
-        eprintln!(
-            "tm register: dropped the credentials embedded in the URL; git's credential \
-             helper supplies them when the repository is cloned"
-        );
+    let (url, notice) = storage_form(&raw_url);
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
     }
 
     let root = &paths.root;
@@ -87,10 +87,26 @@ pub(crate) fn register_alias(
         }
     })?;
     registry.save().context("failed to save registry")?;
-    Ok(format!(
-        "registered {alias} → {}",
-        trusty_mpm::core::remote_url_redact::redact_url(&url)
-    ))
+    Ok(format!("registered {alias} → {url}"))
+}
+
+/// The stderr notice [`storage_form`] returns when it removed a secret.
+pub(crate) const SECRET_REMOVED_NOTICE: &str = "tm register: removed the password or token \
+     embedded in the URL before storing it; git asks for credentials when it clones the repository";
+
+/// The URL `tm register` stores for `raw_url`, and the notice to print when
+/// that removed a secret (#9124, #9155).
+///
+/// What: [`trusty_common::url_userinfo::strip_url_secret`] — the `:password`
+/// on any scheme, the whole userinfo on http(s) — and
+/// [`SECRET_REMOVED_NOTICE`] only when it changed the URL. The notice names no
+/// part of the URL, so it cannot carry the secret.
+/// Test: `register_keeps_the_ssh_login_and_drops_only_the_secret_9155`.
+pub(crate) fn storage_form(raw_url: &str) -> (String, Option<&'static str>) {
+    // #9155: `strip_userinfo` also dropped the `git@` ssh login.
+    let url = trusty_common::url_userinfo::strip_url_secret(raw_url);
+    let notice = (url != raw_url).then_some(SECRET_REMOVED_NOTICE);
+    (url.into_owned(), notice)
 }
 
 /// Handle `tm ls [--json]`.

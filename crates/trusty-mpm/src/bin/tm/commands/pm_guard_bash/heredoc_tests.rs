@@ -166,6 +166,38 @@ fn heredoc_bodies_record_every_expanding_body_9155() {
     assert_eq!(&command[start..end], "echo '$(date)'\n");
 }
 
+/// #9155: bash runs an unterminated body to the end of input, so an unquoted
+/// one — no terminator, or one with a trailing space — expands there while
+/// every byte stays live. A quoted one and an arithmetic `<<` record nothing,
+/// and a terminated body before it is still recorded.
+#[test]
+fn heredoc_bodies_expand_an_unterminated_unquoted_body_9155() {
+    for (command, want) in [
+        ("cat <<X\n'$(date)'", vec!["'$(date)'"]),
+        ("cat <<X\n'$(date)'\nX ", vec!["'$(date)'\nX "]),
+        (
+            "cat <<A\n$(a)\nA\ncat <<B\n'$(b)'",
+            vec!["$(a)\n", "'$(b)'"],
+        ),
+        ("cat <<A\n$(a)\nA\ncat <<'B'\n$(b)", vec!["$(a)\n"]),
+        ("cat <<'X'\n'$(date)'", vec![]),
+        ("echo $((1 << 3))\n'$(date)'", vec![]),
+    ] {
+        let bodies = HeredocBodies::scan(command);
+        let found: Vec<&str> = bodies
+            .expanding()
+            .iter()
+            .map(|&(s, e)| &command[s..e])
+            .collect();
+        assert_eq!(found, want, "{command:?}");
+        assert!(bodies.data().is_empty(), "{command:?} claims no body");
+        assert!(
+            !bodies.contains(command.len() - 1),
+            "{command:?} stays live"
+        );
+    }
+}
+
 /// #9150: a delimiter word outside the `[A-Za-z0-9_.-]` allowlist — a
 /// quoted or escaped break byte, a substitution, a `\` the shell keeps, a
 /// quote or `\` left open — makes the scan unscannable and claim nothing,

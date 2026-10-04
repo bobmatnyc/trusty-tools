@@ -10,6 +10,9 @@
 //! What: spawns `tm hook --pm-guard` through the #8878 fixture and checks that
 //! each such body denies under each bypass, while the same body behind a
 //! quoted delimiter (`<<'PY'`), which the shell never expands, still allows.
+//! The security critic's round-2 probes (an unterminated body, a line
+//! continuation, a here-document nested in a shell-run body or a `bash -c`
+//! string) are pinned the same way.
 //! Test: `cargo test -p trusty-mpm --test integration tm_hook_pm_guard_unquoted_heredoc_expansion::`.
 
 use crate::tm_hook_pm_guard_trust_anchor_8878::{Fixture, bash_payload, run};
@@ -63,4 +66,67 @@ fn a_single_quoted_substitution_in_a_quoted_heredoc_body_allows() {
         let out = run(&fx, &bash_payload(&fx, command), &[], Some("pm"));
         assert!(!out.contains("\"deny\""), "{command:?}: {out}");
     }
+}
+
+/// Every `deny` row denies and every `allow` row allows, with no bypass.
+fn assert_verdicts(deny: &[&str], allow: &[&str]) {
+    let fx = Fixture::new();
+    let mut wrong = Vec::new();
+    for (commands, want_deny) in [(deny, true), (allow, false)] {
+        for command in commands {
+            let out = run(&fx, &bash_payload(&fx, command), &[], Some("pm"));
+            if out.contains("\"deny\"") != want_deny {
+                wrong.push(format!("want deny={want_deny} {command:?}: {out:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "wrong verdicts:\n{}", wrong.join("\n"));
+}
+
+/// #9155 round 2: bash runs an unterminated unquoted body to end of input, a
+/// trailing-space line included, and expands it there. A benign unterminated
+/// body allows.
+#[test]
+fn an_unterminated_unquoted_heredoc_body_is_expanded_9155() {
+    assert_verdicts(
+        &[
+            "cat <<X\n'$(rm -rf /)'",
+            "bash <<X\necho '$(rm -rf /)'",
+            "python3 - <<PY\nprint('$(rm -rf /)')",
+            "cat <<X\n'$(rm -rf /)'\nX ",
+        ],
+        &["cat <<X\nhello there"],
+    );
+}
+
+/// #9155 round 2: bash removes `\`+newline from an unquoted body before it
+/// expands it, so `$\`, newline, `(` is an opener. An even backslash run is
+/// not, and a benign continuation allows.
+#[test]
+fn a_line_continuation_in_an_unquoted_heredoc_body_is_joined_9155() {
+    assert_verdicts(
+        &[
+            "cat <<X\n'$\\\n(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('$\\\n(rm -rf /)')\nPY",
+        ],
+        &[
+            "cat <<X\n'$\\\\\n(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('a' \\\n  'b')\nPY",
+        ],
+    );
+}
+
+/// #9155 round 2: an unquoted here-document nested in a shell-run body or a
+/// wrapper string is read whole. A benign nested body allows.
+#[test]
+fn a_heredoc_nested_in_a_shell_run_body_or_wrapper_is_expanded_9155() {
+    assert_verdicts(
+        &[
+            "bash <<'O'\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "cat <<'O' | bash\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "sudo -s <<'O'\ncat <<I\n'$(rm -rf /)'\nI\nO",
+            "bash -c \"bash <<I\necho '\\$(rm -rf /)'\nI\"",
+        ],
+        &["bash <<'O'\nbash <<I\necho hello\nI\nO"],
+    );
 }

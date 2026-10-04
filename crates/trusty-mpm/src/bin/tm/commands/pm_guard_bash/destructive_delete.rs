@@ -108,8 +108,13 @@ use std::path::{Component, Path, PathBuf};
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
 use super::heredoc::{blank_spans, data_bodies};
-use super::substitutions::{Substitution, blank_inert_heredocs, segment_substitutions};
-use super::{MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, split_shell_segments};
+use super::substitutions::{
+    Substitution, blank_inert_heredocs, segment_substitutions, shell_run_heredoc_bodies,
+};
+use super::{
+    MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, shell_lex, split_shell_segments,
+    split_shell_segments_raw,
+};
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::program_word::resolve_program_word;
 
@@ -328,10 +333,14 @@ const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
 /// reads the body, since a captured body can run again (`eval $(cat <<'X'…)`).
 /// A body a separator split across segments is judged whole afterwards from
 /// every working directory the segments saw, and the most severe class kept
-/// (#8735 round 2). Past [`MAX_WRAPPER_DEPTH`]
+/// (#8735 round 2). #9155: each here-document body a shell runs, and each
+/// string a `bash -c`-style wrapper runs, is judged the same way as a whole
+/// command ([`nested_commands`]), which reads a here-document nested in it.
+/// Past [`MAX_WRAPPER_DEPTH`]
 /// levels the text is not read further, and a delete verb anywhere in it
 /// denies as unresolved; past [`MAX_DELETE_WORK`] calls, anything does.
 /// Test: `denies_a_delete_inside_a_substitution_body`,
+/// `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`,
 /// `denies_a_delete_nested_past_the_depth_cap`,
 /// `allows_a_scratch_delete_inside_a_substitution`,
 /// `judges_a_split_body_from_every_directory_seen`,
@@ -453,7 +462,37 @@ fn classify_at_depth(
             worst = worst.max(classify_at_depth(body.text(), dir, env, depth + 1, work));
         }
     }
+    // #9155: split at its newlines, a nested here-document was never whole.
+    for inner in nested_commands(command) {
+        if !judged.insert(inner.clone()) {
+            continue;
+        }
+        for dir in &cwds_seen {
+            worst = worst.max(classify_at_depth(&inner, dir, env, depth + 1, work));
+        }
+    }
     worst
+}
+
+/// The commands `command` runs as text of their own: each here-document body
+/// a shell or a [`HEREDOC_RUNNERS`] program runs, and the inner string of each
+/// top-level `sh -c` / `bash -c` / `eval` / `xargs` wrapper (#9155).
+///
+/// Why: the segment splitter cuts both at every newline, so `bash <<'O'`
+/// around `bash <<I` around `echo '$(rm -rf /)'` reached the floor as lines,
+/// and the inner unquoted here-document — whose single-quoted substitution
+/// bash expands — was never recognised.
+/// What: [`shell_run_heredoc_bodies`], then [`shell_lex::wrapped_command`] of
+/// each top-level segment. A deeper wrapper is reached by the recursion.
+/// Test: `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`.
+fn nested_commands(command: &str) -> Vec<String> {
+    let mut found = shell_run_heredoc_bodies(command, HEREDOC_RUNNERS);
+    for raw in split_shell_segments_raw(command) {
+        if let shell_lex::WrappedCommand::Inner(inner) = shell_lex::wrapped_command(raw.trim()) {
+            found.push(inner);
+        }
+    }
+    found
 }
 
 /// The substitution bodies `text` runs: those of its argv text with each
@@ -1325,6 +1364,44 @@ mod tests {
         ] {
             assert_eq!(class_of(command), None, "{command}");
         }
+    }
+
+    /// #9155: an unquoted here-document nested in a body a shell runs, or in
+    /// a wrapper's string, is read whole, so its single-quoted substitution
+    /// expands. A benign nested body allows; nesting past the depth cap with
+    /// a delete verb in sight denies as unresolved.
+    #[test]
+    fn denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155() {
+        for command in [
+            "bash <<'O'\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "cat <<'O' | bash\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "sudo -s <<'O'\ncat <<I\n'$(rm -rf /)'\nI\nO",
+            "bash -c \"bash <<I\necho '\\$(rm -rf /)'\nI\"",
+            "bash -c \"cat <<I\n'\\$(rm -rf /)'\nI\"",
+            // The outer shell turns `\$(` into `$(` before the inner one reads it.
+            "bash <<O\nbash <<I\necho '\\$(rm -rf /)'\nI\nO",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+        for command in [
+            "bash <<'O'\nbash <<I\necho '$(date)'\nI\nO",
+            "bash -c \"cat <<I\nhello\nI\"",
+            "bash <<'O'\nbash <<'I'\necho '$(rm -rf /)'\nI\nO",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+        let nest = |levels: usize| {
+            let mut text = "cat <<I\n'$(rm -rf /)'\nI".to_string();
+            for level in 0..levels {
+                text = format!("bash <<'L{level}'\n{text}\nL{level}");
+            }
+            text
+        };
+        assert_eq!(class_of(&nest(3)), Some(DeleteTarget::Root));
+        assert_eq!(class_of(&nest(12)), Some(DeleteTarget::Unresolved));
     }
 
     /// #8735 round 2: a lookup runs nothing, and `sudo -k` and BSD `xargs -J`

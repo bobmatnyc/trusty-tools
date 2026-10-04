@@ -820,3 +820,78 @@ fn register_errors_never_echo_an_embedded_token_9124() {
     .unwrap_err();
     assert_no_token("the collision", &format!("{err:#}"));
 }
+
+/// The URL `register_alias` stored for `url` in a fresh managed root.
+fn stored_after_register(url: &str) -> String {
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let line = crate::commands::standalone::register_alias(&paths, url, None, false).unwrap();
+    // #9155: registering the same URL again is a no-op, not a DuplicateAlias.
+    crate::commands::standalone::register_alias(&paths, url, None, false).unwrap();
+    let registry =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    let stored = registry.list()[0].url.clone();
+    assert!(line.ends_with(&stored), "{line:?} names {stored:?}");
+    stored
+}
+
+/// #9155: `tm register` keeps the ssh login and removes only a secret — the
+/// `:password` on any scheme, the whole userinfo on http(s). The notice
+/// prints only when a secret went, and an scp-style URL holding a password is
+/// refused without echoing it (#9124 item 7).
+#[test]
+fn register_keeps_the_ssh_login_and_drops_only_the_secret_9155() {
+    for (url, want, removed) in [
+        ("git@github.com:o/r.git", "git@github.com:o/r.git", false),
+        ("ssh://git@h:2222/t/r", "ssh://git@h:2222/t/r", false),
+        (
+            "ssh://u:SECRETQATOKEN2@h:2222/t/r",
+            "ssh://u@h:2222/t/r",
+            true,
+        ),
+        (
+            "https://SECRETQATOKEN2@github.com/o/r",
+            "https://github.com/o/r",
+            true,
+        ),
+        (
+            "https://qauser:SECRETQATOKEN2@github.com/o/r",
+            "https://github.com/o/r",
+            true,
+        ),
+    ] {
+        assert_eq!(stored_after_register(url), want, "{url:?}");
+        let (form, notice) = crate::commands::standalone::storage_form(url);
+        assert_eq!(form, want, "{url:?}");
+        assert_eq!(notice.is_some(), removed, "{url:?}");
+        assert_no_token(url, notice.unwrap_or_default());
+    }
+    let scp = "qauser:SECRETQATOKEN2@host:o/r";
+    assert_eq!(
+        crate::commands::standalone::storage_form(scp),
+        (
+            "qauser@host:o/r".to_string(),
+            Some(crate::commands::standalone::SECRET_REMOVED_NOTICE)
+        )
+    );
+    let err = resolve_register_args(scp, None).unwrap_err();
+    assert_no_token(scp, &format!("{err:#}"));
+}
+
+/// #9124 item 7: an scp-style `user:token@host:path` names no `://`, so the
+/// error text masks its password through the scp branch.
+#[test]
+fn shown_masks_an_scp_style_password_9124() {
+    assert_eq!(
+        super::shown("qauser:SECRETQATOKEN2@host:o/r"),
+        "***@host:o/r"
+    );
+    assert_eq!(
+        super::shown("git@github.com:o/r.git"),
+        "git@github.com:o/r.git"
+    );
+    assert_eq!(
+        super::shown("https://qauser:SECRETQATOKEN2@h/o/r"),
+        "https://***@h/o/r"
+    );
+}

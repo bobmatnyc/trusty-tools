@@ -1151,7 +1151,8 @@ pub mod github_path;
 ///
 /// Why: a credential embedded in a git remote (`https://user:<token>@host/…`)
 /// must never become part of a derived owner, repo, palace id or path.
-/// What: [`url_userinfo::strip_userinfo`] and [`url_userinfo::userinfo_end`].
+/// What: [`url_userinfo::strip_userinfo`] and [`url_userinfo::userinfo_end`];
+/// [`url_userinfo::strip_url_secret`] for a URL that is stored (#9155).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// url_userinfo::tests`.
 pub mod url_userinfo;
