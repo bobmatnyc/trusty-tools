@@ -159,7 +159,7 @@ pub(crate) mod test_env {
         /// Set `name` to `value`, remembering what was there.
         pub(crate) fn set(name: &'static str, value: &str) -> Self {
             let previous = std::env::var(name).ok();
-            // SAFETY: every caller is `#[serial_test::serial(channel_credentials)]`, so no
+            // SAFETY: every caller is `#[serial_test::serial]`, so no
             // other test in any process observes the window.
             unsafe { std::env::set_var(name, value) };
             Self { name, previous }
@@ -182,16 +182,24 @@ mod tests {
     use super::*;
     use crate::api::server::agent_channels::Binding;
     use crate::channels::ChannelAdapter;
-    use test_env::EnvVarGuard;
+    use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 
     const SLACK_PROVIDERS: &[&str] = &["slack", "slack-user", "slack-app"];
 
     #[test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     fn channel_credential_ref_resolves_through_the_authority() {
-        let _guard = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
+        // #9123: the authority loads `.env.local` and reads `$HOME`'s store;
+        // the sandbox leaves only the token this test sets within reach.
+        let _home_guard = crate::test_env::lock_home();
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
         let resolved = resolve_credential("slack-app", SLACK_PROVIDERS, "SLACK_").unwrap();
-        assert_eq!(resolved.expose(), "xapp-7427-not-a-real-token");
+        assert_secret_eq(
+            Some(resolved.expose().as_str()),
+            Some("xapp-7427-not-a-real-token"),
+            "the authority must resolve the sandbox's token",
+        );
         // A resolved secret renders a constant, never the value.
         assert!(!format!("{resolved:?}").contains("xapp-7427"));
     }
@@ -303,24 +311,28 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(channel_credentials)]
+    #[serial_test::serial]
     fn channel_binding_serialization_never_carries_a_token_value() {
-        let _guard = EnvVarGuard::set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
+        // #9123: as `channel_credential_ref_resolves_through_the_authority`.
+        let _home_guard = crate::test_env::lock_home();
+        let mut sandbox = CredentialSandbox::enter();
+        sandbox.set("SLACK_APP_TOKEN", "xapp-7427-not-a-real-token");
         let binding: Binding = serde_json::from_value(serde_json::json!({
             "id":"team","name":"Team","provider":"slack","target":"C123456",
             "enabled":true,"send_enabled":true,"credential_ref":"slack-app",
         }))
         .unwrap();
         assert!(binding.validate_in(&[]).is_ok());
-        assert_eq!(
-            resolve_credential(
-                binding.credential_ref.as_deref().unwrap(),
-                SLACK_PROVIDERS,
-                "SLACK_"
-            )
-            .unwrap()
-            .expose(),
-            "xapp-7427-not-a-real-token"
+        let resolved = resolve_credential(
+            binding.credential_ref.as_deref().unwrap(),
+            SLACK_PROVIDERS,
+            "SLACK_",
+        )
+        .unwrap();
+        assert_secret_eq(
+            Some(resolved.expose().as_str()),
+            Some("xapp-7427-not-a-real-token"),
+            "the binding's reference must resolve the sandbox's token",
         );
 
         // The on-disk format is `<assistant>.channels.json`; `Debug` is the

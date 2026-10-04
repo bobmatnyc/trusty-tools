@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 #[path = "source_scan_lex.rs"]
-mod lex;
+pub(super) mod lex;
 use lex::{code_only, is_ident};
 
 /// APIs that read `.env.local`, the credential store or the Keychain. Each
@@ -98,7 +98,7 @@ fn names(code: &str, api: &str) -> bool {
 }
 
 /// Whether `code` names `word` as a whole identifier.
-fn names_word(code: &str, word: &str) -> bool {
+pub(super) fn names_word(code: &str, word: &str) -> bool {
     code.match_indices(word).any(|(at, _)| {
         !code[..at].chars().next_back().is_some_and(is_ident)
             && !code[at + word.len()..].chars().next().is_some_and(is_ident)

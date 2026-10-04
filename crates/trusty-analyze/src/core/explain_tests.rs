@@ -241,18 +241,15 @@ fn resolve_model_prefers_explicit() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn missing_api_key_returns_typed_error() {
-    let prev = std::env::var(ENV_API_KEY).ok();
-    // SAFETY: serial test access; no other thread touches this var.
-    unsafe { std::env::remove_var(ENV_API_KEY) };
+    // #9123: the sandbox clears ENV_API_KEY (and every other credential) and
+    // restores it on drop, so a failed assert cannot strand the env.
+    let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
     let err = deep_analysis("idx", sample_report(), vec![], None, None)
         .await
         .expect_err("missing key should error");
     assert!(matches!(err, DeepAnalysisError::MissingApiKey));
-    // SAFETY: restoring previous env state.
-    if let Some(v) = prev {
-        unsafe { std::env::set_var(ENV_API_KEY, v) };
-    }
 }
 
 // ── extraction / render tests ─────────────────────────────────────────────────

@@ -269,27 +269,16 @@ mod tests {
     /// Why: Pins the exact bug reported by the live smoke test: construction
     /// used to hard-fail with "OPENROUTER_API_KEY is required" regardless of
     /// which model was actually being targeted.
-    /// What: Temporarily unsets `OPENROUTER_API_KEY` (restoring it afterwards
-    /// even on panic-free assertion failure — the restore runs before the
-    /// assert), calls `build_llm_client`, asserts `Ok`.
-    /// Test: this test. No other test in this binary touches
-    /// `OPENROUTER_API_KEY`, so this is safe under `cargo test`'s default
-    /// parallel test execution.
+    /// What: enters the credential sandbox (which unsets `OPENROUTER_API_KEY`
+    /// and restores it on drop, panic or not), calls `build_llm_client`,
+    /// asserts `Ok`.
+    /// Test: this test. #9123: `#[serial]` inside the credential sandbox, so
+    /// no credential tier — env, `.env.local`, `$HOME` store — is in reach.
     #[test]
+    #[serial_test::serial]
     fn build_llm_client_succeeds_without_openrouter_key() {
-        let prev = std::env::var("OPENROUTER_API_KEY").ok();
-        // SAFETY: test-only env mutation; no other test in this binary reads
-        // or writes `OPENROUTER_API_KEY`.
-        unsafe {
-            std::env::remove_var("OPENROUTER_API_KEY");
-        }
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
         let result = build_llm_client();
-        if let Some(key) = prev {
-            // SAFETY: see above.
-            unsafe {
-                std::env::set_var("OPENROUTER_API_KEY", key);
-            }
-        }
         assert!(
             result.is_ok(),
             "expected Ok when OPENROUTER_API_KEY is unset (pure-Bedrock runs must not \

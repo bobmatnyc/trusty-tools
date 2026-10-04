@@ -175,7 +175,7 @@ fn a_malformed_override_table_falls_back_with_a_named_issue() {
 /// resolve is SKIPPED with a per-server status — never fatal, and never a
 /// silent absence.
 #[test]
-#[serial(mcp_auth_env)]
+#[serial]
 fn a_server_with_an_unresolvable_credential_is_skipped_not_fatal() {
     let mut paid = stdio("paid", "paid-bin");
     extensions::set(

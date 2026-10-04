@@ -1217,3 +1217,21 @@ fn a_spawn_pin_logs_no_token_in_any_arm() {
         assert!(!log.contains("tok-"), "a token reached the log: {log}");
     }
 }
+
+/// #9124: both `proof_origin` refusals quote the origin, and both reach the
+/// log; neither carries the origin's token.
+/// Test: itself.
+#[test]
+fn proof_origin_refusals_never_quote_the_origin_token() {
+    const TOKEN: &str = "ghp_9124ProofOriginSyntheticToken0";
+    let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
+    for origin in [
+        format!("https://octo:{TOKEN}@github.com/"),
+        format!("ssh://octo:{TOKEN}@github-alias/acme/widget.git"),
+    ] {
+        let err = crate::session_manager::worktree_reclaim_gh::proof_origin(&origin, &aliases)
+            .expect_err("the origin names no provable host");
+        assert!(!err.contains(TOKEN), "the token reached the refusal");
+        assert!(err.contains("://***@"), "{err}");
+    }
+}

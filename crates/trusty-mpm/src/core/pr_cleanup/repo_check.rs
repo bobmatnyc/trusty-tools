@@ -20,6 +20,7 @@ use super::{CleanupRequest, Git, owned};
 /// undeterminable case on a destructive path.
 /// Test: `cleanup_refuses_when_the_registry_repo_and_checkout_disagree`,
 /// `cleanup_refuses_when_the_checkout_origin_cannot_be_read`,
+/// `cleanup_refusal_never_quotes_the_origin_token` (#9124),
 /// `cleanup_clean_path_removes_everything` (the agreeing case).
 pub(super) fn repo_mismatch<T: Git>(git: &T, req: &CleanupRequest) -> Option<String> {
     let stated = req
@@ -58,9 +59,10 @@ pub(super) fn repo_mismatch<T: Git>(git: &T, req: &CleanupRequest) -> Option<Str
         Ok(slug) => slug,
         Err(_) => {
             return Some(format!(
-                "the registry names `{stated}`, and the `origin` URL at {} ({url}) names no \
+                "the registry names `{stated}`, and the `origin` URL at {} ({}) names no \
                  repository this can compare it against — refusing (#7275)",
-                req.repo_root.display()
+                req.repo_root.display(),
+                crate::core::remote_url_redact::redact_url(&url) // #9124
             ));
         }
     };

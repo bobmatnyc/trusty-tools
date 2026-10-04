@@ -436,10 +436,33 @@ mod tests {
     /// and the assertion printed a live key into test output. Join the same
     /// `dotenv_credential_env` group as every other test that reads or writes a
     /// credential env var — this test is a WRITER of them, via the loader.
+    ///
+    /// #9123: it resolved every REAL secret on the machine — env, `.env.local`,
+    /// store and keychain. It now runs in the credential sandbox with one
+    /// synthetic key, which must come back and be scrubbed.
     #[test]
-    #[serial_test::serial(dotenv_credential_env)]
+    #[serial_test::serial]
     fn resolved_secret_values_are_scrubbable_by_scrub_secrets() {
+        scrubbable_in_the_sandbox();
+    }
+
+    /// The body of `resolved_secret_values_are_scrubbable_by_scrub_secrets`,
+    /// also in the keyed groups and `ENV_LOCK` this crate's credential-env
+    /// writers hold — the three exclude nothing of each other (#7253).
+    #[serial_test::serial(dotenv_credential_env, inference_env)]
+    fn scrubbable_in_the_sandbox() {
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sandbox = super::super::test_sandbox::CredentialSandbox::enter();
+        let synthetic = "sk-or-v1-9123-synthetic-scrub-probe"; // pragma: allowlist secret
+        sandbox.set("OPENROUTER_API_KEY", synthetic);
         let values = resolved_secret_values();
+        assert!(
+            values.iter().any(|v| v == synthetic),
+            "the synthetic key did not resolve ({} values)",
+            values.len()
+        );
         assert!(
             values.len() <= super::super::registered_providers().len(),
             "cannot resolve more secrets than there are registered providers"

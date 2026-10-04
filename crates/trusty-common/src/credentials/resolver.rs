@@ -90,7 +90,7 @@ fn env_tier(provider: &str) -> Option<String> {
 /// module.
 pub fn default_store() -> Box<dyn KeyStore> {
     #[cfg(feature = "keyring-store")]
-    {
+    if keychain_allowed() {
         let keyring = KeyringStore::new();
         if keyring.probe_available() {
             return Box::new(keyring);
@@ -100,6 +100,15 @@ pub fn default_store() -> Box<dyn KeyStore> {
         Ok(store) => Box::new(store),
         Err(_) => Box::new(MemoryKeyStore::new()),
     }
+}
+
+/// Whether [`default_store`] may open the OS keychain: never while a
+/// credential test sandbox is live, whose file store sits under a temp `$HOME`
+/// instead (#9123).
+/// Test: `credentials::test_sandbox::tests::the_sandbox_hides_env_local_and_the_keychain`.
+#[cfg_attr(not(feature = "keyring-store"), allow(dead_code))]
+pub(super) fn keychain_allowed() -> bool {
+    !super::sandbox_active()
 }
 
 #[cfg(test)]

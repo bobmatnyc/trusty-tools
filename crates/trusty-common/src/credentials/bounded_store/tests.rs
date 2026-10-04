@@ -336,7 +336,20 @@ fn the_env_tier_answers_without_touching_the_store() {
 /// resolve under, and the caller must hear that rather than a silent miss.
 /// Test: itself.
 #[test]
+#[serial]
 fn an_unregistered_variable_is_not_resolvable() {
+    unregistered_in_the_sandbox();
+}
+
+/// The body of `an_unregistered_variable_is_not_resolvable`, in the keyed
+/// group and `ENV_LOCK` as well (#7253). #9123: `resolve_env_var_bounded`
+/// loads `.env.local` and reads the default store, so it runs in the sandbox.
+#[serial(dotenv_credential_env, inference_env)]
+fn unregistered_in_the_sandbox() {
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _sandbox = crate::credentials::test_sandbox::CredentialSandbox::enter();
     let err = resolve_env_var_bounded("AWS_SECRET_ACCESS_KEY").expect_err("unregistered");
     assert!(
         matches!(err, SecretResolveError::Unregistered { .. }),
