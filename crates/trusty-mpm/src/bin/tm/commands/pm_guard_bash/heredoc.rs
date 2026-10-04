@@ -62,7 +62,25 @@ pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
     data: Vec<DataBody>,
+    /// #9150: a delimiter word this scan cannot split as the shell does.
+    unscannable: bool,
 }
+
+/// Why [`HeredocBodies::collect`] gave up on a command.
+enum Abandon {
+    /// No terminator line, or an operator line's own quotes do not close:
+    /// claim nothing and leave every byte live (an arithmetic `<<` lands here).
+    NoConfidence,
+    /// #9150: a delimiter word the shell reads differently from this scan.
+    Delimiter,
+}
+
+/// Deny reason for a here-document delimiter the guard cannot read (#9150).
+pub(crate) const HEREDOC_DELIMITER_REASON: &str = "this command opens a here-document whose \
+     delimiter word is quoted or escaped across a space, tab, `<`, `>`, `|`, `;`, `&`, `(` or \
+     `)`, or whose quote or escape never closes on the `<<` line. The shell ends that body at a \
+     different line than the guard can find, so the guard cannot tell which lines run (#9150). \
+     Use a plain delimiter such as `<<'EOF'`.";
 
 impl HeredocBodies {
     /// Locate every here-document body in `command`.
@@ -85,28 +103,53 @@ impl HeredocBodies {
     pub(super) fn scan(command: &str) -> Self {
         let quotes = QuoteScan::new(command);
         if quotes.balanced {
-            return Self::collect(command, Some(&quotes)).unwrap_or_else(Self::empty);
+            return Self::settle(Self::collect(command, Some(&quotes)));
         }
         // #8111: an apostrophe in a BODY (`it's`) unbalances the whole-command
         // map, and claiming nothing made that body prose live shell. Retry with
         // each operator line's own quotes; keep the answer only when blanking
         // the bodies it found leaves the rest of the command balanced.
         match Self::collect(command, None) {
-            Some(found)
+            Ok(found)
                 if !found.spans.is_empty()
                     && QuoteScan::new(&blank_spans(command, &found.spans)).balanced =>
             {
                 found
             }
-            _ => Self::empty(),
+            Ok(_) | Err(Abandon::NoConfidence) => Self::empty(),
+            Err(Abandon::Delimiter) => Self::settle(Err(Abandon::Delimiter)),
+        }
+    }
+
+    /// Whether `command` opens a here-document whose delimiter this scan
+    /// cannot read as the shell does (#9150).
+    ///
+    /// Why: such a scan claims no bodies, and every rule then reads every byte
+    /// as live — but the guard still cannot say where the shell's body ends, so
+    /// [`super::unclassifiable_command`] refuses the command outright.
+    /// Test: `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`.
+    pub(super) fn is_unscannable(&self) -> bool {
+        self.unscannable
+    }
+
+    /// A [`HeredocBodies::collect`] result as a scan: an abandoned scan claims
+    /// nothing, and #9150 records a delimiter it could not read.
+    fn settle(collected: Result<Self, Abandon>) -> Self {
+        match collected {
+            Ok(found) => found,
+            Err(why) => Self {
+                unscannable: matches!(why, Abandon::Delimiter),
+                ..Self::empty()
+            },
         }
     }
 
     /// The line walk behind [`HeredocBodies::scan`]: `quotes` is the
     /// whole-command map, or `None` to read each operator line's quotes alone.
-    /// `None` back when a delimiter has no terminator line, or an operator
-    /// line's own quotes do not close.
-    fn collect(command: &str, quotes: Option<&QuoteScan>) -> Option<Self> {
+    /// [`Abandon::NoConfidence`] back when a delimiter has no terminator line,
+    /// or an operator line's own quotes do not close; [`Abandon::Delimiter`]
+    /// when [`delimiters_on`] cannot read a delimiter word (#9150).
+    fn collect(command: &str, quotes: Option<&QuoteScan>) -> Result<Self, Abandon> {
         let lines = line_spans(command);
         let mut spans = Vec::new();
         let mut frames = Vec::new();
@@ -119,16 +162,21 @@ impl HeredocBodies {
                 Some(quotes) => delimiters_on(operator_line, start, quotes),
                 None => {
                     let own = QuoteScan::new(operator_line);
-                    if !own.balanced {
-                        return None;
+                    // #9150: an unclosed quote in a delimiter word is a
+                    // delimiter the shell reads past this line.
+                    let read = delimiters_on(operator_line, 0, &own);
+                    if !own.balanced && read.is_some() {
+                        return Err(Abandon::NoConfidence);
                     }
-                    delimiters_on(operator_line, 0, &own)
+                    read
                 }
             };
+            let delimiters = delimiters.ok_or(Abandon::Delimiter)?;
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
             line += 1;
             for delimiter in delimiters {
-                let body = body_span(command, &lines, line, &delimiter)?;
+                let body =
+                    body_span(command, &lines, line, &delimiter).ok_or(Abandon::NoConfidence)?;
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
                     if framing {
@@ -150,10 +198,11 @@ impl HeredocBodies {
                 line = body.next_line;
             }
         }
-        Some(Self {
+        Ok(Self {
             spans,
             frames,
             data,
+            unscannable: false,
         })
     }
 
@@ -163,6 +212,7 @@ impl HeredocBodies {
             spans: Vec::new(),
             frames: Vec::new(),
             data: Vec::new(),
+            unscannable: false,
         }
     }
 
@@ -303,10 +353,16 @@ fn line_spans(command: &str) -> Vec<(usize, usize)> {
 /// word with its quoting removed (`<<'PY'`, `<<"PY"`, and `<<PY` name the same
 /// terminator). `offset` maps a line-local index onto `quotes`, which was
 /// built over the whole command.
+///
+/// #9150: `None` — no confidence — when a delimiter word quotes or escapes a
+/// word-break byte (`<<'A B'`, `<<A\ B`), or a quote or `\` in it does not
+/// close on this line. The shell keeps that whole word and ends the body at a
+/// different line than a cut at the break byte would.
 /// Test: `heredoc_bodies_ignore_a_here_string`,
 /// `heredoc_bodies_ignore_quoted_operator`,
-/// `heredoc_bodies_handle_tab_stripped_delimiter`.
-fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter> {
+/// `heredoc_bodies_handle_tab_stripped_delimiter`,
+/// `heredoc_bodies_refuse_a_delimiter_split_by_a_word_break`.
+fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Option<Vec<Delimiter>> {
     let bytes = line.as_bytes();
     let mut found = Vec::new();
     let mut i = 0;
@@ -329,9 +385,8 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter
             j += 1;
         }
         let word_start = j;
-        while j < bytes.len() && !is_word_break(bytes[j]) {
-            j += 1;
-        }
+        // #9150: a cut at a quoted break byte ended the body too late.
+        j = word_end(bytes, j)?;
         let raw = &line[word_start..j];
         let word: String = raw
             .chars()
@@ -348,7 +403,38 @@ fn delimiters_on(line: &str, offset: usize, quotes: &QuoteScan) -> Vec<Delimiter
         }
         i = j.max(i + 2);
     }
-    found
+    Some(found)
+}
+
+/// The end of the delimiter word starting at `start`: the first unquoted,
+/// unescaped word-break byte, or the end of the line.
+///
+/// What: `None` when a quoted or escaped byte inside the word is a word-break
+/// byte, or a quote or trailing `\` is still open at the end of the line —
+/// both shapes the shell reads past where a plain cut would stop (#9150).
+fn word_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut j = start;
+    while j < bytes.len() {
+        let byte = bytes[j];
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(b'"') | None if byte == b'\\' => {
+                // An escape of nothing (line continuation) or of a break byte.
+                j += 1;
+                if bytes.get(j).is_none_or(|next| is_word_break(*next)) {
+                    return None;
+                }
+            }
+            Some(_) if is_word_break(byte) => return None,
+            Some(_) => {}
+            None if byte == b'\'' || byte == b'"' => quote = Some(byte),
+            None if is_word_break(byte) => return Some(j),
+            None => {}
+        }
+        j += 1;
+    }
+    quote.is_none().then_some(j)
 }
 
 /// Whether `byte` ends a here-document delimiter word.
@@ -545,6 +631,56 @@ mod tests {
             assert_eq!(bodies[0].expands, expands, "{command:?}");
             let (start, end) = bodies[0].operator_line;
             assert!(command[start..end].starts_with("cat <<"), "{command:?}");
+        }
+    }
+
+    /// #9150: bash and zsh keep a quoted or escaped break byte in the
+    /// delimiter word, so a cut there ends the body at the wrong line. Each
+    /// such word, and one whose quote or `\` never closes on its line, makes
+    /// the scan unscannable and claim nothing; a plain delimiter does not.
+    #[test]
+    fn heredoc_bodies_refuse_a_delimiter_split_by_a_word_break() {
+        for command in [
+            "cat <<'A B'\nx\nA B\necho \"$(rm -rf /)\"\nA",
+            "cat <<'A>B'\nx\nA>B\nA",
+            "cat <<'A<B'\nx\nA<B\nA",
+            "cat <<-'A B'\n\tx\n\tA B\n\tA",
+            "cat <<'A\tB'\nx\nA\tB\nA",
+            "cat <<\"A;B\"\nx\nA;B\nA",
+            "cat <<A\\ B\nx\nA B\nA",
+            "cat <<A\\\nB\n$(rm -rf /)\nA\nAB",
+            "cat <<'A\nB'\nx\nA",
+            // #8111 retry path: an apostrophe in the body unbalances the map.
+            "cat <<'A B'\nit's\nA B\nA",
+        ] {
+            let bodies = HeredocBodies::scan(command);
+            assert!(bodies.is_unscannable(), "{command:?}");
+            assert!(bodies.spans.is_empty(), "{command:?} claims nothing");
+            assert_eq!(
+                super::super::unclassifiable_command(command),
+                Some(HEREDOC_DELIMITER_REASON),
+                "{command:?}"
+            );
+        }
+        for command in [
+            "cat <<'EOF'\n$(rm -rf /)\nEOF\necho benign",
+            "cat <<\"EOF\" > out\nx\nEOF",
+            "cat <<\\EOF\nx\nEOF",
+            "cat <<-E'O'F\nx\n\tEOF",
+            "cat <<'EOF';echo hi\nx\nEOF",
+            "cat <<'EOF'\nit's\nEOF",
+            "echo $((1 << 3))",
+            "python3 <<'PY'\nprint(1)\n",
+        ] {
+            assert!(
+                !HeredocBodies::scan(command).is_unscannable(),
+                "{command:?}"
+            );
+            assert_eq!(
+                super::super::unclassifiable_command(command),
+                None,
+                "{command:?}"
+            );
         }
     }
 
