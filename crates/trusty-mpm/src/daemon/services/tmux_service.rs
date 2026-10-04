@@ -53,6 +53,41 @@ fn discover_or_session_error(name: &str) -> Result<TmuxDriver, DaemonError> {
 
 pub struct TmuxService;
 
+/// Trailing pane lines the input-box probe reads (#8407). The box and its
+/// footer sit at the bottom of the pane; a multi-line draft fits well inside.
+const INPUT_BOX_PROBE_LINES: u32 = 30;
+
+/// Classify one escaped capture run, reading every failure as "unknown" (#8407).
+///
+/// Why: a capture that failed says nothing about the box, so it must never
+/// read as `empty` — a caller would then overwrite a draft it could not see.
+/// What: a spawn error or a non-zero exit is `None`, logged at debug;
+/// otherwise the classifier's answer, itself `None` with no `❯` line.
+/// Test: `input_box_from_reads_a_suggestion`,
+/// `input_box_from_a_failed_capture_is_unknown`.
+fn input_box_from(
+    name: &str,
+    run: std::io::Result<std::process::Output>,
+) -> Option<crate::core::input_box::InputBox> {
+    match run {
+        Ok(out) if out.status.success() => {
+            crate::core::input_box::classify_input_box(&String::from_utf8_lossy(&out.stdout))
+        }
+        Ok(out) => {
+            tracing::debug!(
+                "#8407: input-box capture for {name} exited {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            None
+        }
+        Err(e) => {
+            tracing::debug!("#8407: input-box capture for {name} failed: {e}");
+            None
+        }
+    }
+}
+
 impl TmuxService {
     /// Capture a session's pane output, degrading to empty when tmux is absent.
     ///
@@ -83,6 +118,35 @@ impl TmuxService {
                 String::new()
             }
         }
+    }
+
+    /// What a session's input box holds, or `None` when that cannot be read (#8407).
+    ///
+    /// Why: a plain capture shows Claude Code's dim next-prompt suggestion
+    /// exactly like a typed draft; only a capture with escape codes can tell
+    /// them apart, and callers should not have to parse those.
+    /// What: `tmux -u capture-pane -p -e` over the last
+    /// [`INPUT_BOX_PROBE_LINES`] lines of the session's pane, classified by
+    /// [`classify_input_box`](crate::core::input_box::classify_input_box) via
+    /// [`input_box_from`]. `-u` keeps the `❯` glyph intact under a non-UTF-8
+    /// locale such as launchd's. The host-state gate applies.
+    /// Test: `input_box_from_*` in this module's tests.
+    pub fn input_box(session: &Session) -> Option<crate::core::input_box::InputBox> {
+        let target = TmuxTarget::session(&session.tmux_name).as_target();
+        let start = format!("-{INPUT_BOX_PROBE_LINES}");
+        let argv: Vec<String> = [
+            "-u",
+            "capture-pane",
+            "-t",
+            &target,
+            "-p",
+            "-e",
+            "-S",
+            &start,
+        ]
+        .map(str::to_string)
+        .to_vec();
+        input_box_from(&session.tmux_name, crate::core::tmux::run_tmux_argv(&argv))
     }
 
     /// Send a command line into a session's pane, best-effort.
@@ -383,6 +447,42 @@ mod tests {
         // tmux is generally absent in CI; capture must degrade to "" not panic.
         let session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
         let _ = TmuxService::capture(&session, 10);
+    }
+
+    /// A process `Output` with exit status `code`.
+    fn output(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// Why (#8407): the route must report a dim suggestion as a suggestion.
+    /// Test: itself.
+    #[test]
+    fn input_box_from_reads_a_suggestion() {
+        use crate::core::input_box::InputBox;
+        let capture = "────\n❯ \u{1b}[2myes to both, go ahead\u{1b}[22m\n────\n";
+        assert_eq!(
+            input_box_from("s", Ok(output(0, capture, ""))),
+            Some(InputBox::Suggestion)
+        );
+    }
+
+    /// Why (#8407): the error arms. A capture that failed to spawn or exited
+    /// non-zero knows nothing about the box, so it is unknown — never `empty`,
+    /// which would invite a caller to overwrite a draft.
+    /// Test: itself.
+    #[test]
+    fn input_box_from_a_failed_capture_is_unknown() {
+        let refused = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "refused");
+        assert_eq!(input_box_from("s", Err(refused)), None);
+        let missing = output(1, "", "can't find session: s");
+        assert_eq!(input_box_from("s", Ok(missing)), None);
+        // Exit 0 with output carrying no prompt line is unknown too.
+        assert_eq!(input_box_from("s", Ok(output(0, "$ \n", ""))), None);
     }
 
     #[test]

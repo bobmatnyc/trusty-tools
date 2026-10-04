@@ -397,22 +397,32 @@ fn options_end(rest: &[String], valued: &[&str]) -> usize {
 /// options, or when a token cannot be re-quoted (it contains a NUL).
 /// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`.
 fn xargs_argument(rest: &[String]) -> Option<String> {
+    let i = xargs_utility_index(rest);
+    if i >= rest.len() {
+        return None;
+    }
+    shlex::try_join(rest[i..].iter().map(String::as_str)).ok()
+}
+
+/// The index in `rest`, the words after `xargs`, of the utility it runs:
+/// past its options, where an [`XARGS_OPTS_WITH_ARG`] option consumes the
+/// next word. `rest.len()` when no utility follows.
+/// Test: `wrappers_do_not_hide_the_inner_command_from_the_git_verb_rules`,
+/// `xargs_into_a_wrapper_or_runner_naming_tmux_denies_9053`.
+pub(super) fn xargs_utility_index(rest: &[String]) -> usize {
     let mut i = 0;
     while i < rest.len() {
         let tok = rest[i].as_str();
         if !tok.starts_with('-') || tok == "-" {
             break;
         }
-        if XARGS_OPTS_WITH_ARG.contains(&tok) {
-            i += 2;
-            continue;
-        }
-        i += 1;
+        i += if XARGS_OPTS_WITH_ARG.contains(&tok) {
+            2
+        } else {
+            1
+        };
     }
-    if i >= rest.len() {
-        return None;
-    }
-    shlex::try_join(rest[i..].iter().map(String::as_str)).ok()
+    i.min(rest.len())
 }
 
 /// Quote context of a single byte of a shell command.

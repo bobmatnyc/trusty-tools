@@ -575,6 +575,24 @@ fn compression_stats_line_printed_when_compressed() {
     print_compression_stats(&body);
 }
 
+/// #8407: `tm sessions output` names the input-box state; `null` or an older
+/// daemon's missing field reads as unknown, never as empty.
+#[test]
+fn input_box_note_names_the_state() {
+    use crate::formatters::session::input_box_note;
+    let note = |v| input_box_note(&serde_json::json!({ "output": "", "input_box": v }));
+    assert_eq!(
+        note(serde_json::json!("suggestion")),
+        "[input box: suggestion]"
+    );
+    assert_eq!(note(serde_json::json!("typed")), "[input box: typed]");
+    assert_eq!(note(serde_json::Value::Null), "[input box: unknown]");
+    assert_eq!(
+        input_box_note(&serde_json::json!({ "output": "" })),
+        "[input box: unknown]"
+    );
+}
+
 #[test]
 fn cli_session_pause_requires_arg() {
     assert!(Cli::try_parse_from(["trusty-mpm", "session", "pause"]).is_err());

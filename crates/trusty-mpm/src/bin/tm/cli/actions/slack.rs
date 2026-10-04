@@ -24,12 +24,14 @@ pub(crate) enum SlackCmd {
         /// applies the lock-file / compiled-in-default fallback itself.
         #[arg(long, env = "TRUSTY_MPM_URL")]
         url: Option<String>,
-        /// Slack bot token (`xoxb-…`). When omitted, resolved from `.env.local` /
-        /// `.env` / the `SLACK_BOT_TOKEN` environment variable.
+        /// Slack bot token (`xoxb-…`). When omitted, `SLACK_BOT_TOKEN` resolves
+        /// from the process environment, `.env.local`, then the credential
+        /// store (#8568).
         #[arg(long)]
         bot_token: Option<String>,
-        /// Slack app-level token (`xapp-…`, Socket Mode). When omitted, resolved
-        /// from `.env.local` / `.env` / the `SLACK_APP_TOKEN` environment variable.
+        /// Slack app-level token (`xapp-…`, Socket Mode). When omitted,
+        /// `SLACK_APP_TOKEN` resolves from the process environment,
+        /// `.env.local`, then the credential store (#8568).
         #[arg(long)]
         app_token: Option<String>,
         /// Validate configuration and exit without connecting to Slack.

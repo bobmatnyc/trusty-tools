@@ -764,7 +764,9 @@ async fn tui_refuses_a_daemon_bound_to_a_different_project() {
     let our_project = tempfile::tempdir().expect("our project");
     let shared_data = tempfile::tempdir().expect("shared data dir");
 
-    let mut daemon = support::tcode_command()
+    // #9139: bound so its isolation tree outlives the spawned daemon.
+    let mut daemon_cmd = support::tcode_command();
+    let mut daemon = daemon_cmd
         .args(["serve", "--http", "--port", "0", "--project"])
         .arg(their_project.path())
         .env("TRUSTY_DATA_DIR_OVERRIDE", shared_data.path())

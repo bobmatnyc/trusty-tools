@@ -35,7 +35,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::core::gh_account::{GH_DOCTOR_TIMEOUT, GhAuthProbe, probe_gh_auth};
+use crate::core::gh_account::{GH_DOCTOR_TIMEOUT, GhAuthProbe};
+use crate::core::gh_login_probe::probe_gh_login;
 use crate::core::trusty_tools_config::GithubConfig;
 use crate::daemon::error::DaemonError;
 use crate::daemon::project_adoption::{RegisterProjectResponse, adopt_pre_existing_worktrees};
@@ -553,13 +554,28 @@ pub async fn patch_project_registry_op(
 ) -> Result<Project, DaemonError> {
     // #6288: the same conditional probe the HTTP route runs, in the shared body.
     let probe = match body.gh_user.as_ref().and_then(|v| v.as_deref()) {
-        Some(login) if !login.trim().is_empty() => Some(
-            tokio::task::spawn_blocking(|| probe_gh_auth(GH_DOCTOR_TIMEOUT))
+        Some(login) if !login.trim().is_empty() => {
+            // #9091: launchd gives the daemon no GH_CONFIG_DIR, so gh is also
+            // asked in the project's pinned dir and tm's per-account dir.
+            let record = state.project_registry().await.get(name).await.ok();
+            let origin = record.as_ref().map(|p| p.repo_url.clone());
+            let pinned = record
+                .as_ref()
+                .and_then(|p| p.github.as_ref())
+                .and_then(crate::core::gh_account_registry::selected_config_dir);
+            let login = login.trim().to_string();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    probe_gh_login(&login, origin.as_deref(), pinned, GH_DOCTOR_TIMEOUT)
+                })
                 .await
                 .unwrap_or_else(|e| {
-                    GhAuthProbe::Inconclusive(format!("the `gh auth status` probe failed: {e}"))
+                    GhAuthProbe::Inconclusive(format!(
+                        "could not run gh: the `gh auth status` probe failed: {e}"
+                    ))
                 }),
-        ),
+            )
+        }
         _ => None,
     };
     patch_project_registry_with_probe(Arc::clone(state), name.to_string(), body, probe).await
@@ -699,6 +715,9 @@ pub(crate) async fn patch_project_registry_with_probe(
 /// introduces it. The `gh auth status` account list is the right authority
 /// because it is the only source that sees every auth mode — keyring,
 /// `hosts.yml`, and an env token, which writes no config file at all (#5032).
+/// Since #9091 the answer comes from [`probe_gh_login`], which also asks gh in
+/// the project's pinned config dir and tm's per-account dir, because the
+/// daemon's launchd environment carries no `GH_CONFIG_DIR`.
 /// What: rejects a blank login with 400 (`null` is the documented way to clear
 /// the field, so blank is a mistake rather than an intent). With a definitive
 /// answer from `gh`, returns the canonical spelling of a logged-in login, or
@@ -722,9 +741,11 @@ fn validate_gh_user_login(login: &str, probe: Option<&GhAuthProbe>) -> Result<St
     match probe {
         Some(GhAuthProbe::Answered(status)) => match status.canonical_logged_in_login(login) {
             Some(canonical) => Ok(canonical),
+            // #9091: name the fact plainly; "could not run gh" is the 503 arm.
             None if status.logged_in.is_empty() => Err(DaemonError::InvalidRequest(format!(
-                "gh_user must name an account `gh auth status` reports as logged in, but it \
-                 reports none — run `gh auth login` before setting gh_user to '{login}'"
+                "gh_user must name an account `gh auth status` reports as logged in, but gh \
+                 reports no logged-in account — run `gh auth login` before setting gh_user \
+                 to '{login}'"
             ))),
             None => Err(DaemonError::InvalidRequest(format!(
                 "gh_user must name an account `gh auth status` reports as logged in; \
@@ -732,8 +753,9 @@ fn validate_gh_user_login(login: &str, probe: Option<&GhAuthProbe>) -> Result<St
                 status.logged_in.join(", ")
             ))),
         },
+        // #9091: `why` says what kept gh from answering, e.g. "could not run gh: …".
         Some(GhAuthProbe::Inconclusive(why)) => Err(DaemonError::ServiceUnavailable(format!(
-            "gh_user '{login}' could not be verified against `gh auth status`: {why}"
+            "gh_user '{login}' could not be verified: {why}"
         ))),
         None => Err(DaemonError::ServiceUnavailable(format!(
             "gh_user '{login}' could not be verified: no `gh auth status` answer was \
@@ -841,6 +863,12 @@ mod tests {
         let (status, message) = (error.status(), error.detail());
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(message.contains("gh auth login"), "{message}");
+        // #9091: the definite "none" says so, never "could not run gh".
+        assert!(
+            message.contains("gh reports no logged-in account"),
+            "{message}"
+        );
+        assert!(!message.contains("could not run gh"), "{message}");
     }
 
     /// Why (#5032/#2121): "`gh` says no" and "I could not ask `gh`" are
@@ -849,11 +877,21 @@ mod tests {
     /// Test: itself.
     #[test]
     fn validate_gh_user_is_503_when_gh_could_not_answer() {
-        let probe = GhAuthProbe::Inconclusive("`gh` could not be run".to_string());
+        // #9091: the probe's own wording for a gh that cannot be spawned.
+        let probe =
+            crate::core::gh_login_probe::classify_auth_status(Err("no such file".to_string()));
         let error = validate_gh_user_login("bobmatnyc", Some(&probe)).unwrap_err();
         let (status, message) = (error.status(), error.detail());
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(message.contains("could not be verified"), "{message}");
+        assert!(
+            message.contains("could not run gh: no such file"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("reports no logged-in account"),
+            "{message}"
+        );
 
         let error = validate_gh_user_login("bobmatnyc", None).unwrap_err();
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);

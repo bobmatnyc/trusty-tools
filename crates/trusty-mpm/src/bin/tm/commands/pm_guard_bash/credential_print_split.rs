@@ -47,9 +47,9 @@ pub(super) fn ungroup(stage: &str) -> String {
 /// — `$(…)`/`<(…)`/`>(…)` with paren counting, backtick pairs — on a
 /// [`QuoteScan`] of `text`. `$(…)`, backtick and `<(…)` bodies run with a
 /// captured stdout; a `>(…)` body writes to the outer stdout. An unclosed
-/// opener is refused. `$((` is arithmetic and stays in place (#8676), while a
-/// substitution inside it is still lifted. Every slice starts and ends at an
-/// ASCII byte.
+/// opener is refused. `$((` arithmetic ([`opens_arithmetic`]) stays in place
+/// (#8676), while a substitution inside it is still lifted. Every slice starts
+/// and ends at an ASCII byte.
 pub(super) fn lift_substitutions(
     text: &str,
     stdout: Sink,
@@ -64,7 +64,7 @@ pub(super) fn lift_substitutions(
     let mut flat = String::with_capacity(text.len());
     let (mut i, mut copied) = (0, 0);
     while i < bytes.len() {
-        let arithmetic = bytes[i] == b'$' && bytes.get(i + 2) == Some(&b'(');
+        let arithmetic = opens_arithmetic(bytes, i);
         let paren = bytes.get(i + 1) == Some(&b'(')
             && !arithmetic
             && match bytes[i] {
@@ -115,6 +115,37 @@ pub(super) fn lift_substitutions(
     }
     flat.push_str(&text[copied..]);
     Ok(flat)
+}
+
+/// Whether `$((` at byte `i` opens arithmetic rather than a command
+/// substitution whose body starts with a subshell (#8931 critic round).
+///
+/// What: the shell reads `$((` as arithmetic only when the `(` at `i + 2`
+/// closes immediately before the outer `)`; `$((cmd) )` and `$((a); (b))` run
+/// commands. An unclosed opener is not arithmetic, so the caller refuses it.
+/// A quote, backslash or backtick before the decision point also means "not
+/// arithmetic": a quoted `)` would skew the paren count, so the inner group is
+/// lifted and scanned instead (#8931).
+/// Test: `denies_a_subshell_substitution_shaped_like_arithmetic_8931`.
+fn opens_arithmetic(bytes: &[u8], i: usize) -> bool {
+    if bytes[i] != b'$' || bytes.get(i + 1) != Some(&b'(') || bytes.get(i + 2) != Some(&b'(') {
+        return false;
+    }
+    let mut level = 0usize;
+    for (j, &b) in bytes.iter().enumerate().skip(i + 2) {
+        match b {
+            b'"' | b'\'' | b'\\' | b'`' => return false,
+            b'(' => level += 1,
+            b')' => {
+                level -= 1;
+                if level == 0 {
+                    return bytes.get(j + 1) == Some(&b')');
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Split `text` into stages: `(stage, stdout piped on, stderr piped on)`.

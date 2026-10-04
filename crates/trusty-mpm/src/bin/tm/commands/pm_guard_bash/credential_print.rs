@@ -71,6 +71,8 @@
 mod credential_print_clis;
 #[path = "credential_print_heredoc.rs"]
 mod credential_print_heredoc;
+#[path = "credential_print_passes.rs"]
+mod credential_print_passes;
 #[path = "credential_print_programs.rs"]
 mod credential_print_programs;
 #[path = "credential_print_redirect.rs"]
@@ -104,6 +106,7 @@ pub(super) use credential_print_programs::COMPOUND_OPENERS;
 pub(super) use credential_print_programs::KEYWORDS;
 pub(super) use credential_print_taint::is_identifier;
 // #8869: the secret-read key-consumer rule reads an fd-0 key redirect with it.
+use credential_print_passes::{MAX_PASSES, stale_after};
 pub(crate) use credential_print_redirect::input_redirect_operand;
 use credential_print_redirect::{
     apply_redirections, changes_directory, redirect_target_sink, terminal_name_sink,
@@ -135,8 +138,8 @@ const ARG_PRINTERS: &[&str] = &["echo", "printf", "print", "cat"];
 /// Substitution and wrapper nesting the scanner follows before refusing.
 const MAX_DEPTH: usize = 8;
 
-/// Work units one whole scan may spend before refusing (#8676): a pass costs
-/// one unit plus one per [`BYTES_PER_UNIT`] of its text.
+/// Work units a scan may spend per top-level pass before refusing (#8676,
+/// #8771): a pass costs one unit plus one per [`BYTES_PER_UNIT`] of its text.
 const WORK_BUDGET: usize = 4_000;
 
 /// Text bytes one work unit covers.
@@ -205,6 +208,8 @@ struct Lifted {
     names: BTreeSet<String>,
     /// #8676: work units spent so far, shared by every clone in one scan.
     spent: Rc<Cell<usize>>,
+    /// #8771: top-level passes begun; each adds one [`WORK_BUDGET`].
+    passes: Rc<Cell<usize>>,
     /// #8677 round 2: the command changes directory, so no relative target's
     /// directory is known.
     changes_dir: bool,
@@ -314,9 +319,11 @@ fn input_is_program_text(text: &str) -> bool {
 /// a credential" and "stdin holds program text" from a stage piped into the
 /// next; program text passes through any stage that is not a stdin consumer.
 /// #8676: a name a stage binds is seen by every later stage of the same pass;
-/// a pass that binds a new name is re-run with it, so every earlier stage and
-/// substitution body sees it too; the set only grows. The passes of the whole
-/// scan share [`WORK_BUDGET`], and exhausting it refuses as unreadable.
+/// a pass that binds a new name is re-run with it when it judged text against
+/// the older set ([`stale_after`], #8771), so every earlier stage and
+/// substitution body sees it too; the set only grows. Each top-level pass adds
+/// one [`WORK_BUDGET`] to the scan's shared budget, and exhausting it, or
+/// needing more than [`MAX_PASSES`], refuses as unreadable.
 fn scan(
     text: &str,
     stdout: Sink,
@@ -328,37 +335,43 @@ fn scan(
         return Err(Refusal::Unreadable("nesting this deep"));
     }
     let mut names = outer.names.clone();
-    loop {
+    for _ in 0..MAX_PASSES {
+        if depth == 0 {
+            outer.passes.set(outer.passes.get() + 1);
+        }
         let mut lifted = outer.clone();
         lifted.names.clone_from(&names);
-        let (yields, bound) = scan_pass(text, stdout, stderr, depth, &mut lifted)?;
+        let (yields, bound, stale) = scan_pass(text, stdout, stderr, depth, &mut lifted)?;
         let known = names.len();
         names.extend(bound);
-        if names.len() == known {
+        if names.len() == known || !stale {
             return Ok(yields);
         }
     }
+    Err(Refusal::Unreadable(
+        "a command binding this many names late",
+    ))
 }
 
-/// One [`scan`] pass with a fixed name set: whether a value is captured, and
-/// every name a stage bound.
+/// One [`scan`] pass: whether a value is captured, every name a stage bound,
+/// and whether a rescan must follow ([`stale_after`]).
 fn scan_pass(
     text: &str,
     stdout: Sink,
     stderr: Sink,
     depth: usize,
     lifted: &mut Lifted,
-) -> Result<(bool, Vec<String>), Refusal> {
+) -> Result<(bool, Vec<String>, bool), Refusal> {
     let text = strip_comments_and_heredocs(text, &mut lifted.heredocs);
     lifted.changes_dir |= changes_directory(&text);
     let flat = lift_substitutions(&text, stdout, stderr, depth, lifted)?;
     let stages = split_stages(&flat);
     let cost = 1 + text.len() / BYTES_PER_UNIT;
     lifted.spent.set(lifted.spent.get() + cost);
-    if lifted.spent.get() > WORK_BUDGET {
+    if lifted.spent.get() > WORK_BUDGET * lifted.passes.get().max(1) {
         return Err(Refusal::Unreadable("a command this costly to follow"));
     }
-    let (mut yields, mut bound) = (false, Vec::new());
+    let (mut yields, mut bound, mut first_bind) = (false, Vec::new(), None);
     let (mut stdin_carries, mut stdin_text) = (false, false);
     for (idx, (stage, piped, pipe_stderr)) in stages.iter().enumerate() {
         let next_exists = stages.get(idx + 1).is_some();
@@ -386,11 +399,13 @@ fn scan_pass(
         stdin_text = *piped && emitted.text;
         for name in emitted.bound {
             if lifted.names.insert(name.clone()) {
+                first_bind.get_or_insert(idx);
                 bound.push(name);
             }
         }
     }
-    Ok((yields, bound))
+    let stale = first_bind.is_some_and(|at| stale_after(&flat, &stages, at));
+    Ok((yields, bound, stale))
 }
 
 /// The sinks a stage starts with, before its own redirections.

@@ -70,11 +70,6 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "\"/usr/bin/security\"",
         "`tm env set` CLI only; reads its value from the login Keychain by design (#8939)",
     ),
-    (
-        "slack/mod.rs",
-        "read_dotenv_key",
-        "`tm slack` CLI only; the daemon never starts the Slack bot",
-    ),
 ];
 
 /// Files allowed to construct a `Configurator`, each over `credential_store()`.
