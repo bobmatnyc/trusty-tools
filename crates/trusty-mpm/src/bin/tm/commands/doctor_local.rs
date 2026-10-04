@@ -172,6 +172,8 @@ async fn daemon_rows(daemon: &trusty_mpm::client::DaemonClient) -> Vec<DoctorChe
     }
     // #8261: build leases are local flocks, so this row needs no daemon answer.
     rows.push(super::doctor_builder_cap::builder_cap_row());
+    // #8451: the slot pool's volume against the daemon's eviction threshold.
+    rows.push(super::doctor_slot_pool::slot_pool_budget_row());
     rows
 }
 
