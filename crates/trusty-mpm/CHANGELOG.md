@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.11] — 2026-10-05
+
+### Fixed
+
+- `tm daemon --sandbox` admits `TRUSTY_SANDBOX` in its closed environment allowlist, and `scripts/sandbox_daemon.sh` passes `TRUSTY_SANDBOX=1`, so the sandboxed daemon loads no `.env.local` credentials (#9178).
+- `tm daemon --sandbox` now refuses to start unless `TRUSTY_SANDBOX` is exactly `1`; an absent, empty, `0`, `true` or non-UTF-8 value refuses with a message that names the variable and never its value, so a hand-built sandbox cannot load `.env.local` credentials (#9178).
+
+### Security
+
+- pm-guard reads the `$(…)` and backtick substitutions of every unquoted-delimiter here-document body with the body's quotes as literal text, including a body that `python3`, `node` or `bash` runs. `python3 - <<PY` with `print('$(rm -rf /)')` was allowed under every bypass; it now hits the rm-root floor. A quoted-delimiter body stays inert (#9155).
+- pm-guard expands an unquoted here-document body that has no terminator line, or only one with trailing whitespace, to the end of the command, as bash runs it; `cat <<X` then `'$(rm -rf /)'` was allowed. Every byte of such a command still stays live for the other rules, and an arithmetic `<<` is unchanged (#9155).
+- pm-guard removes each `\`+newline whose backslash ends an odd-length run before it scans an unquoted here-document body, as bash does, so `$\`, newline, `(rm -rf /)` is read as `$(rm -rf /)` (#9155).
+- The rm-root floor judges each here-document body a shell, `sudo -s`, `su` or `parallel` runs, and each `bash -c`, `sh -c`, `eval` or `xargs` string, as a whole command, so a here-document nested inside one is read and its substitutions expand. `bash <<'O'` around `bash <<I` around `echo '$(rm -rf /)'` was allowed. Nesting past the depth cap with a delete verb in sight denies (#9155).
+- `tm register <url>` removes only the secret before writing `registry.json`: the `:password` on any scheme, and the whole userinfo on `http(s)://`, where a bare `user@` is a token. The `git@` login of `git@github.com:o/r.git` and `ssh://git@host/…` is kept, so `tm load` no longer logs in as the local user and a re-register no longer collides. The stderr notice prints only when a secret was removed and names no part of the URL (#9124, #9155).
+- `tm register` and `tm run` refusals redact an scp-style `user:token@host:path`; the worktree-reclaim origin refusal, logged on every poll, redacts the remote URL; the alias-collision error's `Debug` output redacts the stored URL (#9124).
+- Registry entries `tm register` wrote before #9124 keep any token embedded in their URL, and `tm load` clones from them as stored. They are not migrated: `tm register --force <url-without-token> <alias>` replaces one (#9124).
+
 ## [1.7.10] — 2026-10-05
 
 ### Added
