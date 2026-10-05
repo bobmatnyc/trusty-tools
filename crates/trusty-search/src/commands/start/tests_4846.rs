@@ -141,6 +141,9 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
     unsafe {
         std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
         std::env::set_var("TRUSTY_DISABLE_WATCHER", "1");
+        // #8275: these fixtures carry no recency stamp; lift the age gate so
+        // the boot still restores them eagerly.
+        std::env::set_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV, "0");
     }
 
     let tracked = make_walkable_root(work.path());
@@ -185,6 +188,7 @@ async fn dead_entries_do_not_consume_the_live_index_budget() {
     unsafe {
         std::env::remove_var("TRUSTY_DATA_DIR");
         std::env::remove_var("TRUSTY_DISABLE_WATCHER");
+        std::env::remove_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV);
     }
 
     report_cost(
@@ -234,6 +238,9 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
     unsafe {
         std::env::set_var("TRUSTY_DATA_DIR", data_tmp.path());
         std::env::set_var("TRUSTY_DISABLE_WATCHER", "1");
+        // #8275: these fixtures carry no recency stamp; lift the age gate so
+        // the boot still restores them eagerly.
+        std::env::set_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV, "0");
         std::env::set_var(crate::service::warm_boot::SALVAGE_BUDGET_ENV, "0");
     }
 
@@ -278,6 +285,7 @@ async fn disabled_salvage_budget_costs_a_dead_entry_nothing_but_a_stat() {
     unsafe {
         std::env::remove_var("TRUSTY_DATA_DIR");
         std::env::remove_var("TRUSTY_DISABLE_WATCHER");
+        std::env::remove_var(crate::service::lazy_loader::WARMBOOT_MAX_AGE_HOURS_ENV);
         std::env::remove_var(crate::service::warm_boot::SALVAGE_BUDGET_ENV);
     }
 

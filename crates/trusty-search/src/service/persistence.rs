@@ -228,6 +228,7 @@ pub struct PersistedIndex {
     /// to warm-boot eagerly. Sort key = `max(last_queried_unix, last_indexed_unix)`.
     /// `None` means never queried (first-run / pre-upgrade).
     /// What: updated fire-and-forget in `search_handler` (rate-limited ≤ 60 s).
+    /// Warm-boot defers an entry older than `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (#8275).
     /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_queried_unix: Option<u64>,

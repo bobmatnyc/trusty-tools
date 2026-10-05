@@ -1,11 +1,12 @@
 //! Environment-variable helpers for the selective/lazy warm-boot feature (#993).
 //!
-//! Why: isolates the two env-var readers (`warmboot_max_indexes`,
-//! `cold_reload_timeout`) and the rate-limit constant
+//! Why: isolates the env-var readers (`warmboot_max_indexes`,
+//! `warmboot_max_age`, `cold_reload_timeout`) and the rate-limit constant
 //! (`LAST_QUERIED_WRITE_INTERVAL_SECS`) so `store.rs` and `loader.rs` stay
 //! focused on their respective data-structure / async-load concerns.
-//! What: three public items; no side effects on import.
-//! Test: `warmboot_max_indexes_*` and `cold_reload_timeout_*` in `super::tests`.
+//! What: public readers and constants; no side effects on import.
+//! Test: `warmboot_max_indexes_*` and `cold_reload_timeout_*` in `super::tests`;
+//! `warmboot_max_age_parses_hours_zero_and_invalid` for the #8275 age gate.
 
 use std::time::Duration;
 
@@ -42,6 +43,49 @@ pub fn warmboot_max_indexes() -> Option<usize> {
             None
         }
     }
+}
+
+/// Env var naming the warm-boot age gate, in hours (#8275).
+pub const WARMBOOT_MAX_AGE_HOURS_ENV: &str = "TRUSTY_WARMBOOT_MAX_AGE_HOURS";
+
+/// Age-gate default: an index unused for a day is not eagerly loaded (#8275).
+pub const DEFAULT_WARMBOOT_MAX_AGE_HOURS: u64 = 24;
+
+/// Read the warm-boot age gate from `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (#8275).
+///
+/// Why: warm-boot ranked indexes by recency however old the stamp was, so a
+/// boot fully loaded indexes last used two or three days earlier. That was
+/// about 4.2 GB of the 8.7 GB footprint measured six minutes after a restart.
+/// What: the env value through [`parse_warmboot_max_age`]. `None` means no
+/// age limit.
+/// Test: `warmboot_max_age_parses_hours_zero_and_invalid`.
+pub fn warmboot_max_age() -> Option<Duration> {
+    parse_warmboot_max_age(std::env::var(WARMBOOT_MAX_AGE_HOURS_ENV).ok().as_deref())
+}
+
+/// Parse a raw `TRUSTY_WARMBOOT_MAX_AGE_HOURS` value (#8275).
+///
+/// Why: a pure form lets tests cover every spelling without writing the
+/// process environment.
+/// What: unset → the 24 h default; `0` → `None` (no age limit); `N` → `N`
+/// hours. A value that is not a `u64` logs a `warn!` and falls back to the
+/// default, so a typo never disables the gate.
+/// Test: `warmboot_max_age_parses_hours_zero_and_invalid`.
+pub fn parse_warmboot_max_age(raw: Option<&str>) -> Option<Duration> {
+    let hours = match raw {
+        None => DEFAULT_WARMBOOT_MAX_AGE_HOURS,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(
+                    "{WARMBOOT_MAX_AGE_HOURS_ENV}={raw:?} is not a valid u64 ({e}); \
+                     falling back to the default of {DEFAULT_WARMBOOT_MAX_AGE_HOURS} h (#8275)"
+                );
+                DEFAULT_WARMBOOT_MAX_AGE_HOURS
+            }
+        },
+    };
+    (hours > 0).then(|| Duration::from_secs(hours.saturating_mul(3600)))
 }
 
 /// Per-query lazy-load deadline from `TRUSTY_INDEX_COLD_RELOAD_TIMEOUT_SECS`.

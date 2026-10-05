@@ -63,6 +63,46 @@ pub fn select_warmboot_entries(
     (sorted, cold)
 }
 
+/// Warm-boot's split: drop stale entries first, then apply the recency cap.
+///
+/// Why (#8275): the cap alone loaded the top N by recency however old the
+/// stamp, so indexes untouched for days filled the boot set and the daemon
+/// reached 8.7 GB six minutes after a restart. Filtering before the cut means
+/// a stale index never takes a slot from a fresh one. Warm-boot only: the
+/// residency sweep keeps calling [`select_warmboot_entries`] directly.
+/// What: with `max_age = None` this is exactly [`select_warmboot_entries`].
+/// Otherwise an entry is stale when its [`warmboot_sort_key`] is `0` (never
+/// queried or indexed) or older than `now_unix - max_age`. Stale entries go
+/// cold; the fresh rest go through the cap. A cold entry still lazy-loads on
+/// its first query.
+/// Test: `age_gate_keeps_only_the_fresh_entries_under_the_cap`,
+/// `age_gate_zero_means_no_limit`, `age_gate_treats_never_queried_as_stale`
+/// in `age_gate_8275_tests`.
+pub fn select_fresh_warmboot_entries(
+    entries: Vec<PersistedIndex>,
+    max_n: Option<usize>,
+    max_age: Option<std::time::Duration>,
+    now_unix: u64,
+) -> (Vec<PersistedIndex>, Vec<PersistedIndex>) {
+    let Some(max_age) = max_age else {
+        return select_warmboot_entries(entries, max_n);
+    };
+    let total = entries.len();
+    let cutoff = now_unix.saturating_sub(max_age.as_secs());
+    let (fresh, mut stale): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| {
+        let key = warmboot_sort_key(e);
+        key > 0 && key >= cutoff
+    });
+    let (eager, mut cold) = select_warmboot_entries(fresh, max_n);
+    cold.append(&mut stale);
+    debug_assert_eq!(eager.len() + cold.len(), total, "age gate lost an entry");
+    (eager, cold)
+}
+
+#[cfg(test)]
+#[path = "age_gate_8275_tests.rs"]
+mod age_gate_8275_tests;
+
 /// Why an entry is parked in the cold store (#4250).
 ///
 /// Why: the store held both populations in one `DashMap` with nothing to tell
@@ -73,15 +113,16 @@ pub fn select_warmboot_entries(
 /// `registry.list()` and so never sees one, and only a query naming the id
 /// verbatim would ever load it. A client that discovers indexes by listing
 /// never names it, so it stayed invisible until a human restarted the daemon.
-/// What: [`Self::Deferred`] is policy — `TRUSTY_WARMBOOT_MAX_INDEXES` chose not
-/// to load it, and loading it on first query is the correct, complete
-/// behaviour. [`Self::TimedOut`] is a failure the daemon absorbed, and is what
+/// What: [`Self::Deferred`] is policy — `TRUSTY_WARMBOOT_MAX_INDEXES` or the
+/// `TRUSTY_WARMBOOT_MAX_AGE_HOURS` age gate (#8275) chose not to load it, and
+/// loading it on first query is the correct, complete behaviour. [`Self::TimedOut`] is a failure the daemon absorbed, and is what
 /// the recovery pass drains. The reason is assigned by the store itself, never
 /// passed in by a caller, so an entry cannot be mislabelled at a call site.
 /// Test: `cold_store_timed_out_cohort_excludes_deferred_entries`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColdReason {
-    /// Not in the top-N by recency at boot — lazy BY DESIGN (#993). Never
+    /// Not in the top-N by recency at boot, or older than the warm-boot age
+    /// gate (#8275) — lazy BY DESIGN (#993). Never
     /// proactively retried; a first query is what it is waiting for.
     Deferred,
     /// Parked after its eager warm-boot restore timed out (#4087). The restore

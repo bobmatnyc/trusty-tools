@@ -22,7 +22,8 @@ use crate::commands::start_restore::{
 use crate::service::SearchAppState;
 
 use crate::service::lazy_loader::{
-    select_warmboot_entries, warmboot_cap_for, warmboot_max_indexes,
+    select_fresh_warmboot_entries, warmboot_cap_for, warmboot_max_age, warmboot_max_indexes,
+    WARMBOOT_MAX_AGE_HOURS_ENV,
 };
 use crate::service::persistence::PersistedIndex;
 use crate::service::warm_boot::{
@@ -180,7 +181,8 @@ struct RetainOutcome {
 /// Issue #3929: `no_auto_discover` must gate the colocated-root discovery
 /// scan too — see `collect_colocated_for_warmboot`.
 /// What: collects all entries (legacy + colocated), applies selective warm-boot
-/// (issue #993) to split into eager/cold slices, then restores only the eager
+/// (issue #993) — age gate first (#8275), then the recency cap — to split into
+/// eager/cold slices, then restores only the eager
 /// slice via `restore_one_index_bounded`. Cold entries are registered into
 /// `state.cold_store` for lazy on-demand loading.
 /// Test: integration test in `tests/integration_tests.rs`;
@@ -289,7 +291,23 @@ pub(super) async fn restore_indexes(
     let all_entries = dedup_outcome.survivors;
     let total_discovered = all_entries.len();
 
-    let (eager_entries, cold_entries) = select_warmboot_entries(all_entries, max_warmboot);
+    // #8275: drop entries unused for TRUSTY_WARMBOOT_MAX_AGE_HOURS (default 24)
+    // BEFORE the rank cut, so a stale index never takes a fresh one's slot.
+    let max_age = warmboot_max_age();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match max_age {
+        Some(age) => tracing::info!(
+            "warm-boot: age gate {}h (from {WARMBOOT_MAX_AGE_HOURS_ENV}) — indexes not \
+             used within it are deferred to the cold store (#8275)",
+            age.as_secs() / 3600
+        ),
+        None => tracing::info!("warm-boot: age gate off ({WARMBOOT_MAX_AGE_HOURS_ENV}=0, #8275)"),
+    }
+    let (eager_entries, cold_entries) =
+        select_fresh_warmboot_entries(all_entries, max_warmboot, max_age, now_unix);
     let indexes_lazy = cold_entries.len();
 
     if indexes_lazy > 0 {
