@@ -16,24 +16,27 @@ use trusty_common::credentials::{SANDBOX_ENV_VAR, load_env_local_once, sandbox_f
 /// its sessions) still loaded developer credentials.
 /// What: runs [`load_env_local_once`] (which applies the opt-out itself), then
 /// [`load_startup_env_tiers`] with the process value of
-/// [`SANDBOX_ENV_VAR`], the cwd and [`crate::ctrl::detect_self_project`].
-/// Each found file goes through `dotenvy::from_path`, which never overrides an
-/// already-set variable; a malformed file is skipped, as before.
+/// [`SANDBOX_ENV_VAR`], the cwd and [`crate::ctrl::detect_self_project`] as
+/// the lazy self-project resolver. Each found file goes through
+/// `dotenvy::from_path`, which never overrides an already-set variable; a
+/// malformed file is skipped, as before.
 /// Test: the decision through [`load_startup_env_tiers`]
 /// (`startup_env_tests::sandbox_flag_skips_self_project_env_local`,
 /// `startup_env_tests::sandbox_flag_skips_cwd_dotenv`,
 /// `startup_env_tests::flag_off_loads_both_tiers`,
-/// `startup_env_tests::values_other_than_one_do_not_opt_out`).
+/// `startup_env_tests::values_other_than_one_do_not_opt_out`,
+/// `startup_env_tests::self_project_resolves_after_cwd_dotenv_load`).
 pub(super) fn load_startup_env_files() {
     load_env_local_once();
     // #9224: read the opt-out once; `var_os` has no error branch.
     let sandbox_value = std::env::var_os(SANDBOX_ENV_VAR);
     let cwd = std::env::current_dir().ok();
-    let self_project = crate::ctrl::detect_self_project();
+    // #9224: pass the resolver, not its result, so a `TAGENT_PROJECT_DIR`
+    // hint set by the cwd `.env` still picks the self-project.
     load_startup_env_tiers(
         sandbox_value.as_deref(),
         cwd.as_deref(),
-        self_project.as_deref(),
+        crate::ctrl::detect_self_project,
         |path| {
             let _ = dotenvy::from_path(path);
         },
@@ -43,20 +46,26 @@ pub(super) fn load_startup_env_files() {
 /// Hermetic core of [`load_startup_env_files`]: hand each tagent-owned
 /// credential file to `load`, or none when sandboxed.
 ///
-/// Why (#9224): the flag value, cwd and self-project dir are parameters, so a
-/// test drives the opt-out with no process-env mutation and no real cwd.
+/// Why (#9224): the flag value, cwd and self-project resolver are
+/// parameters, so a test drives the opt-out and the load order with no
+/// process-env mutation and no real cwd.
 /// What: `sandbox_value` exactly `1` (per [`sandbox_flag_set`]) returns before
-/// either file is located. Otherwise calls `load` with the first `.env` found
-/// walking up from `cwd` (the `dotenvy::dotenv` search), then with
-/// `self_project/.env.local` when it is a file — the order startup always used.
+/// either file is located, and `self_project` is never called. Otherwise
+/// calls `load` with the first `.env` found walking up from `cwd` (the
+/// `dotenvy::dotenv` search), then calls `self_project` and loads its
+/// `.env.local` when that is a file. The resolver runs after the `.env` load
+/// because it reads the `TAGENT_PROJECT_DIR` hint from process env, which
+/// that `.env` may set; this is the order startup used before #9224.
 /// Test: `startup_env_tests::sandbox_flag_skips_self_project_env_local`,
 /// `startup_env_tests::sandbox_flag_skips_cwd_dotenv`,
 /// `startup_env_tests::flag_off_loads_both_tiers`,
-/// `startup_env_tests::values_other_than_one_do_not_opt_out`.
+/// `startup_env_tests::values_other_than_one_do_not_opt_out`,
+/// `startup_env_tests::self_project_resolves_after_cwd_dotenv_load`,
+/// `startup_env_tests::sandbox_flag_never_calls_the_resolver`.
 pub(super) fn load_startup_env_tiers(
     sandbox_value: Option<&OsStr>,
     cwd: Option<&Path>,
-    self_project: Option<&Path>,
+    self_project: impl FnOnce() -> Option<PathBuf>,
     mut load: impl FnMut(&Path),
 ) {
     // #9224: a sandboxed tagent loads neither its `.env` nor the self-project
@@ -67,7 +76,8 @@ pub(super) fn load_startup_env_tiers(
     if let Some(dotenv) = cwd.and_then(find_dotenv_upward) {
         load(&dotenv);
     }
-    if let Some(project_env) = self_project
+    // #9224: resolve only now, after the `.env` load that may set the hint.
+    if let Some(project_env) = self_project()
         .map(|dir| dir.join(".env.local"))
         .filter(|path| path.is_file())
     {
@@ -82,8 +92,8 @@ pub(super) fn load_startup_env_tiers(
 /// What: checks `dir/.env` for `start` and each ancestor, returning the first
 /// regular file. A metadata error other than `NotFound` ends the search with
 /// `None`, as dotenvy's finder does, so an unreadable directory loads nothing.
-/// Test: `startup_env_tests::flag_off_loads_both_tiers` (found from a nested
-/// cwd).
+/// Test: `startup_env_tests::find_dotenv_upward_picks_the_nearest_regular_file`,
+/// `startup_env_tests::find_dotenv_upward_stops_at_an_unreadable_ancestor`.
 fn find_dotenv_upward(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let candidate = dir.join(".env");
