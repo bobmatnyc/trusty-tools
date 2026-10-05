@@ -400,6 +400,34 @@ async fn forgetting_an_unmerged_drawer_writes_no_record() {
     assert!(read_journal(&palace.data_dir).unwrap().records.is_empty());
 }
 
+/// Why (#9172): an over-bound merge must not drop the loser's text either.
+/// What: two near-duplicates whose merge would pass `MERGE_MAX_BYTES` by one
+/// byte; the dedup pass merges nothing and both drawers keep their content.
+#[tokio::test]
+async fn a_merge_past_the_byte_bound_keeps_both_drawers() {
+    use super::helpers::MERGE_MAX_BYTES;
+    let dir = tempdir().unwrap();
+    let palace = palace_in(&dir, "merge-bound");
+    let handle = open(&palace);
+    let half = MERGE_MAX_BYTES / 2;
+    let rest = MERGE_MAX_BYTES - half - "\n\nAlso: ".len();
+    let newer: &'static str = "n".repeat(half).leak();
+    let older: &'static str = "o".repeat(rest + 1).leak();
+    let spec = |content, age_days| Spec {
+        content,
+        importance: 0.5,
+        age_days,
+        tags: &[],
+        fact_key: None,
+    };
+    let newer_id = put(&handle, &spec(newer, 0)).await;
+    let older_id = put(&handle, &spec(older, 1)).await;
+
+    assert_eq!(dedup(&handle).await, 0);
+    assert_eq!(content_of(&handle, newer_id), newer);
+    assert_eq!(content_of(&handle, older_id), older);
+}
+
 /// The vector the process-wide mock embedder gives `text` in a dream cycle.
 async fn mock_vector(text: &str) -> Vec<f32> {
     let mock = crate::embedder::MockEmbedder::new(EMBED_DIM);

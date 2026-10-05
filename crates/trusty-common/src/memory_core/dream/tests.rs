@@ -1,5 +1,5 @@
 use super::guard::CompactionGuard;
-use super::helpers::{char_safe_prefix, merged_drawer, now_secs};
+use super::helpers::{MERGE_MAX_BYTES, char_safe_prefix, merged_drawer, now_secs};
 use super::*;
 use crate::credentials::env_guard::EnvVarGuard;
 use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
@@ -2020,7 +2020,7 @@ fn a_merge_keeps_multibyte_loser_text_whole() {
     let mut loser = Drawer::new(room, loser_content);
     loser.tags = vec!["祝賀会".into()];
 
-    let merged = merged_drawer(&survivor, &loser);
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
 
     assert_eq!(
         merged.content(),
@@ -2028,6 +2028,31 @@ fn a_merge_keeps_multibyte_loser_text_whole() {
     );
     assert_eq!(merged.id, survivor.id);
     assert_eq!(merged.tags, vec!["祝賀会".to_string()]);
+}
+
+/// Why (#9172): a near-duplicate that keeps coming back was appended to the
+/// same survivor on every cycle, so the drawer grew without bound.
+/// What: a merge whose content is exactly [`MERGE_MAX_BYTES`] goes through
+/// whole; one byte more is refused. An exact duplicate of an over-bound drawer
+/// appends nothing and still merges.
+/// Test: this test.
+#[test]
+fn a_merge_is_skipped_past_the_byte_bound() {
+    let room = Uuid::new_v4();
+    let survivor = Drawer::new(room, "s".repeat(1000));
+    let sep = "\n\nAlso: ".len();
+    let at_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep));
+    let merged = merged_drawer(&survivor, &at_bound).expect("a merge at the bound");
+    assert_eq!(merged.content().len(), MERGE_MAX_BYTES);
+    assert!(merged.content().ends_with(at_bound.content()));
+
+    let past_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep + 1));
+    assert!(merged_drawer(&survivor, &past_bound).is_none());
+
+    let big = Drawer::new(room, "b".repeat(MERGE_MAX_BYTES * 2));
+    let same = Drawer::new(room, big.content().to_string());
+    let merged = merged_drawer(&big, &same).expect("an exact duplicate adds no bytes");
+    assert_eq!(merged.content(), big.content());
 }
 
 /// Why (#5187): the semantic pass logs a fixed-width preview of a canonical
@@ -2117,7 +2142,7 @@ async fn merge_into_keeps_the_content_hash_in_step() {
     };
     let before = survivor.content_hash();
 
-    let merged = merged_drawer(&survivor, &loser);
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
     assert_ne!(
         merged.content(),
         survivor.content(),
