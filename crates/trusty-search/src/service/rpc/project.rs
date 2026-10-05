@@ -13,8 +13,10 @@
 //! |---|---|---|
 //! | `search.project.resolve` | none | free |
 //!
-//! Free: one registry read and a few `stat` calls, and it is the call a client
-//! makes before any query, so it must not queue behind the queries it unblocks.
+//! Free: one registry read and `stat` calls bounded to the matched group and
+//! the five nearest candidates, never a `/Volumes` root (#9169). It is the call
+//! a client makes before any query, so it must not queue behind the queries it
+//! unblocks.
 //!
 //! Test: `rpc/project_tests.rs`.
 //!
@@ -26,7 +28,7 @@ use serde::Deserialize;
 use trusty_common::uds::server::{RpcError, RpcRouter, CODE_INTERNAL_ERROR};
 
 use crate::service::project_resolve::{
-    classify_root_kind, gather_candidates, resolve, Candidate, ProjectQuery, ResolveMiss,
+    gather_candidates, resolve, Candidate, LiveDisk, ProjectQuery, ResolveMiss,
 };
 use crate::service::server::SearchAppState;
 
@@ -52,9 +54,9 @@ pub struct ProjectResolveParams {
 /// Why: the socket entry point for ruling f6 — one answer to "which index is
 /// this project?" so no client guesses an id.
 /// What: decodes [`ProjectResolveParams`], then [`resolve_report`]. A success
-/// is `{index_id, root_path, repo_identity, kind, resident, last_indexed_unix,
-/// matched_by, duplicates}`; a miss is an error frame whose `data` names the
-/// nearest candidates.
+/// is `{index_id, root_path, repo_identity, kind, resident,
+/// corpus_modified_unix, matched_by, duplicates}`; a miss is an error frame
+/// whose `data` names the nearest candidates.
 /// Test: `resolve_over_the_socket_answers_by_name_identity_and_path`,
 /// `a_socket_miss_carries_the_nearest_candidates_as_data`,
 /// `rpc_router_registers_every_documented_method`.
@@ -71,13 +73,13 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 
 /// Resolve `project` against this daemon's registrations (#9169).
 ///
-/// Why: `indexes.toml` holds every registration with its identity and recency;
-/// the hot registry says which are loaded. Both are read once per call.
+/// Why: `indexes.toml` holds every registration with its identity and storage
+/// layout; the hot registry says which are loaded. Both are read once per call.
 /// What: parses the query (a bad one is `invalid_params`), loads the registry
 /// (an unreadable one is `internal_error`, never an empty map that would turn
-/// every call into a miss), and runs classification and the core on the
-/// blocking pool, because both `stat` the roots and a path outside every root
-/// shells out to `git` for its identity.
+/// every call into a miss), and runs the core on the blocking pool, because it
+/// `stat`s the roots it reports and a path outside every root shells out to
+/// `git` for its identity.
 /// Test: `resolve_over_the_socket_answers_by_name_identity_and_path`,
 /// `an_unreadable_registry_is_an_internal_error_not_a_miss`.
 pub async fn resolve_report(
@@ -104,13 +106,12 @@ pub async fn resolve_report(
         .collect();
     let project = project.to_string();
     let outcome = tokio::task::spawn_blocking(move || {
-        let names = crate::service::constants::ephemeral_dir_names();
-        let candidates = gather_candidates(&persisted, &resident, |root| {
-            classify_root_kind(root, &names)
-        });
-        resolve(&query, &candidates, |path| {
-            trusty_common::repo_identity::RepoIdentity::derive(path).map(|id| id.canonical())
-        })
+        // #9169: no disk read here — `resolve` probes only what it reports.
+        let candidates = gather_candidates(&persisted, &resident);
+        let disk = LiveDisk {
+            names: crate::service::constants::ephemeral_dir_names(),
+        };
+        resolve(&query, &candidates, &disk)
     })
     .await
     .map_err(|e| RpcError::new(CODE_INTERNAL_ERROR, format!("resolve task failed: {e}")))?;

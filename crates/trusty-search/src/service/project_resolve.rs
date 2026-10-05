@@ -7,21 +7,28 @@
 //! stores its `repo_identity` and `root_path`, so trusty-search can own the
 //! project→index map (ruling f6) instead of each caller guessing.
 //!
-//! What: [`ProjectQuery::parse`] classifies the input, [`resolve`] finds the
-//! repo group it names and picks one index from it, and [`gather_candidates`]
+//! What: [`ProjectQuery::parse`] classifies the input, [`gather_candidates`]
 //! builds the candidate list from the persisted registry plus the resident
-//! handles. The pick follows ruling f7: a main-checkout root wins, otherwise
-//! the most recently indexed root, and a worktree root never wins. Every other
-//! index of the same repo is reported in `duplicates`, never dropped. A miss
-//! carries the nearest candidates rather than a bare not-found.
+//! handles without touching disk, and [`resolve`] finds the group the query
+//! names and picks one index from it. The pick follows ruling f7: a
+//! main-checkout root wins, otherwise the most recently written corpus, and a
+//! worktree root never wins. An exact index id or the index owning a path is
+//! returned itself unless it is a worktree or orphaned. Every other index of
+//! the group is reported in `duplicates`, never dropped. A miss carries the
+//! nearest candidates rather than a bare not-found. Disk reads go through
+//! [`Disk`] and cover only the matched group and the nearest candidates.
 //!
 //! Test: `project_resolve_tests.rs`; the RPC adapter in `rpc/project_tests.rs`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
 
 use crate::service::persistence::PersistedIndex;
+
+#[path = "project_resolve_disk.rs"]
+mod disk;
+pub use disk::{classify_root_kind, Disk, LiveDisk};
 
 /// How many nearest candidates a miss reports.
 const MAX_NEAREST: usize = 5;
@@ -74,14 +81,19 @@ impl ProjectQuery {
     }
 }
 
-/// What a registration's root is, as far as ruling f7 cares.
+/// What a registration's root is, as far as ruling f7 cares. Declaration
+/// order is the f7 preference order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RootKind {
     /// A repo's main checkout: `.git` is a directory.
     MainCheckout,
-    /// An existing root that is neither a main checkout nor a worktree.
+    /// An existing root with no `.git` of its own — a subdirectory of a repo,
+    /// or a plain directory. Grouped by root, never by repo identity.
     Checkout,
+    /// Not inspected: a `/Volumes` root (never `stat`ed), or a candidate the
+    /// resolver did not need to probe.
+    Indeterminate,
     /// A git worktree: under a worktree base, or `.git` is a file.
     Worktree,
     /// The root no longer exists on disk.
@@ -91,39 +103,7 @@ pub enum RootKind {
 impl RootKind {
     /// Whether ruling f7 lets an index with this root win a resolve.
     pub fn can_win(self) -> bool {
-        matches!(self, Self::MainCheckout | Self::Checkout)
-    }
-}
-
-/// Classify `root` for ruling f7.
-///
-/// What: a path component naming a worktree base (`.worktrees`, the configured
-/// base, or `.claude/worktrees`) is a worktree whether or not it still exists;
-/// otherwise a missing root is orphaned, a `.git` file marks a linked worktree,
-/// and a `.git` directory marks a main checkout.
-/// Test: `classify_root_kind_reads_the_git_entry_and_the_worktree_base`.
-pub fn classify_root_kind(
-    root: &Path,
-    worktree_names: &trusty_common::workspace_layout::WorktreeDirNames,
-) -> RootKind {
-    let mut previous: Option<&std::ffi::OsStr> = None;
-    for component in root.components() {
-        let name = component.as_os_str();
-        let claude_worktree = previous == Some(std::ffi::OsStr::new(".claude"))
-            && name == std::ffi::OsStr::new("worktrees");
-        if claude_worktree || name.to_str().is_some_and(|n| worktree_names.matches(n)) {
-            return RootKind::Worktree;
-        }
-        previous = Some(name);
-    }
-    if matches!(std::fs::symlink_metadata(root), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
-    {
-        return RootKind::Orphaned;
-    }
-    match std::fs::metadata(root.join(".git")) {
-        Ok(meta) if meta.is_file() => RootKind::Worktree,
-        Ok(meta) if meta.is_dir() => RootKind::MainCheckout,
-        _ => RootKind::Checkout,
+        !matches!(self, Self::Worktree | Self::Orphaned)
     }
 }
 
@@ -138,20 +118,39 @@ pub struct Candidate {
     pub root_path: PathBuf,
     /// The stored canonical repo identity, when one was derived.
     pub repo_identity: Option<String>,
-    /// How ruling f7 classifies the root.
+    /// How ruling f7 classifies the root; `Indeterminate` until probed.
     pub kind: RootKind,
     /// Whether the index is loaded, as opposed to cold-parked.
     pub resident: bool,
-    /// Unix time of the last completed reindex, when known.
-    pub last_indexed_unix: Option<u64>,
+    /// Unix mtime of the index's redb corpus — ruling f7's recency. Read only
+    /// for the resolved group; `None` elsewhere and when the corpus is absent.
+    pub corpus_modified_unix: Option<u64>,
+    /// Whether the registry keeps the corpus under the root (`colocated`).
+    #[serde(skip)]
+    pub colocated: bool,
 }
 
 impl Candidate {
-    /// The key a repo group is formed on: the identity, else the root path.
+    /// The key of the index's repo: its stored identity, else its root.
+    fn identity_key(&self) -> String {
+        self.repo_identity
+            .clone()
+            .unwrap_or_else(|| self.root_key())
+    }
+
+    /// The key of the index's root directory.
+    fn root_key(&self) -> String {
+        format!("root:{}", self.root_path.display())
+    }
+
+    /// The key a resolve groups on. #9169: a root with no `.git` of its own is
+    /// a subdirectory index, so sibling subdirectories of one repo are never
+    /// each other's duplicates.
     fn group_key(&self) -> String {
-        match &self.repo_identity {
-            Some(id) => id.clone(),
-            None => format!("root:{}", self.root_path.display()),
+        if self.kind == RootKind::Checkout {
+            self.root_key()
+        } else {
+            self.identity_key()
         }
     }
 
@@ -191,44 +190,40 @@ fn strip_hash_suffix(id: &str) -> &str {
 /// Build the candidate list from the persisted registry and the resident ids.
 ///
 /// Why: `indexes.toml` holds every registration — resident and cold-parked —
-/// with its identity and recency; the resident set says which are loaded. A
-/// handle with no persisted row still counts, with no identity.
+/// with its identity and storage layout; the resident set says which are
+/// loaded. A handle with no persisted row still counts, with no identity.
 /// What: one candidate per persisted row, then one per resident handle the
-/// registry lacks. `classify` is injected so tests need no real directories.
-/// Test: `a_resident_handle_with_no_persisted_row_is_still_a_candidate`.
+/// registry lacks. No filesystem call: kind and recency are probed later by
+/// [`resolve`], and only for the candidates it reports.
+/// Test: `a_resident_handle_with_no_persisted_row_is_still_a_candidate`,
+/// `the_most_recently_written_corpus_wins_between_two_main_checkouts`.
 pub fn gather_candidates(
     persisted: &[PersistedIndex],
     resident: &[(String, PathBuf)],
-    classify: impl Fn(&Path) -> RootKind,
 ) -> Vec<Candidate> {
+    let unprobed = |id: &str, root: &Path, identity: Option<String>, colocated: bool| Candidate {
+        index_id: id.to_string(),
+        root_path: root.to_path_buf(),
+        repo_identity: identity,
+        kind: RootKind::Indeterminate,
+        resident: resident.iter().any(|(r, _)| r == id),
+        corpus_modified_unix: None,
+        colocated,
+    };
     let mut out: Vec<Candidate> = persisted
         .iter()
-        .map(|e| Candidate {
-            index_id: e.id.clone(),
-            root_path: e.root_path.clone(),
-            repo_identity: e.repo_identity.clone(),
-            kind: classify(&e.root_path),
-            resident: resident.iter().any(|(id, _)| *id == e.id),
-            last_indexed_unix: e.last_indexed_unix,
-        })
+        .map(|e| unprobed(&e.id, &e.root_path, e.repo_identity.clone(), e.colocated))
         .collect();
     for (id, root) in resident {
         if !persisted.iter().any(|e| e.id == *id) {
-            out.push(Candidate {
-                index_id: id.clone(),
-                root_path: root.clone(),
-                repo_identity: None,
-                kind: classify(root),
-                resident: true,
-                last_indexed_unix: None,
-            });
+            out.push(unprobed(id, root, None, false));
         }
     }
     out
 }
 
 /// A successful resolve: the one index, how it was matched, and the rest of
-/// its repo group.
+/// its group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Resolution {
     /// The index ruling f7 picked.
@@ -236,7 +231,7 @@ pub struct Resolution {
     pub index: Candidate,
     /// `index_id`, `name`, `repo_identity` or `path`.
     pub matched_by: &'static str,
-    /// Every other index of the same repo, sorted by id.
+    /// Every other index of the same group, sorted by id.
     pub duplicates: Vec<Candidate>,
 }
 
@@ -245,9 +240,9 @@ pub struct Resolution {
 pub enum ResolveMiss {
     /// Nothing matched; `nearest` holds the closest registrations.
     NotFound { nearest: Vec<Candidate> },
-    /// A name matched indexes of more than one repo.
+    /// The query matched more than one group.
     Ambiguous { matches: Vec<Candidate> },
-    /// The repo's only indexes are worktrees or orphaned roots.
+    /// The group's only indexes are worktrees or orphaned roots.
     NoLiveIndex { group: Vec<Candidate> },
 }
 
@@ -255,71 +250,150 @@ pub enum ResolveMiss {
 ///
 /// Why: the one place a project becomes an index id, so every caller gets the
 /// same answer for the same repo.
-/// What: finds the repo group the query names — exact index id, then a bare
-/// name, an identity, or the deepest registered root containing a path, with
-/// `derive` (a git read) as the fallback for a path outside every root — then
-/// picks the winner with [`pick`]. `derive` runs only on that fallback.
+/// What: an exact index id, or the deepest registered root containing the
+/// (canonical) query path, anchors the resolve: that index wins unless it is a
+/// worktree or orphaned, in which case its group's f7 pick wins. A bare name
+/// or an identity names a group and the f7 pick wins. A path outside every
+/// root falls back to its git identity via [`Disk::derive_identity`].
 /// Test: `resolves_by_name_by_identity_and_by_path`,
 /// `an_exact_index_id_resolves_to_its_repos_main_checkout`,
+/// `an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity`,
+/// `sibling_subdirectory_indexes_are_never_each_others_duplicates`,
+/// `a_dotdot_query_path_matches_the_root_it_names`,
 /// `a_name_shared_by_two_repos_is_ambiguous`,
 /// `a_miss_reports_the_nearest_candidates`,
 /// `a_path_outside_every_root_falls_back_to_the_derived_identity`.
 pub fn resolve(
     query: &ProjectQuery,
     candidates: &[Candidate],
-    derive: impl FnOnce(&Path) -> Option<String>,
+    disk: &impl Disk,
 ) -> Result<Resolution, ResolveMiss> {
-    let (key, matched_by) = match query {
-        ProjectQuery::Identity(id) => (Some(id.clone()), "repo_identity"),
+    match query {
+        ProjectQuery::Identity(id) => resolve_key(id, query, candidates, disk, "repo_identity"),
         ProjectQuery::Name(name) => {
             if let Some(exact) = candidates.iter().find(|c| c.index_id == *name) {
-                (Some(exact.group_key()), "index_id")
-            } else {
-                let lower = name.to_lowercase();
-                let matches: Vec<&Candidate> = candidates
-                    .iter()
-                    .filter(|c| c.names().contains(&lower))
-                    .collect();
-                let mut keys: Vec<String> = matches.iter().map(|c| c.group_key()).collect();
-                keys.sort();
-                keys.dedup();
-                if keys.len() > 1 {
-                    return Err(ResolveMiss::Ambiguous {
-                        matches: sorted(matches.into_iter().cloned().collect()),
-                    });
-                }
-                (keys.pop(), "name")
+                return resolve_anchored(exact, candidates, disk, "index_id");
+            }
+            let lower = name.to_lowercase();
+            let matches = probed(
+                candidates.iter().filter(|c| c.names().contains(&lower)),
+                disk,
+            );
+            match distinct_keys(&matches).as_slice() {
+                [] => Err(ResolveMiss::NotFound {
+                    nearest: nearest(query, candidates, disk),
+                }),
+                [only] => resolve_key(only, query, candidates, disk, "name"),
+                _ => Err(ResolveMiss::Ambiguous {
+                    matches: sorted(matches),
+                }),
             }
         }
-        ProjectQuery::Path(path) => match owning_candidate(path, candidates) {
-            Some(owner) => (Some(owner.group_key()), "path"),
-            None => (derive(path), "path"),
-        },
-    };
-    let group: Vec<Candidate> = match &key {
-        Some(key) => candidates
-            .iter()
-            .filter(|c| c.group_key() == *key)
-            .cloned()
-            .collect(),
-        None => Vec::new(),
-    };
-    if group.is_empty() {
-        return Err(ResolveMiss::NotFound {
-            nearest: nearest(query, candidates),
-        });
+        ProjectQuery::Path(path) => {
+            // #9169: only the query is canonicalised; stored roots already are.
+            let query_path = disk
+                .canonicalize(path)
+                .unwrap_or_else(|| lexical_normalize(path));
+            if let Some(owner) = owning_candidate(&query_path, candidates) {
+                return resolve_anchored(owner, candidates, disk, "path");
+            }
+            match disk.derive_identity(path) {
+                Some(id) => resolve_key(&id, query, candidates, disk, "path"),
+                None => Err(ResolveMiss::NotFound {
+                    nearest: nearest(query, candidates, disk),
+                }),
+            }
+        }
     }
-    pick(group, matched_by)
 }
 
-/// Ruling f7: pick one index from one repo group.
+/// Resolve the group `key` names, picking its winner by ruling f7.
+///
+/// What: probes the candidates sharing the identity or root `key`. When none
+/// of them groups under `key` — every one is a subdirectory index — one root
+/// group is used as is and several are ambiguous.
+fn resolve_key(
+    key: &str,
+    query: &ProjectQuery,
+    candidates: &[Candidate],
+    disk: &impl Disk,
+    matched_by: &'static str,
+) -> Result<Resolution, ResolveMiss> {
+    let members = probed(
+        candidates
+            .iter()
+            .filter(|c| c.identity_key() == key || c.root_key() == key),
+        disk,
+    );
+    let mut group = group_of(&members, key);
+    if group.is_empty() {
+        match distinct_keys(&members).as_slice() {
+            [] => {
+                return Err(ResolveMiss::NotFound {
+                    nearest: nearest(query, candidates, disk),
+                })
+            }
+            [only] => group = group_of(&members, only),
+            _ => {
+                return Err(ResolveMiss::Ambiguous {
+                    matches: sorted(members),
+                })
+            }
+        }
+    }
+    pick(with_recency(group, disk), matched_by)
+}
+
+/// Resolve from one known index — an exact id or a path's owner (#9169).
+///
+/// What: the anchor wins whenever its kind can, with the rest of its group in
+/// `duplicates`; only a worktree or orphaned anchor yields to its group's f7
+/// pick.
+fn resolve_anchored(
+    anchor: &Candidate,
+    candidates: &[Candidate],
+    disk: &impl Disk,
+    matched_by: &'static str,
+) -> Result<Resolution, ResolveMiss> {
+    let (identity, root) = (anchor.identity_key(), anchor.root_key());
+    let members = probed(
+        candidates
+            .iter()
+            .filter(|c| c.identity_key() == identity || c.root_key() == root),
+        disk,
+    );
+    // The anchor always matches its own identity, so it is among `members`.
+    let anchor = members
+        .iter()
+        .find(|c| c.index_id == anchor.index_id)
+        .cloned()
+        .unwrap_or_else(|| Candidate {
+            kind: disk.kind(anchor),
+            ..anchor.clone()
+        });
+    let group = with_recency(group_of(&members, &anchor.group_key()), disk);
+    if !anchor.kind.can_win() {
+        return pick(group, matched_by);
+    }
+    let (index, rest): (Vec<Candidate>, Vec<Candidate>) = group
+        .into_iter()
+        .partition(|c| c.index_id == anchor.index_id);
+    let index = index.into_iter().next().unwrap_or(anchor);
+    Ok(Resolution {
+        index,
+        matched_by,
+        duplicates: sorted(rest),
+    })
+}
+
+/// Ruling f7: pick one index from one group whose recency is filled in.
 ///
 /// What: a worktree or orphaned root never wins. Among the rest a main
-/// checkout beats any other root, then the most recent `last_indexed_unix`
-/// wins (never-indexed sorts last), then the lowest id for determinism.
-/// Test: `the_main_checkout_beats_a_newer_plain_checkout`,
+/// checkout beats any other root, then the newest corpus wins (an absent
+/// corpus sorts last), then the lowest id for determinism.
+/// Test: `the_main_checkout_beats_a_newer_worktree`,
 /// `a_worktree_never_wins_even_when_newest`,
-/// `recency_breaks_a_tie_between_two_plain_checkouts`,
+/// `the_most_recently_written_corpus_wins_between_two_main_checkouts`,
 /// `a_repo_with_only_worktree_indexes_has_no_live_index`.
 fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, ResolveMiss> {
     let winner = group
@@ -328,7 +402,7 @@ fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, R
         .min_by(|a, b| {
             a.kind
                 .cmp(&b.kind)
-                .then(b.last_indexed_unix.cmp(&a.last_indexed_unix))
+                .then(b.corpus_modified_unix.cmp(&a.corpus_modified_unix))
                 .then(a.index_id.cmp(&b.index_id))
         })
         .cloned();
@@ -350,26 +424,73 @@ fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, R
     })
 }
 
-/// The registration whose root is the deepest ancestor of `path`.
+/// Clone `candidates` with their root kind read from `disk`.
+fn probed<'a>(candidates: impl Iterator<Item = &'a Candidate>, disk: &impl Disk) -> Vec<Candidate> {
+    candidates
+        .map(|c| Candidate {
+            kind: disk.kind(c),
+            ..c.clone()
+        })
+        .collect()
+}
+
+/// Fill in each group member's corpus recency.
+fn with_recency(mut group: Vec<Candidate>, disk: &impl Disk) -> Vec<Candidate> {
+    for c in &mut group {
+        c.corpus_modified_unix = disk.corpus_modified_unix(c);
+    }
+    group
+}
+
+/// The probed members whose group key is `key`.
+fn group_of(members: &[Candidate], key: &str) -> Vec<Candidate> {
+    members
+        .iter()
+        .filter(|c| c.group_key() == key)
+        .cloned()
+        .collect()
+}
+
+/// The sorted, deduplicated group keys of probed candidates.
+fn distinct_keys(list: &[Candidate]) -> Vec<String> {
+    let mut keys: Vec<String> = list.iter().map(Candidate::group_key).collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// The registration whose root is the deepest ancestor of `path`. No
+/// filesystem call: `path` is already canonical (or normalised) and stored
+/// roots are canonical.
 fn owning_candidate<'a>(path: &Path, candidates: &'a [Candidate]) -> Option<&'a Candidate> {
-    let canonical = std::fs::canonicalize(path).ok();
     candidates
         .iter()
-        .filter(|c| {
-            let root_canonical = std::fs::canonicalize(&c.root_path).ok();
-            [Some(path), canonical.as_deref()]
-                .into_iter()
-                .flatten()
-                .any(|p| {
-                    p.starts_with(&c.root_path)
-                        || root_canonical.as_deref().is_some_and(|r| p.starts_with(r))
-                })
-        })
+        .filter(|c| path.starts_with(&c.root_path))
         .max_by_key(|c| c.root_path.components().count())
 }
 
+/// Resolve `.` and `..` without touching disk, for a path that cannot be
+/// canonicalised. #9169: a raw `/w/a/../b` would otherwise match root `/w/a`.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The closest registrations to `query` by Jaro-Winkler similarity.
-fn nearest(query: &ProjectQuery, candidates: &[Candidate]) -> Vec<Candidate> {
+///
+/// What: scores every candidate by name alone, keeps the top
+/// [`MAX_NEAREST`], and probes only those, so an equal score can prefer the
+/// root f7 would pick.
+fn nearest(query: &ProjectQuery, candidates: &[Candidate], disk: &impl Disk) -> Vec<Candidate> {
     let needle = match query {
         ProjectQuery::Name(name) => name.to_lowercase(),
         ProjectQuery::Identity(id) => id.rsplit('/').next().unwrap_or(id).to_lowercase(),
@@ -390,18 +511,28 @@ fn nearest(query: &ProjectQuery, candidates: &[Candidate]) -> Vec<Candidate> {
             (score, c)
         })
         .collect();
+    scored.sort_by(|(sa, a), (sb, b)| sb.total_cmp(sa).then(a.index_id.cmp(&b.index_id)));
+    scored.truncate(MAX_NEAREST);
+    let mut top: Vec<(f64, Candidate)> = scored
+        .into_iter()
+        .map(|(s, c)| {
+            (
+                s,
+                Candidate {
+                    kind: disk.kind(c),
+                    ..c.clone()
+                },
+            )
+        })
+        .collect();
     // An equal score prefers the root f7 would pick, so a repo's main checkout
     // leads its own worktrees.
-    scored.sort_by(|(sa, a), (sb, b)| {
+    top.sort_by(|(sa, a), (sb, b)| {
         sb.total_cmp(sa)
             .then(a.kind.cmp(&b.kind))
             .then(a.index_id.cmp(&b.index_id))
     });
-    scored
-        .into_iter()
-        .take(MAX_NEAREST)
-        .map(|(_, c)| c.clone())
-        .collect()
+    top.into_iter().map(|(_, c)| c).collect()
 }
 
 /// Serialise a path as text, replacing any non-UTF-8 bytes.

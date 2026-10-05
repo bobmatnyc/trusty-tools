@@ -29,8 +29,8 @@ async fn rpc(
     router.dispatch(&frame).await
 }
 
-/// A main checkout (`.git` dir) and a NEWER linked worktree (`.git` file) of
-/// one repo, seeded into `indexes.toml`; only the main checkout is resident.
+/// A main checkout (`.git` dir) and a linked worktree (`.git` file) of one
+/// repo, seeded into `indexes.toml`; only the main checkout is resident.
 struct Fixture {
     _tmp: tempfile::TempDir,
     main: std::path::PathBuf,
@@ -46,12 +46,15 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(&worktree).expect("worktree");
     std::fs::write(worktree.join(".git"), "gitdir: elsewhere\n").expect("linked .git");
 
-    let mut main_row = PersistedIndex::new("trusty-tools-4e2cf878", &main);
-    main_row.repo_identity = Some(REPO.to_string());
-    main_row.last_indexed_unix = Some(10);
-    let mut wt_row = PersistedIndex::new("wt-feat", &worktree);
-    wt_row.repo_identity = Some(REPO.to_string());
-    wt_row.last_indexed_unix = Some(9_999);
+    // Colocated, as registration writes an adopted corpus, so recency is read
+    // under the tempdir and never from the real data dir.
+    let row = |id: &str, root: &std::path::Path| PersistedIndex {
+        colocated: true,
+        repo_identity: Some(REPO.to_string()),
+        ..PersistedIndex::new(id, root)
+    };
+    let main_row = row("trusty-tools-4e2cf878", &main);
+    let wt_row = row("wt-feat", &worktree);
     let toml = tmp.path().join("indexes.toml");
     crate::service::persistence::save_index_registry_at(&toml, &[main_row, wt_row])
         .expect("seed indexes.toml");
@@ -76,7 +79,7 @@ fn fixture() -> Fixture {
 }
 
 /// Why: name, `owner/repo` and path all reach the main checkout, and the
-/// newer worktree is reported in `duplicates` rather than winning.
+/// worktree is reported in `duplicates` rather than winning.
 /// Test: this test.
 #[tokio::test]
 async fn resolve_over_the_socket_answers_by_name_identity_and_path() {
