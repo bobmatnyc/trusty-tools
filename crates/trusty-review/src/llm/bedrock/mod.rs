@@ -34,6 +34,7 @@
 //! no real AWS calls).
 
 pub mod pricing;
+mod request_metadata;
 pub mod tool_use;
 
 pub use pricing::{estimate_bedrock_cost_usd, normalize_model_family};
@@ -247,6 +248,13 @@ impl BedrockProvider {
 
         if !system_blocks.is_empty() {
             sdk_req = sdk_req.set_system(Some(system_blocks));
+        }
+
+        // Tag the request for invocation-log cost attribution: caller,
+        // crate_version, and role when the schema names it. This is the only
+        // Converse send site. Test: `converse_request_carries_caller_and_role_metadata`.
+        for (key, value) in request_metadata::request_metadata(req) {
+            sdk_req = sdk_req.request_metadata(key, value);
         }
 
         // When a response_schema is set, inject tool-use forcing.
