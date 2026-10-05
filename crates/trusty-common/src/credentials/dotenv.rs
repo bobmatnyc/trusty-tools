@@ -41,6 +41,8 @@
 //! resolver's, not this module's). [`user_env_local_path`] is the hermetic
 //! core (HOME is injected, not read from the real environment) so the
 //! precedence is unit-testable without `OnceLock`'s once-only semantics.
+//! `TRUSTY_SANDBOX=1` (exactly "1") turns off both `.env.local` tiers and the
+//! read-only inspectors (#9178).
 //! Test: `dotenv_tests` (sibling file).
 
 use std::path::{Path, PathBuf};

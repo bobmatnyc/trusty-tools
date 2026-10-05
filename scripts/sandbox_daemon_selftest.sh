@@ -11,7 +11,8 @@
 #   and arguments it received, from a caller environment (built with `env -i`,
 #   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the four pinned names plus the
+#     allowlist     the stub sees exactly the five pinned names (HOME, PATH,
+#                   TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR, TRUSTY_SANDBOX) plus the
 #                   forwarded names the caller set (LANG, RUST_LOG), never the
 #                   fake secrets or `LC_API_KEY` (plus the names /bin/sh adds
 #                   itself), and `daemon --sandbox`
