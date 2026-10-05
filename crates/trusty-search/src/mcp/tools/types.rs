@@ -15,11 +15,12 @@ use serde_json::Value;
 /// Why: a typed enum lets `dispatch` branch on the failure kind and map it
 /// to the correct JSON-RPC error code or in-band MCP tool error shape without
 /// parsing error strings.
-/// What: six variants — `UnknownTool` (no route), `InvalidParams` (bad args),
-/// `Transport` (HTTP-level failure), `StageNotReady` (issue #138 pre-flight
+/// What: seven variants — `UnknownTool` (no route), `InvalidParams` (bad args),
+/// `Transport` (the socket call failed), `StageNotReady` (issue #138 pre-flight
 /// failure with structured retry hint), `IndexNotReady` (issue #4715 — the
 /// session's advertised index has never been built), `IndexUnavailable`
-/// (issue #5350 — the daemon answered a structured 503).
+/// (issue #5350 — the daemon answered a structured 503), `ProjectUnresolved`
+/// (#9168 — a `project` argument named no single live index).
 /// Test: every variant is exercised by at least one unit test in `tests.rs`,
 /// `tests_lane.rs`, or `tests_not_ready.rs`.
 #[derive(Debug)]
@@ -53,6 +54,13 @@ pub(super) enum DispatchError {
     /// Carries the daemon body verbatim as `payload`, plus `error_code` and
     /// `http_status`.
     IndexUnavailable {
+        message: String,
+        payload: Value,
+    },
+    /// #9168 — `search.project.resolve` found no single live index for the
+    /// caller's `project`. Carries the daemon's `{error, project, candidates}`
+    /// body plus `error_code: "PROJECT_UNRESOLVED"` as `payload`.
+    ProjectUnresolved {
         message: String,
         payload: Value,
     },
@@ -201,5 +209,22 @@ pub(super) fn wrap_stage_not_ready_error(
             "current_stages": current_stages,
             "suggested_tools": suggested_tools,
         }
+    })
+}
+
+/// Wrap a structured failure as `{isError: true, content: [text], _meta}`.
+///
+/// Why (#9168): the `PROJECT_UNRESOLVED` envelope has the same shape as the
+/// `INDEX_NOT_READY` and `INDEX_UNAVAILABLE` ones, so a client that reads one
+/// reads all three.
+/// Test: `an_unresolved_project_surfaces_its_candidates`.
+pub(super) fn wrap_structured_error(message: &str, payload: &Value) -> Value {
+    serde_json::json!({
+        "isError": true,
+        "content": [{
+            "type": "text",
+            "text": message,
+        }],
+        "_meta": payload,
     })
 }

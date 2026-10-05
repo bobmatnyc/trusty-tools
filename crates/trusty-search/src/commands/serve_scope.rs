@@ -36,6 +36,9 @@
 
 use std::path::{Path, PathBuf};
 
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+
 /// Where a session's index pin came from.
 ///
 /// Why (#5264): the session must report not just WHICH index it pinned but on
@@ -212,24 +215,20 @@ pub(crate) fn decide_auto_pin(candidate: &CwdCandidate, verdict: Confirmation) -
     }
 }
 
-/// Fetch the daemon's index list.
+/// Fetch the daemon's index list over its socket (#9168).
 ///
-/// Why: routes through `trusty_common::server::daemon_http_client`, the shared
-/// entry point every other trusty-search daemon call already uses, so the
-/// 2 s connect / 5 s request timeouts apply here too — a startup probe must
-/// never hang an MCP session waiting on a wedged daemon.
-/// What: `GET {base_url}/indexes?details=true`, parsed by
+/// Why: the startup pin must be confirmed against the SAME daemon the session
+/// will query, and the session reaches it only through `daemon`. The socket
+/// client's 60 s call budget bounds the wait, so a wedged daemon cannot hang
+/// `serve` forever.
+/// What: `search.indexes.list` with `details: true`, parsed by
 /// [`parse_index_entries`]. Errors propagate so the caller can report the
 /// session as unpinned rather than guessing.
-/// Test: `fetch_reads_entries_from_a_live_server` binds an ephemeral port.
-pub(crate) async fn fetch_index_entries(base_url: &str) -> anyhow::Result<Vec<DaemonIndex>> {
-    let client = trusty_common::server::daemon_http_client()?;
-    let url = format!("{}/indexes?details=true", base_url.trim_end_matches('/'));
-    let resp = client.get(&url).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("daemon returned {} for {url}", resp.status());
-    }
-    let body: serde_json::Value = resp.json().await?;
+/// Test: `fetch_reads_entries_from_a_live_server` binds a scratch socket.
+pub(crate) async fn fetch_index_entries(daemon: &DaemonClient) -> anyhow::Result<Vec<DaemonIndex>> {
+    let body = daemon
+        .call(METHOD_INDEXES_LIST, serde_json::json!({ "details": true }))
+        .await?;
     Ok(parse_index_entries(&body))
 }
 
@@ -246,9 +245,9 @@ pub(crate) async fn fetch_index_entries(base_url: &str) -> anyhow::Result<Vec<Da
 /// Test: covered through its parts — `derive_cwd_candidate`,
 /// `confirm_candidate`, and `decide_auto_pin` each have direct tests, and
 /// `fetch_reads_entries_from_a_live_server` covers the transport.
-pub(crate) async fn auto_pin_from_cwd(base_url: &str, cwd: &Path) -> Option<AutoPin> {
+pub(crate) async fn auto_pin_from_cwd(daemon: &DaemonClient, cwd: &Path) -> Option<AutoPin> {
     let candidate = derive_cwd_candidate(cwd)?;
-    match fetch_index_entries(base_url).await {
+    match fetch_index_entries(daemon).await {
         Ok(entries) => Some(decide_auto_pin(
             &candidate,
             confirm_candidate(&candidate, &entries),
