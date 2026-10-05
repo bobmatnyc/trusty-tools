@@ -103,6 +103,8 @@ published summary shows it with its stage: Now, Next or Later. Other
 milestones are listed as links. GitHub supplies the progress counts each time
 this section is generated.
 
+trusty-git-analytics and trusty-audit moved to their own repository: [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
+
 <!-- BEGIN GENERATED: roadmap -->
 
 ### trusty-mpm
@@ -178,12 +180,6 @@ Open milestones:
 
 - [0.8.3 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/101) · no items yet
 
-### trusty-audit
-
-Open milestones:
-
-- [Backlog · audit](https://github.com/bobmatnyc/trusty-tools/milestone/75) · 17 of 17 items done
-
 ### trusty-code
 
 Open milestones:
@@ -219,12 +215,6 @@ Open milestones:
 Open milestones:
 
 - [0.1.5 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/105) · no items yet
-
-### trusty-git-analytics
-
-Open milestones:
-
-- [Backlog · tga](https://github.com/bobmatnyc/trusty-tools/milestone/56) · 23 of 23 items done
 
 ### trusty-installer
 
