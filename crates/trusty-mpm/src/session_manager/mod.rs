@@ -40,6 +40,8 @@ mod reconcile;
 pub mod record;
 pub mod relaunch;
 pub mod rename;
+// #9238: a record follows its own pane through a `tmux rename-session`.
+pub mod rename_follow;
 pub mod residency_state;
 pub mod restart_ops;
 /// #6568: the auto-resume circuit breaker's policy and its persisted counters.
@@ -237,6 +239,9 @@ mod rename_tests;
 
 #[cfg(test)]
 mod rename_race_tests;
+
+#[cfg(test)]
+mod rename_follow_tests;
 
 #[cfg(test)]
 mod liveness_tests;

@@ -1062,6 +1062,31 @@ async fn dedupe_name_against_caps_suffixed_length_at_64() {
     assert_ne!(result, long, "the taken candidate must still be suffixed");
 }
 
+/// #9238: every suffix tm mints is two digits. A taken unnumbered name gets
+/// `-02`, then `-03`, the serial allocator's `-NN` form, never `-2`; a taken
+/// numbered name still increments at its own width.
+///
+/// Test: this function IS the test.
+#[test]
+fn dedupe_suffixes_an_unnumbered_name_with_two_digits() {
+    let taken = |names: &[&str]| -> std::collections::HashSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    };
+    let dedupe = SessionManager::dedupe_name_against;
+    assert_eq!(dedupe("tm-localizer", &taken(&[])), "tm-localizer");
+    assert_eq!(
+        dedupe("tm-localizer", &taken(&["tm-localizer"])),
+        "tm-localizer-02"
+    );
+    assert_eq!(
+        dedupe("tm-localizer", &taken(&["tm-localizer", "tm-localizer-02"])),
+        "tm-localizer-03"
+    );
+    assert_eq!(dedupe("tm-i8n-01", &taken(&["tm-i8n-01"])), "tm-i8n-02");
+    // A legacy single-digit name keeps its own width (#9238: still readable).
+    assert_eq!(dedupe("tm-old-2", &taken(&["tm-old-2"])), "tm-old-3");
+}
+
 /// #6116: a live session in the test-owned namespace is never adopted, even
 /// though its pane resolves a working directory.
 ///

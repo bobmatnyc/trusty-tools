@@ -174,8 +174,8 @@ impl SessionManager {
     /// #3692 review's LOW finding flagged: `validate_session_name` enforces
     /// the 64-char cap on the BARE candidate, so a suffix appended here
     /// could silently push past it.
-    /// What: runs [`trusty_common::session_naming::dedupe_by_ordinal`]
-    /// (candidate unchanged when free; else smallest free `-N` ordinal). If
+    /// What: [`dedupe_two_digit`] (candidate unchanged when free; else the
+    /// smallest free two-digit `-NN` ordinal, #9238). If
     /// the suffixed result would exceed [`MAX_SESSION_NAME_LEN`], truncates
     /// the candidate to reserve [`SUFFIX_HEADROOM`] chars (enough for the
     /// worst-case `-<millis>` fallback suffix) and re-dedupes — the result
@@ -183,8 +183,7 @@ impl SessionManager {
     /// Test: `dedupe_name_against_caps_suffixed_length_at_64` in
     /// `super::naming_tests`; every `rename_suffixes_*` test transitively.
     pub(crate) fn dedupe_name_against(candidate: &str, taken: &HashSet<String>) -> String {
-        let result =
-            trusty_common::session_naming::dedupe_by_ordinal(candidate, |c| taken.contains(c));
+        let result = dedupe_two_digit(candidate, taken);
         if result.chars().count() <= MAX_SESSION_NAME_LEN {
             return result;
         }
@@ -194,7 +193,7 @@ impl SessionManager {
             .chars()
             .take(MAX_SESSION_NAME_LEN - SUFFIX_HEADROOM)
             .collect();
-        trusty_common::session_naming::dedupe_by_ordinal(&short, |c| taken.contains(c))
+        dedupe_two_digit(&short, taken)
     }
 
     /// Disambiguate `candidate` against every live/tracked name — auto-suffix
@@ -260,3 +259,34 @@ pub(crate) const MAX_SESSION_NAME_LEN: usize = 64;
 /// a near-cap candidate: covers the worst-case `-<millis>` timestamp fallback
 /// suffix (1 + 13 digits) with margin.
 const SUFFIX_HEADROOM: usize = 16;
+
+/// [`trusty_common::session_naming::dedupe_by_ordinal`] with one suffix
+/// format: a taken name with no trailing ordinal becomes `<name>-02`, then
+/// `-03`, and so on (#9238).
+///
+/// Why: the per-project serial allocator names sessions `tm-<leaf>-01`, while
+/// the shared dedupe suffixed an unnumbered name `-2`, so one fleet carried
+/// both `tm-localizer-2` and `tm-i8n-01`. Two digits is the form most records
+/// already use, and `-02` reads as the second session of the name. Existing
+/// names are opaque strings and stay valid; a taken name that already ends in
+/// an ordinal keeps that ordinal's width, as before.
+/// What: returns `candidate` when it is free. Otherwise, for a candidate with
+/// no trailing `-<digits>`, dedupes `<candidate>-02`, which the shared
+/// function returns when free or increments at width 2; any other candidate
+/// goes to the shared function unchanged.
+/// Test: `dedupe_suffixes_an_unnumbered_name_with_two_digits`.
+fn dedupe_two_digit(candidate: &str, taken: &HashSet<String>) -> String {
+    if !taken.contains(candidate) {
+        return candidate.to_string();
+    }
+    // The shared function's own reading of a trailing ordinal: 1-6 digits.
+    let numbered = candidate.rsplit_once('-').is_some_and(|(_, tail)| {
+        (1..=6).contains(&tail.len()) && tail.bytes().all(|b| b.is_ascii_digit())
+    });
+    let seed = if numbered {
+        candidate.to_string()
+    } else {
+        format!("{candidate}-02")
+    };
+    trusty_common::session_naming::dedupe_by_ordinal(&seed, |c| taken.contains(c))
+}

@@ -163,6 +163,8 @@ pub(crate) async fn list_core(
     slim: bool,
 ) -> RouteOutcome {
     let mgr = state.session_manager().await;
+    // #9238: rows and `attach_cmd` carry the name tmux uses now.
+    mgr.follow_tmux_renames().await;
     // #3034: numbering is observed against the FULL, unfiltered record set
     // BEFORE the `source_id` filter is applied — otherwise a session outside
     // the current filter would go unobserved and receive a fresh number the
@@ -190,6 +192,7 @@ pub(crate) async fn get_core(state: &Arc<DaemonState>, id_str: &str) -> RouteOut
         Err(refusal) => return refusal,
     };
     let mgr = state.session_manager().await;
+    mgr.follow_tmux_renames().await; // #9238
     match mgr.get(&id).await {
         Ok(record) => {
             // Reconcile against live tmux like the list body — this is the
@@ -294,6 +297,7 @@ pub(crate) async fn attach_cmd_core(state: &Arc<DaemonState>, id_str: &str) -> R
         Err(refusal) => return refusal,
     };
     let mgr = state.session_manager().await;
+    mgr.follow_tmux_renames().await; // #9238: attach to a session that exists
     match mgr.get(&id).await {
         Ok(record) => RouteOutcome::ok(&AttachCmdResponse {
             attach_cmd: attach_cmd_for(&record.tmux_name),
