@@ -452,6 +452,7 @@ pub(crate) async fn patch_index_config_report(
         view.respect_gitignore,
         transition.new_skip_kg,
         transition.new_skip_vector,
+        existing.serve_only,
     );
 
     // Issue #2984 Phase 1: spawn the background catch-up. `permit` (held since
@@ -611,6 +612,7 @@ fn persist_hygiene_update(
     respect_gitignore: bool,
     skip_kg: bool,
     skip_vector: bool,
+    serve_only: bool,
 ) -> anyhow::Result<()> {
     use crate::service::persistence::{
         load_index_registry, upsert_index_registry_entry, PersistedIndex,
@@ -622,6 +624,8 @@ fn persist_hygiene_update(
             .unwrap_or_else(|| PersistedIndex {
                 id: id.to_string(),
                 root_path: root_path.to_path_buf(),
+                // #8883: a rebuilt record keeps the handle's serve-only mark.
+                serve_only,
                 ..Default::default()
             }),
         Err(e) => {
@@ -629,6 +633,8 @@ fn persist_hygiene_update(
             PersistedIndex {
                 id: id.to_string(),
                 root_path: root_path.to_path_buf(),
+                // #8883: a rebuilt record keeps the handle's serve-only mark.
+                serve_only,
                 ..Default::default()
             }
         }

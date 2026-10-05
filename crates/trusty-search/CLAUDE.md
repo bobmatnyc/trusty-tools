@@ -335,7 +335,9 @@ see `tests_2984.rs` for the concrete failure mode this ordering avoids.
 A serving daemon that loads an index built on a dedicated indexer can mark it
 serve-only, so a stray reindex never rebuilds it locally and replaces it. Set
 the mark on the index's `indexes.toml` entry and restart the daemon; the flag
-is read at restore, and no route sets it:
+is read at restore, and no route sets it. A `POST /indexes` over an id that
+is already registered, live or cold, keeps the mark. `DELETE /indexes/:id`
+removes the entry and the mark with it:
 
 ```toml
 [[index]]

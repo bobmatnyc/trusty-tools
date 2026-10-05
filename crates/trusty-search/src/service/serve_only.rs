@@ -13,6 +13,30 @@
 
 use axum::http::StatusCode;
 
+use crate::core::registry::IndexId;
+use crate::service::server::SearchAppState;
+
+/// The serve-only mark an existing registration of `id` already carries.
+///
+/// Why: `POST /indexes` over an id that is cold, or only in `indexes.toml`,
+/// rewrites that id's whole record. A create must not clear the mark.
+/// What: the cold store's record first, then the `indexes.toml` entry; `false`
+/// when neither has one. An unreadable registry answers `true` and logs it:
+/// failing closed costs a reindex, failing open costs the shipped index.
+/// Test: `a_create_over_a_cold_serve_only_index_keeps_the_mark`.
+pub(crate) fn prior_mark(state: &SearchAppState, id: &IndexId) -> bool {
+    if let Some(persisted) = state.cold_store.get_persisted(id) {
+        return persisted.serve_only;
+    }
+    match crate::service::persistence::find_index_registry_entry(&id.0) {
+        Ok(entry) => entry.is_some_and(|e| e.serve_only),
+        Err(e) => {
+            tracing::error!(index_id = %id, "cannot read indexes.toml, treating as serve-only (#8883): {e}");
+            true
+        }
+    }
+}
+
 /// The operator-facing reason a serve-only index refused a reindex.
 ///
 /// What: names the index, says nothing was queued and search still works,

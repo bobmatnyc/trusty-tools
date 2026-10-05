@@ -343,10 +343,11 @@ pub(crate) async fn reindex_report(
                     // Issue #2984 Phase 1: preserve the skip_vector flag
                     // across the root_path override — orthogonal to the path.
                     skip_vector: handle.skip_vector,
+                    // #8883: the serve-only mark survives the override.
+                    serve_only: handle.serve_only,
                     // Issue #923: preserve the defer_embed flag across the
                     // root_path override — the operator's embedding-mode
                     // choice is orthogonal to the path being indexed.
-                    serve_only: handle.serve_only,
                     defer_embed: handle.defer_embed,
                     stages: Arc::clone(&handle.stages),
                     search_pressure: Arc::clone(&handle.search_pressure),

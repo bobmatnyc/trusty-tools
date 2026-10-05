@@ -6,7 +6,8 @@
 //! entry point that claims is driven here through its real function: the HTTP
 //! handler, the internal spawn the boot reconcile uses, and the config-release
 //! catch-up. The watcher spawn is the one automatic writer gated outside the
-//! claim, so it is driven here too.
+//! claim, so it is driven here too, as is a `POST /indexes` over a cold
+//! serve-only id, which rewrites the id's `indexes.toml` record.
 //! What: every subject is one planted index holding one committed file. A
 //! refusal must leave its chunk count unchanged and publish no progress entry.
 //! The socket transport is in `rpc::writes_tests`, the restore and boot re-arm
@@ -212,4 +213,60 @@ async fn no_watcher_starts_for_a_serve_only_index() {
         "#8883: a serve-only index must get no file watcher"
     );
     manager.stop_all().await;
+}
+
+/// Why (#8883, code-critic HIGH): `POST /indexes` over a cold-parked id
+/// rewrites that id's whole `indexes.toml` record. Auto-register sends these
+/// routinely, so one idempotent create must not make a shipped index
+/// reindexable.
+/// What: a serve-only entry in `indexes.toml` and the cold store, then a create
+/// with the same id and root. The record keeps `serve_only = true`, the new
+/// live handle carries it, and a reindex is still refused with 403. Against
+/// code that builds the record with `serve_only: false` the record is cleared
+/// and the reindex is queued.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial]
+async fn a_create_over_a_cold_serve_only_index_keeps_the_mark() {
+    use crate::service::persistence::{
+        find_index_registry_entry, remove_index_registry_entry, upsert_index_registry_entry,
+        PersistedIndex,
+    };
+    let id = "serve-only-cold-8883";
+    let (_dir, root) = super::test_support::allowlisted_index_root("ts-8883-cold-");
+    let mut entry = PersistedIndex::new(id, root.clone());
+    entry.serve_only = true;
+    upsert_index_registry_entry(entry.clone()).expect("persist the shipped entry");
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    state
+        .install_embedder(Arc::new(MockEmbedder::new(DIM)))
+        .await;
+    state.cold_store.register_cold_entries(vec![entry]);
+    assert!(
+        state.registry.get(&IndexId::new(id)).is_none(),
+        "precondition: cold"
+    );
+
+    let req = serde_json::from_value(serde_json::json!({ "id": id, "root_path": root }))
+        .expect("create request");
+    super::create_index_report(&state, req)
+        .await
+        .map_err(|(status, body)| format!("{status}: {body}"))
+        .expect("the create over the cold id succeeds");
+
+    let persisted = find_index_registry_entry(id)
+        .expect("indexes.toml reads")
+        .expect("the entry is still registered");
+    let handle = state.registry.get(&IndexId::new(id)).expect("now live");
+    let refused = reindex_handler(State(Arc::clone(&state)), AxumPath(id.to_string()), None).await;
+    remove_index_registry_entry(id).expect("clean up the entry");
+
+    assert!(
+        persisted.serve_only,
+        "#8883: the create cleared the operator's mark"
+    );
+    assert!(handle.serve_only, "#8883: the live handle lost the mark");
+    let (status, axum::Json(body)) = refused.expect_err("#8883: the reindex must stay refused");
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert_eq!(body["error"], "index_serve_only");
 }
