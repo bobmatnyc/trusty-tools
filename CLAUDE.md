@@ -113,11 +113,12 @@ Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,
 `tm-postmortem` output, `report_bug`/`preview_bug_report`, or an agent's
-"Improvement recommendations" block), is fixed in the surfacing PR, dropped,
-or logged in the rollup
+"Improvement recommendations" block), is never a new issue. One that meets
+the Completion Standard fix bar is fixed in the surfacing PR; any other is
+one comment on the PR or existing issue, dropped, or logged in the rollup
 ([#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021)) — never a
-new issue. HIGH+ or independently schedulable work may still be filed
-(search first).
+fix round of its own. HIGH+ or independently schedulable work may still be
+filed (search first).
 
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
 `/// What: <mechanics>`, `/// Test: <where coverage lives>`. Full pattern for
