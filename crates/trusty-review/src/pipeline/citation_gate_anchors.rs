@@ -3,9 +3,9 @@
 //!
 //! Why: split from `citation_gate.rs` to keep it under the 500-SLOC cap.
 //! What: [`finding_anchors`] collects quoted code (backtick snippets and
-//! `[code: …]` excerpts for the finding's own file), optional prose quotes
-//! (long double-quoted spans outside backticks, #8949), and bare backtick
-//! identifiers. #9188 E: identifier-shaped prose words no longer anchor
+//! `[code: …]` excerpts for the finding's own file) and optional prose quotes
+//! (long double-quoted spans outside backticks, #8949). #9188 E: neither an
+//! identifier-shaped prose word nor a bare backtick identifier anchors
 //! anything; a finding must quote the code it describes. [`ref_citations`]
 //! reads the `[jira:]`/`[gh:]`/`[confluence:]` citations (#9188 D), and
 //! [`is_removal_claim`] says whether a finding is about removed code (#9188 F).
@@ -95,28 +95,11 @@ pub(super) struct Anchors {
     /// anchor a citation when present in the file and are never required,
     /// because prose quotes English as often as it quotes code.
     pub(super) prose_quotes: Vec<String>,
-    /// Bare backtick identifiers (`name`, `a::b`). #9188 E: quoted, so they
-    /// anchor a citation when present and nothing else is quoted; never
-    /// required, and never read from unquoted prose.
-    pub(super) idents: Vec<String>,
 }
 
 impl Anchors {
     pub(super) fn is_empty(&self) -> bool {
-        self.snippets.is_empty() && self.prose_quotes.is_empty() && self.idents.is_empty()
-    }
-
-    fn add_ident(&mut self, ident: &str) {
-        let ident = ident.trim_end_matches('(');
-        if ident.len() >= 3
-            && !STOP_WORDS.contains(&ident)
-            && !self.idents.iter().any(|i| i == ident)
-        {
-            self.idents.push(ident.to_string());
-        }
-        if let Some((_, last)) = ident.rsplit_once("::") {
-            self.add_ident(last);
-        }
+        self.snippets.is_empty() && self.prose_quotes.is_empty()
     }
 
     /// Add quoted code. #8905 row 1: its identifiers are NOT added as a
@@ -127,15 +110,15 @@ impl Anchors {
         }
     }
 
-    /// Classify one backtick span as a path (ignored), an identifier, or code.
+    /// Classify one backtick span as a path, a bare identifier, or code; only
+    /// code is kept. #9188 E (Architect ruling): a bare identifier such as
+    /// `step_4` or `run()` names code without quoting it, so it anchors nothing.
     fn add_code_span(&mut self, span: String) {
         if span.len() < 2 || is_path_like(&span) {
             return;
         }
         let bare = span.strip_suffix("()").unwrap_or(&span);
-        if IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len()) {
-            self.add_ident(bare);
-        } else {
+        if !IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len()) {
             self.add_snippet(span);
         }
     }

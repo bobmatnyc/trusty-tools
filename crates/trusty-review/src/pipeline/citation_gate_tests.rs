@@ -520,12 +520,22 @@ fn a_prose_identifier_no_longer_anchors_a_finding() {
     assert!(kept.is_empty(), "{kept:?}");
 }
 
-/// #9188 E: a backtick-quoted identifier is a quote, and still places one.
+/// #9188 E (Architect ruling, inverts the backtick-identifier anchor): a
+/// bare backtick identifier with no other quote names code without quoting
+/// it, so it anchors nothing, even on its own line.
 #[test]
-fn a_quoted_identifier_reanchors_when_no_snippet_is_given() {
-    let body = "The call to `step_12` discards its error.";
-    let kept = gate_one("src/billing.rs", Some(3), body, &billing_index());
-    assert_eq!(kept[0].line, Some(12));
+fn a_backtick_identifier_alone_does_not_anchor_a_finding() {
+    for (body, line) in [
+        ("The call to `step_12` discards its error.", 12),
+        ("The call to `step_12` discards its error.", 3),
+        ("`step_12()` discards its error.", 12),
+    ] {
+        let kept = gate_one("src/billing.rs", Some(line), body, &billing_index());
+        assert!(kept.is_empty(), "{body} at {line}: {kept:?}");
+    }
+    let body = "`step_12(input)` discards its error.";
+    let kept = gate_one("src/billing.rs", Some(12), body, &billing_index());
+    assert_eq!(kept.len(), 1, "control: a quoted call is code");
 }
 
 #[test]

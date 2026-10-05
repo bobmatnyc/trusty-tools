@@ -12,9 +12,10 @@
 //! number; a removed line is recorded at the new-side position of its deletion.
 //! [`enforce_line_citations`] checks the finding's `file`/`line` and every
 //! `[code: `path:line`]` bracket citation against the code the finding quotes —
-//! its quoted snippets, or, when it quotes none, a present prose quote or
-//! backtick identifier:
+//! its quoted snippets, or, when it quotes none, a present prose quote; a bare
+//! backtick identifier is not a quote (#9188 E):
 //!  - a quoted snippet covers the cited line: the finding is kept unchanged;
+//!    for a removal finding, removed code at its deletion's position counts;
 //!  - the quote occurs exactly once elsewhere in the file: the citation moves
 //!    there, recorded in `Finding::citation_correction`;
 //!  - otherwise the finding is dropped, counted, logged with the fragment that
@@ -112,9 +113,10 @@ const REF_EXCERPT_SHORT: &str =
 /// Check one `path` + optional inclusive line `span` against `anchors`.
 ///
 /// #9188 B: every quoted snippet must be in the file (no partial keeps).
-/// #9188 E: a finding that quotes nothing drops; prose quotes and backtick
-/// identifiers place it only when it quotes no snippet. #9188 F: an occurrence
-/// on removed lines counts only when `removal_ok`.
+/// #9188 E: a finding that quotes nothing drops; a bare backtick identifier
+/// is not a quote; a prose quote places a finding only when it quotes no
+/// snippet. #9188 F: an occurrence on removed lines counts only when
+/// `removal_ok`.
 fn check_citation(
     index: &LineIndex,
     path: &str,
@@ -158,7 +160,6 @@ fn check_citation(
             .prose_quotes
             .iter()
             .map(|q| visible(q, false))
-            .chain(anchors.idents.iter().map(|n| visible(n, true)))
             .filter(|occ| !occ.is_empty())
             .collect();
         if found.is_empty() {
@@ -342,7 +343,9 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
 /// What: runs the gate on a copy of `f`; `Ok(())` only when every citation
 /// holds where it stands. A citation the gate would move or drop, or any
 /// error reading the file, is `Err(reason)` (fail closed, #9188 criterion 4).
-/// Test: `a_confirmed_finding_that_does_not_resolve_is_withheld`.
+/// Test: `withhold_unresolved_withholds_a_survivor_off_its_line`,
+/// `withhold_unresolved_withholds_a_range_the_gate_rewrote_short`,
+/// `a_moved_removal_finding_resolves_at_the_head`.
 pub fn resolves_at_head(f: &Finding, index: &LineIndex) -> Result<(), String> {
     match gate_finding(&mut f.clone(), index) {
         Ok(Outcome::Keep) => Ok(()),
@@ -375,10 +378,11 @@ pub struct GateReport {
 /// What: for each finding, [`gate_finding`] checks the `file`/`line` citation,
 /// every `[code: …]` bracket citation, and every context citation. Every
 /// quoted snippet must be in the file (#9188 B); with none quoted, a present
-/// prose quote or backtick identifier must be (#9188 E). A citation whose
-/// cited lines hold an anchor is kept; one whose anchor occurs exactly once
-/// elsewhere, or only on a removed line of a removal finding, moves there; any
-/// other case drops the finding. Any [`GateError`] drops the finding (fail
+/// prose quote must be, and a bare backtick identifier counts as no quote
+/// (#9188 E). A citation whose cited lines hold an anchor — for a removal
+/// finding, removed code at its deletion's position (#9188 F) — is kept; one
+/// whose anchor occurs exactly once elsewhere moves there; any other case
+/// drops the finding. Any [`GateError`] drops the finding (fail
 /// closed). Every drop and move is logged, a drop with the fragment that
 /// failed; each dropped finding is kept in `withheld_findings`.
 /// Test: `a_finding_cited_twelve_lines_off_is_reanchored`,
@@ -387,7 +391,10 @@ pub struct GateReport {
 /// `a_finding_with_no_anchor_is_dropped`,
 /// `a_file_with_a_malformed_hunk_header_fails_closed`,
 /// `a_dropped_finding_names_its_missing_snippet`,
-/// `a_finding_with_one_real_and_one_illustrative_snippet_is_withheld`.
+/// `a_finding_with_one_real_and_one_illustrative_snippet_is_withheld`,
+/// `a_backtick_identifier_alone_does_not_anchor_a_finding`,
+/// `a_removed_line_counts_only_at_its_new_side_position`,
+/// `a_gh_citation_with_a_bogus_id_and_a_real_excerpt_is_withheld`.
 pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) -> GateReport {
     let mut report = GateReport::default();
     let mut kept = Vec::with_capacity(findings.len());
