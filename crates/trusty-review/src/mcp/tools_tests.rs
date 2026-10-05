@@ -489,16 +489,6 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
     );
 }
 
-/// A `Degraded` review (real verdict, non-authoritative banner) must stay
-/// `isError: false` — it is a genuine (if loudly-labelled) result, not an
-/// infra failure the caller must special-case as an error.
-///
-/// Why: distinguishes the "opted-in / interactive-surface-defaulted degrade"
-/// path from the "infra Skip" path — both are non-authoritative, but only the
-/// Skip is a non-result.
-/// What: constructs a `Degraded` result; asserts `isError` stays false and the
-/// envelope carries the degraded sentinel rather than the infra one.
-/// Test: this test itself.
 #[test]
 fn wrap_result_names_a_withheld_unknown_without_is_error() {
     // #9188 K: a review whose every finding was withheld says so on the
@@ -564,6 +554,16 @@ fn a_review_with_nothing_withheld_serializes_as_before() {
 /// at 09721c7bbb, before #9188.
 const PRE_9188_ENVELOPE: &str = r#"{"content":[{"text":"{\n  \"cost_estimate_usd\": 0.0,\n  \"dry_run\": true,\n  \"findings\": [\n    {\n      \"category\": \"correctness\",\n      \"code_provable\": false,\n      \"confidence\": 0.5,\n      \"consequence\": \"\",\n      \"description\": \"`a + b` overflows\",\n      \"effort\": \"low\",\n      \"file\": \"src/a.rs\",\n      \"issue_eligible\": false,\n      \"kind\": \"overflow\",\n      \"line\": 3,\n      \"suggestion\": \"use checked_add\"\n    }\n  ],\n  \"findings_count\": 1,\n  \"grade\": \"A\",\n  \"head_sha\": \"\",\n  \"input_tokens\": 0,\n  \"latency_ms\": 0,\n  \"model\": \"\",\n  \"output_tokens\": 0,\n  \"owner\": \"acme\",\n  \"posted\": false,\n  \"pr_number\": 7,\n  \"pr_title\": \"Add X\",\n  \"pr_url\": \"https://example/pr/7\",\n  \"repo\": \"api\",\n  \"review_body\": \"LGTM\",\n  \"review_version\": \"tr-test\",\n  \"status\": \"completed\",\n  \"timestamp\": \"2026-10-05T00:00:00Z\",\n  \"unverified_count\": 0,\n  \"verdict\": \"APPROVE\",\n  \"withheld_unverified_count\": 0\n}","type":"text"}],"isError":false}"#;
 
+/// A `Degraded` review (real verdict, non-authoritative banner) must stay
+/// `isError: false` — it is a genuine (if loudly-labelled) result, not an
+/// infra failure the caller must special-case as an error.
+///
+/// Why: distinguishes the "opted-in / interactive-surface-defaulted degrade"
+/// path from the "infra Skip" path — both are non-authoritative, but only the
+/// Skip is a non-result.
+/// What: constructs a `Degraded` result; asserts `isError` stays false and the
+/// envelope carries the degraded sentinel rather than the infra one.
+/// Test: this test itself.
 #[test]
 fn wrap_result_degraded_stays_is_error_false() {
     let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");

@@ -109,10 +109,6 @@ fn run_is_failure_passes_a_clean_review() {
     );
 }
 
-/// Why: a result can carry both an error and a skip, and the error is the more
-/// specific of the two — it names what actually broke.
-/// What: the recorded error wins over the generic skip sentence.
-/// Test: this is the test.
 /// A non-withheld local-diff review, shaped like what code-intelligence reads.
 fn local_review() -> ReviewResult {
     let mut r = ReviewResult::new("local", "diff", 0, "local diff", "");
@@ -191,6 +187,10 @@ fn run_json_for_a_non_withheld_review_is_unchanged_by_9188() {
 /// built at 09721c7bbb.
 const PRE_9188_RUN_JSON: &str = r#"{"cost_estimate_usd":0.01,"dry_run":true,"findings":[{"category":"correctness","code_provable":false,"confidence":0.800000011920929,"consequence":"wraps in release","description":"`a + b` overflows","effort":"medium","file":"src/a.rs","issue_eligible":false,"kind":"overflow","line":3,"suggestion":"use checked_add","verified":"confirmed"}],"findings_count":1,"grade":"C+","head_sha":"","input_tokens":0,"latency_ms":0,"model":"fake-model","output_tokens":0,"owner":"local","posted":false,"pr_number":0,"pr_title":"local diff","pr_url":"","repo":"diff","review_body":"One overflow risk.","review_version":"tr-test","status":"completed","timestamp":"2026-10-05T00:00:00Z","unverified_count":0,"verdict":"APPROVE*","withheld_unverified_count":0}"#;
 
+/// Why: a result can carry both an error and a skip, and the error is the more
+/// specific of the two — it names what actually broke.
+/// What: the recorded error wins over the generic skip sentence.
+/// Test: this is the test.
 #[test]
 fn run_failure_reason_prefers_the_recorded_error() {
     let mut result = clean_result();
