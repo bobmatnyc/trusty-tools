@@ -102,10 +102,14 @@ fn resolved_api_token(raw_args: &[String]) -> Option<String> {
 /// What: Performs the bootstrap in argv order. Returns `Ok(false)` when an
 /// early-exit path already handled the invocation (so the caller should
 /// `return Ok(())`); returns `Ok(true)` to continue into the main dispatch.
+/// Credential files load through `startup_env::load_startup_env_files`, which
+/// loads none under `TRUSTY_SANDBOX=1` (#9224).
 /// Test: Indirectly via `cargo run -p trusty-agents` and the crate's
 /// integration tests (`--version`, `--api`, normal REPL startup);
 /// `a_credential_is_resolved_from_argv_then_the_environment` pins the one
-/// decision it makes that a unit test can reach.
+/// decision it makes that a unit test can reach; the credential-file opt-out
+/// in `startup_env_tests::sandbox_flag_skips_self_project_env_local` and
+/// `startup_env_tests::sandbox_flag_skips_cwd_dotenv`.
 pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     // Handle --version / -V before anything else (no env/tracing/etc.).
     // Why: `--version` must be cheap and side-effect-free so it's safe to
@@ -127,31 +131,10 @@ pub(super) async fn run_startup_init(_args: &[String]) -> Result<bool> {
     }
 
     // Load env and init tracing first so everything downstream has logs/keys.
-    //
-    // #250: `.env.local` lookup is relative to cwd, so launching `trusty-agents` from
-    // anywhere other than the project root (e.g. `cd /tmp && trusty-agents ctrl`) used
-    // to skip credential loading entirely and surface as
-    // "no LLM credentials configured". We additionally try the detected
-    // self-project directory so the harness picks up its own `.env.local`
-    // regardless of the user's cwd. dotenvy does NOT override existing env vars
-    // by default, so cwd-local `.env.local` still wins when both exist.
-    //
-    // #2405: the `.env.local` load now routes through the ONE shared, idempotent
-    // loader in trusty-common (`credentials::load_env_local_once`), retiring the
-    // bespoke `dotenvy::from_filename` copy the #2404 review flagged so
-    // `config keys list`'s tier reporting has a single controlled load order.
-    // Behaviour is preserved: the shared loader walks cwd upward for `.env.local`
-    // (a superset of the old cwd-only lookup) and, like all dotenvy loads, never
-    // overrides an already-set process env var. The plain `.env` load and the
-    // detected self-project `.env.local` load below are kept as-is.
-    trusty_common::credentials::load_env_local_once();
-    dotenvy::dotenv().ok();
-    if let Some(project_dir) = ctrl::detect_self_project() {
-        let project_env = project_dir.join(".env.local");
-        if project_env.is_file() {
-            dotenvy::from_path(&project_env).ok();
-        }
-    }
+    // #250 / #2405: the shared `.env.local` tiers, then tagent's own `.env`
+    // and self-project `.env.local`.
+    // #9224: all of them now skip under `TRUSTY_SANDBOX=1`.
+    super::startup_env::load_startup_env_files();
 
     // #7609 (critic HIGH-3, then MEDIUM-2): the channel-write gate applies to
     // the in-process `channel` tool in EVERY process, not only `--api`.
