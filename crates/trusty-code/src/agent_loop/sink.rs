@@ -18,6 +18,7 @@
 
 use async_trait::async_trait;
 
+use crate::finish_report::FinishReport;
 use crate::tools::telemetry::ToolTelemetry;
 
 /// One turn's working-context budget measurement, handed to
@@ -218,4 +219,22 @@ pub trait ToolEventSink: Send + Sync {
     /// A delegated sub-agent's loop aborted (#7940) — see
     /// [`Self::agent_spawned`]. `error` is the runner's error text.
     async fn agent_failed(&self, _agent: &str, _agent_id: &str, _error: &str) {}
+
+    /// An agent's `finish_task` call was ACCEPTED, with its structured report
+    /// (#8204, #8289).
+    ///
+    /// Why: the `tool_finished` hook above already fires for the same call,
+    /// but carries only `render_finish_summary`'s prose — a subscriber that
+    /// wants the changed-file list or the captured test output has to
+    /// re-parse it, which is what #8204 exists to stop. This hook carries the
+    /// typed value instead. It fires IN ADDITION to `tool_finished`, never
+    /// instead of it, so every pre-existing consumer is unaffected.
+    /// What: called at most once per loop run, only after the verify gate
+    /// (#2279/#8206) and the evidence check (#8289) both let the finish
+    /// stand — a REFUSED `finish_task` never reaches this hook, so a report
+    /// arriving here is one the run actually ended on. `report.verified`
+    /// reflects the captured test output, never the model's claim. Default
+    /// no-op body, like the hooks above.
+    /// Test: `crate::task::sink::tests::forwards_the_finish_report`.
+    async fn task_finished(&self, _agent: &str, _agent_id: &str, _report: &FinishReport) {}
 }

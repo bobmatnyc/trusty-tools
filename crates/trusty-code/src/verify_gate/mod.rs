@@ -39,15 +39,22 @@
 //! report records that no test command ran and why; only a detectable,
 //! runnable, unrun suite still produces a refusal, and that refusal names the
 //! manifest or command it detected.
-//! Test: `verify_gate::tests::*`.
+//! What (#8289): naming and running a test command is still not sufficient.
+//! [`evidence`] reads what the command PRINTED out of the same transcript;
+//! `agent_loop::finish_verify` refuses a `completed` finish whose captured
+//! output states a failure, and marks one that captured no verdict at all as
+//! unverified rather than passed.
+//! Test: `verify_gate::tests::*`, `verify_gate::evidence::tests::*`.
 //!
 //! [`names_test_command`]: crate::verify_gate::names_test_command
 //! [`is_test_command`]: crate::verify_gate::is_test_command
 //! [`default_finish_gate`]: crate::verify_gate::default_finish_gate
 //! [`pm_finish_gate`]: crate::verify_gate::pm_finish_gate
 //! [`detect::detect_test_command`]: crate::verify_gate::detect::detect_test_command
+//! [`evidence`]: crate::verify_gate::evidence
 
 pub mod detect;
+pub mod evidence;
 
 #[cfg(test)]
 mod tests;

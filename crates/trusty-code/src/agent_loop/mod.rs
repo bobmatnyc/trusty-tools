@@ -70,7 +70,7 @@ use crate::llm::{
 };
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
-use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
+use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, ToolRegistry, ToolResult};
 use crate::verify_gate::FinishGateOutcome;
 
 pub use cadence::{CadenceConfig, resolve_cadence_config};
@@ -117,6 +117,12 @@ const PERF_WORKFLOW: &str = "agent_loop";
 /// file for the crate's 500-SLOC cap.
 #[path = "final_message.rs"]
 mod final_message;
+
+/// #8204/#8289's structured, evidence-backed completion report, and the
+/// `finish_task` output assembly it replaced, in their own file for the same
+/// cap.
+#[path = "finish_verify.rs"]
+mod finish_verify;
 
 /// Tuning knobs for a single agent-loop run.
 ///
@@ -719,7 +725,11 @@ impl AgentLoop {
             // (the API requires a result for each), so this check happens
             // AFTER `dispatch_all`, not instead of it.
             if let Some(finish_args) = self.dispatch_all(&tool_calls, transcript).await {
-                return Ok(build_finish_output(transcript, perf, &finish_args));
+                return Ok(finish_verify::build_finish_output(
+                    transcript,
+                    perf,
+                    &finish_args,
+                ));
             }
         }
 
@@ -883,7 +893,7 @@ impl AgentLoop {
                             "agent_loop: verify-before-finish gate accepted an unverified \
                              finish_task (#8206)"
                         );
-                        append_finish_note(&mut args, &note);
+                        finish_verify::append_finish_note(&mut args, &note);
                     }
                     FinishGateOutcome::Reject(reason) => {
                         tracing::warn!(
@@ -893,6 +903,13 @@ impl AgentLoop {
                         result = ToolResult::err(reason);
                     }
                 }
+            }
+
+            // #8289: the gate above proves a test command was INVOKED. This
+            // reads what it PRINTED, and refuses a "completed" claim the
+            // captured output contradicts — same recoverable-error shape.
+            if tool == FINISH_TASK_TOOL_NAME {
+                finish_verify::enforce_evidence(&args, transcript, &mut result);
             }
 
             if let Some(sink) = &self.sink {
@@ -910,6 +927,14 @@ impl AgentLoop {
             transcript.push_tool_result(&call.id, tool, result.content());
 
             if tool == FINISH_TASK_TOOL_NAME && !result.is_error() {
+                // #8204: the structured report crosses the wire as data, so a
+                // client renders dedicated slots instead of re-parsing prose.
+                if let (Some(sink), Some(report)) =
+                    (&self.sink, finish_verify::report(&args, transcript))
+                {
+                    sink.task_finished(self.agent_name(), self.agent_id_str(), &report)
+                        .await;
+                }
                 finish_args = Some(args);
             }
         }
@@ -1277,54 +1302,6 @@ fn build_output(transcript: &Transcript, perf: &PerfCollector) -> AgentOutput {
     output
 }
 
-/// Fold a [`FinishGateOutcome::AcceptWithNote`] note into a `finish_task`
-/// call's validated arguments (#8206).
-///
-/// Why: The accepted-but-unverified arm must leave a trace in what the caller
-/// reads back, not only in the log. Appending to the model's own `summary` is
-/// the one edit that reaches BOTH halves of the recorded report —
-/// `AgentOutput::summary` and the `content` `render_finish_summary` builds
-/// from the same field — without a second plumbing path.
-/// What: Appends `note` to `args["summary"]`, separated by a blank line. A
-/// non-string or absent `summary` (unreachable past schema validation, which
-/// marks it required) is left untouched rather than replaced.
-/// Test: `agent_loop::tests::finish_gate_note_reaches_the_recorded_report`.
-fn append_finish_note(args: &mut Value, note: &str) {
-    if let Some(summary) = args.get("summary").and_then(Value::as_str) {
-        let merged = format!("{summary}\n\n{note}");
-        args["summary"] = Value::String(merged);
-    }
-}
-
-/// Assemble the final `AgentOutput` from an explicit `finish_task` call (#2072).
-///
-/// Why: An explicit `finish_task` call carries a deterministic, structured
-/// completion report the model built on purpose — reusing that report as the
-/// loop's final output (rather than falling back to whatever prose the
-/// transcript happens to contain) is the entire point of §5.8's "-20 to -30%
-/// per agent output; deterministic, no prose interpretation" impact claim.
-/// What: Starts from the same usage/content baseline as [`build_output`], then
-/// — if `finish_args` deserialises into a `FinishTaskArgs` (it always should,
-/// since `dispatch_all` only calls this after a successful `finish_task`
-/// dispatch, which itself required a successful deserialisation) — overwrites
-/// `content` with [`crate::tools::render_finish_summary`], sets `summary` to
-/// the model's own one-line `summary` field, and (#2683) records the reported
-/// `status` in `finish_status` so a delegating caller can distinguish an
-/// explicit successful completion from any other termination. On the
-/// (should-be-unreachable) deserialisation failure, falls back to the
-/// transcript-derived content `build_output` already computed, rather than
-/// panicking.
-/// Test: `agent_loop::tests::explicit_finish_task_terminates_loop_with_structured_summary`.
-fn build_finish_output(
-    transcript: &Transcript,
-    perf: &PerfCollector,
-    finish_args: &Value,
-) -> AgentOutput {
-    let mut output = build_output(transcript, perf);
-    if let Ok(parsed) = serde_json::from_value::<FinishTaskArgs>(finish_args.clone()) {
-        output.summary = Some(parsed.summary.clone());
-        output.content = crate::tools::render_finish_summary(&parsed);
-        output.finish_status = Some(parsed.status);
-    }
-    output
-}
+// #8204/#8289: `append_finish_note` and `build_finish_output` moved to
+// `finish_verify.rs`, where the structured report and its captured test
+// evidence are assembled — see that module's docs.
