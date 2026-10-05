@@ -44,7 +44,7 @@ const VECTOR_FILE: &str = "index.usearch.redb";
 /// that `ROOMS` reserves.
 /// Test: `disk_stats_counts_a_palace_that_was_never_opened`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct PalaceDiskStats {
+pub(crate) struct PalaceDiskStats {
     pub drawer_count: usize,
     pub vector_count: usize,
     pub kg_triple_count: usize,
@@ -69,7 +69,7 @@ pub(super) struct PalaceDiskStats {
 /// Test: `disk_stats_counts_a_palace_that_was_never_opened`,
 /// `disk_stats_refuses_a_palace_held_open_for_writing`,
 /// `disk_stats_reports_a_missing_palace_directory`.
-pub(super) fn read(data_dir: &Path) -> Result<PalaceDiskStats, String> {
+pub(crate) fn read(data_dir: &Path) -> Result<PalaceDiskStats, String> {
     let kg = open_read_only(&data_dir.join(KG_FILE))?;
     let rtx = kg
         .begin_read()

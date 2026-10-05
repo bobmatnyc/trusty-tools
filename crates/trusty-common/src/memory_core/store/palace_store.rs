@@ -152,8 +152,11 @@ impl PalaceStore {
     /// (ADR-0045). That distinction matters to `list_palaces`, whose caller
     /// contract treats `NotFound` as "skip this one" — so a denial coerced to
     /// `NotFound` here drops a real palace out of the listing the destructive
-    /// passes act on.
+    /// passes act on. The returned `data_dir` is always `data_dir` itself,
+    /// never the absolute path recorded in the file (#9140 batch).
     /// Test: `palace_store_roundtrip` confirms fields survive a save+load;
+    /// `a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir`
+    /// pins the location rule;
     /// `load_palace_missing_returns_not_found` pins the benign arm and
     /// `load_palace_propagates_an_unstattable_palace_json` the error arm.
     pub fn load_palace(data_dir: &Path) -> Result<Palace> {
@@ -168,7 +171,19 @@ impl PalaceStore {
         let bytes = std::fs::read(&target).map_err(|e| PalaceStoreError::io(target.clone(), e))?;
         let json: PalaceJson =
             serde_json::from_slice(&bytes).map_err(|e| PalaceStoreError::json(target, e))?;
-        Ok(json.into())
+        let mut palace: Palace = json.into();
+        // #9140 batch: the directory the file was read from wins over the
+        // absolute `data_dir` recorded at creation. A palace root copied to a
+        // sandbox otherwise opened the ORIGINAL live files (2026-10-04 15:27Z).
+        if palace.data_dir != data_dir {
+            tracing::debug!(
+                recorded = %palace.data_dir.display(),
+                actual = %data_dir.display(),
+                "palace.json data_dir differs from its location; using its location"
+            );
+            palace.data_dir = data_dir.to_path_buf();
+        }
+        Ok(palace)
     }
 
     /// Walk `registry_dir` for palace subdirectories and return all loadable

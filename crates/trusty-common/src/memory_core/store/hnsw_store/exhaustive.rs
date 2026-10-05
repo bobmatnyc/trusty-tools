@@ -2,7 +2,8 @@
 //! approximation is pure downside (#5171).
 //!
 //! Why: `hnsw_rs` seeds its level-assignment RNG from OS entropy, so
-//! `HnswStore::open` builds a different random graph on every palace open. A
+//! `HnswStore::open` built a different random graph on every palace open
+//! (single-layer since #9141, see `super::replay`). A
 //! layer-0 search returns only what is reachable from the descent pivot along
 //! neighbour lists that Navarro's heuristic has pruned, and that reachable set
 //! is not the whole index. Below `ef_search` points the candidate budget
