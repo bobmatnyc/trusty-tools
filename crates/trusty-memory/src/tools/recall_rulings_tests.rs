@@ -108,6 +108,15 @@ fn expire_failure(leg: &RulingsLeg, palace: &str) {
     *at = Instant::now() - RULINGS_RETRY_AFTER - Duration::from_secs(1);
 }
 
+/// Push every running search of `palace` past the leg's timeout: stalled.
+fn stall(leg: &RulingsLeg, palace: &str) {
+    let mut states = leg.states.lock();
+    let running = &mut states.get_mut(palace).expect("state").running;
+    for started in running.values_mut() {
+        *started = Instant::now() - leg.timeout - Duration::from_secs(1);
+    }
+}
+
 /// Why (#9143 review): a failed palace is not retried on every recall, and a
 /// recovered one is retried once the window passes. A cached failure carries
 /// its original code with `cached: true`.
@@ -133,13 +142,15 @@ fn a_failed_palace_is_skipped_until_the_retry_window_passes() {
 
 /// Why (#9143 review): a timed-out search kept running, untracked, and every
 /// later recall started another, so a stall piled up blocking tasks.
-/// What: while search 1 runs, a second admit is refused as `in_flight` and
-/// starts nothing; once search 1 records, the next admit starts search 2.
+/// What: once search 1 has run past the timeout, a second admit is refused as
+/// `in_flight` and starts nothing; once search 1 records, the next admit
+/// starts search 2.
 #[test]
-fn a_running_search_admits_no_second_search() {
+fn a_stalled_search_admits_no_second_search() {
     let leg = RulingsLeg::new(vec!["rulings-a".into()], RULINGS_TIMEOUT);
     let first = leg.admit("rulings-a").expect("first search runs");
     assert!(leg.in_flight("rulings-a"));
+    stall(&leg, "rulings-a");
     assert_eq!(
         leg.admit("rulings-a"),
         Err((DegradedReason::InFlight, false))
@@ -148,6 +159,28 @@ fn a_running_search_admits_no_second_search() {
     leg.finish("rulings-a", first, Ok(()));
     assert!(!leg.in_flight("rulings-a"));
     assert_eq!(leg.admit("rulings-a"), Ok(2));
+}
+
+/// Why (#9143 review): refusing every concurrent search left the second of
+/// two overlapping healthy recalls with no rulings, reported as `in_flight`.
+/// What: search 2 is admitted while search 1 runs inside the timeout. Search
+/// 1 ending leaves the palace in flight and its outcome unrecorded; search 2
+/// ending is what lands.
+#[test]
+fn overlapping_healthy_searches_are_each_admitted() {
+    let leg = RulingsLeg::new(vec!["rulings-a".into()], RULINGS_TIMEOUT);
+    let first = leg.admit("rulings-a").expect("search 1");
+    let second = leg.admit("rulings-a").expect("search 2 overlaps search 1");
+    assert_eq!((first, second), (1, 2));
+    leg.finish("rulings-a", first, Err(DegradedReason::SearchFailed));
+    assert!(leg.in_flight("rulings-a"), "search 2 still runs");
+    leg.finish("rulings-a", second, Ok(()));
+    assert!(!leg.in_flight("rulings-a"));
+    assert_eq!(
+        leg.admit("rulings-a"),
+        Ok(3),
+        "the older failure never landed"
+    );
 }
 
 /// Why (#9143 review): a search that outlives its recall must still count,
@@ -179,6 +212,7 @@ fn an_older_result_never_overwrites_a_newer_one() {
     let newer = leg.admit("rulings-a").expect("search 2");
     leg.finish("rulings-a", older, Ok(()));
     assert!(leg.in_flight("rulings-a"), "search 2 still runs");
+    stall(&leg, "rulings-a");
     assert_eq!(
         leg.admit("rulings-a"),
         Err((DegradedReason::InFlight, false))

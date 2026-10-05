@@ -290,18 +290,7 @@ async fn a_hung_rulings_palace_runs_one_search_and_its_late_success_counts() {
         .await
         .with_rulings_timeout(bound);
     let (ruling, _) = seed(&state).await;
-    let handle = state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new("rulings-a"))
-        .expect("open rulings palace");
-    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let holder = std::thread::spawn(move || {
-        let _hold = handle.drawers.write();
-        locked_tx.send(()).expect("signal locked");
-        let _ = release_rx.recv(); // released on send or on drop of the sender
-    });
-    locked_rx.recv().expect("the holder took the lock");
+    let (release_tx, holder) = hang_rulings_palace(&state);
 
     let started = Instant::now();
     let task_state = state.clone();
@@ -325,6 +314,15 @@ async fn a_hung_rulings_palace_runs_one_search_and_its_late_success_counts() {
     assert_eq!(degraded(&second), [entry("rulings-a", "in_flight", false)]);
     assert_eq!(started_during_stall, 1, "one search for the whole stall");
 
+    wait_idle(&state).await;
+    let after = recall_envelope(&state, plain(5)).await;
+    assert!(after.get("rulings_degraded").is_none(), "{after:#}");
+    let results = after["results"].as_array().expect("results");
+    assert!(rank_of(results, ruling).is_some(), "{after:#}");
+}
+
+/// Block until no search of `rulings-a` is running, or fail after 10 s.
+async fn wait_idle(state: &AppState) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while state.rulings.in_flight("rulings-a") {
         assert!(
@@ -333,10 +331,113 @@ async fn a_hung_rulings_palace_runs_one_search_and_its_late_success_counts() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let after = recall_envelope(&state, plain(5)).await;
-    assert!(after.get("rulings_degraded").is_none(), "{after:#}");
-    let results = after["results"].as_array().expect("results");
-    assert!(rank_of(results, ruling).is_some(), "{after:#}");
+}
+
+/// Hold `rulings-a`'s drawer-table write lock on a plain thread, so every
+/// search of it blocks. Returns the release sender and the holder thread.
+fn hang_rulings_palace(
+    state: &AppState,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new("rulings-a"))
+        .expect("open rulings palace");
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let _hold = handle.drawers.write();
+        locked_tx.send(()).expect("signal locked");
+        let _ = release_rx.recv(); // released on send or on drop of the sender
+    });
+    locked_rx.recv().expect("the holder took the lock");
+    (release_tx, holder)
+}
+
+/// The UserPromptSubmit hook's whole-body budget, `BODY_DEADLINE` in
+/// `commands::prompt_context`; `RULINGS_TIMEOUT` is asserted at compile time
+/// to be at most half of it.
+const HOOK_BODY_BUDGET: Duration = Duration::from_millis(1500);
+
+/// Why (#9143 review): the hook calls `memory_recall` inside a 1.5 s body
+/// budget, and the recall joins the rulings leg. A 2 s leg bound let one
+/// stalled rulings palace time the hook out, so it injected nothing, not
+/// even the project hits.
+/// What: with the default bound, a hung rulings palace; the recall returns
+/// the project drawers inside the hook budget and reports `timed_out`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hung_rulings_palace_leaves_the_recall_inside_the_hook_budget() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a", "rulings-a"], &["rulings-a"]).await;
+    seed(&state).await;
+    let (release_tx, holder) = hang_rulings_palace(&state);
+
+    let started = Instant::now();
+    let envelope = recall_envelope(&state, plain(5)).await;
+    let elapsed = started.elapsed();
+    drop(release_tx);
+    holder.join().expect("lock holder");
+    wait_idle(&state).await;
+
+    assert!(
+        elapsed < HOOK_BODY_BUDGET,
+        "the recall took {elapsed:?}; the hook gives its body {HOOK_BODY_BUDGET:?}"
+    );
+    assert_primary_survives(&envelope);
+    assert_eq!(
+        degraded(&envelope),
+        [entry("rulings-a", "timed_out", false)]
+    );
+}
+
+/// Why (#9143 review): one search per palace at a time refused the second of
+/// two overlapping healthy recalls, which got no rulings and reported
+/// `in_flight`, and the prompt hook never shows `rulings_degraded`.
+/// What: the rulings palace is held just long enough for a second recall to
+/// start while the first one's search runs, well inside a 5 s bound. Both
+/// recalls return the ruling with no degraded entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_healthy_recalls_each_get_the_ruling() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a", "rulings-a"], &["rulings-a"])
+        .await
+        .with_rulings_timeout(Duration::from_secs(5));
+    let (ruling, _) = seed(&state).await;
+    let (release_tx, holder) = hang_rulings_palace(&state);
+
+    let spawn_recall = |state: &AppState| {
+        let state = state.clone();
+        tokio::spawn(async move { recall_envelope(&state, plain(5)).await })
+    };
+    let first = spawn_recall(&state);
+    let second_started = async {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while state.rulings.searches_started("rulings-a") < 1 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let second = spawn_recall(&state);
+        // Pre-fix the second recall is refused and never starts a search.
+        while state.rulings.searches_started("rulings-a") < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        second
+    };
+    let second = second_started.await;
+    drop(release_tx);
+    holder.join().expect("lock holder");
+
+    for (name, task) in [("first", first), ("second", second)] {
+        let envelope = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap_or_else(|_| panic!("the {name} recall hung"))
+            .expect("recall task");
+        assert!(
+            envelope.get("rulings_degraded").is_none(),
+            "{name}: {envelope:#}"
+        );
+        let results = envelope["results"].as_array().expect("results");
+        assert!(rank_of(results, ruling).is_some(), "{name}: {envelope:#}");
+    }
+    assert_eq!(state.rulings.searches_started("rulings-a"), 2);
 }
 
 /// Why (#9143 review, scope leak): a room-scoped recall asked for one slice

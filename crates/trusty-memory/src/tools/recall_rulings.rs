@@ -18,7 +18,7 @@
 //! `rulings_degraded`; the project's own hits are always returned.
 //! Test: `tests/recall_rulings_leg.rs`; `tools::recall_rulings_tests`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use trusty_common::memory_core::retrieval::{
 use super::bm25::{bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 use super::recall_rank::is_ruling;
+use crate::commands::prompt_context::BODY_DEADLINE;
 use crate::AppState;
 
 /// Environment variable naming the user-scope rulings palaces.
@@ -45,10 +46,19 @@ pub const RULINGS_PALACES_ENV: &str = "TRUSTY_MEMORY_RULINGS_PALACES";
 /// Upper bound on the whole rulings leg of one recall.
 ///
 /// Why (#9143 review): a slow or hung rulings palace must not stall the
-/// project recall. Palaces run concurrently, so this bounds the leg, not each
-/// palace in turn. A search that outlives the bound keeps running; see
-/// [`DegradedReason::InFlight`].
-pub const RULINGS_TIMEOUT: Duration = Duration::from_secs(2);
+/// project recall. `memory_recall` joins the leg with the project lanes, so a
+/// recall takes `max(project lanes, this bound)`, and the UserPromptSubmit
+/// hook gives its whole body `BODY_DEADLINE` (1.5 s). At 500 ms a stalled
+/// rulings palace leaves a second of that budget for the hook's other calls
+/// and its compose; a warm rulings search is the same work as the project's
+/// vector lane. Palaces run concurrently, so this bounds the leg, not each
+/// palace in turn. A search that outlives the bound keeps running and counts
+/// as stalled; see [`DegradedReason::InFlight`].
+/// Test: `a_hung_rulings_palace_leaves_the_recall_inside_the_hook_budget`.
+pub const RULINGS_TIMEOUT: Duration = Duration::from_millis(500);
+
+// See #9143: the leg's bound stays at most half the hook's body budget.
+const _: () = assert!(RULINGS_TIMEOUT.as_millis() * 2 <= BODY_DEADLINE.as_millis());
 
 /// How long a failed rulings palace is skipped before it is tried again.
 ///
@@ -87,8 +97,9 @@ pub enum DegradedReason {
     /// `timed_out`: this recall's search outlived [`RULINGS_TIMEOUT`]. The
     /// search keeps running and records its own outcome when it ends.
     TimedOut,
-    /// `in_flight`: a search an earlier recall started is still running, so
-    /// this recall started none.
+    /// `in_flight`: a search an earlier recall started has run past
+    /// [`RULINGS_TIMEOUT`] and is still running (stalled), so this recall
+    /// started none.
     InFlight,
 }
 
@@ -112,12 +123,13 @@ pub(crate) type PalaceOutcome = Result<Vec<RecallResult>, RulingsDegraded>;
 /// Why: a timed-out search used to be detached and forgotten, so repeated
 /// stalls piled up blocking tasks and a late success was thrown away.
 /// What: `generation` counts the searches started; only the newest may record
-/// an outcome. `running` is true while that search runs. `failure` is the last
-/// recorded failure and when it was recorded.
+/// an outcome. `running` maps each unfinished search's generation to its start
+/// time, oldest first. `failure` is the last recorded failure and when it was
+/// recorded.
 #[derive(Debug, Default)]
 struct PalaceState {
     generation: u64,
-    running: bool,
+    running: BTreeMap<u64, Instant>,
     failure: Option<(Instant, DegradedReason)>,
 }
 
@@ -129,7 +141,8 @@ struct PalaceState {
 /// What: an immutable, de-duplicated palace list and timeout, plus a mutex
 /// guarded map of palace id to [`PalaceState`].
 /// Test: `a_failed_palace_is_skipped_until_the_retry_window_passes`,
-/// `a_running_search_admits_no_second_search`.
+/// `a_stalled_search_admits_no_second_search`,
+/// `overlapping_healthy_searches_are_each_admitted`.
 pub struct RulingsLeg {
     palaces: Vec<String>,
     timeout: Duration,
@@ -156,9 +169,12 @@ impl RulingsLeg {
         &self.palaces
     }
 
-    /// Whether a search of `palace` is running now.
+    /// Whether any search of `palace` is running now.
     pub fn in_flight(&self, palace: &str) -> bool {
-        self.states.lock().get(palace).is_some_and(|s| s.running)
+        self.states
+            .lock()
+            .get(palace)
+            .is_some_and(|s| !s.running.is_empty())
     }
 
     /// How many searches of `palace` this leg has started.
@@ -168,14 +184,18 @@ impl RulingsLeg {
 
     /// Start a search of `palace`, or say why this recall must not.
     ///
-    /// What: `Err(InFlight)` while a search runs; the cached failure, with
-    /// `cached: true`, within [`RULINGS_RETRY_AFTER`] of it; otherwise marks a
-    /// new search running and returns its generation.
+    /// What: `Err(InFlight)` while a running search has run for the leg's
+    /// timeout or longer; the cached failure, with `cached: true`, within
+    /// [`RULINGS_RETRY_AFTER`] of it; otherwise records a new running search
+    /// and returns its generation. A search still inside the timeout refuses
+    /// nothing, so overlapping healthy recalls each search.
     fn admit(&self, palace: &str) -> Result<u64, (DegradedReason, bool)> {
         let mut states = self.states.lock();
         let state = states.entry(palace.to_string()).or_default();
-        // #9143 review: one search per palace at a time, so stalls never pile up.
-        if state.running {
+        // See #9143: only a stalled search refuses a new one, so a stall never
+        // piles up blocking tasks and overlapping recalls all get rulings.
+        let oldest = state.running.values().next();
+        if oldest.is_some_and(|started| started.elapsed() >= self.timeout) {
             return Err((DegradedReason::InFlight, false));
         }
         if let Some((at, reason)) = state.failure {
@@ -184,25 +204,26 @@ impl RulingsLeg {
             }
         }
         state.generation += 1;
-        state.running = true;
+        state.running.insert(state.generation, Instant::now());
         Ok(state.generation)
     }
 
     /// Record the outcome of search `generation` of `palace`.
     ///
-    /// What: ignored unless `generation` is the newest search started, so an
-    /// older result never overwrites a newer one. Otherwise the search stops
-    /// running, a success clears the failure and a failure replaces it.
+    /// What: the search stops running whatever its generation. Its outcome is
+    /// ignored unless `generation` is the newest search started, so an older
+    /// result never overwrites a newer one; otherwise a success clears the
+    /// failure and a failure replaces it.
     fn finish(&self, palace: &str, generation: u64, outcome: Result<(), DegradedReason>) {
         let mut states = self.states.lock();
         let Some(state) = states.get_mut(palace) else {
             return;
         };
+        state.running.remove(&generation);
         // #9143 review: a stale result never overwrites a newer one.
         if generation != state.generation {
             return;
         }
-        state.running = false;
         state.failure = outcome.err().map(|reason| (Instant::now(), reason));
     }
 }
@@ -313,8 +334,8 @@ fn leg_applies(state: &AppState, scope: &RecallScope) -> bool {
 /// Why: see the module doc. Running here, beside the project lanes, keeps the
 /// leg off the recall's critical path except for its own bound.
 /// What: empty when [`leg_applies`] is false or `top_k` is 0. Otherwise, for
-/// each palace, [`RulingsLeg::admit`] either refuses (`in_flight`, or a cached
-/// failure) or starts [`search_one_bounded`].
+/// each palace, [`RulingsLeg::admit`] either refuses (`in_flight` behind a
+/// stalled search, or a cached failure) or starts [`search_one_bounded`].
 /// Test: `an_absent_rulings_palace_degrades_and_is_not_retried_at_once`,
 /// `a_hung_rulings_palace_runs_one_search_and_its_late_success_counts`.
 pub(crate) async fn fetch_user_rulings(
