@@ -11775,6 +11775,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-secrets"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "fd-lock",
+ "keyring",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "trusty-sld-lint"
 version = "0.1.0"
 dependencies = [
