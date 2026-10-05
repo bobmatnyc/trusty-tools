@@ -146,6 +146,7 @@ async fn verify_timeout_withholds_the_finding() {
 }
 
 /// (b) An unparsable verifier reply is not a judgment: the finding is withheld.
+/// AQ-7t (Bob 2026-10-05): the APPROVE* review keeps APPROVE*.
 #[tokio::test]
 async fn verify_unparsable_reply_withholds_the_finding() {
     let mut findings = vec![finding("src/a.rs", 3, "a bug", Effort::Low, 0.7)];
@@ -160,8 +161,8 @@ async fn verify_unparsable_reply_withholds_the_finding() {
     assert_eq!(report.unjudged, 1);
     assert_eq!(
         report.verdict,
-        Verdict::Unknown,
-        "a drop never turns a non-APPROVE verdict into APPROVE"
+        Verdict::ApproveWithReservations,
+        "a drop neither relaxes APPROVE* to APPROVE nor turns it UNKNOWN"
     );
 }
 
