@@ -11,16 +11,12 @@
 
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
-use crate::service::recall_stream::recall_streamed;
-use crate::service::{load_user_config, palace_info_from, DreamStatusPayload};
+use crate::service::{load_user_config, palace_info_from, DreamStatusPayload, MemoryService};
 use crate::AppState;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use trusty_common::memory_core::dream::PersistedDreamStats;
 use trusty_common::memory_core::palace::{PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
-    recall_across_palaces_with_default_embedder, recall_with_default_embedder,
-};
 use trusty_common::memory_core::store::kg::Triple;
 use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::{ChatMessage, ToolDef};
@@ -320,15 +316,18 @@ async fn execute_get_palace(state: &AppState, id: &str) -> Value {
     }
 }
 
+/// Chat `recall_memories`: the ranked per-palace recall (#8246).
+///
+/// Why: this tool called the retrieval layer directly and so skipped the
+/// stale-snapshot demotion every MCP recall applies.
+/// What: [`MemoryService::recall_ranked`], serialized in this tool's row shape.
+/// Test: `demotion_applies_on_every_recall_surface` covers the shared method.
 async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: usize) -> Value {
-    let handle = match state
-        .registry
-        .open_palace(&state.data_root, &PalaceId::new(palace_id))
-    {
-        Ok(h) => h,
-        Err(e) => return json!({ "error": format!("open palace {palace_id}: {e:#}") }),
-    };
-    match recall_with_default_embedder(&handle, query, top_k).await {
+    // #8246: route through the service so the chat tool demotes too.
+    let ranked = MemoryService::new(state.clone())
+        .recall_ranked(palace_id, query, top_k, false)
+        .await;
+    match ranked {
         Ok(hits) => json!(hits
             .into_iter()
             .map(|r| json!({
@@ -340,24 +339,15 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
                 "layer": r.layer,
             }))
             .collect::<Vec<_>>()),
-        Err(e) => json!({ "error": format!("recall: {e:#}") }),
+        Err(e) => json!({ "error": format!("recall {palace_id}: {e}") }),
     }
 }
 
-/// Execute a cross-palace recall and return JSON results tagged with palace id.
+/// Chat `memory_recall_all`: the ranked cross-palace recall (#8246).
 ///
-/// Why: Both the MCP `memory_recall_all` tool and the `GET /api/v1/recall`
-/// HTTP route share the same wiring — list palaces, open handles, fan out via
-/// `recall_across_palaces_with_default_embedder`, and serialize.
-/// What: Lists every palace on disk, then streams them through
-/// `recall_streamed` in bounded batches, delegating each batch to the core
-/// fan-out. On success returns a JSON array; on listing failure returns
-/// `{ "error": "..." }`.
-/// Why (#7125): opening every palace at once made peak residency and the
-/// post-call LRU residue scale with the palace count. Batching bounds both;
-/// palaces the registry already held are left resident.
-/// Test: Indirectly via `recall_across_palaces_merges_results` (core merge
-/// logic) and the HTTP/MCP integration paths;
+/// Why: this was a copy of `MemoryService::recall_all` without its demotion.
+/// What: delegates to [`MemoryService::recall_all`]; same JSON array shape.
+/// Test: `demotion_applies_on_every_recall_surface` covers the shared method;
 /// `recall_all_returns_open_palaces_to_baseline` pins the residency bound.
 pub(crate) async fn execute_recall_all(
     state: &AppState,
@@ -365,38 +355,10 @@ pub(crate) async fn execute_recall_all(
     top_k: usize,
     deep: bool,
 ) -> Value {
-    let palaces = match list_palaces_blocking(state).await {
-        Ok(v) => v,
-        Err(e) => return json!({ "error": format!("{e:#}") }),
-    };
-    // #9141: an empty palace is skipped without being opened.
-    let (palaces, _) = crate::service::recall_stream::skip_empty_palaces(state, palaces).await;
-    // #7125: stream the estate in batches instead of opening all of it.
-    let streamed = recall_streamed(
-        state,
-        &palaces,
-        "execute_recall_all",
-        top_k,
-        |handles| async move {
-            recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await
-        },
-    )
-    .await;
-    match streamed {
-        Ok(results) => json!(results
-            .into_iter()
-            .map(|r| json!({
-                "palace_id": r.palace_id,
-                "drawer_id": r.result.drawer.id.to_string(),
-                "content": r.result.drawer.content(),
-                "importance": r.result.drawer.importance,
-                "tags": r.result.drawer.tags,
-                "score": r.result.score,
-                "layer": r.result.layer,
-            }))
-            .collect::<Vec<_>>()),
-        Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
-    }
+    // #8246: one implementation, so the chat surface demotes as well.
+    MemoryService::new(state.clone())
+        .recall_all(query, top_k, deep)
+        .await
 }
 
 async fn execute_list_drawers(state: &AppState, palace_id: &str) -> Value {

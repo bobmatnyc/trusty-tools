@@ -4,12 +4,48 @@
 //! against the 500 cap. This function was the largest self-contained unit
 //! there and depends only on the public `trusty_memory` surface, so it moves
 //! without touching the CLI definition or the dispatch table.
-//! What: `spawn_startup_tasks` — the #6820 machine-tier log line, embedder
+//! What: `daemon_state` — the daemon's `AppState` builder chain (moved here
+//! for #9143, which pushed `main.rs` past the cap again) — and
+//! `spawn_startup_tasks` — the #6820 machine-tier log line, embedder
 //! warm-up, palace hydration, dream scheduler, BM25 sweeps, alias discovery,
 //! update check, and the pin scan.
 //! Test: `startup_task_tests::spawn_startup_tasks_populates_pin_map`.
 
+use std::path::PathBuf;
+
 use trusty_memory::AppState;
+
+/// Build the daemon `AppState` once — the builder chain is identical for the
+/// fixed-port and dynamic/foreground HTTP paths.
+///
+/// Why: issue #1487: `with_writer_intent()` MUST come first (it replaces the
+/// registry) and run before `spawn_startup_tasks` hydration so palace redb
+/// files open as `Writer` — a second daemon instance then fails loud instead
+/// of silently degrading to read-only snapshot mode. Bug-reporting #478 wires
+/// the ErrorStore; #156/#193 opt into the BM25 lexical lane when enabled.
+/// Issue #2223: `with_multi_tenant_mode_from_env()` reads
+/// `TRUSTY_MEMORY_MULTI_TENANT=1` and was defined + unit-tested (issue
+/// #1714 / PR #2221) but never called here, so the opt-in authz seam was
+/// dead in the shipped binary. Wiring it here is additive-only: default
+/// (unset) preserves today's single-tenant behaviour exactly. #9143: this is
+/// the only reader of `TRUSTY_MEMORY_RULINGS_PALACES`; `AppState::new` reads
+/// no environment, so test states stay hermetic.
+/// What: `AppState::new(data_root)` plus the daemon's builders, in order.
+pub(crate) fn daemon_state(
+    data_root: PathBuf,
+    palace: Option<String>,
+    log_buffer: trusty_common::log_buffer::LogBuffer,
+    error_store: trusty_common::error_capture::ErrorStore,
+) -> AppState {
+    AppState::new(data_root)
+        .with_writer_intent()
+        .with_default_palace(palace)
+        .with_log_buffer(log_buffer)
+        .with_error_store(error_store)
+        .with_bm25_lane_from_env()
+        .with_multi_tenant_mode_from_env()
+        .with_rulings_palaces_from_env()
+}
 
 /// Why: startup tasks (palace hydration, alias discovery, pin scan, and the
 ///      issue-#1529 autonomous dream scheduler) are the same regardless of

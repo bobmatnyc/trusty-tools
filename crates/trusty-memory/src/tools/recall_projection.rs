@@ -21,6 +21,8 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::retrieval::RecallResult;
 
+use super::recall_rulings::RulingsDegraded;
+
 /// The lowest recall layer a `min_score` floor is allowed to drop a hit from.
 ///
 /// Why: L0 (palace identity) and L1 (essential drawers) are the palace's
@@ -34,13 +36,13 @@ use trusty_common::memory_core::retrieval::RecallResult;
 /// Test: `score_floor_keeps_identity_and_essential_layers`.
 pub(crate) const FIRST_FILTERABLE_LAYER: u8 = 2;
 
-/// The two projection facts a recall response carries beyond its hits.
+/// The projection facts a recall response carries beyond its hits.
 ///
-/// Why: `serialize_recall` needs to know whether to show attribution tags and
-/// how many hits the floor removed. Passing them as one value keeps the
-/// serializer's signature readable and keeps the two facts travelling together
-/// from the handler that computed them.
-/// What: a plain data carrier; no defaults, so each handler states both.
+/// Why: `serialize_recall` needs to know whether to show attribution tags, how
+/// many hits the floor removed, and which user-scope rulings palaces failed.
+/// Passing them as one value keeps the serializer's signature readable and
+/// keeps the facts travelling together from the handler that computed them.
+/// What: a plain data carrier; no defaults, so each handler states every field.
 /// Test: `tools::tests::recall_projection_tests`.
 pub(crate) struct RecallProjection {
     /// `true` when the caller explicitly asked for the `creator:*` tags back.
@@ -48,6 +50,10 @@ pub(crate) struct RecallProjection {
     /// How many hits [`apply_score_floor`] removed, reported to the caller so
     /// filtering is visible rather than inferred from a short result list.
     pub dropped_below_floor: usize,
+    /// #9143: rulings palaces that contributed nothing, and why. Serialized
+    /// as `rulings_degraded` only when non-empty, so a recall with the leg
+    /// unset or healthy keeps its pre-#9143 envelope byte for byte.
+    pub rulings_degraded: Vec<RulingsDegraded>,
 }
 
 /// Read the optional `include_creator_tags` argument.
@@ -203,8 +209,11 @@ pub(crate) fn project_tags(tags: &[String], include_creator_tags: bool) -> Vec<&
 /// by [`project_tags`], wrapped in the `palace`/`query` envelope.
 /// `dropped_below_floor` is always present, so `0` states "the floor removed
 /// nothing" rather than leaving the caller to guess from a missing key.
+/// `rulings_degraded` is the opposite: present only when a rulings palace
+/// failed, so clients written before #9143 see no new key.
 /// Test: `recall_response_reports_the_dropped_count`,
-/// `creator_tags_are_hidden_by_default`.
+/// `creator_tags_are_hidden_by_default`,
+/// `an_absent_rulings_palace_degrades_and_is_not_retried_at_once`.
 pub(crate) fn serialize_recall(
     palace: &str,
     query: &str,
@@ -225,10 +234,15 @@ pub(crate) fn serialize_recall(
             })
         })
         .collect();
-    json!({
+    let mut envelope = json!({
         "palace": palace,
         "query": query,
         "results": payload,
         "dropped_below_floor": projection.dropped_below_floor,
-    })
+    });
+    // #9143: absent when empty, so existing clients see no new field.
+    if !projection.rulings_degraded.is_empty() {
+        envelope["rulings_degraded"] = json!(projection.rulings_degraded);
+    }
+    envelope
 }

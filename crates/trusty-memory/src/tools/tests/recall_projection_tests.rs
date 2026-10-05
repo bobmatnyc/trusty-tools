@@ -65,6 +65,7 @@ fn no_floor(include_creator_tags: bool) -> RecallProjection {
     RecallProjection {
         include_creator_tags,
         dropped_below_floor: 0,
+        rulings_degraded: Vec::new(),
     }
 }
 
@@ -173,6 +174,7 @@ fn recall_response_reports_the_dropped_count() {
         &RecallProjection {
             include_creator_tags: false,
             dropped_below_floor,
+            rulings_degraded: Vec::new(),
         },
     );
     assert_eq!(filtered["dropped_below_floor"], json!(1));

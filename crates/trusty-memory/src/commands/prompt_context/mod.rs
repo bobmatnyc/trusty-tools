@@ -103,7 +103,8 @@ const STDIN_READ_DEADLINE: Duration = Duration::from_millis(300);
 /// What: passed to [`tokio::time::timeout`] around `build_injection_body`
 /// in [`handle_prompt_context`].
 /// Test: `handle_prompt_context_fails_open_on_slow_daemon`.
-const BODY_DEADLINE: Duration = Duration::from_millis(1500);
+// See #9143: crate-visible so the rulings leg can bound itself against it.
+pub(crate) const BODY_DEADLINE: Duration = Duration::from_millis(1500);
 
 /// Deadline for the best-effort `HookFired` activity POST (issue #2043).
 ///
