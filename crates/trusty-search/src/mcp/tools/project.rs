@@ -194,9 +194,13 @@ fn project_miss(data: Option<&Value>) -> Option<DispatchError> {
 
 /// Advertise `project` on every tool in [`PROJECT_TOOLS`].
 ///
-/// Why: a schema-obeying client sends only the arguments the schema lists.
-/// What: adds an optional `project` string property; `required` is untouched,
-/// so the change is additive.
+/// Why: a schema-obeying client sends only the arguments the schema lists, and
+/// never omits a `required` one — so `index_id` stops being required where
+/// `project` can stand in for it (`list_chunks`, `get_call_chain`; the other
+/// tools already treat it as optional).
+/// What: adds an optional `project` string property and drops `index_id` from
+/// `required`. Nothing becomes required, so every call valid before stays
+/// valid. A call with neither still gets the same error or directory it did.
 /// Test: `project_tools_advertise_the_project_argument`.
 pub(super) fn annotate_project_tools(defs: &mut Value) {
     let Some(tools) = defs.as_array_mut() else {
@@ -210,11 +214,13 @@ pub(super) fn annotate_project_tools(defs: &mut Value) {
         if !named {
             continue;
         }
-        if let Some(props) = tool
-            .get_mut("inputSchema")
-            .and_then(|s| s.get_mut("properties"))
-            .and_then(Value::as_object_mut)
-        {
+        let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+            required.retain(|v| v.as_str() != Some("index_id"));
+        }
+        if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
             props.insert(
                 "project".into(),
                 serde_json::json!({ "type": "string", "description": PROP_NOTE }),

@@ -194,7 +194,9 @@ async fn a_non_string_project_is_invalid_params() {
     );
 }
 
-/// The schema advertises `project` on exactly [`PROJECT_TOOLS`], optional.
+/// The schema advertises `project` on exactly [`PROJECT_TOOLS`], optional,
+/// and none of those tools still requires `index_id` — otherwise a
+/// schema-obeying client could never send `project` alone.
 #[test]
 fn project_tools_advertise_the_project_argument() {
     let defs = tool_descriptors();
@@ -208,6 +210,12 @@ fn project_tools_advertise_the_project_argument() {
             !required.iter().any(|r| r == "project"),
             "{name}: project must stay optional"
         );
+        if has {
+            assert!(
+                !required.iter().any(|r| r == "index_id"),
+                "{name}: index_id must not be required where project stands in"
+            );
+        }
     }
 }
 
