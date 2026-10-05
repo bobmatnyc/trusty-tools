@@ -505,6 +505,76 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     assert_eq!(mtime(b_corpus), b_before, "reading B's stamp rewrote B");
 }
 
+/// Why: #9230 — clone A, kept current by incremental writes, lost to clone B,
+/// whose only advantage was a more recent full reindex.
+/// What: A's corpus carries a two-day-old full-reindex stamp, B's a one-hour
+/// old one. A resident A then takes one `index_file` write, and the resolver
+/// must pick A. Fails on origin/main: it picks B.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incremental_write_after_the_others_full_reindex_resolves_to_it() {
+    use crate::core::corpus::CorpusStore;
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let ago = |age: u64| {
+        (SystemTime::now() - Duration::from_secs(age))
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_secs()
+    };
+    let mut rows = Vec::new();
+    let mut roots = Vec::new();
+    for (id, dir, age) in [
+        ("clone-a", "a/repo", 2 * 86_400),
+        ("clone-b", "b/repo", 3_600),
+    ] {
+        let root = tmp.path().join(dir);
+        std::fs::create_dir_all(root.join(".git")).expect(".git");
+        std::fs::create_dir_all(root.join(".trusty-search")).expect("store");
+        CorpusStore::open(&root.join(".trusty-search/index.redb"))
+            .expect("open")
+            .write_reindexed_unix_sync(ago(age))
+            .expect("full-reindex stamp");
+        rows.push(PersistedIndex {
+            colocated: true,
+            repo_identity: Some(REPO.to_string()),
+            ..PersistedIndex::new(id, root.clone())
+        });
+        roots.push(root);
+    }
+    let a_root = roots[0].clone();
+    let mut indexer = CodeIndexer::new("clone-a", a_root.clone());
+    indexer.set_corpus_store(Arc::new(
+        CorpusStore::open(&a_root.join(".trusty-search/index.redb")).expect("load A"),
+    ));
+    indexer
+        .index_file("src/lib.rs", "pub fn kept_current_9230() {}\n")
+        .await
+        .expect("incremental write");
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("clone-a"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        a_root.clone(),
+    ));
+
+    let candidates = gather_candidates(&rows, &[("clone-a".to_string(), a_root)]);
+    let disk = LiveDisk {
+        names: WorktreeDirNames::default(),
+        resident: [("clone-a".to_string(), handle)].into_iter().collect(),
+        runtime: Some(tokio::runtime::Handle::current()),
+    };
+    let got = tokio::task::spawn_blocking(move || {
+        resolve(&ProjectQuery::Identity(REPO.into()), &candidates, &disk).expect("resolves")
+    })
+    .await
+    .expect("resolve task");
+    assert_eq!(got.index.index_id, "clone-a", "{got:?}");
+    assert_eq!(ids(&got.duplicates), ["clone-b"]);
+}
+
 /// Why: #9169 — a repo whose identity group holds only a worktree still has a
 /// live index when a subdirectory of it (no `.git` of its own) is indexed.
 /// Test: this test.

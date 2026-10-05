@@ -1,0 +1,2 @@
+Fixed
+- `search.project.resolve` now sees incremental updates: a committed `index-file` write (including a tombstone that removes rows), a watcher write, a watcher rescan batch, and a boot-reconcile file update each stamp the corpus's `reindexed_unix`, as a full reindex already did. A refused, failed or no-op write does not stamp, nor does a write whose redb persist failed and was only logged; a failed stamp write is logged and keeps the previous stamp (#9230).

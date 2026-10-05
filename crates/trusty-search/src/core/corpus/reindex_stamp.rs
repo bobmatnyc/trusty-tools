@@ -29,9 +29,9 @@ impl CorpusStore {
 
     /// Record that a reindex committed this corpus at `unix` seconds.
     ///
-    /// Why: the resolver's recency must change only when a reindex commits.
+    /// Why: the resolver's recency must change only when a commit lands.
     /// What: one write transaction upserting the 8-byte little-endian value.
-    /// Only `stamp_reindex_commit` calls it in production.
+    /// Production writes go through [`Self::write_reindexed_now_sync`].
     /// Test: `the_stamp_round_trips_and_a_staging_copy_carries_it`.
     pub(crate) fn write_reindexed_unix_sync(&self, unix: u64) -> Result<()> {
         let txn = self.db.begin_write().context("begin _meta write txn")?;
@@ -43,6 +43,21 @@ impl CorpusStore {
         }
         txn.commit().context("commit _meta write txn")?;
         Ok(())
+    }
+
+    /// Stamp the current unix time; returns the value written.
+    ///
+    /// Why: a full reindex commit (#9169) and an incremental commit (#9230)
+    /// both stamp "now"; a clock before the epoch is an error, not a 0 stamp.
+    /// What: reads `SystemTime::now()`, then [`Self::write_reindexed_unix_sync`].
+    /// Test: `index_file_stamps_the_corpus_it_commits`.
+    pub(crate) fn write_reindexed_now_sync(&self) -> Result<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .context("system clock is before the unix epoch")?
+            .as_secs();
+        self.write_reindexed_unix_sync(now)?;
+        Ok(now)
     }
 }
 
