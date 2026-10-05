@@ -5,3 +5,4 @@ Added
   - No method returns a secret value. Every failure is fixed text per method and error kind, so a malformed `set` never echoes its value.
   - An `api`- or `store`-only consumer depends with `default-features = false` and links no tokio or UDS code.
   - A `set` whose index write and cleanup delete both fail after the backend accepted the key reports kind `orphaned_backend_entry`, code `-32064`: the backend may hold an entry that no index row lists. The error carries no key, vault or value.
+  - `secrets.copy` writes each key through `SecretStore::set`, so it takes the index lock and deletes a new destination entry again when the index publish fails; an entry that cleanup cannot delete aborts the copy with `orphaned_backend_entry` instead of landing in `failed`.

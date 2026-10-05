@@ -24,7 +24,7 @@ use super::router::State;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
-use crate::api::{BackendId, SecretKey};
+use crate::api::{BackendId, SecretKey, SecretsError};
 use crate::store::{Capabilities, SecretStore};
 
 /// `secrets.doctor` — not among S1's method names.
@@ -141,15 +141,23 @@ impl CopySelection {
 /// `secrets.copy`: copy keys between two backends inside one project.
 ///
 /// Why: DOC-74 §13 Q6 — copy never crosses projects. The request names no
-/// vault; the vault is always this project's own project vault.
+/// vault; the vault is always this project's own project vault. #9065: the
+/// destination write and its index row must not drift apart, so each key
+/// goes through [`SecretStore::set`] rather than a bare backend write.
 /// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a source without
 /// `READ` or a destination without `WRITE` ([`ErrorKind::Unsupported`]),
-/// before any key moves. Each key is read from the source and written to the
-/// destination; a key the source lacks, or a per-key backend failure, lands
-/// in `failed` and the copy continues. A copied key the index lacks gets a
-/// row, so `list` shows it. Values are never returned.
+/// before any key moves. Each key is read from the source and written with
+/// [`SecretStore::set`] on the destination, which takes the index lock,
+/// upserts the row and, when the publish fails, deletes a new entry again.
+/// A key the source lacks, or any other per-key failure, lands in `failed`
+/// and the copy continues. An entry that compensation could not delete
+/// aborts the copy with [`ErrorKind::OrphanedBackendEntry`] and no copied
+/// list; keys copied before it stay visible through `secrets.list`. Values
+/// are never returned.
 /// Test: `server_copy_moves_keys_between_backends_in_one_project`,
-/// `server_copy_refuses_the_same_backend_twice`.
+/// `server_copy_refuses_the_same_backend_twice`,
+/// `server_copy_compensates_a_key_whose_index_publish_fails`,
+/// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`.
 pub fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: CopyRequest = decode(rest)?;
@@ -174,29 +182,22 @@ pub fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
             .map(|meta| meta.name)
             .collect(),
     };
+    // #9065: write through `set`'s index lock and compensation, never around it.
+    let store = SecretStore::new(destination, state.index.clone());
     let mut response = CopyResponse {
         copied: Vec::new(),
         failed: Vec::new(),
     };
     for key in keys {
-        let moved = match source.get(&vault, &key) {
-            Ok(Some(value)) => destination.set(&vault, &key, &value).is_ok_and(|()| {
-                // A row the index already holds is left as it is.
-                match state.index.get(&vault, &key) {
-                    Ok(Some(_)) => true,
-                    Ok(None) => state
-                        .index
-                        .upsert(&vault, &key, value.char_len(), now_unix())
-                        .is_ok(),
-                    Err(_) => false,
-                }
-            }),
-            Ok(None) | Err(_) => false,
-        };
-        if moved {
-            response.copied.push(key);
-        } else {
+        let Ok(Some(value)) = source.get(&vault, &key) else {
             response.failed.push(key);
+            continue;
+        };
+        match store.set(&vault, &key, &value) {
+            Ok(_) => response.copied.push(key),
+            // #9065: an orphan is never folded into `failed`; it aborts the copy.
+            Err(orphan @ SecretsError::OrphanedBackendEntry { .. }) => return Err(orphan.into()),
+            Err(_) => response.failed.push(key),
         }
     }
     to_json(&response)
@@ -302,11 +303,4 @@ fn capability_names(caps: Capabilities) -> Vec<String> {
     .filter(|(flag, _)| caps.contains(*flag))
     .map(|(_, name)| name.to_string())
     .collect()
-}
-
-/// Seconds since the Unix epoch, for a row `copy` adds.
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }

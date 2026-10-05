@@ -97,8 +97,22 @@ impl Fixture {
 
     /// Start a server; returns its task and the shutdown trigger.
     async fn start(&self) -> Running {
+        self.start_with(self.backends()).await
+    }
+
+    /// Start a server whose factory also maps `faulty` to `backend`.
+    async fn start_with_faulty(&self, backend: Arc<dyn SecretBackend>) -> Running {
+        let base = self.backends();
+        let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+            "faulty" => Ok(Arc::clone(&backend)),
+            _ => base(id),
+        });
+        self.start_with(factory).await
+    }
+
+    async fn start_with(&self, backends: BackendFactory) -> Running {
         let (tx, rx) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(self.settings.clone(), self.backends(), async move {
+        let task = tokio::spawn(serve(self.settings.clone(), backends, async move {
             let _ = rx.await;
         }));
         wait_serving(&self.settings.socket).await;
@@ -350,6 +364,209 @@ async fn server_copy_refuses_the_same_backend_twice() {
         fixed_error(&unknown, method::COPY),
         ErrorKind::UnknownBackend
     );
+    server.stop().await;
+}
+
+/// A memory backend that makes the index publish fail after it stores one
+/// key, by setting the index root to 0500.
+///
+/// Why: #9065 — copy's index publish can fail after the destination write.
+/// At 0500 the lock sidecar still opens, but the publish's scratch file
+/// cannot be created: the fault `store_tests.rs` uses for `set`.
+/// What: `set` of `poison` stores the value, then sets the root to 0500.
+/// `delete` sets the root back to 0700, then deletes, or fails when
+/// `undeletable`.
+#[cfg(unix)]
+#[derive(Debug)]
+struct PublishFaultBackend {
+    inner: MemoryBackend,
+    index_root: PathBuf,
+    poison: SecretKey,
+    undeletable: bool,
+}
+
+#[cfg(unix)]
+impl PublishFaultBackend {
+    fn new(fx: &Fixture, poison: &str, undeletable: bool) -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryBackend::new(),
+            index_root: fx.settings.index_root.clone(),
+            poison: key(poison),
+            undeletable,
+        })
+    }
+
+    fn holds(&self, name: &str) -> bool {
+        self.inner
+            .get(&vault("trusty/acme/web"), &key(name))
+            .unwrap()
+            .is_some_and(|stored| stored.expose() == VALUE)
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(dir: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Sets the index root back to 0700 on drop, so a failed test still cleans up.
+#[cfg(unix)]
+struct RestoreMode(PathBuf);
+
+#[cfg(unix)]
+impl Drop for RestoreMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(unix)]
+impl SecretBackend for PublishFaultBackend {
+    fn id(&self) -> BackendId {
+        BackendId::new("faulty").unwrap()
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.inner.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.inner.set(vault, key, value)?;
+        if *key == self.poison {
+            set_mode(&self.index_root, 0o500);
+        }
+        Ok(())
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        set_mode(&self.index_root, 0o700);
+        if self.undeletable {
+            return Err(SecretsError::Backend {
+                backend: "faulty".into(),
+                vault: vault.to_string(),
+                key: key.to_string(),
+                reason: "delete refused".into(),
+            });
+        }
+        self.inner.delete(vault, key)
+    }
+}
+
+/// Put `names` in the source backend under the project vault, unindexed.
+#[cfg(unix)]
+fn seed_source(fx: &Fixture, names: &[&str]) {
+    for name in names {
+        fx.keychain
+            .set(
+                &vault("trusty/acme/web"),
+                &key(name),
+                &SecretValue::new(VALUE),
+            )
+            .unwrap();
+    }
+}
+
+/// Why: #9065 — copy wrote the destination before the index and never
+/// undid it, so a failed publish left a destination entry no index row
+/// lists. Copy now writes through `SecretStore::set`, whose compensation
+/// deletes the new entry; the key is `failed` and later keys still copy.
+/// Test: itself.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_compensates_a_key_whose_index_publish_fails() {
+    let fx = fixture();
+    let _restore = RestoreMode(fx.settings.index_root.clone());
+    let faulty = PublishFaultBackend::new(&fx, "POISON", false);
+    let server = fx
+        .start_with_faulty(Arc::clone(&faulty) as Arc<dyn SecretBackend>)
+        .await;
+    seed_source(&fx, &["GOOD1", "POISON", "GOOD2"]);
+
+    let response = call(
+        &fx.settings.socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "faulty",
+               "keys": ["GOOD1", "POISON", "GOOD2"]}),
+    )
+    .await;
+    assert!(!wire(&response).contains(VALUE));
+    assert_eq!(
+        ok(response),
+        json!({"copied": ["GOOD1", "GOOD2"], "failed": ["POISON"]})
+    );
+    assert!(
+        !faulty.holds("POISON"),
+        "compensation must delete the entry"
+    );
+    assert!(faulty.holds("GOOD1") && faulty.holds("GOOD2"));
+    let list = ok(call(
+        &fx.settings.socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await);
+    let names: Vec<&str> = list["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["GOOD1", "GOOD2"]);
+    server.stop().await;
+}
+
+/// Why: #9065 — when the publish fails and compensation fails too, the
+/// destination holds an entry no index row lists. Folding that into
+/// `failed` hid it; copy now aborts with `orphaned_backend_entry` and no
+/// copied list. Keys copied before it stay visible through `secrets.list`.
+/// Test: itself.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails() {
+    let fx = fixture();
+    let _restore = RestoreMode(fx.settings.index_root.clone());
+    let faulty = PublishFaultBackend::new(&fx, "POISON", true);
+    let server = fx
+        .start_with_faulty(Arc::clone(&faulty) as Arc<dyn SecretBackend>)
+        .await;
+    seed_source(&fx, &["GOOD1", "POISON", "GOOD2"]);
+
+    let response = call(
+        &fx.settings.socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "faulty",
+               "keys": ["GOOD1", "POISON", "GOOD2"]}),
+    )
+    .await;
+    assert!(!wire(&response).contains(VALUE));
+    assert!(
+        response.result.is_none(),
+        "an orphan returns no copied list"
+    );
+    assert_eq!(
+        fixed_error(&response, method::COPY),
+        ErrorKind::OrphanedBackendEntry
+    );
+    assert!(
+        faulty.holds("POISON"),
+        "the orphan the error reports is real"
+    );
+    assert!(!faulty.holds("GOOD2"), "the copy stops at the orphan");
+    let list = ok(call(
+        &fx.settings.socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await);
+    assert_eq!(list["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(list["keys"][0]["name"], "GOOD1");
     server.stop().await;
 }
 
