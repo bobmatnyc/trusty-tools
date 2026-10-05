@@ -11,7 +11,9 @@
 //!   method request/response types, and [`SecretsError`].
 //! - `store` — the [`store::SecretBackend`] trait and its Keychain
 //!   implementation, the names-only [`store::NamesIndex`], scope resolution,
-//!   [`store::mask_secret`], and config resolution.
+//!   [`store::mask_secret`], config resolution, and the in-process
+//!   `secret://` resolver, env map and `.env` parser `tm secrets exec` uses
+//!   ([`store::resolve`], [`store::parse_dotenv`]).
 //! - `server` — the `secrets.*` methods on an on-demand Unix socket, the
 //!   `trusty-secrets` binary that serves them, and the client helper that
 //!   spawns it ([`server`]; Unix only).

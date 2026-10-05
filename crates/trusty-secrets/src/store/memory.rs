@@ -4,11 +4,13 @@
 //! keychain. Compiled only for this crate's tests and under the
 //! `test-support` feature, so no production build can select it.
 //! What: a mutex-guarded map keyed by (vault, key), with configurable
-//! capabilities. `Debug` shows the entry count only.
+//! capabilities. `Debug` shows the entry count only. [`MemoryBackend::reads`]
+//! counts `get` calls, so a test can prove a gate refused before any read.
 //! Test: `store_debug_never_contains_a_value`.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use super::{Capabilities, SecretBackend};
@@ -21,6 +23,7 @@ pub struct MemoryBackend {
     id: BackendId,
     capabilities: Capabilities,
     entries: Mutex<Entries>,
+    reads: AtomicUsize,
 }
 
 impl MemoryBackend {
@@ -35,6 +38,7 @@ impl MemoryBackend {
             id: BackendId::from_static("memory"),
             capabilities,
             entries: Mutex::new(BTreeMap::new()),
+            reads: AtomicUsize::new(0),
         }
     }
 
@@ -59,6 +63,14 @@ impl MemoryBackend {
     /// Whether no entry is stored.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// How many times `get` has been called, hit or miss.
+    ///
+    /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`.
+    pub fn reads(&self) -> usize {
+        // #7525: the counter that proves a refused key never reached a read.
+        self.reads.load(Ordering::SeqCst)
     }
 }
 
@@ -87,6 +99,7 @@ impl SecretBackend for MemoryBackend {
     }
 
     fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         Ok(self
             .entries(vault, key)?
             .get(&(vault.clone(), key.clone()))

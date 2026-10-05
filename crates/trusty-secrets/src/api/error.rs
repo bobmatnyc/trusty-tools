@@ -96,6 +96,50 @@ pub enum SecretsError {
         cleanup: Box<SecretsError>,
     },
 
+    /// A process whose parent chain includes Claude Code asked for a key that
+    /// is not flagged "agents may use" (DOC-74 §15.8). Raised before any
+    /// backend read.
+    #[error(
+        "secret {key} in {vault} is not flagged \"agents may use\"; \
+         refusing to resolve it under a Claude Code parent"
+    )]
+    AgentUseRefused {
+        /// The key refused.
+        key: String,
+        /// The vault whose index row carries the flag.
+        vault: String,
+    },
+
+    /// An env-map entry is unusable before any resolution starts.
+    #[error("env entry {position}: {reason}")]
+    InvalidEnvEntry {
+        /// 1-based position of the entry in the env map.
+        position: usize,
+        /// Which rule the entry broke. Never the name or value text.
+        reason: &'static str,
+    },
+
+    /// A `secret://` reference in an env map did not resolve.
+    #[error("env {name}: cannot resolve {reference}: {source}")]
+    EnvResolution {
+        /// The env variable name, already validated.
+        name: String,
+        /// The canonical reference, or a fixed phrase when it did not parse.
+        reference: String,
+        /// Why resolution failed.
+        #[source]
+        source: Box<SecretsError>,
+    },
+
+    /// A `.env` line is outside the supported subset.
+    #[error(".env line {line}: {reason}")]
+    DotenvSyntax {
+        /// 1-based line number.
+        line: usize,
+        /// Which rule the line broke. Never the line's text.
+        reason: &'static str,
+    },
+
     /// The backend lacks the capability an operation needs.
     #[error("{backend} backend does not support {operation}")]
     Unsupported {
