@@ -5,31 +5,29 @@
 //! intent of the default configuration and the compare-set candidates.
 //!
 //! What: defines the built-in default model ids for all three roles (now
-//! Bedrock-first), plus a Bedrock-only compare-set (Haiku → Sonnet 4.5 →
-//! Sonnet 4.6).  Opus is removed from the compare-set default because it is
-//! not access-granted in the target account; the three confirmed-available
-//! ids replace it.
+//! Bedrock-first), plus a Bedrock-only compare-set (Haiku 4.5 → Sonnet 4.6 →
+//! Sonnet 5.5 → Opus 5.5).
 //!
 //! #5971 demoted these constants one rung: the built-in model default is now a
 //! `trusty_common::inference::ModelTier` lookup against the resolved provider,
 //! and a constant here applies only when that (tier, provider) pair has no
 //! verified id. Which is why the reviewer default below still describes
 //! Bedrock: the tier layer resolves Opus 4.8 on OpenRouter and the Anthropic
-//! first-party API, but Bedrock's Opus 4.8 inference-profile id is deliberately
-//! unmapped, so a standalone Bedrock run falls through to Sonnet 4.6 here.
+//! first-party API, but Bedrock's `Analysis` tier is unmapped, so a standalone
+//! Bedrock run falls through to Sonnet 5.5 here.
 //!
 //! DEFAULT PROVIDER: Bedrock (effective as of this file's introduction).
-//!   - Reviewer:   `us.anthropic.claude-sonnet-4-6`              (verified)
+//!   - Reviewer:   `us.anthropic.claude-sonnet-5-5`              (verified)
 //!   - Verifier:   `us.anthropic.claude-haiku-4-5-20251001-v1:0` (verified)
 //!   - Summarizer: `us.anthropic.claude-haiku-4-5-20251001-v1:0` (verified)
 //!
-//! Model-id verification status (June 2026):
+//! Model-id verification status:
+//!   - `us.anthropic.claude-sonnet-5-5`, `us.anthropic.claude-opus-5-5` — one
+//!     Converse call each succeeded on 2026-10-05 (us-east-1).
 //!   - `us.anthropic.claude-sonnet-4-6`                  — confirmed in CLAUDE.md.
 //!   - `us.anthropic.claude-haiku-4-5-20251001-v1:0`     — verified against live
 //!     Bedrock account (replaces the incorrect `us.anthropic.claude-haiku-4-5`
 //!     which produced HTTP 400 ValidationException).
-//!   - `us.anthropic.claude-sonnet-4-5-20250929-v1:0`    — confirmed available
-//!     in target account (live Bedrock testing, June 2026).
 //!
 //! OpenRouter remains fully available for all roles; select it with:
 //!   - `--provider openrouter` CLI flag, or
@@ -48,24 +46,25 @@
 //! Test: `bedrock_defaults_have_inference_profile_prefix`,
 //! `compare_set_models_are_bedrock_only`,
 //! `haiku_default_has_correct_date_versioned_id`,
-//! `compare_set_contains_sonnet_4_5`.
+//! `compare_set_contains_the_5_5_models`.
 
 // ─── Default Bedrock model ids ────────────────────────────────────────────────
 
-/// Default model for the reviewer role (main review pass) — Bedrock Sonnet 4.6.
+/// Default model for the reviewer role (main review pass) — Bedrock Sonnet 5.5.
 ///
-/// Why: the reviewer role makes the highest-quality call in the pipeline; Claude
-/// Sonnet 4.6 is the recommended balanced choice on Bedrock.  Bedrock is the
-/// default because it uses IAM auth (no API key), integrates with AWS secrets
+/// Why: the reviewer role makes the highest-quality call in the pipeline; the
+/// owner chose Sonnet 5.5 for it (Bob, 2026-10-05).  Bedrock is the default
+/// because it uses IAM auth (no API key), integrates with AWS secrets
 /// management, and keeps data within the operator's VPC.
-/// What: `us.anthropic.claude-sonnet-4-6` is the Claude Sonnet 4.6 cross-region
-/// inference profile for the US geography.  No date stamp or `-v1:0` suffix
-/// (verified against AWS docs as of May 2026).
-/// Since #5971 this is reached only when `ModelTier::Analysis` declines for the
-/// resolved provider — in practice, Bedrock, whose Opus 4.8 profile id is
-/// unmapped by ruling.  On OpenRouter the reviewer resolves Opus 4.8 instead.
+/// What: `us.anthropic.claude-sonnet-5-5` is the Claude Sonnet 5.5 cross-region
+/// inference profile for the US geography, with no date stamp or `-v1:0`
+/// suffix.  Since #5971 this is reached only when `ModelTier::Analysis`
+/// declines for the resolved provider — in practice, Bedrock.  On OpenRouter
+/// the reviewer resolves Opus 4.8 instead.
 /// Override via `TRUSTY_REVIEW_REVIEWER_MODEL`.
-pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-4-6";
+/// Test: `role_models_bedrock_reviewer_keeps_sonnet_default`.
+// Bob 2026-10-05: Sonnet 5.5 default
+pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
 
 /// Default model for the verifier role (per-finding verification round) — Bedrock Haiku 4.5.
 ///
@@ -98,28 +97,27 @@ pub const DEFAULT_SUMMARIZER_MODEL: &str = "us.anthropic.claude-haiku-4-5-202510
 /// and ranks them by quality/speed/cost.  This default set is Bedrock-only so
 /// it works out of the box without an OpenRouter API key, and uses only
 /// confirmed-available ids from the target account.
-/// What: a static slice of `bedrock/`-prefixed model ids ordered cheapest →
-/// most capable.  The `compare` subcommand resolves the provider per-entry
-/// via `resolve_provider_and_model`, strips the prefix, and sends the bare id
-/// to the Bedrock Converse API.
+/// What: a static slice of `bedrock/`-prefixed model ids ordered by tier
+/// (Haiku, Sonnet, Opus), then by generation within a tier.  The `compare`
+/// subcommand resolves the provider per-entry via `resolve_provider_and_model`,
+/// strips the prefix, and sends the bare id to the Bedrock Converse API.
 /// Override with `--models` to add OpenRouter or other providers.
 ///
-/// CONFIRMED-AVAILABLE ids (live Bedrock testing, June 2026):
-///   - Haiku 4.5:    `us.anthropic.claude-haiku-4-5-20251001-v1:0`  (cheapest)
-///   - Sonnet 4.5:   `us.anthropic.claude-sonnet-4-5-20250929-v1:0` (mid-tier)
-///   - Sonnet 4.6:   `us.anthropic.claude-sonnet-4-6`               (reviewer default)
-///
-/// Opus 4.8 is intentionally excluded: it is not access-granted in the target
-/// Bedrock account and would fail with AccessDenied for most operators.
+/// Ids and their `us.` on-demand $/MTok (input/output, see `bedrock/pricing.rs`):
+///   - Haiku 4.5:  `us.anthropic.claude-haiku-4-5-20251001-v1:0` (1.10/5.50)
+///   - Sonnet 4.6: `us.anthropic.claude-sonnet-4-6`              (3.30/16.50)
+///   - Sonnet 5.5: `us.anthropic.claude-sonnet-5-5`              (2.20/11.00, reviewer default)
+///   - Opus 5.5:   `us.anthropic.claude-opus-5-5`                (4.40/22.00)
 pub const COMPARE_CANDIDATE_MODELS: &[&str] = &[
-    // Bedrock Haiku 4.5 — cheapest tier (verifier/summarizer default).
+    // Bedrock Haiku 4.5 — verifier/summarizer default.
     // date-versioned id required by Bedrock (short form produces HTTP 400).
     "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    // Bedrock Sonnet 4.5 — mid-tier (confirmed available, June 2026).
-    // Full date-versioned id required by Bedrock.
-    "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    // Bedrock Sonnet 4.6 — balanced reviewer default (no date stamp needed).
+    // Bedrock Sonnet 4.6 — the previous reviewer default.
     "bedrock/us.anthropic.claude-sonnet-4-6",
+    // Bedrock Sonnet 5.5 — reviewer default (no date stamp needed).
+    "bedrock/us.anthropic.claude-sonnet-5-5",
+    // Bedrock Opus 5.5 — premium tier (no date stamp needed).
+    "bedrock/us.anthropic.claude-opus-5-5",
 ];
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -167,13 +165,10 @@ mod tests {
     }
 
     /// Regression test: default compare set must be Bedrock-only and contain
-    /// exactly the three confirmed-available ids.
+    /// exactly the four ids the model comparison runs on.
     ///
-    /// Why: the previous compare set included Opus (not access-granted in the
-    /// target account) and an OpenRouter entry that requires a separate API key
-    /// — the new set uses only confirmed-available Bedrock ids (Haiku 4.5,
-    /// Sonnet 4.5, Sonnet 4.6) so compare mode works out of the box.
-    /// What: asserts all entries are `bedrock/`-prefixed and count is 3.
+    /// Why: compare mode must work out of the box without an OpenRouter key.
+    /// What: asserts all entries are `bedrock/`-prefixed and count is 4.
     /// Test: this test itself.
     #[test]
     fn compare_set_models_are_bedrock_only() {
@@ -186,39 +181,33 @@ mod tests {
         );
         assert_eq!(
             COMPARE_CANDIDATE_MODELS.len(),
-            3,
-            "expect haiku-4.5, sonnet-4.5, sonnet-4.6"
+            4,
+            "expect haiku-4.5, sonnet-4.6, sonnet-5.5, opus-5.5"
         );
     }
 
-    /// Verify the compare set contains Sonnet 4.5 (newly added confirmed-available model).
+    /// Verify the compare set carries both 5.5 models and no Sonnet 4.5.
     ///
-    /// Why: Sonnet 4.5 is confirmed available in the target account; the compare
-    /// set must include it to enable head-to-head Sonnet 4.5 vs 4.6 comparison.
-    /// What: asserts the verified Sonnet 4.5 id appears in the compare set.
+    /// Why: the model comparison weighs Sonnet 5.5 and Opus 5.5 against the
+    /// current Haiku and Sonnet 4.6; Sonnet 4.5 was dropped from the set.
+    /// What: asserts both 5.5 ids are present and no `sonnet-4-5` entry is.
     /// Test: this test itself.
     #[test]
-    fn compare_set_contains_sonnet_4_5() {
-        const EXPECTED_SONNET_4_5: &str = "bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+    fn compare_set_contains_the_5_5_models() {
+        for expected in [
+            "bedrock/us.anthropic.claude-sonnet-5-5",
+            "bedrock/us.anthropic.claude-opus-5-5",
+        ] {
+            assert!(
+                COMPARE_CANDIDATE_MODELS.contains(&expected),
+                "compare set must include {expected}"
+            );
+        }
         assert!(
-            COMPARE_CANDIDATE_MODELS.contains(&EXPECTED_SONNET_4_5),
-            "compare set must include the confirmed Sonnet 4.5 id {EXPECTED_SONNET_4_5}"
-        );
-    }
-
-    /// Verify that Opus is NOT in the default compare set.
-    ///
-    /// Why: Opus 4.8 is not access-granted in the target Bedrock account; its
-    /// presence would cause AccessDenied errors for most operators running
-    /// compare mode.
-    /// What: asserts no compare-set entry contains "opus".
-    /// Test: this test itself.
-    #[test]
-    fn compare_set_excludes_opus() {
-        let has_opus = COMPARE_CANDIDATE_MODELS.iter().any(|m| m.contains("opus"));
-        assert!(
-            !has_opus,
-            "default compare set must not contain Opus (not access-granted in target account)"
+            !COMPARE_CANDIDATE_MODELS
+                .iter()
+                .any(|m| m.contains("sonnet-4-5")),
+            "Sonnet 4.5 was dropped from the compare set"
         );
     }
 
@@ -249,37 +238,29 @@ mod tests {
         );
     }
 
-    /// Verify compare set is ordered cheapest → most capable.
+    /// Verify compare set is ordered by tier, then generation.
     ///
-    /// Why: the `compare` report presents results in table order; cheapest
-    /// first is the conventional display for cost-tier comparison.
-    /// What: asserts Haiku comes before Sonnet 4.5, Sonnet 4.5 before Sonnet 4.6.
+    /// Why: the `compare` report presents results in table order; Haiku →
+    /// Sonnet → Opus keeps the tiers readable side by side.
+    /// What: asserts haiku-4-5 < sonnet-4-6 < sonnet-5-5 < opus-5-5 by position.
     /// Test: this test itself.
     #[test]
-    fn compare_set_is_ordered_cheap_to_premium() {
+    fn compare_set_is_ordered_by_tier_then_generation() {
         let pos = |needle: &str| -> usize {
             COMPARE_CANDIDATE_MODELS
                 .iter()
                 .position(|m| m.contains(needle))
                 .unwrap_or(usize::MAX)
         };
-        assert!(
-            pos("haiku") < pos("sonnet"),
-            "haiku must come before sonnet in compare set"
-        );
-        // sonnet-4-5 should come before sonnet-4-6
-        let pos_s45 = COMPARE_CANDIDATE_MODELS
-            .iter()
-            .position(|m| m.contains("sonnet-4-5"))
-            .unwrap_or(usize::MAX);
-        let pos_s46 = COMPARE_CANDIDATE_MODELS
-            .iter()
-            .position(|m| m.contains("sonnet-4-6"))
-            .unwrap_or(usize::MAX);
-        assert!(
-            pos_s45 < pos_s46,
-            "sonnet-4-5 must come before sonnet-4-6 in compare set"
-        );
+        let order = ["haiku-4-5", "sonnet-4-6", "sonnet-5-5", "opus-5-5"];
+        for pair in order.windows(2) {
+            assert!(
+                pos(pair[0]) < pos(pair[1]),
+                "{} must come before {} in compare set",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]

@@ -86,8 +86,8 @@ pub const DEDUP_STALE_SECS: u64 = 7200; // 2 hours.
 
 /// Maximum length of the full diff text (characters) fed to the LLM.
 ///
-/// Why: the reviewer model (Bedrock Claude Sonnet 4.6) has a 200 K-token context
-/// window; the old 60 K-char cap (~15 K tokens) was overly conservative and
+/// Why: the reviewer default when this cap was set (Bedrock Claude Sonnet 4.6)
+/// had a 200 K-token context window; the old 60 K-char cap (~15 K tokens) was overly conservative and
 /// caused real PRs with large fixture churn to drop substantive code changes.
 /// Raised to 160 K chars (≈40 K tokens) — still ~5× under the 200 K window —
 /// to give the DiffAnalyzer noise filter enough headroom to work.

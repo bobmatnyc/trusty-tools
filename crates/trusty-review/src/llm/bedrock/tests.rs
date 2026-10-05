@@ -119,19 +119,59 @@ fn bedrock_empty_model_id_is_validation_error() {
 
 // ── Cost estimation ───────────────────────────────────────────────────────
 
+/// Per-million `(input, output)` rate the estimator applies to `model`.
+fn priced(model: &str) -> (f64, f64) {
+    (
+        estimate_bedrock_cost_usd(model, 1_000_000, 0),
+        estimate_bedrock_cost_usd(model, 0, 1_000_000),
+    )
+}
+
+/// Why: a `us.` profile bills at the AWS "Regional" rate (10% above global)
+/// and a `global.` profile at the global rate; pricing every id at one rate
+/// misreported the reviewer default's cost, and an unpriced Sonnet 5.5 id
+/// reported every review as $0.
+/// What: asserts the exact input and output rate for the four compare-set
+/// families under both prefixes, against the AWS Price List API values
+/// recorded in `pricing.rs` (retrieved 2026-10-05).
+/// Test: this test itself; no network calls.
+#[test]
+fn bedrock_cost_estimate_matches_price_list_per_profile() {
+    let cases: [(&str, (f64, f64)); 8] = [
+        ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
+        ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
+        ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
+        ("global.anthropic.claude-opus-5-5", (4.00, 20.00)),
+        ("us.anthropic.claude-sonnet-4-6", (3.30, 16.50)),
+        ("global.anthropic.claude-sonnet-4-6", (3.00, 15.00)),
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", (1.10, 5.50)),
+        (
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            (1.00, 5.00),
+        ),
+    ];
+    for (model, expected) in cases {
+        assert_eq!(
+            priced(model),
+            expected,
+            "per-MTok (input, output) for {model}"
+        );
+    }
+}
+
 #[test]
 fn bedrock_cost_estimate_sonnet() {
-    // 1M input + 1M output at Sonnet pricing ($3/M + $15/M = $18/M).
+    // 1M input + 1M output on the us. profile: $3.30 + $16.50 = $19.80.
     let cost = estimate_bedrock_cost_usd("us.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00 for 1M+1M Sonnet tokens, got {cost}"
+        (cost - 19.8_f64).abs() < 1e-9,
+        "expected $19.80 for 1M+1M Sonnet 4.6 us. tokens, got {cost}"
     );
 }
 
 #[test]
 fn bedrock_cost_estimate_eu_prefix_normalized() {
-    // eu. prefix should resolve to the same pricing as us.
+    // eu. is a geographic profile, so it prices at the same geo rate as us.
     let eu_cost = estimate_bedrock_cost_usd("eu.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     let us_cost = estimate_bedrock_cost_usd("us.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     assert!(
@@ -142,21 +182,20 @@ fn bedrock_cost_estimate_eu_prefix_normalized() {
 
 #[test]
 fn bedrock_cost_estimate_haiku() {
-    // Short-form id (no date suffix) must still price correctly.
+    // Short-form id (no date suffix) must price like the date-versioned one.
     let cost = estimate_bedrock_cost_usd("us.anthropic.claude-haiku-4-5", 1_000_000, 1_000_000);
     assert!(
-        (cost - 4.8_f64).abs() < 1e-9,
-        "expected $4.80 for 1M+1M Haiku tokens (short id), got {cost}"
+        (cost - 6.6_f64).abs() < 1e-9,
+        "expected $6.60 for 1M+1M Haiku us. tokens (short id), got {cost}"
     );
 }
 
 /// Regression test: the verified Haiku 4.5 date-versioned id must resolve
-/// to non-zero pricing (Bug 3 fix).
+/// to its geo price, not zero and not the retired 0.80/4.00 rate.
 ///
 /// Why: `anthropic.claude-haiku-4-5-20251001-v1:0` (after geo-prefix strip)
-/// did not match the pricing table's `anthropic.claude-haiku-4-5` entry,
-/// causing cost_usd to be $0.00 in all Haiku compare runs.
-/// What: asserts the real date-versioned id prices at $4.80 for 1M+1M tokens.
+/// once missed the `anthropic.claude-haiku-4-5` entry and priced at $0.00.
+/// What: asserts the real date-versioned id prices at $6.60 for 1M+1M tokens.
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_haiku_date_versioned() {
@@ -166,8 +205,8 @@ fn bedrock_cost_estimate_haiku_date_versioned() {
         1_000_000,
     );
     assert!(
-        (cost - 4.8_f64).abs() < 1e-9,
-        "expected $4.80 for 1M+1M Haiku tokens (date-versioned id), got {cost}. \
+        (cost - 6.6_f64).abs() < 1e-9,
+        "expected $6.60 for 1M+1M Haiku us. tokens (date-versioned id), got {cost}. \
          The normalize_model_family() function must strip -20251001-v1:0 to match \
          the pricing table entry."
     );
@@ -209,9 +248,10 @@ fn bedrock_normalize_model_family_strips_suffix() {
 
 /// Test that Sonnet 4.5 date-versioned id normalises to the pricing table entry.
 ///
-/// Why: Sonnet 4.5 is in the new compare set; its pricing must not be zero.
+/// Why: a `--models` override can still name Sonnet 4.5; its pricing must not
+/// be zero.
 /// What: asserts `us.anthropic.claude-sonnet-4-5-20250929-v1:0` prices at
-/// $18/M (same as Sonnet 4.6) after geo+date+version normalization.
+/// $19.80 for 1M+1M (geo rate, same as Sonnet 4.6) after normalization.
 /// Test: no network.
 #[test]
 fn bedrock_cost_estimate_sonnet_4_5_date_versioned() {
@@ -221,8 +261,8 @@ fn bedrock_cost_estimate_sonnet_4_5_date_versioned() {
         1_000_000,
     );
     assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00 for 1M+1M Sonnet 4.5 tokens (date-versioned id), got {cost}"
+        (cost - 19.8_f64).abs() < 1e-9,
+        "expected $19.80 for 1M+1M Sonnet 4.5 us. tokens (date-versioned id), got {cost}"
     );
 }
 
