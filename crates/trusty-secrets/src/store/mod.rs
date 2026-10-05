@@ -15,7 +15,7 @@ mod keychain;
 mod mask;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
-mod platform;
+pub(crate) mod platform;
 mod scope;
 mod secret_store;
 
@@ -25,6 +25,7 @@ pub use keychain::KeychainBackend;
 pub use mask::{MASK_HEAD_CHARS, mask_secret};
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::MemoryBackend;
+pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};
 pub use scope::{ScopeSet, parse_remote_identity};
 pub use secret_store::SecretStore;
 

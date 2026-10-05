@@ -13,6 +13,7 @@
 //! `index_write_publishes_by_rename`, `index_concurrent_writers_never_lose_a_name`,
 //! `index_lock_timeout_fails_closed`, `scope_derive_reads_the_origin_remote`.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -178,18 +179,79 @@ pub(crate) fn with_exclusive_lock<R>(
     f()
 }
 
+/// Environment variables that aim `git` at another repository or config.
+///
+/// Why: a long-lived caller — the detached secrets server keeps its first
+/// spawner's environment — would otherwise resolve every `git -C <dir>` to
+/// the repository or remote URL an inherited variable names, and every
+/// project would share one vault (#9065). Cross-checked against trusty-mpm's
+/// `GIT_ENV_REDIRECTS` (`session_manager/worktree_safety.rs`), plus the
+/// config-injection variables.
+/// What: fixed names. Numbered `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`
+/// pairs are matched by prefix in [`git_redirect_vars`].
+pub const GIT_ENV_REDIRECTS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_NAMESPACE",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+];
+
+/// Prefixes of the numbered `git -c`-equivalent config pairs.
+const GIT_CONFIG_PAIR_PREFIXES: [&str; 2] = ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
+
+/// Every git redirect variable to remove, given the names in `ambient`.
+///
+/// What: [`GIT_ENV_REDIRECTS`], plus each name in `ambient` that starts
+/// with `GIT_CONFIG_KEY_` or `GIT_CONFIG_VALUE_`. Pass
+/// `std::env::vars_os().map(|(k, _)| k)` for the current process.
+/// Test: `inherited_git_redirect_env_never_reaches_the_servers_git_calls`.
+pub fn git_redirect_vars(ambient: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut vars: Vec<OsString> = GIT_ENV_REDIRECTS.iter().map(OsString::from).collect();
+    vars.extend(ambient.into_iter().filter(|name| {
+        name.to_str().is_some_and(|name| {
+            GIT_CONFIG_PAIR_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
+    }));
+    vars
+}
+
+/// `git -C <dir>` with every redirect variable removed from its environment.
+///
+/// Why: see [`GIT_ENV_REDIRECTS`]. Every git call in this crate goes through
+/// here, so no call site can forget the scrub.
+/// Test: `inherited_git_redirect_env_never_reaches_the_servers_git_calls`.
+pub(crate) fn git_command(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(dir);
+    for var in git_redirect_vars(std::env::vars_os().map(|(name, _)| name)) {
+        command.env_remove(var);
+    }
+    command
+}
+
 /// The `origin` remote URL of the checkout containing `dir`, if any.
 ///
 /// Why: the project and owner scopes come from the git remote (DOC-74 §15.3).
-/// What: `git -C <dir> config --get remote.origin.url`; no network. A
+/// What: `git -C <dir> config --get remote.origin.url` through
+/// [`git_command`], so inherited redirect variables are ignored; no network. A
 /// missing `git`, a non-checkout, or no origin all read as `None`. The URL is
 /// returned to the caller and never logged: it can carry a token.
 /// Test: `scope_derive_reads_the_origin_remote`,
 /// `scope_derive_without_a_remote_fails_closed`.
 pub(crate) fn origin_remote_url(dir: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    let output = git_command(dir)
         .args(["config", "--get", "remote.origin.url"])
         .output()
         .ok()?;
