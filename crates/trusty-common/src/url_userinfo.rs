@@ -16,6 +16,10 @@
 //! URL that is stored and cloned rather than compared (#9155).
 //! Test: `strip_userinfo_table`, `strip_url_secret_table`,
 //! `userinfo_end_stops_at_free_text`.
+//!
+//! [`userinfo_end`]: crate::url_userinfo::userinfo_end
+//! [`strip_userinfo`]: crate::url_userinfo::strip_userinfo
+//! [`strip_url_secret`]: crate::url_userinfo::strip_url_secret
 
 use std::borrow::Cow;
 
