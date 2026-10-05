@@ -1,3 +1,0 @@
-Added
-- trusty-mpm's skills now live under `content/skills/`, its PM instruction sections, supervisor sections, instruction package and schema under `content/instructions/`, its output styles under `content/instructions/output-styles/`, its SM instructions under `content/instructions/sm_instructions/`, and the two bundled docs under `content/instructions/docs/`, moved from `crates/trusty-mpm` (#9012). The bundle paths are unchanged except the new `instructions/docs/`.
-- Every skill entry point declares `metadata: {version}` (its former top-level `version:` moved under `metadata:`; `tm-doctor` starts at 0.1.0); `content/manifest.toml` lists the 57 skills as members under bundle version 2.1.0, the highest member version (#9012).
