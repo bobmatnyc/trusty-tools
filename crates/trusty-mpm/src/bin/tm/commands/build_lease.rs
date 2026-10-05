@@ -21,6 +21,10 @@
 //! timeout, exit [`EXIT_LEASE_TIMEOUT`] naming the holders and every reading. Every decision is POSTed to the daemon log with the
 //! command summarized, never its full argv.
 //!
+//! `tm build-lease status` runs no build and takes no lease: it lists the
+//! holders, each repo's slots, and every seed in progress or abandoned with
+//! its slot, owner pid and age (#9239).
+//!
 //! `tm build-lease --census` runs no build; it probes slot locks like `tm
 //! doctor` (#8261 round 5). It prints the lease holders and every build group
 //! the census counts against the ceiling, attributed by pgid, leader, driver
@@ -36,7 +40,6 @@ use trusty_mpm::core::build_lease::acquire::{
 };
 use trusty_mpm::core::build_lease::admission::Decision;
 use trusty_mpm::core::build_lease::census::LiveSampler;
-use trusty_mpm::core::build_lease::census_detail::{header, live_breakdown};
 use trusty_mpm::core::build_lease::config::{BuildLeaseConfig, clamp_wait};
 use trusty_mpm::core::build_lease::slots::{HolderRecord, SlotDir, SlotGuard, summarize_command};
 use trusty_mpm::core::build_lease::stale_guard::{
@@ -48,41 +51,9 @@ use trusty_mpm::core::build_lease::target_dir::{
 };
 use trusty_mpm::core::builders::{BuildersConfig, resolve_max_concurrent};
 
+use super::build_lease_status::{print_census, print_status};
 use super::pm_guard_bash::build_lease_rewrite::is_heavy_build;
 use trusty_mpm::core::config::MpmConfig;
-
-/// `tm build-lease --census`: print the holders and the attributed census.
-///
-/// What: runs no build; probes slot locks like `tm doctor`, which creates the
-/// store if it is missing (#8261 round 5). Exit 0 on a census read; exit 1
-/// naming the error when the process table cannot be read. A store that cannot be opened lists no
-/// holders and says so. Argument values never print (see `census_detail`).
-/// Test: `the_census_view_lists_holders_without_argument_values`.
-fn print_census() -> ! {
-    let slots = SlotDir::resolve(dirs::home_dir().as_deref());
-    let holders = slots.as_ref().map(SlotDir::holders).unwrap_or_default();
-    let details = match live_breakdown(&holders) {
-        Ok(details) => details,
-        Err(err) => {
-            eprintln!("tm build-lease: the process census cannot be read: {err}");
-            std::process::exit(1)
-        }
-    };
-    println!(
-        "{}",
-        header(details.len(), holders.len(), resolve_max_concurrent())
-    );
-    if let Err(err) = &slots {
-        println!("  lease store unusable: {err}");
-    }
-    for holder in &holders {
-        println!("  lease {}", holder.render());
-    }
-    for (i, detail) in details.iter().enumerate() {
-        println!("  group {}: {}", i + 1, detail.render());
-    }
-    std::process::exit(0)
-}
 
 /// The exit code for a command that is not a heavy build (`EX_USAGE`).
 const EXIT_NOT_A_HEAVY_BUILD: i32 = 64;
@@ -163,7 +134,8 @@ pub(crate) struct BuildLeaseArgs {
     /// for the command's `cd` (#8969).
     #[arg(long, value_name = "DIR")]
     expect_cwd: Option<PathBuf>,
-    /// The heavy build to run, after `--`; anything else is refused.
+    /// The heavy build to run, after `--`; anything else is refused. The
+    /// single word `status` prints the lease and seeding status instead (#9239).
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,
@@ -180,6 +152,10 @@ pub(crate) struct BuildLeaseArgs {
 pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
     if args.census {
         print_census()
+    }
+    // #9239: `tm build-lease status` is a read-only view; no lease, no build.
+    if args.command == ["status"] {
+        print_status(&MpmConfig::load_default().builders)
     }
     let builders: BuildersConfig = MpmConfig::load_default().builders;
     let lease = BuildLeaseConfig::load_default();
@@ -293,7 +269,7 @@ pub(crate) async fn run(args: BuildLeaseArgs) -> ! {
             decision,
         } => {
             warn_degraded(&decision);
-            let target = match target_dir(&target_plan, guard.slot(), &cwd) {
+            let target = match target_dir(&target_plan, guard.slot(), &cwd, wait) {
                 Ok(target) => target,
                 Err(why) => {
                     // #8261 (owner ruling 2026-09-21): an unsafe target never admits.
@@ -455,13 +431,20 @@ fn render(decision: &Decision, holders: &[HolderRecord]) -> String {
 /// The `CARGO_TARGET_DIR` for this build, seeding the slot directory if new.
 ///
 /// What: `Ok(None)` leaves cargo's own choice; `Ok(Some(dir))` sets `dir`.
+/// #9239: the seed is bounded by `seed_wait` (the lease wait); past it the
+/// slot starts cold. A slot is handed out only when its seed has committed.
 /// `Err` when the build would otherwise run in a SHARED target directory
 /// because its slot directory cannot be made or its stale fingerprints cannot
 /// be cleared — the caller refuses instead (#8261, owner ruling 2026-09-21: an
 /// unsafe target never admits).
 /// Test: `an_unusable_slot_directory_refuses_instead_of_sharing`,
 /// `a_busy_orphan_slot_is_not_reused` in `tests/tm_build_lease.rs`.
-fn target_dir(plan: &TargetPlan, slot: u32, cwd: &Path) -> Result<Option<String>, String> {
+fn target_dir(
+    plan: &TargetPlan,
+    slot: u32,
+    cwd: &Path,
+    seed_wait: Duration,
+) -> Result<Option<String>, String> {
     let (pool, clone_from) = match plan {
         TargetPlan::Keep(dir) => return Ok(Some(dir.clone())),
         TargetPlan::Slot { pool, clone_from } => (pool, clone_from),
@@ -469,7 +452,15 @@ fn target_dir(plan: &TargetPlan, slot: u32, cwd: &Path) -> Result<Option<String>
         _ => return Ok(None),
     };
     let path = pool.slot_path(slot);
-    let seeded = tokio::task::block_in_place(|| pool.seed(slot, clone_from.as_deref()));
+    if pool.committed(slot).is_none() {
+        eprintln!(
+            "tm build-lease: seeding slot {slot} from the shared target directory, bounded at \
+             {}s; past that it starts cold (#9239). `tm build-lease status` shows the seed.",
+            seed_wait.as_secs()
+        );
+    }
+    let seeded =
+        tokio::task::block_in_place(|| pool.seed_within(slot, clone_from.as_deref(), seed_wait));
     let dir = seeded.map(|(dir, _)| dir).map_err(|err| {
         format!(
             "slot directory {} is unusable ({err}), and the inherited CARGO_TARGET_DIR is a \
@@ -479,6 +470,14 @@ fn target_dir(plan: &TargetPlan, slot: u32, cwd: &Path) -> Result<Option<String>
             path.display()
         )
     })?;
+    // #9239: never a staging tree, never an uncommitted seed.
+    if pool.committed(slot).as_ref() != Some(&dir) {
+        return Err(format!(
+            "slot directory {} has no committed seed, so no build runs in it (#9239); \
+             `tm build-lease status` shows the slot",
+            dir.display()
+        ));
+    }
     guard_against_stale_builds(&dir, cwd)?;
     Ok(Some(dir.display().to_string()))
 }

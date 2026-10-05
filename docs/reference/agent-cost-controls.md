@@ -90,6 +90,13 @@ The agent adds no override of its own: the lease applies it. A private slot
 directory avoids lock contention on the shared target dir: a build there does
 not wait on the lock that every other builder on the machine holds in turn.
 
+The first lease on a new slot seeds it with an APFS clone of the shared
+directory. That clone is bounded by the lease wait; past it the slot starts
+cold rather than holding the build
+([#9239](https://github.com/bobmatnyc/trusty-tools/issues/9239)).
+`tm build-lease status` lists the lease holders, each slot's seed state, and
+every seed in progress with its slot, owner pid and age.
+
 `.envrc` is the operator's local mechanism. The declarative one that tm itself
 ships is the `build:` section of `~/.trusty-tools/trusty-mpm/config.yaml`,
 reported by the `rust_build_env` `tm doctor` row

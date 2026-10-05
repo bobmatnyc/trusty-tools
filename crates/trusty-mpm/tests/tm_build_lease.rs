@@ -1268,3 +1268,43 @@ async fn tm_build_lease_logs_its_decision_over_the_socket() {
         "the decision log dialled TCP"
     );
 }
+
+/// #9239: `tm build-lease status` lists a seed in progress with its slot,
+/// owner pid and age, and each slot as seeded or not — and deletes nothing.
+#[test]
+fn build_lease_status_lists_a_seed_in_progress_9239() {
+    let home = home_with_ceiling(2, "");
+    let (_repo, pool, _shared) = widget_repo(home.path());
+    let repo_dir = pool.join("acme/widget");
+    std::fs::create_dir_all(repo_dir.join("slot-0")).expect("slot 0");
+    std::fs::write(
+        repo_dir.join("slot-0/.trusty-slot-seeded"),
+        "#8261 builder slot pool\nstatus: seeded\nseed: ClonedFromShared\n",
+    )
+    .expect("marker");
+    let started = std::time::SystemTime::now() - Duration::from_secs(150);
+    let nanos = started
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after epoch")
+        .as_nanos();
+    let staging = repo_dir.join(format!(".slot-4.seeding.{}.{nanos}", std::process::id()));
+    std::fs::create_dir_all(&staging).expect("a seed in progress");
+
+    let out = build_lease(home.path())
+        .arg("status")
+        .output()
+        .expect("status");
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
+    assert!(text.starts_with("tm build-lease status: "), "{text}");
+    assert!(text.contains("slot-0 seeded"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "seeding slot 4: pid {} (alive), age 2m",
+            std::process::id()
+        )),
+        "{text}"
+    );
+    assert!(staging.is_dir(), "status deletes nothing: {text}");
+}
