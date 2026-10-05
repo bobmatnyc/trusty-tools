@@ -12,6 +12,7 @@
 use serde_json::Value;
 
 use super::byte_cap::{capped_tool_names, measure, DEFAULT_MAX_BYTES, HARD_MAX_BYTES};
+use super::test_daemon::{mock_daemon, unreachable_server, MockDaemon};
 use super::tests::req;
 use super::{tool_descriptors, McpServer};
 
@@ -78,58 +79,28 @@ fn grep_body(count: usize) -> Value {
     })
 }
 
-/// Mock daemon answering the four capped endpoints this module exercises.
-async fn spawn_mock(search: Value, chunks: Value, grep: Value, call_chain: String) -> String {
-    use axum::extract::State;
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-    use std::sync::Arc;
-
-    #[derive(Clone)]
-    struct Mock {
-        search: Arc<Value>,
-        chunks: Arc<Value>,
-        grep: Arc<Value>,
-        call_chain: Arc<String>,
-    }
-
-    async fn search_route(State(s): State<Mock>, Json(_b): Json<Value>) -> Json<Value> {
-        Json((*s.search).clone())
-    }
-    async fn chunks_route(State(s): State<Mock>) -> Json<Value> {
-        Json((*s.chunks).clone())
-    }
-    async fn grep_route(State(s): State<Mock>, Json(_b): Json<Value>) -> Json<Value> {
-        Json((*s.grep).clone())
-    }
-    async fn call_chain_route(State(s): State<Mock>) -> String {
-        (*s.call_chain).clone()
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}/search", post(search_route))
-        .route("/indexes/{id}/chunks", get(chunks_route))
-        .route("/indexes/{id}/grep", post(grep_route))
-        .route("/indexes/{id}/call_chain", get(call_chain_route))
-        .with_state(Mock {
-            search: Arc::new(search),
-            chunks: Arc::new(chunks),
-            grep: Arc::new(grep),
-            call_chain: Arc::new(call_chain),
-        });
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+/// Mock socket daemon answering the four capped methods this module exercises.
+///
+/// #9168: `search.call_chain` answers its prose as a JSON string, as the
+/// daemon's socket method does.
+async fn spawn_mock(search: Value, chunks: Value, grep: Value, call_chain: String) -> MockDaemon {
+    mock_daemon(move |method, _params| {
+        Ok(match method {
+            "search.query" => search.clone(),
+            "search.chunks.list" => chunks.clone(),
+            "search.grep" => grep.clone(),
+            "search.call_chain" => Value::String(call_chain.clone()),
+            _ => Value::Null,
+        })
+    })
+    .await
 }
 
-/// Spawn a daemon serving only the given search body.
-async fn search_daemon(hits: usize) -> McpServer {
-    let base = spawn_mock(search_body(hits), Value::Null, Value::Null, String::new()).await;
-    McpServer::new(base)
+/// Spawn a daemon serving only the given search body. Keep the daemon alive.
+async fn search_daemon(hits: usize) -> (MockDaemon, McpServer) {
+    let daemon = spawn_mock(search_body(hits), Value::Null, Value::Null, String::new()).await;
+    let server = daemon.server();
+    (daemon, server)
 }
 
 /// Dispatch a tool through `tools/call` and return its parsed payload plus
@@ -173,7 +144,7 @@ async fn call_err(server: &McpServer, tool: &str, arguments: Value) -> String {
 /// An over-cap search returns whole hits only, and says how many it withheld.
 #[tokio::test]
 async fn over_cap_search_returns_whole_hits_and_a_withheld_count() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let (payload, len) = call(
         &server,
         "search",
@@ -219,7 +190,7 @@ async fn over_cap_search_returns_whole_hits_and_a_withheld_count() {
 /// `full: true` disables the ceiling for that call and reports nothing missing.
 #[tokio::test]
 async fn full_true_returns_every_hit_with_truncated_false() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let (payload, _) = call(
         &server,
         "search",
@@ -241,7 +212,7 @@ async fn full_true_returns_every_hit_with_truncated_false() {
 /// A `max_bytes` above the hard bound is clamped, and the clamp is reported.
 #[tokio::test]
 async fn max_bytes_above_the_hard_ceiling_is_clamped_and_reported() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let (payload, len) = call(
         &server,
         "search",
@@ -264,7 +235,7 @@ async fn max_bytes_above_the_hard_ceiling_is_clamped_and_reported() {
 /// A `max_bytes` that is not a byte count is rejected, never silently ignored.
 #[tokio::test]
 async fn a_malformed_max_bytes_is_rejected() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let msg = call_err(
         &server,
         "search",
@@ -278,7 +249,7 @@ async fn a_malformed_max_bytes_is_rejected() {
 /// — a non-empty match set never folds to an empty one.
 #[tokio::test]
 async fn a_single_result_larger_than_the_cap_is_returned_alone() {
-    let server = search_daemon(1).await;
+    let (_daemon, server) = search_daemon(1).await;
     let (payload, _) = call(
         &server,
         "search",
@@ -299,8 +270,8 @@ async fn a_single_result_larger_than_the_cap_is_returned_alone() {
 /// chunk, so the next page starts at the first withheld one.
 #[tokio::test]
 async fn list_chunks_cursor_points_at_the_last_returned_chunk() {
-    let base = spawn_mock(Value::Null, chunks_body(10), Value::Null, String::new()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_mock(Value::Null, chunks_body(10), Value::Null, String::new()).await;
+    let server = daemon.server();
     let (payload, _) = call(
         &server,
         "list_chunks",
@@ -329,8 +300,8 @@ async fn list_chunks_cursor_points_at_the_last_returned_chunk() {
 /// size it actually returned instead.
 #[tokio::test]
 async fn list_chunks_offset_paging_resumes_at_the_first_withheld_chunk() {
-    let base = spawn_mock(Value::Null, chunks_body(10), Value::Null, String::new()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_mock(Value::Null, chunks_body(10), Value::Null, String::new()).await;
+    let server = daemon.server();
     let (payload, _) = call(
         &server,
         "list_chunks",
@@ -354,8 +325,8 @@ async fn list_chunks_offset_paging_resumes_at_the_first_withheld_chunk() {
 /// daemon's own top-level `truncated` flag.
 #[tokio::test]
 async fn grep_matches_fold_to_the_ceiling() {
-    let base = spawn_mock(Value::Null, Value::Null, grep_body(10), String::new()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_mock(Value::Null, Value::Null, grep_body(10), String::new()).await;
+    let server = daemon.server();
     let (payload, _) = call(
         &server,
         "grep",
@@ -382,8 +353,8 @@ async fn grep_matches_fold_to_the_ceiling() {
 #[tokio::test]
 async fn get_call_chain_over_the_cap_is_flagged_not_dropped() {
     let tree = "fn handler(req: Request) -> Response\n".repeat(400);
-    let base = spawn_mock(Value::Null, Value::Null, Value::Null, tree.clone()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_mock(Value::Null, Value::Null, Value::Null, tree.clone()).await;
+    let server = daemon.server();
     let (payload, _) = call(
         &server,
         "get_call_chain",
@@ -402,7 +373,7 @@ async fn get_call_chain_over_the_cap_is_flagged_not_dropped() {
 /// A response under the ceiling keeps its shape; only `meta.truncated` is new.
 #[tokio::test]
 async fn an_under_cap_response_is_untouched_apart_from_the_flag() {
-    let server = search_daemon(2).await;
+    let (_daemon, server) = search_daemon(2).await;
     let (payload, len) = call(
         &server,
         "search",
@@ -462,7 +433,7 @@ fn every_capped_tool_advertises_max_bytes_and_full() {
 async fn every_capped_tool_is_routed_by_the_dispatcher() {
     // No daemon behind it: an arg or transport error is fine, METHOD_NOT_FOUND
     // is not — that is the router disowning the name.
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     for name in capped_tool_names() {
         let resp = server
             .dispatch(req(name, serde_json::json!({ "index_id": "demo" })))
@@ -480,7 +451,7 @@ async fn every_capped_tool_is_routed_by_the_dispatcher() {
 /// response fits a ceiling it is over.
 #[tokio::test]
 async fn an_oversized_first_hit_among_many_reports_honestly() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let (payload, len) = call(
         &server,
         "search",
@@ -509,7 +480,7 @@ async fn an_oversized_first_hit_among_many_reports_honestly() {
 /// A `full` that is not a boolean is rejected, exactly like `max_bytes`.
 #[tokio::test]
 async fn a_non_boolean_full_is_rejected() {
-    let server = search_daemon(10).await;
+    let (_daemon, server) = search_daemon(10).await;
     let msg = call_err(
         &server,
         "search",
@@ -523,14 +494,14 @@ async fn a_non_boolean_full_is_rejected() {
 /// key under the cap, and nothing else.
 #[tokio::test]
 async fn under_cap_tools_without_a_meta_block_gain_only_the_flag() {
-    let base = spawn_mock(
+    let daemon = spawn_mock(
         Value::Null,
         chunks_body(2),
         grep_body(2),
         "fn handler(req: Request) -> Response\n".to_string(),
     )
     .await;
-    let server = McpServer::new(base);
+    let server = daemon.server();
 
     for (tool, args) in [
         (
