@@ -1,2 +1,0 @@
-Added
-- `GET /api/search/indexes/{id}/typeahead` now reaches trusty-search's `search.typeahead` socket method instead of answering `501`, so the search dashboard's query box gets suggestions through the console. `limit` arrives as an integer; the typed prefix `q` always stays text, so a prefix such as `404` or `true` is not refused as `invalid_params`. A dead socket is `502`; a malformed parameter is the daemon's `400`.
