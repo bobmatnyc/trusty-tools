@@ -24,7 +24,7 @@ use dashmap::DashMap;
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -188,6 +188,9 @@ pub struct PalaceRegistry {
     /// #8733: this data root's maintenance election. `None` (CLI, stdio,
     /// tests) keeps the pre-#8733 behaviour of always maintaining.
     maintenance: Option<Arc<MaintenanceLease>>,
+    /// #9173: the root the palaces live under, when the owner names it. The
+    /// dream scheduler walks it to reach palaces that are not open.
+    data_root: Option<PathBuf>,
 }
 
 impl Default for PalaceRegistry {
@@ -228,6 +231,7 @@ impl PalaceRegistry {
             open_queue_timeout: crate::memory_core::timeouts::open_queue_timeout(),
             unopenable: Arc::new(DashMap::new()),
             maintenance: None,
+            data_root: None,
         }
     }
 
@@ -301,6 +305,25 @@ impl PalaceRegistry {
     pub fn with_maintenance_lease(mut self, lease: Arc<MaintenanceLease>) -> Self {
         self.maintenance = Some(lease);
         self
+    }
+
+    /// Name the data root this registry's palaces live under (#9173).
+    ///
+    /// Why: the handle cache holds at most `max_open` palaces, so it cannot
+    /// say which palaces exist; the dream scheduler needs the root to reach
+    /// the rest.
+    /// What: consuming builder storing `data_root`; read by [`Self::data_root`].
+    /// Test: `registry_tests::data_root_is_unset_by_default_and_named_by_open_and_the_builder`.
+    #[must_use]
+    pub fn with_data_root(mut self, data_root: &Path) -> Self {
+        self.data_root = Some(data_root.to_path_buf());
+        self
+    }
+
+    /// The data root named by [`Self::with_data_root`], if any.
+    #[must_use]
+    pub fn data_root(&self) -> Option<&Path> {
+        self.data_root.as_deref()
     }
 
     /// The maintenance lease this registry is gated on, if any.
@@ -807,7 +830,7 @@ impl PalaceRegistry {
     pub fn open(data_root: &Path) -> Result<Self> {
         std::fs::create_dir_all(data_root)
             .with_context(|| format!("create registry root {}", data_root.display()))?;
-        let registry = Self::new();
+        let registry = Self::new().with_data_root(data_root);
         let palaces = PalaceStore::list_palaces(data_root)
             .with_context(|| format!("list palaces under {}", data_root.display()))?;
         for palace in palaces {

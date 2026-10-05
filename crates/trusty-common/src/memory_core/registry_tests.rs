@@ -1577,3 +1577,16 @@ fn a_non_maintainer_open_deletes_no_expired_row() {
         "the new maintainer reclaims the expired row"
     );
 }
+
+/// Why (#9173): the dream scheduler reads the data root from the registry to
+/// reach palaces outside the handle cache; a registry built without one, or by
+/// the eager `open`, must answer accordingly.
+#[test]
+fn data_root_is_unset_by_default_and_named_by_open_and_the_builder() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(PalaceRegistry::new().data_root().is_none());
+    let named = PalaceRegistry::new().with_data_root(dir.path());
+    assert_eq!(named.data_root(), Some(dir.path()));
+    let opened = PalaceRegistry::open(dir.path()).unwrap();
+    assert_eq!(opened.data_root(), Some(dir.path()));
+}
