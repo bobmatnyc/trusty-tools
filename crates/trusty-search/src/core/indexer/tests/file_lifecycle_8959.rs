@@ -201,3 +201,54 @@ fn rebuild_due_waits_for_quiet_or_max_wait() {
         );
     }
 }
+
+/// #9179: the real debounce constants on paused tokio time. A write every
+/// second never leaves a 2 s quiet window, so only the 60 s cap fires the
+/// rebuild; after it, a quiet burst rebuilds 2 s after its last write.
+#[tokio::test(start_paused = true)]
+async fn continuous_writes_still_rebuild_at_the_max_wait_cap() {
+    use std::time::Duration;
+
+    use crate::core::indexer::graph_refresh::{GRAPH_REFRESH_MAX_WAIT, GRAPH_REFRESH_QUIET};
+
+    let idx = make_indexer();
+    let base = idx.symbol_graph_full_rebuilds();
+    let tick = Duration::from_secs(1);
+
+    // Write stream: one deferred write, then one ticker pass, each second.
+    let mut fired_at = None;
+    for second in 1..=GRAPH_REFRESH_MAX_WAIT.as_secs() + 5 {
+        idx.mark_symbol_graph_stale();
+        tokio::time::advance(tick).await;
+        if idx
+            .refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+            .await
+        {
+            fired_at = Some(second);
+            break;
+        }
+    }
+    assert_eq!(
+        fired_at,
+        Some(GRAPH_REFRESH_MAX_WAIT.as_secs()),
+        "a continuous write stream must rebuild exactly at the max-wait cap"
+    );
+    assert_eq!(idx.symbol_graph_full_rebuilds(), base + 1);
+    assert!(!idx.symbol_graph_is_stale());
+
+    // Quiet burst: due only once 2 s pass with no write.
+    idx.mark_symbol_graph_stale();
+    tokio::time::advance(tick).await;
+    assert!(
+        !idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+            .await,
+        "inside the quiet window"
+    );
+    tokio::time::advance(tick).await;
+    assert!(
+        idx.refresh_symbol_graph_if_due(GRAPH_REFRESH_QUIET, GRAPH_REFRESH_MAX_WAIT)
+            .await,
+        "the quiet window elapsed"
+    );
+    assert_eq!(idx.symbol_graph_full_rebuilds(), base + 2);
+}

@@ -13,14 +13,18 @@
 //! writes (graph export, call chain) call [`CodeIndexer::fresh_symbol_graph`];
 //! the search KG lane and the status endpoints read the serving graph and
 //! never wait on a rebuild.
-//! Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild` and
-//! `rebuild_due_waits_for_quiet_or_max_wait` in
+//! Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+//! `rebuild_due_waits_for_quiet_or_max_wait` and
+//! `continuous_writes_still_rebuild_at_the_max_wait_cap` in
 //! `indexer::tests::file_lifecycle_8959`; the ticker by
 //! `graph_refresh_tick_rebuilds_a_stale_index_once`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// #9179: tokio's clock, so a paused-time test drives the debounce windows.
+use tokio::time::Instant;
 
 use crate::core::symbol_graph::SymbolGraph;
 
@@ -37,7 +41,7 @@ pub(crate) const GRAPH_REFRESH_MAX_WAIT: Duration = Duration::from_secs(60);
 ///
 /// Why: the write paths and the ticker share one fact — "the serving graph
 /// misses writes since T" — and it must be cheap to set from a write.
-/// What: two millisecond stamps on a monotonic clock (`0` means fresh), a
+/// What: two millisecond stamps on tokio's monotonic clock (`0` means fresh), a
 /// mutex that makes concurrent flushers share one rebuild, and a count of full
 /// rebuilds, which tests and diagnostics read.
 /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
@@ -174,7 +178,8 @@ impl CodeIndexer {
     /// The ticker's entry point: flush when the debounce window says so.
     ///
     /// What: [`Self::flush_symbol_graph`] gated on [`rebuild_due`].
-    /// Test: `graph_refresh_tick_rebuilds_a_stale_index_once`.
+    /// Test: `graph_refresh_tick_rebuilds_a_stale_index_once`,
+    /// `continuous_writes_still_rebuild_at_the_max_wait_cap`.
     pub(crate) async fn refresh_symbol_graph_if_due(
         &self,
         quiet: Duration,
