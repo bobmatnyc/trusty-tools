@@ -220,7 +220,9 @@ pub(crate) fn settle_no_survivors(result: &mut ReviewResult) {
 /// verdict is `Unknown` (no grade, #1474). Otherwise the grade is the default
 /// grade of the verdict the survivors alone derive (`derive_verdict` from
 /// APPROVE), reconciled into the final verdict's band so the two agree.
-/// Test: `run_review_withheld_findings_never_shape_the_grade`.
+/// Test: `run_review_withheld_findings_never_shape_the_grade`,
+/// `run_review_all_withheld_approve_stays_approve_and_exits_zero` (no
+/// survivor: `A+` on APPROVE, `C+` on APPROVE*, AQ-7t).
 pub(crate) fn regrade_from_survivors(result: &mut ReviewResult) {
     let shaped = result
         .withheld_findings

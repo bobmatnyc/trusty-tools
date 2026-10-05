@@ -461,8 +461,10 @@ pub fn gate_posted_findings(result: &mut ReviewResult, filtered: &FilteredDiff) 
 /// array from a fenced JSON block in the body and every dropped `file:line`
 /// from its prose (row 5); and when findings were dropped, applies the
 /// withhold policy (row 4, `verdict::withhold_verdict`). On `Unknown` the
-/// grade is cleared and the note becomes the error.
-/// Test: `plain_approve_is_unknown_when_its_only_finding_is_withheld`.
+/// grade is cleared and the note becomes the error; an approving review keeps
+/// its verdict and has no error (AQ-7t).
+/// Test: `plain_approve_keeps_its_verdict_when_its_only_finding_is_withheld`,
+/// `gate_posted_findings_withholds_when_it_drops_every_finding`.
 pub fn gate_posted_findings_with_index(result: &mut ReviewResult, index: &LineIndex) -> GateReport {
     let report = enforce_line_citations(&mut result.findings, index);
     result
