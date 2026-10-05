@@ -1,0 +1,2 @@
+Fixed
+- The HNSW graph `HnswStore::open` rebuilds is single-layer. `hnsw_rs` seeds its layer generator from OS entropy, so the 16-layer graph got a new hierarchy on every open and two opens of one palace ranked recalls differently above the 4,096-drawer exact-search limit (#9141). The replay stays parallel; identical results across opens hold while the search finds the exact top k, which `hnsw_rs` does not guarantee.

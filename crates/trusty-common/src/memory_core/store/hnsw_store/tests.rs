@@ -793,18 +793,12 @@ fn reference_ranking(pool: &[Vec<f32>], query: &[f32]) -> Vec<usize> {
 /// Test: this test itself is the verification.
 #[test]
 fn exhaustive_scan_returns_every_point_the_graph_holds() {
-    use hnsw_rs::prelude::{DistCosine, Hnsw};
-
     let dim = 64;
     let n = 40usize;
     let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 900 + i as u64)).collect();
-    let index = Hnsw::<f32, DistCosine>::new(
-        HNSW_MAX_NB_CONNECTION,
-        HNSW_INITIAL_CAPACITY,
-        HNSW_MAX_LAYER,
-        HNSW_EF_CONSTRUCTION,
-        DistCosine,
-    );
+    // #9141: the store's own constructor, so the scan is tested on the graph
+    // shape `HnswStore::open` builds.
+    let index = replay::new_index();
     for (i, v) in pool.iter().enumerate() {
         index.insert((v.as_slice(), i));
     }
@@ -1460,5 +1454,87 @@ fn search_above_the_threshold_stops_widening_when_the_graph_is_exhausted() {
     );
     for (u, _) in &hits {
         assert!(survivors.contains(u), "{u} is not a live drawer");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// #9141 — every open of the same rows builds the same graph.
+// ---------------------------------------------------------------------------
+
+/// Write `pool` straight into `VECTORS` / `VECTOR_KEYS` in one transaction, as
+/// drawers `drawer-00000`, `drawer-00001`, ... with vector ids from 1.
+///
+/// Why: thousands of `upsert` calls would each commit a transaction AND insert
+/// into the live graph, which this fixture does not need — the test builds its
+/// graphs by reopening.
+fn seed_rows(db: &Database, pool: &[Vec<f32>]) {
+    let wtx = db.begin_write().expect("begin_write");
+    {
+        let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+        let mut keys = wtx.open_table(VECTOR_KEYS).expect("vector_keys");
+        for (i, v) in pool.iter().enumerate() {
+            let id = i as u64 + 1;
+            let encoded = postcard::to_allocvec(v).expect("encode");
+            vectors
+                .insert(id, encoded.as_slice())
+                .expect("insert vector");
+            keys.insert(format!("drawer-{i:05}").as_str(), id)
+                .expect("insert key");
+        }
+    }
+    wtx.commit().expect("commit");
+}
+
+/// Why (#9141): two opens of one palace ranked recalls differently — a query's
+/// correct drawer ranked 4 on one open and fell out of the top 10 on another.
+/// `hnsw_rs` seeds its layer RNG from OS entropy, so a 16-layer graph got a new
+/// hierarchy per open (see `replay`).
+/// What: seeds a palace past [`exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS`] (so
+/// `search` takes the graph arm) and one below it (the exact scan), and opens
+/// each twice over the same rows. It asserts two things:
+/// 1. Every point of both graphs sits on layer 0. This is what the fix
+///    guarantees. On a 16-layer graph each point lands above layer 0 with
+///    probability 1/16, so even the 300-row palace fails with probability
+///    above 1 - 1e-8.
+/// 2. Both opens return the same top-10 ids, order and distance bits for 24
+///    queries. The parallel replay does not guarantee this; it holds while
+///    both searches find the exact top 10, which held in 65 of 65 runs.
+///
+/// The threshold is the real constant: the fixture writes 4,500 rows directly
+/// instead of lowering it, because the store has no hook for the threshold.
+/// Test: this test itself is the verification.
+#[test]
+fn reopening_a_palace_answers_every_query_identically() {
+    let dim = 16;
+    for n in [300, exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 404] {
+        let (_dir, store) = open_store(dim);
+        let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 77_000 + i as u64)).collect();
+        seed_rows(&store.db, &pool);
+        let first = HnswStore::open(Arc::clone(&store.db), dim).expect("first open");
+        let second = HnswStore::open(Arc::clone(&store.db), dim).expect("second open");
+        for (name, open) in [("first", &first), ("second", &second)] {
+            let index = open.index.read();
+            assert_eq!(index.get_nb_point(), n, "n={n} {name} open: point count");
+            assert_eq!(
+                index.get_max_level_observed(),
+                0,
+                "n={n} {name} open: a point sits above layer 0, so the OS-seeded \
+                 layer RNG shapes the graph"
+            );
+        }
+        let bits = |hits: &[(String, f32)]| -> Vec<(String, u32)> {
+            hits.iter().map(|(u, d)| (u.clone(), d.to_bits())).collect()
+        };
+        for q in 0..24u64 {
+            let query = spread_vec(dim, 9_000_000 + q);
+            let a = first.search(&query, 10).expect("search first");
+            let b = second.search(&query, 10).expect("search second");
+            assert_eq!(a.len(), 10, "n={n} query {q}: expected a full top 10");
+            assert_eq!(
+                bits(&a),
+                bits(&b),
+                "n={n} query {q}: two opens of the same rows ranked differently"
+            );
+        }
     }
 }
