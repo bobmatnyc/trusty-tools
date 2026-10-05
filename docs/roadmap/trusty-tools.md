@@ -108,7 +108,8 @@ this section is generated.
 trusty-git-analytics and trusty-audit moved to their own repository: [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
 
 Ship dates are anticipated targets taken from GitHub milestone due dates, not
-commitments. TBD means the milestone has no due date yet.
+commitments. TBD means a versioned milestone has no due date yet. Backlog
+milestones carry no ship date.
 
 <!-- BEGIN GENERATED: roadmap -->
 
@@ -154,7 +155,7 @@ Other open milestones:
 
 - [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 2026-10-16 · 93 of 113 items done
 - [Session, worktree & daemon lifecycle · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/64) · 2026-11-13 · 71 of 83 items done
-- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · TBD · 737 of 773 items done
+- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · Backlog · 737 of 773 items done
 
 ### trusty-secrets
 
@@ -170,7 +171,7 @@ Open milestones:
 
 - [trusty agents mvp](https://github.com/bobmatnyc/trusty-tools/milestone/86) · 2026-10-23 · 22 of 29 items done
 - [1.0 — assistant platform](https://github.com/bobmatnyc/trusty-tools/milestone/83) · 2026-10-30 · 36 of 40 items done
-- [Backlog · agents](https://github.com/bobmatnyc/trusty-tools/milestone/73) · TBD · 102 of 113 items done
+- [Backlog · agents](https://github.com/bobmatnyc/trusty-tools/milestone/73) · Backlog · 102 of 113 items done
 
 ### trusty-code
 
@@ -180,7 +181,7 @@ Open milestones:
 - [R1 · Reliable independent core](https://github.com/bobmatnyc/trusty-tools/milestone/54) · 2026-11-06 · 19 of 22 items done
 - [R2 · Shared instructions, agents & skills](https://github.com/bobmatnyc/trusty-tools/milestone/59) · 2026-11-06 · 14 of 16 items done
 - [v0.7.0 · Claude Code TUI parity + PM-delegated coding tasks](https://github.com/bobmatnyc/trusty-tools/milestone/87) · 2026-11-06 · 29 of 44 items done
-- [Backlog · code](https://github.com/bobmatnyc/trusty-tools/milestone/76) · TBD · 15 of 20 items done
+- [Backlog · code](https://github.com/bobmatnyc/trusty-tools/milestone/76) · Backlog · 15 of 20 items done
 
 ### trusty-common
 
@@ -193,20 +194,20 @@ Open milestones:
 Open milestones:
 
 - [0.12.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/104) · 2026-10-09 · 1 of 2 items done
-- [Backlog · console](https://github.com/bobmatnyc/trusty-tools/milestone/77) · TBD · 21 of 24 items done
+- [Backlog · console](https://github.com/bobmatnyc/trusty-tools/milestone/77) · Backlog · 21 of 24 items done
 
 ### trusty-mcp
 
 Open milestones:
 
-- [Backlog · mcp](https://github.com/bobmatnyc/trusty-tools/milestone/80) · TBD · 4 of 7 items done
+- [Backlog · mcp](https://github.com/bobmatnyc/trusty-tools/milestone/80) · Backlog · 4 of 7 items done
 
 ### trusty-memory
 
 Open milestones:
 
 - [0.28.4 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/127) · 2026-10-16 · 1 of 6 items done
-- [Backlog · memory (triaged)](https://github.com/bobmatnyc/trusty-tools/milestone/81) · TBD · 20 of 32 items done
+- [Backlog · memory (triaged)](https://github.com/bobmatnyc/trusty-tools/milestone/81) · Backlog · 20 of 32 items done
 
 ### trusty-review
 
@@ -220,15 +221,15 @@ Open milestones:
 
 - [0.54.8 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/129) · 2026-10-16 · 6 of 7 items done
 - [0.54.9 · feature](https://github.com/bobmatnyc/trusty-tools/milestone/130) · 2026-10-16 · 3 of 4 items done
-- [Backlog · search](https://github.com/bobmatnyc/trusty-tools/milestone/58) · TBD · 72 of 77 items done
+- [Backlog · search](https://github.com/bobmatnyc/trusty-tools/milestone/58) · Backlog · 72 of 77 items done
 
 ### Across the workspace
 
 Open milestones:
 
 - [Issue management](https://github.com/bobmatnyc/trusty-tools/milestone/94) · 2026-11-06 · 11 of 14 items done
-- [Backlog · analyze/review](https://github.com/bobmatnyc/trusty-tools/milestone/74) · TBD · 15 of 24 items done
-- [Backlog · optimize](https://github.com/bobmatnyc/trusty-tools/milestone/121) · TBD · 18 of 32 items done
+- [Backlog · analyze/review](https://github.com/bobmatnyc/trusty-tools/milestone/74) · Backlog · 15 of 24 items done
+- [Backlog · optimize](https://github.com/bobmatnyc/trusty-tools/milestone/121) · Backlog · 18 of 32 items done
 
 <!-- END GENERATED: roadmap -->
 

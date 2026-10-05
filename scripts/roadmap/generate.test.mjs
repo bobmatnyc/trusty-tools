@@ -402,3 +402,19 @@ test("ship date: due_on renders as YYYY-MM-DD, null or bad renders TBD, in both 
   assert.match(out, /Anticipated ship date: 2026-11-27 · 1 of 4 items done/);
   assert.match(out, /\/milestone\/2\) · TBD · 1 of 4 items done/);
 });
+
+test("ship date: a Backlog milestone shows Backlog with no date and no TBD; a versioned null stays TBD", () => {
+  assert.equal(shipDateText({ title: "Backlog · search", due_on: null }), "Backlog");
+  assert.equal(shipDateText({ title: "Backlog · search", due_on: "2026-11-27T00:00:00Z" }), "Backlog");
+  assert.equal(shipDateText({ title: "trusty-search 0.54.9", due_on: null }), "TBD");
+
+  const backlog = milestoneFixture({
+    number: 3,
+    title: "Backlog · mpm/core",
+    description: "",
+    html_url: "https://github.com/bobmatnyc/trusty-tools/milestone/3",
+  });
+  const out = renderRegion([backlog]);
+  assert.match(out, /milestone\/3\) · Backlog · 1 of 4 items done/);
+  assert.doesNotMatch(out, /TBD/);
+});

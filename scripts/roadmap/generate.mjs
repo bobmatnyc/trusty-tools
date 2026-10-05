@@ -51,7 +51,8 @@
  *
  * Every milestone shows its anticipated ship date: the GitHub `due_on` as
  * YYYY-MM-DD, or `TBD` when null (owner instruction 2026-10-05). A date is
- * never derived or invented.
+ * never derived or invented. A milestone titled `Backlog …` shows `Backlog`
+ * instead, with no date and no `TBD`.
  *
  * A crate name that prefixes a milestone's title is dropped from the rendered
  * heading, since the crate section already names it (`trusty-mpm 2.0.0` ->
@@ -310,7 +311,15 @@ function groupByCrate(milestones) {
  * The anticipated ship date: the milestone's GitHub `due_on` as YYYY-MM-DD
  * (UTC), or `TBD` when it is null, empty or unparseable. Never derived.
  */
+function isBacklog(milestone) {
+  return /^backlog\b/i.test(String(milestone.title ?? "").trim());
+}
+
+/** A Backlog milestone is not a ship target (owner ruling 2026-10-05): "Backlog", no date, no TBD. */
 function shipDateText(milestone) {
+  if (isBacklog(milestone)) {
+    return "Backlog";
+  }
   const due = milestone.due_on;
   if (typeof due !== "string" || due === "") {
     return "TBD";
@@ -333,7 +342,7 @@ function renderMilestoneBlock(milestone, crate) {
     parts.push(milestone.roadmapBody);
   }
   parts.push(
-    `Anticipated ship date: ${shipDateText(milestone)} · ${progressText(milestone)} · [follow on GitHub](${milestone.html_url})`,
+    `${isBacklog(milestone) ? "" : "Anticipated ship date: "}${shipDateText(milestone)} · ${progressText(milestone)} · [follow on GitHub](${milestone.html_url})`,
   );
   return parts.join("\n\n");
 }
