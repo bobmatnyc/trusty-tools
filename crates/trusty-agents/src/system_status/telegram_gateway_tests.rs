@@ -153,10 +153,8 @@ fn telegram_gateway_status_a_rescan_preserves_a_polling_row() {
 fn telegram_gateway_status_snapshot_reports_a_live_lock_holder() {
     clear();
     let dir = tempfile::tempdir().expect("tempdir");
-    let key = crate::telegram::BotKey::from_token(FIXTURE_TOKEN);
-    let path = dir.path().join(format!("telegram-{}.pid", key.digest()));
     // Held for the whole assertion — closing the file releases the lock.
-    let _guard = crate::telegram::acquire_gateway_lock_for_test(path.clone())
+    let _guard = crate::telegram::acquire_gateway_lock_for_test(gateway_lock_path(dir.path()))
         .expect("a free lock must be acquirable");
 
     let held = snapshot_at(dir.path());
@@ -167,13 +165,136 @@ fn telegram_gateway_status_snapshot_reports_a_live_lock_holder() {
     );
 
     drop(_guard);
-    let free = snapshot_at(dir.path());
+    // #9220: release is eventual — a sibling test's child can still hold a
+    // copy of the descriptor between `fork` and `exec`.
+    let free = lock_holders_once_released(dir.path());
     assert!(
-        free.lock_holders.is_empty(),
-        "closing the descriptor releases the lock: {:?}",
-        free.lock_holders
+        free.is_empty(),
+        "closing the descriptor releases the lock: {free:?}"
     );
     clear();
+}
+
+/// How long a released gateway lock may still read as held.
+const RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The fixture bot's gateway lock file inside `dir`.
+fn gateway_lock_path(dir: &std::path::Path) -> std::path::PathBuf {
+    let key = crate::telegram::BotKey::from_token(FIXTURE_TOKEN);
+    dir.join(format!("telegram-{}.pid", key.digest()))
+}
+
+/// The lock holders at `dir` once they clear, or the last read at the deadline.
+///
+/// Why (#9220): every lib test is a thread of one process, so a sibling's
+/// child holds a copy of the lock descriptor between `fork` and `exec`, and a
+/// `flock` stays held until its last copy closes. Release right after the
+/// guard drops is therefore eventual, not immediate.
+/// What: re-reads `snapshot_at(dir).lock_holders` every 10 ms until it is
+/// empty or [`RELEASE_DEADLINE`] passes, and returns the last read.
+/// Test: `telegram_gateway_lock_release_waits_out_a_child_in_its_fork_exec_window`.
+fn lock_holders_once_released(dir: &std::path::Path) -> Vec<i32> {
+    let deadline = std::time::Instant::now() + RELEASE_DEADLINE;
+    loop {
+        let holders = snapshot_at(dir).lock_holders;
+        if holders.is_empty() || std::time::Instant::now() >= deadline {
+            return holders;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// #9220 regression: a child forked while the gateway lock is held keeps the
+/// lock until it execs, and the release check waits that out.
+///
+/// Why: this is the CI interleaving made certain — the child is parked in its
+/// fork-to-exec window when the guard drops.
+/// What: the child's `pre_exec` hook signals on a pipe, then sleeps 300 ms; the
+/// guard drops only after the signal arrives. An immediate release assertion
+/// failed here every run.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn telegram_gateway_lock_release_waits_out_a_child_in_its_fork_exec_window() {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let guard = crate::telegram::acquire_gateway_lock_for_test(gateway_lock_path(dir.path()))
+        .expect("a free lock must be acquirable");
+    let (mut forked, signal) = std::io::pipe().expect("pipe");
+    let spawner = std::thread::spawn(move || {
+        let fd = signal.as_raw_fd();
+        let mut child = std::process::Command::new("true");
+        // SAFETY: the hook runs in the forked child before `exec` and calls
+        // only `write` and `usleep`, both async-signal-safe.
+        unsafe {
+            child.pre_exec(move || {
+                let _ = libc::write(fd, b"f".as_ptr().cast(), 1);
+                let _ = libc::usleep(300_000);
+                Ok(())
+            });
+        }
+        let status = child.status();
+        // An early spawn failure closes the pipe, so the read below fails
+        // instead of hanging.
+        drop(signal);
+        status
+    });
+    let mut byte = [0_u8; 1];
+    forked
+        .read_exact(&mut byte)
+        .expect("the child forked and holds a copy of the lock descriptor");
+
+    drop(guard);
+    let holders = lock_holders_once_released(dir.path());
+    let status = spawner.join().expect("spawner thread");
+    assert!(
+        holders.is_empty(),
+        "the lock outlived the child's exec: {holders:?}"
+    );
+    assert!(status.expect("child ran").success());
+}
+
+/// #9220 guard: the gateway lock descriptor does not survive `exec`.
+///
+/// Why: the polling in [`lock_holders_once_released`] tolerates a child in its
+/// fork-to-exec window. A descriptor that leaked through `exec` would instead
+/// hold the lock for the child's whole life — a real second-poller bug — and
+/// this test stays red at any deadline.
+/// What: holds the lock, spawns `sleep 30` (`spawn` returns after `exec`),
+/// drops the guard, and requires release within [`RELEASE_DEADLINE`]. The
+/// child is killed and reaped on every exit path, panics included.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn telegram_gateway_lock_does_not_survive_into_an_execed_child() {
+    /// Kills and reaps the child when dropped, so no process outlives the test.
+    struct KillOnDrop(std::process::Child);
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let guard = crate::telegram::acquire_gateway_lock_for_test(gateway_lock_path(dir.path()))
+        .expect("a free lock must be acquirable");
+    let _child = KillOnDrop(
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep"),
+    );
+
+    drop(guard);
+    let holders = lock_holders_once_released(dir.path());
+    assert!(
+        holders.is_empty(),
+        "the lock descriptor leaked into an exec'd child: {holders:?}"
+    );
 }
 
 /// No bot token and no digest of one may appear anywhere an operator or an
