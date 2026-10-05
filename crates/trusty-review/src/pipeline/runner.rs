@@ -619,7 +619,8 @@ pub async fn run_review(
     };
 
     info!(
-        model = %llm_resp.model,
+        // #9200: never log an ARN model's account id.
+        model = %crate::llm::bedrock::arn::mask_account_ids(&llm_resp.model),
         input_tokens = llm_resp.input_tokens,
         output_tokens = llm_resp.output_tokens,
         cost_usd = llm_resp.cost_usd,

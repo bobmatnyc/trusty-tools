@@ -94,6 +94,30 @@ async fn converse_request_carries_caller_and_role_metadata() {
     assert_eq!(sent, expected);
 }
 
+/// #9200: a call whose model is a Bedrock ARN carries the same #9216 tags.
+/// The ARN must first pass the constructor's model-id check, which rejected
+/// every ARN before ARN support.
+#[tokio::test]
+async fn arn_request_carries_caller_and_role_metadata() {
+    let arn = "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751";
+    let provider = BedrockProvider::new(arn).expect("an ARN is a valid Bedrock model id");
+    assert_eq!(provider.region(), "us-west-2");
+
+    let mut req = request(Some(crate::pipeline::prompt::review_response_schema()));
+    req.model = arn.to_string();
+    let sent = metadata_sent_for(&req).await;
+
+    assert_eq!(
+        sent.get("caller").map(String::as_str),
+        Some("trusty-review")
+    );
+    assert_eq!(
+        sent.get("crate_version").map(String::as_str),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(sent.get("role").map(String::as_str), Some("reviewer"));
+}
+
 /// A request with no schema still names the caller, and carries no role.
 #[tokio::test]
 async fn schemaless_request_carries_caller_without_role() {

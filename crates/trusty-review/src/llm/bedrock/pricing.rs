@@ -7,9 +7,9 @@
 //! Test: `bedrock_cost_estimate_*` and `bedrock_normalize_model_family_*`
 //! tests live in `bedrock/tests.rs`.
 
-use tracing::debug;
+use tracing::{debug, warn};
 
-use super::INFERENCE_PROFILE_PREFIXES;
+use super::{INFERENCE_PROFILE_PREFIXES, arn};
 
 /// The inference-profile prefix billed at the global on-demand rate.
 const GLOBAL_PROFILE_PREFIX: &str = "global.";
@@ -39,13 +39,32 @@ impl FamilyRates {
 /// AWS bills a geographic inference profile (`us.` and the other geo prefixes)
 /// at the "Regional" rate, 10% above the `global.` rate for Claude 4.5 and
 /// later, so the prefix must pick the rate before it is stripped.
-/// What: reads whether `model` carries the `global.` prefix, strips any
-/// inference-profile prefix, normalises date/version suffixes via
-/// [`normalize_model_family`], and returns the matching family's global or
-/// geo rate. Unknown ids → `(0.0, 0.0)` with a debug log.
+/// What: a Bedrock model ARN is first replaced by the model id it embeds
+/// (#9200); an application-inference-profile ARN embeds none, so it is
+/// unpriced: `(0.0, 0.0)` with a warn log naming it unpriced. Then reads
+/// whether the id carries the `global.` prefix, strips any inference-profile
+/// prefix, normalises date/version suffixes via [`normalize_model_family`],
+/// and returns the matching family's global or geo rate. Unknown ids →
+/// `(0.0, 0.0)` with a debug log.
 /// Test: `bedrock_cost_estimate_matches_price_list_per_profile`,
-/// `bedrock_cost_estimate_haiku_date_versioned`.
+/// `bedrock_cost_estimate_haiku_date_versioned`,
+/// `arn_pricing_resolves_the_embedded_model_or_reports_unpriced`.
 pub(super) fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
+    // #9200: price an ARN as the model it names; never guess a hidden one.
+    let model = match arn::parse(model) {
+        None => model,
+        Some(parsed) => match parsed.priced_model() {
+            Some(embedded) => embedded,
+            None => {
+                warn!(
+                    model = %arn::mask_account_ids(model),
+                    "Bedrock application inference profile is unpriced: its ARN does not \
+                     name the model it runs, so cost_usd 0.0 is not a measured cost"
+                );
+                return (0.0, 0.0);
+            }
+        },
+    };
     let is_global = model.starts_with(GLOBAL_PROFILE_PREFIX);
     let after_geo = INFERENCE_PROFILE_PREFIXES
         .iter()
