@@ -30,6 +30,10 @@ pub mod user_config;
 #[cfg(test)]
 #[path = "core_kg_tests.rs"]
 mod core_kg_tests;
+// #9141: `recall_all` in `core_recall.rs` keeps the empty-palace skip.
+#[cfg(test)]
+#[path = "core_recall_tests.rs"]
+mod core_recall_tests;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;

@@ -10,7 +10,8 @@
 //! user-scope rulings leg here: these surfaces return a bare JSON array, which
 //! has nowhere to report a failed rulings palace.
 //! Test: `demotion_applies_on_every_recall_surface`
-//! (`tests/recall_temporal_rank.rs`); `recall_entry_json_hoists_drawer_fields`.
+//! (`tests/recall_temporal_rank.rs`); `recall_entry_json_hoists_drawer_fields`;
+//! `recall_all_never_opens_an_empty_palace` (#9141).
 
 use serde_json::{json, Value};
 use trusty_common::memory_core::retrieval::{
