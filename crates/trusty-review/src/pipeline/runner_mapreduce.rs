@@ -71,7 +71,7 @@ pub(super) struct MapReduceRun {
 ///
 /// Why: this is the REAL fix for over-cap diffs — every file is reviewed with
 /// its own LLM call so no changed code is ever invisible (the #1638 symptom).
-/// What: runs split → map → reduce via `run_map_reduce`, then folds the
+/// What: runs split → map → reduce via `run_map_reduce_with_wiped`, then folds the
 /// `ReducedReview` into `result` and runs the SAME post-LLM chain as the unified
 /// path (grade floor, coverage floor, verification, grade clamp, inline comments,
 /// finalize).  When the reduce stage assessed NOTHING (no reviewed chunks), the

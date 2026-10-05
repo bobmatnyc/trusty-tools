@@ -362,6 +362,20 @@ pub struct GateReport {
     pub dropped: usize,
     /// Findings kept after at least one citation moved to the verified line.
     pub reanchored: usize,
+    /// #8949: findings kept as advisory because only part of the code they
+    /// quote is in the diff.
+    ///
+    /// Why: kept for API compatibility (owner ruling 7t). #9188 B withholds
+    /// such a finding instead of keeping it, so the gate itself never keeps
+    /// one; a kept finding that already carried `citation_partial` still
+    /// counts.
+    /// What: the number of kept findings with `Finding::citation_partial` set.
+    /// Test: `gate_report_partial_counts_only_kept_partial_findings`.
+    #[deprecated(
+        since = "0.39.0",
+        note = "#9188 B: a partly quoted finding is withheld, not kept; read `dropped` and `withheld_findings` (`missing_fragment`)"
+    )]
+    pub partial: usize,
     /// `file:line` of every dropped finding that cited a line, so the review
     /// body can be scrubbed of it (#8905 row 5).
     pub withheld: Vec<String>,
@@ -411,6 +425,10 @@ pub fn enforce_line_citations(findings: &mut Vec<Finding>, index: &LineIndex) ->
             Err(error) => Some((error.to_string(), None)),
         };
         let Some((reason, fragment)) = cause else {
+            #[allow(deprecated)] // #9188: keep the deprecated count truthful.
+            {
+                report.partial += usize::from(f.citation_partial);
+            }
             kept.push(f);
             continue;
         };

@@ -157,6 +157,26 @@ fn a_finding_with_one_real_and_one_illustrative_snippet_is_withheld() {
     );
 }
 
+/// Deprecated `GateReport::partial` keeps its #8949 meaning, the number of
+/// kept findings marked `citation_partial`: a partly quoted finding is
+/// withheld now (#9188 B), so it does not count; a kept finding that already
+/// carries the mark does.
+#[test]
+#[allow(deprecated)]
+fn gate_report_partial_counts_only_kept_partial_findings() {
+    let partly_quoted = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
+    let mut marked = finding("src/billing.rs", Some(SUM_LINE), SUM_QUOTE);
+    marked.citation_partial = true;
+    let mut findings = vec![
+        finding("src/billing.rs", Some(SUM_LINE), partly_quoted),
+        marked,
+    ];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert_eq!(report.dropped, 1, "the partly quoted finding is withheld");
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(report.partial, 1, "only the kept, marked finding counts");
+}
+
 /// #8949 fix 1: a drop names the fragment that failed and keeps the finding.
 #[test]
 fn a_dropped_finding_names_its_missing_snippet() {
