@@ -131,7 +131,8 @@ pub(crate) async fn forget_file_hash(
 impl crate::core::CodeIndexer {
     /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
     /// then its content hash. Returns the chunks removed; the caller rebuilds
-    /// the graph once, and only when something was removed.
+    /// the graph once, and only when something was removed. Stamps the
+    /// durable graph-dirty mark first (#8959).
     ///
     /// A method, not a free function, so `scripts/check_teardown_guard.sh`
     /// sees every `.purge_file(` call site: both writes are durable and each
@@ -150,6 +151,9 @@ impl crate::core::CodeIndexer {
         rel: &str,
         mode: RedbChunkDelete,
     ) -> anyhow::Result<usize> {
+        // #8959: durable stale mark before anything leaves, so a crash before
+        // the caller's per-pass rebuild still rebuilds at the next boot.
+        let _graph_write = self.begin_graph_write_for_removal(rel).await?;
         let removed = self.remove_file_no_kg_rebuild_with(rel, mode).await?;
         forget_file_hash(index_id, self, rel).await?;
         Ok(removed)

@@ -213,6 +213,23 @@ impl CodeIndexer {
         Ok(guard)
     }
 
+    /// [`Self::begin_graph_write`] for removing `file_path`, or `None` when
+    /// the removal cannot change the graph: a `skip_kg` index, or a path
+    /// holding no chunks and no entity list (#8959).
+    /// Test: `a_purge_without_its_rebuild_is_rebuilt_after_a_reopen`.
+    pub(crate) async fn begin_graph_write_for_removal(
+        &self,
+        file_path: &str,
+    ) -> anyhow::Result<Option<GraphWriteGuard<'_>>> {
+        if self.skip_kg
+            || (self.chunk_ids_for_file(file_path).await.is_empty()
+                && !self.entities.read().await.contains_key(file_path))
+        {
+            return Ok(None);
+        }
+        self.begin_graph_write().await.map(Some)
+    }
+
     /// Remove the durable dirty mark after a rebuild persisted its graph,
     /// unless a write the rebuild may have missed stamped it (#8959).
     /// A failure is logged: the mark stays, which costs one extra rebuild.

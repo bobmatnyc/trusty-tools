@@ -350,6 +350,52 @@ async fn a_deferred_rebuild_survives_a_reopen() {
     assert!(!idx.symbol_graph_is_stale(), "a rebuilt graph boots fresh");
 }
 
+/// #8959: `purge_file`, the no-rebuild removal the watcher rescan and the git
+/// reconcile pass call per file, stamps the durable mark before it removes
+/// anything. Fails with the stamp removed from `purge_file_with`: the reopened
+/// index booted the old persisted graph as current and served the purged
+/// file's symbol.
+#[tokio::test]
+async fn a_purge_without_its_rebuild_is_rebuilt_after_a_reopen() {
+    const ID: &str = "lifecycle-8959-purge-reopen";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let redb = dir.path().join("index.redb");
+    {
+        let idx = corpus_indexer(ID, &redb);
+        idx.index_files_batch(&[
+            (PATH.to_string(), OLD.to_string()),
+            (
+                "src/keep.rs".to_string(),
+                "fn heron_keep() {}\n".to_string(),
+            ),
+        ])
+        .await
+        .expect("seed batch persists the graph");
+        let id = crate::core::registry::IndexId::new(ID);
+        let removed = idx.purge_file(&id, PATH).await.expect("purge");
+        assert!(removed > 0, "the fixture must purge chunks");
+        // Dropped before the caller's per-pass rebuild: a crash in the pass.
+    }
+
+    let idx = corpus_indexer(ID, &redb);
+    idx.load_chunks_from_redb().await.expect("warm boot");
+    assert!(
+        idx.symbol_graph_is_stale(),
+        "the reopened index must schedule the rebuild the purge owed"
+    );
+    assert!(
+        idx.refresh_symbol_graph_if_due(std::time::Duration::ZERO, std::time::Duration::MAX)
+            .await
+    );
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.resolve_symbol("zebra_quokka_old"),
+        SymbolMatch::NotFound,
+        "the purged file's symbol is gone after the scheduled rebuild"
+    );
+    assert_ne!(graph.resolve_symbol("heron_keep"), SymbolMatch::NotFound);
+}
+
 /// #8959 finding 2, error arm: a failed redb delete of the superseded ids
 /// fails the write before the commit and leaves the old chunks in place, and
 /// a retry then succeeds. Fails at 35ccee8252: the failure was only logged,

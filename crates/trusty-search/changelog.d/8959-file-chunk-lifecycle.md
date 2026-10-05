@@ -6,3 +6,4 @@ Fixed
 - A tombstone or sops-encrypted `index_file` write now fails when the file's chunks cannot be deleted from the durable corpus. Before, it answered success and a restart brought the old chunks back, for a sops file its plaintext; a retry now removes them (#8959).
 - Concurrent `index_file` writes to the same path now end with only the last write's chunks on that path (#8959).
 - `GET /indexes/:id/graph`, `call_chain` and `graph/neighbors` hold the index teardown guard while they flush pending graph writes, so a concurrent `DELETE` cannot remove the data directory during the rebuild (#8959).
+- A file the watcher rescan or the git reconcile pass removes now stores the stale mark before its chunks leave. Before, a crash before that pass rebuilt the symbol graph booted the old graph, which still answered the removed file's symbols (#8959).

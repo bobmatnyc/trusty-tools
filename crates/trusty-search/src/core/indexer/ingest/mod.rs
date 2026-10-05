@@ -399,16 +399,9 @@ impl CodeIndexer {
             // when it is decrypted again; the graph is rebuilt only when chunks
             // actually left.
             let id = crate::core::registry::IndexId::new(self.index_id.as_str());
-            // #8959: durable stale mark before the purge removes anything; the
-            // guard sets the in-memory mark for the deferred rebuild.
-            let _graph_write =
-                if self.skip_kg || self.chunk_ids_for_file(file_path).await.is_empty() {
-                    None
-                } else {
-                    Some(self.begin_graph_write().await?)
-                };
-            // #8959: fail closed, or a failed redb delete answered
-            // `SopsEncrypted` and the plaintext chunks came back at the next boot.
+            // #8959: `purge_file_with` stamps the durable stale mark. Fail
+            // closed, or a failed redb delete answered `SopsEncrypted` and the
+            // plaintext chunks came back at the next boot.
             let removed = self
                 .purge_file_with(&id, file_path, super::RedbChunkDelete::FailClosed)
                 .await?;
