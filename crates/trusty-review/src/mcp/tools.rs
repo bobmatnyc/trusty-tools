@@ -105,7 +105,7 @@ pub fn tool_descriptors() -> Value {
                         "description": "Override the reviewer model slug. \
                                        Use a `bedrock/<id>` prefix to force AWS Bedrock, \
                                        `openrouter/<id>` for OpenRouter. \
-                                       Default: us.anthropic.claude-sonnet-4-6 on Bedrock.",
+                                       Default: us.anthropic.claude-sonnet-5-5 on Bedrock.",
                         "examples": [
                             "bedrock/us.anthropic.claude-sonnet-4-6",
                             "bedrock/us.anthropic.claude-haiku-4-5",
