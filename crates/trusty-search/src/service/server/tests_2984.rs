@@ -60,6 +60,7 @@ fn create_req_with_skip_kg(
         skip_kg,
         skip_vector: None,
         defer_embed: None,
+        colocated: None,
         extra_skip_dirs: None,
         data_file_max_bytes: None,
         allow_sensitive_path: false,

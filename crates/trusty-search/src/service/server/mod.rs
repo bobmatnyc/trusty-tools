@@ -117,6 +117,9 @@ mod tests_8499;
 // #8499 round 2: store placement, registration claims, relocate vs reindex.
 #[cfg(test)]
 mod registration_8499_tests;
+// #8147: `POST /indexes` honours `colocated: false`.
+#[cfg(all(test, unix))]
+mod colocated_8147_tests;
 // #8777: a created index is stamped at the current schema version.
 #[cfg(test)]
 mod tests_schema_stamp_8777;

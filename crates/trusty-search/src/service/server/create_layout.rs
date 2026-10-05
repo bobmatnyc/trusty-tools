@@ -4,13 +4,20 @@
 //! Why: #8499 moved new indexes out of the work tree into the per-id data dir.
 //! Two registrations over one root no longer share a redb file, so redb's
 //! single-open no longer catches the #2336 check-then-act race; a claim does.
-//! Relocate takes the same claim for its new root (#8499 round 3).
+//! Relocate takes the same claim for its new root (#8499 round 3). #8147 adds
+//! the caller's `colocated: false` opt-out and its refusals.
 //! Test: `service::server::tests_8499`,
 //! `create_index_concurrent_same_root_only_one_wins`,
-//! `relocate_races_into_one_root_register_exactly_once`.
+//! `relocate_races_into_one_root_register_exactly_once`,
+//! `service::server::colocated_8147_tests`.
 
-use crate::service::storage_layout::{is_write_refusal, StorageLayout};
+use super::router::CreateIndexRequest;
+use crate::core::registry::IndexHandle;
+use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+use crate::service::persistence::PersistedIndex;
+use crate::service::storage_layout::{is_write_refusal, layout_of, StorageLayout};
 use axum::http::StatusCode;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -167,15 +174,30 @@ pub(super) fn corpus_open_refusal(
 ///
 /// Why (#8499): see [`StorageLayout::for_new_registration`]. Fail closed — a
 /// store that would land in the repository is refused with `409`, never
-/// redirected and never hidden by editing the tracked `.gitignore`.
-/// What: `Ok(layout)`; a guard refusal → `409`; any other failure → `500`.
-/// Both bodies carry an `error` naming #8499.
-/// Test: `create_refuses_when_the_store_would_land_in_the_work_tree`.
+/// redirected and never hidden by editing the tracked `.gitignore`. #8147: a
+/// `colocated: false` request never adopts `<root>/.trusty-search/`, and an
+/// adopted one the daemon cannot write is named, not reported as a corpus
+/// open failure.
+/// What: `colocated == Some(false)` →
+/// [`StorageLayout::for_new_data_dir_registration`]; otherwise
+/// [`StorageLayout::for_new_registration`]. `Ok(layout)`; a guard refusal →
+/// `409`; any other failure → `500`, both naming #8499; a `Colocated` result
+/// whose directory is unwritable → the `403` of [`preflight_colocated_root`].
+/// Test: `create_refuses_when_the_store_would_land_in_the_work_tree`,
+/// `colocated_false_over_a_read_only_colocated_corpus_registers_in_the_data_dir`,
+/// `omitted_colocated_over_a_read_only_colocated_corpus_is_a_403`.
 pub(super) fn registration_layout(
     id: &str,
     root: &Path,
-) -> Result<StorageLayout, (StatusCode, serde_json::Value)> {
-    StorageLayout::for_new_registration(id, root).map_err(|e| {
+    colocated: Option<bool>,
+) -> Result<StorageLayout, Refusal> {
+    // #8147: `colocated: false` skips adoption of an in-repo corpus.
+    let resolved = if colocated == Some(false) {
+        StorageLayout::for_new_data_dir_registration(id, root)
+    } else {
+        StorageLayout::for_new_registration(id, root)
+    };
+    let layout = resolved.map_err(|e| {
         let status = if is_write_refusal(&e) {
             StatusCode::CONFLICT
         } else {
@@ -185,5 +207,180 @@ pub(super) fn registration_layout(
         let error =
             format!("no safe place for this index's store outside the work tree: {e:#} (#8499)");
         (status, serde_json::json!({ "error": error }))
-    })
+    })?;
+    if layout == StorageLayout::Colocated {
+        preflight_colocated_root(id, root)?;
+    }
+    Ok(layout)
+}
+
+/// A refusal: the HTTP status and its JSON body.
+pub(super) type Refusal = (StatusCode, serde_json::Value);
+
+/// Refuse a colocated registration whose `<root>/.trusty-search/` the daemon
+/// cannot write (#8147).
+///
+/// Why: the indexer build failed on such a directory with a generic `500
+/// corpus open failed`, which named neither the permission problem nor the
+/// `colocated: false` way out.
+/// What: creates and removes a probe file in the directory. A permission or
+/// read-only-filesystem error is a `403` whose `error` starts `permission
+/// denied:` and names the directory and the opt-out. Any other error is left
+/// for the indexer build to report, as before. Nothing is registered.
+/// Test: `omitted_colocated_over_a_read_only_colocated_corpus_is_a_403`.
+fn preflight_colocated_root(id: &str, root: &Path) -> Result<(), Refusal> {
+    let dir = root.join(COLOCATED_DIR_NAME);
+    let probe = dir.join(format!(".write-probe-{}", std::process::id()));
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe);
+    let e = match opened {
+        Ok(_) => {
+            if let Err(e) = std::fs::remove_file(&probe) {
+                tracing::warn!("create_index: could not remove {}: {e}", probe.display());
+            }
+            return Ok(());
+        }
+        Err(e) => e,
+    };
+    if !matches!(
+        e.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+    ) {
+        return Ok(());
+    }
+    tracing::warn!(
+        "create_index: refusing '{id}' — cannot write {}: {e} (#8147)",
+        dir.display()
+    );
+    let error = format!(
+        "permission denied: the daemon cannot write {:?} ({e}). Register with \
+         colocated=false to keep this index in the daemon's data directory and leave \
+         that directory untouched (#8147)",
+        dir.display()
+    );
+    Err((
+        StatusCode::FORBIDDEN,
+        serde_json::json!({ "error": error, "id": id }),
+    ))
+}
+
+/// Refuse `colocated: false` for an id registered colocated at this root
+/// (#8147).
+///
+/// Why: a registration never changes an existing index's layout. Answering
+/// `200 created:false`, or building an empty data-dir store beside the
+/// recorded colocated one, would tell the caller its opt-out took effect.
+/// What: `Ok` unless the request says `colocated: false`. A `resident` handle
+/// (already checked to be at this root) is judged by its live layout; with
+/// none, the id's `indexes.toml` row is, since a lazy load can move an id
+/// between the in-memory stores mid-request. A colocated row at another root
+/// is the #3993 recreate-after-move case and does not conflict. An unreadable
+/// registry is a `500`: the recorded layout is unknown. Takes a short indexer
+/// read lock, so the caller must hold no indexer guard.
+/// Test: `colocated_false_against_a_colocated_registration_is_a_409`,
+/// `colocated_false_conflict_is_a_409_while_the_embedder_warms`,
+/// `colocated_false_with_an_unreadable_registry_is_a_500`.
+pub(super) async fn refuse_layout_change(
+    req: &CreateIndexRequest,
+    resident: Option<&IndexHandle>,
+) -> Result<(), Refusal> {
+    if req.colocated != Some(false) {
+        return Ok(());
+    }
+    let registered_colocated = match resident {
+        Some(handle) => layout_of(handle).await == StorageLayout::Colocated,
+        None => find_registry_entry(&req.id)
+            .map_err(|e| registry_read_refusal(&req.id, &e))?
+            .is_some_and(|row| {
+                row.colocated
+                    && super::helpers::identifies_same_root(&row.root_path, &req.root_path)
+            }),
+    };
+    if !registered_colocated {
+        return Ok(());
+    }
+    tracing::warn!(
+        "create_index: refusing '{}' — registered colocated, request asked for \
+         colocated=false (#8147)",
+        req.id
+    );
+    let error = format!(
+        "index '{}' is registered with colocated=true (<root>/.trusty-search/); this \
+         request asked for colocated=false. A registration never changes an existing \
+         index's storage layout: omit `colocated`, or delete the index and register it \
+         again (#8147)",
+        req.id
+    );
+    Err((
+        StatusCode::CONFLICT,
+        serde_json::json!({
+            "error": error,
+            "id": req.id,
+            "registered_colocated": true,
+            "requested_colocated": false,
+        }),
+    ))
+}
+
+/// The `500` for a `colocated: false` create whose `indexes.toml` could not be
+/// read (#8147).
+fn registry_read_refusal(id: &str, e: &anyhow::Error) -> Refusal {
+    tracing::error!("create_index: refusing '{id}' — indexes.toml unreadable: {e:#} (#8147)");
+    let error = format!(
+        "could not read indexes.toml to find the recorded storage layout of '{id}' ({e:#}); \
+         nothing was registered. Fix or restore the registry file and retry (#8147)"
+    );
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({ "error": error, "id": id }),
+    )
+}
+
+/// Read `id`'s `indexes.toml` row; in test builds an id armed through
+/// `registry_fault::ReadFault` fails instead, so a test never plants a bad
+/// file in the process-global `TRUSTY_DATA_DIR`.
+fn find_registry_entry(id: &str) -> anyhow::Result<Option<PersistedIndex>> {
+    #[cfg(test)]
+    if registry_fault::is_armed(id) {
+        anyhow::bail!("injected indexes.toml read failure for '{id}'");
+    }
+    crate::service::persistence::find_index_registry_entry(id)
+}
+
+/// Per-id `indexes.toml` read-fault seam for [`find_registry_entry`], test
+/// builds only (#8147).
+#[cfg(test)]
+pub(super) mod registry_fault {
+    use std::collections::BTreeSet;
+    use std::sync::{Mutex, MutexGuard};
+
+    static ARMED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+    fn armed() -> MutexGuard<'static, BTreeSet<String>> {
+        ARMED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(in crate::service::server) fn is_armed(id: &str) -> bool {
+        armed().contains(id)
+    }
+
+    /// Fails every registry read for one id until dropped.
+    pub(in crate::service::server) struct ReadFault(String);
+
+    impl ReadFault {
+        pub(in crate::service::server) fn arm(id: &str) -> Self {
+            armed().insert(id.to_string());
+            Self(id.to_string())
+        }
+    }
+
+    impl Drop for ReadFault {
+        fn drop(&mut self) {
+            armed().remove(&self.0);
+        }
+    }
 }
