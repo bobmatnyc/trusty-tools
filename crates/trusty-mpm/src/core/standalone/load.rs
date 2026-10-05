@@ -10,14 +10,16 @@
 //! `<managed_root>/projects/<alias>/repo/`, runs `prepare_session` from the
 //! session-launch core, writes `.trusty-mpm/managed.toml`, and returns the
 //! absolute path to `repo/`.
-//! Test: unit tests for the marker-file write logic; git operations are
-//! integration-only (require network/git binary).
+//! Test: unit tests for the marker-file write logic; the clone path against a
+//! local bare repo in `load_alias_strips_a_stored_token_before_clone_and_marker`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use trusty_common::url_userinfo::{scp_userinfo_end, strip_url_secret, userinfo_end};
 
 use super::registry::ManagedRegistry;
 
@@ -61,30 +63,49 @@ pub struct ManagedMarker {
 /// The trust seed (step 7) writes ONLY into `<claude_config_dir>` — never to
 /// `~/.claude.json` or `~/.claude/` (isolation invariant, WI-7).
 ///
-/// #9124: an entry `tm register` stored before #9124 keeps any token embedded
-/// in its URL, and this clones from the URL as stored, so the token reaches
-/// the clone's `.git/config`. Such entries are not migrated; `tm register
-/// --force <url-without-token> <alias>` replaces one.
+/// #9227: an entry `tm register` stored before #9124 can still embed a token
+/// in its URL. The clone, the marker and `prepare_session` get [`clone_url`]'s
+/// stripped form, so no new clone records the token; a URL whose secret cannot
+/// be stripped is refused before anything is cloned. `registry.json` itself is
+/// not rewritten, and a clone made before this fix keeps its `.git/config`.
 ///
-/// Test: `test_marker_write_round_trip` (marker); git operations require network.
+/// Test: `load_alias_strips_a_stored_token_before_clone_and_marker`,
+/// `load_alias_refuses_a_url_whose_token_cannot_be_stripped`,
+/// `test_marker_write_round_trip`.
 pub fn load_alias(
     alias: &str,
     managed_root: &Path,
     claude_config_dir: &Path,
+) -> anyhow::Result<PathBuf> {
+    load_alias_with_git_env(alias, managed_root, claude_config_dir, &[])
+}
+
+/// [`load_alias`] with extra environment for the `git clone` child.
+///
+/// Why: a test points the clone at a sandboxed git config and HOME without
+/// mutating the test process's environment.
+/// What: the whole of [`load_alias`]; `git_env` is set on the clone `Command`.
+/// Test: `load_alias_strips_a_stored_token_before_clone_and_marker`.
+fn load_alias_with_git_env(
+    alias: &str,
+    managed_root: &Path,
+    claude_config_dir: &Path,
+    git_env: &[(&str, &OsStr)],
 ) -> anyhow::Result<PathBuf> {
     let registry = ManagedRegistry::load(managed_root)
         .with_context(|| format!("failed to load registry from {}", managed_root.display()))?;
     let entry = registry
         .get(alias)
         .with_context(|| format!("alias '{alias}' is not registered"))?;
-    let url = entry.url.clone();
+    // #9227: strip once, before any use; the raw stored URL is not used again.
+    let url = clone_url(alias, &entry.url)?;
     let git_ref = entry.git_ref.clone();
 
     let project_dir = managed_root.join("projects").join(alias);
     let repo_dir = project_dir.join("repo");
 
     if !repo_dir.exists() {
-        clone_repo(&url, &project_dir)?;
+        clone_repo(&url, &project_dir, git_env)?;
     } else {
         pull_ff_only(&repo_dir);
     }
@@ -113,14 +134,60 @@ pub fn load_alias(
     Ok(repo_dir)
 }
 
+/// The registry URL with its secret removed; an error when one may remain.
+///
+/// Why (#9227): a URL stored before #9124 can embed a token, and `git clone`
+/// writes the URL it is given into `.git/config`. `strip_url_secret` returns a
+/// URL it cannot parse unchanged, so its output is checked again.
+/// What: applies [`strip_url_secret`], then refuses the result when the
+/// over-reading [`userinfo_end`] or [`scp_userinfo_end`] still finds userinfo
+/// that is on an `http(s)` scheme or holds a `:password`. Over-reading fails
+/// closed: `https://host:8080/@scope/pkg` is refused too. The error names the
+/// URL only through `redact_url`.
+/// Test: `clone_url_strips_or_refuses`,
+/// `load_alias_refuses_a_url_whose_token_cannot_be_stripped`.
+fn clone_url(alias: &str, stored: &str) -> anyhow::Result<String> {
+    let url = strip_url_secret(stored);
+    if may_carry_secret(&url) {
+        anyhow::bail!(
+            "refusing to load '{alias}': its registered URL '{}' may carry a \
+             credential that cannot be stripped; re-register it with \
+             `tm register --force <url-without-credentials> {alias}`",
+            crate::core::remote_url_redact::redact_url(stored)
+        );
+    }
+    Ok(url.into_owned())
+}
+
+/// Whether `url` still has userinfo on `http(s)`, or a `:password` on any
+/// scheme, as the over-reading boundary finds it.
+fn may_carry_secret(url: &str) -> bool {
+    let (userinfo, http) = match url.find("://") {
+        Some(at) => {
+            let tail = &url[at + 3..];
+            let Some(cut) = userinfo_end(tail) else {
+                return false;
+            };
+            let scheme = url[..at].rsplit('+').next().unwrap_or_default();
+            let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+            (&tail[..cut], http)
+        }
+        None => match scp_userinfo_end(url) {
+            Some(at) => (&url[..at], false),
+            None => return false,
+        },
+    };
+    http || userinfo.contains(':')
+}
+
 /// Clone the repository into `<project_dir>/repo/`.
 ///
 /// Why: `git clone` is the authoritative way to get a fresh checkout;
 /// shelling out avoids a heavy libgit2 dependency.
 /// What: runs `git clone --depth 1 <url> repo/` in `project_dir`, creating
-/// the directory first.
-/// Test: integration-only (requires git binary + network).
-fn clone_repo(url: &str, project_dir: &Path) -> anyhow::Result<()> {
+/// the directory first; `git_env` is added to the child's environment.
+/// Test: `load_alias_strips_a_stored_token_before_clone_and_marker`.
+fn clone_repo(url: &str, project_dir: &Path, git_env: &[(&str, &OsStr)]) -> anyhow::Result<()> {
     std::fs::create_dir_all(project_dir).with_context(|| {
         format!(
             "failed to create project directory {}",
@@ -129,6 +196,7 @@ fn clone_repo(url: &str, project_dir: &Path) -> anyhow::Result<()> {
     })?;
     let status = Command::new("git")
         .args(["clone", "--depth", "1", url, "repo"])
+        .envs(git_env.iter().copied())
         .current_dir(project_dir)
         .status()
         .context("failed to spawn git clone")?;
@@ -263,6 +331,7 @@ fn write_marker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use trusty_common::credentials::test_sandbox::CredentialSandbox;
 
     /// RAII guard that clears an env var for the duration of a test and restores
     /// the prior value on drop.
@@ -444,6 +513,196 @@ mod tests {
         assert_eq!(
             marker.git_ref, "default",
             "git_ref must be the 'default' sentinel, not a literal branch name"
+        );
+    }
+
+    /// #9227: a stripped URL loads; one with an unstrippable secret is refused.
+    #[test]
+    fn clone_url_strips_or_refuses() {
+        for (row, (stored, want)) in [
+            ("https://u:T@github.com/o/r", Some("https://github.com/o/r")),
+            ("git@github.com:o/r.git", Some("git@github.com:o/r.git")),
+            ("ssh://git@h:2222/o/r", Some("ssh://git@h:2222/o/r")),
+            ("u:T@host:o/r", Some("u@host:o/r")),
+            ("/srv/dir@x/repo", Some("/srv/dir@x/repo")),
+            ("https://u:/T@host/o/r", None),
+            ("https://u:1234/T@host/o/r", None),
+            // Fail closed: the `@` after a port cannot be told from a password.
+            ("https://host:8080/@scope/pkg", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let got = clone_url("a", stored).ok();
+            assert!(got.as_deref() == want, "row {row} gave the wrong verdict");
+        }
+    }
+
+    /// Sentinel token for the #9227 clone tests; never printed by an assert.
+    const TOKEN: &str = "tm9227SentinelTok";
+
+    /// A sandbox with a local bare repo that a credentialed `https` URL clones
+    /// from offline, through `url.<base>.insteadOf` in a private git config.
+    struct GitSandbox {
+        _dir: tempfile::TempDir,
+        home: PathBuf,
+        gitconfig: PathBuf,
+        managed_root: PathBuf,
+        claude_config_dir: PathBuf,
+    }
+
+    impl GitSandbox {
+        fn new() -> Self {
+            let dir = crate::test_support::hermetic_temp_dir();
+            let root = dir.path().to_path_buf();
+            let home = root.join("home");
+            let remotes = root.join("remotes");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::create_dir_all(&remotes).unwrap();
+            let gitconfig = root.join("gitconfig");
+            let base = format!("file://{}/", remotes.display());
+            std::fs::write(
+                &gitconfig,
+                format!(
+                    "[init]\n\tdefaultBranch = main\n[commit]\n\tgpgsign = false\n\
+                     [url \"{base}\"]\n\tinsteadOf = https://example.invalid/\n\
+                     \tinsteadOf = https://x-access-token:{TOKEN}@example.invalid/\n\
+                     \tinsteadOf = https://x-access-token:/{TOKEN}@example.invalid/\n"
+                ),
+            )
+            .unwrap();
+            let sb = Self {
+                _dir: dir,
+                home,
+                gitconfig,
+                managed_root: root.join("managed"),
+                claude_config_dir: root.join("claude-config"),
+            };
+            let work = root.join("work");
+            sb.git(&root, &["init", "-q", "work"]);
+            std::fs::write(work.join("README.md"), "fixture\n").unwrap();
+            sb.git(&work, &["add", "README.md"]);
+            sb.git(
+                &work,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-qm",
+                    "i",
+                ],
+            );
+            sb.git(
+                &root,
+                &["clone", "-q", "--bare", "work", "remotes/o9227/r9227.git"],
+            );
+            sb
+        }
+
+        /// The environment every child git gets: no system, user or
+        /// environment-injected config. `GIT_CONFIG_COUNT=0` also covers the
+        /// sandbox clearing `GIT_CONFIG_KEY_<n>` but not the count.
+        fn env(&self) -> [(&'static str, &OsStr); 5] {
+            [
+                ("HOME", self.home.as_os_str()),
+                ("GIT_CONFIG_GLOBAL", self.gitconfig.as_os_str()),
+                ("GIT_CONFIG_NOSYSTEM", OsStr::new("1")),
+                ("GIT_CONFIG_COUNT", OsStr::new("0")),
+                ("GIT_CONFIG_PARAMETERS", OsStr::new("")),
+            ]
+        }
+
+        fn git(&self, dir: &Path, args: &[&str]) {
+            let status = Command::new("git")
+                .args(args)
+                .envs(self.env())
+                .current_dir(dir)
+                .status()
+                .expect("spawn git");
+            assert!(status.success(), "fixture git {:?} failed", args[0]);
+        }
+
+        fn register(&self, alias: &str, url: &str) {
+            let mut reg = ManagedRegistry::load(&self.managed_root).unwrap();
+            reg.add(alias, url, false).unwrap();
+            reg.save().unwrap();
+        }
+
+        fn load(&self, alias: &str) -> anyhow::Result<PathBuf> {
+            load_alias_with_git_env(
+                alias,
+                &self.managed_root,
+                &self.claude_config_dir,
+                &self.env(),
+            )
+        }
+    }
+
+    /// #9227: a registry entry stored with a token clones through the stripped
+    /// URL, so neither `.git/config` nor `managed.toml` records the token, and
+    /// `registry.json` keeps the entry as stored.
+    #[test]
+    #[serial_test::serial]
+    fn load_alias_strips_a_stored_token_before_clone_and_marker() {
+        // `prepare_session` resolves `dirs::home_dir()` and writes there.
+        let _creds = CredentialSandbox::enter();
+        let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        let sb = GitSandbox::new();
+        let raw = format!("https://x-access-token:{TOKEN}@example.invalid/o9227/r9227.git");
+        let clean = "https://example.invalid/o9227/r9227.git";
+        sb.register("tok9227", &raw);
+
+        let repo = sb.load("tok9227").expect("load_alias clones the fixture");
+
+        let git_config = std::fs::read_to_string(repo.join(".git").join("config")).unwrap();
+        assert!(!git_config.contains(TOKEN), ".git/config holds the token");
+        assert!(
+            !git_config.contains('@') && git_config.contains(&format!("url = {clean}")),
+            "remote.origin.url is not the userinfo-free URL"
+        );
+        let marker_text =
+            std::fs::read_to_string(repo.join(".trusty-mpm").join("managed.toml")).unwrap();
+        let marker: ManagedMarker = toml::from_str(&marker_text).unwrap();
+        assert!(
+            !marker_text.contains(TOKEN) && !marker_text.contains('@'),
+            "managed.toml holds userinfo"
+        );
+        assert!(
+            marker.url == clean,
+            "managed.toml url is not the stripped URL"
+        );
+        let reg = ManagedRegistry::load(&sb.managed_root).unwrap();
+        assert!(
+            reg.get("tok9227").unwrap().url == raw,
+            "registry.json entry was rewritten"
+        );
+    }
+
+    /// #9227: a token `strip_url_secret` cannot remove is refused before any
+    /// clone, and the error never echoes it.
+    #[test]
+    #[serial_test::serial]
+    fn load_alias_refuses_a_url_whose_token_cannot_be_stripped() {
+        let _creds = CredentialSandbox::enter();
+        let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        let sb = GitSandbox::new();
+        // A raw `/` after an empty port reads as `host:` to the stripper.
+        sb.register(
+            "bad9227",
+            &format!("https://x-access-token:/{TOKEN}@example.invalid/o9227/r9227.git"),
+        );
+
+        let Err(err) = sb.load("bad9227") else {
+            panic!("load_alias cloned a URL whose token it could not strip");
+        };
+
+        let text = format!("{err:#} {err:?}");
+        assert!(!text.contains(TOKEN), "the refusal echoes the token");
+        assert!(
+            !sb.managed_root.join("projects").join("bad9227").exists(),
+            "a refused load created the project directory"
         );
     }
 }
