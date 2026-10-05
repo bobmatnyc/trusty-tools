@@ -36,7 +36,7 @@ Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
 `trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`, `trusty-kb`,
 `trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
-`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-sld-lint`,
+`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-secrets`, `trusty-sld-lint`,
 `tc-services`, `tga`, `cto-assistant`.
 
 Subsystem labels for paths no crate owns: `ci`, `daemon`, `deps`, `dx`,
