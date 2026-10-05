@@ -294,7 +294,7 @@ async fn manager_adopt_existing_reuses_name_freed_by_decommissioned_record() {
 /// What: adopts a pane under `tm-recycled` (captures `pane-old`), then adopts
 /// the SAME name again after the driver reports a DIFFERENT live `pane_id`
 /// (`pane-new`) — simulating the first pane dying and a new one taking its
-/// name. Asserts the second adoption succeeds as `tm-recycled-2` and the live
+/// name. Asserts the second adoption succeeds as `tm-recycled-02` and the live
 /// tmux session was physically renamed to match.
 /// Test: itself.
 #[tokio::test]
@@ -332,15 +332,15 @@ async fn manager_adopt_existing_suffixes_recycled_name() {
         .await
         .expect("a recycled name must auto-suffix, never reject");
 
-    assert_eq!(second.tmux_name, "tm-recycled-2");
+    assert_eq!(second.tmux_name, "tm-recycled-02");
     assert_ne!(first.id, second.id);
     assert!(
         fake.rename_calls
             .lock()
             .unwrap()
             .iter()
-            .any(|(o, n)| o == "tm-recycled" && n == "tm-recycled-2"),
-        "expected rename_session(tm-recycled -> tm-recycled-2), got {:?}",
+            .any(|(o, n)| o == "tm-recycled" && n == "tm-recycled-02"),
+        "expected rename_session(tm-recycled -> tm-recycled-02), got {:?}",
         fake.rename_calls.lock().unwrap()
     );
     // #3692 review MEDIUM: the stale record's pane is provably dead (a
@@ -355,8 +355,8 @@ async fn manager_adopt_existing_suffixes_recycled_name() {
 }
 
 /// A THIRD adoption attempt for the same recycled name must skip the
-/// now-taken `-2` and land on `-3` — the smallest free ordinal, not a loop
-/// back to `-2` or a failure (issue #3692).
+/// now-taken `-02` and land on `-03` — the smallest free ordinal, not a loop
+/// back to `-02` or a failure (issue #3692; two digits since #9238).
 /// Test: itself.
 #[tokio::test]
 async fn manager_adopt_existing_recycled_name_skips_to_next_free_ordinal() {
@@ -385,8 +385,8 @@ async fn manager_adopt_existing_recycled_name_skips_to_next_free_ordinal() {
             false,
         )
         .await
-        .expect("second adopt auto-suffixes to -2");
-    assert_eq!(second.tmux_name, "tm-recycled-2");
+        .expect("second adopt auto-suffixes to -02");
+    assert_eq!(second.tmux_name, "tm-recycled-02");
 
     *fake.pane_id_override.lock().unwrap() = Some("pane-3".into());
     let third = mgr
@@ -398,8 +398,8 @@ async fn manager_adopt_existing_recycled_name_skips_to_next_free_ordinal() {
             false,
         )
         .await
-        .expect("third adopt must skip the taken -2 and land on -3");
-    assert_eq!(third.tmux_name, "tm-recycled-3");
+        .expect("third adopt must skip the taken -02 and land on -03");
+    assert_eq!(third.tmux_name, "tm-recycled-03");
 }
 
 /// A store failure AFTER the recycled-name tmux rename must roll the rename
@@ -410,8 +410,8 @@ async fn manager_adopt_existing_recycled_name_skips_to_next_free_ordinal() {
 /// What: adopts a pane under `tm-roll`, simulates the name being recycled
 /// (different live `pane_id`), makes the store directory read-only so the
 /// next persist fails, adopts again, and asserts the call errored, the
-/// driver saw BOTH the forward rename (`tm-roll` → `tm-roll-2`) and its
-/// compensating rollback (`tm-roll-2` → `tm-roll`), and the live session
+/// driver saw BOTH the forward rename (`tm-roll` → `tm-roll-02`) and its
+/// compensating rollback (`tm-roll-02` → `tm-roll`), and the live session
 /// answers to its ORIGINAL name again.
 /// Test: this function IS the test.
 #[cfg(unix)]
@@ -468,13 +468,13 @@ async fn manager_adopt_existing_rolls_back_tmux_rename_when_store_write_fails() 
     assert!(
         renames
             .iter()
-            .any(|(o, n)| o == "tm-roll" && n == "tm-roll-2"),
+            .any(|(o, n)| o == "tm-roll" && n == "tm-roll-02"),
         "the forward rename must have happened: {renames:?}"
     );
     assert!(
         renames
             .iter()
-            .any(|(o, n)| o == "tm-roll-2" && n == "tm-roll"),
+            .any(|(o, n)| o == "tm-roll-02" && n == "tm-roll"),
         "the compensating rollback rename must have happened: {renames:?}"
     );
 }
