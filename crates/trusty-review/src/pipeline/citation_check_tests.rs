@@ -661,7 +661,7 @@ fn bracket_finding(bracket: &str) -> Finding {
     Finding::new(
         "src/a.rs",
         "logic-error",
-        &format!("The sum can overflow {bracket}."),
+        format!("The sum can overflow {bracket}."),
         "s",
         0.9,
         Effort::High,
