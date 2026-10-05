@@ -240,6 +240,7 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
         ("writes", crate::service::rpc::writes::METHODS),
         ("streams", crate::service::rpc::streams::METHODS),
         ("warm", crate::service::rpc::warm::METHODS),
+        ("project", crate::service::rpc::project::METHODS),
     ] {
         for method in names {
             assert!(

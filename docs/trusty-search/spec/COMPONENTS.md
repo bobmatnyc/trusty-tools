@@ -207,10 +207,11 @@ over stdio and HTTP/SSE so an LLM client (Claude Code) can drive code search.
 - `sse` (`src/mcp/sse.rs`) — axum `POST /mcp` + `GET /mcp/sse`.
 - `openrpc` (`src/mcp/openrpc.rs`) — OpenRPC descriptor.
 
-**Current state.** ✅ 19 tools: `search_code`, `search_kg`, `search_semantic`,
-`search_lexical`, `search_all`, `search_similar`, `grep`, `get_call_chain`,
-`index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`,
-`reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`.
+**Current state.** ✅ Tools include `search_code`, `search_kg`,
+`search_semantic`, `search_lexical`, `search_all`, `search_similar`, `grep`,
+`get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`,
+`delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`,
+`chat`. There is no `upgrade` tool (#9169).
 The `grep` tool now accepts `max_count` as a ripgrep-parity alias for
 `max_results` (#447). stdout reserved for JSON-RPC; logs to stderr.
 

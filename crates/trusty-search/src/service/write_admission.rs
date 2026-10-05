@@ -134,7 +134,7 @@ pub(crate) async fn gate(
     }
 }
 
-/// Purge an excluded pushed path: chunks, content hash, then one graph rebuild.
+/// Purge an excluded pushed path: chunks, content hash, then a stale graph mark.
 ///
 /// Why (#8922): a hash left behind makes a reindex hash-skip the file once the
 /// policy admits it again. The reindex keys hashes by root-relative path, so an
@@ -145,12 +145,11 @@ async fn purge_pushed(
     path: &str,
 ) -> anyhow::Result<usize> {
     use crate::service::reindex::hash::forget_file_hash;
+    // #8959: `purge_file` stamps the durable stale mark; the graph-refresh
+    // ticker rebuilds, so no whole-corpus pass per write.
     let removed = indexer.purge_file(&handle.id, path).await?;
     if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
         forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
-    }
-    if removed > 0 {
-        indexer.rebuild_symbol_graph_now().await;
     }
     Ok(removed)
 }

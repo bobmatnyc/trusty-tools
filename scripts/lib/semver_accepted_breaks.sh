@@ -148,12 +148,15 @@ semver_break_entries() {
   esc="$(printf '\033')"
   clean="$(sed "s/${esc}\[[0-9;]*m//g" "$log")"
 
-  n_check="$(printf '%s\n' "$clean" | grep -c "^CHECK " || true)"
-  if [ "$n_check" -ne 1 ] || ! printf '%s\n' "$clean" | grep -q "^CHECK ${pkg}: "; then
+  # Here-strings, never `printf "$clean" | grep -q`: grep -q exits at its first
+  # match, the writer of a log past a pipe buffer takes SIGPIPE, and pipefail
+  # turns a match into a failure (same fix as check5_semver's here-string).
+  n_check="$(grep -c "^CHECK " <<<"$clean" || true)"
+  if [ "$n_check" -ne 1 ] || ! grep -q "^CHECK ${pkg}: " <<<"$clean"; then
     printf 'ERROR\texpected exactly one "CHECK %s:" comparison, found %s\n' "$pkg" "$n_check"
     return 1
   fi
-  if printf '%s\n' "$clean" | grep -Eq '^NO (VERDICT|INVENTORY) '; then
+  if grep -Eq '^NO (VERDICT|INVENTORY) ' <<<"$clean"; then
     printf 'ERROR\tthe gate also reported NO VERDICT, so part of the API was never compared\n'
     return 1
   fi
@@ -306,7 +309,7 @@ semver_accept_source() {
 # (prints [WARN]), 1 to stop (prints [FAIL]).
 semver_accept_decide() {
   local log="$1" pkg="$2" version="$3"
-  local rel decl work lints n_items lint items tab compared_to rc=0
+  local rel decl work lints n_items lint items tab compared_to checked rc=0
   tab="$(printf '\t')"
   rel="$(semver_accept_rel "$pkg" "$version")"
   work="$(mktemp -d "${TMPDIR:-/tmp}/preflight-accept.XXXXXX")"
@@ -328,7 +331,9 @@ semver_accept_decide() {
 
   # The declaration binds to the version the gate COMPARED (the manifest's), not
   # only to the version argument; an unreadable CHECK line is refused too.
-  compared_to="$(sed -n "s/^CHECK ${pkg}: [^ ]* -> \([^ ]*\) .*/\1/p" "$log" | head -1)"
+  # First line by parameter expansion, not `| head -1` (SIGPIPE under pipefail).
+  compared_to="$(sed -n "s/^CHECK ${pkg}: [^ ]* -> \([^ ]*\) .*/\1/p" "$log")"
+  compared_to="${compared_to%%$'\n'*}"
   if [ "$compared_to" != "$version" ]; then
     echo "names version '${version}', but the gate compared ${pkg} '${compared_to:-<unknown>}' (the manifest version) — the breaks it lists belong to that release" >> "${work}/err"
   fi
@@ -376,7 +381,8 @@ semver_accept_decide() {
   echo "       Accepted lints: ${lints}" >&2
   echo "       Reason: ${SEMVER_ACCEPT_REASON}" >&2
   echo "       Declaration: ${SEMVER_ACCEPT_PROVENANCE}" >&2
-  echo "       Gate compared: $(grep '^CHECK ' "$log" | head -1)" >&2
+  checked="$(grep '^CHECK ' "$log" || true)"
+  echo "       Gate compared: ${checked%%$'\n'*}" >&2
   echo "       Accept rows:" >&2
   while IFS="$tab" read -r lint items; do
     if grep -Fxq "UNUSED${tab}${lint}${tab}${items}" "${work}/match"; then

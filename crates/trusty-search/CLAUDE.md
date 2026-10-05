@@ -846,8 +846,12 @@ git diff --name-status "$PREV_HEAD" HEAD | while IFS=$'\t' read -r status path n
 done
 ```
 
-Note: `index_file` triggers a full `rebuild_symbol_graph` per call
-(`core/indexer/ingest/mod.rs`) — fine for a handful of files per push. There is
+Note: `index_file` replaces the file's prior chunks, and neither it nor
+`remove_file` rebuilds the symbol graph per call (#8959, #9179). Each marks the
+graph stale; the daemon rebuilds it once the index has been quiet for 2 s, or
+after 60 s under a continuous write stream. Search reads the last built graph
+in the meantime; `GET /graph`, `call_chain` and `graph/neighbors` flush pending
+writes first. There is
 currently no HTTP/MCP-exposed batch variant (the internal
 `index_files_batch_no_rebuild` fast path is only used by the full-reindex
 pipeline); a consumer that needs to apply a LARGE batch of per-file changes at
@@ -1029,7 +1033,7 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **20 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1054,7 +1058,6 @@ this table is generated from it, not maintained by hand.
 | `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
 | `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
-| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
 <!-- END GENERATED: mcp-tools -->
 
 ## Stack

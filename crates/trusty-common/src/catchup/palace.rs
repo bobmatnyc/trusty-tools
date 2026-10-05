@@ -111,6 +111,23 @@ fn is_absent_palace(e: &anyhow::Error) -> bool {
         .is_some_and(crate::memory_rpc::MemoryRpcError::is_not_found)
 }
 
+/// The stderr line for a `memory_list` call that failed other than as an
+/// absent palace (#9026).
+///
+/// Why: the line printed `{e}`, which renders only the outermost context —
+/// "call memory_list on the trusty-memory daemon at …" — so a timeout, a
+/// hardened-connect refusal of the socket file, and a dead socket all read
+/// the same, and a socket the client refused before sending anything looked
+/// like an unreachable daemon.
+/// What: names the socket and the whole `anyhow` cause chain (`{e:#}`).
+/// Test: `the_unreachable_warning_carries_the_whole_cause_chain_9026`.
+fn memory_list_failed_warning(memory_socket: &std::path::Path, e: &anyhow::Error) -> String {
+    format!(
+        "catchup: memory_list on trusty-memory at {} failed: {e:#}",
+        memory_socket.display()
+    )
+}
+
 /// Fetch recent drawers from a trusty-memory palace, fail-open.
 ///
 /// Why: palace drawers are one of three catch-up activity sources; failure to
@@ -142,10 +159,8 @@ pub async fn fetch_recent_palace_drawers(
             // exist yet. That is "reached, nothing stored", not an outage.
             Err(e) if is_absent_palace(&e) => return Some(Vec::new()),
             Err(e) => {
-                eprintln!(
-                    "catchup: could not reach trusty-memory at {}: {e}",
-                    memory_socket.display()
-                );
+                // #9026: the whole chain, not the outermost context.
+                eprintln!("{}", memory_list_failed_warning(memory_socket, &e));
                 return None;
             }
         };
@@ -305,5 +320,30 @@ mod tests {
             drawers.is_none(),
             "an internal error is not an empty palace"
         );
+    }
+
+    /// #9026: the warning names the root cause, here the dial refusal of a
+    /// socket file that does not exist, not only the outer "call memory_list"
+    /// context; and it no longer claims the daemon could not be reached.
+    #[tokio::test]
+    async fn the_unreachable_warning_carries_the_whole_cause_chain_9026() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dead = tmp.path().join("absent.sock");
+        let e = crate::memory_rpc::call_memory_tool_at_with_timeout(
+            &dead,
+            "memory_list",
+            json!({ "palace": "p" }),
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .expect_err("nothing serves the socket");
+        let root = e.root_cause().to_string();
+        let line = memory_list_failed_warning(&dead, &e);
+        assert!(
+            line.contains(&root),
+            "{line:?} lacks the root cause {root:?}"
+        );
+        assert!(line.contains("call memory_list"), "{line:?}");
+        assert!(!line.contains("could not reach"), "{line:?}");
     }
 }

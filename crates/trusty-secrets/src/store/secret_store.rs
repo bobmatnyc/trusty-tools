@@ -196,14 +196,27 @@ impl SecretStore {
         reference: &SecretRef,
         scopes: &ScopeSet,
     ) -> Result<VaultName, SecretsError> {
+        self.locate_row(reference, scopes).map(|(vault, _)| vault)
+    }
+
+    /// [`Self::locate`], also returning the index row that matched.
+    ///
+    /// Why: #7525 — the agents gate must judge the same row the read uses,
+    /// from one index read, so the row cannot change between check and read.
+    /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`.
+    fn locate_row(
+        &self,
+        reference: &SecretRef,
+        scopes: &ScopeSet,
+    ) -> Result<(VaultName, KeyMeta), SecretsError> {
         let key = reference.key();
         let candidates: Vec<VaultName> = match reference.pinned_vault() {
             Some(vault) => vec![vault],
             None => scopes.lookup_order().cloned().collect(),
         };
         for vault in &candidates {
-            if self.index.get(vault, key)?.is_some() {
-                return Ok(vault.clone());
+            if let Some(row) = self.index.get(vault, key)? {
+                return Ok((vault.clone(), row));
             }
         }
         Err(SecretsError::NotFound {
@@ -230,8 +243,26 @@ impl SecretStore {
         reference: &SecretRef,
         scopes: &ScopeSet,
     ) -> Result<SecretValue, SecretsError> {
+        self.read_admitted(reference, scopes, |_, _| Ok(()))
+    }
+
+    /// [`Self::read`], with `admit` judging the located row before the
+    /// backend is touched.
+    ///
+    /// Why: #7525 — a refused key must never reach the Keychain, so the gate
+    /// runs between the index lookup and the value read.
+    /// What: `require(READ)`, [`Self::locate_row`], `admit(vault, row)`, then
+    /// the uncached backend read. An `admit` error is returned as-is.
+    /// Test: `resolve_agent_gate_refuses_flag_off_before_any_read`.
+    pub(crate) fn read_admitted(
+        &self,
+        reference: &SecretRef,
+        scopes: &ScopeSet,
+        admit: impl FnOnce(&VaultName, &KeyMeta) -> Result<(), SecretsError>,
+    ) -> Result<SecretValue, SecretsError> {
         self.require(Capabilities::READ, "read")?;
-        let vault = self.locate(reference, scopes)?;
+        let (vault, row) = self.locate_row(reference, scopes)?;
+        admit(&vault, &row)?;
         let key = reference.key();
         self.backend
             .get(&vault, key)?

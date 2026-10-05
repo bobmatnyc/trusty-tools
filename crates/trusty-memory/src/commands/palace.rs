@@ -39,6 +39,8 @@ use super::maintenance_gate::{open_purging_under_lease, require_lease};
 /// tool's blast radius with nothing in its name to warn a caller.
 /// What: `Stats` is always read-only. `Compact` writes unless `--dry-run`.
 /// `LegacyKg` writes only with `--apply` (#8434). `Deletions` is read-only (#8732).
+/// `Reclaim` is a dry run unless `--apply` (a reviewed list, to trash) or
+/// `--purge-trash` (#9140 ruling f0).
 /// Test: `cargo run -p trusty-memory -- palace --help` lists both.
 #[derive(Debug, Subcommand)]
 pub enum PalaceAction {
@@ -120,6 +122,54 @@ pub enum PalaceAction {
         #[arg(long)]
         json: bool,
     },
+    /// List what a reclaim would remove, and why; move a reviewed list to trash (#9140).
+    ///
+    /// Without `--apply` or `--purge-trash` this is a DRY RUN. It lists
+    /// `*.v2-incompatible` files, KG backups, empty palaces idle 30+ days,
+    /// directories without `palace.json`, a stale `uds_addr`, and trusty-code
+    /// fixture turn drawers, with path, size, palace and reason. Drawer tables
+    /// are read from private copies; nothing is written.
+    ///
+    /// `--apply --manifest <FILE>` re-scans and acts only on items in FILE (a
+    /// saved `--json` dry run) that the fresh scan lists unchanged: same path,
+    /// size and mtime, or same palace and drawer id. Each moves by rename to
+    /// `<palace-root>/.trash/<UTC-date>-reclaim/` at its relative path, and
+    /// `manifest.json` there records it. A palace whose store the live daemon
+    /// holds open is skipped. A fixture drawer is exported to
+    /// `<trash>/<palace>/kg.redb.drawers/<id>.json`, then removed through the
+    /// daemon's `memory.drawer_delete`; with no daemon serving it is skipped.
+    /// Any item left in place makes the exit non-zero.
+    ///
+    /// `--purge-trash` deletes trash dirs under `<palace-root>/.trash/` that
+    /// are named `<YYYY-MM-DD>-reclaim`, hold a `manifest.json`, and are more
+    /// than 7 days old. Nothing else is deleted.
+    ///
+    /// RESTORE (manual, from the trash dir's `manifest.json`): move every
+    /// entry whose `status` is `moved` from `trash_path` back to
+    /// `original_path`; `moved_with_parent` entries return with their
+    /// directory. With jq:
+    /// `jq -r '.entries[] | select(.status=="moved") | [.trash_path, .original_path] | @tsv' manifest.json | while IFS=$'\t' read -r t o; do mv -n "$t" "$o"; done`.
+    /// A `drawer_removed` entry's `trash_path` is the drawer's JSON export;
+    /// re-add its `content` with `trusty-memory note --palace <palace>`, which
+    /// gives it a new id.
+    Reclaim {
+        /// Accepted for the documented spelling; the default is a dry run.
+        #[arg(long, conflicts_with_all = ["apply", "purge_trash"])]
+        dry_run: bool,
+        /// Emit JSON instead of text (the dry-run manifest, or the run report).
+        #[arg(long)]
+        json: bool,
+        /// Move the reviewed items in `--manifest` to the dated trash dir.
+        // #9140 ruling f0: no apply without a reviewed list.
+        #[arg(long, requires = "manifest", conflicts_with = "purge_trash")]
+        apply: bool,
+        /// The reviewed list: a saved `palace reclaim --json` dry run.
+        #[arg(long, value_name = "FILE", requires = "apply")]
+        manifest: Option<PathBuf>,
+        /// Delete reclaim trash dirs more than 7 days old.
+        #[arg(long)]
+        purge_trash: bool,
+    },
 }
 
 /// Route one `palace` subcommand to its handler.
@@ -183,6 +233,28 @@ pub async fn dispatch(action: PalaceAction) -> Result<()> {
                 super::palace_deletions::deletions_report(&name, &palace, drawer, limit, json)?;
             print!("{report}");
             Ok(())
+        }
+        // #9140 ruling f0: dry run by default; apply and purge are explicit.
+        PalaceAction::Reclaim {
+            dry_run: _,
+            json,
+            apply,
+            manifest,
+            purge_trash,
+        } => {
+            let rt = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || {
+                if purge_trash {
+                    super::palace_reclaim_apply::handle_purge(json)
+                } else if apply {
+                    let list = manifest.context("--apply needs --manifest <FILE> (#9140)")?;
+                    super::palace_reclaim_apply::handle_apply(&list, json, rt)
+                } else {
+                    super::palace_reclaim::handle_reclaim(json)
+                }
+            })
+            .await
+            .context("join palace reclaim")?
         }
     }
 }

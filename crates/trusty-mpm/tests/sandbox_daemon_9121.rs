@@ -38,6 +38,8 @@ fn sandbox_command(home: &Path, vars: &[(&str, &str)]) -> Command {
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
         .env("TRUSTY_DATA_DIR_OVERRIDE", home.join("data"))
         .env("TRUSTY_MPM_ADDR", "127.0.0.1:0")
+        // #9178: required, as `scripts/sandbox_daemon.sh` passes it.
+        .env("TRUSTY_SANDBOX", "1")
         .args(["daemon", "--sandbox"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -149,5 +151,34 @@ fn sandbox_refuses_secret_env_and_never_prints_a_value() {
             assert!(!stdout.contains(value), "{name}'s value on stdout");
             assert!(!stderr.contains(value), "{name}'s value on stderr");
         }
+    }
+}
+
+/// Why (#9178): without `TRUSTY_SANDBOX=1` trusty-common reads `.env.local`.
+/// An otherwise isolated sandbox with the flag absent, or set to anything but
+/// `1`, must exit non-zero, name the variable, and print no value.
+/// Test: this test.
+#[test]
+fn sandbox_refuses_unless_trusty_sandbox_is_exactly_one() {
+    const WRONG: &str = "fake-9178-flag-value";
+    for value in [None, Some(WRONG)] {
+        let home = tempfile::tempdir().expect("scratch home");
+        let mut cmd = sandbox_command(home.path(), &[]);
+        match value {
+            None => cmd.env_remove("TRUSTY_SANDBOX"),
+            Some(v) => cmd.env("TRUSTY_SANDBOX", v),
+        };
+
+        let (success, stdout, stderr) = wait_bounded(cmd.spawn().expect("spawn"));
+
+        assert!(
+            !success,
+            "the sandbox started with flag {value:?}\n{stderr}"
+        );
+        assert!(
+            stderr.contains("TRUSTY_SANDBOX is not set to exactly 1"),
+            "flag {value:?}\nstderr: {stderr}"
+        );
+        assert!(!stdout.contains(WRONG) && !stderr.contains(WRONG));
     }
 }

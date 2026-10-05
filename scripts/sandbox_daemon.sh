@@ -12,9 +12,10 @@
 # What: validates, then execs, in the foreground:
 #     env -i HOME=<dir>/home PATH=<caller's PATH> \
 #            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data TRUSTY_MPM_ADDR=127.0.0.1:<port> \
+#            TRUSTY_SANDBOX=1 \
 #            [<FORWARDED names the caller has set>] \
 #            <tm> daemon --sandbox
-#   The four pinned names are always set; FORWARDED names (locale, terminal,
+#   The five pinned names are always set; FORWARDED names (locale, terminal,
 #   account name, temp dir, log filter) pass through only when the caller set
 #   them. No other variable reaches the daemon. Both lists are a subset of the
 #   daemon's own closed allowlist (`ENV_ALLOWLIST` and `LOCALE_CATEGORIES` in
@@ -30,6 +31,8 @@
 #   The script therefore never runs the daemon from the caller's cwd, and
 #   refuses when the physical <dir>/home or any ancestor holds a `.env.local`.
 #   It does not rely on the daemon's sandbox latch to ignore that file.
+#   TRUSTY_SANDBOX=1 (#9178) also tells that loader to read no `.env.local`,
+#   project or $HOME tier, as a second layer behind the refusal above.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
@@ -52,7 +55,8 @@ if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 set -euo pipefail
 
 # Always set by this script. Keep in step with the exec below.
-PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR"
+# #9178: TRUSTY_SANDBOX=1 stops trusty-common loading any `.env.local`.
+PINNED="HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX"
 # Passed through from the caller only when set — never a credential.
 FORWARDED="LANG LC_ALL LC_COLLATE LC_CTYPE LC_MESSAGES LC_MONETARY LC_NUMERIC LC_TIME \
 LC_ADDRESS LC_IDENTIFICATION LC_MEASUREMENT LC_NAME LC_PAPER LC_TELEPHONE \
@@ -192,5 +196,6 @@ exec env -i \
   PATH="$PATH" \
   TRUSTY_DATA_DIR_OVERRIDE="$SANDBOX/data" \
   TRUSTY_MPM_ADDR="$ADDR" \
+  TRUSTY_SANDBOX=1 \
   ${EXTRA[@]+"${EXTRA[@]}"} \
   "$BIN" daemon --sandbox

@@ -402,22 +402,6 @@ pub fn tool_descriptors() -> Value {
             }
         },
         {
-            "name": "upgrade",
-            "description": "Check for or install a new version of trusty-search (issue #537). \
-                            With check=true (or without confirm): report current vs. available version — NEVER installs. \
-                            With confirm=true: install via `cargo install trusty-search --locked`, run a binary \
-                            health gate, then restart the daemon under launchd (or print a restart hint when \
-                            not supervised). The MCP response is returned BEFORE the daemon exits.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "check":   { "type": "boolean", "description": "Report versions only, no install (default when confirm absent)", "default": true },
-                    "confirm": { "type": "boolean", "description": "Set to true to install the new version. Must be explicit — never assumed.", "default": false }
-                },
-                "required": []
-            }
-        },
-        {
             "name": "console_metrics",
             "description": "Return a ConsoleMetricsReport with daemon health and index aggregate \
                             statistics (index_count, warm_boot_degraded, index list with \

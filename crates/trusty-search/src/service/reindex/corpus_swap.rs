@@ -218,6 +218,13 @@ async fn begin_staged_corpus_swap_with_schema_reader(
                         )
                     })?;
                 }
+                // #9169: keep the last reindex stamp readable while the
+                // indexer serves staging; the commit writes a new one.
+                if let Ok(Some(unix)) = live.read_reindexed_unix_sync() {
+                    store.write_reindexed_unix_sync(unix).with_context(|| {
+                        format!("reindex[{index_id_str}]: carry the reindex stamp into staging")
+                    })?;
+                }
             }
             // See PR #5527. ADR-0009: the promotion is a rename, so a contribution absent
             // from staging is destroyed by it — and nothing regenerates

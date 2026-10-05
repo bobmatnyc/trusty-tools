@@ -627,3 +627,30 @@ fn preflight_refusal_never_quotes_the_origin_token() {
         "{err}"
     );
 }
+
+/// #9124 sink 3: an owner-less credentialed URL made the token the owner, so
+/// it was lowercased into the managed-checkout path (`…/secretqatoken2-
+/// example-invalid/x`), the daemon log and the CLI error. No part of it may
+/// reach the identity, checked case-insensitively.
+#[test]
+fn a_token_in_the_url_never_reaches_the_identity_9124() {
+    for url in [
+        "https://qauser:SECRETQATOKEN2@example.invalid/x.git",
+        "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+    ] {
+        let RunTarget::Repo {
+            owner,
+            repo,
+            account,
+            ..
+        } = classify_run_target(url).unwrap()
+        else {
+            panic!("{url} is a repo");
+        };
+        let identity = format!("{owner}/{repo} {account:?}").to_ascii_lowercase();
+        for part in ["secretqatoken2", "qauser"] {
+            assert!(!identity.contains(part), "{url} -> {identity}");
+        }
+        assert_eq!(repo, "x");
+    }
+}

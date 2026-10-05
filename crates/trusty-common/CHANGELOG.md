@@ -6,6 +6,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.5] — 2026-10-05
+
+### Added
+
+- `credentials::sandbox_flag_set` and `credentials::SANDBOX_ENV_VAR` are public, so a caller can require the `.env.local` opt-out on the same exact-`1` rule the loader uses (#9178).
+
+### Fixed
+
+- `parent_death`: the watchdog's graceful-shutdown window is now `shutdown::CLEANUP_RESERVE` plus 5 s (10 s), derived from the reserve rather than a separate 5 s literal. The old window equalled the reserve, so a daemon whose parent died could be force-exited during a full-budget exit flush, before it unlinked its socket (#7085).
+- The memory secret filter stores a bare Google Docs/Sheets/Drive document id when the same text names a Google document (`spreadsheet`, `sheet`, `doc`, `drive`, `folder`, …) and the token has Google's exact id shape. A bare id with no such word, and every credential shape tested beside those words, is still refused (#8589).
+- The catch-up digest's warning for a failed `memory_list` prints the whole cause chain (a timeout, a refused socket file, a dead socket) and no longer calls every failure "could not reach trusty-memory" (#9026).
+- `url_userinfo::strip_url_secret` no longer reads an `@` in the path or query as the end of the userinfo when the authority is a plain `host:port` or an IPv6 `[...]` host: `https://host:8080/@scope/pkg` and `ssh://h:2222/o/r@x` are stored unchanged instead of as `https://scope/pkg` and `ssh://h@x`, so `tm register` keeps the clone URL intact (#9124). The log redactor keeps its over-read.
+- `PalaceStore::load_palace` uses the directory it read `palace.json` from as the palace's `data_dir`, not the absolute path recorded at creation. A palace root copied elsewhere no longer opens the original palace's files.
+- A second in-process open of a live palace shares the first handle's recall log (`RecallLog::open_shared`) instead of failing with "Database already open" and running with recall analytics disabled.
+- A cold palace open replays its stored vectors into the HNSW graph in parallel, which was the largest cost of a cold open (#9141).
+- The HNSW graph `HnswStore::open` rebuilds is single-layer. `hnsw_rs` seeds its layer generator from OS entropy, so the 16-layer graph got a new hierarchy on every open and two opens of one palace ranked recalls differently above the 4,096-drawer exact-search limit (#9141). The replay stays parallel after a serial first insert, so no parallel insert can read an empty entry point and be stored with no neighbours, out of reach of every search. Identical results across opens hold while the search finds the exact top k, which `hnsw_rs` does not guarantee.
+- `TRUSTY_SANDBOX=1` in the process environment now stops `load_env_local_once` from loading the project `.env.local` or `$HOME/.env.local`. `env_local_value` and `read_var_from_env_local` answer `None` under the same flag, so no tool reports a tier that resolution skips. Only the exact value `1` opts out; empty, `0`, `true` and non-UTF-8 values do not. Before this, a daemon started under `env -i` still loaded the developer's credentials from `.env.local` (#9178).
+- `classify_model_shape` and `conclusive_shape_mismatch` classify a Bedrock model ARN (`arn:aws:bedrock:<region>:<account>:application-inference-profile/<id>`, `inference-profile/<id>`, or `arn:aws:bedrock:<region>::foundation-model/<id>`) as Bedrock with conclusive evidence. Before, the `/` in the ARN read as an OpenRouter slug and routed the id to OpenRouter. Malformed ARNs, other ARN services and partitions, and ids that only contain `arn:aws:bedrock:` past the start keep their old classification (#9200).
+
+### Security
+
+- `parse_github_path`, `parse_remote_url`, `owner_repo_from_git_remote` and `repo_slug_from_git_remote` strip a remote URL's userinfo before deriving anything, so a token embedded as `https://user:<token>@host/x.git` no longer becomes the owner of a managed-checkout path, a palace id, a log line or an error (#9124). New `url_userinfo::strip_userinfo` and `url_userinfo::userinfo_end`.
+- New `url_userinfo::strip_url_secret` removes only a URL's secret, for a URL that is stored and cloned: the `:password` on any scheme and the whole userinfo on `http(s)://`, keeping the `git@` ssh login. New `url_userinfo::scp_userinfo_end` locates the userinfo of an scp-style `user@host:path` (#9155).
+
+## [0.53.4] — 2026-10-05
+
+### Added
+
+- `SpawnSpec::stderr_to(path)` appends a detached child's stderr to an owner-only (`0600`) log file instead of inheriting the caller's. An existing file is set to `0600` as well, and a file past 8 MiB is moved to `<path>.1` at spawn so the log stays bounded. A file that cannot be opened fails the spawn with the new `SupervisorError::StderrLog` before any child starts. `OnDemandAnalyze::quiet()` uses it to send a probe-started analyze server's stderr to `trusty-analyze.stderr.log` beside its socket; `analyze_stderr_log` names that path (#8103).
+- `catchup::resolve` resolves a relaunched session's own snapshot by its tmux
+  session name when the window route misses, and reports it as
+  `ResolutionPath::TmuxSession` (`"tmux_session"`). A relaunch recreates the
+  tmux window, so the window id the caller holds afterwards never matched its
+  last pause. The route needs the caller's tmux `#{session_created}`
+  (`CallerIdentity::with_tmux_session_created`, used by the new
+  `resolve_snapshot_for_identity`) and matches only snapshots paused after it,
+  so a later session reusing the name never claims an earlier session's
+  snapshot. `resolve_snapshot_for_caller` carries no creation time and never
+  takes this route. A digits-only session name never matches.
+  `catchup::resolve::session_name_of` is the new parser.
+- `redact_sessions_not_owned_by` grants ownership by tmux session name only
+  to the one snapshot the resolver answered, never to every entry sharing the
+  name.
+- `credentials::test_sandbox` behind the new `credential-test-sandbox` feature
+  (dev-dependencies only): `CredentialSandbox::enter()` clears every
+  credential-shaped environment variable, points `HOME`, the XDG dirs,
+  `GH_CONFIG_DIR` and `TRUSTY_DATA_DIR_OVERRIDE` at a temp tree, sets
+  `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, keeps the one-time
+  `.env.local` loader from reading a file, and panics when isolation does not
+  take. While a sandbox is live, `default_store()` skips the OS keychain and
+  `env_local_value()` returns `None`; a build without the feature cannot turn
+  either tier off. `assert_secret_eq` prints only a redacted preview on
+  mismatch. The crate's own unit tests use the sandbox too: the
+  `resolved_secret_values` scrub test now resolves one synthetic key instead
+  of every real secret on the machine (#9123).
+
+### Fixed
+
+- The catch-up digest treats a `memory_list` not-found refusal (a palace that was never created) as an empty palace. It no longer writes "could not reach trusty-memory" to stderr on every run for such a project, or renders the memory section as unreachable. Any other refusal still reports the daemon unreachable (#9026).
+
+### Changed
+
+- Every drawer a maintenance pass deletes (dream dedup, content prune, prune, room consolidation, TTL purge) is now logged on its own `warn` line naming the palace, drawer id and reason, beside its journal record. Before, the log showed only a per-pass count (#8729).
+- `content::DEV_CLASS_SOURCES` reads `skills`, `instructions`, `instructions/output-styles` and `instructions/sm_instructions` from `content/`, where #9012 moved them; every destination now lives under the checkout's `content/` tree.
+
 ## [0.53.1] — 2026-10-03
 
 ### Changed
