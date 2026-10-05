@@ -36,14 +36,18 @@ pub fn ends_authority(c: char) -> bool {
 /// The byte index of the `@` that ends the userinfo in `tail`, the text right
 /// after a `scheme://`; `None` when the authority carries no userinfo.
 ///
-/// Why: see the module docs.
+/// Why: the log redactor (`core::remote_url_redact` in trusty-mpm) and
+/// [`strip_userinfo`] must never let a password through, so this boundary
+/// over-reads: masking or dropping too much is the safe direction for a log
+/// line or a derived identity. [`strip_url_secret`] stores the URL it returns,
+/// where an over-read rewrites the URL, so it uses `stored_userinfo_end`
+/// instead (#9124).
 /// What: the authority runs to the first `/`, `?`, `#`, quote or whitespace.
 /// When it holds an `@`, the LAST one ends the userinfo, as a URL parser
 /// splits it. When it holds none but has a `:`, the userinfo may be
 /// `user:pa/ss` — git accepts a raw `/`, `?` or `#` in a password, which ends
 /// the authority early — so the search runs to the last `@` before the URL
-/// ends in the surrounding text. That over-reads `host:port/path@x`, which is
-/// the safe direction for a credential.
+/// ends in the surrounding text. That over-reads `host:port/path@x`.
 /// Test: `strip_userinfo_table`, `userinfo_end_stops_at_free_text`.
 pub fn userinfo_end(tail: &str) -> Option<usize> {
     let end = tail.find(ends_authority).unwrap_or(tail.len());
@@ -54,6 +58,40 @@ pub fn userinfo_end(tail: &str) -> Option<usize> {
     let colon = authority.find(':')?;
     let url_end = tail.find(ends_url).unwrap_or(tail.len());
     tail.get(colon..url_end)?.rfind('@').map(|i| colon + i)
+}
+
+/// [`userinfo_end`] without its over-read of a userinfo-free authority, for a
+/// URL that is stored rather than logged (#9124).
+///
+/// What: `None` when the authority holds no `@` and parses as a host with an
+/// optional numeric port — `host`, `host:8080`, `[::1]`, `[::1]:8080` — so an
+/// `@` in the path or query is never read as the userinfo's end. Any other
+/// authority, such as `user:pa` cut short by a raw `/` in the password, gets
+/// [`userinfo_end`]'s answer.
+/// Test: `strip_url_secret_table`.
+fn stored_userinfo_end(tail: &str) -> Option<usize> {
+    let end = tail.find(ends_authority).unwrap_or(tail.len());
+    let authority = &tail[..end];
+    if !authority.contains('@') && is_host_port(authority) {
+        return None;
+    }
+    userinfo_end(tail)
+}
+
+/// Whether `authority` is a host with an optional numeric port, an IPv6
+/// `[...]` literal included.
+fn is_host_port(authority: &str) -> bool {
+    let after_host = match authority.strip_prefix('[') {
+        Some(v6) => match v6.find(']') {
+            Some(close) => &v6[close + 1..],
+            None => return false,
+        },
+        None => authority.find(':').map_or("", |colon| &authority[colon..]),
+    };
+    after_host.is_empty()
+        || after_host
+            .strip_prefix(':')
+            .is_some_and(|port| port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `url` with its userinfo removed; borrowed and unchanged when it has none.
@@ -104,12 +142,14 @@ pub fn scp_userinfo_end(url: &str) -> Option<usize> {
 /// `http(s)://` URL (a `+`-prefixed scheme such as `git+https` included) it
 /// removes the whole userinfo, because a bare `user@` there is a token. A bare
 /// `user@` on any other scheme, or on an scp-style `user@host:path`, is kept.
-/// The userinfo ends where [`userinfo_end`] or [`scp_userinfo_end`] says.
+/// The userinfo ends where `stored_userinfo_end` or [`scp_userinfo_end`]
+/// says, so `https://host:8080/@scope/pkg` is stored unchanged.
 /// Test: `strip_url_secret_table`.
 pub fn strip_url_secret(url: &str) -> Cow<'_, str> {
     let (prefix, userinfo, rest, http) = if let Some(at) = url.find("://") {
         let tail = &url[at + 3..];
-        let Some(cut) = userinfo_end(tail) else {
+        // #9124: `userinfo_end` over-reads `host:port/path@x`; storage must not.
+        let Some(cut) = stored_userinfo_end(tail) else {
             return Cow::Borrowed(url);
         };
         let scheme = url[..at].rsplit('+').next().unwrap_or_default();
