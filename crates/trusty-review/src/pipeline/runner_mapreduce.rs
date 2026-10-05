@@ -199,7 +199,10 @@ pub(super) async fn run_mapreduce_branch(
         &mut result,
         parsed,
         &run,
-        synthesis_active,
+        ReduceFacts {
+            synthesis_active,
+            wiped_model_verdict: reduced.wiped_model_verdict.clone(),
+        },
     )
     .await;
 
@@ -316,6 +319,14 @@ pub(super) fn restore_caller_context(
     restored
 }
 
+/// What the reduce stage knew that the post-LLM chain needs besides the parse.
+struct ReduceFacts {
+    /// The synthesis pass (#1663) ran and floored the verdict itself.
+    synthesis_active: bool,
+    /// `ReducedReview::wiped_model_verdict`, for `settle_no_survivors` (#9188).
+    wiped_model_verdict: Option<crate::models::Verdict>,
+}
+
 /// Apply the post-LLM grade/verify/inline chain to a reduced parse.
 ///
 /// Why: the reduce output must go through the severity floor, coverage floor,
@@ -339,7 +350,7 @@ async fn fold_reduced_into_result(
     result: &mut ReviewResult,
     parsed: ParsedReview,
     run: &MapReduceRun,
-    synthesis_active: bool,
+    facts: ReduceFacts,
 ) {
     // Derive (final_verdict, final_grade, original_llm_grade) depending on path.
     //
@@ -354,7 +365,7 @@ async fn fold_reduced_into_result(
     // Both grades are Option<Grade> (#1474 parity): None for an UNKNOWN verdict.
     // The synthesis path is always a real verdict (not UNKNOWN), so Some() wraps
     // the concrete grades to keep the type consistent with apply_grade_and_floor.
-    let (final_verdict, final_grade, original_llm_grade) = if synthesis_active {
+    let (final_verdict, final_grade, original_llm_grade) = if facts.synthesis_active {
         // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
         // floor.  Use the synthesis verdict + grade directly instead.
@@ -414,6 +425,7 @@ async fn fold_reduced_into_result(
         author_rationale: author_rationale.as_deref(),
         refs: &refs,
         narrative: &parsed.summary, // #9188 C: the synthesis summary
+        wiped_model_verdict: facts.wiped_model_verdict,
     };
     gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 

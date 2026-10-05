@@ -134,6 +134,7 @@ fn reduced_with_findings(verdict: Verdict, findings: Vec<Finding>) -> ReducedRev
         summary: String::new(),
         tokens: BASE_MAP_TOKENS,
         withheld_findings: Vec::new(),
+        wiped_model_verdict: None,
     }
 }
 

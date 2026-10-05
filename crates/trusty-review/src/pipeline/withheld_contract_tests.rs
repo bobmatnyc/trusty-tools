@@ -159,13 +159,13 @@ fn settle_no_survivors_withholds_only_a_blocking_verdict() {
     let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
     result.verdict = Verdict::Approve;
     result.grade = Some("A".to_string());
-    settle_no_survivors(&mut result);
+    settle_no_survivors(&mut result, None);
     assert_eq!(result.verdict, Verdict::Approve);
 
     result.withheld_findings.push(withheld(UNVERIFIABLE_REASON));
     for approving in [Verdict::Approve, Verdict::ApproveWithReservations] {
         result.verdict = approving.clone();
-        settle_no_survivors(&mut result);
+        settle_no_survivors(&mut result, None);
         assert_eq!(result.verdict, approving);
         assert_eq!(result.grade.as_deref(), Some("A"));
         assert_eq!(result.error, None);
@@ -175,7 +175,7 @@ fn settle_no_survivors_withholds_only_a_blocking_verdict() {
         result.verdict = blocking;
         result.grade = Some("D".to_string());
         result.error = None;
-        settle_no_survivors(&mut result);
+        settle_no_survivors(&mut result, None);
         assert_eq!(result.verdict, Verdict::Unknown);
         assert_eq!(result.grade, None);
         assert_eq!(
@@ -183,6 +183,31 @@ fn settle_no_survivors_withholds_only_a_blocking_verdict() {
             Some("no verified findings, 1 withheld")
         );
     }
+}
+
+/// #9188 (Architect ruling, option A): a blocking model verdict that the
+/// pre-grade hygiene pass relaxed to APPROVE is settled from the model's
+/// verdict, so it ends `Unknown`; a relaxed APPROVE* keeps the APPROVE.
+#[test]
+fn settle_no_survivors_decides_from_a_wiped_blocking_verdict() {
+    let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
+    result.withheld_findings.push(withheld(UNVERIFIABLE_REASON));
+    for blocking in [Verdict::RequestChanges, Verdict::Block] {
+        result.verdict = Verdict::Approve;
+        result.grade = Some("A+".to_string());
+        result.error = None;
+        settle_no_survivors(&mut result, Some(&blocking));
+        assert_eq!(result.verdict, Verdict::Unknown, "{blocking}");
+        assert_eq!(result.grade, None);
+        assert!(result.error.is_some());
+    }
+
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A+".to_string());
+    result.error = None;
+    settle_no_survivors(&mut result, Some(&Verdict::ApproveWithReservations));
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.error, None);
 }
 
 /// #9188 K with AQ-7t: `verdict_status` names a review with no survivor and

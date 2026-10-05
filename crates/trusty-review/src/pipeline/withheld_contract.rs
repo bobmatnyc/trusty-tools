@@ -180,20 +180,33 @@ pub(crate) fn withhold_unresolved(result: &mut ReviewResult, index: &LineIndex) 
 /// it cannot un-approve a review; the review keeps APPROVE / APPROVE* and
 /// exits 0, `regrade_from_survivors` grades it from the survivors (none), and
 /// `verdict_status` says no finding was verified.
-/// What: when `findings` is empty, `withheld_findings` is not, and the verdict
-/// is not APPROVE / APPROVE*, sets `Unknown`, clears the grade, and records
-/// "no verified findings, N withheld" as the error unless one is already set.
-/// Otherwise a no-op.
+/// What: decides from `wiped_model_verdict` when the pre-grade hygiene pass
+/// relaxed the model's verdict to APPROVE, else from `result.verdict`
+/// (#9188, Architect ruling option A: a blocking model verdict whose findings
+/// were all dropped before grading is not a clean APPROVE). When `findings` is
+/// empty, `withheld_findings` is not, and that verdict is not APPROVE /
+/// APPROVE*, sets `Unknown`, clears the grade, and records "no verified
+/// findings, N withheld" as the error unless one is already set. Otherwise a
+/// no-op.
 /// Test: `settle_no_survivors_withholds_only_a_blocking_verdict`,
+/// `settle_no_survivors_decides_from_a_wiped_blocking_verdict`,
+/// `hallucination_count_is_zero`,
+/// `mapreduce_phantom_missing_file_finding_does_not_block`,
 /// `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
-/// `run_review_all_withheld_request_changes_is_unknown`.
-pub(crate) fn settle_no_survivors(result: &mut ReviewResult) {
+/// `run_review_all_withheld_request_changes_is_unknown`,
+/// `run_review_blocking_review_wiped_before_grading_is_unknown`.
+pub(crate) fn settle_no_survivors(
+    result: &mut ReviewResult,
+    wiped_model_verdict: Option<&Verdict>,
+) {
     if !result.findings.is_empty() || result.withheld_findings.is_empty() {
         return;
     }
     // AQ-7t (Bob 2026-10-05): keep APPROVE. UNKNOWN is for blocking verdicts only.
+    // #9188 option A: a relaxed verdict is judged by what the model said.
+    let model_verdict = wiped_model_verdict.unwrap_or(&result.verdict);
     if matches!(
-        result.verdict,
+        model_verdict,
         Verdict::Approve | Verdict::ApproveWithReservations
     ) {
         return;

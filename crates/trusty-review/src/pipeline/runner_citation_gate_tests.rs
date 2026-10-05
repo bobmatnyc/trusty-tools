@@ -389,7 +389,7 @@ async fn run_review_all_withheld_approve_star_stays_approve_star_and_exits_zero(
 /// still becomes UNKNOWN with no grade and an error, so `run --json` exits
 /// non-zero. Pins the blocking path against the two approving ones above.
 /// The short quote reaches the #8905 gate; a longer absent quote is dropped
-/// before grading, which relaxes the verdict to APPROVE (#4042).
+/// before grading (`run_review_blocking_review_wiped_before_grading_is_unknown`).
 #[tokio::test]
 async fn run_review_all_withheld_request_changes_is_unknown() {
     let bug = billing_finding(
@@ -413,6 +413,37 @@ async fn run_review_all_withheld_request_changes_is_unknown() {
     assert!(result.error.is_some());
     assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
     assert!(result.findings.is_empty(), "{:?}", result.findings);
+}
+
+/// #9188 (Architect ruling, option A), single-pass path: a REQUEST_CHANGES
+/// review whose only finding quotes code absent from the diff loses it before
+/// grading. #4042 relaxes the verdict to APPROVE, but the final check decides
+/// from the model's verdict: UNKNOWN, no grade, and `run --json` exits non-zero.
+#[tokio::test]
+async fn run_review_blocking_review_wiped_before_grading_is_unknown() {
+    let bug = billing_finding(
+        "data-loss",
+        "`ledger.flush_all()` loses the total.",
+        "high",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "The flush loses data.",
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([bug]),
+        "CONFIRMED",
+    )
+    .await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::Unknown, "{json}");
+    assert!(fails, "a wiped blocking review exits non-zero");
+    assert_eq!(result.grade, None);
+    assert_eq!(
+        json["withheld_by_reason"]["citation_integrity"], 1,
+        "{json}"
+    );
+    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
 }
 
 /// #9188 B, end to end: a CONFIRMED finding with one quoted snippet absent

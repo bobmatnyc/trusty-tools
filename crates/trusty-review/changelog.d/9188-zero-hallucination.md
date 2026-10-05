@@ -2,7 +2,10 @@ Fixed
 - A review whose every finding was withheld posts none of them, and its
   verdict follows the model's (#9188 A; AQ-7t, Bob 2026-10-05). A blocking
   review (REQUEST_CHANGES or BLOCK) is UNKNOWN with no grade and an error, so
-  `run --json` exits non-zero. An APPROVE or APPROVE* review keeps its
+  `run --json` exits non-zero. That includes a blocking review whose findings
+  were all dropped before grading because their quote or path is not in the
+  diff, on the single-pass and map-reduce paths: the #4042 relaxation to
+  APPROVE no longer decides its final verdict. An APPROVE or APPROVE* review keeps its
   verdict and exits 0, whichever gate withheld its findings (citation gate,
   verifier refutation or UNVERIFIABLE, head re-check, or no verifier round
   because verification is disabled or no verifier could be built); it is

@@ -690,7 +690,7 @@ pub async fn run_review(
     // and a self-reported verdict left resting on findings this run removed —
     // all four run before grading. See `ground_parsed_findings`. #4044: each
     // drop is recorded in the review record, never posted.
-    let withheld = ground_parsed_findings(&mut parsed, &filtered);
+    let (withheld, wiped_model_verdict) = ground_parsed_findings(&mut parsed, &filtered);
     result.withheld_findings.extend(withheld);
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
@@ -758,6 +758,7 @@ pub async fn run_review(
         author_rationale: author_rationale.as_deref(),
         refs: &refs,
         narrative: &narrative,
+        wiped_model_verdict,
     };
     gate_then_verify(config, deps.verifier.as_ref(), &mut result, &inputs).await;
 

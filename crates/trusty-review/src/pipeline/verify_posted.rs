@@ -251,6 +251,9 @@ pub(crate) struct GateInputs<'a> {
     pub(crate) refs: &'a str,
     /// #9188 C: the model-written prose inside `review_body`.
     pub(crate) narrative: &'a str,
+    /// The model's verdict when `relax_verdict_if_evidence_wiped` relaxed it
+    /// before grading; `settle_no_survivors` decides from it (#9188, option A).
+    pub(crate) wiped_model_verdict: Option<Verdict>,
 }
 
 /// Gate citations, then verify the survivors, on a graded review (#8904).
@@ -288,7 +291,7 @@ pub(crate) async fn gate_then_verify(
     gate_posted_findings_with_index(result, &index); // #8905 runs first.
     verify_survivors(config, verifier, result, inputs).await;
     contract::withhold_unresolved(result, &index); // #9188 L
-    contract::settle_no_survivors(result); // #9188 A, J
+    contract::settle_no_survivors(result, inputs.wiped_model_verdict.as_ref()); // #9188 A, J
     if let Some(narrative) = narrative {
         contract::restore_narrative(result, narrative, &index); // #9188 C
     }

@@ -243,6 +243,7 @@ pub async fn synthesize_review(
         summary,
         tokens,
         withheld_findings: reduced.withheld_findings,
+        wiped_model_verdict: reduced.wiped_model_verdict,
     }
 }
 

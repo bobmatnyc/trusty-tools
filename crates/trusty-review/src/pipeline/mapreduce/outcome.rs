@@ -229,6 +229,11 @@ pub struct ReducedReview {
     /// Test: `run_review_mapreduce_records_hygiene_withholds`,
     /// `reduce_records_capped_findings_as_withheld`.
     pub withheld_findings: Vec<WithheldFinding>,
+    /// The strictest verdict a chunk reported before the pre-grade hygiene
+    /// pass dropped all its findings and relaxed it to APPROVE; `None` when
+    /// none was relaxed (#9188, option A).
+    /// Test: `mapreduce_phantom_missing_file_finding_does_not_block`.
+    pub wiped_model_verdict: Option<Verdict>,
 }
 
 #[cfg(test)]

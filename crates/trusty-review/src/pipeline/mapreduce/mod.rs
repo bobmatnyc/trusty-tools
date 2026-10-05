@@ -87,6 +87,7 @@ pub async fn run_map_reduce(
     // #4044: every finding these passes drop is kept for the review record.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
     let mut withheld = Vec::new();
+    let mut wiped_model_verdict: Option<crate::models::Verdict> = None;
     for outcome in &mut outcomes {
         if let MapOutcome::Reviewed {
             findings, verdict, ..
@@ -112,17 +113,26 @@ pub async fn run_map_reduce(
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
             // #4044).
             let mut grade_unused = None;
-            crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+            let wiped = crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
                 verdict,
                 &mut grade_unused,
                 findings_before,
                 findings,
             );
+            // #9188 option A: keep the strictest verdict a chunk had relaxed.
+            if let Some(v) = wiped
+                && wiped_model_verdict
+                    .as_ref()
+                    .is_none_or(|w| v.ordinal() > w.ordinal())
+            {
+                wiped_model_verdict = Some(v);
+            }
         }
     }
 
     let mut reduced = reduce(outcomes, config);
     withheld.append(&mut reduced.withheld_findings);
     reduced.withheld_findings = withheld;
+    reduced.wiped_model_verdict = wiped_model_verdict;
     synthesize_review(reduced, llm, ctx, config).await
 }
