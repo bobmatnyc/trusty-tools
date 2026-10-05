@@ -1021,9 +1021,11 @@ pub(crate) async fn search_report(
             "bm25_lane_degraded": bm25_lane_degraded,
             // #9235: `true` when the BM25 corpus cap kept resident chunks out
             // of the lexical lane; those chunks can only match semantically.
-            "bm25_truncated": bm25.truncated,
-            "bm25_docs_dropped": bm25.docs_dropped,
-            "bm25_corpus_cap": bm25.corpus_cap,
+            "bm25_truncated": bm25.map(|b| b.truncated),
+            "bm25_docs_dropped": bm25.map(|b| b.docs_dropped),
+            "bm25_corpus_cap": bm25.map(|b| b.corpus_cap),
+            "bm25_truncation_unavailable_reason":
+                bm25.is_none().then_some(crate::core::bm25::Bm25Truncation::UNAVAILABLE_REASON),
             // #5068: the counterpart flag to `bm25_lane_degraded` for the OTHER
             // lane. `true` means this hybrid query ran with no vector
             // contribution at all — the results are lexical, however

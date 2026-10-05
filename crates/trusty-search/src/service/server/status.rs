@@ -465,9 +465,12 @@ pub(crate) async fn index_status_report(
         "respect_gitignore": handle.respect_gitignore,
         "walk_truncated_by_budget": walk_truncated_by_budget,
         "chunks_dropped_by_cap": chunks_dropped_by_cap,
-        "bm25_truncated": bm25.truncated,
-        "bm25_docs_dropped": bm25.docs_dropped,
-        "bm25_corpus_cap": bm25.corpus_cap,
+        // #9235: all three `null` when the evicted durable count errored.
+        "bm25_truncated": bm25.map(|b| b.truncated),
+        "bm25_docs_dropped": bm25.map(|b| b.docs_dropped),
+        "bm25_corpus_cap": bm25.map(|b| b.corpus_cap),
+        "bm25_truncation_unavailable_reason":
+            bm25.is_none().then_some(crate::core::bm25::Bm25Truncation::UNAVAILABLE_REASON),
         // Issue #280: walk diagnostic fields.
         "last_walk_started_at": walk_diag.last_walk_started_at,
         "last_walk_files_seen": walk_diag.last_walk_files_seen,

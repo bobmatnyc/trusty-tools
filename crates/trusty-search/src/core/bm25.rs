@@ -160,7 +160,7 @@ impl Default for CodeBm25Index {
 /// What: `docs_dropped = chunk_count - bm25_len`, saturating at 0;
 /// `truncated` is `docs_dropped > 0`; `corpus_cap` is the cap in force.
 /// Test: `truncation_saturates_and_flags_only_a_shortfall`,
-/// `every_tier_reports_truncation_when_its_chunk_cap_exceeds_its_bm25_cap`.
+/// `applying_a_tier_policy_sets_the_cap_the_bm25_lane_reports`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Bm25Truncation {
@@ -173,6 +173,10 @@ pub struct Bm25Truncation {
 }
 
 impl Bm25Truncation {
+    /// `bm25_truncation_unavailable_reason` when the durable count errored
+    /// while the index was evicted, so no report could be computed (#9235).
+    pub const UNAVAILABLE_REASON: &'static str = "corpus_count_unreadable";
+
     /// Build the report from a chunk count, a BM25 live-doc count and a cap.
     pub fn from_counts(chunk_count: usize, bm25_len: usize, corpus_cap: usize) -> Self {
         let docs_dropped = chunk_count.saturating_sub(bm25_len) as u64;
