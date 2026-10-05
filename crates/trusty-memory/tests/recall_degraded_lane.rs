@@ -136,3 +136,76 @@ async fn recall_all_degrades_to_l0_l1_when_the_embedder_is_genuinely_cold() {
     assert!(result["results"].is_array());
     assert_no_vector_lane(&result, "memory_recall_all");
 }
+
+/// Why (#8246 review): the embedder-warming path must demote stale snapshots
+/// like the ready path does, or a recall issued during warm-up still puts an
+/// old status line above the current ruling.
+/// What: a cold, `Warming` state with the in-process BM25 lane, so the
+/// lexical lane is the only query-scored lane. The snapshot repeats the query
+/// terms and so out-scores the ruling on BM25; backdated 30 days it must rank
+/// below it on both single-palace recall tools.
+#[tokio::test]
+async fn the_warming_path_demotes_stale_snapshots() {
+    use trusty_common::memory_core::palace::{Drawer, PalaceId};
+    use trusty_memory::bm25_lane::Bm25Lane;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let lane = Bm25Lane::new(tmp.path().join("bm25"));
+    let state = cold_warming_state(&tmp).with_bm25_lane(lane.clone());
+    let palace = "warmtest-rank";
+    let cwd = tmp.path().to_string_lossy().to_string();
+    dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": palace, "force": true, "cwd": cwd}),
+    )
+    .await
+    .expect("palace_create");
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+
+    let add = |text: &str, tag: &str, age_days: i64| {
+        let mut d = Drawer::new(uuid::Uuid::new_v4(), text);
+        d.tags = vec![tag.to_string()];
+        d.created_at = chrono::Utc::now() - chrono::Duration::days(age_days);
+        let id = d.id;
+        handle.add_drawer(d);
+        (id, text.to_string())
+    };
+    let snapshot = add("rust builder cap snapshot rust builder cap", "status", 30);
+    let ruling = add("rust builder cap ruling", "bob-ruling", 1);
+    for (id, text) in [&snapshot, &ruling] {
+        lane.index(palace, &id.to_string(), text)
+            .await
+            .expect("index");
+    }
+
+    for tool in ["memory_recall", "memory_recall_deep"] {
+        let result = dispatch_tool(
+            &state,
+            tool,
+            json!({"palace": palace, "query": "rust builder cap", "top_k": 5}),
+        )
+        .await
+        .expect("recall while warming");
+        assert_no_vector_lane(&result, tool);
+        let ids: Vec<&str> = result["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .filter_map(|r| r["drawer_id"].as_str())
+            .collect();
+        let rank = |id: uuid::Uuid| ids.iter().position(|d| *d == id.to_string());
+        let (s, r) = (rank(snapshot.0), rank(ruling.0));
+        assert!(
+            s.is_some() && r.is_some(),
+            "{tool}: both recalled: {result:#}"
+        );
+        assert!(
+            r < s,
+            "{tool}: the ruling must outrank the stale snapshot: {result:#}"
+        );
+    }
+}
