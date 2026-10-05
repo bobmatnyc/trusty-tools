@@ -2,13 +2,16 @@
 //! error naming the quarantine, not as a queued run.
 //!
 //! Why: the owner ruling on #8105 names both surfaces — HTTP 409, and an MCP
-//! error result naming the quarantine reason. A real axum router renders the
-//! refusal and a real `McpServer` relays it over loopback, so the assertion is
-//! what an MCP client receives. Against pre-fix code the tool call succeeds
-//! with `queued: true`.
+//! error result naming the quarantine reason. The daemon's real socket router
+//! renders the refusal (409's twin, `conflict`) and a real `McpServer` relays
+//! it over a scratch socket (#9168), so the assertion is what an MCP client
+//! receives. Against pre-fix code the tool call succeeds with `queued: true`.
 //! What: one quarantined index, raised by a DIRECTORY at the colocated redb
 //! path, and one `tools/call reindex` against it.
 //! Test: `cargo test -p trusty-search --test mcp_reindex_quarantine_8105`
+
+#[path = "support/socket_daemon.rs"]
+mod socket_daemon;
 
 use std::sync::Arc;
 
@@ -21,10 +24,11 @@ use trusty_search::core::Embedder;
 use trusty_search::mcp::{McpServer, Request};
 use trusty_search::service::persistence::PersistedIndex;
 use trusty_search::service::persistence_loader::build_indexer_from_entry;
-use trusty_search::service::server::{build_router, SearchAppState};
+use trusty_search::service::server::SearchAppState;
 
 /// The MCP error result for a reindex of a write-quarantined index names the
-/// 409, the `index_write_quarantined` code, and the quarantine itself.
+/// conflict refusal (409's twin), the `index_write_quarantined` code, and the
+/// quarantine itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_reindex_of_a_write_quarantined_index_is_an_error_naming_the_quarantine() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -48,15 +52,8 @@ async fn mcp_reindex_of_a_write_quarantined_index_is_an_error_naming_the_quarant
         dir.path().to_path_buf(),
     ));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    let app = build_router(SearchAppState::new(registry));
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let server = McpServer::new(format!("http://{addr}"));
+    let daemon = socket_daemon::serve_state(SearchAppState::new(registry)).await;
+    let server = McpServer::new(daemon.client.clone());
 
     let resp = server
         .dispatch(Request {
@@ -80,8 +77,8 @@ async fn mcp_reindex_of_a_write_quarantined_index_is_an_error_naming_the_quarant
         .as_str()
         .expect("a prose content node");
     assert!(
-        text.contains("409") && text.contains("index_write_quarantined"),
-        "the error must carry the 409 and its code: {text}"
+        text.contains("conflict") && text.contains("index_write_quarantined"),
+        "the error must carry the conflict refusal and its code: {text}"
     );
     assert!(
         text.contains("write-quarantined") && text.contains("restart the daemon"),

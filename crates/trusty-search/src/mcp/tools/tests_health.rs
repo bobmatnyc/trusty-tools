@@ -1,79 +1,56 @@
 //! `search_health` structured-diagnostics contract tests (#5264).
 //!
-//! Why: the arm used to forward `GET /health` verbatim, so all three states a
-//! caller must act on differently arrived the same way — a connection refusal
-//! and an HTTP 500 both became one `DispatchError::Transport` prose string, and
-//! a healthy 200 named neither the responder nor whether this project was
-//! indexed on it. Each test below fails against the pre-fix arm because the
+//! Why: the arm used to forward the daemon's health body verbatim, so all three
+//! states a caller must act on differently arrived the same way — a refused
+//! dial and an internal error both became one `DispatchError::Transport` prose
+//! string, and a healthy answer named neither the responder nor whether this
+//! project was indexed on it. Each test below fails against the pre-fix arm because the
 //! report fields it asserts on did not exist.
-//! What: drives `McpServer::dispatch` against loopback daemons fixed at each
-//! state, and reads the report back out of the `tools/call` envelope.
+//! What: drives `McpServer::dispatch` against mock socket daemons fixed at
+//! each state (#9168), and reads the report back out of the `tools/call`
+//! envelope.
 //! Test: this file.
 
 use serde_json::{json, Value};
 
+use super::test_daemon::{mock_daemon, refusal, unreachable_server, MockDaemon};
 use super::tests::req;
 use super::{
     McpServer, HEALTH_DAEMON_ERROR, HEALTH_DAEMON_UNREACHABLE, HEALTH_INDEX_EMPTY,
     HEALTH_INDEX_NOT_REGISTERED, HEALTH_INDEX_UNKNOWN, HEALTH_OK,
 };
 
-/// A loopback daemon whose `/health` and `/indexes/{id}/status` responses are
-/// both fixed by the caller.
+/// A mock socket daemon whose `search.health` and `search.index.status`
+/// answers are both fixed by the caller.
 ///
-/// Why: the three verdicts are defined by the HTTP status on two different
-/// routes, so a mock that can only fix one of them cannot express them.
-/// What: returns the base URL. `health` and `status` are each `(code, body)`;
-/// a `body` of [`Value::Null`] is served as a plain-text body so the
-/// "answered, but not with a health object" path is reachable.
+/// Why: the three verdicts are defined by the answers to two different
+/// methods, so a mock that can only fix one of them cannot express them.
+/// What: `health` and `status` are each `(code, body)` in HTTP terms: `200`
+/// answers `body` — a [`Value::Null`] body answers a JSON string instead, so
+/// the "answered, but not with a health object" path is reachable — and any
+/// other code answers the refusal the daemon renders for it.
 /// Test: used by every test in this file.
-async fn spawn_health_daemon(health: (u16, Value), status: (u16, Value)) -> String {
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::response::{IntoResponse, Response as AxumResponse};
-    use axum::routing::get;
-    use axum::Router;
-
-    #[derive(Clone)]
-    struct S {
-        health: (StatusCode, Value),
-        status: (StatusCode, Value),
-    }
-
-    fn render(code: StatusCode, body: &Value) -> AxumResponse {
-        match body {
-            Value::Null => (code, "not json at all").into_response(),
-            v => (code, axum::Json(v.clone())).into_response(),
+async fn spawn_health_daemon(health: (u16, Value), status: (u16, Value)) -> MockDaemon {
+    fn answer(fixed: &(u16, Value)) -> Result<Value, trusty_common::uds::server::RpcError> {
+        match fixed {
+            (200, Value::Null) => Ok(Value::String("not json at all".into())),
+            (200, body) => Ok(body.clone()),
+            (code, body) => Err(refusal(*code, body)),
         }
     }
-
-    async fn health_handler(State(s): State<S>) -> AxumResponse {
-        render(s.health.0, &s.health.1)
-    }
-    async fn status_handler(State(s): State<S>) -> AxumResponse {
-        render(s.status.0, &s.status.1)
-    }
-
-    let state = S {
-        health: (StatusCode::from_u16(health.0).expect("status"), health.1),
-        status: (StatusCode::from_u16(status.0).expect("status"), status.1),
-    };
-    let app = Router::new()
-        .route("/health", get(health_handler))
-        .route("/indexes/{id}/status", get(status_handler))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+    mock_daemon(move |method, _params| match method {
+        "search.health" => answer(&health),
+        _ => answer(&status),
+    })
+    .await
 }
 
-/// A healthy `/health` body shaped like the daemon's real one.
+/// The socket a mock daemon serves, as the report renders it.
+fn socket_of(daemon: &MockDaemon) -> String {
+    daemon.client.socket().display().to_string()
+}
+
+/// A healthy `search.health` body shaped like the daemon's real one.
 fn healthy_body(indexes: u64, total_chunks: u64) -> Value {
     json!({
         "status": "ok",
@@ -103,20 +80,21 @@ async fn health_report(server: &McpServer, args: Value) -> Value {
 /// Nothing listening is its own verdict, with the command that fixes it.
 ///
 /// Pre-fix this arm returned `Err(Transport)`, so the response was
-/// `isError: true` carrying a reqwest string — `result["status"]` did not
+/// `isError: true` carrying a transport string — `result["status"]` did not
 /// exist and this test failed at the `serde_json::from_str` of a non-JSON
-/// `Error: GET …` body.
+/// `Error: …` body.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_reports_daemon_unreachable_with_remediation() {
-    // Port 1 is reserved and unbound on every developer machine.
-    let server = McpServer::new("http://127.0.0.1:1");
+    // A socket path nothing serves.
+    let server = unreachable_server();
+    let socket = server.daemon().socket().display().to_string();
 
     let report = health_report(&server, json!({})).await;
 
     assert_eq!(report["status"], HEALTH_DAEMON_UNREACHABLE);
     assert_eq!(report["healthy"], Value::Bool(false));
     assert_eq!(report["daemon"]["reachable"], Value::Bool(false));
-    assert_eq!(report["daemon"]["base_url"], "http://127.0.0.1:1");
+    assert_eq!(report["daemon"]["socket"], socket);
     let remediation = report["remediation"].as_str().expect("remediation");
     assert!(
         remediation.contains("trusty-search start"),
@@ -126,34 +104,37 @@ async fn search_health_reports_daemon_unreachable_with_remediation() {
 
 /// A daemon that answers badly is NOT the same verdict as one that is absent.
 #[tokio::test(flavor = "multi_thread")]
-async fn search_health_reports_a_non_2xx_daemon() {
-    let base = spawn_health_daemon(
+async fn search_health_reports_a_daemon_that_answers_badly() {
+    let daemon = spawn_health_daemon(
         (500, json!({ "error": "boom" })),
         (200, json!({ "chunk_count": 1 })),
     )
     .await;
-    let server = McpServer::new(base.clone());
+    let server = daemon.server();
 
     let report = health_report(&server, json!({ "index_id": "any" })).await;
 
     assert_eq!(report["status"], HEALTH_DAEMON_ERROR);
     assert_eq!(report["healthy"], Value::Bool(false));
     assert_eq!(report["daemon"]["reachable"], Value::Bool(true));
-    assert_eq!(report["daemon"]["http_status"], 500);
-    assert_eq!(report["daemon"]["base_url"], base);
+    assert_eq!(
+        report["daemon"]["rpc_code"],
+        trusty_common::uds::server::CODE_INTERNAL_ERROR
+    );
+    assert_eq!(report["daemon"]["socket"], socket_of(&daemon));
 }
 
 /// A 2xx from something that is not this daemon must not read as healthy.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_rejects_a_2xx_body_that_is_not_a_health_object() {
-    let base = spawn_health_daemon((200, Value::Null), (404, json!({}))).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_health_daemon((200, Value::Null), (404, json!({}))).await;
+    let server = daemon.server();
 
     let report = health_report(&server, json!({ "index_id": "any" })).await;
 
     assert_eq!(report["status"], HEALTH_DAEMON_ERROR);
     assert_eq!(report["healthy"], Value::Bool(false));
-    let body = report["daemon"]["body"].as_str().unwrap_or_default();
+    let body = report["daemon"]["error"].as_str().unwrap_or_default();
     assert!(
         body.contains("not a JSON health object"),
         "the report must say what was wrong with the body: {body}"
@@ -164,12 +145,12 @@ async fn search_health_rejects_a_2xx_body_that_is_not_a_health_object() {
 /// the remediation is to index, not to start anything.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_reports_an_unregistered_project_index() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(42, 430_000)),
         (404, json!({ "error": "unknown index: mine" })),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -189,7 +170,7 @@ async fn search_health_reports_an_unregistered_project_index() {
 /// against it return nothing, and the report must say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_reports_a_registered_but_empty_index() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(1, 0)),
         (
             200,
@@ -197,7 +178,7 @@ async fn search_health_reports_a_registered_but_empty_index() {
         ),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -214,25 +195,26 @@ async fn search_health_reports_a_registered_but_empty_index() {
 /// green 200 back that said nothing about it.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_names_the_answering_daemon() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(42, 430_000)),
         (200, json!({ "index_id": "mine", "chunk_count": 7 })),
     )
     .await;
-    let server = McpServer::new(base.clone()).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
+    let socket = socket_of(&daemon);
 
     let report = health_report(&server, json!({})).await;
 
     assert_eq!(report["status"], HEALTH_OK);
     assert_eq!(report["healthy"], Value::Bool(true));
-    assert_eq!(report["daemon"]["base_url"], base);
+    assert_eq!(report["daemon"]["socket"], socket);
     assert_eq!(report["daemon"]["version"], "9.9.9");
     assert_eq!(report["daemon"]["indexes"], 42);
     assert_eq!(report["daemon"]["total_chunks"], 430_000);
 
     let message = report["message"].as_str().expect("message");
     assert!(
-        message.contains(&base) && message.contains("42") && message.contains("430000"),
+        message.contains(&socket) && message.contains("42") && message.contains("430000"),
         "the prose must identify the responder too: {message}"
     );
 }
@@ -249,12 +231,12 @@ async fn search_health_names_the_answering_daemon() {
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_does_not_report_ok_when_no_index_could_be_resolved() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(42, 430_000)),
         (200, json!({ "chunk_count": 1 })),
     )
     .await;
-    let server = McpServer::new(base);
+    let server = daemon.server();
 
     let report = super::health::report_health(&server, None).await;
 
@@ -290,7 +272,7 @@ async fn search_health_does_not_report_ok_when_no_index_could_be_resolved() {
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_does_not_report_an_unreadable_chunk_count_as_empty() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(1, 0)),
         (
             200,
@@ -307,7 +289,7 @@ async fn search_health_does_not_report_an_unreadable_chunk_count_as_empty() {
         ),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -361,7 +343,7 @@ async fn search_health_does_not_report_an_unreadable_chunk_count_as_empty() {
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_reports_a_failed_migration_instead_of_prescribing_a_reindex() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(1, 0)),
         (
             200,
@@ -378,7 +360,7 @@ async fn search_health_reports_a_failed_migration_instead_of_prescribing_a_reind
         ),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -420,8 +402,8 @@ async fn search_health_reports_a_held_index() {
         "status": "held",
         "last_walk_error": reason,
     });
-    let base = spawn_health_daemon((200, healthy_body(1, 42)), (200, status)).await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let daemon = spawn_health_daemon((200, healthy_body(1, 42)), (200, status)).await;
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -448,12 +430,12 @@ async fn search_health_reports_a_held_index() {
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_does_not_report_a_missing_chunk_count_as_empty() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(1, 0)),
         (200, json!({ "index_id": "mine", "root_path": "/x" })),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 
@@ -468,12 +450,12 @@ async fn search_health_does_not_report_a_missing_chunk_count_as_empty() {
 /// says which source decided.
 #[tokio::test(flavor = "multi_thread")]
 async fn search_health_reports_which_source_named_the_index() {
-    let base = spawn_health_daemon(
+    let daemon = spawn_health_daemon(
         (200, healthy_body(2, 10)),
         (200, json!({ "chunk_count": 3 })),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("pinned-one");
+    let server = daemon.server().with_pinned_index("pinned-one");
 
     let report = health_report(&server, json!({ "index_id": "explicit-one" })).await;
 
@@ -492,8 +474,8 @@ async fn search_health_reports_which_source_named_the_index() {
 async fn search_health_reports_a_failing_embedder_as_unhealthy() {
     let mut health = healthy_body(1, 5);
     health["embedder"] = json!("stalled");
-    let base = spawn_health_daemon((200, health), (200, json!({ "chunk_count": 5 }))).await;
-    let server = McpServer::new(base).with_pinned_index("mine");
+    let daemon = spawn_health_daemon((200, health), (200, json!({ "chunk_count": 5 }))).await;
+    let server = daemon.server().with_pinned_index("mine");
 
     let report = health_report(&server, json!({})).await;
 

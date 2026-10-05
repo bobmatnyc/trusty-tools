@@ -3,15 +3,18 @@
 //!
 //! Why: the unit tests in `mcp/tools/tests_unavailable.rs` fix the daemon's
 //! response with a hand-written body, which proves the transport but not that
-//! the transport and the daemon still agree. This file removes the fixture: a
-//! real axum router built by `service::server::build_router` renders the
-//! `index_not_resident` verdict from `degraded.rs`, and a real `McpServer`
-//! speaks JSON-RPC against it over a loopback socket. What the test asserts is
-//! literally what an MCP client receives.
+//! the transport and the daemon still agree. This file removes the fixture: the
+//! daemon's real socket router (#9168) renders the `index_not_resident`
+//! verdict from `degraded.rs`, and a real `McpServer` speaks JSON-RPC against
+//! it over a scratch Unix socket. What the test asserts is literally what an
+//! MCP client receives.
 //!
 //! What: registers a cold-parked index in a real `SearchAppState`, serves the
-//! real router, and drives `index_status` in both MCP call forms.
+//! real socket router, and drives `index_status` in both MCP call forms.
 //! Test: `cargo test -p trusty-search --test mcp_structured_503_5350`
+
+#[path = "support/socket_daemon.rs"]
+mod socket_daemon;
 
 use std::path::PathBuf;
 
@@ -21,11 +24,12 @@ use trusty_search::core::registry::IndexRegistry;
 use trusty_search::mcp::tools::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
 use trusty_search::mcp::{McpServer, Request};
 use trusty_search::service::persistence::PersistedIndex;
-use trusty_search::service::server::{build_router, SearchAppState};
+use trusty_search::service::server::SearchAppState;
 
-/// Serve the real daemon router with one index registered as cold-parked, and
-/// return its base URL.
-async fn spawn_daemon_with_cold_index(id: &str) -> String {
+use socket_daemon::{serve_state, SocketDaemon};
+
+/// Serve the real socket router with one index registered as cold-parked.
+async fn spawn_daemon_with_cold_index(id: &str) -> SocketDaemon {
     let state = SearchAppState::new(IndexRegistry::new());
     state
         .cold_store
@@ -33,16 +37,7 @@ async fn spawn_daemon_with_cold_index(id: &str) -> String {
             id.to_string(),
             PathBuf::from(format!("/tmp/trusty-5350-{id}")),
         )]);
-    let app = build_router(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+    serve_state(state).await
 }
 
 fn req(method: &str, params: Value) -> Request {
@@ -58,8 +53,8 @@ fn req(method: &str, params: Value) -> Request {
 /// every field a caller branches on intact.
 #[tokio::test]
 async fn mcp_client_receives_the_daemons_structured_503() {
-    let base = spawn_daemon_with_cold_index("cold-e2e").await;
-    let server = McpServer::new(base);
+    let daemon = spawn_daemon_with_cold_index("cold-e2e").await;
+    let server = McpServer::new(daemon.client.clone());
 
     let resp = server
         .dispatch(req(
@@ -83,16 +78,16 @@ async fn mcp_client_receives_the_daemons_structured_503() {
         .as_str()
         .expect("a prose content node");
     assert!(
-        !text.contains("returned 503 Service Unavailable"),
-        "the client must not be handed a stringified HTTP failure: {text}"
+        !text.contains("returned 503 Service Unavailable") && !text.contains("refused ("),
+        "the client must not be handed a stringified transport failure: {text}"
     );
 }
 
 /// The bare-method form of the same call carries it under `error.data`.
 #[tokio::test]
 async fn bare_method_client_receives_the_daemons_structured_503() {
-    let base = spawn_daemon_with_cold_index("cold-e2e-bare").await;
-    let server = McpServer::new(base);
+    let daemon = spawn_daemon_with_cold_index("cold-e2e-bare").await;
+    let server = McpServer::new(daemon.client.clone());
 
     let resp = server
         .dispatch(req("index_status", json!({ "index_id": "cold-e2e-bare" })))

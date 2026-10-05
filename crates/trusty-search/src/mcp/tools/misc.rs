@@ -17,6 +17,10 @@ use super::{
     types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+use crate::service::rpc::chat::METHOD_CHAT;
+use crate::service::rpc::queries::{METHOD_GREP, METHOD_GREP_ALL};
+use crate::service::rpc::reads::METHOD_CALL_CHAIN;
+use crate::service::socket::METHOD_HEALTH;
 
 /// `grep`'s ripgrep-parity boolean switches, each with what `true` does.
 ///
@@ -94,31 +98,36 @@ pub(super) async fn dispatch_misc_tool(
             if let Some(key) = args.get("api_key").and_then(Value::as_str) {
                 body["api_key"] = Value::String(key.to_string());
             }
-            Some(server.post("/chat", &body).await)
+            Some(server.call(METHOD_CHAT, body).await)
         }
         "get_call_chain" => {
             // Issue #76 — annotated call tree for an entry-point function.
-            // The daemon endpoint returns `text/plain`; we wrap the body in
-            // the JSON envelope MCP clients consume.
-            // Default `index_id` to the session's pinned index (#1373).
-            let index_id = match server.resolve_index_id(args) {
-                Some(v) => v,
-                None => {
+            // The daemon answers plain text (a JSON string over the socket);
+            // we wrap it in the JSON envelope MCP clients consume.
+            // Default `index_id` to the session's pinned index (#1373); #9168
+            // adds `project`, resolved by the daemon.
+            let index_id = match server.resolve_target(args).await {
+                Ok(Some(v)) => v,
+                Ok(None) => {
                     return Some(Err(DispatchError::InvalidParams(
                         "missing required string field: index_id".into(),
                     )))
                 }
+                Err(e) => return Some(Err(e)),
             };
             let entry_point = match require_str(args, "entry_point") {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            let mut query: Vec<(&str, String)> = vec![("entry_point", entry_point.to_string())];
+            let mut params = serde_json::json!({
+                "index_id": index_id,
+                "entry_point": entry_point,
+            });
             if let Some(dir) = args.get("direction").and_then(Value::as_str) {
-                query.push(("direction", dir.to_string()));
+                params["direction"] = Value::String(dir.to_string());
             }
             if let Some(d) = args.get("max_depth").and_then(Value::as_u64) {
-                query.push(("max_depth", d.to_string()));
+                params["max_depth"] = Value::from(d);
             }
             // #7927: a wrong-typed flag is rejected, not read as absent.
             match optional_bool(
@@ -126,23 +135,18 @@ pub(super) async fn dispatch_misc_tool(
                 "include_source",
                 "true embeds full source at depth <= 1",
             ) {
-                Ok(Some(inc)) => query.push(("include_source", inc.to_string())),
+                Ok(Some(inc)) => params["include_source"] = Value::Bool(inc),
                 Ok(None) => {}
                 Err(e) => return Some(Err(e)),
             }
-            Some(
-                server
-                    .get_text(&format!("/indexes/{index_id}/call_chain"), &query)
-                    .await
-                    .map(|text| serde_json::json!({ "text": text })),
-            )
+            Some(call_chain(server, params).await)
         }
         "grep" => {
             // grep-parity regex/literal search over an index's files.
-            // Mirrors `POST /grep` (global) and `POST /indexes/:id/grep`.
+            // Mirrors `search.grep.all` (global) and `search.grep` (one index).
             // #3805: `index_id` is optional, but omitting it does NOT fan out
-            // when the session is pinned — `resolve_index_id` below returns the
-            // pin first, and only an unpinned session reaches `POST /grep`.
+            // when the session is pinned — `resolve_target` below returns the
+            // pin first, and only an unpinned session reaches the global grep.
             // The comment here used to claim fan-out and so did the tool
             // schema; both now state the pinned-first order.
             let pattern = match require_str(args, "pattern") {
@@ -181,19 +185,19 @@ pub(super) async fn dispatch_misc_tool(
             {
                 body["max_results"] = Value::from(v);
             }
-            // Scope to the resolved index (explicit arg, else pinned, #1373).
-            // Only when neither is set do we fan out across every index via the
-            // global `/grep` endpoint — a pinned session never sweeps all.
-            match server.resolve_index_id(args) {
+            // Scope to the resolved index (explicit arg, else `project` (#9168),
+            // else pinned, #1373). Only when none is set do we fan out across
+            // every index via the global grep — a pinned session never sweeps all.
+            match server.resolve_target(args).await {
                 // #4715: the pinned `grep` path is index-backed too, so a
                 // never-indexed worktree must say so rather than 404 — the
                 // agent needs to know to reach for its own filesystem tools.
-                Some(id) => Some(
-                    server
-                        .post_scoped(&format!("/indexes/{id}/grep"), &body, Some(&id))
-                        .await,
-                ),
-                None => Some(server.post("/grep", &body).await),
+                Ok(Some(id)) => {
+                    let params = serde_json::json!({ "index_id": id, "body": body });
+                    Some(server.call_scoped(METHOD_GREP, params, Some(&id)).await)
+                }
+                Ok(None) => Some(server.call(METHOD_GREP_ALL, body).await),
+                Err(e) => Some(Err(e)),
             }
         }
         "console_metrics" => Some(handle_console_metrics(server).await),
@@ -206,8 +210,8 @@ pub(super) async fn dispatch_misc_tool(
 /// Why: The trusty-console metrics poller calls this tool via a supervised
 /// stdio MCP connection every poll_interval seconds to refresh the
 /// `/api/console/metrics/search` dashboard panel (epic #1104).
-/// What: Probes `GET /health` for daemon liveness, index count, and
-/// warm_boot_degraded status; also calls `GET /indexes?details=true` for
+/// What: Probes `search.health` for daemon liveness, index count, and
+/// warm_boot_degraded status; also calls `search.indexes.list` (details) for
 /// the per-index list. Builds a `ConsoleMetricsReport` via `make_report()`.
 /// #6424: schema 1 -> 2 adds `last_used_unix` to each index entry; nothing is
 /// removed or renamed, so a console built against schema 1 reads unchanged.
@@ -218,8 +222,9 @@ pub(super) async fn dispatch_misc_tool(
 async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchError> {
     use trusty_common::console_metrics::{make_report, ServiceHealth};
 
-    // Probe /health — determines status and index_count.
-    let (status, index_count, warm_boot_degraded) = match server.get("/health").await {
+    // Probe search.health — determines status and index_count.
+    let health = server.call(METHOD_HEALTH, serde_json::json!({})).await;
+    let (status, index_count, warm_boot_degraded) = match health {
         Ok(health) => {
             let idx = health.get("indexes").and_then(Value::as_u64).unwrap_or(0) as usize;
             let degraded = health
@@ -232,11 +237,8 @@ async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchErr
         Err(_) => (ServiceHealth::Error, 0usize, false),
     };
 
-    // GET /indexes?details=true returns {"indexes":[{…}]}, not a bare array.
-    let raw = server
-        .get("/indexes?details=true")
-        .await
-        .unwrap_or_default();
+    // The details listing is {"indexes":[{…}]}, not a bare array.
+    let raw = super::index::list_indexes(server).await.unwrap_or_default();
     let indexes: Vec<Value> = raw
         .get("indexes")
         .and_then(Value::as_array)
@@ -274,4 +276,22 @@ async fn handle_console_metrics(server: &McpServer) -> Result<Value, DispatchErr
     );
 
     serde_json::to_value(&report).map_err(|e| DispatchError::Transport(e.to_string()))
+}
+
+/// `search.call_chain`, unwrapped from its JSON string into `{text}`.
+///
+/// Why: the HTTP route answered `text/plain`; the socket method answers the
+/// same prose as a JSON string, and MCP clients read it under `text`.
+///
+/// # Errors
+///
+/// The transport mapping in [`McpServer::dispatch_error`], or `Transport` when
+/// the daemon answers something other than a string.
+async fn call_chain(server: &McpServer, params: Value) -> Result<Value, DispatchError> {
+    match server.call(METHOD_CALL_CHAIN, params).await? {
+        Value::String(text) => Ok(serde_json::json!({ "text": text })),
+        other => Err(DispatchError::Transport(format!(
+            "search.call_chain answered a non-string body: {other}"
+        ))),
+    }
 }

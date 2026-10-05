@@ -7,8 +7,9 @@
 //! id instead, which is the wrong-index failure #1373 exists to prevent. The
 //! owner ruling (2026-08-27) is that a read tool with nothing to resolve
 //! answers with an index of what exists, as a successful result.
-//! What: [`index_directory`] builds that answer from `GET /indexes?details=true`
-//! — the same rows `list_indexes` serves — plus a `hint` naming how to retry.
+//! What: [`index_directory`] builds that answer from `search.indexes.list`
+//! (details) — the same rows `list_indexes` serves — plus a `hint` naming how
+//! to retry.
 //! [`annotate_directory_tools`] makes the advertised schema agree: `index_id`
 //! stops being `required` on those tools and both descriptions say what an
 //! omitted id does.
@@ -23,7 +24,7 @@ use super::{types::DispatchError, McpServer};
 /// Why: the issue names six — `search`, `search_lexical`, `search_semantic`,
 /// `typeahead`, `grep`, `index_status`. `grep` is absent here because it
 /// already satisfies the ruling: an unpinned `grep` with no id fans out over
-/// `POST /grep` rather than erroring (#3805). `search_kg` is present because it
+/// `search.grep.all` rather than erroring (#3805). `search_kg` is present because it
 /// shares [`super::search::run_lane_search`] with the two named lanes, and a
 /// read lane that errors where its siblings answer would be the drift this
 /// module exists to prevent.
@@ -57,11 +58,11 @@ pub(super) const NO_INDEX_RESOLVED: &str = "no_index_resolved";
 ///
 /// Why: see the module doc — the owner ruling requires the discovery answer
 /// inline rather than an error pointing at discovery.
-/// What: GETs `/indexes?details=true` (the `list_indexes` body: `id`,
-/// `root_path`, `size_bytes`, `repo_identity`, `last_used_unix`) and returns
-/// `{status, tool, hint, indexes}`. Chunk counts are deliberately absent — they
-/// live behind a per-index `GET /indexes/:id/status`, so including them would
-/// turn one call into N. A daemon that cannot answer the listing still yields a
+/// What: reads the `list_indexes` body (`id`, `root_path`, `size_bytes`,
+/// `repo_identity`, `last_used_unix`) and returns `{status, tool, hint,
+/// indexes}`. Chunk counts are deliberately absent — they live behind a
+/// per-index `search.index.status`, so including them would turn one call
+/// into N. A daemon that cannot answer the listing still yields a
 /// `Transport` error; this path invents nothing.
 /// Test: `unresolved_read_tools_return_the_index_directory`,
 /// `empty_daemon_directory_points_at_create_index`.
@@ -69,7 +70,7 @@ pub(super) async fn index_directory(
     server: &McpServer,
     tool: &str,
 ) -> Result<Value, DispatchError> {
-    let listed = server.get("/indexes?details=true").await?;
+    let listed = super::index::list_indexes(server).await?;
     let indexes = listed
         .get("indexes")
         .cloned()

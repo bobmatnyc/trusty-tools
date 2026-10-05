@@ -767,11 +767,7 @@ crates/trusty-search/src/core/store/types.rs	test_rewrite_keys_to_relative
 crates/trusty-search/src/core/store/usearch_impl.rs	test_rewrite_keys_to_relative
 crates/trusty-search/src/core/store_config.rs	mmap_serve_mode_from_env_*
 crates/trusty-search/src/core/symbol_graph/build.rs	test_update_file_drops_old_edges
-crates/trusty-search/src/mcp/tools/http.rs	delete_index
-crates/trusty-search/src/mcp/tools/http.rs	list_chunks
-crates/trusty-search/src/mcp/tools/http.rs	search_health
 crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_mcp_tool_returns_hits
-crates/trusty-search/src/mcp/tools/typeahead.rs	typeahead_tool_returns_daemon_response
 crates/trusty-search/src/service/colocated_storage.rs	colocated_dir_exists_after_create
 crates/trusty-search/src/service/config.rs	load_user_config_returns_defaults_when_missing
 crates/trusty-search/src/service/embed_pool.rs	embed_pool_reply_rx_timeout_returns_error
@@ -969,7 +965,6 @@ crates/trusty-search/src/commands/discover/mod.rs	skips_when_no_markers
 crates/trusty-search/src/commands/index.rs	filters_from_index_config_translates_languages
 crates/trusty-search/src/commands/port.rs	handle_port_missing_daemon_test
 crates/trusty-search/src/commands/query.rs	test_query_routing
-crates/trusty-search/src/commands/serve.rs	daemon_bridge
 crates/trusty-search/src/core/corpus/corpus_ops.rs	prune_deleted_files_removes_hashes
 crates/trusty-search/src/core/indexer/archive.rs	test_stale_signal_fires_for_old_files
 crates/trusty-search/src/core/indexer/files.rs	prune_deleted_files_cleans_staging_corpus

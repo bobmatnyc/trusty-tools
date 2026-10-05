@@ -43,10 +43,17 @@ pub(crate) struct MockDaemon {
 pub(crate) async fn mock_daemon(
     handler: impl Fn(&str, Value) -> Result<Value, RpcError> + Send + Sync + 'static,
 ) -> MockDaemon {
+    mock_daemon_with(Fallback(Arc::new(handler))).await
+}
+
+/// Bind a scratch socket and answer every call through `fallback`.
+///
+/// #9168: the async form, so a bridge test can answer after a delay.
+pub(crate) async fn mock_daemon_with(fallback: impl RpcFallback) -> MockDaemon {
     let dir = tempfile::tempdir().expect("scratch socket dir");
     let socket = dir.path().join("ts.sock");
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the scratch socket");
-    let router = Arc::new(RpcRouter::new().fallback(Fallback(Arc::new(handler))));
+    let router = Arc::new(RpcRouter::new().fallback(fallback));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         serve_until(&listener, router, RpcServeOptions::default(), async {

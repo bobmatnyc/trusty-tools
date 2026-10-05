@@ -4,8 +4,9 @@
 //! Why: two checkouts named alike derive one id, and the fallback probed that
 //! id without comparing roots — it reported a different clone's index as this
 //! project's with `healthy: true`.
-//! What: two scratch checkouts both named `api` under a loopback daemon that
-//! serves `/health`, `/indexes?details=true` and per-id status. Each test first
+//! What: two scratch checkouts both named `api` under a mock socket daemon
+//! (#9168) that answers `search.health`, the detailed `search.indexes.list`
+//! and per-id `search.index.status`. Each test first
 //! asserts the pair collides under `derive_index_id`, then asserts the
 //! resolution `search_health` reports for each tree.
 //! Test: this file.
@@ -15,62 +16,34 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::health::{report_health, resolve_scope};
-use super::{McpServer, HEALTH_INDEX_NOT_REGISTERED, HEALTH_OK};
+use super::test_daemon::{mock_daemon, refusal, MockDaemon};
+use super::{HEALTH_INDEX_NOT_REGISTERED, HEALTH_OK};
 
-/// A loopback daemon serving `/health`, the detailed index list, and a status
-/// body per id (404 for an id it does not hold).
-async fn spawn_daemon(entries: Vec<(&str, &Path, u64)>) -> String {
-    use axum::extract::{Path as AxPath, State};
-    use axum::http::StatusCode;
-    use axum::routing::get;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-
+/// A mock socket daemon answering health, the detailed index list, and a
+/// status body per id (not-found for an id it does not hold).
+async fn spawn_daemon(entries: Vec<(&str, &Path, u64)>) -> MockDaemon {
     let list: Vec<Value> = entries
         .iter()
         .map(|(id, root, _)| json!({ "id": id, "root_path": root.display().to_string() }))
         .collect();
-    let counts: Arc<Vec<(String, u64)>> = Arc::new(
-        entries
-            .iter()
-            .map(|(id, _, n)| ((*id).to_string(), *n))
-            .collect(),
-    );
-    let indexes = Arc::new(json!({ "indexes": list }));
+    let counts: Vec<(String, u64)> = entries
+        .iter()
+        .map(|(id, _, n)| ((*id).to_string(), *n))
+        .collect();
+    let indexes = json!({ "indexes": list });
 
-    let app = Router::new()
-        .route(
-            "/health",
-            get(|| async { Json(json!({ "status": "ok", "version": "9.9.9", "indexes": 2 })) }),
-        )
-        .route(
-            "/indexes",
-            get({
-                let indexes = Arc::clone(&indexes);
-                move || async move { Json((*indexes).clone()) }
-            }),
-        )
-        .route(
-            "/indexes/{id}/status",
-            get(
-                |State(counts): State<Arc<Vec<(String, u64)>>>, AxPath(id): AxPath<String>| async move {
-                    match counts.iter().find(|(known, _)| *known == id) {
-                        Some((_, n)) => (StatusCode::OK, Json(json!({ "index_id": id, "chunk_count": n }))),
-                        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "unknown index" }))),
-                    }
-                },
-            ),
-        )
-        .with_state(counts);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+    mock_daemon(move |method, params| match method {
+        "search.health" => Ok(json!({ "status": "ok", "version": "9.9.9", "indexes": 2 })),
+        "search.indexes.list" => Ok(indexes.clone()),
+        _ => {
+            let id = params["index_id"].as_str().unwrap_or_default();
+            match counts.iter().find(|(known, _)| known == id) {
+                Some((_, n)) => Ok(json!({ "index_id": id, "chunk_count": n })),
+                None => Err(refusal(404, &json!({ "error": "unknown index" }))),
+            }
+        }
+    })
+    .await
 }
 
 /// Two checkouts named `api` under distinct parents, each a git root.
@@ -90,8 +63,8 @@ fn same_named_checkouts(tmp: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// Resolve and report as an unpinned session running in `cwd`.
-async fn health_from(base: &str, cwd: &Path) -> Value {
-    let server = McpServer::new(base.to_string());
+async fn health_from(daemon: &MockDaemon, cwd: &Path) -> Value {
+    let server = daemon.server();
     report_health(&server, resolve_scope(&server, &json!({}), Some(cwd))).await
 }
 
@@ -103,15 +76,15 @@ async fn health_from(base: &str, cwd: &Path) -> Value {
 async fn cwd_fallback_resolves_same_basename_checkouts_to_their_own_indexes() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (one, two) = same_named_checkouts(tmp.path());
-    let base = spawn_daemon(vec![("api", &one, 10), ("api-2b1f00aa", &two, 20)]).await;
+    let daemon = spawn_daemon(vec![("api", &one, 10), ("api-2b1f00aa", &two, 20)]).await;
 
-    let first = health_from(&base, &one).await;
+    let first = health_from(&daemon, &one).await;
     assert_eq!(first["status"], HEALTH_OK, "{first}");
     assert_eq!(first["index"]["index_id"], "api");
     assert_eq!(first["index"]["resolved_from"], "cwd");
     assert_eq!(first["index"]["chunk_count"], 10);
 
-    let second = health_from(&base, &two).await;
+    let second = health_from(&daemon, &two).await;
     assert_eq!(second["status"], HEALTH_OK, "{second}");
     assert_eq!(
         second["index"]["index_id"], "api-2b1f00aa",
@@ -127,9 +100,9 @@ async fn cwd_fallback_resolves_same_basename_checkouts_to_their_own_indexes() {
 async fn cwd_fallback_refuses_an_id_served_from_another_tree() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (one, two) = same_named_checkouts(tmp.path());
-    let base = spawn_daemon(vec![("api", &one, 10)]).await;
+    let daemon = spawn_daemon(vec![("api", &one, 10)]).await;
 
-    let report = health_from(&base, &two).await;
+    let report = health_from(&daemon, &two).await;
 
     assert_eq!(report["status"], HEALTH_INDEX_NOT_REGISTERED, "{report}");
     assert_eq!(report["healthy"], Value::Bool(false));

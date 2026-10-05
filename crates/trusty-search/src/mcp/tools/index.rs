@@ -16,6 +16,11 @@ use super::{
     types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+use crate::service::rpc::reads::{METHOD_CHUNKS_LIST, METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
+use crate::service::rpc::writes::{
+    METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_PUT, METHOD_INDEX_FILE_REMOVE,
+    METHOD_INDEX_REINDEX,
+};
 
 /// Resolve `index_id` for a MUTATING index-management tool, defaulting to the
 /// pinned index (#1373) when the caller omits it.
@@ -43,7 +48,7 @@ fn required_index_id(server: &McpServer, args: &Value) -> Result<String, Dispatc
 
 /// Read `key` as a non-empty array whose every entry is a string.
 ///
-/// Why: `create_index` forwards `exclude_globs` verbatim into the HTTP body,
+/// Why: `create_index` forwards `exclude_globs` verbatim into the request body,
 /// and the daemon deserialises it as `Option<Vec<String>>` — a caller that
 /// passed `[1, 2]` would get a 422 from the daemon instead of an MCP-level
 /// answer. Validating here keeps the wire body well-typed.
@@ -115,14 +120,11 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(
-                server
-                    .post(
-                        &format!("/indexes/{index_id}/index-file"),
-                        &serde_json::json!({ "path": path, "content": content }),
-                    )
-                    .await,
-            )
+            let params = serde_json::json!({
+                "index_id": index_id,
+                "body": { "path": path, "content": content },
+            });
+            Some(server.call(METHOD_INDEX_FILE_PUT, params).await)
         }
         "remove_file" => {
             let index_id = match required_index_id(server, args) {
@@ -133,18 +135,12 @@ pub(super) async fn dispatch_index_tool(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(
-                server
-                    .post(
-                        &format!("/indexes/{index_id}/remove-file"),
-                        &serde_json::json!({ "path": path }),
-                    )
-                    .await,
-            )
+            let params = serde_json::json!({ "index_id": index_id, "body": { "path": path } });
+            Some(server.call(METHOD_INDEX_FILE_REMOVE, params).await)
         }
         // Issue #312: request details=true so the response includes
         // per-index size_bytes in addition to the id list.
-        "list_indexes" => Some(server.get("/indexes?details=true").await),
+        "list_indexes" => Some(list_indexes(server).await),
         "create_index" => {
             let id = match require_str(args, "id") {
                 Ok(v) => v,
@@ -178,7 +174,7 @@ pub(super) async fn dispatch_index_tool(
             if let Some(globs) = string_array(args, "exclude_globs") {
                 body["exclude_globs"] = Value::Array(globs);
             }
-            Some(server.post("/indexes", &body).await)
+            Some(server.call(METHOD_INDEX_CREATE, body).await)
         }
         "delete_index" => {
             let index_id = match required_index_id(server, args) {
@@ -188,84 +184,107 @@ pub(super) async fn dispatch_index_tool(
             // #6422: the on-disk data goes by default, and `delete_data: false`
             // is the explicit deregister-only opt-out. The daemon's own default
             // is still the opposite (#4123), so the flag is always sent.
+            // #9168: `search.index.delete` takes it as a params field.
             let delete_data = match delete_data_arg(args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(
-                server
-                    .delete(&format!("/indexes/{index_id}?delete_data={delete_data}"))
-                    .await,
-            )
+            let params = serde_json::json!({ "index_id": index_id, "delete_data": delete_data });
+            Some(server.call(METHOD_INDEX_DELETE, params).await)
         }
         "reindex" => {
             let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            // Accept optional root_path override (mirrors the HTTP body).
+            // Accept optional root_path override (mirrors the request body).
             let mut body = serde_json::json!({});
             if let Some(rp) = args.get("root_path").and_then(Value::as_str) {
                 body["root_path"] = Value::String(rp.to_string());
             }
-            Some(
-                server
-                    .post(&format!("/indexes/{index_id}/reindex"), &body)
-                    .await,
-            )
+            let params = serde_json::json!({ "index_id": index_id, "body": body });
+            Some(server.call(METHOD_INDEX_REINDEX, params).await)
         }
         "index_status" => {
             // #6317: `index_status` is a read, so an unresolvable id answers
             // with the indexes that exist rather than the write tools' error.
-            let Some(index_id) = server.resolve_index_id(args) else {
-                return Some(super::index_directory::index_directory(server, "index_status").await);
+            // #9168: `project` resolves through the daemon.
+            let index_id = match server.resolve_target(args).await {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return Some(
+                        super::index_directory::index_directory(server, "index_status").await,
+                    )
+                }
+                Err(e) => return Some(Err(e)),
             };
             // #4715: `index_status` on a never-indexed pin 404'd the same way
             // `search` did; it gets the same honest not-ready answer.
+            let params = serde_json::json!({ "index_id": index_id });
             Some(
                 server
-                    .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                    .call_scoped(METHOD_INDEX_STATUS, params, Some(&index_id))
                     .await,
             )
         }
         "list_chunks" => {
             // Issue #54 — paginated enumeration of an index's corpus.
-            // Mirrors `GET /indexes/:id/chunks?offset=&limit=&after=`.
+            // Mirrors `search.chunks.list` (`GET /indexes/:id/chunks`).
             // Issue #1325: an optional `after` cursor switches to an indexed
             // redb seek (O(page) at any depth) instead of the O(offset) scan;
             // the daemon echoes `next_cursor` for the next call.
-            let index_id = match required_index_id(server, args) {
-                Ok(v) => v,
+            // #9168: `project` resolves through the daemon; with neither it and
+            // no pin, the mutating-tool error still applies.
+            let index_id = match server.resolve_target(args).await {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return Some(Err(DispatchError::InvalidParams(
+                        super::types::MISSING_INDEX_ID.into(),
+                    )))
+                }
                 Err(e) => return Some(Err(e)),
             };
             let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
             let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(100);
-            let mut query: Vec<(&str, String)> =
-                vec![("offset", offset.to_string()), ("limit", limit.to_string())];
+            // #9168: the socket carries the query fields as typed JSON beside
+            // `index_id`; a cursor needs no percent-encoding there.
+            let mut params = serde_json::json!({
+                "index_id": index_id,
+                "offset": offset,
+                "limit": limit,
+            });
             if let Some(after) = args.get("after").and_then(Value::as_str) {
-                // The cursor is a chunk id (`path:start:end`) — reqwest's
-                // `.query()` percent-encodes it so reserved chars don't break
-                // the query string.
-                query.push(("after", after.to_string()));
+                params["after"] = Value::String(after.to_string());
             }
             // #7677: one-call outline read for a file or directory. The daemon
             // filters before paging, so `total` and `next_cursor` describe the
             // scoped set.
             if let Some(prefix) = args.get("path_prefix").and_then(Value::as_str) {
-                query.push(("path_prefix", prefix.to_string()));
+                params["path_prefix"] = Value::String(prefix.to_string());
             }
             // #4715: index-scoped like its `index_status` neighbour — a
             // never-indexed pin gets the same not-ready answer here.
             Some(
                 server
-                    .get_query_scoped(
-                        &format!("/indexes/{index_id}/chunks"),
-                        &query,
-                        Some(&index_id),
-                    )
+                    .call_scoped(METHOD_CHUNKS_LIST, params, Some(&index_id))
                     .await,
             )
         }
         _ => None,
     }
+}
+
+/// `search.indexes.list` with `details: true` — the `list_indexes` body.
+///
+/// Why: three callers read this listing (`list_indexes`, the #6317 index
+/// directory, `console_metrics`); one function keeps the params identical.
+/// What: issue #312's `details` view, so each row carries `size_bytes`.
+///
+/// # Errors
+///
+/// The transport mapping in [`McpServer::dispatch_error`].
+pub(super) async fn list_indexes(server: &McpServer) -> Result<Value, DispatchError> {
+    server
+        .call(METHOD_INDEXES_LIST, serde_json::json!({ "details": true }))
+        .await
 }

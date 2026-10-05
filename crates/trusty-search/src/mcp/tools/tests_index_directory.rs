@@ -8,49 +8,33 @@
 //! index. These tests pin all four, plus the schema that lets a client issue
 //! the call at all.
 //! What: drives `McpServer::dispatch` in the `tools/call` form against a mock
-//! daemon serving `GET /indexes` and `POST /grep`.
+//! socket daemon (#9168) answering `search.indexes.list` and `search.grep.all`.
 //! Test: this file.
 
 use serde_json::Value;
 
 use super::index_directory::{DIRECTORY_TOOLS, NO_INDEX_RESOLVED};
+use super::test_daemon::{mock_daemon, MockDaemon};
 use super::tests::req;
-use super::McpServer;
 
-/// Spin up a mock daemon serving the listing and fan-out routes this contract
-/// touches.
+/// A mock socket daemon answering the listing and fan-out methods this
+/// contract touches.
 ///
-/// Why: the directory answer is built from the daemon's own `GET /indexes`
-/// body, so a test that stubs the payload elsewhere would prove nothing about
-/// the round-trip. `spawn_mock_daemon` in `tests.rs` serves only the per-index
-/// status and search routes.
-/// What: returns the base URL of a loopback listener answering
-/// `GET /indexes` with `{"indexes": indexes}` and `POST /grep` with an empty
-/// match set.
+/// Why: the directory answer is built from the daemon's own listing body, so a
+/// test that stubs the payload elsewhere would prove nothing about the
+/// round-trip. `spawn_mock_daemon` in `tests.rs` serves only the per-index
+/// status and search methods.
+/// What: answers `search.indexes.list` with `{"indexes": indexes}` and
+/// `search.grep.all` with an empty match set.
 /// Test: used by every test in this file.
-async fn spawn_listing_daemon(indexes: Value) -> String {
-    use axum::extract::State;
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-
-    async fn list(State(s): State<Value>) -> Json<Value> {
-        Json(serde_json::json!({ "indexes": s }))
-    }
-    async fn grep() -> Json<Value> {
-        Json(serde_json::json!({ "matches": [], "truncated": false }))
-    }
-
-    let app = Router::new()
-        .route("/indexes", get(list))
-        .route("/grep", post(grep))
-        .with_state(indexes);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+async fn spawn_listing_daemon(indexes: Value) -> MockDaemon {
+    mock_daemon(move |method, _params| {
+        Ok(match method {
+            "search.indexes.list" => serde_json::json!({ "indexes": indexes }),
+            _ => serde_json::json!({ "matches": [], "truncated": false }),
+        })
+    })
+    .await
 }
 
 /// Two registered indexes, shaped like the real `?details=true` rows.
@@ -97,9 +81,9 @@ fn call(tool: &str) -> super::Request {
 /// Test: this test.
 #[tokio::test]
 async fn unresolved_read_tools_return_the_index_directory() {
-    let base = spawn_listing_daemon(two_indexes()).await;
+    let daemon = spawn_listing_daemon(two_indexes()).await;
     // No pin, no explicit id, no fan-out: there is genuinely nothing to resolve.
-    let server = McpServer::new(base);
+    let server = daemon.server();
 
     for tool in DIRECTORY_TOOLS {
         let (payload, is_error) = tool_result(&server.dispatch(call(tool)).await);
@@ -146,8 +130,8 @@ async fn unresolved_read_tools_return_the_index_directory() {
 /// Test: this test.
 #[tokio::test]
 async fn empty_daemon_directory_points_at_create_index() {
-    let base = spawn_listing_daemon(serde_json::json!([])).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_listing_daemon(serde_json::json!([])).await;
+    let server = daemon.server();
     let (payload, is_error) = tool_result(&server.dispatch(call("search")).await);
     assert!(
         !is_error,
@@ -173,8 +157,8 @@ async fn empty_daemon_directory_points_at_create_index() {
 /// Test: this test.
 #[tokio::test]
 async fn mutating_tools_still_error_when_no_index_resolves() {
-    let base = spawn_listing_daemon(two_indexes()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_listing_daemon(two_indexes()).await;
+    let server = daemon.server();
     for tool in ["index_file", "remove_file", "delete_index", "reindex"] {
         let (payload, is_error) = tool_result(&server.dispatch(call(tool)).await);
         assert!(
@@ -194,7 +178,7 @@ async fn mutating_tools_still_error_when_no_index_resolves() {
 ///
 /// Why (#6317): the issue lists `grep` among the six tools that must stop
 /// erroring, but `grep` never took that path — `resolve_index_id` returning
-/// `None` sends it to the global `POST /grep` (#3805). Returning a directory
+/// `None` sends it to the global `search.grep.all` (#3805). Returning a directory
 /// instead would delete that fan-out. This test states the reason `grep` is
 /// absent from `DIRECTORY_TOOLS` as an assertion rather than a comment.
 /// What: dispatches `grep` unpinned with no id and asserts a successful daemon
@@ -202,8 +186,8 @@ async fn mutating_tools_still_error_when_no_index_resolves() {
 /// Test: this test.
 #[tokio::test]
 async fn unpinned_grep_with_no_index_fans_out() {
-    let base = spawn_listing_daemon(two_indexes()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_listing_daemon(two_indexes()).await;
+    let server = daemon.server();
     let (payload, is_error) = tool_result(&server.dispatch(call("grep")).await);
     assert!(!is_error, "grep fan-out is a success: {payload}");
     assert!(

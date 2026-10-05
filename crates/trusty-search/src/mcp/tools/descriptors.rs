@@ -15,7 +15,7 @@ use serde_json::Value;
 ///
 /// Why: listing tools separately from their implementation allows the MCP
 /// client to introspect the full tool catalogue without triggering any daemon
-/// HTTP calls.
+/// calls.
 /// What: returns a `Value::Array` containing one descriptor object per
 /// registered tool. Each object has `name`, `description`, and `inputSchema`.
 ///
@@ -452,6 +452,9 @@ pub fn tool_descriptors() -> Value {
     // #7493: every result-returning tool advertises the byte ceiling's two
     // knobs, from the same list the dispatcher enforces them from.
     super::byte_cap::annotate_capped_tools(&mut defs);
+    // #9168: the read tools that take one index also accept `project`, from the
+    // same list the dispatcher resolves it for.
+    super::project::annotate_project_tools(&mut defs);
     defs
 }
 

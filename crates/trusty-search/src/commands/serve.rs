@@ -1,10 +1,14 @@
 //! Handler for `trusty-search serve` -- MCP server (stdio + optional HTTP/SSE).
+//!
+//! #9168: the bridge reaches the daemon only through `DaemonClient` on its
+//! Unix socket. The optional `--with-http` listener is the MCP transport's own
+//! endpoint for MCP clients, not a route to the daemon.
 
-use super::daemon_utils::{daemon_base_url, mcp_http_addr_path};
+use super::daemon_utils::mcp_http_addr_path;
 use super::serve_scope::{auto_pin_from_cwd, PinChoice};
 use anyhow::Result;
 use colored::Colorize;
-use trusty_mcp::DaemonBridgeConfig;
+use trusty_search::service::daemon_client::DaemonClient;
 
 pub(crate) use super::serve_scope::resolve_pinned_index;
 
@@ -13,9 +17,9 @@ pub(crate) use super::serve_scope::resolve_pinned_index;
 /// to follow in isolation.
 /// What: routes between stdio-only (the default -- issue #123) and HTTP modes;
 /// HTTP is opt-in via `--with-http` (or the legacy explicit `--http <addr>`).
-/// In stdio mode, ensures the daemon is running (auto-starting it if absent via
-/// the shared `trusty_mcp::ensure_daemon_up` helper) before entering
-/// the MCP stdio loop; exits the process immediately when the MCP client closes
+/// In stdio mode, ensures the daemon answers on its socket (auto-starting it
+/// if absent via `daemon_guard::ensure_daemon_up`, which waits on the socket,
+/// never on an HTTP address — #9168) before entering the MCP stdio loop; exits the process immediately when the MCP client closes
 /// its pipe (stdin EOF), so the process never lingers as an orphan after Claude
 /// Code's session ends (issue #457).
 /// Test: `cargo run -- serve` runs MCP over stdio only; `serve --with-http`
@@ -25,7 +29,7 @@ pub(crate) use super::serve_scope::resolve_pinned_index;
 /// daemon's `http_addr` file) so a crashed `serve` cannot clobber the daemon's
 /// discovery file (issue #117). EOF self-exit is unit-tested in
 /// `crates/trusty-common/src/mcp/mod.rs` (`stdio_loop_exits_on_eof`).
-/// Auto-start behavior covered by `trusty_mcp::daemon_bridge` tests.
+/// Socket wait covered by `ensure_daemon_up_names_the_socket_when_it_never_answers`.
 pub async fn handle_serve(
     with_http: bool,
     port: u16,
@@ -52,27 +56,30 @@ pub async fn handle_serve(
         None => server,
     };
 
+    // #9168: the one route to the daemon — its socket, resolved the way the
+    // daemon derives it (`TRUSTY_DATA_DIR`, or `TRUSTY_SEARCH_SOCKET`).
+    let daemon = DaemonClient::resolve()?;
+
     match bind_addr {
         Some(addr) => {
             // #5264: the working-directory tier is deliberately stdio-only. An
             // HTTP listener is a shared, multi-client endpoint; deriving its
             // scope from whichever directory happened to launch it would apply
             // one client's project to every other client.
-            let daemon_url = daemon_base_url();
             let server = pin(
-                crate::mcp::McpServer::new(daemon_url.clone()),
+                crate::mcp::McpServer::new(daemon.clone()),
                 pinned_index.as_ref(),
             );
             if let Some(ref choice) = pinned_index {
                 eprintln!("{} {}", "\u{25c9}".green(), choice.report());
             }
-            serve_http(server, addr, &daemon_url).await
+            serve_http(server, addr, &daemon).await
         }
         None => {
-            // Stdio mode: ensure the daemon is running before entering the
-            // MCP dispatch loop. The McpServer forwards every tool call to
-            // the daemon's REST API, so the daemon MUST be reachable.
-            let base_url = ensure_search_daemon_up().await?;
+            // Stdio mode: ensure the daemon answers on its socket before
+            // entering the MCP dispatch loop. Every tool call goes over that
+            // socket, so the daemon MUST be reachable there.
+            super::daemon_guard::ensure_daemon_up(&daemon).await?;
 
             // #5264: with no explicit flag, scope the session to the working
             // directory — confirmed against the daemon first, so an unindexed
@@ -82,7 +89,7 @@ pub async fn handle_serve(
             let resolved = match pinned_index {
                 Some(choice) => Some(super::serve_scope::AutoPin::Pinned(choice)),
                 None => match std::env::current_dir() {
-                    Ok(cwd) => auto_pin_from_cwd(&base_url, &cwd).await,
+                    Ok(cwd) => auto_pin_from_cwd(&daemon, &cwd).await,
                     Err(e) => Some(super::serve_scope::AutoPin::Unpinned {
                         reason: format!(
                             "MCP session UNPINNED — could not read the working directory \
@@ -93,7 +100,7 @@ pub async fn handle_serve(
             };
 
             let server = pin(
-                crate::mcp::McpServer::new(base_url.clone()),
+                crate::mcp::McpServer::new(daemon.clone()),
                 resolved.as_ref().and_then(|r| r.choice()),
             );
             if let Some(ref r) = resolved {
@@ -105,14 +112,13 @@ pub async fn handle_serve(
                 eprintln!("{} {}", marker, r.report());
             }
             eprintln!(
-                "{} MCP stdio (no HTTP) -> daemon {}",
+                "{} MCP stdio -> daemon socket {}",
                 "\u{25c9}".green(),
-                base_url.dimmed()
+                daemon.socket().display().to_string().dimmed()
             );
             crate::mcp::stdio::run(server).await?;
-            // Why: the reqwest connection pool and tokio background threads can
-            // keep the runtime alive for up to 90 s after the stdio loop exits
-            // (reqwest's default pool_idle_timeout). In MCP stdio mode the
+            // Why: tokio background threads can keep the runtime alive after
+            // the stdio loop exits. In MCP stdio mode the
             // client has already disconnected (stdin hit EOF), so lingering is
             // never useful -- the process is an orphan at this point. Calling
             // exit(0) immediately tears it down so workers never accumulate
@@ -124,44 +130,13 @@ pub async fn handle_serve(
     }
 }
 
-/// Ensure the trusty-search daemon is running; return its live base URL.
-///
-/// Why: the MCP stdio bridge forwards every tool call to the daemon's REST API.
-/// If the daemon is not running the bridge would emit connection errors on every
-/// tool call, which is confusing. Auto-starting matches the UX of the memory
-/// bridge (issue #1078) and aligns all three daemon-backed MCP servers.
-/// What: uses the shared `trusty_mcp::ensure_daemon_up` helper with the
-/// trusty-search-specific config: health path `/health`, spawn args
-/// `start --foreground` (which binds a fixed port written to the discovery
-/// file), and a `base_url_fn` that re-reads the address file on every poll.
-/// Issue #3545: `base_url_fn` now delegates straight to `daemon_base_url()`,
-/// the same `TRUSTY_DATA_DIR`-aware resolver every other CLI subcommand uses,
-/// instead of a separate inline call to `trusty_common::read_daemon_addr`
-/// (which only honoured the test-only `TRUSTY_DATA_DIR_OVERRIDE` env var and
-/// could re-discover the wrong daemon instance).
-/// Test: covered by `trusty_mcp::daemon_bridge` unit tests; the live
-/// path is exercised by `cargo run -- serve` with no daemon running.
-async fn ensure_search_daemon_up() -> Result<String> {
-    let config = DaemonBridgeConfig {
-        service_name: "trusty-search".to_string(),
-        // `start --foreground` launches the HTTP daemon inline (blocking) in
-        // the spawned child. The daemon writes its bound `host:port` to
-        // `{data_dir}/http_addr`; our `base_url_fn` reads that file on each
-        // iteration to discover the live address.
-        spawn_args: vec!["start".to_string(), "--foreground".to_string()],
-        health_path: "/health".to_string(),
-        base_url_fn: Box::new(daemon_base_url),
-        startup_timeout: None,
-        poll_interval: None,
-        no_spawn: false,     // trusty-search bridge may auto-start its daemon
-        no_spawn_hint: None, // unused: no_spawn is false
-    };
-    trusty_mcp::ensure_daemon_up(&config).await
-}
-
 /// Run the MCP HTTP/SSE listener on `addr`. Writes the discovery file before
 /// serving and removes it on exit (clean or crashed).
-async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &str) -> Result<()> {
+async fn serve_http(
+    server: crate::mcp::McpServer,
+    addr: String,
+    daemon: &DaemonClient,
+) -> Result<()> {
     // Bind first so we can report the OS-chosen port when 0.
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let local = listener.local_addr()?;
@@ -170,7 +145,7 @@ async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &st
     // this MCP server's transport. Distinct from the daemon's `http_addr` file
     // (issue #117): two processes writing the same file caused stale-address
     // races where a SIGKILL'd `serve --http` would leave a dead address that
-    // `daemon_base_url()` reads first, then waits 60s for. Best-effort:
+    // the daemon-address resolver read first, then waited 60s for. Best-effort:
     // a missing $HOME is reported but doesn't abort.
     let addr_file = mcp_http_addr_path();
     if let Some(ref path) = addr_file {
@@ -186,16 +161,14 @@ async fn serve_http(server: crate::mcp::McpServer, addr: String, daemon_url: &st
         }
     }
 
+    // #9168: this listener is the MCP transport's own endpoint; the daemon is
+    // reached through its socket, named here.
     eprintln!(
-        "trusty-search v{} -- HTTP admin panel: http://{}",
-        env!("CARGO_PKG_VERSION"),
-        local,
-    );
-    eprintln!(
-        "{} MCP HTTP/SSE on {} -> daemon {}",
+        "{} trusty-search v{} MCP HTTP/SSE on {} -> daemon socket {}",
         "\u{25c9}".green(),
+        env!("CARGO_PKG_VERSION"),
         local.to_string().cyan(),
-        daemon_url.dimmed()
+        daemon.socket().display().to_string().dimmed()
     );
 
     let app = crate::mcp::sse::router(server);

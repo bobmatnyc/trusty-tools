@@ -11,6 +11,9 @@
 //! vector-availability contract stopped at the HTTP boundary and never reached
 //! an MCP consumer.
 //!
+//! #9168: the bridge now reaches the daemon over its socket, where the same
+//! 503 body arrives as the refusal's `data` member; the contract is unchanged.
+//!
 //! What: [`classify_unavailable`] — the single place a daemon 503 becomes a
 //! structured error — plus the JSON-RPC code and the `tools/call` envelope
 //! wrapper. Deliberately shaped as [`super::not_ready`]'s twin: that module
@@ -31,6 +34,7 @@
 use serde_json::Value;
 
 use super::types::DispatchError;
+use crate::service::daemon_client::DaemonCallError;
 
 /// Application-level JSON-RPC error code for "the daemon answered 503 with a
 /// structured availability verdict" (issue #5350).
@@ -51,31 +55,32 @@ pub const INDEX_UNAVAILABLE_CODE: i32 = -32012;
 /// `index_restore_failed`, …) stays available beside it under `error`.
 pub const INDEX_UNAVAILABLE: &str = "INDEX_UNAVAILABLE";
 
-/// Turn a daemon 503 carrying a JSON body into a structured dispatch error.
+/// Turn a daemon unavailable refusal carrying its 503 body into a structured
+/// dispatch error.
 ///
-/// Why: this is the fix for #5350. Called from every HTTP helper's failure
-/// path so no verb keeps the old prose-flattening behaviour — a structured 503
-/// reaching a caller as text on `index_status` but as data on `search` would be
-/// the same defect wearing a smaller blast radius.
+/// Why: this is the fix for #5350, carried onto the socket by #9168. The
+/// daemon renders every availability verdict as an `unavailable` (or
+/// `permanently unavailable`) refusal whose `data` is the 503 body verbatim
+/// (`service::rpc::error::rpc_error_from_http`), so the fields a caller
+/// branches on — `index_id`, `retryable`, `restore_via`, `reason`,
+/// `transient`, `stages` — arrive as data, not prose.
 ///
 /// What: returns `Some(DispatchError::IndexUnavailable { .. })` only when the
-/// status is exactly `503` AND the body is a JSON object with a string `error`
-/// field — the shape every availability verdict in
+/// refusal's code is one of the two unavailable codes AND its `data` is a JSON
+/// object with a string `error` field — the shape every availability verdict in
 /// `service/server/degraded.rs` emits. Anything else returns `None` and the
-/// caller falls through to its existing `Transport` error unchanged, so a
-/// bodyless 503, a plain-text 503 from a proxy, or any other status behaves
-/// exactly as before. It has no fallible step that could turn a failure into a
-/// success: every path yields `None` or an `Err`.
+/// caller falls through to its existing error unchanged, so a refusal without
+/// `data`, or any other code, behaves exactly as before. The payload adds
+/// `error_code` and `http_status: 503` (the status the daemon's verdict maps
+/// to) and changes nothing else. It has no fallible step that could turn a
+/// failure into a success: every path yields `None` or an `Err`.
 ///
 /// Test: `classify_unavailable_ignores_non_503_and_unstructured_bodies`.
-pub(super) fn classify_unavailable(
-    status: reqwest::StatusCode,
-    body: &Value,
-) -> Option<DispatchError> {
-    if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+pub(super) fn classify_unavailable(e: &DaemonCallError) -> Option<DispatchError> {
+    if !e.is_unavailable() {
         return None;
     }
-    let obj = body.as_object()?;
+    let obj = e.data()?.as_object()?;
     let code = obj.get("error").and_then(Value::as_str)?;
 
     let mut payload = obj.clone();
@@ -86,18 +91,6 @@ pub(super) fn classify_unavailable(
         message: unavailable_message(code, obj),
         payload: Value::Object(payload),
     })
-}
-
-/// Parse a raw response body, then classify it (issue #5350).
-///
-/// The text-bodied HTTP helpers hold a `String`, not a `Value`; an unparseable
-/// body is simply not a structured verdict, so it falls through to `None`.
-pub(super) fn classify_unavailable_text(
-    status: reqwest::StatusCode,
-    text: &str,
-) -> Option<DispatchError> {
-    let body: Value = serde_json::from_str(text).ok()?;
-    classify_unavailable(status, &body)
 }
 
 /// Human-readable text shown to the model alongside the structured payload.
@@ -122,7 +115,7 @@ fn unavailable_message(code: &str, obj: &serde_json::Map<String, Value>) -> Stri
                 .unwrap_or("<unknown>");
             format!(
                 "The daemon cannot serve this request against index '{id}': {code} \
-                 (HTTP 503). See the structured payload for the full verdict."
+                 (unavailable). See the structured payload for the full verdict."
             )
         }
     };

@@ -10,7 +10,7 @@
 //! callers from disagreeing about which index a directory maps to.
 //! What: the candidate derivation, the daemon-list parser, and the
 //! confirmation verdict. No I/O beyond `canonicalize`; each caller fetches
-//! `GET /indexes?details=true` with its own client.
+//! `search.indexes.list` (details) with its own client.
 //!
 //! Test: `confirm_accepts_matching_root` and its siblings in the binary's
 //! `serve_scope_tests.rs`; `cwd_fallback_resolves_same_basename_checkouts_to_their_own_indexes`
@@ -61,7 +61,7 @@ pub fn derive_cwd_candidate(cwd: &Path) -> Option<CwdCandidate> {
     })
 }
 
-/// One index as the daemon reports it on `GET /indexes?details=true`.
+/// One index as the daemon reports it on `search.indexes.list` (details).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonIndex {
     pub id: String,
@@ -125,7 +125,7 @@ fn same_root(a: &Path, b: &Path) -> bool {
 /// id — `trusty-tools-checkout` beside `trusty-tools` on 2026-09-05 — so the
 /// entries already in hand are scanned for a `root_path` that IS this tree
 /// before the candidate is refused. That scan costs no request: `entries` is the
-/// single `GET /indexes?details=true` the caller already made. The same scan
+/// single `search.indexes.list` (details) the caller already made. The same scan
 /// runs when the derived id is served from another root and when it is not
 /// served at all, because the remedy is identical in both.
 /// Test: `confirm_accepts_matching_root`, `confirm_rejects_colliding_basename`,
@@ -176,7 +176,7 @@ fn index_serving_root(entries: &[DaemonIndex], root: &Path) -> Option<String> {
 ///
 /// Why: `?details=true` carries `root_path` alongside each id (#661, added so
 /// callers could derive the index from the current project directory), which is
-/// the field [`confirm_candidate`] needs. The flat `GET /indexes` returns bare
+/// the field [`confirm_candidate`] needs. The flat listing returns bare
 /// ids and cannot confirm identity.
 /// What: tolerates entries missing or misshaping `root_path` by carrying `None`
 /// rather than dropping the entry, so a null root reports as unconfirmable

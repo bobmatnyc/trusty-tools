@@ -37,9 +37,10 @@ use crate::service::rpc::error::{
 };
 use crate::service::socket::{self, MAX_FRAME_BYTES};
 
+// #9168: `pub(crate)` so the MCP bridge's tests share this mock daemon.
 #[cfg(test)]
 #[path = "daemon_client_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "daemon_client_sweep_tests.rs"]

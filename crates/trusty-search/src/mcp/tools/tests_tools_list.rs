@@ -3,15 +3,16 @@
 //! Why: validates that the four per-lane search tools (#138) plus the legacy
 //! `search` tool all appear in `tools/list` with correct descriptions and
 //! schemas, that `summarise_stages` renders correctly, and that `search_all`
-//! without `index_id` fans out to the global `/search` endpoint.
-//! What: unit/integration tests using a mock base URL or a tiny axum mock
-//! daemon; no shared state with the core tests file.
+//! without `index_id` fans out to the global `search.query.all` method.
+//! What: unit/integration tests using an unreachable socket or a mock socket
+//! daemon (#9168); no shared state with the core tests file.
 //! Test: this file.
 
 use serde_json::Value;
 
+use super::error_codes;
+use super::test_daemon::{methods, recording_daemon, unreachable_server};
 use super::tests::req;
-use super::{error_codes, McpServer};
 
 /// `summarise_stages` renders the three known keys in lexical →
 /// semantic → graph order and Title-cases snake_case statuses.
@@ -32,7 +33,7 @@ fn summarise_stages_renders_in_order() {
 /// `test_tools_list_complete` assertion.
 #[tokio::test]
 async fn tools_list_returns_five_search_tools() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -84,7 +85,7 @@ async fn tools_list_returns_five_search_tools() {
 /// (when-to-use phrasing) so the LLM can pick reliably.
 #[tokio::test]
 async fn per_lane_tool_descriptions_carry_when_to_use_hooks() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -118,7 +119,7 @@ async fn per_lane_tool_descriptions_carry_when_to_use_hooks() {
 /// and leaves `query` as the one missing argument this test is about.
 #[tokio::test]
 async fn per_lane_tools_require_index_id_and_query() {
-    let server = McpServer::new("http://127.0.0.1:1").with_pinned_index("pinned-proj");
+    let server = unreachable_server().with_pinned_index("pinned-proj");
     for tool in ["search_lexical", "search_semantic", "search_kg"] {
         let resp = server.dispatch(req(tool, serde_json::json!({}))).await;
         let err = resp.error.expect("expected error");
@@ -132,45 +133,22 @@ async fn per_lane_tools_require_index_id_and_query() {
 
 /// `search_all` without `index_id` keeps the legacy fan-out behaviour
 /// (issue #10) — the tool's input schema requires `query` only, and
-/// the daemon's `POST /search` endpoint is responsible for the fan-out
+/// the daemon's `search.query.all` method is responsible for the fan-out
 /// logic.
 #[tokio::test]
 async fn search_all_without_index_id_calls_global_fanout_endpoint() {
-    // Mock daemon that returns a fan-out response from POST /search.
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    // Mock daemon that returns a fan-out response from search.query.all.
+    let (daemon, calls) = recording_daemon(|_, _| Ok(serde_json::json!({ "results": [] }))).await;
 
-    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let captured_clone = Arc::clone(&captured);
-
-    async fn fanout_handler(
-        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Vec<String>>>>,
-        Json(_body): Json<Value>,
-    ) -> Json<Value> {
-        captured.lock().await.push("/search".into());
-        Json(serde_json::json!({ "results": [] }))
-    }
-
-    let app = Router::new()
-        .route("/search", post(fanout_handler))
-        .with_state(captured_clone);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
-    let resp = server
+    let resp = daemon
+        .server()
         .dispatch(req(
             "search_all",
             serde_json::json!({ "query": "anything" }),
         ))
         .await;
     assert!(resp.error.is_none());
-    assert_eq!(captured.lock().await.as_slice(), &["/search".to_string()]);
+    assert_eq!(methods(&calls), ["search.query.all"]);
 }
 
 // Issue #1373 — pinned-index descriptor advertisement
@@ -274,7 +252,7 @@ fn pinned_descriptors_annotate_index_id() {
 /// Test: this is the test.
 #[tokio::test]
 async fn tools_list_reflects_session_pin() {
-    let server = McpServer::new("http://127.0.0.1:1").with_pinned_index("trusty-tools");
+    let server = unreachable_server().with_pinned_index("trusty-tools");
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let tools = resp
         .result
@@ -309,7 +287,7 @@ async fn tools_list_reflects_session_pin() {
 /// Test: this is the test.
 #[tokio::test]
 async fn grep_index_id_docs_state_the_pinned_default() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let tools = resp
         .result

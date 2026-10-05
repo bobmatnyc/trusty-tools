@@ -8,16 +8,20 @@
 //! usable: the verdict arrives as DATA on every verb, the `retryable` split
 //! survives as a boolean rather than as prose, and a 503 is never mistaken for
 //! a search that ran and found nothing.
-//! What: drives `McpServer::dispatch` against a mock daemon fixed at 503 with
-//! each of the availability bodies `service/server/degraded.rs` emits.
+//! What: drives `McpServer::dispatch` against a mock socket daemon fixed at the
+//! 503 refusal for each of the availability bodies `service/server/degraded.rs`
+//! emits — rendered by the daemon's own `rpc_error_from_http`, which carries the
+//! body as the refusal's `data` (#9168).
 //! Test: this file.
 
 use serde_json::{json, Value};
 
+use super::test_daemon::refusal;
 use super::tests::req;
 use super::tests_not_ready::spawn_status_daemon;
 use super::unavailable::classify_unavailable;
-use super::{McpServer, INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
+use super::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
+use crate::service::daemon_client::DaemonCallError;
 
 /// The `503 index_not_resident` body `residency_miss_response` emits for a
 /// cold-parked index, copied field for field from `degraded.rs`.
@@ -54,8 +58,8 @@ fn text(resp: &super::Response) -> String {
 /// every assertion below on `_meta` failed.
 #[tokio::test]
 async fn tools_call_search_on_cold_parked_index_returns_structured_meta() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -91,8 +95,8 @@ async fn tools_call_search_on_cold_parked_index_returns_structured_meta() {
 /// app-level code distinct from `INTERNAL_ERROR`.
 #[tokio::test]
 async fn bare_method_search_on_cold_parked_index_returns_structured_data() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -127,7 +131,7 @@ async fn bare_method_search_on_cold_parked_index_returns_structured_data() {
 /// polls forever or gives up on a state that was about to resolve.
 #[tokio::test]
 async fn non_retryable_vector_verdict_survives_as_a_boolean() {
-    let base = spawn_status_daemon(
+    let daemon = spawn_status_daemon(
         503,
         json!({
             "error": "vector_unavailable",
@@ -138,7 +142,7 @@ async fn non_retryable_vector_verdict_survives_as_a_boolean() {
         }),
     )
     .await;
-    let server = McpServer::new(base);
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -163,8 +167,8 @@ async fn non_retryable_vector_verdict_survives_as_a_boolean() {
 /// The GET verbs get the same treatment as the POST verbs.
 #[tokio::test]
 async fn index_status_503_is_structured_not_prose() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -182,8 +186,8 @@ async fn index_status_503_is_structured_not_prose() {
 /// those endpoints return, not that they should return one).
 #[tokio::test]
 async fn index_file_503_is_structured_not_prose() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -207,7 +211,7 @@ async fn index_file_503_is_structured_not_prose() {
 /// still produces a usable one, built from the fields that ARE present.
 #[tokio::test]
 async fn call_chain_503_without_a_message_field_still_reads_usefully() {
-    let base = spawn_status_daemon(
+    let daemon = spawn_status_daemon(
         503,
         json!({
             "error": "kg_unavailable",
@@ -216,7 +220,7 @@ async fn call_chain_503_without_a_message_field_still_reads_usefully() {
         }),
     )
     .await;
-    let server = McpServer::new(base);
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -239,8 +243,8 @@ async fn call_chain_503_without_a_message_field_still_reads_usefully() {
 /// `content[]` before it reads `_meta`.
 #[tokio::test]
 async fn unavailable_message_carries_the_restore_hint() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -260,7 +264,7 @@ async fn unavailable_message_carries_the_restore_hint() {
         "the endpoint that clears the state must be legible in the prose: {t}"
     );
     assert!(
-        !t.contains("returned 503 Service Unavailable"),
+        !t.contains("returned 503 Service Unavailable") && !t.contains("refused ("),
         "the prose must be the daemon's message, not a stringified HTTP failure: {t}"
     );
 }
@@ -269,8 +273,8 @@ async fn unavailable_message_carries_the_restore_hint() {
 /// ran and returned nothing.
 #[tokio::test]
 async fn structured_503_is_never_mistaken_for_an_empty_result_set() {
-    let base = spawn_status_daemon(503, cold_parked_body()).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, cold_parked_body()).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(
@@ -290,53 +294,68 @@ async fn structured_503_is_never_mistaken_for_an_empty_result_set() {
     );
 }
 
-/// The classifier fires ONLY on a 503 carrying a structured body — everything
-/// else falls through to the pre-existing `Transport` error unchanged.
+/// The refusal a client sees for the daemon's `(status, body)`.
+fn refused(status: u16, body: &Value) -> DaemonCallError {
+    let e = refusal(status, body);
+    DaemonCallError::Refused {
+        method: "search.query".into(),
+        code: e.code,
+        message: e.message,
+        data: e.data,
+    }
+}
+
+/// The classifier fires ONLY on an unavailable refusal carrying a structured
+/// body — everything else falls through to the pre-existing `Transport` error
+/// unchanged.
 ///
-/// Why this matters: the fix must not swallow a status it does not understand.
-/// A 500, a bodyless 503, or a 503 from a proxy that answers HTML all keep the
-/// behaviour they had before #5350.
+/// Why this matters: the fix must not swallow a refusal it does not
+/// understand. An internal error, a bodyless 503, or a 503 from a proxy that
+/// answers HTML all keep the behaviour they had before #5350.
 #[test]
 fn classify_unavailable_ignores_non_503_and_unstructured_bodies() {
-    use reqwest::StatusCode;
-
     let structured = cold_parked_body();
     assert!(
-        classify_unavailable(StatusCode::INTERNAL_SERVER_ERROR, &structured).is_none(),
+        classify_unavailable(&refused(500, &structured)).is_none(),
         "only 503 is an availability verdict"
     );
     assert!(
-        classify_unavailable(StatusCode::NOT_FOUND, &structured).is_none(),
+        classify_unavailable(&refused(404, &structured)).is_none(),
         "404 belongs to the #4715 contract, not this one"
     );
     assert!(
-        classify_unavailable(StatusCode::SERVICE_UNAVAILABLE, &json!([1, 2, 3])).is_none(),
+        classify_unavailable(&refused(503, &json!([1, 2, 3]))).is_none(),
         "a non-object body is not a verdict"
     );
     assert!(
-        classify_unavailable(
-            StatusCode::SERVICE_UNAVAILABLE,
-            &json!({ "detail": "nope" })
-        )
-        .is_none(),
+        classify_unavailable(&refused(503, &json!({ "detail": "nope" }))).is_none(),
         "a body without an `error` code is not a verdict"
     );
     assert!(
-        classify_unavailable(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": 503 })).is_none(),
+        classify_unavailable(&refused(503, &json!({ "error": 503 }))).is_none(),
         "a non-string `error` is not a code"
     );
     assert!(
-        classify_unavailable(StatusCode::SERVICE_UNAVAILABLE, &structured).is_some(),
+        classify_unavailable(&refused(503, &structured)).is_some(),
         "the one shape that IS a verdict"
     );
+    // #9168: a structured body under a non-unavailable code is not a verdict
+    // either — the code decides, as the HTTP status did.
+    let not_unavailable = DaemonCallError::Refused {
+        method: "search.query".into(),
+        code: crate::service::rpc::error::CODE_NOT_FOUND,
+        message: "unknown index".into(),
+        data: Some(structured),
+    };
+    assert!(classify_unavailable(&not_unavailable).is_none());
 }
 
 /// An unstructured 503 keeps reaching the caller as the prose transport error
 /// it always was — the fallback is intact, not replaced.
 #[tokio::test]
 async fn unstructured_503_still_falls_through_to_the_transport_error() {
-    let base = spawn_status_daemon(503, json!({ "detail": "gateway said no" })).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, json!({ "detail": "gateway said no" })).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req("search", json!({ "index_id": "wt-1", "query": "q" })))
@@ -367,8 +386,8 @@ async fn tools_call_grep_on_an_unreadable_corpus_returns_structured_meta() {
         "retryable": true,
         "message": "index 'wt-1': the durable corpus could not be read (#5917)",
     });
-    let base = spawn_status_daemon(503, body).await;
-    let server = McpServer::new(base);
+    let daemon = spawn_status_daemon(503, body).await;
+    let server = daemon.server();
 
     let resp = server
         .dispatch(req(

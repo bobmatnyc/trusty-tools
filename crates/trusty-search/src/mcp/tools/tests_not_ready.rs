@@ -7,62 +7,36 @@
 //! distinguishable from an unknown index, it is structurally distinguishable
 //! from a zero-hit result set, and a failure of the readiness check itself
 //! degrades to an error rather than to "ready" or "empty".
-//! What: drives `McpServer::dispatch` against mock daemons that 404, that
-//! return an empty result set, and that return a 500.
+//! What: drives `McpServer::dispatch` against mock socket daemons that answer
+//! not-found, an empty result set, and an internal error (#9168: the HTTP
+//! statuses' socket twins, rendered by the daemon's own `rpc_error_from_http`).
 //! Test: this file.
 
 use serde_json::Value;
 
+use super::test_daemon::{mock_daemon, refusal, unreachable_server, MockDaemon};
 use super::tests::req;
-use super::{McpServer, INDEX_NOT_READY, INDEX_NOT_READY_CODE};
+use super::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
 
-/// Spin up a mock daemon that answers every route with `status` and `body`.
+/// A mock socket daemon that answers every method as `status` and `body` would.
 ///
-/// Why: the not-ready path is defined by the daemon's HTTP status, so each
-/// test needs to fix that status precisely — `spawn_mock_daemon` in `tests.rs`
-/// always answers 200 and cannot express it.
-/// What: returns the base URL of a loopback listener serving `status`/`body`
-/// on the search, grep, status, chunks, index-file, remove-file, and call_chain
-/// routes — one per HTTP verb the transport helpers use.
+/// Why: the not-ready path is defined by the daemon's refusal class, so each
+/// test needs to fix it precisely — `spawn_mock_daemon` in `tests.rs` always
+/// succeeds and cannot express it.
+/// What: `200` answers `body`; any other status answers the refusal the daemon
+/// itself renders for `(status, body)` — code from the status, message from
+/// `error`/`message`, and a structured 503's body as `data`. Every method gets
+/// the same answer, so the 503 contract can be asserted on every tool.
 /// Test: used by every test in this file and in `tests_unavailable.rs`.
-pub(super) async fn spawn_status_daemon(status: u16, body: Value) -> String {
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-
-    #[derive(Clone)]
-    struct S {
-        status: StatusCode,
-        body: Value,
-    }
-
-    async fn handler(State(s): State<S>) -> (StatusCode, Json<Value>) {
-        (s.status, Json(s.body.clone()))
-    }
-
-    let state = S {
-        status: StatusCode::from_u16(status).expect("valid status"),
-        body,
-    };
-    let app = Router::new()
-        .route("/indexes/{id}/search", post(handler))
-        .route("/indexes/{id}/grep", post(handler))
-        .route("/indexes/{id}/status", get(handler))
-        .route("/indexes/{id}/chunks", get(handler))
-        // #5350: the same fixed-status daemon serves the write and call-chain
-        // routes, so the 503 contract can be asserted on every verb.
-        .route("/indexes/{id}/index-file", post(handler))
-        .route("/indexes/{id}/remove-file", post(handler))
-        .route("/indexes/{id}/call_chain", get(handler))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+pub(super) async fn spawn_status_daemon(status: u16, body: Value) -> MockDaemon {
+    mock_daemon(move |_method, _params| {
+        if status == 200 {
+            Ok(body.clone())
+        } else {
+            Err(refusal(status, &body))
+        }
+    })
+    .await
 }
 
 /// Pull the `_meta` block out of a `tools/call` result, if present.
@@ -74,9 +48,9 @@ fn meta(resp: &super::Response) -> Option<Value> {
 /// structured `INDEX_NOT_READY` envelope, not the daemon's raw 404 text.
 #[tokio::test]
 async fn tools_call_search_on_unindexed_pin_returns_structured_not_ready() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
 
     let resp = server
         .dispatch(req(
@@ -114,9 +88,9 @@ async fn tools_call_search_on_unindexed_pin_returns_structured_not_ready() {
 /// app-level code, so a caller never has to parse the message string.
 #[tokio::test]
 async fn bare_method_search_on_unindexed_pin_returns_index_not_ready_code() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
 
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "anything" })))
@@ -149,12 +123,12 @@ async fn bare_method_search_on_unindexed_pin_returns_index_not_ready_code() {
 /// Test: this is the test.
 #[tokio::test]
 async fn not_ready_is_distinguishable_from_an_empty_result_set() {
-    let empty_base = spawn_status_daemon(
+    let empty_daemon = spawn_status_daemon(
         200,
         serde_json::json!({ "results": [], "intent": "Definition", "latency_ms": 3 }),
     )
     .await;
-    let empty = McpServer::new(empty_base).with_pinned_index("wt-1");
+    let empty = empty_daemon.server().with_pinned_index("wt-1");
     let empty_resp = empty
         .dispatch(req(
             "tools/call",
@@ -173,9 +147,9 @@ async fn not_ready_is_distinguishable_from_an_empty_result_set() {
         "an empty result set must carry no not-ready marker"
     );
 
-    let missing_base =
+    let missing_daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let missing = McpServer::new(missing_base).with_pinned_index("wt-1");
+    let missing = missing_daemon.server().with_pinned_index("wt-1");
     let missing_resp = missing
         .dispatch(req(
             "tools/call",
@@ -197,8 +171,8 @@ async fn not_ready_is_distinguishable_from_an_empty_result_set() {
 #[tokio::test]
 async fn readiness_check_failure_does_not_degrade_to_ready_or_empty() {
     // Server-side failure.
-    let base = spawn_status_daemon(500, serde_json::json!({ "error": "boom" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let daemon = spawn_status_daemon(500, serde_json::json!({ "error": "boom" })).await;
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "q" })))
         .await;
@@ -209,8 +183,8 @@ async fn readiness_check_failure_does_not_degrade_to_ready_or_empty() {
     );
     assert!(resp.result.is_none(), "no result body on failure");
 
-    // Transport failure: nothing is listening on port 1.
-    let dead = McpServer::new("http://127.0.0.1:1").with_pinned_index("wt-1");
+    // Transport failure: nothing is serving the socket.
+    let dead = unreachable_server().with_pinned_index("wt-1");
     let dead_resp = dead
         .dispatch(req("search", serde_json::json!({ "query": "q" })))
         .await;
@@ -230,7 +204,7 @@ async fn readiness_check_failure_does_not_degrade_to_ready_or_empty() {
 /// Test: this is the test.
 #[test]
 fn classify_index_miss_only_fires_for_the_pinned_index() {
-    let pinned = McpServer::new("http://127.0.0.1:1").with_pinned_index("wt-1");
+    let pinned = unreachable_server().with_pinned_index("wt-1");
     assert!(pinned.classify_index_miss(Some("wt-1")).is_some());
     assert!(
         pinned
@@ -240,7 +214,7 @@ fn classify_index_miss_only_fires_for_the_pinned_index() {
     );
     assert!(pinned.classify_index_miss(None).is_none());
 
-    let unpinned = McpServer::new("http://127.0.0.1:1");
+    let unpinned = unreachable_server();
     assert!(unpinned.classify_index_miss(Some("wt-1")).is_none());
 }
 
@@ -248,9 +222,9 @@ fn classify_index_miss_only_fires_for_the_pinned_index() {
 /// `search` — issue #4715 observed both 404ing on the same id.
 #[tokio::test]
 async fn index_status_on_unindexed_pin_returns_index_not_ready() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("index_status", serde_json::json!({})))
         .await;
@@ -264,9 +238,9 @@ async fn index_status_on_unindexed_pin_returns_index_not_ready() {
 /// out the cold store before it 404s — see `service::server::tests_4715`.
 #[tokio::test]
 async fn list_chunks_on_unindexed_pin_returns_index_not_ready() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("list_chunks", serde_json::json!({})))
         .await;
@@ -282,12 +256,12 @@ async fn list_chunks_on_unindexed_pin_returns_index_not_ready() {
 /// index was built; saying it never was is the same defect this PR removes.
 #[tokio::test]
 async fn non_resident_503_is_not_classified_as_never_indexed() {
-    let base = spawn_status_daemon(
+    let daemon = spawn_status_daemon(
         503,
         serde_json::json!({ "error": "index_not_resident", "message": "restoring" }),
     )
     .await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("index_status", serde_json::json!({})))
         .await;
@@ -303,9 +277,9 @@ async fn non_resident_503_is_not_classified_as_never_indexed() {
 /// that cannot answer either.
 #[tokio::test]
 async fn grep_on_unindexed_pin_returns_index_not_ready() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("grep", serde_json::json!({ "pattern": "fn main" })))
         .await;
@@ -319,9 +293,9 @@ async fn grep_on_unindexed_pin_returns_index_not_ready() {
 /// the reason, and the suggested fallback.
 #[tokio::test]
 async fn not_ready_payload_carries_state_reason_and_fallback() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "q" })))
         .await;
@@ -344,9 +318,9 @@ async fn not_ready_payload_carries_state_reason_and_fallback() {
 /// a model that ignores `_meta` still gets the right instruction.
 #[tokio::test]
 async fn not_ready_message_says_retryable_and_names_the_fallback() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "q" })))
         .await;
@@ -357,8 +331,8 @@ async fn not_ready_message_says_retryable_and_names_the_fallback() {
     assert!(msg.contains("grep"), "must name the fallback: {msg}");
     assert!(msg.contains("find"), "must name the fallback: {msg}");
     assert!(
-        !msg.starts_with("POST "),
-        "must not leak the raw HTTP transport error: {msg}"
+        !msg.starts_with("POST ") && !msg.contains("refused ("),
+        "must not leak a raw transport error: {msg}"
     );
 }
 
@@ -375,9 +349,9 @@ async fn not_ready_message_says_retryable_and_names_the_fallback() {
 /// Test: this test.
 #[tokio::test]
 async fn not_ready_payload_points_at_list_indexes_not_only_a_fallback() {
-    let base =
+    let daemon =
         spawn_status_daemon(404, serde_json::json!({ "error": "unknown index: wt-1" })).await;
-    let server = McpServer::new(base).with_pinned_index("wt-1");
+    let server = daemon.server().with_pinned_index("wt-1");
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "q" })))
         .await;
@@ -415,7 +389,7 @@ async fn not_ready_payload_points_at_list_indexes_not_only_a_fallback() {
 #[tokio::test]
 async fn missing_index_id_error_names_list_indexes() {
     // No pin, no explicit id: there is genuinely nothing to resolve.
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     for tool in ["reindex", "index_file", "remove_file"] {
         let resp = server
             .dispatch(req(tool, serde_json::json!({ "query": "q" })))

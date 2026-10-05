@@ -29,8 +29,8 @@ const HTTP_MARKERS: &[&str] = &[
 ///
 /// `src/main.rs` and `src/commands/dashboard.rs` open the browser UI at
 /// `<base>/ui`, which is not a daemon call and moves with #6155's UI carve-out.
-/// `src/commands/serve.rs`, `serve_scope.rs` and `src/mcp/**` are the MCP
-/// bridge, the next step of #6285.
+/// #9168 moved the MCP bridge (`src/mcp/**`, `serve.rs`, `serve_scope.rs`) off
+/// this list; [`the_mcp_bridge_builds_no_http_url`] keeps it off.
 const NOT_YET_MOVED: &[&str] = &[
     "src/commands/add.rs",
     "src/commands/cleanup.rs",
@@ -60,18 +60,10 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/reindex_engine/tests.rs",
     "src/commands/reindex_engine/verify.rs",
     "src/commands/remove.rs",
-    "src/commands/serve.rs",
-    "src/commands/serve_scope.rs",
     "src/commands/start/tests.rs",
     "src/commands/status.rs",
     "src/commands/watch.rs",
     "src/main.rs",
-    "src/mcp/tools/health.rs",
-    "src/mcp/tools/http.rs",
-    "src/mcp/tools/mod.rs",
-    "src/mcp/tools/tests.rs",
-    "src/mcp/tools/tests_unavailable.rs",
-    "src/mcp/tools/unavailable.rs",
 ];
 
 /// Every `.rs` file under `dir`, recursively.
@@ -140,4 +132,67 @@ fn no_cli_or_bridge_file_reintroduces_an_http_daemon_call() {
 fn the_quantize_command_dials_no_http() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(!files_dialling_http(root).contains(&"src/commands/quantize.rs".to_string()));
+}
+
+/// The MCP bridge's own files, crate-relative: everything under `src/mcp/`,
+/// plus the `serve` command and its scope module with their tests.
+fn bridge_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    rust_files(&root.join("src/mcp"), &mut files);
+    for f in [
+        "serve.rs",
+        "serve_scope.rs",
+        "serve_scope_tests.rs",
+        "serve_index_env_tests.rs",
+    ] {
+        files.push(root.join("src/commands").join(f));
+    }
+    files
+}
+
+/// Source text that means "this line builds or dials an HTTP daemon address".
+///
+/// Assembled from parts so this file does not name the markers it forbids.
+fn url_markers() -> Vec<String> {
+    vec![
+        ["http", "://"].concat(),
+        ["daemon_base", "_url"].concat(),
+        ["req", "west"].concat(),
+        ["DaemonBridge", "Config"].concat(),
+        ["78", "78"].concat(),
+    ]
+}
+
+/// #9168: no line of the MCP bridge builds an `http://` URL or reaches for an
+/// HTTP client. Comment lines are skipped — a doc may name the retired route.
+///
+/// Why: acceptance item 1 — `trusty-search serve` reaches the daemon only
+/// through `DaemonClient` over the socket. The ratchet above only forbids the
+/// daemon-call markers; this also forbids a literal URL, so a test mock or a
+/// log line that builds one cannot creep back in.
+/// What: every non-comment line of [`bridge_files`] is checked against
+/// [`url_markers`]; each hit is reported as `path:line`.
+/// Test: this test.
+#[test]
+fn the_mcp_bridge_builds_no_http_url() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let markers = url_markers();
+    let mut hits = Vec::new();
+    for path in bridge_files(root) {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if markers.iter().any(|m| line.contains(m.as_str())) {
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                hits.push(format!("{}:{}", rel.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "the MCP bridge must reach the daemon only over its socket: {hits:?}"
+    );
 }
