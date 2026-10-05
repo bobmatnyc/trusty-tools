@@ -1131,6 +1131,51 @@ async fn a_write_quarantined_reindex_is_refused_and_queues_nothing_on_either_tra
     );
 }
 
+/// Why (#8883): `search.index.reindex` serves the same `reindex_report` body as
+/// HTTP, so a serve-only index must be refused on both or the socket would
+/// rebuild the shipped index.
+/// What: plants the index with `serve_only` set, compares the two refusals
+/// (`403` / `CODE_FORBIDDEN`), and checks nothing was queued. Against code
+/// without the claim refusal both transports answer `queued: true`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_serve_only_reindex_is_refused_and_queues_nothing_on_either_transport() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let planted = planted_registry("so", tmp.path());
+    let bare = planted.get(&IndexId::new("so")).expect("planted");
+    let registry = IndexRegistry::new();
+    registry.register(IndexHandle {
+        serve_only: true,
+        ..IndexHandle::bare(
+            IndexId::new("so"),
+            Arc::clone(&bare.indexer),
+            tmp.path().to_path_buf(),
+        )
+    });
+    let (state, http, rpc) = routers(SearchAppState::new(registry)).await;
+
+    let over_http = http_err(&http, "POST", "/indexes/so/reindex", serde_json::json!({})).await;
+    assert_eq!(over_http.0, StatusCode::FORBIDDEN, "body: {}", over_http.1);
+    assert_eq!(over_http.1["error"], "index_serve_only");
+    let over_socket = rpc_err(
+        &rpc,
+        writes::METHOD_INDEX_REINDEX,
+        serde_json::json!({ "index_id": "so", "body": { "force": true } }),
+    )
+    .await;
+
+    assert_same_refusal(
+        &over_http,
+        &over_socket,
+        CODE_FORBIDDEN,
+        "reindex of a serve-only index",
+    );
+    assert!(
+        state.reindex_progress.get(&IndexId::new("so")).is_none(),
+        "#8883: a refused trigger must queue nothing"
+    );
+}
+
 // ------------------------------------------------------------ graph ingest ---
 
 fn ingest_body(producer: &str) -> serde_json::Value {

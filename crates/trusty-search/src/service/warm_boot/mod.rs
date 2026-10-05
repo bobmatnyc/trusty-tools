@@ -487,18 +487,21 @@ pub fn dedup_entries_by_corpus_path_verbose(entries: Vec<PersistedIndex>) -> Ded
 /// What: appends every value from each of `dropped`'s WHITELIST list fields
 /// (`include_paths`, `extensions`, `domain_terms`, `path_filter`) that is not
 /// already present in `survivor`'s corresponding field, preserving order
-/// (survivor's existing values first). `exclude_globs` is untouched —
+/// (survivor's existing values first), and ORs `serve_only` (#8883). `exclude_globs` is untouched —
 /// `survivor.exclude_globs` keeps exactly its own pre-merge value.
 /// Test: `dedup_verbose_merges_list_config_into_survivor`,
 /// `dedup_verbose_does_not_merge_scalar_flags`,
 /// `dedup_verbose_does_not_merge_exclude_globs`,
-/// `merge_dropped_config_deduplicates_overlapping_values` in
-/// `warm_boot_tests.rs`.
+/// `merge_dropped_config_deduplicates_overlapping_values`,
+/// `dedup_verbose_keeps_a_dropped_serve_only_mark` in `warm_boot_tests.rs`.
 fn merge_dropped_config_into_survivor(survivor: &mut PersistedIndex, dropped: &PersistedIndex) {
     merge_unique_strings(&mut survivor.include_paths, &dropped.include_paths);
     merge_unique_strings(&mut survivor.extensions, &dropped.extensions);
     merge_unique_strings(&mut survivor.domain_terms, &dropped.domain_terms);
     merge_unique_strings(&mut survivor.path_filter, &dropped.path_filter);
+    // #8883: both entries name one corpus, so either mark protects it. OR is
+    // safe here, unlike the pipeline flags above: it only refuses more.
+    survivor.serve_only |= dropped.serve_only;
 }
 
 /// Append every string in `from` that is not already present in `into`,

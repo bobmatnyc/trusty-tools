@@ -613,6 +613,28 @@ fn dedup_verbose_does_not_merge_scalar_flags() {
     );
 }
 
+/// Why (#8883): two entries over one corpus name one shipped index. If the
+/// dropped entry carried the serve-only mark, the merged survivor that is
+/// written back must carry it too, or the boot drops the protection.
+/// What: only the loser is serve-only; the survivor must come out serve-only
+/// and be listed as merged, so the restore writes it back.
+/// Test: this test.
+#[test]
+fn dedup_verbose_keeps_a_dropped_serve_only_mark() {
+    let shared = tempfile::tempdir().unwrap();
+    let winner = colocated_entry("fresh", shared.path(), Some(2));
+    let mut loser = colocated_entry("stale", shared.path(), Some(1));
+    loser.serve_only = true;
+
+    let outcome = dedup_entries_by_corpus_path_verbose(vec![winner, loser]);
+
+    assert!(
+        outcome.survivors[0].serve_only,
+        "the mark must survive the merge"
+    );
+    assert!(outcome.merged_survivor_ids.contains("fresh"));
+}
+
 /// Why: the common case (no collision at all) must be a cheap no-op — callers
 /// use `dropped.is_empty()` to skip all `indexes.toml` IO.
 /// What: two entries at distinct roots; asserts both survive with empty

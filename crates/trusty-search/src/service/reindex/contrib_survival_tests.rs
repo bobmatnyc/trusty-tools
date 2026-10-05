@@ -73,6 +73,7 @@ fn make_handle(root: &Path, id: &str) -> Arc<IndexHandle> {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

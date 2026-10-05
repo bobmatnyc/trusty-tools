@@ -107,6 +107,7 @@ async fn stamp_handle_produces_valid_rfc3339_date() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 0,
@@ -304,6 +305,7 @@ async fn reconcile_stamps_head_sha_after_delta() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 0,
@@ -415,6 +417,7 @@ async fn reconcile_up_to_date_index_is_noop() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             // #4680: this premise is a POPULATED index. Reconcile now checks
@@ -493,6 +496,7 @@ async fn reconcile_stale_index_stamps_new_sha() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             // #4680: this premise is a POPULATED index. Reconcile now checks
@@ -529,6 +533,62 @@ async fn reconcile_stale_index_stamps_new_sha() {
     assert!(
         handle.last_indexed_at.read().await.is_some(),
         "last_indexed_at must be stamped after reconcile"
+    );
+}
+
+/// Why (#8883): the boot reconcile's git delta writes changed files straight
+/// into the index with no reindex claim, so the claim refusal does not cover it.
+/// What: the same two-commit stale fixture as
+/// `reconcile_stale_index_stamps_new_sha`, marked serve-only. The reconcile
+/// must leave the stored SHA, the corpus and the summary untouched. Against
+/// code without the gate the SHA advances and `delta_reindexed` is 1.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_skips_a_serve_only_index() {
+    use crate::core::registry::{IndexHandle, IndexId};
+    use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
+
+    let (_dir, first_sha, root) = init_git_repo_with_file("lib.rs", "fn old() {}");
+    add_commit(&root, "lib.rs", "fn old() {}\nfn new_fn() {}\n");
+    let bare = IndexHandle::bare(
+        IndexId::new("test-serve-only"),
+        Arc::new(RwLock::new(crate::core::CodeIndexer::new(
+            "test-serve-only",
+            &root,
+        ))),
+        root.clone(),
+    );
+    let handle = Arc::new(IndexHandle {
+        serve_only: true,
+        indexed_head_sha: Arc::new(RwLock::new(Some(first_sha.clone()))),
+        // A populated index, so reconcile takes the git path (see #4680 above).
+        stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 1,
+            hnsw_snapshot_ready: false,
+            graph_node_count: 0,
+            lexical_only: false,
+            skip_kg: false,
+            skip_vector: false,
+            corpus_open_failure: None,
+        }))),
+        ..bare
+    });
+
+    let summary = Arc::new(std::sync::Mutex::new(
+        crate::service::server::ReconcileSummary::default(),
+    ));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    assert_eq!(
+        handle.indexed_head_sha.read().await.clone(),
+        Some(first_sha),
+        "#8883: a serve-only index must not take the boot delta"
+    );
+    assert_eq!(handle.indexer.read().await.chunk_count(), 0);
+    let s = summary.lock().expect("summary").clone();
+    assert_eq!(
+        (s.delta_reindexed, s.fell_back_to_full, s.stuck_retried),
+        (0, 0, 0)
     );
 }
 
@@ -579,6 +639,7 @@ async fn apply_delta_total_failure_does_not_stamp() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 0,
@@ -803,6 +864,7 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             // #4680: this premise is a POPULATED index. Reconcile now checks
@@ -881,6 +943,7 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             // #4680: this premise is a POPULATED index. Reconcile now checks
@@ -971,6 +1034,7 @@ async fn reconcile_summary_counts_up_to_date() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             // #4680: this premise is a POPULATED index. Reconcile now checks
@@ -1046,6 +1110,7 @@ fn stuck_unwalked_handle(
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
             chunk_count: 0,

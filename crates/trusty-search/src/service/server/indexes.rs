@@ -566,6 +566,9 @@ pub(crate) async fn create_index_report(
     // `colocated: false` never adopts the in-repo corpus.
     let layout = super::create_layout::registration_layout(&req.id, &req.root_path, req.colocated)?;
     let colocated = layout == crate::service::storage_layout::StorageLayout::Colocated;
+    // #8883: a create over an existing id (cold, or only in indexes.toml) keeps
+    // its serve-only mark; the upsert below rewrites the whole record.
+    let serve_only = crate::service::serve_only::prior_mark(state, &id);
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
@@ -748,6 +751,7 @@ pub(crate) async fn create_index_report(
             indexed_head_sha: None,
             // #4390: no deferred-embed pass has been queued for a new index.
             deferred_embed_pending: false,
+            serve_only,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
@@ -867,6 +871,7 @@ pub(crate) async fn create_index_report(
         lexical_only,
         skip_kg,
         skip_vector,
+        serve_only,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

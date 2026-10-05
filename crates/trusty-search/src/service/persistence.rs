@@ -322,6 +322,17 @@ pub struct PersistedIndex {
     /// `commands::start_restore`'s `markers_tests` submodule.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub deferred_embed_pending: bool,
+
+    /// #8883: `true` marks the index serve-only on this daemon.
+    ///
+    /// Why: a serving instance loads an index shipped from a dedicated
+    /// indexer and must never rebuild it locally.
+    /// What: operator-set in `indexes.toml`; restore copies it onto
+    /// `IndexHandle::serve_only`, which refuses every reindex. Read at daemon
+    /// start. `#[serde(default)]` keeps legacy files loading as `false`.
+    /// Test: `restore_carries_serve_only_onto_the_handle`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serve_only: bool,
 }
 
 /// Why: serde's `default` attribute needs a free function (closures aren't
@@ -423,6 +434,7 @@ impl Default for PersistedIndex {
             ambiguous_root_since_unix: None,
             indexed_head_sha: None,
             deferred_embed_pending: false,
+            serve_only: false,
         }
     }
 }

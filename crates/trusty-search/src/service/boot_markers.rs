@@ -170,6 +170,14 @@ pub async fn rearm_deferred_embed_if_pending(
         return;
     }
     let index_id = handle.id.0.clone();
+    // #8883: a serve-only index embeds nothing on this daemon. The marker is
+    // kept, so lifting the mark and restarting still owes the pass.
+    if handle.serve_only {
+        tracing::info!(
+            "boot_markers[{index_id}]: deferred-embed re-arm skipped, serve-only (#8883)"
+        );
+        return;
+    }
     if handle.skip_vector || handle.lexical_only {
         // #4390: the vector lane was disabled after the pass was queued — the
         // work is owed to nobody, so drop the marker instead of re-firing it.

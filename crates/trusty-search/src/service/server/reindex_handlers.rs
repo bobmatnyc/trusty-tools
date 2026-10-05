@@ -343,6 +343,8 @@ pub(crate) async fn reindex_report(
                     // Issue #2984 Phase 1: preserve the skip_vector flag
                     // across the root_path override — orthogonal to the path.
                     skip_vector: handle.skip_vector,
+                    // #8883: the serve-only mark survives the override.
+                    serve_only: handle.serve_only,
                     // Issue #923: preserve the defer_embed flag across the
                     // root_path override — the operator's embedding-mode
                     // choice is orthogonal to the path being indexed.
@@ -497,10 +499,12 @@ pub(crate) async fn start_release_catch_up(
 /// caller's.
 /// What: `AlreadyRunning` → `409` naming the running job and its stream URL;
 /// `GuardUnavailable` → `503`; `Held` (#9059) → `409 index_held` naming the
-/// invalid globs. All carry `queued: false`.
+/// invalid globs; `ServeOnly` (#8883) → `403 index_serve_only`. All carry
+/// `queued: false`.
 /// Test: `a_second_reindex_request_is_refused_while_the_first_runs`,
 /// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`,
-/// `every_ingest_path_refuses_a_held_index`.
+/// `every_ingest_path_refuses_a_held_index`,
+/// `reindex_of_a_serve_only_index_is_refused_with_403`.
 fn claim_refusal(
     index_id: &IndexId,
     refused: ReindexClaimError,
@@ -541,6 +545,12 @@ fn claim_refusal(
                 patterns: invalid_exclude_globs,
             };
             let (status, mut body) = hold.refusal();
+            body["queued"] = false.into();
+            (status, body)
+        }
+        // #8883: a serve-only index is never rebuilt by this daemon.
+        ReindexClaimError::ServeOnly { index_id, .. } => {
+            let (status, mut body) = crate::service::serve_only::refusal(&index_id);
             body["queued"] = false.into();
             (status, body)
         }

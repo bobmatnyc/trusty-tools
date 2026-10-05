@@ -76,17 +76,28 @@ impl ExcludeHold {
     }
 }
 
-/// Claim `handle` for a reindex, refusing while it is held.
+/// Claim `handle` for a reindex, refusing a serve-only or held index.
 ///
 /// Why: every reindex entry point claims first (#8889), so refusing here keeps
-/// a held index from ever reaching the walk, the prune or a stage reset.
-/// What: [`ReindexClaimError::Held`] naming the glob, else [`try_claim_reindex`].
-/// Test: `every_ingest_path_refuses_a_held_index` (`reindex-http`, `reindex-spawn`).
+/// a serve-only (#8883) or held index from ever reaching the walk, the prune
+/// or a stage reset.
+/// What: [`ReindexClaimError::ServeOnly`] for a serve-only index, then
+/// [`ReindexClaimError::Held`] naming the glob, else [`try_claim_reindex`].
+/// Test: `every_ingest_path_refuses_a_held_index` (`reindex-http`, `reindex-spawn`),
+/// `an_internal_reindex_spawn_refuses_a_serve_only_index`.
 pub(crate) fn claim_reindex(
     handle: &IndexHandle,
     origin: &'static str,
     force: bool,
 ) -> Result<ReindexClaim, ReindexClaimError> {
+    // #8883: refused before the claim slot is touched, so nothing is queued.
+    if handle.serve_only {
+        tracing::warn!(index_id = %handle.id, origin, "reindex refused: index is serve-only (#8883)");
+        return Err(ReindexClaimError::ServeOnly {
+            index_id: handle.id.0.clone(),
+            message: crate::service::serve_only::reason(&handle.id.0),
+        });
+    }
     if let Some(hold) = hold(handle) {
         return Err(ReindexClaimError::Held {
             message: hold.reason(),

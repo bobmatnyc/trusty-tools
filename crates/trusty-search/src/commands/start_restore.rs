@@ -448,6 +448,8 @@ pub(crate) async fn restore_one_index(
     let defer_embed = entry.defer_embed;
     // #4390: read the marker before `entry` is consumed by the handle below.
     let deferred_embed_pending = entry.deferred_embed_pending;
+    // #8883: the operator's serve-only mark travels onto the handle.
+    let serve_only = entry.serve_only;
     // Issue #135: inspect the on-disk artifacts that
     // `build_indexer_from_entry` just restored and derive the staged-pipeline
     // state from them. Before this, every warm-booted index landed with
@@ -536,6 +538,7 @@ pub(crate) async fn restore_one_index(
         lexical_only,
         skip_kg,
         skip_vector,
+        serve_only,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

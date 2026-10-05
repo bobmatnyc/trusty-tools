@@ -237,6 +237,17 @@ pub async fn reconcile_semantic_vector_gap(handle: &Arc<IndexHandle>) -> bool {
             stages.semantic = StageState::failed(reason);
             return false;
         }
+        if handle.serve_only {
+            // #8883: the vectors ship with the index; this daemon backfills
+            // none. Named and terminal, like the no-embedder arm above.
+            let reason = format!(
+                "semantic embed was not scheduled: {gap} of {chunk_count} chunks have no vector \
+                 and the index is serve-only, so this daemon does not backfill it (#8883)"
+            );
+            tracing::error!("vector_gap[{index_id}]: {reason}");
+            stages.semantic = StageState::failed(reason);
+            return false;
+        }
         stages.semantic = StageState {
             status: StageStatus::InProgress,
             total: Some(chunk_count),

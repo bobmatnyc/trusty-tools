@@ -451,6 +451,17 @@ pub struct IndexHandle {
     /// Test: `skip_vector_index_never_embeds` in `service::reindex::tests`.
     pub skip_vector: bool,
 
+    /// #8883: serve-only — this daemon serves the index but never builds it.
+    ///
+    /// Why: a serving instance loads a pre-built index shipped from a
+    /// dedicated indexer; a local reindex is expensive and replaces it.
+    /// What: read from `serve_only` on the `indexes.toml` entry at restore.
+    /// When `true` every reindex claim is refused, the boot reconcile skips
+    /// the index, no watcher starts, and no deferred-embed pass is queued.
+    /// Search is unaffected. Defaults to `false`.
+    /// Test: `crate::service::server::serve_only_8883_tests`.
+    pub serve_only: bool,
+
     /// Deferred-embedding mode (issue #923): when `true` (the default),
     /// the fast pass (walk → chunk → BM25 → KG) runs synchronously and
     /// marks lexical + graph stages `Ready` in seconds, making the index
@@ -607,6 +618,7 @@ impl IndexHandle {
             lexical_only: false,
             skip_kg: false,
             skip_vector: false,
+            serve_only: false,
             defer_embed: true,
             stages: Arc::new(RwLock::new(IndexStages::default())),
             search_pressure: Arc::new(tokio::sync::Notify::new()),
