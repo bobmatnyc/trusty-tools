@@ -408,20 +408,16 @@ async fn overlapping_healthy_recalls_each_get_the_ruling() {
         let state = state.clone();
         tokio::spawn(async move { recall_envelope(&state, plain(5)).await })
     };
+    let deadline = Instant::now() + Duration::from_secs(2);
     let first = spawn_recall(&state);
-    let second_started = async {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while state.rulings.searches_started("rulings-a") < 1 && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let second = spawn_recall(&state);
-        // Pre-fix the second recall is refused and never starts a search.
-        while state.rulings.searches_started("rulings-a") < 2 && Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        second
-    };
-    let second = second_started.await;
+    while state.rulings.searches_started("rulings-a") < 1 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let second = spawn_recall(&state);
+    // Pre-fix the second recall is refused and never starts a search.
+    while state.rulings.searches_started("rulings-a") < 2 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     drop(release_tx);
     holder.join().expect("lock holder");
 
