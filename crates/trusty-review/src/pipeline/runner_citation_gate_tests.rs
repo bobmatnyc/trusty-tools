@@ -125,6 +125,207 @@ async fn run_review_drops_a_finding_with_no_anchor() {
     );
 }
 
+/// Review `billing_diff` with a reviewer that writes `prose`, then a fenced
+/// payload with `verdict`, `grade` and `findings`; the verifier answers
+/// `judgment` for every finding (#9188).
+async fn review_payload(
+    prose: &str,
+    verdict: &str,
+    grade: &str,
+    findings: serde_json::Value,
+    judgment: &'static str,
+) -> ReviewResult {
+    let (source, _tmp) = local_diff_source(&billing_diff());
+    let payload = serde_json::json!({
+        "verdict": verdict,
+        "grade": grade,
+        "summary": prose,
+        "findings": findings,
+    });
+    let llm = FakeLlm {
+        response: format!("{prose}\n\n```json\n{payload}\n```"),
+        error: None,
+        output_tokens: None,
+    };
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+        surface: InvocationSurface::default(),
+    };
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier { judgment });
+    run_review(
+        &default_config(),
+        input,
+        ready_deps(Arc::new(llm), Some(verifier)),
+    )
+    .await
+}
+
+/// One reviewer finding against `src/billing.rs`.
+fn billing_finding(title: &str, body: &str, severity: &str, line: u32) -> serde_json::Value {
+    serde_json::json!({
+        "title": title,
+        "body": body,
+        "severity": severity,
+        "confidence": 0.9,
+        "file": "src/billing.rs",
+        "line": line,
+    })
+}
+
+/// #9188 C: a defect the reviewer's prose names, whose finding was withheld,
+/// never reaches the body by the prose route.
+#[tokio::test]
+async fn a_withheld_defect_named_in_the_summary_never_reaches_the_body() {
+    let finding = billing_finding(
+        "lost-write",
+        "`ledger.flush_all()` is never awaited, so the invoice total is lost.",
+        "high",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "The ledger flush is never awaited, so every invoice total is lost.",
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert!(
+        !result.review_body.contains("never awaited"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// #9188 C: a clean review whose prose rests on its verified finding keeps it.
+#[tokio::test]
+async fn a_clean_review_keeps_its_prose() {
+    let finding = billing_finding(
+        "overflow",
+        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
+        "medium",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "Overflow risk at src/billing.rs:30 when invoices are large.",
+        "REQUEST_CHANGES",
+        "C",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert!(
+        result
+            .review_body
+            .contains("Overflow risk at src/billing.rs:30"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// #9188 J (Architect ruling 2026-10-05 03:28Z): on a review that is not
+/// `Unknown`, withheld findings never shape the grade. It stays present and is
+/// recomputed from the survivors alone, so it differs from the grade the
+/// withheld finding's severity would have produced.
+#[tokio::test]
+async fn run_review_withheld_findings_never_shape_the_grade() {
+    let withheld = billing_finding(
+        "lost-write",
+        "`ledger.flush_all()` loses every invoice write.",
+        "medium",
+        SUM_LINE,
+    );
+    let nit = billing_finding(
+        "naming",
+        "`let value_2 = step_2(input);` needs a clearer name.",
+        "low",
+        2,
+    );
+    let result = review_payload(
+        "One naming nit.",
+        "APPROVE",
+        "B-",
+        serde_json::json!([withheld, nit]),
+        "CONFIRMED",
+    )
+    .await;
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert_eq!(result.withheld_findings.len(), 1);
+    assert_eq!(result.verdict, Verdict::Approve);
+
+    let survivors_only = crate::pipeline::grade::derive_verdict(Verdict::Approve, &result.findings);
+    let with_withheld = crate::pipeline::grade::derive_verdict(
+        Verdict::Approve,
+        &[
+            result.findings[0].clone(),
+            result.withheld_findings[0].finding.clone(),
+        ],
+    );
+    assert_ne!(
+        survivors_only, with_withheld,
+        "the withheld severity changes the grade"
+    );
+    let would_have_been = crate::pipeline::letter_grade::reconcile_grade_with_verdict(
+        crate::pipeline::letter_grade::default_grade_for_verdict(&with_withheld),
+        &result.verdict,
+    );
+    assert_eq!(
+        result.grade.as_deref(),
+        Some("A+"),
+        "recomputed from the survivor"
+    );
+    assert_ne!(result.grade, Some(would_have_been.to_string()));
+}
+
+/// #9188 A, end to end: an APPROVE review whose every finding was withheld is
+/// `Unknown` and carries no grade, though the model graded it A-.
+#[tokio::test]
+async fn run_review_all_withheld_review_carries_no_grade() {
+    let nit = billing_finding("style", "`ledger.flush_all()` is slow.", "low", SUM_LINE);
+    let result = review_payload(
+        "Minor style nit only.",
+        "APPROVE",
+        "A-",
+        serde_json::json!([nit]),
+        "CONFIRMED",
+    )
+    .await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
+}
+
+/// #9188 L: a verifier CONFIRMED is not a resolve. A confirmed finding whose
+/// citation does not resolve at the head is withheld, not posted.
+#[tokio::test]
+async fn a_confirmed_finding_that_does_not_resolve_is_withheld() {
+    let finding = billing_finding(
+        "overflow",
+        "`amounts.iter().sum::<u64>()` overflows before `ledger.reconcile_all()` runs.",
+        "medium",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "Overflow risk.",
+        "REQUEST_CHANGES",
+        "C",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_ne!(result.verdict, Verdict::Approve);
+}
+
 /// Row 5: a dropped finding's citation reaches the posted body by no route —
 /// neither the reviewer's prose nor the fenced findings JSON.
 #[tokio::test]

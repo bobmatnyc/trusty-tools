@@ -1,0 +1,24 @@
+{
+  "leak": "H",
+  "about": "The finding cites an old path that shares only a basename with the file at the head.",
+  "diff": [
+    "diff --git a/src/new/billing.rs b/src/new/billing.rs",
+    "--- a/src/new/billing.rs",
+    "+++ b/src/new/billing.rs",
+    "@@ -0,0 +1,2 @@",
+    "+fn total(amounts: &[u64]) -> u64 {",
+    "+    amounts.iter().sum::<u64>() }"
+  ],
+  "reviewer": {
+    "prose": "Overflow in the legacy module.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "legacy-overflow", "body": "`amounts.iter().sum::<u64>()` can overflow.", "severity": "medium", "confidence": 0.9, "file": "src/old/billing.rs", "line": 2}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["legacy-overflow"],
+  "forbidden_in_body": ["legacy module"],
+  "expect_survivors": 0
+}

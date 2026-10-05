@@ -1,0 +1,17 @@
+{
+  "leak": "B",
+  "about": "One quote is on the cited line; the other is invented.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "The total is reconciled too late.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "late-reconcile", "body": "`amounts.iter().sum::<u64>()` overflows before `ledger.reconcile_all()` runs.", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["late-reconcile"],
+  "forbidden_in_body": ["reconciled too late"],
+  "expect_survivors": 0
+}

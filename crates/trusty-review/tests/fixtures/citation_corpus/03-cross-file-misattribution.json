@@ -1,0 +1,30 @@
+{
+  "leak": "-",
+  "about": "The finding cites src/billing.rs but quotes src/report.rs.",
+  "diff": [
+    "diff --git a/src/billing.rs b/src/billing.rs",
+    "--- a/src/billing.rs",
+    "+++ b/src/billing.rs",
+    "@@ -0,0 +1,2 @@",
+    "+fn total(amounts: &[u64]) -> u64 {",
+    "+    amounts.iter().sum::<u64>() }",
+    "diff --git a/src/report.rs b/src/report.rs",
+    "--- a/src/report.rs",
+    "+++ b/src/report.rs",
+    "@@ -0,0 +1,2 @@",
+    "+fn render(rows: &[Row]) -> String {",
+    "+    rows.iter().map(format_row).collect() }"
+  ],
+  "reviewer": {
+    "prose": "Rendering allocates per row.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "alloc", "body": "`rows.iter().map(format_row).collect()` allocates a String per row.", "severity": "medium", "confidence": 0.8, "file": "src/billing.rs", "line": 2}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["alloc"],
+  "forbidden_in_body": ["allocates per row"],
+  "expect_survivors": 0
+}

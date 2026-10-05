@@ -142,21 +142,18 @@ fn a_finding_with_no_anchor_is_dropped() {
 
 // ─── Critic round (#8905 rows 1–3, 6, 7) ───────────────────────────────────────
 
-/// #8949 ruling (a), replacing #8905 row 1's all-of rule: one quote on the
-/// cited line keeps the finding, marked partial and advisory only.
+/// #9188 B (inverts #8949 ruling (a)): a finding with one quote that is not
+/// in the file is withheld, never kept as `citation_partial`.
 #[test]
-fn a_finding_with_one_real_and_one_illustrative_snippet_is_kept_marked() {
+fn a_finding_with_one_real_and_one_illustrative_snippet_is_withheld() {
     let body = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
     let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
     let report = enforce_line_citations(&mut findings, &billing_index());
-    assert_eq!((report.dropped, report.partial), (0, 1));
-    let f = &findings[0];
-    assert!(f.citation_partial, "{f:?}");
-    assert_eq!(f.line, Some(SUM_LINE));
-    assert!(f.effort != Effort::High && f.confidence <= 0.65, "{f:?}");
-    assert!(
-        f.description.contains("Citation partly unverified"),
-        "{f:?}"
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(report.dropped, 1);
+    assert_eq!(
+        report.withheld_findings[0].missing_fragment.as_deref(),
+        Some("ledger.flush_all()")
     );
 }
 
@@ -231,12 +228,69 @@ fn an_old_side_line_number_never_satisfies_a_citation() {
     let kept = gate_one(
         "src/load.rs",
         Some(101),
-        "`parse(x).unwrap()` panics.",
+        "The removed `parse(x).unwrap()` panicked.",
         &index,
     );
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].line, Some(151));
     assert!(kept[0].citation_correction.is_some_and(|c| c.removed_code));
+}
+
+/// #9188 F: a quote found only on removed (base-only) lines does not verify a
+/// finding about the head code, even at the deletion's own position.
+#[test]
+fn a_base_only_quote_does_not_verify_a_finding_about_head_code() {
+    let index = LineIndex::from_filtered(&diff(vec![file(
+        "src/load.rs",
+        FileDisposition::Kept,
+        vec![hunk(
+            "@@ -100,3 +150,3 @@",
+            lines(&[
+                " fn load(x: &str) -> u32 {",
+                "-  let n = parse(x).unwrap();",
+                "+  let n = parse(x)?;",
+                "   n",
+            ]),
+        )],
+    )]));
+    let kept = gate_one(
+        "src/load.rs",
+        Some(151),
+        "`parse(x).unwrap()` panics on bad input.",
+        &index,
+    );
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// #9188 I: an anchor must fall on the cited lines. A prose quote on the
+/// cited line no longer holds a finding whose quoted code is elsewhere, and a
+/// range must contain the whole quoted span.
+#[test]
+fn an_anchor_must_fall_on_the_cited_lines() {
+    let body = "`amounts.iter().sum::<u64>()` overflows, unlike \"let value_12 = step_12(input)\".";
+    let kept = gate_one("src/billing.rs", Some(12), body, &billing_index());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].line, Some(SUM_LINE), "{:?}", kept[0]);
+
+    let body = "Overflow [code: `src/billing.rs:31-32` — \"sum::<u64>(); let value_31\"].";
+    let kept = gate_one("src/billing.rs", Some(31), body, &billing_index());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(
+        kept[0].description.contains("`src/billing.rs:30-31`"),
+        "{}",
+        kept[0].description
+    );
+}
+
+/// #9188 D: a `[gh: …]` citation the fetched context does not hold is
+/// withheld; the gate no longer strips it and fails open.
+#[test]
+fn a_gh_citation_absent_from_the_context_is_withheld() {
+    let body = format!("{SUM_QUOTE} [gh: #99999 — \"fix the overflow race in billing\"]");
+    let mut result = blocking_result(vec![finding("src/billing.rs", Some(SUM_LINE), &body)]);
+    gate_posted_findings(&mut result, &diff(vec![billing_file()]));
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.withheld_findings.len(), 1);
 }
 
 #[test]
@@ -393,9 +447,19 @@ fn a_finding_whose_line_holds_its_code_is_kept_unchanged() {
     assert_eq!(findings[0].citation_correction, None);
 }
 
+/// #9188 E (inverts the #8905 identifier fallback): a finding that quotes no
+/// code is withheld, even when an identifier in its prose is in the file.
 #[test]
-fn an_identifier_anchor_reanchors_when_no_snippet_is_given() {
+fn a_prose_identifier_no_longer_anchors_a_finding() {
     let body = "The call to step_12 discards its error.";
+    let kept = gate_one("src/billing.rs", Some(3), body, &billing_index());
+    assert!(kept.is_empty(), "{kept:?}");
+}
+
+/// #9188 E: a backtick-quoted identifier is a quote, and still places one.
+#[test]
+fn a_quoted_identifier_reanchors_when_no_snippet_is_given() {
+    let body = "The call to `step_12` discards its error.";
     let kept = gate_one("src/billing.rs", Some(3), body, &billing_index());
     assert_eq!(kept[0].line, Some(12));
 }
@@ -526,9 +590,10 @@ fn approve_star_result(f: Finding) -> ReviewResult {
     result
 }
 
-/// #8949 ruling (b): dropping only advisory findings keeps APPROVE*.
+/// #9188 A (inverts #8949 ruling (b)): an APPROVE* review whose only finding,
+/// an advisory one, is withheld has no verified finding: `Unknown`, no grade.
 #[test]
-fn approve_star_survives_when_only_advisory_findings_are_dropped() {
+fn approve_star_is_unknown_when_its_only_advisory_finding_is_dropped() {
     let mut nit = finding(
         "src/billing.rs",
         Some(SUM_LINE),
@@ -540,15 +605,14 @@ fn approve_star_survives_when_only_advisory_findings_are_dropped() {
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
     assert!(result.findings.is_empty());
-    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
-    assert_eq!(result.grade.as_deref(), Some("C+"));
-    assert_eq!(result.error, None);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
 }
 
-/// #8949 (Architect ruling 2026-09-30): a plain APPROVE keeps APPROVE when only
-/// advisory findings are dropped, the same as APPROVE*.
+/// #9188 A (inverts `plain_approve_survives_when_only_advisory_findings_are_dropped`):
+/// a plain APPROVE that lost its only finding is `Unknown` with no grade.
 #[test]
-fn plain_approve_survives_when_only_advisory_findings_are_dropped() {
+fn plain_approve_is_unknown_when_its_only_finding_is_withheld() {
     let mut nit = finding(
         "src/billing.rs",
         Some(SUM_LINE),
@@ -562,9 +626,9 @@ fn plain_approve_survives_when_only_advisory_findings_are_dropped() {
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
     assert!(result.findings.is_empty());
-    assert_eq!(result.verdict, Verdict::Approve);
-    assert_eq!(result.grade.as_deref(), Some("A-"));
-    assert_eq!(result.error, None);
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.grade, None);
+    assert!(result.error.is_some());
 }
 
 /// Error arm (#8949 ruling (b)): a dropped finding that could escalate on its
@@ -583,21 +647,20 @@ fn approve_star_is_withheld_when_a_dropped_finding_could_escalate() {
     assert_eq!(result.grade, None);
 }
 
-/// Error arm (#8949 ruling (a)): a partial finding is advisory, so it cannot
-/// hold a blocking verdict, and the review never relaxes to APPROVE on it.
+/// #9188 B: a partly quoted finding is withheld, so a blocking review that
+/// rested on it is `Unknown`, never APPROVE.
 #[test]
-fn a_partial_finding_cannot_carry_a_blocking_verdict() {
+fn a_partial_finding_is_withheld_from_a_blocking_review() {
     let body = "`amounts.iter().sum::<u64>()` then `ledger.flush_all()` loses the total.";
     let mut result = blocking_result(vec![finding("src/billing.rs", Some(SUM_LINE), body)]);
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
-    assert_eq!(result.findings.len(), 1);
-    assert!(result.findings[0].citation_partial);
+    assert!(result.findings.is_empty());
     assert_eq!(result.verdict, Verdict::Unknown);
     assert!(
         result
             .review_body
-            .starts_with("1 findings kept with a partly unverified citation (advisory)"),
+            .starts_with("1 findings withheld: citation unverifiable"),
         "{}",
         result.review_body
     );

@@ -298,10 +298,31 @@ async fn verify_unverifiable_finding_is_withheld_not_posted() {
     assert!(note.contains("2 unverifiable"), "{note}");
 }
 
-/// #4044 keeps the #8949 rule: an APPROVE* review that loses only an advisory
-/// UNVERIFIABLE finding keeps its verdict instead of turning UNKNOWN.
+/// #4044 keeps the #8949 rule while a finding survives: an APPROVE* review
+/// that loses only an advisory UNVERIFIABLE finding keeps its verdict.
 #[tokio::test]
 async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
+    let mut findings = vec![
+        finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6),
+        finding("src/a.rs", 4, "naming", Effort::Low, 0.6),
+    ];
+    let report = run(
+        Arc::new(MarkerVerifier::default()),
+        Verdict::ApproveWithReservations,
+        &mut findings,
+        policy(8, 4),
+    )
+    .await;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(report.unverifiable, 1);
+    // `rederive_verdict` over the surviving Low finding: still approving.
+    assert_eq!(report.verdict, Verdict::Approve);
+}
+
+/// #9188 A (the 2026-10-01 case): an APPROVE* review whose verifier could not
+/// confirm its only, advisory, finding has nothing verified: `Unknown`.
+#[tokio::test]
+async fn verify_unverifiable_advisory_with_no_survivor_is_unknown() {
     let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
     let report = run(
         Arc::new(MarkerVerifier::default()),
@@ -312,7 +333,7 @@ async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
     .await;
     assert!(findings.is_empty());
     assert_eq!(report.unverifiable, 1);
-    assert_eq!(report.verdict, Verdict::ApproveWithReservations);
+    assert_eq!(report.verdict, Verdict::Unknown);
 }
 
 /// `enforce_outcomes` with nothing dropped re-derives instead of withholding.

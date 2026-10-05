@@ -329,8 +329,9 @@ async fn run_review_records_a_refuted_finding_as_withheld() {
 
 /// #4044 (owner ruling on #8905, 2026-09-30): only a CONFIRMED finding is
 /// posted. A finding the verifier judges UNVERIFIABLE is withheld with the
-/// reason "unverifiable" and counted as withheld-unverified; the APPROVE
-/// review it was an advisory on keeps its verdict (the #8949 rule).
+/// reason "unverifiable" and counted as withheld-unverified. #9188 A: it was
+/// the review's only finding, so the review has no verified finding and is
+/// `Unknown`, not APPROVE.
 /// Red on `origin/main`: it was posted as a demoted advisory.
 #[tokio::test]
 async fn run_review_withholds_an_unverifiable_finding() {
@@ -347,7 +348,7 @@ async fn run_review_withholds_an_unverifiable_finding() {
     assert_eq!(withheld_reasons(&result), vec!["unverifiable"]);
     assert_eq!(result.withheld_unverified_count, 1);
     assert_eq!(result.unverified_count, 1);
-    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.verdict, Verdict::Unknown);
     assert!(
         result
             .review_body

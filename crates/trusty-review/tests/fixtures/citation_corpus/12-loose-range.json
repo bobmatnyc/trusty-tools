@@ -1,0 +1,17 @@
+{
+  "leak": "I",
+  "about": "A prose quote sits on the cited line while the quoted code is elsewhere; the citation must move to the code.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "Overflow risk.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "overflow", "body": "`amounts.iter().sum::<u64>()` overflows, unlike \"let value_4 = step_4(input)\".", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 4}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 1
+}

@@ -36,8 +36,9 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
-        verify_posted::gate_then_verify,
+        verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
+        withheld_contract::{refs_corpus, regrade_from_survivors},
     },
 };
 
@@ -397,16 +398,24 @@ async fn fold_reduced_into_result(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    gate_then_verify(
-        config,
-        deps.verifier.as_ref(),
-        result,
-        &run.filtered,
-        &run.raw_diff,
-        true,
-        author_rationale.as_deref(),
-    )
-    .await;
+    // #9188 D: context citations resolve in what the reviewer was shown.
+    let refs = refs_corpus(&[
+        Some(&run.pr_meta.title),
+        Some(&run.pr_meta.body),
+        Some(&run.external_context),
+        run.context.pr_description.as_deref(),
+        run.context.pr_discussion.as_deref(),
+        run.context.referenced_code.as_deref(),
+    ]);
+    let inputs = GateInputs {
+        filtered: &run.filtered,
+        diff: &run.raw_diff,
+        per_file: true,
+        author_rationale: author_rationale.as_deref(),
+        refs: &refs,
+        narrative: &parsed.summary, // #9188 C: the synthesis summary
+    };
+    gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 
     // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).
@@ -419,6 +428,7 @@ async fn fold_reduced_into_result(
         original_llm_grade.filter(|_| result.verdict != crate::models::Verdict::Unknown);
     result.grade =
         original_llm_grade.map(|g| reconcile_grade_with_verdict(g, &result.verdict).to_string());
+    regrade_from_survivors(result); // #9188 J: withheld findings never shape it
 
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);

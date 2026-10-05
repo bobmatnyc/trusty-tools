@@ -295,6 +295,7 @@ pub(super) async fn abort_dry(
     // it too rather than leaving a stale zero.
     result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
         + result.withheld_unverified_count; // #8904
+    crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
     if claim == DedupClaim::Held

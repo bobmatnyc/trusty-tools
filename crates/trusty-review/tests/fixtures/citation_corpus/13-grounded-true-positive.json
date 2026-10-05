@@ -1,0 +1,18 @@
+{
+  "leak": "-",
+  "about": "Control: a correctly cited, confirmed finding and a context citation that resolves both survive.",
+  "diff_file": "billing.diff",
+  "pr_description": "Adds an invoice total. Follows up #42: overflow fixed by checked_add in billing.",
+  "reviewer": {
+    "prose": "Overflow risk at src/billing.rs:10.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "overflow", "body": "`amounts.iter().sum::<u64>()` can overflow [gh: #42 — \"overflow fixed by checked_add in billing\"].", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 1
+}

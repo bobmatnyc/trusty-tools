@@ -500,6 +500,71 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
 /// envelope carries the degraded sentinel rather than the infra one.
 /// Test: this test itself.
 #[test]
+fn wrap_result_names_a_withheld_unknown_without_is_error() {
+    // #9188 K: a review whose every finding was withheld says so on the
+    // envelope with typed counts; `isError` stays false (Architect ruling
+    // 2026-10-05: isError is for real failures only).
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::Unknown;
+    result
+        .withheld_findings
+        .push(crate::models::WithheldFinding {
+            finding: crate::models::Finding::new(
+                "src/a.rs",
+                "overflow",
+                "`a + b` overflows",
+                "",
+                0.9,
+                crate::models::Effort::Medium,
+            ),
+            reason: "refuted by the verifier".to_string(),
+            missing_fragment: None,
+        });
+
+    let envelope = wrap_result(&result);
+
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(envelope["withheld"]["count"], 1, "{envelope}");
+    assert_eq!(
+        envelope["withheld"]["by_reason"]["refuted"], 1,
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["verdict_status"], "no_verified_findings",
+        "{envelope}"
+    );
+}
+
+/// #9188 compatibility (Bob, 2026-10-05 02:48Z): a review that withheld
+/// nothing serializes byte-identically to the pre-#9188 envelope.
+#[test]
+fn a_review_with_nothing_withheld_serializes_as_before() {
+    let mut result = ReviewResult::new("acme", "api", 7, "Add X", "https://example/pr/7");
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A".to_string());
+    result.review_body = "LGTM".to_string();
+    result.timestamp = "2026-10-05T00:00:00Z".to_string();
+    result.review_version = "tr-test".to_string();
+    let mut finding = crate::models::Finding::new(
+        "src/a.rs",
+        "overflow",
+        "`a + b` overflows",
+        "use checked_add",
+        0.5,
+        crate::models::Effort::Low,
+    );
+    finding.line = Some(3);
+    result.findings = vec![finding];
+    result.findings_count = 1;
+
+    assert_eq!(wrap_result(&result).to_string(), PRE_9188_ENVELOPE);
+}
+
+/// The envelope `a_review_with_nothing_withheld_serializes_as_before` built
+/// at 09721c7bbb, before #9188.
+const PRE_9188_ENVELOPE: &str = r#"{"content":[{"text":"{\n  \"cost_estimate_usd\": 0.0,\n  \"dry_run\": true,\n  \"findings\": [\n    {\n      \"category\": \"correctness\",\n      \"code_provable\": false,\n      \"confidence\": 0.5,\n      \"consequence\": \"\",\n      \"description\": \"`a + b` overflows\",\n      \"effort\": \"low\",\n      \"file\": \"src/a.rs\",\n      \"issue_eligible\": false,\n      \"kind\": \"overflow\",\n      \"line\": 3,\n      \"suggestion\": \"use checked_add\"\n    }\n  ],\n  \"findings_count\": 1,\n  \"grade\": \"A\",\n  \"head_sha\": \"\",\n  \"input_tokens\": 0,\n  \"latency_ms\": 0,\n  \"model\": \"\",\n  \"output_tokens\": 0,\n  \"owner\": \"acme\",\n  \"posted\": false,\n  \"pr_number\": 7,\n  \"pr_title\": \"Add X\",\n  \"pr_url\": \"https://example/pr/7\",\n  \"repo\": \"api\",\n  \"review_body\": \"LGTM\",\n  \"review_version\": \"tr-test\",\n  \"status\": \"completed\",\n  \"timestamp\": \"2026-10-05T00:00:00Z\",\n  \"unverified_count\": 0,\n  \"verdict\": \"APPROVE\",\n  \"withheld_unverified_count\": 0\n}","type":"text"}],"isError":false}"#;
+
+#[test]
 fn wrap_result_degraded_stays_is_error_false() {
     let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
     result.status = ReviewStatus::Degraded;

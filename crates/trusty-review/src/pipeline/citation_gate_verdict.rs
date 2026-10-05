@@ -5,19 +5,16 @@
 //! read as "nothing wrong": the verdict cannot relax to APPROVE on its absence,
 //! and its citation must not reach the posted body by another route.
 //! What: [`withhold_verdict`] sets the verdict after a gate pass;
-//! [`scrub_body`] removes withheld findings from the review body;
-//! [`mark_partial`] keeps a partly verified finding as advisory (#8949).
+//! [`scrub_body`] removes withheld findings from the review body.
 //! Test: `citation_gate_tests.rs`, `runner_citation_gate_tests.rs`.
 
 use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 use serde_json::Value;
-use tracing::warn;
 
 use super::GateReport;
 use crate::models::{Finding, Verdict};
-use crate::pipeline::evidence_admission::demote_to_unverifiable_advisory;
 use crate::pipeline::grade::derive_verdict;
 
 /// A fenced ```json block, capturing its body.
@@ -25,63 +22,39 @@ static FENCED_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?s)```json[ \t]*\n(.*?)\n?```").expect("fenced-json regex is a valid literal")
 });
 
-/// Set the verdict after the gate dropped `report.dropped` findings or kept
-/// `report.partial` findings as advisory (#8905 row 4, #8949).
+/// Set the verdict after the gate dropped `report.dropped` findings (#8905
+/// row 4).
 ///
-/// What: neither → `None`, verdict untouched. Otherwise returns the summary
-/// line ("N findings withheld: citation unverifiable", then "N findings kept
-/// with a partly unverified citation (advisory)") and:
-///  - an APPROVE or APPROVE* review whose every dropped finding was advisory
-///    keeps its verdict (#8949, owner ruling (b); Architect ruling 2026-09-30
-///    extends it to plain APPROVE);
-///  - otherwise the verdict [`settle_withheld`] gives: no survivors →
-///    `Unknown`; a BLOCK / REQUEST_CHANGES review → what the survivors alone
-///    derive, or `Unknown` when that would approve. A partial finding is
-///    already demoted, so it cannot carry a blocking verdict on its own.
+/// What: nothing dropped → `None`, verdict untouched. Otherwise returns the
+/// summary line ("N findings withheld: citation unverifiable") and sets the
+/// verdict [`settle_withheld`] gives: no survivors → `Unknown`; a BLOCK /
+/// REQUEST_CHANGES review → what the survivors alone derive, or `Unknown`
+/// when that would approve; an approving review with survivors keeps its
+/// verdict. #9188 A: an APPROVE or APPROVE* review that lost every finding is
+/// `Unknown` even when every dropped finding was advisory — a review with no
+/// verified finding has nothing to approve on.
 ///
 /// Refutation-based relaxation (`relax_verdict_if_evidence_wiped`) is separate
 /// and unchanged.
 /// Test: `gate_posted_findings_withholds_when_it_drops_every_finding`,
 /// `gate_posted_findings_never_approves_a_blocking_review`,
-/// `approve_star_survives_when_only_advisory_findings_are_dropped`,
-/// `plain_approve_survives_when_only_advisory_findings_are_dropped`,
-/// `approve_star_is_withheld_when_a_dropped_finding_could_escalate`,
-/// `a_partial_finding_cannot_carry_a_blocking_verdict`.
+/// `approve_star_is_unknown_when_its_only_advisory_finding_is_dropped`,
+/// `plain_approve_is_unknown_when_its_only_finding_is_withheld`,
+/// `approve_star_is_withheld_when_a_dropped_finding_could_escalate`.
 pub(super) fn withhold_verdict(
     verdict: &mut Verdict,
     report: &GateReport,
     survivors: &[Finding],
 ) -> Option<String> {
-    if report.dropped == 0 && report.partial == 0 {
+    if report.dropped == 0 {
         return None;
     }
-    let mut notes = Vec::with_capacity(2);
-    if report.dropped > 0 {
-        notes.push(format!(
-            "{} findings withheld: citation unverifiable",
-            report.dropped
-        ));
-    }
-    if report.partial > 0 {
-        notes.push(format!(
-            "{} findings kept with a partly unverified citation (advisory)",
-            report.partial
-        ));
-    }
-    // Fail closed: a drop with no recorded finding is never read as advisory.
-    let advisory_only = report.withheld_findings.len() == report.dropped
-        && report
-            .withheld_findings
-            .iter()
-            .all(|w| is_advisory(&w.finding));
-    let approving = matches!(
-        *verdict,
-        Verdict::Approve | Verdict::ApproveWithReservations
-    );
-    if !(approving && advisory_only) {
-        *verdict = settle_withheld(verdict.clone(), survivors);
-    }
-    Some(notes.join("; "))
+    // #9188 A: no advisory exemption — an all-withheld review is `Unknown`.
+    *verdict = settle_withheld(verdict.clone(), survivors);
+    Some(format!(
+        "{} findings withheld: citation unverifiable",
+        report.dropped
+    ))
 }
 
 /// Whether a finding, on its own, cannot move a review past APPROVE* (#8949).
@@ -140,28 +113,6 @@ pub(crate) fn scrub_body(body: &str, withheld: &[String]) -> String {
         out = out.replace(cite.as_str(), "(withheld citation)");
     }
     out
-}
-
-/// Body note on a finding whose citation the gate verified only in part (#8949).
-/// It quotes no code, so a second gate pass reads nothing new from it.
-const PARTIAL_NOTE: &str = "_Citation partly unverified: code this finding quotes is not in \
-     the reviewed diff. Advisory only._";
-
-/// Keep a partly verified finding as advisory only (#8949, owner ruling (a)).
-///
-/// What: sets `citation_partial`, strips every signal that lets the finding
-/// escalate a verdict (`demote_to_unverifiable_advisory`), appends
-/// [`PARTIAL_NOTE`] once, and logs the fragments that failed to match. A
-/// partial finding is posted in the body, never inline
-/// (`inline::build_inline_plan`).
-pub(super) fn mark_partial(f: &mut Finding, missing: &[String]) {
-    demote_to_unverifiable_advisory(f);
-    if !f.citation_partial {
-        f.citation_partial = true;
-        f.description = format!("{}\n\n{PARTIAL_NOTE}", f.description.trim_end());
-    }
-    let missing: Vec<String> = missing.iter().map(|m| log_excerpt(m)).collect();
-    warn!(file = %f.file, line = ?f.line, kind = %f.kind, ?missing, "citation-gate: keeping finding with a partly unverified citation (#8949)");
 }
 
 /// Longest quoted fragment a gate log line carries, in characters.

@@ -113,6 +113,84 @@ fn run_is_failure_passes_a_clean_review() {
 /// specific of the two — it names what actually broke.
 /// What: the recorded error wins over the generic skip sentence.
 /// Test: this is the test.
+/// A non-withheld local-diff review, shaped like what code-intelligence reads.
+fn local_review() -> ReviewResult {
+    let mut r = ReviewResult::new("local", "diff", 0, "local diff", "");
+    r.verdict = crate::models::Verdict::ApproveWithReservations;
+    r.grade = Some("C+".to_owned());
+    r.review_body = "One overflow risk.".to_owned();
+    r.model = "fake-model".to_owned();
+    r.cost_estimate_usd = 0.01;
+    r.timestamp = "2026-10-05T00:00:00Z".to_owned();
+    r.review_version = "tr-test".to_owned();
+    let mut f = crate::models::Finding::new(
+        "src/a.rs",
+        "overflow",
+        "`a + b` overflows",
+        "use checked_add",
+        0.8,
+        crate::models::Effort::Medium,
+    );
+    f.line = Some(3);
+    f.consequence = "wraps in release".to_owned();
+    f.verified = Some(crate::models::VerifyOutcome::Confirmed);
+    r.findings = vec![f];
+    r.findings_count = 1;
+    r
+}
+
+/// #9188 compatibility (Bob 02:48Z; Architect 03:26Z item 4): for a review
+/// that withheld nothing, `run --local-diff - --json` prints every field
+/// code-intelligence parses with the same name, type and value as before
+/// #9188, byte for byte, and no new key.
+/// Test: this is the test; it passes on 09721c7bbb and on the #9188 branch.
+#[test]
+fn run_json_for_a_non_withheld_review_is_unchanged_by_9188() {
+    let payload = run_json_payload(&local_review());
+    assert_eq!(payload.to_string(), PRE_9188_RUN_JSON);
+    assert_eq!(payload["verdict"], "APPROVE*");
+    assert_eq!(payload["grade"], "C+");
+    assert!(payload["findings"].is_array());
+    assert_eq!(payload["findings_count"], 1);
+    assert_eq!(payload["model"], "fake-model");
+    assert!(payload["cost_estimate_usd"].is_f64());
+    assert_eq!(payload["status"], "completed");
+    for absent in [
+        "summary",
+        "grade_justification",
+        "mcp_status",
+        "infra_unavailable",
+        "withheld_count",
+        "withheld_by_reason",
+        "withheld_findings",
+    ] {
+        assert!(
+            payload.get(absent).is_none(),
+            "`{absent}` appeared: {payload}"
+        );
+    }
+    let f = &payload["findings"][0];
+    for key in [
+        "file",
+        "line",
+        "description",
+        "consequence",
+        "category",
+        "suggestion",
+        "confidence",
+        "effort",
+        "kind",
+        "verified",
+        "code_provable",
+    ] {
+        assert!(f.get(key).is_some(), "finding lost `{key}`: {f}");
+    }
+}
+
+/// `run_json_for_a_non_withheld_review_is_unchanged_by_9188`'s payload, as
+/// built at 09721c7bbb.
+const PRE_9188_RUN_JSON: &str = r#"{"cost_estimate_usd":0.01,"dry_run":true,"findings":[{"category":"correctness","code_provable":false,"confidence":0.800000011920929,"consequence":"wraps in release","description":"`a + b` overflows","effort":"medium","file":"src/a.rs","issue_eligible":false,"kind":"overflow","line":3,"suggestion":"use checked_add","verified":"confirmed"}],"findings_count":1,"grade":"C+","head_sha":"","input_tokens":0,"latency_ms":0,"model":"fake-model","output_tokens":0,"owner":"local","posted":false,"pr_number":0,"pr_title":"local diff","pr_url":"","repo":"diff","review_body":"One overflow risk.","review_version":"tr-test","status":"completed","timestamp":"2026-10-05T00:00:00Z","unverified_count":0,"verdict":"APPROVE*","withheld_unverified_count":0}"#;
+
 #[test]
 fn run_failure_reason_prefers_the_recorded_error() {
     let mut result = clean_result();

@@ -1,0 +1,18 @@
+{
+  "leak": "A",
+  "about": "The 2026-10-01 code-intelligence case: the verifier cannot judge any finding, so every finding is withheld; the review must not approve.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "Two small notes on the total.",
+    "verdict": "APPROVE",
+    "grade": "A",
+    "findings": [
+      {"title": "naming", "body": "`let value_4 = step_4(input);` could use a clearer name.", "severity": "low", "confidence": 0.4, "file": "src/billing.rs", "line": 4},
+      {"title": "overflow-note", "body": "`amounts.iter().sum::<u64>()` may overflow on huge inputs.", "severity": "low", "confidence": 0.4, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "UNVERIFIABLE",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 0
+}

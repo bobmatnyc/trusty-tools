@@ -1,0 +1,17 @@
+{
+  "leak": "-",
+  "about": "The finding quotes code that is not in the cited file.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "The ledger write is lost.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "D",
+    "findings": [
+      {"title": "lost-write", "body": "`ledger.flush_all()` is never awaited, so the total is lost.", "severity": "high", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["lost-write"],
+  "forbidden_in_body": ["ledger write is lost"],
+  "expect_survivors": 0
+}

@@ -1,0 +1,15 @@
+{
+  "leak": "C",
+  "about": "The summary names a defect at a location that no finding carries.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "SQL injection at src/billing.rs:7 through the unescaped input.",
+    "verdict": "APPROVE",
+    "grade": "B",
+    "findings": []
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": ["SQL injection"],
+  "expect_survivors": 0
+}

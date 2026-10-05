@@ -28,9 +28,10 @@ use crate::{
     llm::LlmProvider,
     models::{Finding, ReviewResult, Verdict, VerifyOutcome, WithheldFinding},
     pipeline::{
-        citation_gate::{gate_posted_findings, verdict as withhold},
+        citation_gate::{LineIndex, gate_posted_findings_with_index, verdict as withhold},
         diff_analyzer::models::FilteredDiff,
         verify::{VerifierReach, apply_outcome, maybe_verify, rederive_verdict},
+        withheld_contract as contract,
     },
 };
 
@@ -118,7 +119,8 @@ impl VerifyReport {
 /// `Unverifiable`), logging each and recording each in
 /// `report.withheld_findings`; then settles the verdict — `Unknown` stays
 /// `Unknown`; nothing dropped, or an APPROVE/APPROVE* review that lost only
-/// advisory unverifiable findings (the #8949 rule) → `rederive_verdict`;
+/// advisory unverifiable findings (the #8949 rule) and kept at least one
+/// (#9188 A) → `rederive_verdict`;
 /// anything else dropped → `settle_withheld`, which never turns a non-APPROVE
 /// verdict into APPROVE but may relax a blocking one. When any finding went
 /// unjudged the result is floored at `primary` (the #8653 verdict), so a
@@ -132,7 +134,8 @@ impl VerifyReport {
 /// `run_review_withheld_blocker_keeps_its_block_floor`,
 /// `run_review_records_a_refuted_finding_as_withheld`,
 /// `verify_unverifiable_finding_is_withheld_not_posted`,
-/// `verify_unverifiable_advisory_keeps_an_approving_verdict`.
+/// `verify_unverifiable_advisory_keeps_an_approving_verdict`,
+/// `verify_unverifiable_advisory_with_no_survivor_is_unknown`.
 pub(crate) fn enforce_outcomes(
     primary: Verdict,
     findings: &mut Vec<Finding>,
@@ -208,9 +211,11 @@ pub(crate) fn enforce_outcomes(
             .iter()
             .all(|w| withhold::is_advisory(&w.finding));
     let approving = matches!(primary, Verdict::Approve | Verdict::ApproveWithReservations);
+    // #9188 A: the advisory exemption needs a survivor; with none, `settle_withheld`
+    // gives `Unknown` — a review with no verified finding approves nothing.
     report.verdict = if primary == Verdict::Unknown {
         Verdict::Unknown
-    } else if report.dropped() == 0 || (approving && advisory_only) {
+    } else if report.dropped() == 0 || (approving && advisory_only && !findings.is_empty()) {
         rederive_verdict(primary, findings)
     } else {
         let settled = withhold::settle_withheld(primary.clone(), findings);
@@ -229,44 +234,78 @@ pub(crate) fn enforce_outcomes(
     report
 }
 
+/// What the post-grading gates read besides the result (#8904, #9188).
+pub(crate) struct GateInputs<'a> {
+    /// The filtered diff the reviewer saw; citations resolve against it.
+    pub(crate) filtered: &'a FilteredDiff,
+    /// The diff text the verifier is shown.
+    pub(crate) diff: &'a str,
+    /// Show the verifier only each finding's own file sections.
+    pub(crate) per_file: bool,
+    /// PR description and discussion for the verifier (#1618).
+    pub(crate) author_rationale: Option<&'a str>,
+    /// #9188 D: the fetched context a `[jira:]`/`[gh:]`/`[confluence:]`
+    /// citation must resolve in.
+    pub(crate) refs: &'a str,
+    /// #9188 C: the model-written prose inside `review_body`.
+    pub(crate) narrative: &'a str,
+}
+
 /// Gate citations, then verify the survivors, on a graded review (#8904).
 ///
 /// Why: both review paths must run the same two gates in the same order, and
 /// the citation gate first saves a verifier call on every finding it drops.
-/// What: runs `gate_posted_findings` (#8905), then `maybe_verify` on
-/// `result.findings` with `result.verdict` as the primary verdict. Records
-/// the unjudged, over-cap and unverifiable drops in
-/// `result.withheld_unverified_count`, and every drop with its reason in
-/// `result.withheld_findings` (#4044). When
-/// the round withheld findings, scrubs their citations from the body, prepends
-/// the report's note, and on `Unknown` clears the grade and records the note as
+/// What: runs the #8905 citation gate (context citations resolve in
+/// `inputs.refs`), then `maybe_verify` on `result.findings` with
+/// `result.verdict` as the primary verdict. Records the unjudged, over-cap and
+/// unverifiable drops in `result.withheld_unverified_count`, and every drop
+/// with its reason in `result.withheld_findings` (#4044). When the round
+/// withheld findings, scrubs their citations from the body, prepends the
+/// report's note, and on `Unknown` clears the grade and records the note as
 /// the error — the same shape the citation gate uses. When no round ran,
 /// [`withhold_unverified`] withholds every finding and the review is UNKNOWN
-/// (Bob's "withhold all" ruling, 2026-09-30; supersedes #8904's 09-29 rule).
+/// (Bob's "withhold all" ruling, 2026-09-30). #9188 then re-checks every
+/// survivor at the head (L), makes a review with no survivor `Unknown` (A, J),
+/// and keeps the model's prose only when it rests on survivors (C).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
 /// `run_review_enabled_without_a_verifier_withholds_every_finding`,
 /// `run_review_disabled_verification_withholds_every_finding`,
-/// `run_review_mapreduce_verifies_findings_from_every_chunk`.
+/// `run_review_mapreduce_verifies_findings_from_every_chunk`,
+/// `a_confirmed_finding_that_does_not_resolve_is_withheld`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,
     result: &mut ReviewResult,
-    filtered: &FilteredDiff,
-    diff: &str,
-    per_file: bool,
-    author_rationale: Option<&str>,
+    inputs: &GateInputs<'_>,
 ) {
-    gate_posted_findings(result, filtered); // #8905 runs first.
+    let narrative = contract::take_narrative(result, inputs.narrative);
+    let index = LineIndex::from_filtered(inputs.filtered).with_refs(inputs.refs);
+    gate_posted_findings_with_index(result, &index); // #8905 runs first.
+    verify_survivors(config, verifier, result, inputs).await;
+    contract::withhold_unresolved(result, &index); // #9188 L
+    contract::settle_no_survivors(result); // #9188 A, J
+    if let Some(narrative) = narrative {
+        contract::restore_narrative(result, narrative); // #9188 C
+    }
+}
+
+/// The #8904 verifier round on the gate's survivors, and its withhold policy.
+async fn verify_survivors(
+    config: &ReviewConfig,
+    verifier: Option<&Arc<dyn LlmProvider>>,
+    result: &mut ReviewResult,
+    inputs: &GateInputs<'_>,
+) {
     let primary = result.verdict.clone();
     let Some(report) = maybe_verify(
         config,
         verifier,
-        diff,
-        per_file,
+        inputs.diff,
+        inputs.per_file,
         primary,
         &mut result.findings,
-        author_rationale,
+        inputs.author_rationale,
     )
     .await
     else {
