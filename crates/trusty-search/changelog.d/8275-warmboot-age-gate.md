@@ -1,0 +1,3 @@
+Changed
+- Warm-boot no longer loads indexes that have not been used recently. An index whose last query is older than `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (default 24), or that was never queried, goes to the cold store and loads on its first query. The filter runs before the `TRUSTY_WARMBOOT_MAX_INDEXES` cut, so a stale index never takes a fresh one's slot. `0` disables the gate (#8275).
+- After a restart, an index idle for 24 h or more stays cold until a per-index search names it. The global `POST /search` / `search_all` fan-out skips cold indexes, counting them in `cold_indexes_skipped`, and does not revive them (#8275).
