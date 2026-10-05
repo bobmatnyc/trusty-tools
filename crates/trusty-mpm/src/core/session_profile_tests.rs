@@ -226,6 +226,7 @@ fn every_kept_item_reaches_the_supervisor_prompt() {
         ("evidence labels", "**reported**"),
         ("evidence labels", "**verified**"),
         ("decisions as options", "\"(Recommended)\""),
+        ("completion standard", "Clear a PR when Done items 1-3 hold"),
         ("monitoring", "## Monitoring and Heartbeat"),
         ("heartbeat", "Run exactly one heartbeat"),
         ("trusty tool priority", "## Trusty Tool Priority"),

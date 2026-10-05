@@ -1,0 +1,64 @@
+[package]
+name = "trusty-secrets"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project- and owner-scoped secret storage for the trusty-* tools: key, scope and reference types, a names-only index, and an OS Keychain backend (DOC-74 §15)."
+keywords = ["secrets", "keychain", "credentials"]
+categories = ["authentication", "development-tools"]
+homepage = "https://trustytools.dev"
+
+# DOC-74 §15.2. `api` is the wire vocabulary only (no store code), so a caller
+# that only names keys — trusty-console's bridge — never links a keychain.
+# `store` is everything that touches a backend or the disk. The `client`
+# feature in the spec ships with S9, not here.
+#
+# `server` (S2, #9065) is the on-demand UDS socket and the `trusty-secrets`
+# binary: tokio plus trusty-common's UDS stack (owner rulings 24, 31, 32). It
+# is a default feature so `cargo install trusty-secrets` builds the binary;
+# an `api`/`store` consumer opts out with `default-features = false`.
+[features]
+default = ["api", "store", "server"]
+api = ["dep:serde", "dep:thiserror"]
+store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs"]
+server = ["store", "dep:tokio", "dep:trusty-common"]
+# Exposes the in-memory `MemoryBackend` test double to downstream test suites.
+test-support = ["store"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+fd-lock = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+trusty-common = { workspace = true, optional = true, features = ["uds-supervisor"] }
+
+[[bin]]
+name = "trusty-secrets"
+path = "src/bin/trusty-secrets.rs"
+required-features = ["server"]
+
+# Spawns the real binary, so it needs the target `server` builds.
+[[test]]
+name = "on_demand_server"
+path = "tests/on_demand_server.rs"
+required-features = ["server"]
+
+# #9064: macOS only, `apple-native` only. Not the workspace `keyring` entry:
+# its `sync-secret-service` feature pulls libdbus-sys, which fails to build on
+# a runner without libdbus-1-dev, and `workspace = true` can only add features.
+# On any other target there is no `keyring` at all, so its in-memory mock
+# store can never be selected; `KeychainBackend` returns
+# `SecretsError::UnknownBackend` instead (see store/keychain.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The api tests decode wire JSON even when only `api` is enabled.
+serde_json = { workspace = true }

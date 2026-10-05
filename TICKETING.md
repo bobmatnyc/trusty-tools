@@ -30,14 +30,16 @@ the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
 "Abbreviations & Aliases" table first.
 
 Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
-`trusty-agents-ui`, `trusty-analyze`, `trusty-audit`, `trusty-audit-ui`,
+`trusty-agents-ui`, `trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
 `trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`, `trusty-kb`,
 `trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
-`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-sld-lint`,
-`tc-services`, `tga`, `cto-assistant`.
+`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-secrets`, `trusty-sld-lint`,
+`tc-services`, `cto-assistant`.
+
+trusty-git-analytics and trusty-audit are tracked in bobmatnyc/trusty-git-analytics.
 
 Subsystem labels for paths no crate owns: `ci`, `daemon`, `deps`, `dx`,
 `launchd`, `mcp`, `monitor`, `ops`, `performance`, `spec`, `test`, `ui`.
@@ -76,10 +78,10 @@ created. Run `tm issue seed-labels` first; it is idempotent and creates the four
 Live titles, as of generation:
 
 - Crate backlogs: `Backlog · agents`, `Backlog · analyze/review`,
-  `Backlog · audit`, `Backlog · code`, `Backlog · console`,
+  `Backlog · code`, `Backlog · console`,
   `Backlog · embedderd`, `Backlog · installer`, `Backlog · mcp`,
   `Backlog · memory (triaged)`, `Backlog · mpm/core`, `Backlog · search`,
-  `Backlog · tc-services`, `Backlog · tga`.
+  `Backlog · tc-services`.
 - Version milestones: `1.7.1`, `1.7.2`, `trusty-mpm 2.0.0`.
 - Epic milestones: `Issue management` (#94) — issue-management work and its
   follow-ups; `Instructional content` (#95).
@@ -127,11 +129,10 @@ Live projects, by number, owner `bobmatnyc`:
 | 22 | trusty-memory | 29 | trusty-console |
 | 23 | trusty-search | 38 | cross-crate + trusty-common |
 | 24 | trusty-analyze + trusty-review | 39 | tc-services |
-| 25 | trusty-mpm | 40 | tga |
-| 26 | trusty-code | 41 | trusty-audit |
-| 27 | trusty-agents | 42 | trusty-embedderd |
-| 28 | trusty-installer | 43 | trusty-mcp |
-| | | 44 | trusty-tools · CI & infra |
+| 25 | trusty-mpm | 42 | trusty-embedderd |
+| 26 | trusty-code | 43 | trusty-mcp |
+| 27 | trusty-agents | 44 | trusty-tools · CI & infra |
+| 28 | trusty-installer | | |
 
 **Selection rule:** the project of the owning crate. A change spanning crates,
 or one in `trusty-common`, goes to #38. A CI, workflow, or `scripts/` issue goes
@@ -368,9 +369,11 @@ on verification. A hit there is prior art worth reading.
   "Improvement recommendations" block.
 - A PM or agent "Prompt feedback" addendum item.
 
-Each is fixed in the surfacing PR, dropped, or logged as a dated comment on the
-rollup issue [#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021),
-deduplicated against earlier comments. HIGH+ or independently schedulable work
+Each one that meets the PM's Completion Standard fix bar (`tm-workflow`) is
+fixed in the surfacing PR. Any other is one comment on the PR or existing
+issue, dropped, or logged as a dated comment on the rollup issue
+[#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021), deduplicated
+against earlier comments — never a fix round of its own. HIGH+ or independently schedulable work
 may still be filed — search first.
 
 ## Title and body

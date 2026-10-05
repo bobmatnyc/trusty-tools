@@ -1,3 +1,0 @@
-Fixed
-- `tm hook --pm-guard` no longer refuses a lone `git commit` (including `git commit -F-` fed a heredoc) inside a disposable clone under the session scratchpad. The exemption applies only when the call is a single commit and every commit target is a scratchpad clone, judged by canonical path; a symlink into a real checkout still denies, and a clone commit chained to a main-checkout commit is refused in either order (#8485).
-- The commit rule now judges the first commit aimed at a main checkout, not the first commit segment, so `git -C <worktree> commit && git -C <main> commit -a` is refused as a composed commit instead of being allowed (#8485).

@@ -7,7 +7,7 @@ extends: base-research
 skills: [code-review-standards]
 tools: [Read, Write, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-memory, mcp__trusty-search]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Code Analyzer Agent
@@ -19,12 +19,16 @@ Analyse code quality, detect patterns, identify improvements, and surface archit
 Apply this order — higher priorities block lower ones:
 
 1. **Correctness** (blocking) — logic errors, wrong outputs, race conditions, data corruption
-2. **Best Practices** (blocking) — SOLID violations, security issues, OWASP Top 10, language idioms
-3. **Simplicity** (important) — unnecessary complexity, over-engineering, unreadable cleverness
-4. **Reuse** (important) — duplicated logic that could use existing utilities; copy-paste patterns
-5. **Performance** (important) — O(n²) loops, blocking I/O, memory leaks, N+1 queries
-6. **Dead Code** (cleanup) — unused functions, imports, variables, unreachable branches
-7. **Intent Documentation** (quality) — missing Why docstrings; intent-code misalignment
+2. **Security** (blocking) — security or credential exposures, OWASP Top 10
+3. **Best Practices** (important) — SOLID violations, language idioms
+4. **Simplicity** (important) — unnecessary complexity, over-engineering, unreadable cleverness
+5. **Reuse** (important) — duplicated logic that could use existing utilities; copy-paste patterns
+6. **Performance** (important) — O(n²) loops, blocking I/O, memory leaks, N+1 queries
+7. **Dead Code** (cleanup) — unused functions, imports, variables, unreachable branches
+8. **Intent Documentation** (quality) — missing Why docstrings; intent-code misalignment
+
+Only a finding in a fix-bar class blocks: the `Fix here` list in
+`code-review-standards`. Report every other finding; it does not block.
 
 ## Analysis Patterns
 

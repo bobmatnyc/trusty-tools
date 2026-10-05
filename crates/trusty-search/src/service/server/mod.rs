@@ -31,6 +31,8 @@ mod fanout;
 // #9027: per-index deadline and one query embed for the all-index fan-out.
 mod fanout_deadline;
 mod files;
+// #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
+mod graph_refresh_ticker;
 mod health;
 pub(crate) mod helpers;
 mod index_config;
@@ -117,6 +119,9 @@ mod tests_8499;
 // #8499 round 2: store placement, registration claims, relocate vs reindex.
 #[cfg(test)]
 mod registration_8499_tests;
+// #8147: `POST /indexes` honours `colocated: false`.
+#[cfg(all(test, unix))]
+mod colocated_8147_tests;
 // #8777: a created index is stamped at the current schema version.
 #[cfg(test)]
 mod tests_schema_stamp_8777;
@@ -132,6 +137,9 @@ mod tests_8134;
 // #8105: a reindex of a write-quarantined index is refused, not queued.
 #[cfg(test)]
 mod tests_8105;
+// #8883: a serve-only index refuses every reindex and gets no watcher.
+#[cfg(test)]
+mod serve_only_8883_tests;
 // #8889: one reindex per index through the HTTP handler.
 #[cfg(test)]
 mod tests_8889;
@@ -407,6 +415,7 @@ pub fn build_router_on(
     spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
     spawn_residency_sweep_ticker(Arc::clone(&state_arc));
     spawn_memory_pressure_ticker(Arc::clone(&state_arc));
+    graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(&state_arc));
     // #4250: drive indexes parked by a warm-boot restore timeout back into the
     // registry. Nothing else will — they are absent from `list_indexes`, so a
     // client that discovers indexes by listing never names them, and boot

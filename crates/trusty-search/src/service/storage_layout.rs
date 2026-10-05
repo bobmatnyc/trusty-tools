@@ -162,6 +162,17 @@ impl StorageLayout {
         if holds_colocated_artifact(root_path) {
             return Ok(Self::Colocated);
         }
+        Self::for_new_data_dir_registration(index_id, root_path)
+    }
+
+    /// The data-dir half of [`Self::for_new_registration`]: the same work-tree
+    /// guard and store creation, without adopting `<root>/.trusty-search/`.
+    ///
+    /// Why (#8147): a `colocated: false` registration must never open the
+    /// in-repo directory, which may be read-only or root-owned.
+    /// What: always `DataDir`, or the #8499 refusal.
+    /// Test: `colocated_false_over_a_read_only_colocated_corpus_registers_in_the_data_dir`.
+    pub(crate) fn for_new_data_dir_registration(index_id: &str, root_path: &Path) -> Result<Self> {
         // #8499: an entry `indexes.toml` already holds at this root keeps the
         // #8438 exemption for its EXISTING store; `storage_dir` refuses to
         // create a missing one. An unreadable registry exempts nothing.

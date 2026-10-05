@@ -122,6 +122,41 @@ async fn a_gap_demotes_the_stage_and_queues_a_backfill() {
     }
 }
 
+/// Why (#8883): the vector-gap backfill runs at restore with no request, and a
+/// serve-only index's vectors ship with it — this daemon embeds none.
+/// What: the short fixture above, marked serve-only. Nothing is queued, the
+/// store keeps its one vector, and the stage is a named `Failed`. Against code
+/// without the gate the reconcile queues the backfill and returns `true`.
+/// Test: this test.
+#[tokio::test]
+async fn a_gap_on_a_serve_only_index_queues_no_backfill() {
+    let (handle, total) = handle_with_vectors("vector-gap-8883-serve-only", 1).await;
+    let handle = Arc::new(IndexHandle {
+        serve_only: true,
+        ..Arc::try_unwrap(handle).unwrap_or_else(|_| panic!("the fixture holds the only clone"))
+    });
+
+    assert!(
+        !reconcile_semantic_vector_gap(&handle).await,
+        "#8883: a serve-only index must get no backfill"
+    );
+    let semantic = handle.stages.read().await.semantic.clone();
+    assert_eq!(semantic.status, StageStatus::Failed, "{semantic:?}");
+    assert!(
+        semantic
+            .failure
+            .as_deref()
+            .is_some_and(|r| r.contains("serve-only")),
+        "the failure must name why nothing was scheduled: {semantic:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        handle.indexer.read().await.vector_count().await,
+        Some(1),
+        "1 of {total} vectors before, and no pass may add any"
+    );
+}
+
 /// Why (#8726): a fully covered store is healthy — the reconcile must not
 /// demote it or spend the background permit on it.
 /// Test: this test.

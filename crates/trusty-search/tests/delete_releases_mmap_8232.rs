@@ -56,6 +56,16 @@ async fn seed_snapshot(entry: &PersistedIndex, embedder: &Arc<dyn Embedder>) {
             .await
             .expect("index_file");
     }
+    // #8959: every 16th commit spawns a detached HNSW checkpoint. Once
+    // `index_file` stopped rebuilding the symbol graph per call, the last one
+    // could still be running after the reload below, and its rename replaced
+    // the snapshot the view had mapped, so the view held a deleted file.
+    assert!(
+        indexer
+            .wait_for_incremental_persist_drain(std::time::Duration::from_secs(30))
+            .await,
+        "the seed's background HNSW checkpoint must finish before the reload"
+    );
     let hnsw = hnsw_path_for_entry(entry).expect("hnsw path");
     let saved = indexer.save_vector_store(&hnsw).await.expect("save hnsw");
     assert!(saved, "the seed pass must write {}", hnsw.display());

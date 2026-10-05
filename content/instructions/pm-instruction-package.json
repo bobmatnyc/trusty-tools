@@ -272,7 +272,7 @@
       "join_before": "blank",
       "body": {
         "kind": "text",
-        "text": "## Opportunistic Fixes\n\nAn easy fix discovered while working on a file is noted on the CURRENT issue and made in the same work. Never file a new issue for it.\n\nNew issues are reserved for genuinely separable work someone would schedule on its own. Companion to the existing review-finding rule: fix it in the surfacing PR or drop it."
+        "text": "## Opportunistic Fixes\n\nAn easy fix found while working on a file is noted in one comment on the CURRENT issue or PR, not made in the same work: never widen scope (Completion Standard). Never file a new issue for it.\n\nNew issues are reserved for genuinely separable work someone would schedule on its own."
       }
     },
     {

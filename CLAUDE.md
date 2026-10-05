@@ -41,8 +41,10 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   gate at a worktree-local `target/` — that is a cold build of the whole
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 **A live check needing an isolated daemon starts it with
-  `scripts/sandbox_daemon.sh` only (#9121)** — a hand-built `tm daemon`
-  inherits bot tokens and reaches the per-user Keychain.
+  `scripts/sandbox_daemon.sh` (tm) or `scripts/sandbox_search_daemon.sh`
+  (trusty-search) only (#9121)** — a hand-built daemon inherits bot tokens,
+  loads the `.env.local` at or above its cwd (#9161), and reaches the
+  per-user Keychain.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
@@ -113,11 +115,12 @@ Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,
 `tm-postmortem` output, `report_bug`/`preview_bug_report`, or an agent's
-"Improvement recommendations" block), is fixed in the surfacing PR, dropped,
-or logged in the rollup
+"Improvement recommendations" block), is never a new issue. One that meets
+the Completion Standard fix bar is fixed in the surfacing PR; any other is
+one comment on the PR or existing issue, dropped, or logged in the rollup
 ([#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021)) — never a
-new issue. HIGH+ or independently schedulable work may still be filed
-(search first).
+fix round of its own. HIGH+ or independently schedulable work may still be
+filed (search first).
 
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
 `/// What: <mechanics>`, `/// Test: <where coverage lives>`. Full pattern for
