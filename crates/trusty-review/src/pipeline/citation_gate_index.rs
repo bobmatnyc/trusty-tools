@@ -182,7 +182,9 @@ impl LineIndex {
             && self.refs.match_indices(id).any(|(pos, _)| {
                 let before = self.refs[..pos].chars().next_back();
                 let after = self.refs[pos + id.len()..].chars().next();
-                !(edge(first) && edge(before)) && !(edge(last) && edge(after))
+                let joined_before = edge(first) && edge(before);
+                let joined_after = edge(last) && edge(after);
+                !joined_before && !joined_after
             })
     }
 

@@ -92,7 +92,11 @@ async fn withhold_unresolved_withholds_a_range_the_gate_rewrote_short() {
     )];
     gate_posted_findings_with_index(&mut result, &index);
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
-    assert!(result.findings[0].description.contains("`src/billing.rs:10-11`"));
+    assert!(
+        result.findings[0]
+            .description
+            .contains("`src/billing.rs:10-11`")
+    );
 
     assert_eq!(withhold_unresolved(&mut result, &index), 1);
     assert!(result.findings.is_empty());

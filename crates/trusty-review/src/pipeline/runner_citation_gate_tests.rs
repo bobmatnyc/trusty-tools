@@ -430,7 +430,12 @@ async fn run_review_keeps_a_clean_review_byte_for_byte() {
     assert_eq!(result.findings.len(), 1);
     let f = &result.findings[0];
     assert_eq!(
-        (f.file.as_str(), f.line, f.kind.as_str(), f.description.as_str()),
+        (
+            f.file.as_str(),
+            f.line,
+            f.kind.as_str(),
+            f.description.as_str()
+        ),
         ("src/billing.rs", Some(SUM_LINE), "overflow", body)
     );
     assert_eq!(f.citation_correction, None);

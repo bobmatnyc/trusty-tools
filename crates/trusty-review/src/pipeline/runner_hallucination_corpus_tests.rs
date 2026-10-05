@@ -160,7 +160,9 @@ fn diff_lines(diff: &str) -> (Lines, Lines) {
             pending.push(norm(body));
         } else if let Some(body) = line.strip_prefix('+').or_else(|| line.strip_prefix(' ')) {
             flush(&file, next, &mut pending);
-            head.entry(file.clone()).or_default().insert(next, norm(body));
+            head.entry(file.clone())
+                .or_default()
+                .insert(next, norm(body));
             next += 1;
         }
     }
@@ -191,7 +193,10 @@ fn oracle_resolves(f: &Finding, (head, base): &(Lines, Lines), removal: bool) ->
     };
     let mut whole: String = lines.values().cloned().collect::<Vec<_>>().join(" ");
     if let Some(removed) = removed {
-        whole = format!("{whole} {}", removed.values().cloned().collect::<Vec<_>>().join(" "));
+        whole = format!(
+            "{whole} {}",
+            removed.values().cloned().collect::<Vec<_>>().join(" ")
+        );
         if let Some(gone) = f.line.and_then(|l| removed.get(&l)) {
             on_line = format!("{on_line} {gone}");
         }

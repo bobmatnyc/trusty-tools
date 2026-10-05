@@ -239,7 +239,11 @@ pub(crate) fn take_narrative(result: &mut ReviewResult, narrative: &str) -> Opti
 /// the body, a rebuild replaces the whole body (fail closed).
 /// Test: `a_withheld_defect_named_in_the_summary_never_reaches_the_body`,
 /// `a_clean_review_keeps_its_prose`.
-pub(crate) fn restore_narrative(result: &mut ReviewResult, narrative: Narrative, index: &LineIndex) {
+pub(crate) fn restore_narrative(
+    result: &mut ReviewResult,
+    narrative: Narrative,
+    index: &LineIndex,
+) {
     let keep = narrative_is_backed(&narrative.text, result, index);
     if keep {
         if narrative.slotted {

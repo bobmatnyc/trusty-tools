@@ -118,7 +118,8 @@ impl Anchors {
             return;
         }
         let bare = span.strip_suffix("()").unwrap_or(&span);
-        if !IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len()) {
+        let is_ident = IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len());
+        if !is_ident {
             self.add_snippet(span);
         }
     }
