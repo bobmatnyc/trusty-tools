@@ -19,7 +19,7 @@ use std::process::Command;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use trusty_common::url_userinfo::{scp_userinfo_end, strip_url_secret, userinfo_end};
+use trusty_common::url_userinfo::{ends_url, strip_url_secret, userinfo_end};
 
 use super::registry::ManagedRegistry;
 
@@ -66,8 +66,10 @@ pub struct ManagedMarker {
 /// #9227: an entry `tm register` stored before #9124 can still embed a token
 /// in its URL. The clone, the marker and `prepare_session` get [`clone_url`]'s
 /// stripped form, so no new clone records the token; a URL whose secret cannot
-/// be stripped is refused before anything is cloned. `registry.json` itself is
-/// not rewritten, and a clone made before this fix keeps its `.git/config`.
+/// be stripped is refused before anything is cloned or refreshed, so an
+/// existing clone is blocked too until the alias is re-registered.
+/// `registry.json` itself is not rewritten, and a clone made before this fix
+/// keeps its `.git/config`.
 ///
 /// Test: `load_alias_strips_a_stored_token_before_clone_and_marker`,
 /// `load_alias_refuses_a_url_whose_token_cannot_be_stripped`,
@@ -140,44 +142,101 @@ fn load_alias_with_git_env(
 /// writes the URL it is given into `.git/config`. `strip_url_secret` returns a
 /// URL it cannot parse unchanged, so its output is checked again.
 /// What: applies [`strip_url_secret`], then refuses the result when the
-/// over-reading [`userinfo_end`] or [`scp_userinfo_end`] still finds userinfo
-/// that is on an `http(s)` scheme or holds a `:password`. Over-reading fails
-/// closed: `https://host:8080/@scope/pkg` is refused too. The error names the
-/// URL only through `redact_url`.
+/// over-reading [`authority_userinfo_end`] or the scp-style boundary still
+/// finds userinfo that is on an `http(s)` scheme, holds a `:password`, or
+/// holds a quote or whitespace. Over-reading fails closed:
+/// `https://host:8080/@scope/pkg` is refused too. The error names only the
+/// alias, because `redact_url` misses a password that holds a quote.
 /// Test: `clone_url_strips_or_refuses`,
+/// `clone_url_refusal_never_echoes_a_quoted_password`,
 /// `load_alias_refuses_a_url_whose_token_cannot_be_stripped`.
 fn clone_url(alias: &str, stored: &str) -> anyhow::Result<String> {
     let url = strip_url_secret(stored);
     if may_carry_secret(&url) {
         anyhow::bail!(
-            "refusing to load '{alias}': its registered URL '{}' may carry a \
+            "refusing to load '{alias}': its registered URL may carry a \
              credential that cannot be stripped; re-register it with \
-             `tm register --force <url-without-credentials> {alias}`",
-            crate::core::remote_url_redact::redact_url(stored)
+             `tm register --force <url-without-credentials> {alias}`"
         );
     }
     Ok(url.into_owned())
 }
 
-/// Whether `url` still has userinfo on `http(s)`, or a `:password` on any
-/// scheme, as the over-reading boundary finds it.
+/// Whether `url` still has userinfo on `http(s)`, or userinfo holding a `:`,
+/// a quote or whitespace on any scheme, as the over-reading boundary finds it.
 fn may_carry_secret(url: &str) -> bool {
-    let (userinfo, http) = match url.find("://") {
+    let (userinfo, http) = match url.find("://").filter(|&at| is_git_scheme(&url[..at])) {
         Some(at) => {
             let tail = &url[at + 3..];
-            let Some(cut) = userinfo_end(tail) else {
+            let cut = authority_userinfo_end(tail);
+            debug_assert!(userinfo_end(tail) <= cut, "stored cut ends early");
+            let Some(cut) = cut else {
                 return false;
             };
+            // #9227: a quote or space here is where `userinfo_end` stops early.
+            if tail[..cut].contains(ends_url) {
+                return true;
+            }
             let scheme = url[..at].rsplit('+').next().unwrap_or_default();
             let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
             (&tail[..cut], http)
         }
-        None => match scp_userinfo_end(url) {
-            Some(at) => (&url[..at], false),
-            None => return false,
-        },
+        // #9227: git reads `u:T@h:o/r://x` as scp-style; so does this arm.
+        None => {
+            let head = &url[..url.find('/').unwrap_or(url.len())];
+            match head.rfind('@').filter(|&at| head[at..].contains(':')) {
+                Some(at) => (&url[..at], false),
+                None => return false,
+            }
+        }
     };
     http || userinfo.contains(':')
+}
+
+/// [`userinfo_end`] for a stored URL, which is not free text (#9227).
+///
+/// What: the authority runs to the first `/`, `?` or `#` only, so a quote or
+/// whitespace cannot end it; its last `@` ends the userinfo. With no `@` but a
+/// `:`, the search runs to the end of the URL, as `userinfo_end`'s over-read
+/// does. Never ends before `userinfo_end`'s cut.
+/// Test: `clone_url_strips_or_refuses`.
+fn authority_userinfo_end(tail: &str) -> Option<usize> {
+    let authority = &tail[..tail.find(['/', '?', '#']).unwrap_or(tail.len())];
+    if let Some(at) = authority.rfind('@') {
+        return Some(at);
+    }
+    let colon = authority.find(':')?;
+    tail[colon..].rfind('@').map(|i| colon + i)
+}
+
+/// Whether git reads `scheme` as a URL scheme: an alphanumeric, then
+/// alphanumerics, `+`, `-` or `.` (git's `is_urlschemechar`).
+fn is_git_scheme(scheme: &str) -> bool {
+    scheme.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// What an error may print of a URL [`may_carry_secret`] admitted:
+/// `scheme://host[:port]`, an scp-style URL's host, or `a local path`.
+///
+/// Why (#9227): `redact_url` reads its input as free text, so a quote hides a
+/// query token from it; no path, query or userinfo is printed here.
+/// Test: `clone_origin_prints_scheme_and_host_only`.
+fn clone_origin(url: &str) -> String {
+    debug_assert!(!may_carry_secret(url), "clone_origin of a refused URL");
+    if let Some(at) = url.find("://").filter(|&at| is_git_scheme(&url[..at])) {
+        let tail = &url[at + 3..];
+        let authority = &tail[..tail.find(['/', '?', '#']).unwrap_or(tail.len())];
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        return format!("{}://{host}", &url[..at]);
+    }
+    let head = &url[..url.find('/').unwrap_or(url.len())];
+    match head.rsplit('@').next().unwrap_or_default().split_once(':') {
+        Some((host, _)) => host.to_owned(),
+        None => "a local path".to_owned(),
+    }
 }
 
 /// Clone the repository into `<project_dir>/repo/`.
@@ -201,11 +260,8 @@ fn clone_repo(url: &str, project_dir: &Path, git_env: &[(&str, &OsStr)]) -> anyh
         .status()
         .context("failed to spawn git clone")?;
     if !status.success() {
-        // #9124: a remote URL may embed `user:token@`.
-        anyhow::bail!(
-            "git clone failed for '{}'",
-            crate::core::remote_url_redact::redact_url(url)
-        );
+        // #9124, #9227: print the scheme and host only.
+        anyhow::bail!("git clone failed for '{}'", clone_origin(url));
     }
     Ok(())
 }
@@ -519,7 +575,7 @@ mod tests {
     /// #9227: a stripped URL loads; one with an unstrippable secret is refused.
     #[test]
     fn clone_url_strips_or_refuses() {
-        for (row, (stored, want)) in [
+        let wrong = [
             ("https://u:T@github.com/o/r", Some("https://github.com/o/r")),
             ("git@github.com:o/r.git", Some("git@github.com:o/r.git")),
             ("ssh://git@h:2222/o/r", Some("ssh://git@h:2222/o/r")),
@@ -529,12 +585,52 @@ mod tests {
             ("https://u:1234/T@host/o/r", None),
             // Fail closed: the `@` after a port cannot be told from a password.
             ("https://host:8080/@scope/pkg", None),
+            // A quote or space must not end a stored URL's authority.
+            ("https://u:pa'ss@host/o/r", None),
+            ("https://u:pa ss@host/o/r", None),
+            ("https://u:pa\"ss@host/o/r", None),
+            ("https://u:pa`ss@host/o/r", None),
+            ("https://us'er:T@host/o/r", None),
+            ("https://u:pa'ss/x@host/o/r", None),
+            ("ssh://git@h'x:pw@host/r", None),
+            ("ssh://gi t@host/r", None),
+            // Not a URL to git: an invalid scheme makes it scp-style `u:T@h:…`.
+            ("u:T@h:o/r://x", None),
         ]
         .into_iter()
         .enumerate()
-        {
-            let got = clone_url("a", stored).ok();
-            assert!(got.as_deref() == want, "row {row} gave the wrong verdict");
+        .filter(|(_, (stored, want))| clone_url("a", stored).ok().as_deref() != *want)
+        .map(|(row, _)| row)
+        .collect::<Vec<_>>();
+        assert!(wrong.is_empty(), "rows {wrong:?} gave the wrong verdict");
+    }
+
+    /// #9227: a clone-failure error prints no path, query or userinfo.
+    #[test]
+    fn clone_origin_prints_scheme_and_host_only() {
+        for (url, want) in [
+            ("https://h:8443/o/r?token=a'SECRET", "https://h:8443"),
+            ("ssh://git@h:22/o/r", "ssh://h:22"),
+            ("git@github.com:o/r.git", "github.com"),
+            ("/srv/dir@x/repo", "a local path"),
+        ] {
+            assert_eq!(clone_origin(url), want, "{url:?}");
+        }
+    }
+
+    /// #9227: the refusal names the alias, never any part of the userinfo.
+    #[test]
+    fn clone_url_refusal_never_echoes_a_quoted_password() {
+        let Err(err) = clone_url("q9227", "https://u:pa'ss@host/o/r") else {
+            panic!("a quoted password was admitted");
+        };
+        let text = format!("{err:#} {err:?}");
+        assert!(
+            text.contains("q9227"),
+            "the refusal does not name the alias"
+        );
+        for part in ["pa'ss", "'ss", "u:pa", "ss@"] {
+            assert!(!text.contains(part), "the refusal echoes {part:?}");
         }
     }
 
