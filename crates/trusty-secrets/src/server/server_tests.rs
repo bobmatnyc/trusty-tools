@@ -25,7 +25,7 @@ use crate::store::{MemoryBackend, NamesIndex, SecretBackend, mask_secret};
 
 const VALUE: &str = "sk-fake-server-0123456789abcdef";
 const SENTINEL: &str = "SENTINEL-c0ffee-9065";
-const SENTINEL_NUMBER: u64 = 4_242_424_242_9065;
+const SENTINEL_NUMBER: u64 = 42_424_242_429_065;
 
 struct Fixture {
     tmp: TempDir,
