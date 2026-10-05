@@ -31,10 +31,13 @@ async fn index_file_replaces_a_files_prior_chunks() {
 
     idx.index_file(PATH, NEW).await.expect("second write");
     let new_ids = idx.chunk_ids_for_file(PATH).await;
-    assert!(!new_ids.is_empty(), "the new content must land");
+    assert!(
+        new_ids.iter().any(|id| id.contains("walrus_pelican_new")),
+        "the new content must land: {new_ids:?}"
+    );
     assert!(
         old_ids.iter().all(|id| !new_ids.contains(id)),
-        "precondition: the rename changes every chunk id ({old_ids:?} vs {new_ids:?})"
+        "the rewrite left the old chunk ids on the path ({old_ids:?} vs {new_ids:?})"
     );
 
     // Corpus: only the new content is held for the path.
