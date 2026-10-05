@@ -170,6 +170,22 @@ impl LineIndex {
         !needle.is_empty() && self.refs.contains(needle)
     }
 
+    /// Whether the reference `id` (already normalized) occurs in the fetched
+    /// context as a whole token: an alphanumeric edge of `id` must meet a
+    /// non-alphanumeric character or the end of the text (#9188 D), so `#918`
+    /// does not match `#9188` and `PROJ-1` does not match `PROJ-12`.
+    /// Test: `a_gh_citation_id_matches_only_as_a_whole_token`.
+    pub(super) fn refs_contain_id(&self, id: &str) -> bool {
+        let edge = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        let (first, last) = (id.chars().next(), id.chars().next_back());
+        !id.is_empty()
+            && self.refs.match_indices(id).any(|(pos, _)| {
+                let before = self.refs[..pos].chars().next_back();
+                let after = self.refs[pos + id.len()..].chars().next();
+                !(edge(first) && edge(before)) && !(edge(last) && edge(after))
+            })
+    }
+
     pub(super) fn lines_for(&self, path: &str) -> Result<(&[Run], Option<u32>), GateError> {
         let key = resolve_path_key(&self.files, path)
             .ok_or_else(|| GateError::FileNotInDiff(path.to_string()))?;

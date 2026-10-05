@@ -36,7 +36,7 @@ use tracing::{info, warn};
 use crate::models::{
     CitationCorrection, Finding, ReviewResult, UNKNOWN_FILE_PLACEHOLDER, Verdict, WithheldFinding,
 };
-use crate::pipeline::citation_check::CODE_CITATION_RE;
+use crate::pipeline::citation_check::{CODE_CITATION_RE, MIN_SPAN_LEN};
 use crate::pipeline::diff_analyzer::models::FilteredDiff;
 
 #[path = "citation_gate_anchors.rs"]
@@ -104,6 +104,10 @@ const SNIPPET_ABSENT: &str = "a snippet the finding quotes is not in the cited f
 /// Reason for a context citation the fetched context does not hold (#9188 D).
 const REF_UNRESOLVED: &str =
     "a [jira:]/[gh:]/[confluence:] citation does not resolve in the fetched context";
+
+/// Reason for a context citation whose excerpt is too short to verify (#9188 D).
+const REF_EXCERPT_SHORT: &str =
+    "a [jira:]/[gh:]/[confluence:] excerpt is too short to verify the citation";
 
 /// Check one `path` + optional inclusive line `span` against `anchors`.
 ///
@@ -288,13 +292,26 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
             }
         }
     }
-    // #9188 D: a context citation resolves in the fetched context, or drops.
-    for needles in ref_citations(f) {
-        let unresolved = needles.iter().find(|n| !index.refs_contain(n));
-        if needles.is_empty() || unresolved.is_some() {
+    // #9188 D: a context citation resolves in the fetched context, or drops:
+    // its reference as a whole token, and every excerpt, each long enough to
+    // be specific (the code-quote floor, `MIN_SPAN_LEN`).
+    for cite in ref_citations(f) {
+        if !index.refs_contain_id(&cite.id) {
             return Ok(Outcome::Drop(DropCause {
                 reason: REF_UNRESOLVED,
-                fragment: unresolved.cloned(),
+                fragment: Some(cite.id).filter(|id| !id.is_empty()),
+            }));
+        }
+        if let Some(short) = cite.excerpts.iter().find(|e| e.len() < MIN_SPAN_LEN) {
+            return Ok(Outcome::Drop(DropCause {
+                reason: REF_EXCERPT_SHORT,
+                fragment: Some(short.clone()),
+            }));
+        }
+        if let Some(missing) = cite.excerpts.iter().find(|e| !index.refs_contain(e)) {
+            return Ok(Outcome::Drop(DropCause {
+                reason: REF_UNRESOLVED,
+                fragment: Some(missing.clone()),
             }));
         }
     }

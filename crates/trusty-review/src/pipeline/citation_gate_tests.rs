@@ -293,6 +293,52 @@ fn a_gh_citation_absent_from_the_context_is_withheld() {
     assert_eq!(result.withheld_findings.len(), 1);
 }
 
+/// Gate one [`SUM_LINE`] finding with `body` over the billing file, with
+/// `refs` as the fetched context; returns how many findings survive.
+fn kept_with_refs(body: &str, refs: &str) -> usize {
+    let mut findings = vec![finding("src/billing.rs", Some(SUM_LINE), body)];
+    enforce_line_citations(&mut findings, &billing_index().with_refs(refs));
+    findings.len()
+}
+
+/// #9188 D hole (a): with an excerpt present, the reference id is checked
+/// too, so a bogus issue number does not resolve through a real excerpt.
+#[test]
+fn a_gh_citation_with_a_bogus_id_and_a_real_excerpt_is_withheld() {
+    let refs = "Follows #42: overflow fixed by checked_add in billing.";
+    let body = format!("{SUM_QUOTE} [gh: #99999 — \"overflow fixed by checked_add\"]");
+    assert_eq!(kept_with_refs(&body, refs), 0);
+    let body = format!("{SUM_QUOTE} [gh: #42 — \"overflow fixed by checked_add\"]");
+    assert_eq!(kept_with_refs(&body, refs), 1, "control");
+}
+
+/// #9188 D hole (b): an id matches only as a whole token, never inside a
+/// longer reference.
+#[test]
+fn a_gh_citation_id_matches_only_as_a_whole_token() {
+    let refs = "Tracked in #9188 and PROJ-12; mirrored at bobmatnyc/trusty-tools#77.";
+    for (cite, kept) in [
+        ("[gh: #918]", 0),
+        ("[jira: PROJ-1]", 0),
+        ("[jira: ROJ-12]", 0),
+        ("[gh: #9188]", 1),
+        ("[jira: PROJ-12]", 1),
+        ("[gh: #77]", 1),
+    ] {
+        let body = format!("{SUM_QUOTE} {cite}");
+        assert_eq!(kept_with_refs(&body, refs), kept, "{cite}");
+    }
+}
+
+/// #9188 D: a context excerpt shorter than the code-quote floor
+/// (`MIN_SPAN_LEN`) matches almost any context, so it verifies nothing.
+#[test]
+fn a_short_context_excerpt_does_not_verify_a_citation() {
+    let refs = "Follows #42: overflow fixed by checked_add in billing.";
+    let body = format!("{SUM_QUOTE} [gh: #42 — \"overflow\"]");
+    assert_eq!(kept_with_refs(&body, refs), 0);
+}
+
 #[test]
 fn a_removed_line_counts_only_at_its_new_side_position() {
     let index = LineIndex::from_filtered(&diff(vec![file(

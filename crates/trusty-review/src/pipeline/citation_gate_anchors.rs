@@ -253,27 +253,36 @@ static REF_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
 static REF_SEPARATOR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+[—–-]+\s+").expect("ref-separator regex is a valid literal"));
 
+/// One `[jira:]`/`[gh:]`/`[confluence:]` citation (#9188 D).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct RefCitation {
+    /// The reference before the separator (`#123`, `PROJ-12`), normalized;
+    /// empty when the citation names none.
+    pub(super) id: String,
+    /// Its double-quoted excerpts, normalized.
+    pub(super) excerpts: Vec<String>,
+}
+
 /// What each context citation in a finding must resolve to (#9188 D).
 ///
-/// What: one entry per citation, in text order: its double-quoted excerpts,
-/// or, when it quotes none, its bare reference (`#123`, `TICKET-123`). Every
-/// string is normalized; an empty entry names nothing checkable.
-/// Test: `a_gh_citation_absent_from_the_context_is_withheld`.
-pub(super) fn ref_citations(f: &Finding) -> Vec<Vec<String>> {
+/// What: one entry per citation, in text order: its reference, read up to
+/// the first ` — ` separator or opening quote, and its double-quoted
+/// excerpts. The gate requires both the reference and every excerpt.
+/// Test: `a_gh_citation_absent_from_the_context_is_withheld`,
+/// `a_gh_citation_with_a_bogus_id_and_a_real_excerpt_is_withheld`.
+pub(super) fn ref_citations(f: &Finding) -> Vec<RefCitation> {
     let mut out = Vec::new();
     for text in [f.description.as_str(), f.consequence.as_str()] {
         for caps in REF_CITATION_RE.captures_iter(text) {
             let body = caps.get(1).map_or("", |m| m.as_str());
-            let mut needles = Vec::new();
-            collect_delimited(body, '"', &mut needles);
-            if needles.is_empty() {
-                let token = REF_SEPARATOR_RE.split(body).next().unwrap_or("");
-                let token = normalize(token.trim_matches(|c: char| c == '"' || c.is_whitespace()));
-                if !token.is_empty() {
-                    needles.push(token);
-                }
-            }
-            out.push(needles);
+            let mut excerpts = Vec::new();
+            collect_delimited(body, '"', &mut excerpts);
+            let head = body.split('"').next().unwrap_or("");
+            let token = REF_SEPARATOR_RE.split(head).next().unwrap_or("");
+            out.push(RefCitation {
+                id: normalize(token.trim_matches(|c: char| c == '"' || c.is_whitespace())),
+                excerpts,
+            });
         }
     }
     out
