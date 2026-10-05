@@ -132,7 +132,7 @@ OUT1="$(run_launcher --bin "$STUB" --dir "$DIR1" --dry-run 2>&1)"
 STATUS1=$?
 set -e
 GOT1="$(printf '%s\n' "$OUT1" | sed -n 's/^  \([A-Z_]*\)=.*/\1/p' | tr '\n' ' ')"
-WANT1="HOME PATH TRUSTY_DATA_DIR TRUSTY_REDB_CACHE_MB TRUSTY_EMBED_INFLIGHT RUST_LOG "
+WANT1="HOME PATH TRUSTY_DATA_DIR TRUSTY_SANDBOX TRUSTY_REDB_CACHE_MB TRUSTY_EMBED_INFLIGHT RUST_LOG "
 if [ "$STATUS1" -ne 0 ]; then
   fail allowlist "dry run exit $STATUS1"
 elif [ "$GOT1" != "$WANT1" ]; then
@@ -157,7 +157,7 @@ if [ "$STATUS2" -ne 0 ] || [ ! -f "$DIR2/home/stub-env-names" ]; then
   printf '%s\n' "$OUT2" | sed 's/^/    /'
 else
   GOT2="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR2/home/stub-env-names" | tr '\n' ' ')"
-  WANT2="HOME PATH RUST_LOG TRUSTY_DATA_DIR TRUSTY_EMBED_INFLIGHT TRUSTY_REDB_CACHE_MB "
+  WANT2="HOME PATH RUST_LOG TRUSTY_DATA_DIR TRUSTY_EMBED_INFLIGHT TRUSTY_REDB_CACHE_MB TRUSTY_SANDBOX "
   if [ "$GOT2" != "$WANT2" ]; then
     fail allowlist "stub saw [$GOT2], want [$WANT2]"
   elif leaks "$OUT2"; then
