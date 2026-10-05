@@ -80,6 +80,62 @@ pub enum MemoryVerbError {
         /// What the transport or the daemon reported.
         detail: String,
     },
+    /// `--expires-at` is not an RFC 3339 timestamp; nothing was sent (#9142).
+    #[error(
+        "--expires-at must be an RFC 3339 timestamp (e.g. 2026-10-06T12:00:00Z), got {value:?}: {detail}"
+    )]
+    ExpiresAt {
+        /// The value the caller passed.
+        value: String,
+        /// What the parser reported.
+        detail: String,
+    },
+}
+
+/// The ADR-0028 Tier C slot a write occupies (#9142).
+///
+/// Why: a status or resume fact that a later write cannot retire outranks the
+/// current one in recall for weeks. Writing it under a stable `fact_key`
+/// (`ws:<session>/resume`, `pr:<n>/state`) makes the next write to that key
+/// supersede it.
+/// What: `fact_key` and `expires_at`, sent verbatim under trusty-memory's own
+/// `memory_remember`/`memory_note` schema keys of the same names
+/// (`crates/trusty-memory/src/tools/definitions.rs`). Both `None` sends neither
+/// key, so the request is the pre-#9142 one. The daemon owns the slot grammar
+/// and the 24-hour default expiry; this side only rejects an unparseable
+/// timestamp before anything is sent.
+/// Test: `a_fact_key_and_expiry_reach_the_request`,
+/// `a_write_without_slot_flags_sends_the_old_request`,
+/// `a_bad_expires_at_is_refused_before_any_rpc`.
+#[derive(Debug, Clone, Default)]
+pub struct FactSlot {
+    /// `--fact-key`: the slot, `<domain>:<id>/<aspect>`.
+    pub fact_key: Option<String>,
+    /// `--expires-at`: RFC 3339 timestamp after which the fact stops being current.
+    pub expires_at: Option<String>,
+}
+
+impl FactSlot {
+    /// Reject an `expires_at` that is not RFC 3339.
+    ///
+    /// Why: trusty-memory refuses an unparseable timestamp only after the call,
+    /// and a caller typo must fail loudly here rather than reach the daemon.
+    /// Test: `a_bad_expires_at_is_refused_before_any_rpc`.
+    fn validate(&self) -> Result<(), MemoryVerbError> {
+        if let Some(raw) = self.expires_at.as_deref() {
+            chrono::DateTime::parse_from_rfc3339(raw).map_err(|e| MemoryVerbError::ExpiresAt {
+                value: raw.to_string(),
+                detail: e.to_string(),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Insert the slot keys the caller supplied.
+    fn insert_into(&self, args: &mut Map<String, Value>) {
+        insert_opt(args, "fact_key", self.fact_key.clone().map(Value::from));
+        insert_opt(args, "expires_at", self.expires_at.clone().map(Value::from));
+    }
 }
 
 /// One `tm memory` verb and the arguments it carries.
@@ -114,6 +170,8 @@ pub enum MemoryVerb {
         room: Option<String>,
         /// Tags to store alongside it.
         tags: Vec<String>,
+        /// #9142: the Tier C slot, if any.
+        slot: FactSlot,
     },
     /// Store a short curated fact (`DrawerType::UserFact`, importance 1.0).
     Note {
@@ -123,6 +181,8 @@ pub enum MemoryVerb {
         room: Option<String>,
         /// Tags to store alongside it.
         tags: Vec<String>,
+        /// #9142: the Tier C slot, if any.
+        slot: FactSlot,
     },
 }
 
@@ -143,6 +203,14 @@ impl MemoryVerb {
     /// the caller which palace to name next.
     pub fn is_write(&self) -> bool {
         !matches!(self, Self::Recall { .. })
+    }
+
+    /// The Tier C slot a write carries; `None` for a recall.
+    fn slot(&self) -> Option<&FactSlot> {
+        match self {
+            Self::Recall { .. } => None,
+            Self::Remember { slot, .. } | Self::Note { slot, .. } => Some(slot),
+        }
     }
 
     /// The tool arguments, without `palace`.
@@ -167,19 +235,27 @@ impl MemoryVerb {
                 insert_opt(&mut args, "wing", wing.clone().map(Value::from));
                 insert_opt(&mut args, "min_score", min_score.map(Value::from));
             }
-            Self::Remember { text, room, tags } => {
+            Self::Remember {
+                text,
+                room,
+                tags,
+                slot,
+            } => {
                 args.insert("text".into(), json!(text));
                 insert_opt(&mut args, "room", room.clone().map(Value::from));
                 insert_tags(&mut args, tags);
+                slot.insert_into(&mut args); // #9142
             }
             Self::Note {
                 content,
                 room,
                 tags,
+                slot,
             } => {
                 args.insert("content".into(), json!(content));
                 insert_opt(&mut args, "room", room.clone().map(Value::from));
                 insert_tags(&mut args, tags);
+                slot.insert_into(&mut args); // #9142
             }
         }
         args
@@ -282,6 +358,8 @@ pub fn resolve_verb_palace(
 ///
 /// # Errors
 ///
+/// [`MemoryVerbError::ExpiresAt`] when `--expires-at` is not RFC 3339 — raised
+/// before the palace or socket is resolved, so nothing is sent (#9142);
 /// [`MemoryVerbError::Palace`] when a write has no palace,
 /// [`MemoryVerbError::Socket`] when the socket path cannot be derived, and
 /// [`MemoryVerbError::Call`] — naming the socket — when nothing answers it or
@@ -290,11 +368,15 @@ pub fn resolve_verb_palace(
 /// rather than hanging.
 ///
 /// Test: `recall_sends_the_resolved_palace`, `a_write_sends_a_write_method_over_the_socket`,
-/// `a_dead_socket_is_an_error_naming_it`.
+/// `a_dead_socket_is_an_error_naming_it`, `a_bad_expires_at_is_refused_before_any_rpc`.
 pub async fn run_verb(
     verb: &MemoryVerb,
     opts: &MemoryVerbOptions,
 ) -> Result<MemoryVerbOutcome, MemoryVerbError> {
+    // #9142: an unparseable expiry fails here, before any RPC.
+    if let Some(slot) = verb.slot() {
+        slot.validate()?;
+    }
     let palace = resolve_verb_palace(verb, opts)?;
     let socket = match opts.socket.clone() {
         Some(socket) => socket,

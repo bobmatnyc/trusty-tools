@@ -72,6 +72,14 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// #9142: ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        /// `pr:<n>/state`). The next write to the same key supersedes this one.
+        #[arg(long)]
+        fact_key: Option<String>,
+        /// #9142: RFC 3339 time the fact stops being current. With `--fact-key`
+        /// and omitted, trusty-memory applies a 24-hour default.
+        #[arg(long)]
+        expires_at: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -96,6 +104,14 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        /// #9142: ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        /// `pr:<n>/state`). The next write to the same key supersedes this one.
+        #[arg(long)]
+        fact_key: Option<String>,
+        /// #9142: RFC 3339 time the fact stops being current. With `--fact-key`
+        /// and omitted, trusty-memory applies a 24-hour default.
+        #[arg(long)]
+        expires_at: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
