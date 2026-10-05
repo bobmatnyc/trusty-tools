@@ -1268,6 +1268,9 @@ impl DaemonState {
     /// `super::tests`.
     pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
         let mgr = self.session_manager().await;
+        // #9238: a session renamed in tmux keeps its pane; follow it first,
+        // so the name check below never stops it.
+        mgr.follow_tmux_renames().await;
         let records = mgr.list().await;
         // #6194: an empty live set is a lost tmux SERVER, not N killed sessions.
         let cause = if live.is_empty() {
