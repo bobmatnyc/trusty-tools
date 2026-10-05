@@ -67,8 +67,11 @@ pub fn userinfo_end(tail: &str) -> Option<usize> {
 /// optional numeric port — `host`, `host:8080`, `[::1]`, `[::1]:8080` — so an
 /// `@` in the path or query is never read as the userinfo's end. Any other
 /// authority, such as `user:pa` cut short by a raw `/` in the password, gets
-/// [`userinfo_end`]'s answer.
-/// Test: `strip_url_secret_table`.
+/// [`userinfo_end`]'s answer. A digits-only or empty port followed by a raw
+/// `/`, `?` or `#` is read as `host:port` per RFC 3986, so a password holding
+/// an unencoded delimiter is not recognised and must be percent-encoded.
+/// Test: `strip_url_secret_table` (the `https://u:1234/x@host/` and
+/// `https://u:/x@host/` rows).
 fn stored_userinfo_end(tail: &str) -> Option<usize> {
     let end = tail.find(ends_authority).unwrap_or(tail.len());
     let authority = &tail[..end];
@@ -234,6 +237,10 @@ mod tests {
             ("https://host:8443/p?who=a@b", "https://host:8443/p?who=a@b"),
             ("https://[::1]:8080/o/r@x", "https://[::1]:8080/o/r@x"),
             ("https://[::1]/o/r?who=a@b", "https://[::1]/o/r?who=a@b"),
+            // RFC 3986: raw '/' is not valid userinfo; reads as host:port
+            ("https://u:1234/x@host/", "https://u:1234/x@host/"),
+            // RFC 3986: raw '/' is not valid userinfo; reads as host:port
+            ("https://u:/x@host/", "https://u:/x@host/"),
             ("", ""),
         ] {
             assert_eq!(strip_url_secret(url), want, "{url:?}");
