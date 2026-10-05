@@ -107,15 +107,20 @@ async fn index_file_replaces_a_files_prior_chunks() {
 
 /// Fails against origin/main through behaviour: blank content left the old
 /// chunk in place, because the commit only ran when chunks were produced.
+/// A JSON path, because blank JSON parses into zero chunks; a blank `.rs`
+/// file still gets the AST chunker's whole-file fallback chunk.
 #[tokio::test]
 async fn index_file_with_blank_content_drops_the_files_old_chunks() {
+    const JSON: &str = "config/zoo.json";
     let idx = make_indexer();
-    idx.index_file(PATH, OLD).await.expect("first write");
-    assert!(!idx.chunk_ids_for_file(PATH).await.is_empty());
+    idx.index_file(JSON, "{\"zebra_quokka_old\": 1}\n")
+        .await
+        .expect("first write");
+    assert!(!idx.chunk_ids_for_file(JSON).await.is_empty());
 
-    idx.index_file(PATH, "\n").await.expect("blank write");
+    idx.index_file(JSON, "\n").await.expect("blank write");
     assert!(
-        idx.chunk_ids_for_file(PATH).await.is_empty(),
+        idx.chunk_ids_for_file(JSON).await.is_empty(),
         "a file rewritten blank keeps no chunks"
     );
 }
