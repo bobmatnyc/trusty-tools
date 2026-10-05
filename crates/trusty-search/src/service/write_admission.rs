@@ -145,13 +145,17 @@ async fn purge_pushed(
     path: &str,
 ) -> anyhow::Result<usize> {
     use crate::service::reindex::hash::forget_file_hash;
+    // #8959: the graph-refresh ticker rebuilds; no whole-corpus pass per write.
+    // The guard stamps the durable stale mark before the purge removes
+    // anything, and sets the in-memory mark when it drops.
+    let _graph_write = if indexer.chunk_ids_for_file(path).await.is_empty() {
+        None
+    } else {
+        Some(indexer.begin_graph_write().await?)
+    };
     let removed = indexer.purge_file(&handle.id, path).await?;
     if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
         forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
-    }
-    if removed > 0 {
-        // #8959: the graph-refresh ticker rebuilds; no whole-corpus pass per write.
-        indexer.mark_symbol_graph_stale();
     }
     Ok(removed)
 }

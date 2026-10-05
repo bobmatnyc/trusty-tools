@@ -609,24 +609,29 @@ impl CodeIndexer {
     /// Why: `index-file` re-indexes a file in place, but file deletion (and
     /// `FileWatcher` rename/remove events) needs to drop all of a file's
     /// chunks at once. Returns the number of chunks removed.
-    /// What: removes the chunks and the entity list, then marks the symbol
-    /// graph stale when anything left (#9179) rather than rebuilding it.
-    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
+    /// What: when anything will leave, stamps the durable stale mark first
+    /// (#8959), removes the chunks and the entity list, then marks the graph
+    /// stale in memory (#9179) rather than rebuilding it.
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+    /// `a_deferred_rebuild_survives_a_reopen`.
     pub async fn remove_file(&self, file_path: &str) -> Result<usize> {
         // `chunk_ids_for_file` rehydrates an idle-evicted map first, so the
         // redb delete below still sees the ids it is keyed by.
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
+        // #9179: was a whole-corpus `rebuild_symbol_graph` per call (60 s and
+        // ~1.2 GB on a 315K-chunk index); the ticker now rebuilds once per
+        // burst. #8959: the guard's durable mark precedes every removal.
+        let _graph_write = if removed > 0 || self.entities.read().await.contains_key(file_path) {
+            Some(self.begin_graph_write().await?)
+        } else {
+            None
+        };
         self.remove_chunks_from_stores(&ids).await;
-        let had_entities = self.entities.write().await.remove(file_path).is_some();
+        self.entities.write().await.remove(file_path);
         // Issue #28: evict the file's entity list from the durable redb store
         // too, or a restart would resurrect it into the symbol graph.
         self.delete_entities_from_redb(file_path).await;
-        // #9179: was a whole-corpus `rebuild_symbol_graph` per call (60 s and
-        // ~1.2 GB on a 315K-chunk index); the ticker now rebuilds once per burst.
-        if removed > 0 || had_entities {
-            self.mark_symbol_graph_stale();
-        }
         Ok(removed)
     }
 
@@ -660,26 +665,13 @@ impl CodeIndexer {
     ///
     /// Why: `remove_chunk` / `remove_file` evict chunks from every in-memory
     /// structure; the redb store must follow or a restart resurrects them.
-    /// What: runs `CorpusStore::delete_chunks` on a blocking worker. Errors are
-    /// logged, never propagated.
+    /// What: [`Self::try_delete_chunks_from_redb`] with the error logged, never
+    /// propagated. `index_file`'s superseded-id removal uses the fallible
+    /// form instead (#8959).
     /// Test: covered by `tests::test_corpus_store_roundtrip` deletion paths.
     async fn delete_chunks_from_redb(&self, ids: &[String]) {
-        let Some(corpus) = self.corpus.clone() else {
-            return;
-        };
-        if ids.is_empty() {
-            return;
-        }
-        let ids = ids.to_vec();
-        let index_id = self.index_id.clone();
-        match tokio::task::spawn_blocking(move || corpus.delete_chunks(&ids)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("index '{index_id}': redb chunk delete failed ({e})")
-            }
-            Err(e) => {
-                tracing::warn!("index '{index_id}': redb chunk delete task panicked ({e})")
-            }
+        if let Err(e) = self.try_delete_chunks_from_redb(ids).await {
+            tracing::warn!("index '{}': {e:#}", self.index_id);
         }
     }
 
@@ -712,7 +704,7 @@ impl CodeIndexer {
     /// remaining in-memory structure for the whole batch.
     /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`,
     /// `a_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
-    async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
+    pub(super) async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
         // #8761: map before vector. A deferred-embed commit that upserts one of
         // these ids either finds it gone on its post-upsert check or upserted
         // before the `store.remove` below.

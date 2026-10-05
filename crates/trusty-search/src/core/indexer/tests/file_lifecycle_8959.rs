@@ -260,3 +260,252 @@ async fn continuous_writes_still_rebuild_at_the_max_wait_cap() {
     );
     assert_eq!(idx.symbol_graph_full_rebuilds(), base + 2);
 }
+
+// ---------------------------------------------------------------------------
+// Code-critic round on #8959 / #9179: durability, fail-closed delete, and the
+// same-path write race.
+// ---------------------------------------------------------------------------
+
+/// A corpus-backed indexer under a test-unique id, so the id-keyed fault seam
+/// never reaches a concurrently running test.
+fn corpus_indexer(id: &str, redb: &std::path::Path) -> crate::core::indexer::CodeIndexer {
+    let mut idx = crate::core::indexer::CodeIndexer::new(id, "/tmp/lifecycle-8959");
+    let store = crate::core::corpus::CorpusStore::open(redb).expect("open corpus store");
+    idx.set_corpus_store(std::sync::Arc::new(store));
+    idx
+}
+
+/// Arms the failed-redb-delete seam for one index id; disarms on drop.
+struct FailChunkDelete(String);
+
+impl FailChunkDelete {
+    fn arm(id: &str) -> Self {
+        crate::core::indexer::TEST_FAIL_CHUNK_DELETE
+            .lock()
+            .expect("seam lock")
+            .push(id.to_string());
+        Self(id.to_string())
+    }
+}
+
+impl Drop for FailChunkDelete {
+    fn drop(&mut self) {
+        if let Ok(mut f) = crate::core::indexer::TEST_FAIL_CHUNK_DELETE.lock() {
+            f.retain(|id| *id != self.0);
+        }
+    }
+}
+
+/// #8959 finding 1: a write's deferred rebuild survives a restart inside the
+/// debounce window. Fails at 35ccee8252: the stale mark lived only in memory,
+/// so the reopened index booted the old persisted graph as current and never
+/// rebuilt it.
+#[tokio::test]
+async fn a_deferred_rebuild_survives_a_reopen() {
+    const ID: &str = "lifecycle-8959-reopen";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let redb = dir.path().join("index.redb");
+    {
+        let idx = corpus_indexer(ID, &redb);
+        idx.index_files_batch(&[
+            ("src/zoo.rs".to_string(), OLD.to_string()),
+            (
+                "src/keep.rs".to_string(),
+                "fn heron_keep() {}\n".to_string(),
+            ),
+        ])
+        .await
+        .expect("seed batch persists the graph");
+        idx.index_file("src/zoo.rs", NEW).await.expect("rewrite");
+        assert!(idx.symbol_graph_is_stale(), "the rebuild is deferred");
+        // Dropped with the rebuild still pending: no flush, no ticker.
+    }
+
+    let idx = corpus_indexer(ID, &redb);
+    idx.load_chunks_from_redb().await.expect("warm boot");
+    assert!(
+        idx.symbol_graph_is_stale(),
+        "the reopened index must schedule the rebuild the old process owed"
+    );
+    assert!(
+        idx.refresh_symbol_graph_if_due(std::time::Duration::ZERO, std::time::Duration::MAX)
+            .await,
+        "the scheduled rebuild runs on the first due tick"
+    );
+    let graph = idx.snapshot_symbol_graph().await;
+    assert_eq!(
+        graph.resolve_symbol("zebra_quokka_old"),
+        SymbolMatch::NotFound,
+        "the rewritten-away symbol is gone after the scheduled rebuild"
+    );
+    assert_ne!(
+        graph.resolve_symbol("walrus_pelican_new"),
+        SymbolMatch::NotFound
+    );
+    drop(idx);
+
+    // The rebuild persisted its graph and cleared the durable mark.
+    let idx = corpus_indexer(ID, &redb);
+    idx.load_chunks_from_redb().await.expect("second warm boot");
+    assert!(!idx.symbol_graph_is_stale(), "a rebuilt graph boots fresh");
+}
+
+/// #8959 finding 2, error arm: a failed redb delete of the superseded ids
+/// fails the write before the commit and leaves the old chunks in place, and
+/// a retry then succeeds. Fails at 35ccee8252: the failure was only logged,
+/// so the write answered `Ok`.
+#[tokio::test]
+async fn a_failed_superseded_delete_fails_the_write_and_stays_retryable() {
+    const ID: &str = "lifecycle-8959-delete-err";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let idx = corpus_indexer(ID, &dir.path().join("index.redb"));
+    idx.index_file(PATH, OLD).await.expect("first write");
+    let mut old_ids = idx.chunk_ids_for_file(PATH).await;
+    old_ids.sort();
+    assert!(!old_ids.is_empty());
+
+    let fault = FailChunkDelete::arm(ID);
+    let err = idx.index_file(PATH, NEW).await;
+    assert!(
+        err.is_err(),
+        "a failed redb delete must fail the write, not answer Ok"
+    );
+    let mut held = idx.chunk_ids_for_file(PATH).await;
+    held.sort();
+    assert_eq!(
+        held, old_ids,
+        "a failed write commits nothing and keeps the old ids for a retry"
+    );
+
+    drop(fault);
+    idx.index_file(PATH, NEW).await.expect("retry");
+    let ids = idx.chunk_ids_for_file(PATH).await;
+    assert!(ids.iter().all(|id| !old_ids.contains(id)), "{ids:?}");
+    assert!(
+        ids.iter().any(|id| id.contains("walrus_pelican_new")),
+        "{ids:?}"
+    );
+}
+
+/// #8959 finding 2, durable arm: a rewrite retried after a failed delete
+/// leaves no old id in redb, so a reopen loads only the new chunks. Fails at
+/// 35ccee8252: the failed write dropped the old ids from memory only, the
+/// retry found nothing to remove, and the reopen loaded them back.
+#[tokio::test]
+async fn a_rewrite_after_a_failed_delete_leaves_no_old_ids_after_reopen() {
+    const ID: &str = "lifecycle-8959-delete-reopen";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let redb = dir.path().join("index.redb");
+    let old_ids = {
+        let idx = corpus_indexer(ID, &redb);
+        idx.index_file(PATH, OLD).await.expect("first write");
+        let old_ids = idx.chunk_ids_for_file(PATH).await;
+        {
+            let _fault = FailChunkDelete::arm(ID);
+            let _ = idx.index_file(PATH, NEW).await;
+        }
+        idx.index_file(PATH, NEW).await.expect("retry");
+        old_ids
+    };
+
+    let idx = corpus_indexer(ID, &redb);
+    idx.load_chunks_from_redb().await.expect("warm boot");
+    let ids = idx.chunk_ids_for_file(PATH).await;
+    assert!(
+        ids.iter().all(|id| !old_ids.contains(id)),
+        "old ids came back from redb after a reopen: {ids:?}"
+    );
+    assert!(
+        ids.iter().any(|id| id.contains("walrus_pelican_new")),
+        "{ids:?}"
+    );
+}
+
+/// An embedder that blocks every batch on a gate the test opens one permit at
+/// a time, and counts the batches that reached it.
+struct GatedEmbedder {
+    gate: tokio::sync::Semaphore,
+    started: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::core::embed::Embedder for GatedEmbedder {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        unimplemented!("index_file embeds through embed_batch")
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.gate.acquire().await?.forget();
+        Ok(texts.iter().map(|_| vec![0.5f32; 8]).collect())
+    }
+    fn dimension(&self) -> usize {
+        8
+    }
+}
+
+/// Wait, bounded, until `n` embed batches have reached the gate.
+async fn wait_started(embedder: &GatedEmbedder, n: usize) {
+    for _ in 0..500 {
+        if embedder.started.load(std::sync::atomic::Ordering::SeqCst) >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("embed batch {n} never reached the gate");
+}
+
+/// #8959 finding 4: two writes to one path that overlap at the embed await
+/// end with only the later version's ids. Fails at 35ccee8252: both writes
+/// snapshotted the first version's ids, so the earlier writer's chunks were
+/// never superseded and both versions stayed indexed.
+#[tokio::test]
+async fn concurrent_writes_to_one_path_keep_only_the_last_version() {
+    use std::sync::Arc;
+
+    const V_A: &str = "fn osprey_first() {\n    let marker = 3;\n}\n";
+    const V_B: &str = "fn ibis_second() {\n    let marker = 4;\n}\n";
+    let embedder = Arc::new(GatedEmbedder {
+        gate: tokio::sync::Semaphore::new(0),
+        started: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let dyn_embedder: Arc<dyn crate::core::embed::Embedder> = embedder.clone();
+    let store: Arc<dyn crate::core::store::VectorStore> =
+        Arc::new(crate::core::store::UsearchStore::new(8).expect("usearch new"));
+    let idx = Arc::new(
+        crate::core::indexer::CodeIndexer::new("lifecycle-8959-race", "/tmp/lifecycle-8959")
+            .with_components(dyn_embedder, store),
+    );
+
+    embedder.gate.add_permits(1);
+    idx.index_file(PATH, OLD).await.expect("seed write");
+
+    let a = tokio::spawn({
+        let idx = Arc::clone(&idx);
+        async move { idx.index_file(PATH, V_A).await }
+    });
+    wait_started(&embedder, 2).await; // A holds its snapshot, parked at the embed.
+    let b = tokio::spawn({
+        let idx = Arc::clone(&idx);
+        async move { idx.index_file(PATH, V_B).await }
+    });
+    // B runs until it blocks: on the path lock, or (racy code) at the embed
+    // with a snapshot taken before A committed.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    embedder.gate.add_permits(1);
+    a.await.expect("join A").expect("write A");
+    embedder.gate.add_permits(1);
+    b.await.expect("join B").expect("write B");
+
+    let ids = idx.chunk_ids_for_file(PATH).await;
+    assert!(
+        ids.iter().any(|id| id.contains("ibis_second")),
+        "the last write landed: {ids:?}"
+    );
+    assert!(
+        ids.iter()
+            .all(|id| !id.contains("osprey_first") && !id.contains("zebra_quokka_old")),
+        "an earlier version's chunks stayed on the path: {ids:?}"
+    );
+}

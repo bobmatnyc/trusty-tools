@@ -13,7 +13,13 @@
 //! writes (graph export, call chain) call [`CodeIndexer::fresh_symbol_graph`];
 //! the search KG lane and the status endpoints read the serving graph and
 //! never wait on a rebuild.
+//! The stale mark is also durable (#8959): a write stamps a generation into
+//! the corpus `_meta` table before it mutates anything, a rebuild removes the
+//! stamp once its graph is saved, and a boot that finds the stamp schedules a
+//! rebuild. A restart, park or crash inside the debounce window therefore
+//! never serves the old persisted graph as current.
 //! Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+//! `a_deferred_rebuild_survives_a_reopen`,
 //! `rebuild_due_waits_for_quiet_or_max_wait` and
 //! `continuous_writes_still_rebuild_at_the_max_wait_cap` in
 //! `indexer::tests::file_lifecycle_8959`; the ticker by
@@ -56,6 +62,36 @@ pub(crate) struct GraphRefresh {
     flush_lock: tokio::sync::Mutex<()>,
     /// Full `rebuild_symbol_graph` passes run on this index.
     full_rebuilds: AtomicU64,
+    /// #8959: generation of the latest single-file write; seeded from the
+    /// durable mark at boot so a rebuild can clear a mark written before it.
+    write_gen: AtomicU64,
+    /// #8959: single-file writes between their durable mark and their
+    /// in-memory mark. A rebuild that starts while one is in flight may miss
+    /// it, so it leaves the durable mark in place.
+    inflight: AtomicU64,
+}
+
+/// What a full rebuild may clear once its graph is persisted (#8959).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RebuildTicket {
+    /// The write generation the rebuild's snapshot covers.
+    through: u64,
+    /// `false` when a write was in flight as the rebuild began.
+    clear_ok: bool,
+}
+
+/// An in-flight single-file write (#8959). Dropping it marks the serving
+/// graph stale in memory, on success and on every error path alike, because
+/// a failed write may still have mutated part of the corpus.
+pub(crate) struct GraphWriteGuard<'a> {
+    refresh: &'a GraphRefresh,
+}
+
+impl Drop for GraphWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.refresh.mark_stale();
+        self.refresh.inflight.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for GraphRefresh {
@@ -66,6 +102,8 @@ impl Default for GraphRefresh {
             last_write_ms: AtomicU64::new(0),
             flush_lock: tokio::sync::Mutex::new(()),
             full_rebuilds: AtomicU64::new(0),
+            write_gen: AtomicU64::new(0),
+            inflight: AtomicU64::new(0),
         }
     }
 }
@@ -90,9 +128,16 @@ impl GraphRefresh {
 
     /// Called at the start of every full rebuild: the rebuild's snapshot is
     /// taken after this, so it covers every write marked before it.
-    pub(crate) fn begin_full_rebuild(&self) {
+    ///
+    /// #8959: the generation is read BEFORE the in-flight count. A write that
+    /// enters after the count was read takes a generation after `through`, so
+    /// its durable mark outlives this rebuild's clear.
+    pub(crate) fn begin_full_rebuild(&self) -> RebuildTicket {
+        let through = self.write_gen.load(Ordering::SeqCst);
+        let clear_ok = self.inflight.load(Ordering::SeqCst) == 0;
         self.stale_since_ms.store(0, Ordering::Release);
         self.full_rebuilds.fetch_add(1, Ordering::Relaxed);
+        RebuildTicket { through, clear_ok }
     }
 
     fn is_stale(&self) -> bool {
@@ -141,6 +186,80 @@ impl CodeIndexer {
     /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
     pub(crate) fn mark_symbol_graph_stale(&self) {
         self.graph_refresh.mark_stale();
+    }
+
+    /// Start a single-file write that leaves the symbol graph stale (#8959).
+    ///
+    /// Why: the in-memory stale mark dies with the process, and the persisted
+    /// graph then boots as current while missing every deferred write.
+    /// What: counts the write in flight, takes a write generation, and stamps
+    /// it into the corpus as the durable dirty mark BEFORE the caller mutates
+    /// anything, so a crash at any later point still finds the mark. The
+    /// returned guard sets the in-memory mark when dropped. A failed stamp is
+    /// an `Err` and the caller must not mutate; no corpus wired is a no-op
+    /// stamp.
+    /// Test: `a_deferred_rebuild_survives_a_reopen`.
+    pub(crate) async fn begin_graph_write(&self) -> anyhow::Result<GraphWriteGuard<'_>> {
+        let refresh = &self.graph_refresh;
+        refresh.inflight.fetch_add(1, Ordering::SeqCst);
+        let guard = GraphWriteGuard { refresh };
+        let generation = refresh.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(corpus) = self.corpus.clone() {
+            tokio::task::spawn_blocking(move || corpus.mark_kg_graph_dirty(generation))
+                .await
+                .map_err(|e| anyhow::anyhow!("symbol-graph dirty mark task failed: {e}"))?
+                .map_err(|e| e.context("persist the symbol-graph dirty mark (#8959)"))?;
+        }
+        Ok(guard)
+    }
+
+    /// Remove the durable dirty mark after a rebuild persisted its graph,
+    /// unless a write the rebuild may have missed stamped it (#8959).
+    /// A failure is logged: the mark stays, which costs one extra rebuild.
+    pub(super) async fn clear_graph_dirty_mark(&self, ticket: RebuildTicket) {
+        let Some(corpus) = self.corpus.clone() else {
+            return;
+        };
+        if !ticket.clear_ok {
+            return;
+        }
+        let through = ticket.through;
+        match tokio::task::spawn_blocking(move || corpus.clear_kg_graph_dirty_through(through))
+            .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(
+                index_id = %self.index_id,
+                "kg: could not clear the dirty mark ({e:#}); the next boot rebuilds (#8959)"
+            ),
+            Err(e) => tracing::warn!(
+                index_id = %self.index_id,
+                "kg: dirty-mark clear task failed ({e}); the next boot rebuilds (#8959)"
+            ),
+        }
+    }
+
+    /// Boot half of the durable mark (#8959): seed the write generation from
+    /// the stored mark so the scheduled rebuild can clear it, and report
+    /// whether the persisted graph must be treated as stale. An unreadable
+    /// mark counts as stale.
+    pub(super) fn adopt_graph_dirty_mark(&self, stored: &anyhow::Result<Option<u64>>) -> bool {
+        match stored {
+            Ok(None) => false,
+            Ok(Some(generation)) => {
+                self.graph_refresh
+                    .write_gen
+                    .fetch_max(*generation, Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    index_id = %self.index_id,
+                    "kg: dirty mark unreadable ({e:#}); scheduling a rebuild (#8959)"
+                );
+                true
+            }
+        }
     }
 
     /// Whether writes have landed since the serving graph was built.
