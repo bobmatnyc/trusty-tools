@@ -868,11 +868,13 @@ impl PalaceHandle {
     /// about. Nothing else has been mutated at that point, so the drawer is
     /// left wholly intact rather than half-deleted.
     pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
-        let removed = self.forget_removing(id).await?;
+        let (removed, l1_saved) = self.forget_removing(id).await?;
         // #9172: a user forget of a recorded dedup survivor is journalled.
         if let Some(drawer) = &removed {
             crate::memory_core::maintenance_log::record_survivor_forget(self, drawer);
         }
+        // #8729: journalled before the L1 error surfaces; the row is gone.
+        l1_saved?;
         Ok(if removed.is_some() {
             ForgetOutcome::Deleted
         } else {
@@ -884,9 +886,13 @@ impl PalaceHandle {
     ///
     /// Why (#9172): maintenance deletions journal their own record, and the
     /// removed row is what a journal record copies.
-    /// What: the forget body; `None` when no such drawer existed.
-    /// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`.
-    pub(crate) async fn forget_removing(&self, id: Uuid) -> Result<Option<Drawer>> {
+    /// What: the forget body; the row is `None` when no such drawer existed.
+    /// `Err` means nothing was deleted. #8729: the L1 snapshot save runs after
+    /// the redb delete, so its result comes back beside the row instead of
+    /// replacing it, and the caller can journal the copy before surfacing it.
+    /// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
+    /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
+    pub(crate) async fn forget_removing(&self, id: Uuid) -> Result<(Option<Drawer>, Result<()>)> {
         // Idle-to-disk: a forget is a genuine user access. Suppressed during
         // dream cycles (which forget merged/pruned drawers) via `touch`.
         self.touch();
@@ -958,12 +964,15 @@ impl PalaceHandle {
             drawers.retain(|d| d.id != id);
         }
 
-        if let Some(data_dir) = self.data_dir.as_ref() {
-            let snap = self.drawers.read().clone();
-            L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")?;
-        }
+        let l1_saved = match self.data_dir.as_ref() {
+            Some(data_dir) => {
+                let snap = self.drawers.read().clone();
+                L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")
+            }
+            None => Ok(()),
+        };
 
-        Ok(removed)
+        Ok((removed, l1_saved))
     }
 
     /// List drawers with optional room/tag filters, most important first.

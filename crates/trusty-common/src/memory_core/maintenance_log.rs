@@ -40,7 +40,8 @@ use uuid::Uuid;
 pub const MAINTENANCE_LOG_FILENAME: &str = "maintenance_deletions.jsonl";
 /// File name the journal is rotated to once it passes [`ROTATE_AT_BYTES`].
 pub const MAINTENANCE_LOG_ROTATED_FILENAME: &str = "maintenance_deletions.1.jsonl";
-/// Journal size that triggers one rotation. About 16k records at ~250 bytes.
+/// Journal size that triggers one rotation. #8729: a record carries the
+/// removed drawer's content, so how many records fit depends on drawer size.
 pub(crate) const ROTATE_AT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Which maintenance path deleted a drawer.
@@ -252,14 +253,19 @@ fn append_line(path: &Path, line: &str) -> Result<()> {
 /// Why/What: see the module doc. Appends to the journal when the palace has a
 /// data dir, and logs the removal at `warn` (#8729). When the append fails, the
 /// whole record goes to the log at `error`; with no data dir it goes at `warn`.
-/// Every arm reaches the daemon's log at its default filter.
+/// #8729: those two lines carry the record as its journal JSON, `drawer` copy
+/// included, so the copy survives a failed append. Every arm reaches the
+/// daemon's log at its default filter.
 /// Test: `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
 /// `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutcome {
+    // #8729: the stand-in record keeps the drawer copy, not only the ids.
+    let as_json =
+        || serde_json::to_string(rec).unwrap_or_else(|e| format!("<record not serializable: {e}>"));
     let Some(dir) = data_dir else {
         tracing::warn!(
             palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
-            survivor_id = ?rec.survivor_id, score = ?rec.score,
+            survivor_id = ?rec.survivor_id, score = ?rec.score, record = %as_json(),
             "#8732: maintenance deletion (palace has no data dir; this line is the record)"
         );
         return RecordOutcome::LoggedOnly;
@@ -278,7 +284,7 @@ pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutco
         Err(e) => {
             tracing::error!(
                 palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
-                survivor_id = ?rec.survivor_id, score = ?rec.score,
+                survivor_id = ?rec.survivor_id, score = ?rec.score, record = %as_json(),
                 "#8732: maintenance deletion journal write failed; the drawer is \
                  deleted and this line is the record: {e:#}"
             );
@@ -340,11 +346,13 @@ impl PalaceHandle {
     /// Why: a maintenance deletion must leave a trail (#8732); a user's
     /// `forget` must not be reclassified as one, so the two stay separate
     /// entry points.
-    /// What: runs [`PalaceHandle::forget`]. Only a real delete
+    /// What: runs `PalaceHandle::forget_removing`. Only a real delete
     /// ([`ForgetOutcome::Deleted`]) is recorded; `survivor` carries the
-    /// surviving drawer id and, for dedup, the score.
+    /// surviving drawer id and, for dedup, the score. #8729: a failed L1
+    /// snapshot save after the delete is returned only after the record.
     /// Test: `maintenance_log_tests::dream_dedup_records_the_removed_and_surviving_drawer`,
-    /// `maintenance_log_tests::user_forget_writes_no_maintenance_record`.
+    /// `maintenance_log_tests::user_forget_writes_no_maintenance_record`,
+    /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
     pub async fn forget_for_maintenance(
         &self,
         id: Uuid,
@@ -353,7 +361,9 @@ impl PalaceHandle {
     ) -> Result<ForgetOutcome> {
         // #9172: `forget_removing`, not `forget`, so a maintenance deletion of
         // a survivor writes this one record rather than two.
-        let Some(removed) = self.forget_removing(id).await? else {
+        let (removed, l1_saved) = self.forget_removing(id).await?;
+        let Some(removed) = removed else {
+            l1_saved?;
             return Ok(ForgetOutcome::NotFound);
         };
         // #8729: the record carries the removed drawer, not only its id.
@@ -362,6 +372,8 @@ impl PalaceHandle {
             rec = rec.with_survivor(survivor_id, score);
         }
         record(self.data_dir.as_deref(), &rec);
+        // #8729: the drawer is gone from redb; its copy is recorded first.
+        l1_saved?;
         Ok(ForgetOutcome::Deleted)
     }
 }

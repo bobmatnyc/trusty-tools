@@ -257,12 +257,51 @@ async fn a_failed_record_write_logs_the_record_and_still_deletes() {
         &survivor.to_string(),
         "dream_dedup",
         "0.97",
+        // #8729: the stand-in record carries the drawer copy too.
+        "a drawer dedup will remove",
     ] {
         assert!(text.contains(needle), "missing {needle} in {text}");
     }
 
     let rec = MaintenanceDeletion::new(&handle.id, doomed_id, DeletionReason::DreamPrune);
     assert_eq!(record(Some(&data_dir), &rec), RecordOutcome::LoggedOnly);
+}
+
+/// Why (#8729): the L1 snapshot save runs after the redb delete. Its error
+/// used to replace the removed row, so the drawer was gone and nothing was
+/// journalled.
+/// What: a directory where the L1 snapshot file belongs makes the save fail;
+/// the maintenance forget must still report the error, delete the drawer and
+/// journal its copy.
+#[tokio::test]
+async fn a_failed_snapshot_save_after_the_delete_still_journals_the_copy() {
+    let (_dir, data_dir, handle) = open_palace("broken-snapshot");
+    let content = "a drawer whose snapshot save will fail";
+    let id = handle
+        .remember(content.into(), RoomType::General, vec![], 0.5)
+        .await
+        .unwrap();
+    let snapshot = data_dir.join("l1_cache.json");
+    let _ = std::fs::remove_file(&snapshot);
+    std::fs::create_dir_all(snapshot.join("occupied")).unwrap();
+
+    let err = handle
+        .forget_for_maintenance(id, DeletionReason::DreamPrune, None)
+        .await
+        .expect_err("the failed snapshot save is reported");
+    assert!(format!("{err:#}").contains("L1 snapshot"), "{err:#}");
+
+    assert!(handle.drawers.read().iter().all(|d| d.id != id));
+    let journal = read_journal(&data_dir).unwrap();
+    let rec = journal
+        .records
+        .iter()
+        .find(|r| r.drawer_id == id)
+        .unwrap_or_else(|| panic!("no record for the removed drawer: {:?}", journal.records));
+    assert_eq!(
+        rec.drawer.as_ref().map(|d| d.content.as_str()),
+        Some(content)
+    );
 }
 
 /// Why: the journal is bounded by one rotation, and a reader must see both
