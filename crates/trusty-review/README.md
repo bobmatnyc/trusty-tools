@@ -262,7 +262,7 @@ the post-verification verdict.
 When posted to GitHub, the review comment includes a footer:
 
 ```
-Grade: B+ · 🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-4-6`) · tokens ↑1234 ↓567 · est. $0.01
+Grade: B+ · 🤖 Reviewed by Trusty-Review (`us.anthropic.claude-sonnet-5-5`) · tokens ↑1234 ↓567 · est. $0.01
 ```
 
 (↑ = input tokens, ↓ = output tokens). The footer appears identically in dry-run output.
@@ -293,7 +293,7 @@ Returns a health status object:
   "status": "ok",
   "version": "0.3.2",
   "dry_run": true,
-  "reviewer_model": "us.anthropic.claude-sonnet-4-6",
+  "reviewer_model": "us.anthropic.claude-sonnet-5-5",
   "inference": "ok",
   "deps": {
     "trusty_search": {
@@ -423,7 +423,9 @@ already enables). See the [Cargo features](#cargo-features) note below.
 
 ## Reviewer model
 
-The default reviewer model is `us.anthropic.claude-sonnet-4-6` on AWS Bedrock.
+The default reviewer model is `us.anthropic.claude-sonnet-5-5` (Claude Sonnet 5.5) on AWS Bedrock.
+The verifier and summarizer default to Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`).
 
 Override via:
 

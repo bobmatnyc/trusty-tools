@@ -572,21 +572,32 @@ fn role_models_openrouter_cost_roles_resolve_classification_tier() {
     assert_eq!(roles.summarizer.model, "anthropic/claude-haiku-4.5");
 }
 
-/// Why: Bedrock's Opus 4.8 inference-profile id could not be verified and is
-/// deliberately unmapped, so the tier lookup declines and trusty-review must
-/// keep the Sonnet 4.6 profile it defaulted to before #5971. A regression here
+/// Why: Bedrock's `Analysis` tier is unmapped, so the tier lookup declines and
+/// the reviewer falls through to the pinned Sonnet profile — Sonnet 5.5 since
+/// Bob's 2026-10-05 ruling, which changed the reviewer only. A regression here
 /// would ship an id that fails at call time, not compile time.
-/// What: default provider (Bedrock) with no model named at any layer.
+/// What: default provider (Bedrock) with no model named at any layer (no CLI,
+/// manifest, env or config file); asserts the literal ids all three roles
+/// resolve to.
 #[test]
 fn role_models_bedrock_reviewer_keeps_sonnet_default() {
-    let roles = RoleModels::from_env(&RoleEnv::default());
+    let roles = RoleModels::resolve_with_manifest(None, None, &RoleEnv::default(), None);
     assert_eq!(roles.reviewer.provider, Provider::Bedrock);
     assert_eq!(
         roles.reviewer.model,
         crate::llm::models::DEFAULT_REVIEWER_MODEL,
         "Bedrock's opus tiers are unmapped by ruling — the pinned Sonnet default must survive"
     );
-    assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-4-6");
+    assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-5-5");
+    for (role, model) in [
+        ("verifier", &roles.verifier.model),
+        ("summarizer", &roles.summarizer.model),
+    ] {
+        assert_eq!(
+            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "{role} default stays Haiku 4.5"
+        );
+    }
 }
 
 /// Why: the two cost-driven roles must keep the value they had — only the
