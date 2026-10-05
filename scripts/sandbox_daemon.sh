@@ -142,6 +142,8 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
   if [ -e "$SANDBOX/home" ] || [ -L "$SANDBOX/home" ]; then
     anc="$(resolve "$SANDBOX/home")"
     [ -n "$anc" ] || die "cannot resolve <dir>/home: $SANDBOX/home"
+    # `$(resolve)` strips a trailing newline, so the result can name another dir.
+    [ "$anc" -ef "$SANDBOX/home" ] || die "cannot resolve <dir>/home: $SANDBOX/home"
   else
     anc="$SANDBOX"
   fi

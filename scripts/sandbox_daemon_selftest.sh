@@ -34,6 +34,8 @@
 #     cwd-home-env-local  <dir>/home/.env.local itself refuses
 #     cwd-newline   a `.env.local` in an ancestor whose name ends in a newline
 #                   refuses
+#     cwd-newline-symlinked-home  <dir>/home linked to a newline-ended dir
+#                   holding a `.env.local` refuses; the stub never runs
 #     unresolvable-home  an existing <dir>/home that cannot be entered (mode
 #                   000) refuses before the walk falls back to <dir>
 #     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
@@ -270,6 +272,18 @@ mkdir -p "$NL_DIR/sb"
 touch "$NL_DIR/.env.local"
 expect_refusal cwd-newline 1 ".env.local would be loaded" \
   --bin "$STUB" --dir "$NL_DIR/sb" --dry-run
+
+# <dir>/home links to a newline-ended dir; `$(pwd -P)` drops the newline, so
+# the walk would start in another dir. Not a dry run: the stub must not start.
+NL_HOME="$TMP_ROOT/nlhome
+"
+DIR9="$TMP_ROOT/case9"
+mkdir -p "$NL_HOME" "$DIR9"
+touch "$NL_HOME/.env.local"
+ln -s "$NL_HOME" "$DIR9/home"
+expect_refusal cwd-newline-symlinked-home 1 "cannot resolve <dir>/home" \
+  --bin "$STUB" --dir "$DIR9"
+[ ! -e "$NL_HOME/stub-pwd" ] || fail cwd-newline-symlinked-home "the stub ran"
 
 if [ "$(id -u)" -eq 0 ]; then
   echo "skip unresolvable-home, cd-fails: root enters a mode-000 directory"
