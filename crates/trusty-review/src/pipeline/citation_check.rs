@@ -76,8 +76,9 @@ pub const CITATION_REASON: &str = "#4042 citation";
 /// Why: used to strip ALL bracket citations before the generic backtick/quote
 /// scan, so a citation's `path:line` locator token is never mistaken for a
 /// free-text code quote. `jira:`/`gh:`/`confluence:` citations ground
-/// in context (ticket/PR/wiki-page text) this module has no index for and
-/// are left untouched (fail-open); `code:` citations are extracted and verified
+/// in context (ticket/PR/wiki-page text) this module has no index for; the
+/// line gate resolves them against the fetched context or withholds the
+/// finding (#9188 D). `code:` citations are extracted and verified
 /// SEPARATELY, before this strip runs (see [`CODE_CITATION_RE`]).
 /// This list and the prompt's grammar section
 /// (`assets/prompts/system_prompt_stock.md`) must stay in step — a form the
@@ -678,9 +679,14 @@ pub(crate) fn normalize_path(p: &str) -> String {
 /// Resolve a cited path to the key of `map` that names it (#8905: shared with
 /// `citation_gate`, so both gates resolve a path by one rule).
 ///
-/// What: exact normalized-path match first, else a basename match when exactly
-/// one key shares that basename; `None` when the basename is ambiguous.
-/// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`.
+/// What: exact normalized-path match first, else the one key the cited path
+/// ends at a `/` boundary — so a bare basename or a shortened path resolves
+/// when exactly one key matches it; `None` when none or several match.
+/// #9188 H: never a basename match for a path with directories. `src/old/a.rs`
+/// is not `src/new/a.rs`; resolving one to the other grounded a citation in
+/// the wrong file (an old path after a rename, for one).
+/// Test: `lookup_matches_by_basename`, `lookup_ambiguous_basename_is_none`,
+/// `an_old_path_never_resolves_to_a_different_file_by_basename`.
 pub(crate) fn resolve_path_key<'a, V>(
     map: &'a HashMap<String, V>,
     cited_path: &str,
@@ -689,22 +695,20 @@ pub(crate) fn resolve_path_key<'a, V>(
     if let Some((k, _)) = map.get_key_value(&key) {
         return Some(k.as_str());
     }
-    let base = basename(&key);
+    if key.is_empty() {
+        return None;
+    }
+    let suffix = format!("/{key}");
     let mut hit: Option<&'a str> = None;
     for path in map.keys() {
-        if basename(path) == base {
+        if path.ends_with(&suffix) {
             if hit.is_some() {
-                return None; // ambiguous basename — refuse to guess
+                return None; // ambiguous — refuse to guess
             }
             hit = Some(path.as_str());
         }
     }
     hit
-}
-
-/// Return the final path component of `p`.
-pub(crate) fn basename(p: &str) -> &str {
-    p.rsplit('/').next().unwrap_or(p)
 }
 
 #[cfg(test)]

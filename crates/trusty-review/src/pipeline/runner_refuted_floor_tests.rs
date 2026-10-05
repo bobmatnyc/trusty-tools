@@ -130,9 +130,10 @@ async fn review_file(file: &str, added_line: &str, findings_json: &str) -> Revie
 #[tokio::test]
 async fn run_review_refuted_sole_blocker_does_not_clamp_to_block() {
     // The confirmed 0.9-confidence Medium is real evidence and floors every case
-    // to REQUEST_CHANGES on its own; the grade follows it down from F to D-.
+    // to REQUEST_CHANGES on its own. #9188 J: the withheld blocker no longer
+    // shapes the grade either; it is recomputed from the survivors alone (D).
     for category in ["test-coverage", "style", "method-conformance"] {
-        let (want_verdict, want_grade) = (Verdict::RequestChanges, "D-");
+        let (want_verdict, want_grade) = (Verdict::RequestChanges, "D");
         let confirmed = finding_json("gap", "the new branch has no test", "high", category);
         let medium = finding_json(
             "naming",

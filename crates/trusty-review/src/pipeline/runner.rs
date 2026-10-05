@@ -49,8 +49,9 @@ use crate::{
         runner_helpers::{ClaimGate, classify_claim}, // #8904: moved for SLOC headroom
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
-        verify_posted::gate_then_verify,
+        verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
+        withheld_contract::{refs_corpus, regrade_from_survivors}, // #9188 D, J
     },
     store::DedupStore,
 };
@@ -631,6 +632,7 @@ pub async fn run_review(
     // here — before the banner, the truncation guard, and every abort path — so
     // no consumer can ever read the wire payload as the review.
     result.review_body = crate::pipeline::body_render::render_review_body(&result.review_body);
+    let narrative = result.review_body.clone(); // #9188 C: the model's own prose
 
     // ── Degraded labelling (#590) ─────────────────────────────────────────
     // When an operator opted out of a required dependency, the review still ran
@@ -688,7 +690,7 @@ pub async fn run_review(
     // and a self-reported verdict left resting on findings this run removed —
     // all four run before grading. See `ground_parsed_findings`. #4044: each
     // drop is recorded in the review record, never posted.
-    let withheld = ground_parsed_findings(&mut parsed, &filtered);
+    let (withheld, wiped_model_verdict) = ground_parsed_findings(&mut parsed, &filtered);
     result.withheld_findings.extend(withheld);
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
@@ -740,18 +742,25 @@ pub async fn run_review(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    let verifier = deps.verifier.as_ref();
-    let rationale = author_rationale.as_deref();
-    gate_then_verify(
-        config,
-        verifier,
-        &mut result,
-        &filtered,
-        &diff,
-        false,
-        rationale,
-    )
-    .await;
+    let caller = &input.caller_context;
+    let refs = refs_corpus(&[
+        Some(&pr_meta.title),
+        Some(&pr_meta.body),
+        Some(&external_context),
+        caller.pr_description.as_deref(),
+        caller.pr_discussion.as_deref(),
+        caller.referenced_code.as_deref(),
+    ]);
+    let inputs = GateInputs {
+        filtered: &filtered,
+        diff: &diff,
+        per_file: false,
+        author_rationale: author_rationale.as_deref(),
+        refs: &refs,
+        narrative: &narrative,
+        wiped_model_verdict,
+    };
+    gate_then_verify(config, deps.verifier.as_ref(), &mut result, &inputs).await;
 
     // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
     // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
@@ -786,6 +795,7 @@ pub async fn run_review(
     result.grade = original_llm_grade.map(|g| {
         crate::pipeline::letter_grade::reconcile_grade_with_verdict(g, &result.verdict).to_string()
     });
+    regrade_from_survivors(&mut result); // #9188 J: withheld findings never shape it
 
     // 7d-post: flag a suspiciously "shallow" clean review (#1877) — a
     // zero-findings APPROVE on a large diff whose output-token spend looks too

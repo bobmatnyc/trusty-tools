@@ -1,0 +1,16 @@
+diff --git a/src/billing.rs b/src/billing.rs
+--- a/src/billing.rs
++++ b/src/billing.rs
+@@ -0,0 +1,12 @@
++fn total(amounts: &[u64], input: u64) -> u64 {
++    let value_2 = step_2(input);
++    let value_3 = step_3(input);
++    let value_4 = step_4(input);
++    let value_5 = step_5(input);
++    let value_6 = step_6(input);
++    let value_7 = step_7(input);
++    let value_8 = step_8(input);
++    let value_9 = step_9(input);
++    let total = amounts.iter().sum::<u64>();
++    total + value_2
++}

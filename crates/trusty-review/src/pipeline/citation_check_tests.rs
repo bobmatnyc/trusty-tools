@@ -132,6 +132,20 @@ fn lookup_ambiguous_basename_is_none() {
     );
 }
 
+/// #9188 H: an old path (say, before a rename) never resolves to a different
+/// file that only shares its basename; a whole-segment suffix still resolves.
+#[test]
+fn an_old_path_never_resolves_to_a_different_file_by_basename() {
+    let renamed = kept_file("src/new/billing.rs", vec![hunk("@@ -1 +1 @@", &["+a"])]);
+    let idx = DiffContentIndex::from_filtered(&filtered(vec![renamed]));
+    assert!(
+        idx.lookup("src/old/billing.rs").is_none(),
+        "a different directory is a different file"
+    );
+    assert!(idx.lookup("new/billing.rs").is_some());
+    assert!(idx.lookup("billing.rs").is_some());
+}
+
 #[test]
 fn contains_is_whitespace_tolerant() {
     assert_eq!(normalize("a   b\n\tc"), "a b c");

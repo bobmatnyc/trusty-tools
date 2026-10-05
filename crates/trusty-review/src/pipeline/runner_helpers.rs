@@ -295,6 +295,7 @@ pub(super) async fn abort_dry(
     // it too rather than leaving a stale zero.
     result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
         + result.withheld_unverified_count; // #8904
+    crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
     if claim == DedupClaim::Held
@@ -413,14 +414,18 @@ pub(super) async fn finalize_run(
 ///
 /// Returns every finding passes 1–3 dropped, each with its reason, for the
 /// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
-/// on #8905, 2026-09-30).
+/// on #8905, 2026-09-30), and the model's verdict when pass 4 relaxed it, for
+/// `settle_no_survivors` (#9188, option A).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
 /// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
 /// `run_review_records_self_negated_findings_as_withheld`.
 pub(super) fn ground_parsed_findings(
     parsed: &mut crate::pipeline::parser::ParsedReview,
     filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
-) -> Vec<crate::models::WithheldFinding> {
+) -> (
+    Vec<crate::models::WithheldFinding>,
+    Option<crate::models::Verdict>,
+) {
     let findings_before = parsed.findings.len();
     let mut withheld = Vec::new();
     crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings, &mut withheld);
@@ -437,13 +442,13 @@ pub(super) fn ground_parsed_findings(
         &mut withheld,
     );
 
-    crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+    let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,
         &mut parsed.grade,
         findings_before,
         &parsed.findings,
     );
-    withheld
+    (withheld, wiped_model_verdict)
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

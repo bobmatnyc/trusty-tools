@@ -10,6 +10,8 @@
 //! `finding_confidence_clamping`, and `finding_source_citation_roundtrip`
 //! in this module.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 pub mod status;
@@ -676,6 +678,34 @@ pub struct ReviewResult {
     /// `run_review_withholds_an_unverifiable_finding`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub withheld_findings: Vec<WithheldFinding>,
+    /// How many findings any gate withheld: `withheld_findings.len()` (#9188).
+    ///
+    /// Why: a typed total, so a caller need not count an array to learn that
+    /// a review with no findings withheld some rather than found none.
+    /// What: synced at the same two exit points as `findings_count`. Absent
+    /// from the JSON when zero, so a review that withheld nothing serializes
+    /// as it did before #9188.
+    /// Test: `a_withheld_review_reports_typed_withheld_counts`,
+    /// `a_review_with_nothing_withheld_serializes_as_before`.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub withheld_count: usize,
+    /// `withheld_count` split by reason class (#9188), e.g. `refuted`,
+    /// `line_citation`, `citation_integrity`, `no_verifier`; see
+    /// `pipeline::withheld_contract::reason_class`. Absent when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub withheld_by_reason: BTreeMap<String, usize>,
+    /// `"no_verified_findings"` when no finding survived and at least one was
+    /// withheld (#9188 K); absent otherwise.
+    ///
+    /// Why: AQ-7t (Bob 2026-10-05) keeps an all-withheld APPROVE as APPROVE
+    /// with exit 0, so `run --json` needs its own signal that nothing was
+    /// verified; a field here reaches `run --json` and the MCP text alike.
+    /// What: set by `withheld_contract::sync_withheld_counts` at the same two
+    /// exit points as `withheld_count`.
+    /// Test: `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
+    /// `run_json_for_a_non_withheld_review_is_unchanged_by_9188`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_status: Option<String>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -845,6 +875,9 @@ impl ReviewResult {
             unverified_count: 0,
             withheld_unverified_count: 0,
             withheld_findings: Vec::new(),
+            withheld_count: 0,
+            withheld_by_reason: BTreeMap::new(),
+            verdict_status: None,
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
