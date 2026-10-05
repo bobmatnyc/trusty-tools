@@ -406,35 +406,6 @@ async fn dedup_one(
     Ok(0)
 }
 
-/// Test seam between a persisted dedup merge and the loser's forget (#9172).
-///
-/// Why: the cross-cycle interleaving that lost text happens in exactly that
-/// window, and a test can only drive it deterministically by pausing there.
-/// What: a per-palace async hook; [`dedup_one`] awaits it when one is set.
-#[cfg(test)]
-pub(super) mod merge_seam {
-    use std::collections::HashMap;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::{Arc, LazyLock, Mutex};
-
-    /// What the hook returns: the pause the merging cycle awaits.
-    pub(in crate::memory_core::dream) type Pause = Pin<Box<dyn Future<Output = ()> + Send>>;
-    /// A hook, called once per persisted merge.
-    pub(in crate::memory_core::dream) type Hook = Arc<dyn Fn() -> Pause + Send + Sync>;
-
-    /// Hooks keyed by palace id, so parallel tests on other palaces are unaffected.
-    pub(in crate::memory_core::dream) static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
-        LazyLock::new(Default::default);
-
-    pub(super) async fn after_merge_persisted(palace: &str) {
-        let hook = HOOKS.lock().expect("seam lock").get(palace).cloned();
-        if let Some(hook) = hook {
-            hook().await;
-        }
-    }
-}
-
 /// Drop drawers whose effective importance is below `prune_importance`
 /// AND that are older than 30 days. Returns the prune count.
 ///
@@ -509,4 +480,33 @@ pub(super) fn refresh_closets(handle: &Arc<PalaceHandle>) -> usize {
     let mut closets = handle.closets.write();
     *closets = new_index;
     count
+}
+
+/// Test seam between a persisted dedup merge and the loser's forget (#9172).
+///
+/// Why: the cross-cycle interleaving that lost text happens in exactly that
+/// window, and a test can only drive it deterministically by pausing there.
+/// What: a per-palace async hook; [`dedup_one`] awaits it when one is set.
+#[cfg(test)]
+pub(super) mod merge_seam {
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::{Arc, LazyLock, Mutex};
+
+    /// What the hook returns: the pause the merging cycle awaits.
+    pub(in crate::memory_core::dream) type Pause = Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// A hook, called once per persisted merge.
+    pub(in crate::memory_core::dream) type Hook = Arc<dyn Fn() -> Pause + Send + Sync>;
+
+    /// Hooks keyed by palace id, so parallel tests on other palaces are unaffected.
+    pub(in crate::memory_core::dream) static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) async fn after_merge_persisted(palace: &str) {
+        let hook = HOOKS.lock().expect("seam lock").get(palace).cloned();
+        if let Some(hook) = hook {
+            hook().await;
+        }
+    }
 }
