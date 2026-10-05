@@ -10,5 +10,5 @@ Fixed
   over the ARN's (#9200).
 - Cost for an `inference-profile` or `foundation-model` ARN is priced as the
   model id the ARN names. An `application-inference-profile` ARN does not name
-  its model, so its cost is reported as unpriced in a warning log line instead
-  of a silent $0 estimate (#9200).
+  its model, so a warning log line reports it as unpriced. The review footer
+  still shows an estimate of $0 for it (#9200).
