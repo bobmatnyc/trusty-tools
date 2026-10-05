@@ -15,9 +15,9 @@ spec_refs:
 
 **Status:** Draft
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
-**Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon hosts the `secrets.*` UDS methods, the `tm secrets` CLI group, the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
+**Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
-**Last-updated:** 2026-10-01
+**Last-updated:** 2026-10-02
 **PRD:** [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) — the WHAT and WHY of the console secrets service. This document is the HOW.
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation.
@@ -148,7 +148,7 @@ value" rule for the panel.
 
 **Console path (amended 2026-10-01, §15.6).** A developer types a value into
 the console's `/tools/secrets/` page. The value travels browser → console
-`secrets_uds` bridge → tm daemon UDS → store, in one direction. No
+`secrets_uds` bridge → trusty-secrets socket → store, in one direction. No
 `secrets.*` method returns a value to the console, and no response, error or
 log line on that path carries one. The value never passes through an agent,
 a terminal or a transcript, so T-2 holds without relying on the model to
@@ -710,7 +710,7 @@ languages."*
 The result:
 
 - Value entry moves out of the session and into a console page (§15.6).
-- The design ships as a library crate hosted by the tm daemon (§15.2).
+- The design ships as a library crate that serves its own on-demand socket; the tm daemon and the console are clients (§15.2, owner ruling 24, 2026-10-02).
 - Secrets gain an owner scope beside the project scope (§15.3).
 - Nothing resolves at startup (§15.5).
 - App code reads secrets through three language tiers (§15.8).
@@ -735,13 +735,14 @@ resolution, masking and the exec-grant logic. It has three features:
 | `store` | `SecretBackend` implementations, scope resolution, `mask_secret`, the CLI-source cache | The tm daemon and the `tm` CLI |
 | `client` | A UDS client for `secrets.resolve` inside an exec grant (§15.8). No new dependencies. | Rust app code (S9) |
 
-**Host.** The tm daemon serves the methods on its existing UDS socket. The
-family registers in
-[`build_router`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-mpm/src/daemon/socket.rs#L68),
-and the socket's peer-uid check runs on every accepted connection before a
-byte is read
-([`socket.rs` module doc](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-mpm/src/daemon/socket.rs#L14-L18)).
-There is no new daemon and no TCP listener.
+**Host (owner ruling 24, 2026-10-02).** `trusty-secrets` owns and serves its
+own on-demand socket. The tm daemon and the console are clients of that socket;
+neither hosts a `secrets.*` method. The socket spawns on the first call, holds
+no background task and exits when idle, so it is not a daemon (owner ruling 28).
+There is no new resident daemon and no TCP listener. The socket path and the
+spawn contract are pending owner decision (socket path, spawn contract).
+An earlier draft placed the methods on the tm daemon's existing UDS socket
+(`build_router`); ruling 24 supersedes that placement.
 
 **Methods.**
 
@@ -821,7 +822,7 @@ Every CLI-backed integration needs the stdin-capable CLI runner (§8.2) first.
 ### 15.6 Console bridge, page, masking and hardening (S3a, S4)
 
 trusty-console adds a `secrets_uds` bridge at `/api/secrets/*` and a page at
-`/tools/secrets/`. The bridge forwards to the tm daemon's `secrets.*` methods.
+`/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket path and spawn contract: pending owner decision (socket path, spawn contract)).
 The console never opens a store.
 
 **Masking.** A new `mask_secret` in `trusty-secrets`:
@@ -948,7 +949,7 @@ Rungs follow the [Rust Test Ladder](../../CLAUDE.md#rust-test-ladder).
 |---|---|---|---|
 | S0 | This amendment and PRD-SECRETS-01 | 1 | — |
 | S1 | `trusty-secrets` crate: `api` and `store` features, scopes, `mask_secret`, Keychain backend | 4 | S0 |
-| S2 | tm daemon `secrets.*` methods | 5 | S1 |
+| S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client (path and spawn contract: pending owner decision) | 5 | S1 |
 | S3a | Console `secrets_uds` bridge and hardening (§15.6) | 5 | S2 |
 | S3b | Tailnet gate (§15.7); closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for secrets routes | 5 | S3a |
 | S4 | `/tools/secrets/` page, including the "agents may use" toggle | 6 | S3a; tailnet access waits on S3b |
