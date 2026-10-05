@@ -27,20 +27,18 @@ static FENCED_JSON_RE: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// What: nothing dropped → `None`, verdict untouched. Otherwise returns the
 /// summary line ("N findings withheld: citation unverifiable") and sets the
-/// verdict [`settle_withheld`] gives: no survivors → `Unknown`; a BLOCK /
-/// REQUEST_CHANGES review → what the survivors alone derive, or `Unknown`
-/// when that would approve; an approving review with survivors keeps its
-/// verdict. #9188 A: an APPROVE or APPROVE* review that lost every finding is
-/// `Unknown` even when every dropped finding was advisory — a review with no
-/// verified finding has nothing to approve on.
+/// verdict [`settle_withheld`] gives: an approving review keeps its verdict,
+/// with or without survivors (AQ-7t, Bob 2026-10-05); a BLOCK /
+/// REQUEST_CHANGES review → what the survivors alone derive, `Unknown` when
+/// that would approve or when nothing survived.
 ///
 /// Refutation-based relaxation (`relax_verdict_if_evidence_wiped`) is separate
 /// and unchanged.
 /// Test: `gate_posted_findings_withholds_when_it_drops_every_finding`,
 /// `gate_posted_findings_never_approves_a_blocking_review`,
-/// `approve_star_is_unknown_when_its_only_advisory_finding_is_dropped`,
-/// `plain_approve_is_unknown_when_its_only_finding_is_withheld`,
-/// `approve_star_is_withheld_when_a_dropped_finding_could_escalate`.
+/// `approve_star_keeps_its_verdict_when_its_only_advisory_finding_is_dropped`,
+/// `plain_approve_keeps_its_verdict_when_its_only_finding_is_withheld`,
+/// `approve_star_keeps_its_verdict_when_a_dropped_finding_could_escalate`.
 pub(super) fn withhold_verdict(
     verdict: &mut Verdict,
     report: &GateReport,
@@ -49,7 +47,6 @@ pub(super) fn withhold_verdict(
     if report.dropped == 0 {
         return None;
     }
-    // #9188 A: no advisory exemption — an all-withheld review is `Unknown`.
     *verdict = settle_withheld(verdict.clone(), survivors);
     Some(format!(
         "{} findings withheld: citation unverifiable",
@@ -71,14 +68,22 @@ pub(crate) fn is_advisory(f: &Finding) -> bool {
 /// The verdict a review keeps after at least one finding was withheld.
 ///
 /// Why: #8904 — the verifier withholds findings too, and one policy must
-/// settle every withheld finding, whichever gate withheld it.
-/// What: no survivors → `Unknown`; a BLOCK / REQUEST_CHANGES review with
-/// survivors → the verdict the survivors alone derive, or `Unknown` when that
-/// would approve; any other verdict is returned unchanged. It never turns a
-/// non-APPROVE verdict into APPROVE.
+/// settle every withheld finding, whichever gate withheld it. AQ-7t (Bob
+/// 2026-10-05): a withheld finding is unverified, so it can neither block nor
+/// un-approve; an approving review that lost every finding still approves.
+/// What: an APPROVE / APPROVE* review is returned unchanged, with or without
+/// survivors. Any other verdict with no survivors → `Unknown`; a BLOCK /
+/// REQUEST_CHANGES review with survivors → the verdict the survivors alone
+/// derive, or `Unknown` when that would approve. It never turns a non-APPROVE
+/// verdict into APPROVE.
 /// Test: `gate_posted_findings_never_approves_a_blocking_review`,
-/// `verify_refuting_every_finding_of_a_block_review_is_unknown`.
+/// `verify_refuting_every_finding_of_a_block_review_is_unknown`,
+/// `plain_approve_keeps_its_verdict_when_its_only_finding_is_withheld`.
 pub(crate) fn settle_withheld(verdict: Verdict, survivors: &[Finding]) -> Verdict {
+    // AQ-7t (Bob 2026-10-05): keep APPROVE. Only a blocking verdict turns `Unknown`.
+    if matches!(verdict, Verdict::Approve | Verdict::ApproveWithReservations) {
+        return verdict;
+    }
     if survivors.is_empty() {
         return Verdict::Unknown;
     }

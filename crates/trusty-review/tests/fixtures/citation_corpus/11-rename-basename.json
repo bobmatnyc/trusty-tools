@@ -20,5 +20,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["legacy-overflow"],
   "forbidden_in_body": ["legacy module"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
 }

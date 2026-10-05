@@ -664,10 +664,10 @@ fn approve_star_result(f: Finding) -> ReviewResult {
     result
 }
 
-/// #9188 A (inverts #8949 ruling (b)): an APPROVE* review whose only finding,
-/// an advisory one, is withheld has no verified finding: `Unknown`, no grade.
+/// AQ-7t (Bob 2026-10-05; inverts the #9188 A rule): an APPROVE* review whose
+/// only finding, an advisory one, is withheld keeps APPROVE* with no error.
 #[test]
-fn approve_star_is_unknown_when_its_only_advisory_finding_is_dropped() {
+fn approve_star_keeps_its_verdict_when_its_only_advisory_finding_is_dropped() {
     let mut nit = finding(
         "src/billing.rs",
         Some(SUM_LINE),
@@ -679,14 +679,16 @@ fn approve_star_is_unknown_when_its_only_advisory_finding_is_dropped() {
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
     assert!(result.findings.is_empty());
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
+    assert_eq!(result.withheld_findings.len(), 1);
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
+    assert_eq!(result.error, None);
 }
 
-/// #9188 A (inverts `plain_approve_survives_when_only_advisory_findings_are_dropped`):
-/// a plain APPROVE that lost its only finding is `Unknown` with no grade.
+/// AQ-7t (Bob 2026-10-05; inverts the #9188 A rule): a plain APPROVE that
+/// lost its only finding keeps APPROVE with no error. The runner regrades it
+/// from the survivors (`run_review_all_withheld_approve_stays_approve_and_exits_zero`).
 #[test]
-fn plain_approve_is_unknown_when_its_only_finding_is_withheld() {
+fn plain_approve_keeps_its_verdict_when_its_only_finding_is_withheld() {
     let mut nit = finding(
         "src/billing.rs",
         Some(SUM_LINE),
@@ -700,15 +702,17 @@ fn plain_approve_is_unknown_when_its_only_finding_is_withheld() {
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
     assert!(result.findings.is_empty());
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
-    assert!(result.error.is_some());
+    assert_eq!(result.withheld_findings.len(), 1);
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.error, None);
 }
 
-/// Error arm (#8949 ruling (b)): a dropped finding that could escalate on its
-/// own still withholds an APPROVE* review.
+/// AQ-7t (Bob 2026-10-05; inverts #8949 ruling (b)'s error arm): the verdict
+/// is the model's, so an APPROVE* review keeps APPROVE* even when its dropped
+/// finding could escalate on its own; an unverified finding blocks nothing.
+/// The finding is withheld, never posted.
 #[test]
-fn approve_star_is_withheld_when_a_dropped_finding_could_escalate() {
+fn approve_star_keeps_its_verdict_when_a_dropped_finding_could_escalate() {
     let blocker = finding(
         "src/billing.rs",
         Some(SUM_LINE),
@@ -717,8 +721,9 @@ fn approve_star_is_withheld_when_a_dropped_finding_could_escalate() {
     let mut result = approve_star_result(blocker);
     gate_posted_findings(&mut result, &diff(vec![billing_file()]));
 
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
+    assert!(result.findings.is_empty());
+    assert_eq!(result.withheld_findings.len(), 1);
+    assert_eq!(result.verdict, Verdict::ApproveWithReservations);
 }
 
 /// #9188 B: a partly quoted finding is withheld, so a blocking review that

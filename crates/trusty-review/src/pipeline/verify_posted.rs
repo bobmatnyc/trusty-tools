@@ -120,9 +120,10 @@ impl VerifyReport {
 /// `report.withheld_findings`; then settles the verdict — `Unknown` stays
 /// `Unknown`; nothing dropped, or an APPROVE/APPROVE* review that lost only
 /// advisory unverifiable findings (the #8949 rule) and kept at least one
-/// (#9188 A) → `rederive_verdict`;
-/// anything else dropped → `settle_withheld`, which never turns a non-APPROVE
-/// verdict into APPROVE but may relax a blocking one. When any finding went
+/// → `rederive_verdict`;
+/// anything else dropped → `settle_withheld`, which keeps an approving verdict
+/// even with no survivor (AQ-7t), never turns a non-APPROVE verdict into
+/// APPROVE, and may relax a blocking one. When any finding went
 /// unjudged the result is floored at `primary` (the #8653 verdict), so a
 /// verifier failure never relaxes a review. Refuted and over-cap drops are not
 /// floored: with no unjudged finding, either may relax the verdict through
@@ -135,7 +136,8 @@ impl VerifyReport {
 /// `run_review_records_a_refuted_finding_as_withheld`,
 /// `verify_unverifiable_finding_is_withheld_not_posted`,
 /// `verify_unverifiable_advisory_keeps_an_approving_verdict`,
-/// `verify_unverifiable_advisory_with_no_survivor_is_unknown`.
+/// `verify_unverifiable_advisory_with_no_survivor_keeps_approve_star`,
+/// `verify_unverifiable_finding_of_a_blocking_review_with_no_survivor_is_unknown`.
 pub(crate) fn enforce_outcomes(
     primary: Verdict,
     findings: &mut Vec<Finding>,
@@ -211,8 +213,8 @@ pub(crate) fn enforce_outcomes(
             .iter()
             .all(|w| withhold::is_advisory(&w.finding));
     let approving = matches!(primary, Verdict::Approve | Verdict::ApproveWithReservations);
-    // #9188 A: the advisory exemption needs a survivor; with none, `settle_withheld`
-    // gives `Unknown` — a review with no verified finding approves nothing.
+    // With no survivor there is nothing to re-derive from: `settle_withheld`
+    // returns an approving verdict unchanged (AQ-7t) and a blocking one `Unknown`.
     report.verdict = if primary == Verdict::Unknown {
         Verdict::Unknown
     } else if report.dropped() == 0 || (approving && advisory_only && !findings.is_empty()) {
@@ -265,8 +267,8 @@ pub(crate) struct GateInputs<'a> {
 /// the error — the same shape the citation gate uses. When no round ran,
 /// [`withhold_unverified`] withholds every finding and the review is UNKNOWN
 /// (Bob's "withhold all" ruling, 2026-09-30). #9188 then re-checks every
-/// survivor at the head (L), makes a review with no survivor `Unknown` (A, J),
-/// and keeps the model's prose only when it rests on survivors (C).
+/// survivor at the head (L), makes a blocking review with no survivor
+/// `Unknown` (A, J; an approving one keeps its verdict, AQ-7t), and keeps the model's prose only when it rests on survivors (C).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
 /// `run_review_enabled_without_a_verifier_withholds_every_finding`,

@@ -11,5 +11,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": [],
   "forbidden_in_body": ["SQL injection"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "APPROVE"
 }

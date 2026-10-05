@@ -27,20 +27,16 @@ use crate::{
     config::{InvocationSurface, ReviewConfig},
     integrations::github::RunMode,
     mcp::console_metrics,
-    models::{ReviewResult, ReviewStatus, Verdict},
+    models::{ReviewResult, ReviewStatus},
     pipeline::{
         DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
-        withheld_contract::withheld_by_reason,
+        withheld_contract::{verdict_status, withheld_by_reason},
     },
     service::{
         AppState,
         handlers::{compute_status, probe_deps},
     },
 };
-
-/// Envelope `verdict_status` for a review whose every finding was withheld
-/// (#9188 K): "no verified findings, N withheld" — not a clean review.
-const VERDICT_STATUS_NO_VERIFIED_FINDINGS: &str = "no_verified_findings";
 
 // ─── Posting posture (#4254) ─────────────────────────────────────────────────
 
@@ -524,11 +520,13 @@ const MCP_STATUS_DEGRADED_CONTEXT: &str = "degraded_context";
 /// then stamps the `mcp_status` sentinel for an infra outage or a degraded
 /// verdict. #9188 K: when any finding was withheld, adds `withheld`
 /// (`count`, `by_reason`), and `verdict_status: "no_verified_findings"` when
-/// none survived; both are absent otherwise, and `isError` is unchanged.
+/// none survived, whatever the verdict (AQ-7t); both are absent otherwise,
+/// and `isError` is unchanged.
 /// Test: `wrap_result_never_carries_a_reviewer_model_fallback`,
 /// `wrap_result_infra_unavailable_sets_error_and_sentinel`,
 /// `wrap_result_degraded_stays_isError_false` (in `tools_tests.rs`),
-/// `wrap_result_names_a_withheld_unknown_without_is_error`.
+/// `wrap_result_names_a_withheld_unknown_without_is_error`,
+/// `wrap_result_names_an_all_withheld_approve`.
 fn wrap_result(result: &ReviewResult) -> Value {
     let payload = serde_json::to_value(result).unwrap_or(Value::Null);
     let text = serde_json::to_string_pretty(&payload)
@@ -550,10 +548,11 @@ fn wrap_result(result: &ReviewResult) -> Value {
             "withheld".to_string(),
             serde_json::json!({ "count": result.withheld_findings.len(), "by_reason": by_reason }),
         );
-        if result.verdict == Verdict::Unknown && result.findings.is_empty() {
+        // AQ-7t: also on an all-withheld APPROVE, which keeps its verdict.
+        if let Some(status) = verdict_status(result) {
             obj.insert(
                 "verdict_status".to_string(),
-                Value::String(VERDICT_STATUS_NO_VERIFIED_FINDINGS.to_string()),
+                Value::String(status.to_string()),
             );
         }
     }

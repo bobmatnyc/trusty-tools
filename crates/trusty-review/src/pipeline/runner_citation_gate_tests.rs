@@ -298,10 +298,22 @@ async fn run_review_withheld_findings_never_shape_the_grade() {
     assert_ne!(result.grade, Some(would_have_been.to_string()));
 }
 
-/// #9188 A, end to end: an APPROVE review whose every finding was withheld is
-/// `Unknown` and carries no grade, though the model graded it A-.
+/// What `run --json` reads off a review: its verdict, whether the run exits
+/// non-zero, and the printed payload.
+fn run_json(result: &ReviewResult) -> (Verdict, bool, serde_json::Value) {
+    (
+        result.verdict.clone(),
+        crate::run_output::run_is_failure(result),
+        crate::run_output::run_json_payload(result),
+    )
+}
+
+/// AQ-7t (Bob 2026-10-05), end to end: an APPROVE review whose only finding
+/// the citation gate withheld stays APPROVE and exits 0. The grade is
+/// recomputed from the survivors (none) under the leak-J rule, so the model's
+/// A- becomes A+; `run --json` carries `verdict_status` and the counts.
 #[tokio::test]
-async fn run_review_all_withheld_review_carries_no_grade() {
+async fn run_review_all_withheld_approve_stays_approve_and_exits_zero() {
     let nit = billing_finding("style", "`ledger.flush_all()` is slow.", "low", SUM_LINE);
     let result = review_payload(
         "Minor style nit only.",
@@ -311,9 +323,92 @@ async fn run_review_all_withheld_review_carries_no_grade() {
         "CONFIRMED",
     )
     .await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::Approve, "{:?}", result.error);
+    assert!(
+        !fails,
+        "an all-withheld APPROVE exits 0: {:?}",
+        result.error
+    );
+    assert_eq!(json["verdict"], "APPROVE");
+    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(json["grade"], "A+", "graded from no survivor, not the A-");
+    assert_eq!(json["withheld_count"], 1);
+    assert_eq!(json["withheld_by_reason"]["line_citation"], 1, "{json}");
+    assert!(json.get("error").is_none(), "{json}");
     assert!(result.findings.is_empty(), "{:?}", result.findings);
-    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(json["findings"], serde_json::json!([]));
+    assert!(
+        !result.review_body.contains("flush_all"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// AQ-7t, end to end, the 2026-10-01 code-intelligence shape: an APPROVE*
+/// review whose only finding the verifier could not confirm stays APPROVE*,
+/// exits 0, and is graded C+ (the APPROVE* band's best) from no survivor.
+#[tokio::test]
+async fn run_review_all_withheld_approve_star_stays_approve_star_and_exits_zero() {
+    let note = billing_finding(
+        "overflow-note",
+        "`amounts.iter().sum::<u64>()` may overflow on huge inputs.",
+        "low",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "One note on the total.",
+        "APPROVE*",
+        "C+",
+        serde_json::json!([note]),
+        "UNVERIFIABLE",
+    )
+    .await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(
+        verdict,
+        Verdict::ApproveWithReservations,
+        "{:?}",
+        result.error
+    );
+    assert!(
+        !fails,
+        "an all-withheld APPROVE* exits 0: {:?}",
+        result.error
+    );
+    assert_eq!(json["verdict"], "APPROVE*");
+    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(json["grade"], "C+");
+    assert_eq!(json["withheld_by_reason"]["unverifiable"], 1, "{json}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+}
+
+/// AQ-7t counterpart: a REQUEST_CHANGES review whose only finding was withheld
+/// still becomes UNKNOWN with no grade and an error, so `run --json` exits
+/// non-zero. Pins the blocking path against the two approving ones above.
+#[tokio::test]
+async fn run_review_all_withheld_request_changes_is_unknown() {
+    let bug = billing_finding(
+        "data-loss",
+        "`ledger.flush_all()` loses the total.",
+        "high",
+        SUM_LINE,
+    );
+    let result = review_payload(
+        "The flush loses data.",
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([bug]),
+        "CONFIRMED",
+    )
+    .await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::Unknown);
+    assert!(fails, "an all-withheld blocking review exits non-zero");
     assert_eq!(result.grade, None);
+    assert!(result.error.is_some());
+    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
 /// #9188 B, end to end: a CONFIRMED finding with one quoted snippet absent

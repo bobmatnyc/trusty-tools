@@ -13,5 +13,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["lost-write"],
   "forbidden_in_body": ["ledger write is lost"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
 }

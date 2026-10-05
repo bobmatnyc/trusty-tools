@@ -22,5 +22,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["panic"],
   "forbidden_in_body": ["panics on bad input"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
 }

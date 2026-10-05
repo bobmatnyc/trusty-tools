@@ -525,6 +525,38 @@ fn wrap_result_names_a_withheld_unknown_without_is_error() {
     );
 }
 
+/// AQ-7t (Bob 2026-10-05): an APPROVE whose every finding was withheld keeps
+/// APPROVE, and the envelope still names it `no_verified_findings`.
+#[test]
+fn wrap_result_names_an_all_withheld_approve() {
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A+".to_string());
+    result
+        .withheld_findings
+        .push(crate::models::WithheldFinding {
+            finding: crate::models::Finding::new(
+                "src/a.rs",
+                "style",
+                "`a + b` is slow",
+                "",
+                0.3,
+                crate::models::Effort::Low,
+            ),
+            reason: "unverifiable".to_string(),
+            missing_fragment: None,
+        });
+
+    let envelope = wrap_result(&result);
+
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(
+        envelope["verdict_status"], "no_verified_findings",
+        "{envelope}"
+    );
+    assert_eq!(envelope["withheld"]["by_reason"]["unverifiable"], 1);
+}
+
 /// #9188 compatibility (Bob, 2026-10-05 02:48Z): a review that withheld
 /// nothing serializes byte-identically to the pre-#9188 envelope.
 #[test]

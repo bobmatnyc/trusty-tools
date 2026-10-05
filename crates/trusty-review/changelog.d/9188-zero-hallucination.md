@@ -1,10 +1,14 @@
 Fixed
-- A review whose every finding was withheld is now UNKNOWN with no grade,
-  including an APPROVE or APPROVE* review that lost only advisory findings and
-  a review whose verifier could not confirm any finding (#9188 A). Exit code:
-  `run --json` now exits non-zero for such a review, where it returned
-  APPROVE with exit 0 before, even when every withheld finding was
-  advisory-only.
+- A review whose every finding was withheld posts none of them, and its
+  verdict follows the model's (#9188 A; AQ-7t, Bob 2026-10-05). A blocking
+  review (REQUEST_CHANGES or BLOCK) is UNKNOWN with no grade and an error, so
+  `run --json` exits non-zero. An APPROVE or APPROVE* review keeps its
+  verdict and exits 0, whichever gate withheld its findings (citation gate,
+  verifier refutation or UNVERIFIABLE, head re-check); it is graded from the
+  posted findings alone, so with none it is `A+` for APPROVE and `C+` for
+  APPROVE*, and it carries `withheld_count`, `withheld_by_reason` and
+  `verdict_status: "no_verified_findings"`. A review whose findings no
+  verifier round checked is still UNKNOWN, as before (#4044).
 - A finding with any quoted snippet missing from the cited file is withheld;
   it is no longer kept as `citation_partial` (#9188 B).
 - The reviewer's prose and the map-reduce synthesis summary are kept only
@@ -32,10 +36,11 @@ Fixed
   whole quote (#9188 I).
 - On a review that is not UNKNOWN, a withheld finding no longer shapes the
   grade: it is recomputed from the posted findings alone (#9188 J).
-- `ReviewResult` gains `withheld_count` and `withheld_by_reason`, and the MCP
-  envelope gains `withheld` (`count`, `by_reason`) and, when nothing
-  survived, `verdict_status: "no_verified_findings"`; all are absent when
-  nothing was withheld, and `isError` is unchanged (#9188 K).
+- `ReviewResult`, and so `run --json`, gains `withheld_count`,
+  `withheld_by_reason` and, when no finding survived, `verdict_status:
+  "no_verified_findings"`, whatever the verdict. The MCP envelope gains
+  `withheld` (`count`, `by_reason`) and the same `verdict_status`. All are
+  absent when nothing was withheld, and `isError` is unchanged (#9188 K).
 - Every posted finding is re-checked at the head after the verifier; a
   CONFIRMED finding whose citation does not resolve is withheld (#9188 L).
 - `calibrate` reports `unresolvable_survivor_count` and `withheld_by_reason`

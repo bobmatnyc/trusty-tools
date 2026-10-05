@@ -26,5 +26,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["alloc"],
   "forbidden_in_body": ["allocates per row"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
 }

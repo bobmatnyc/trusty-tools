@@ -151,10 +151,11 @@ async fn unresolvable_survivors_counts_an_unresolved_finding() {
     assert_eq!(unresolvable_survivors(&findings, &filtered), 2);
 }
 
-/// #9188 A, J: no survivor and anything withheld is `Unknown` with no grade;
-/// a review that withheld nothing keeps its verdict.
+/// #9188 A, J with AQ-7t (Bob 2026-10-05): no survivor and anything withheld
+/// makes a blocking verdict `Unknown` with no grade; an approving verdict, or
+/// a review that withheld nothing, keeps its verdict and grade.
 #[test]
-fn settle_no_survivors_withholds_the_verdict_only_when_something_was_withheld() {
+fn settle_no_survivors_withholds_only_a_blocking_verdict() {
     let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
     result.verdict = Verdict::Approve;
     result.grade = Some("A".to_string());
@@ -162,13 +163,52 @@ fn settle_no_survivors_withholds_the_verdict_only_when_something_was_withheld() 
     assert_eq!(result.verdict, Verdict::Approve);
 
     result.withheld_findings.push(withheld(UNVERIFIABLE_REASON));
-    settle_no_survivors(&mut result);
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
+    for approving in [Verdict::Approve, Verdict::ApproveWithReservations] {
+        result.verdict = approving.clone();
+        settle_no_survivors(&mut result);
+        assert_eq!(result.verdict, approving);
+        assert_eq!(result.grade.as_deref(), Some("A"));
+        assert_eq!(result.error, None);
+    }
+
+    for blocking in [Verdict::RequestChanges, Verdict::Block] {
+        result.verdict = blocking;
+        result.grade = Some("D".to_string());
+        result.error = None;
+        settle_no_survivors(&mut result);
+        assert_eq!(result.verdict, Verdict::Unknown);
+        assert_eq!(result.grade, None);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("no verified findings, 1 withheld")
+        );
+    }
+}
+
+/// #9188 K with AQ-7t: `verdict_status` names a review with no survivor and
+/// anything withheld, approving or not; it is absent when nothing was withheld
+/// or a finding survived.
+#[test]
+fn verdict_status_names_a_review_with_no_verified_finding() {
+    let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
+    result.verdict = Verdict::Approve;
+    sync_withheld_counts(&mut result);
+    assert_eq!(result.verdict_status, None);
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert!(json.get("verdict_status").is_none(), "{json}");
+
+    result.withheld_findings.push(withheld(UNVERIFIABLE_REASON));
+    sync_withheld_counts(&mut result);
     assert_eq!(
-        result.error.as_deref(),
-        Some("no verified findings, 1 withheld")
+        result.verdict_status.as_deref(),
+        Some(VERDICT_STATUS_NO_VERIFIED_FINDINGS)
     );
+    let json = serde_json::to_value(&result).expect("serialize");
+    assert_eq!(json["verdict_status"], "no_verified_findings");
+
+    result.findings.push(finding(10, "`x`"));
+    sync_withheld_counts(&mut result);
+    assert_eq!(result.verdict_status, None);
 }
 
 /// Restore `prose` over a review whose one survivor is `survivor`, with

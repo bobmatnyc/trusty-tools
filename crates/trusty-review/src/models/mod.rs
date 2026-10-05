@@ -694,6 +694,18 @@ pub struct ReviewResult {
     /// `pipeline::withheld_contract::reason_class`. Absent when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub withheld_by_reason: BTreeMap<String, usize>,
+    /// `"no_verified_findings"` when no finding survived and at least one was
+    /// withheld (#9188 K); absent otherwise.
+    ///
+    /// Why: AQ-7t (Bob 2026-10-05) keeps an all-withheld APPROVE as APPROVE
+    /// with exit 0, so `run --json` needs its own signal that nothing was
+    /// verified; a field here reaches `run --json` and the MCP text alike.
+    /// What: set by `withheld_contract::sync_withheld_counts` at the same two
+    /// exit points as `withheld_count`.
+    /// Test: `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
+    /// `run_json_for_a_non_withheld_review_is_unchanged_by_9188`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_status: Option<String>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -865,6 +877,7 @@ impl ReviewResult {
             withheld_findings: Vec::new(),
             withheld_count: 0,
             withheld_by_reason: BTreeMap::new(),
+            verdict_status: None,
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,

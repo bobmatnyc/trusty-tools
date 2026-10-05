@@ -9,7 +9,9 @@
 //! and a stub verifier that answers the case's `verifier` judgment, then
 //! counts hallucinations: survivors labelled false or that [`oracle_resolves`]
 //! cannot resolve at the head, forbidden prose in the body, and a review with
-//! no survivor that still approves or carries a grade.
+//! no survivor whose verdict blocks or whose grade a withheld finding shaped.
+//! It also checks each case's survivor count and verdict (`expect_verdict`;
+//! AQ-7t, Bob 2026-10-05: an all-withheld APPROVE / APPROVE* keeps it).
 //! Test: `hallucination_count_is_zero`.
 
 use std::collections::HashMap;
@@ -39,6 +41,8 @@ struct Case {
     removals: Vec<String>,
     forbidden_in_body: Vec<String>,
     expect_survivors: usize,
+    /// The verdict the review must end with, as `run --json` prints it.
+    expect_verdict: String,
 }
 
 fn corpus_dir() -> &'static Path {
@@ -230,18 +234,24 @@ fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
         .iter()
         .filter(|p| result.review_body.contains(p.as_str()))
         .count();
-    let approves = matches!(
-        result.verdict,
-        Verdict::Approve | Verdict::ApproveWithReservations
-    );
-    let empty_verdict = result.findings.is_empty()
+    // AQ-7t (Bob 2026-10-05): with no survivor, a withheld finding may neither
+    // block nor shape the grade. An approving verdict keeps the grade its band
+    // gives an empty survivor set; UNKNOWN carries none.
+    let survivorless_grade = match result.verdict {
+        Verdict::Approve => Some("A+"),
+        Verdict::ApproveWithReservations => Some("C+"),
+        _ => None,
+    };
+    let withheld_shapes_verdict = result.findings.is_empty()
         && !result.withheld_findings.is_empty()
-        && (approves || result.grade.is_some());
-    survivors + prose + usize::from(empty_verdict)
+        && (matches!(result.verdict, Verdict::RequestChanges | Verdict::Block)
+            || result.grade.as_deref() != survivorless_grade);
+    survivors + prose + usize::from(withheld_shapes_verdict)
 }
 
 /// #9188: every survivor over the corpus resolves at the head; no prose names
-/// an unbacked defect; no all-withheld review approves or carries a grade.
+/// an unbacked defect; no withheld finding blocks or grades a review. Each case
+/// ends with its expected survivors and verdict (AQ-7t).
 #[tokio::test]
 async fn hallucination_count_is_zero() {
     let cases = load_cases();
@@ -256,18 +266,21 @@ async fn hallucination_count_is_zero() {
         let count = hallucinations(case, &diff, &result);
         total += count;
         let survivors = result.findings.len();
-        let flag = if survivors == case.expect_survivors {
-            ""
-        } else {
-            " SURVIVORS-MISMATCH"
-        };
+        let verdict = result.verdict.to_string();
+        let mut flag = String::new();
+        if survivors != case.expect_survivors {
+            flag.push_str(" SURVIVORS-MISMATCH");
+        }
+        if verdict != case.expect_verdict {
+            flag.push_str(" VERDICT-MISMATCH");
+        }
         report.push(format!(
-            "{name} [leak {}]: hallucinations={count} survivors={survivors}/{}{flag}",
-            case.leak, case.expect_survivors
+            "{name} [leak {}]: hallucinations={count} survivors={survivors}/{} verdict={verdict}/{}{flag}",
+            case.leak, case.expect_survivors, case.expect_verdict
         ));
     }
     eprintln!("hallucination corpus:\n{}", report.join("\n"));
-    let mismatched = report.iter().any(|l| l.ends_with("SURVIVORS-MISMATCH"));
+    let mismatched = report.iter().any(|l| l.contains("-MISMATCH"));
     assert!(
         total == 0 && !mismatched,
         "hallucination_count={total}\n{}",

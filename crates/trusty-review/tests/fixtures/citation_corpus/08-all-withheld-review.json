@@ -1,6 +1,6 @@
 {
   "leak": "A",
-  "about": "An APPROVE review whose only (advisory) finding is withheld must not approve or carry a grade.",
+  "about": "An APPROVE review whose only (advisory) finding is withheld keeps APPROVE (AQ-7t) and posts nothing; its grade comes from no survivor, never the model's A-.",
   "diff_file": "billing.diff",
   "reviewer": {
     "prose": "Looks fine apart from a slow flush.",
@@ -13,5 +13,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["slow-flush"],
   "forbidden_in_body": ["slow flush"],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "APPROVE"
 }

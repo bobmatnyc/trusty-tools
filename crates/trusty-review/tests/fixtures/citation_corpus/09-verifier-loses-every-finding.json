@@ -1,6 +1,6 @@
 {
   "leak": "A",
-  "about": "The 2026-10-01 code-intelligence case: the verifier cannot judge any finding, so every finding is withheld; the review must not approve.",
+  "about": "The 2026-10-01 code-intelligence case: the verifier cannot judge any finding, so every finding is withheld and none is posted; the review keeps APPROVE and exits 0 (AQ-7t).",
   "diff_file": "billing.diff",
   "reviewer": {
     "prose": "Two small notes on the total.",
@@ -14,5 +14,6 @@
   "verifier": "UNVERIFIABLE",
   "hallucinated": [],
   "forbidden_in_body": [],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "APPROVE"
 }

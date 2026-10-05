@@ -23,5 +23,6 @@
   "hallucinated": [],
   "removals": ["missing-admin-check"],
   "forbidden_in_body": [],
-  "expect_survivors": 1
+  "expect_survivors": 1,
+  "expect_verdict": "REQUEST_CHANGES"
 }

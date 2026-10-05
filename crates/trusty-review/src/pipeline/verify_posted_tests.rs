@@ -319,10 +319,11 @@ async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
     assert_eq!(report.verdict, Verdict::Approve);
 }
 
-/// #9188 A (the 2026-10-01 case): an APPROVE* review whose verifier could not
-/// confirm its only, advisory, finding has nothing verified: `Unknown`.
+/// AQ-7t (Bob 2026-10-05; inverts the #9188 A rule for the 2026-10-01 case):
+/// an APPROVE* review whose verifier could not confirm its only, advisory,
+/// finding withholds it and keeps APPROVE*.
 #[tokio::test]
-async fn verify_unverifiable_advisory_with_no_survivor_is_unknown() {
+async fn verify_unverifiable_advisory_with_no_survivor_keeps_approve_star() {
     let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
     let report = run(
         Arc::new(MarkerVerifier::default()),
@@ -333,6 +334,22 @@ async fn verify_unverifiable_advisory_with_no_survivor_is_unknown() {
     .await;
     assert!(findings.is_empty());
     assert_eq!(report.unverifiable, 1);
+    assert_eq!(report.verdict, Verdict::ApproveWithReservations);
+}
+
+/// AQ-7t counterpart: a REQUEST_CHANGES review whose verifier could not
+/// confirm its only finding has no verified blocker: `Unknown`, as before.
+#[tokio::test]
+async fn verify_unverifiable_finding_of_a_blocking_review_with_no_survivor_is_unknown() {
+    let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
+    let report = run(
+        Arc::new(MarkerVerifier::default()),
+        Verdict::RequestChanges,
+        &mut findings,
+        policy(8, 4),
+    )
+    .await;
+    assert!(findings.is_empty());
     assert_eq!(report.verdict, Verdict::Unknown);
 }
 

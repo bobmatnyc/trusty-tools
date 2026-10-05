@@ -8,15 +8,16 @@
 //! What:
 //!  - [`withhold_unresolved`] re-checks every survivor at the head after the
 //!    verifier (leak L) and withholds any that does not resolve;
-//!  - [`settle_no_survivors`] makes a review with no survivor and anything
-//!    withheld `Unknown` with no grade (leak A);
+//!  - [`settle_no_survivors`] makes a blocking review with no survivor and
+//!    anything withheld `Unknown` with no grade (leak A); an approving one
+//!    keeps its verdict (AQ-7t, Bob 2026-10-05);
 //!  - [`regrade_from_survivors`] recomputes a non-`Unknown` grade from the
 //!    survivors alone when anything was withheld (leak J);
 //!  - [`take_narrative`] / [`restore_narrative`] keep the model's prose only
 //!    when nothing was withheld and every location it cites is backed by a
 //!    survivor, and otherwise rebuild it from the survivors (leak C);
-//!  - [`sync_withheld_counts`] fills the typed `withheld_count` and
-//!    `withheld_by_reason` (leak K, via the MCP envelope);
+//!  - [`sync_withheld_counts`] fills the typed `withheld_count`,
+//!    `withheld_by_reason` and `verdict_status` (leak K, AQ-7t);
 //!  - [`unresolvable_survivors`] counts survivors that do not resolve, for
 //!    `calibrate` and the offline corpus.
 //!
@@ -94,13 +95,33 @@ pub fn withheld_by_reason(withheld: &[WithheldFinding]) -> BTreeMap<String, usiz
     by_reason
 }
 
-/// Fill `withheld_count` and `withheld_by_reason` from `withheld_findings`.
+/// `verdict_status` of a review with no survivor and anything withheld
+/// (#9188 K): "no verified findings, N withheld", not a clean review.
+pub const VERDICT_STATUS_NO_VERIFIED_FINDINGS: &str = "no_verified_findings";
+
+/// The review's `verdict_status`, or `None` when it needs none (#9188 K).
 ///
-/// What: called at the two canonical exit points, beside `findings_count`.
-/// Test: `a_withheld_review_reports_typed_withheld_counts`.
+/// Why: AQ-7t (Bob 2026-10-05) keeps an all-withheld APPROVE as APPROVE, so
+/// the verdict alone no longer tells a caller that nothing was verified.
+/// What: [`VERDICT_STATUS_NO_VERIFIED_FINDINGS`] when no finding survived and
+/// at least one was withheld, whatever the verdict; `None` otherwise.
+/// Test: `verdict_status_names_a_review_with_no_verified_finding`.
+pub fn verdict_status(result: &ReviewResult) -> Option<&'static str> {
+    (result.findings.is_empty() && !result.withheld_findings.is_empty())
+        .then_some(VERDICT_STATUS_NO_VERIFIED_FINDINGS)
+}
+
+/// Fill `withheld_count`, `withheld_by_reason` and `verdict_status` from
+/// `withheld_findings`.
+///
+/// What: called at the two canonical exit points, beside `findings_count`;
+/// all three stay absent from the JSON when nothing was withheld.
+/// Test: `a_withheld_review_reports_typed_withheld_counts`,
+/// `verdict_status_names_a_review_with_no_verified_finding`.
 pub fn sync_withheld_counts(result: &mut ReviewResult) {
     result.withheld_count = result.withheld_findings.len();
     result.withheld_by_reason = withheld_by_reason(&result.withheld_findings);
+    result.verdict_status = verdict_status(result).map(str::to_string);
 }
 
 /// Withhold every survivor that does not resolve at the head (#9188 L).
@@ -150,18 +171,31 @@ pub(crate) fn withhold_unresolved(result: &mut ReviewResult, index: &LineIndex) 
     withheld
 }
 
-/// No survivor and anything withheld → `Unknown`, no grade (#9188 A, J).
+/// No survivor, anything withheld, and a blocking verdict → `Unknown`, no
+/// grade (#9188 A, J).
 ///
-/// Why: "no verified findings, N withheld" is not "nothing wrong". Before
-/// #9188 an APPROVE review whose findings were all withheld kept APPROVE and
-/// its grade, so a review with no verified finding still approved the change.
-/// What: when `findings` is empty and `withheld_findings` is not, sets
-/// `Unknown`, clears the grade, and records "no verified findings, N withheld"
-/// as the error unless one is already set. Otherwise a no-op.
-/// Test: `plain_approve_is_unknown_when_its_only_finding_is_withheld`,
-/// `run_review_all_withheld_review_carries_no_grade`.
+/// Why: a blocking verdict with no verified finding has nothing left to block
+/// on, and it must not read as "nothing wrong". AQ-7t (Bob 2026-10-05): an
+/// approving verdict is not settled here. A withheld finding is unverified, so
+/// it cannot un-approve a review; the review keeps APPROVE / APPROVE* and
+/// exits 0, `regrade_from_survivors` grades it from the survivors (none), and
+/// `verdict_status` says no finding was verified.
+/// What: when `findings` is empty, `withheld_findings` is not, and the verdict
+/// is not APPROVE / APPROVE*, sets `Unknown`, clears the grade, and records
+/// "no verified findings, N withheld" as the error unless one is already set.
+/// Otherwise a no-op.
+/// Test: `settle_no_survivors_withholds_only_a_blocking_verdict`,
+/// `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
+/// `run_review_all_withheld_request_changes_is_unknown`.
 pub(crate) fn settle_no_survivors(result: &mut ReviewResult) {
     if !result.findings.is_empty() || result.withheld_findings.is_empty() {
+        return;
+    }
+    // AQ-7t (Bob 2026-10-05): keep APPROVE. UNKNOWN is for blocking verdicts only.
+    if matches!(
+        result.verdict,
+        Verdict::Approve | Verdict::ApproveWithReservations
+    ) {
         return;
     }
     let note = format!(

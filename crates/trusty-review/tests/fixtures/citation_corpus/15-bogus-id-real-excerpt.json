@@ -14,5 +14,6 @@
   "verifier": "CONFIRMED",
   "hallucinated": ["overflow-regression"],
   "forbidden_in_body": [],
-  "expect_survivors": 0
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
 }
