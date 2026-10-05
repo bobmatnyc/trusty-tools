@@ -391,8 +391,9 @@ fn resolve_anchored(
 /// What: a worktree or orphaned root never wins. Among the rest a main
 /// checkout beats any other root, then the newest corpus wins (an absent
 /// corpus sorts last), then the lowest id for determinism.
-/// Test: `the_main_checkout_beats_a_newer_worktree`,
+/// Test: `the_main_checkout_beats_a_newer_indeterminate_root`,
 /// `a_worktree_never_wins_even_when_newest`,
+/// `an_absent_corpus_sorts_last_among_main_checkouts`,
 /// `the_most_recently_written_corpus_wins_between_two_main_checkouts`,
 /// `a_repo_with_only_worktree_indexes_has_no_live_index`.
 fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, ResolveMiss> {
