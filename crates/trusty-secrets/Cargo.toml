@@ -1,0 +1,37 @@
+[package]
+name = "trusty-secrets"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Project- and owner-scoped secret storage for the trusty-* tools: key, scope and reference types, a names-only index, and an OS Keychain backend (DOC-74 §15)."
+keywords = ["secrets", "keychain", "credentials"]
+categories = ["authentication", "development-tools"]
+homepage = "https://trustytools.dev"
+
+# DOC-74 §15.2. `api` is the wire vocabulary only (no store code), so a caller
+# that only names keys — trusty-console's bridge — never links a keychain.
+# `store` is everything that touches a backend or the disk. The `client`
+# feature in the spec ships with S9, not here.
+[features]
+default = ["api", "store"]
+api = ["dep:serde", "dep:thiserror"]
+store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs"]
+# Exposes the in-memory `MemoryBackend` test double to downstream test suites.
+test-support = ["store"]
+
+[dependencies]
+serde = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+keyring = { workspace = true, optional = true }
+fd-lock = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde_yaml = { workspace = true, optional = true }
+dirs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The api tests decode wire JSON even when only `api` is enabled.
+serde_json = { workspace = true }

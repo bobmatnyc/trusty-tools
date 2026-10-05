@@ -1,0 +1,331 @@
+//! Unit tests for [`super::SecretStore`], capabilities, backend selection, and
+//! `mask_secret`. Every test runs against [`MemoryBackend`] or a failing
+//! double, with a temp-dir index.
+//!
+//! Test: itself.
+
+use std::sync::Arc;
+
+use tempfile::TempDir;
+
+use super::*;
+use crate::api::methods::SetOutcome;
+use crate::api::{BackendId, SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
+
+const FAKE_VALUE: &str = "sk-fake-store-1234567890";
+
+fn project() -> VaultName {
+    VaultName::new("trusty/acme/web").unwrap()
+}
+
+fn owner() -> VaultName {
+    VaultName::new("trusty/acme").unwrap()
+}
+
+fn key(name: &str) -> SecretKey {
+    SecretKey::new(name).unwrap()
+}
+
+fn scopes() -> ScopeSet {
+    ScopeSet::new(project(), Some(owner()))
+}
+
+fn fixture_with(backend: Arc<dyn SecretBackend>) -> (TempDir, SecretStore) {
+    let tmp = TempDir::new().unwrap();
+    let store = SecretStore::new(backend, NamesIndex::at(tmp.path().join("index")));
+    (tmp, store)
+}
+
+fn fixture() -> (TempDir, Arc<MemoryBackend>, SecretStore) {
+    let backend = Arc::new(MemoryBackend::new());
+    let (tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
+    (tmp, backend, store)
+}
+
+/// A backend whose every call fails, standing in for a locked keychain.
+#[derive(Debug)]
+struct FailingBackend;
+
+impl FailingBackend {
+    fn failure(vault: &VaultName, key: &SecretKey) -> SecretsError {
+        SecretsError::Backend {
+            backend: "failing".to_string(),
+            vault: vault.to_string(),
+            key: key.to_string(),
+            reason: "storage is locked".to_string(),
+        }
+    }
+}
+
+impl SecretBackend for FailingBackend {
+    fn id(&self) -> BackendId {
+        BackendId::new("failing").unwrap()
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::READ | Capabilities::WRITE
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        Err(Self::failure(vault, key))
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, _: &SecretValue) -> Result<(), SecretsError> {
+        Err(Self::failure(vault, key))
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Err(Self::failure(vault, key))
+    }
+}
+
+/// Why: DOC-74 §15.6 — `set` reports new/updated and shows the mask once;
+/// an empty value is refused before it reaches the backend.
+/// Test: itself.
+#[test]
+fn store_set_reports_outcome_and_mask_once() {
+    let (_tmp, backend, store) = fixture();
+    let first = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    assert_eq!(first.outcome, SetOutcome::New);
+    assert_eq!(first.masked, "sk-fake-… [24 chars]");
+    let second = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new("short"))
+        .unwrap();
+    assert_eq!(second.outcome, SetOutcome::Updated);
+    assert_eq!(second.masked, "[5 chars]");
+
+    let err = store
+        .set(&project(), &key("EMPTY"), &SecretValue::new(""))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::InvalidValue { .. }), "{err:?}");
+    assert_eq!(
+        backend.len(),
+        1,
+        "a refused value never reaches the backend"
+    );
+}
+
+/// Why: `list` carries length and `updated_at`, never characters, and reads
+/// the index rather than values.
+/// Test: itself.
+#[test]
+fn store_list_reports_length_and_time_never_characters() {
+    let (_tmp, _backend, store) = fixture();
+    store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    let rows = store.list(&project()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].length, FAKE_VALUE.chars().count());
+    assert!(rows[0].updated_at > 0);
+    let wire = serde_json::to_string(&rows).unwrap();
+    assert!(
+        !wire.contains(&FAKE_VALUE[..8]),
+        "list leaked characters: {wire}"
+    );
+}
+
+/// Why: removal must clear both records, or `list` reports a key that is gone.
+/// Test: itself.
+#[test]
+fn store_delete_removes_entry_and_row() {
+    let (_tmp, backend, store) = fixture();
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("KEEP"), &value).unwrap();
+    store.set(&project(), &key("DROP"), &value).unwrap();
+
+    assert!(store.delete(&project(), &key("DROP")).unwrap().removed);
+    let names: Vec<String> = store
+        .list(&project())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.name.to_string())
+        .collect();
+    assert_eq!(names, ["KEEP"]);
+    assert_eq!(backend.len(), 1);
+    assert!(!store.delete(&project(), &key("DROP")).unwrap().removed);
+}
+
+/// Why: DOC-74 §15.3 — a project key wins over an owner key with the same
+/// name; explicit references read only the vault they name.
+/// Test: itself.
+#[test]
+fn store_resolution_prefers_project_over_owner() {
+    let (_tmp, _backend, store) = fixture();
+    store
+        .set(&owner(), &key("SHARED"), &SecretValue::new("owner-value"))
+        .unwrap();
+    store
+        .set(
+            &owner(),
+            &key("ONLY_OWNER"),
+            &SecretValue::new("owner-only"),
+        )
+        .unwrap();
+    store
+        .set(
+            &project(),
+            &key("SHARED"),
+            &SecretValue::new("project-value"),
+        )
+        .unwrap();
+
+    let read = |raw: &str| store.read(&SecretRef::parse(raw).unwrap(), &scopes());
+    assert_eq!(read("secret://SHARED").unwrap().expose(), "project-value");
+    assert_eq!(read("secret://ONLY_OWNER").unwrap().expose(), "owner-only");
+    assert_eq!(
+        read("secret://acme/SHARED").unwrap().expose(),
+        "owner-value"
+    );
+    assert_eq!(
+        read("secret://acme/web/SHARED").unwrap().expose(),
+        "project-value"
+    );
+}
+
+/// Why: a miss must be `NotFound`, never an empty value, and must name every
+/// vault searched. An indexed key the backend lost is also `NotFound`.
+/// Test: itself.
+#[test]
+fn store_resolution_miss_is_not_found() {
+    let (_tmp, backend, store) = fixture();
+    let err = store
+        .read(&SecretRef::parse("secret://NOPE").unwrap(), &scopes())
+        .unwrap_err();
+    match err {
+        SecretsError::NotFound { key, searched } => {
+            assert_eq!(key, "NOPE");
+            assert_eq!(searched, "trusty/acme/web, trusty/acme");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+    assert!(matches!(
+        store.read(
+            &SecretRef::parse("secret://acme/web/NOPE").unwrap(),
+            &scopes()
+        ),
+        Err(SecretsError::NotFound { .. })
+    ));
+
+    store
+        .set(&project(), &key("LOST"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    backend.delete(&project(), &key("LOST")).unwrap();
+    assert!(matches!(
+        store.read(&SecretRef::parse("secret://LOST").unwrap(), &scopes()),
+        Err(SecretsError::NotFound { .. })
+    ));
+}
+
+/// Why: fail closed — a backend failure must propagate as a backend error on
+/// every path, never read as a miss, and a refused write must not add an
+/// index row.
+/// Test: itself.
+#[test]
+fn store_backend_errors_are_never_downgraded() {
+    let (_tmp, store) = fixture_with(Arc::new(FailingBackend));
+    let err = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(
+        store.list(&project()).unwrap().is_empty(),
+        "no row on failure"
+    );
+
+    store
+        .index()
+        .upsert(&project(), &key("API_KEY"), 3, 1)
+        .unwrap();
+    let err = store
+        .read(&SecretRef::parse("secret://API_KEY").unwrap(), &scopes())
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+
+    let err = store.delete(&project(), &key("API_KEY")).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert_eq!(
+        store.list(&project()).unwrap().len(),
+        1,
+        "row kept on failure"
+    );
+}
+
+/// Why: a sync target is write-only (DOC-74 §15.4); reading it back must be
+/// refused before the backend is called.
+/// Test: itself.
+#[test]
+fn store_capabilities_gate_operations() {
+    let sync = Capabilities::WRITE | Capabilities::SYNC_TARGET;
+    assert!(sync.contains(Capabilities::WRITE));
+    assert!(!sync.contains(Capabilities::READ));
+    assert_eq!(format!("{sync:?}"), "Capabilities(WRITE | SYNC_TARGET)");
+
+    let (_tmp, store) = fixture_with(Arc::new(MemoryBackend::with_capabilities(sync)));
+    store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    let err = store
+        .read(&SecretRef::parse("secret://API_KEY").unwrap(), &scopes())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SecretsError::Unsupported {
+                operation: "read",
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let err = store.backend().list_names(&project()).unwrap_err();
+    assert!(matches!(err, SecretsError::Unsupported { .. }), "{err:?}");
+
+    let (_tmp, read_only) = fixture_with(Arc::new(MemoryBackend::with_capabilities(
+        Capabilities::READ,
+    )));
+    let err = read_only
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Unsupported { .. }), "{err:?}");
+}
+
+/// Why: a configured backend this build does not implement must fail closed,
+/// never fall back to the Keychain.
+/// Test: itself.
+#[test]
+fn store_open_backend_knows_only_keychain() {
+    let keychain = open_backend(&BackendId::keychain()).unwrap();
+    assert_eq!(keychain.id().as_str(), "keychain");
+    let err = open_backend(&BackendId::new("onepassword").unwrap()).unwrap_err();
+    assert!(
+        matches!(err, SecretsError::UnknownBackend { .. }),
+        "{err:?}"
+    );
+}
+
+/// Why: QA regression class from PR #2427 — `{:?}` of anything holding a
+/// value must not render it.
+/// Test: itself.
+#[test]
+fn store_debug_never_contains_a_value() {
+    let (_tmp, backend, store) = fixture();
+    store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    let shown = format!(
+        "{store:?} {backend:?} {:?}",
+        backend.get(&project(), &key("API_KEY"))
+    );
+    assert!(!shown.contains(FAKE_VALUE), "{shown}");
+}
+
+/// Why: owner ruling 2026-10-01 — ≤ 8 characters shows only the length;
+/// longer shows the first 8 plus the length. Characters, not bytes.
+/// Test: itself.
+#[test]
+fn mask_secret_table() {
+    assert_eq!(mask_secret(""), "[0 chars]");
+    assert_eq!(mask_secret("12345678"), "[8 chars]");
+    assert_eq!(mask_secret("123456789"), "12345678… [9 chars]");
+    assert_eq!(mask_secret("ééééééééé"), "éééééééé… [9 chars]");
+    assert!(!mask_secret("12345678").contains('1'));
+}
