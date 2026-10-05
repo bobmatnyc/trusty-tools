@@ -56,7 +56,7 @@ name = "trusty-search"
 # touches src/** (the resumed-walk vector-gap fix).
 # 0.54.9 (Refs #8959, #9179): patch — 0.54.8 is live on crates.io and this change
 # touches src/** (file-chunk lifecycle fix).
-version = "0.54.9"
+version = "0.55.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
