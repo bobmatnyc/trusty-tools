@@ -531,8 +531,10 @@ impl PalaceHandle {
         // without a recall log, leaving `analytics show` permanently reporting
         // "not configured". Wiring the log at open-time ensures every consumer
         // of `PalaceRegistry::open_palace` gets logging for free.
-        let recall_log = match RecallLog::open(&data_dir.join(RECALL_LOG_FILENAME)) {
-            Ok(log) => Some(Arc::new(log)),
+        // #9140 batch: shared, so a second open of a live palace in this
+        // process reuses the first handle's log instead of failing on redb's lock.
+        let recall_log = match RecallLog::open_shared(&data_dir.join(RECALL_LOG_FILENAME)) {
+            Ok(log) => Some(log),
             Err(e) => {
                 tracing::warn!(palace = %palace.id, "open recall log failed, analytics disabled: {e:#}");
                 None

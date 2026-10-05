@@ -376,6 +376,9 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // that fail to open are skipped with a warning so a single bad
     // namespace cannot fail the whole fan-out.
     let palaces = crate::service::helpers::list_palaces_blocking(state).await?;
+    // #9141: an empty palace is skipped without being opened.
+    let (palaces, palaces_skipped) =
+        crate::service::recall_stream::skip_empty_palaces(state, palaces).await;
 
     // #7125: `recall_streamed` still opens every palace — a cache-only answer
     // would silently drop most of the corpus — but holds only one batch at a
@@ -420,5 +423,11 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
             })
         })
         .collect();
-    Ok(json!({ "query": query, "results": payload }))
+    Ok(json!({
+        "query": query,
+        "results": payload,
+        // #9141 AC 2: how much of the estate the fan-out actually opened.
+        "palaces_searched": palaces.len(),
+        "palaces_skipped": palaces_skipped,
+    }))
 }

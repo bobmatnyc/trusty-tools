@@ -117,6 +117,54 @@ where
     Ok(merged)
 }
 
+/// Split `palaces` into the ones a recall-all must search and a count of the
+/// empty ones it can skip without opening.
+///
+/// Why (#9141): a recall-all opened every palace on disk, and on the live
+/// estate 61 of 104 held no drawer — about a quarter of the fan-out's cold-open
+/// time spent proving there was nothing to find.
+/// What: a palace the registry already holds is kept (its open costs nothing).
+/// Any other palace is read with `console_metrics::disk_stats::read`, a
+/// shared-lock header read that never opens the palace; it is skipped only
+/// when it reports 0 drawers and 0 vectors AND the palace has no L1 snapshot
+/// drawer. A read that fails (no store yet, a writer holds it) keeps the
+/// palace, so a skip is never a guess. Runs on the blocking pool.
+/// Test: `recall_all_skips_empty_palaces_without_opening_them`.
+pub(crate) async fn skip_empty_palaces(
+    state: &AppState,
+    palaces: Vec<Palace>,
+) -> (Vec<Palace>, usize) {
+    let registry = Arc::clone(&state.registry);
+    let all = palaces.clone();
+    let kept = tokio::task::spawn_blocking(move || {
+        palaces
+            .into_iter()
+            .filter(|p| registry.peek(&p.id).is_some() || !is_empty_on_disk(p))
+            .collect::<Vec<_>>()
+    })
+    .await;
+    match kept {
+        Ok(kept) => {
+            let skipped = all.len() - kept.len();
+            (kept, skipped)
+        }
+        Err(e) => {
+            // A failed filter must not hide the corpus: search everything.
+            tracing::warn!("recall-all empty-palace filter failed: {e}");
+            (all, 0)
+        }
+    }
+}
+
+/// True only when `palace` is provably empty on disk. See [`skip_empty_palaces`].
+fn is_empty_on_disk(palace: &Palace) -> bool {
+    let empty_store = crate::console_metrics::disk_stats::read(&palace.data_dir)
+        .is_ok_and(|s| s.drawer_count == 0 && s.vector_count == 0);
+    empty_store
+        && trusty_common::memory_core::store::L1Cache::load_l1_cache(&palace.data_dir)
+            .is_ok_and(|l1| l1.is_empty())
+}
+
 /// Ids the registry holds open right now.
 ///
 /// Why (#7125): the baseline a recall-all must return to. Taken once, before

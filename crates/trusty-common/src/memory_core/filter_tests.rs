@@ -3569,13 +3569,107 @@ fn real_secrets_still_blocked_after_8589_path_rules() {
     }
 
     // KNOWN BOUND: a BARE document id is character-for-character a 44-char
-    // mixed-case credential, so it stays refused. #8589's closure asks for it
-    // to store; no shape test can grant that without also admitting the 34-char
-    // credential above. Only the URL position is exempt.
+    // mixed-case credential, so with no context naming a Google document it
+    // stays refused. `bare_google_doc_ids_named_by_context_after_8589` covers
+    // the context-named form.
     assert!(
         check_secret("17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk").is_err(),
         "#8589: a bare document id is indistinguishable from a credential"
     );
+}
+
+/// Why (issue #8589): the reported false positive's second form is the bare
+/// 44-character spreadsheet id, written in prose that says what it is. A bare
+/// id is admitted only with that context and the exact Google id signature;
+/// real credentials of comparable entropy stay refused even next to the same
+/// context words.
+/// What: one table. `true` rows must pass `check_secret`; `false` rows must be
+/// refused as `PotentialSecret`.
+/// Test: itself.
+#[test]
+fn bare_google_doc_ids_named_by_context_after_8589() {
+    for (allow, label, content) in [
+        // The reported false positives (allow).
+        (
+            true,
+            "#8589 repro URL",
+            "Source sheet: https://docs.google.com/spreadsheets/d/17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        ),
+        (
+            true,
+            "#8589 repro bare id in prose",
+            "hotstats-reporting spreadsheet id is 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk.",
+        ),
+        (
+            true,
+            "bare id after a camelCase key word",
+            "spreadsheetId: 1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms",
+        ),
+        (
+            true,
+            "33-char Drive folder id",
+            "Drive folder 1a2B3c4D5e6F7g8H9i0JkLmNoPqRsTuVw holds the exports",
+        ),
+        (
+            true,
+            "28-char legacy Drive id",
+            "old doc 0BwwA4oUTeiV1TGRPeTVjaWRDY1E",
+        ),
+        // Real-secret shapes (deny), each written next to a context word.
+        (
+            false,
+            "bare id with no context word",
+            "the value is 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk",
+        ),
+        (
+            false,
+            "GitHub token next to 'sheet'",
+            "sheet token ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "AWS key id next to 'docs'",
+            "docs key AKIAIOSFODNN7EXAMPLE", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "44-char key not opening with 1",
+            "spreadsheet key aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1Qw2Er3Ty4U", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "43-char base64url key (32 bytes)",
+            "doc secret 1B3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1Qw2Er3Ty4", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "44-char base64 with + and /",
+            "Google key 1B3dE5fG7hJ9kL1+N2pQ4rS6tU8vW0x/z1Qw2Er3Ty4U", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "34-char mixed-case credential",
+            "drive secret aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+        (
+            false,
+            "second credential after an admitted id",
+            "sheet 17PDzetUvtCHNrEpRtf8tqZJCnW5hFpRezS9gJ5t5AVk key aB3dE5fG7hJ9kL1mN2pQ4rS6tU8vW0xYz1", // pragma: allowlist secret
+        ),
+    ] {
+        let got = check_secret(content);
+        if allow {
+            assert!(
+                got.is_ok(),
+                "#8589 ({label}) must pass: {content}; got {got:?}"
+            );
+        } else {
+            assert!(
+                matches!(got, Err(FilterReject::PotentialSecret { .. })),
+                "#8589 ({label}) must STILL be refused: {content}"
+            );
+        }
+    }
 }
 
 /// Why (issues #8589, #277): `is_readable_alpha_run` admits a long alphabetic

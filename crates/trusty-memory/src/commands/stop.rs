@@ -32,25 +32,42 @@ const TERM_GRACE: Duration = Duration::from_secs(5);
 /// What: on macOS, `launchd::stop_with_unit` over [`list_processes`] and the
 /// real `com.trusty.memory` unit, whose daemon gets the shared termination
 /// grace (#8750); elsewhere, [`stop_daemons_in`] over the table alone. On a
-/// clean stop, removes the stale address file.
+/// clean stop, removes the stale address file. Under
+/// `TRUSTY_DATA_DIR_OVERRIDE` none of that runs: only the daemon proven to
+/// serve the override's socket is stopped (`sandbox::stop_target`, #9140).
 /// Test: `stop_terminates_a_launchd_daemon_the_process_table_misses`,
 /// `stop_terminates_the_daemon_and_spares_a_stdio_bridge`,
 /// `stop_reports_no_daemon_when_only_bridges_run`,
-/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`.
+/// `stop_fails_when_a_daemon_is_still_alive_after_sigkill`,
+/// `stop_under_a_data_dir_override_never_reaches_the_live_unit`.
 pub async fn handle_stop() -> Result<()> {
-    // #8750: launchd first, by label, so a supervised daemon is never missed.
-    #[cfg(target_os = "macos")]
-    launchd::stop_with_unit(
-        &list_processes(),
-        std::process::id(),
-        TERM_GRACE,
-        &launchd::UserLaunchAgent,
-        trusty_common::shutdown::termination_grace(),
-    )?;
-    #[cfg(not(target_os = "macos"))]
-    stop_daemons_in(&list_processes(), std::process::id(), TERM_GRACE)?;
+    // #9140: an override stops only its own daemon, never the live unit.
+    let target = sandbox::StopTarget::resolve().await?;
+    let procs = list_processes();
+    let me = std::process::id();
+    sandbox::stop_target(&target, &procs, me, TERM_GRACE, || stop_live(&procs, me))?;
     cleanup_addr_file();
     Ok(())
+}
+
+/// Stop the live install: the launchd unit first on macOS (#8750), then the
+/// process table.
+fn stop_live(procs: &[ProcInfo], me: u32) -> Result<()> {
+    // #8750: launchd first, by label, so a supervised daemon is never missed.
+    #[cfg(target_os = "macos")]
+    {
+        launchd::stop_with_unit(
+            procs,
+            me,
+            TERM_GRACE,
+            &launchd::UserLaunchAgent,
+            trusty_common::shutdown::termination_grace(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        stop_daemons_in(procs, me, TERM_GRACE)
+    }
 }
 
 /// Signal the daemons in `procs` (excluding `me`) until they exit.
@@ -312,6 +329,10 @@ fn pid_alive(_pid: u32) -> bool {
 #[cfg(target_os = "macos")]
 #[path = "stop_launchd.rs"]
 pub(crate) mod launchd;
+
+// #9140: what `stop` may signal under TRUSTY_DATA_DIR_OVERRIDE.
+#[path = "stop_sandbox.rs"]
+pub(crate) mod sandbox;
 
 #[cfg(test)]
 #[path = "stop_tests.rs"]

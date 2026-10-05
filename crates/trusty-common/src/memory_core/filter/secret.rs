@@ -16,6 +16,9 @@ use super::{FilterReject, is_git_sha_like};
 // module so this file stays under the 500-SLOC production cap.
 mod shapes;
 pub(crate) use shapes::*;
+// #8589: a bare Google document id, admitted only when the prose names one.
+mod google_bare_id;
+pub(crate) use google_bare_id::*;
 
 /// Scan `content` for the first token that looks like a genuine high-entropy
 /// secret (API key, access token, long base64/JWT-ish blob), explicitly
@@ -56,17 +59,27 @@ pub(crate) use shapes::*;
 /// stripped of surrounding punctuation before classification. The preview
 /// shows the leading characters and masks the tail so the secret itself is not
 /// echoed back verbatim.
+/// A bare Google document id is the one refused shape let through, and only
+/// when the same content names a Google document (issue #8589).
 /// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
 /// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`,
 /// `backtick_joined_spans_are_not_flagged`,
-/// `real_secrets_still_blocked_after_4312_backtick_split`.
+/// `real_secrets_still_blocked_after_4312_backtick_split`,
+/// `bare_google_doc_ids_named_by_context_after_8589`.
 pub fn find_secret_token(content: &str) -> Option<String> {
+    // #8589: computed once, and only when a token would otherwise be refused.
+    let mut names_doc: Option<bool> = None;
     // #4312: backticks delimit Markdown inline-code spans and occur in no
     // machine-generated credential, so split on them alongside whitespace.
     for raw in content.split(|c: char| c.is_whitespace() || c == '`') {
         let tok =
             raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
         if looks_like_secret(tok) {
+            if is_bare_google_doc_id(tok)
+                && *names_doc.get_or_insert_with(|| names_google_document(content))
+            {
+                continue;
+            }
             return Some(redact_token(tok));
         }
     }

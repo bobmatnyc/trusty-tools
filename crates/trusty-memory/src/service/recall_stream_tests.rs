@@ -132,3 +132,84 @@ async fn recall_streamed_visits_every_palace_in_bounded_batches() {
     );
     assert_eq!(state.registry.len(), 0, "nothing is left resident");
 }
+
+/// An empty palace is skipped without being opened, and the response says so.
+///
+/// Why (#9141 AC 2): 61 of the live estate's 104 palaces held no drawer, and
+/// every `memory_recall_all` cold-opened each one. The skip must never drop a
+/// palace that holds drawers, nor one the registry already holds.
+/// What: seeds four palaces, puts a drawer in two, keeps one empty palace
+/// resident, then asserts the filter keeps three, skips one, opens nothing
+/// (the registry count stays at 1), and that `memory_recall_all` reports
+/// `palaces_searched: 3` and `palaces_skipped: 1`.
+/// Test: this test.
+#[tokio::test]
+async fn recall_all_skips_empty_palaces_without_opening_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Each palace is created and filled through one registry, then removed
+    // from it, so no handle keeps a redb lock the disk read would trip on.
+    let writer = PalaceRegistry::new();
+    let mut palaces = Vec::new();
+    for i in 0..4 {
+        let id = PalaceId::new(format!("unit-{i:02}"));
+        let palace = Palace {
+            id: id.clone(),
+            name: id.as_str().to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: tmp.path().join(id.as_str()),
+        };
+        let handle = writer
+            .create_palace(tmp.path(), palace.clone())
+            .expect("create_palace");
+        if i < 2 {
+            let drawer =
+                trusty_common::memory_core::Drawer::new(uuid::Uuid::new_v4(), "a stored fact");
+            handle.kg.store().upsert_drawer(&drawer).expect("upsert");
+        }
+        drop(handle);
+        writer.remove(&id);
+        palaces.push(palace);
+    }
+    drop(writer);
+    // A dropped KG store's writer task releases the redb lock once the
+    // runtime polls it; wait for that rather than racing it.
+    for _ in 0..200 {
+        if palaces
+            .iter()
+            .all(|p| crate::console_metrics::disk_stats::read(&p.data_dir).is_ok())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let state = AppState::new(tmp.path().to_path_buf());
+    let resident = state
+        .registry
+        .open_palace(tmp.path(), &palaces[3].id)
+        .expect("open resident");
+    assert_eq!(state.registry.len(), 1);
+
+    let (kept, skipped) = super::recall_stream::skip_empty_palaces(&state, palaces.clone()).await;
+    let kept_ids: Vec<&str> = kept.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(kept_ids, ["unit-00", "unit-01", "unit-03"]);
+    assert_eq!(skipped, 1);
+    assert_eq!(state.registry.len(), 1, "the filter must open no palace");
+
+    let out = crate::tools::dispatch_tool(
+        &state,
+        "memory_recall_all",
+        serde_json::json!({"q": "stored fact", "top_k": 5}),
+    )
+    .await
+    .expect("memory_recall_all");
+    assert_eq!(out["palaces_searched"], 3, "{out}");
+    assert_eq!(out["palaces_skipped"], 1, "{out}");
+    assert_eq!(
+        state.registry.len(),
+        1,
+        "only the resident palace stays open"
+    );
+    drop(resident);
+}
