@@ -312,9 +312,11 @@ fn run_json(result: &ReviewResult) -> (Verdict, bool, serde_json::Value) {
 /// the citation gate withheld stays APPROVE and exits 0. The grade is
 /// recomputed from the survivors (none) under the leak-J rule, so the model's
 /// A- becomes A+; `run --json` carries `verdict_status` and the counts.
+/// The quote is under `citation_check`'s 12-character floor, so the #8905
+/// gate withholds it, not the pre-grade hygiene pass.
 #[tokio::test]
 async fn run_review_all_withheld_approve_stays_approve_and_exits_zero() {
-    let nit = billing_finding("style", "`ledger.flush_all()` is slow.", "low", SUM_LINE);
+    let nit = billing_finding("style", "`flush_all()` is slow.", "low", SUM_LINE);
     let result = review_payload(
         "Minor style nit only.",
         "APPROVE",
@@ -386,11 +388,13 @@ async fn run_review_all_withheld_approve_star_stays_approve_star_and_exits_zero(
 /// AQ-7t counterpart: a REQUEST_CHANGES review whose only finding was withheld
 /// still becomes UNKNOWN with no grade and an error, so `run --json` exits
 /// non-zero. Pins the blocking path against the two approving ones above.
+/// The short quote reaches the #8905 gate; a longer absent quote is dropped
+/// before grading, which relaxes the verdict to APPROVE (#4042).
 #[tokio::test]
 async fn run_review_all_withheld_request_changes_is_unknown() {
     let bug = billing_finding(
         "data-loss",
-        "`ledger.flush_all()` loses the total.",
+        "`flush_all()` loses the total.",
         "high",
         SUM_LINE,
     );

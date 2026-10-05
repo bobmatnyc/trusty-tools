@@ -265,8 +265,9 @@ pub(crate) struct GateInputs<'a> {
 /// withheld findings, scrubs their citations from the body, prepends the
 /// report's note, and on `Unknown` clears the grade and records the note as
 /// the error — the same shape the citation gate uses. When no round ran,
-/// [`withhold_unverified`] withholds every finding and the review is UNKNOWN
-/// (Bob's "withhold all" ruling, 2026-09-30). #9188 then re-checks every
+/// [`withhold_unverified`] withholds every finding (Bob's "withhold all"
+/// ruling, 2026-09-30); a blocking review is UNKNOWN, an approving one keeps
+/// its verdict (AQ-7t). #9188 then re-checks every
 /// survivor at the head (L), makes a blocking review with no survivor
 /// `Unknown` (A, J; an approving one keeps its verdict, AQ-7t), and keeps the model's prose only when it rests on survivors (C).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
@@ -348,14 +349,17 @@ pub const NO_VERIFIER_REASON: &str = "no verifier";
 /// finding is posted, so with no round nothing is.
 /// What: no findings → nothing to do, verdict untouched. Otherwise moves every
 /// finding into `result.withheld_findings` with reason [`NO_VERIFIER_REASON`],
-/// prepends "N findings withheld: no verifier (<why>)", and sets the verdict
-/// to `Unknown` with no grade and the note as the error — no verdict rests on
-/// findings nobody checked. With verification enabled but no verifier built,
+/// prepends "N findings withheld: no verifier (<why>)", and settles the
+/// verdict with `settle_withheld` and no survivors: APPROVE / APPROVE* keeps
+/// its verdict and exits 0 (AQ-7t, Bob 2026-10-05); any other verdict is
+/// `Unknown` with no grade and the note as the error, so no blocking verdict
+/// rests on findings nobody checked. With verification enabled but no verifier built,
 /// each finding is first marked `Unverifiable` and counted in
 /// `withheld_unverified_count` (the #4459 alarm); with verification disabled by
 /// config, an operator choice, they keep no outcome and are not counted.
 /// Test: `run_review_enabled_without_a_verifier_withholds_every_finding`,
-/// `run_review_disabled_verification_withholds_every_finding`.
+/// `run_review_disabled_verification_withholds_every_finding`,
+/// `run_review_no_verifier_all_withheld_approve_stays_approve_and_exits_zero`.
 fn withhold_unverified(result: &mut ReviewResult, enabled: bool) {
     if result.findings.is_empty() {
         return;
@@ -383,9 +387,12 @@ fn withhold_unverified(result: &mut ReviewResult, enabled: bool) {
     let note = format!("{count} findings withheld: no verifier ({why})");
     result.review_body = withhold::scrub_body(&result.review_body, &cites);
     result.review_body = format!("{note}\n\n{}", result.review_body);
-    result.verdict = Verdict::Unknown;
-    result.grade = None;
-    result.error.get_or_insert(note);
+    // AQ-7t (Bob 2026-10-05): keep APPROVE, as on the verifier path.
+    result.verdict = withhold::settle_withheld(result.verdict.clone(), &[]);
+    if result.verdict == Verdict::Unknown {
+        result.grade = None;
+        result.error.get_or_insert(note);
+    }
 }
 
 /// Mark every finding with no recorded outcome `Unverifiable` (#8904).

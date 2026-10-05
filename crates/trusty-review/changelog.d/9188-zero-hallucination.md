@@ -4,11 +4,12 @@ Fixed
   review (REQUEST_CHANGES or BLOCK) is UNKNOWN with no grade and an error, so
   `run --json` exits non-zero. An APPROVE or APPROVE* review keeps its
   verdict and exits 0, whichever gate withheld its findings (citation gate,
-  verifier refutation or UNVERIFIABLE, head re-check); it is graded from the
-  posted findings alone, so with none it is `A+` for APPROVE and `C+` for
-  APPROVE*, and it carries `withheld_count`, `withheld_by_reason` and
-  `verdict_status: "no_verified_findings"`. A review whose findings no
-  verifier round checked is still UNKNOWN, as before (#4044).
+  verifier refutation or UNVERIFIABLE, head re-check, or no verifier round
+  because verification is disabled or no verifier could be built); it is
+  graded from the posted findings alone, so with none it is `A+` for APPROVE
+  and `C+` for APPROVE*, and it carries `withheld_count`, `withheld_by_reason`
+  and `verdict_status: "no_verified_findings"`. Before, a review whose
+  findings no verifier round checked was always UNKNOWN (#4044).
 - A finding with any quoted snippet missing from the cited file is withheld;
   it is no longer kept as `citation_partial` (#9188 B).
 - The reviewer's prose and the map-reduce synthesis summary are kept only
