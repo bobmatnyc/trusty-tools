@@ -7,7 +7,9 @@
 //! What: every drawer a maintenance path deletes is appended as one JSON line to
 //! `<palace data_dir>/maintenance_deletions.jsonl`: time, palace, drawer id,
 //! reason, the surviving drawer id and cosine score where one exists, and the
-//! pid of the deleting process. Each deleting pass also logs one summary at
+//! pid of the deleting process. #8729: a deletion made through
+//! [`PalaceHandle::forget_for_maintenance`] also copies the drawer's content,
+//! room, tags, importance and creation time, so it can be recreated. Each deleting pass also logs one summary at
 //! `warn`. #8729 (owner ruling): every removal is also logged on its own `warn`
 //! line naming the palace, drawer id and reason, so the daemon log alone shows
 //! which drawers went and why. `trusty-memory palace deletions` reads the file
@@ -101,6 +103,44 @@ pub struct MaintenanceDeletion {
     pub score: Option<f32>,
     /// Pid of the process that deleted it; several processes may write one palace.
     pub pid: u32,
+    /// #8729: a copy of the removed drawer, so it can be re-remembered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawer: Option<RemovedDrawer>,
+}
+
+/// What a journal record keeps of a removed drawer (#8729).
+///
+/// Why: an id alone names a lost drawer but cannot bring it back.
+/// What: the fields `remember` needs to recreate the drawer.
+/// Test: `maintenance_log_tests::every_dream_removal_journals_a_recoverable_copy`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RemovedDrawer {
+    /// The drawer body, verbatim.
+    pub content: String,
+    /// Room the drawer lived in.
+    pub room_id: Uuid,
+    /// Tags, in stored order.
+    pub tags: Vec<String>,
+    /// Stored importance.
+    pub importance: f32,
+    /// When the drawer was first written.
+    pub created_at: DateTime<Utc>,
+    /// Tier C slot the drawer held, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fact_key: Option<String>,
+}
+
+impl From<&Drawer> for RemovedDrawer {
+    fn from(d: &Drawer) -> Self {
+        Self {
+            content: d.content().to_string(),
+            room_id: d.room_id,
+            tags: d.tags.clone(),
+            importance: d.importance,
+            created_at: d.created_at,
+            fact_key: d.fact_key.clone(),
+        }
+    }
 }
 
 impl MaintenanceDeletion {
@@ -114,7 +154,14 @@ impl MaintenanceDeletion {
             survivor_id: None,
             score: None,
             pid: std::process::id(),
+            drawer: None,
         }
+    }
+
+    /// #8729: attach a recoverable copy of the removed drawer.
+    pub fn with_drawer(mut self, drawer: &Drawer) -> Self {
+        self.drawer = Some(RemovedDrawer::from(drawer));
+        self
     }
 
     /// Attach the surviving drawer and, for dedup, the similarity score.
@@ -306,10 +353,11 @@ impl PalaceHandle {
     ) -> Result<ForgetOutcome> {
         // #9172: `forget_removing`, not `forget`, so a maintenance deletion of
         // a survivor writes this one record rather than two.
-        let Some(_removed) = self.forget_removing(id).await? else {
+        let Some(removed) = self.forget_removing(id).await? else {
             return Ok(ForgetOutcome::NotFound);
         };
-        let mut rec = MaintenanceDeletion::new(&self.id, id, reason);
+        // #8729: the record carries the removed drawer, not only its id.
+        let mut rec = MaintenanceDeletion::new(&self.id, id, reason).with_drawer(&removed);
         if let Some((survivor_id, score)) = survivor {
             rec = rec.with_survivor(survivor_id, score);
         }
@@ -335,7 +383,8 @@ pub(crate) fn record_survivor_forget(handle: &PalaceHandle, drawer: &Drawer) {
             &handle.id,
             drawer.id,
             DeletionReason::ForgetOfMergedSurvivor,
-        );
+        )
+        .with_drawer(drawer);
         record(Some(dir), &rec);
     }
 }

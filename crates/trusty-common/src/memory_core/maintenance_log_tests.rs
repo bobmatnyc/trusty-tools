@@ -364,3 +364,75 @@ fn a_lock_or_rotation_failure_still_appends_the_record() {
     assert!(live.contains(&first.drawer_id.to_string()), "{live}");
     assert!(live.contains(&second.drawer_id.to_string()), "{live}");
 }
+
+/// Why (#8729): the journal named each drawer a dream pass removed but held
+/// none of its text, so a wrongly removed drawer could be identified and not
+/// recovered.
+/// What: one dream cycle removes a duplicate (dedup), a two-word drawer
+/// (content prune) and an aged, unimportant drawer (prune). Every journal
+/// line, read as raw JSON, must carry the removed drawer's content, tags and
+/// importance under `drawer`.
+#[tokio::test]
+async fn every_dream_removal_journals_a_recoverable_copy() {
+    use super::retrieval::RememberOptions;
+    let (_dir, data_dir, handle) = open_palace("recoverable");
+    let dup = "Rust uses HNSW for vector search";
+    let short = "hello world";
+    let stale = "very stale fact nobody cares about";
+    for content in [dup, dup] {
+        handle
+            .remember(content.into(), RoomType::Backend, vec!["rust".into()], 0.6)
+            .await
+            .unwrap();
+    }
+    handle
+        .remember_with_options(
+            short.into(),
+            RoomType::General,
+            vec![],
+            0.5,
+            RememberOptions::forced(),
+        )
+        .await
+        .unwrap();
+    let stale_id = handle
+        .remember(stale.into(), RoomType::General, vec![], 0.01)
+        .await
+        .unwrap();
+    for d in handle.drawers.write().iter_mut() {
+        if d.id == stale_id {
+            d.created_at = Utc::now() - Duration::days(60);
+        }
+    }
+    let originals: std::collections::HashMap<String, (String, Vec<String>)> = handle
+        .drawers
+        .read()
+        .iter()
+        .map(|d| (d.id.to_string(), (d.content().to_string(), d.tags.clone())))
+        .collect();
+
+    let stats = Dreamer::new(dedup_only_config())
+        .dream_cycle(&handle)
+        .await
+        .unwrap();
+    assert_eq!(
+        (stats.merged, stats.content_pruned, stats.pruned),
+        (1, 1, 1),
+        "{stats:?}"
+    );
+
+    let raw = std::fs::read_to_string(journal_path(&data_dir)).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "{raw}");
+    for line in &lines {
+        let id = line["drawer_id"].as_str().unwrap();
+        let (content, tags) = &originals[id];
+        let copy = &line["drawer"];
+        assert_eq!(copy["content"], content.as_str(), "{line}");
+        assert_eq!(copy["tags"], serde_json::json!(tags), "{line}");
+        assert!(copy["importance"].is_number(), "{line}");
+    }
+}
