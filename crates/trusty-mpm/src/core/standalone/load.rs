@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use trusty_common::url_userinfo::{ends_url, strip_url_secret, userinfo_end};
 
 use super::registry::ManagedRegistry;
+use crate::core::remote_url_redact::{authority_userinfo_end, is_git_scheme};
 
 /// The marker file written into every managed project.
 ///
@@ -191,31 +192,6 @@ fn may_carry_secret(url: &str) -> bool {
         }
     };
     http || userinfo.contains(':')
-}
-
-/// [`userinfo_end`] for a stored URL, which is not free text (#9227).
-///
-/// What: the authority runs to the first `/`, `?` or `#` only, so a quote or
-/// whitespace cannot end it; its last `@` ends the userinfo. With no `@` but a
-/// `:`, the search runs to the end of the URL, as `userinfo_end`'s over-read
-/// does. Never ends before `userinfo_end`'s cut.
-/// Test: `clone_url_strips_or_refuses`.
-fn authority_userinfo_end(tail: &str) -> Option<usize> {
-    let authority = &tail[..tail.find(['/', '?', '#']).unwrap_or(tail.len())];
-    if let Some(at) = authority.rfind('@') {
-        return Some(at);
-    }
-    let colon = authority.find(':')?;
-    tail[colon..].rfind('@').map(|i| colon + i)
-}
-
-/// Whether git reads `scheme` as a URL scheme: an alphanumeric, then
-/// alphanumerics, `+`, `-` or `.` (git's `is_urlschemechar`).
-fn is_git_scheme(scheme: &str) -> bool {
-    scheme.starts_with(|c: char| c.is_ascii_alphanumeric())
-        && scheme
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 /// What an error may print of a URL [`may_carry_secret`] admitted:
