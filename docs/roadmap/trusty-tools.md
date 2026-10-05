@@ -50,7 +50,9 @@ console reads from it. `trusty-events` is published to crates.io because it
 ships its own binary, and ADR-0043 allows installs from the registry only. It
 makes no stability promise to outside users, and no other crate links it.
 
-**4. trusty-mpm 2.0.0 — the architect.** See "What 2.0.0 brings" below.
+**4. trusty-mpm 2.0.0 — the architect.** Anticipated ship date 2026-11-27, the
+due date of the GitHub milestone "trusty-mpm 2.0.0" (#97). See "What 2.0.0
+brings" below.
 
 **5. trusty-mpm 2.1.0 — the mpm dashboard.** The console shows the event
 stream as a scrolling list and as a call tree whose nodes appear while each
@@ -103,6 +105,12 @@ published summary shows it with its stage: Now, Next or Later. Other
 milestones are listed as links. GitHub supplies the progress counts each time
 this section is generated.
 
+trusty-git-analytics and trusty-audit moved to their own repository (bobmatnyc/trusty-git-analytics).
+
+Ship dates are anticipated targets taken from GitHub milestone due dates, not
+commitments. TBD means a versioned milestone has no due date yet. Backlog
+milestones carry no ship date.
+
 <!-- BEGIN GENERATED: roadmap -->
 
 ### trusty-mpm
@@ -111,43 +119,43 @@ this section is generated.
 
 trusty-mpm 1.8.0 is the base before the architect. Agents, skills and PM instructions leave the binaries and ship from content/ with their own versions. Every trusty service talks over a Unix socket; only the console listens on the network. Worktrees are tracked in one machine-wide registry and reclaimed once their work merges. A new session starts with much less context. pm-guard keeps the checks that stop real harm, and the Claude Code sandbox takes over the rest.
 
-35 of 107 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/111)
+Anticipated ship date: 2026-11-13 · 61 of 117 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/111)
 
 #### 1.9.0 · Next
 
 trusty-mpm 1.9.0 records every event on one event bus. trusty-mpm, trusty-code, trusty-agents and trusty-analyze record what they do as typed events. The bus moves out of the console into trusty-events, a crate for trusty components only, served over a Unix socket. The console reads from it.
 
-1 of 9 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/124)
+Anticipated ship date: 2026-11-20 · 1 of 6 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/124)
 
 #### 2.0.0 · Next
 
 trusty-mpm 2.0.0 adds an architect: one session that watches all of your projects, handles what it can, and asks you about the rest. You create it with a single request, and it comes with its own instructions and writing style, made for watching and reporting instead of for running coding work. Each project can be given its own chat channel, starting with Slack, so the architect can send you a question and take your answer there. Incoming messages go through a routing table that refuses anything not explicitly allowed, and a message can only answer a question the architect actually asked. One architect serves every project, so the same question never reaches you twice.
 
-8 of 22 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/97)
+Anticipated ship date: 2026-11-27 · 8 of 22 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/97)
 
 #### 2.1.0 · Later
 
 trusty-mpm 2.1.0 is the mpm dashboard. The console shows the event stream as a scrolling list and as a call tree whose nodes appear while each action runs. Any event opens the object it links to, and each view has a screensaver mode.
 
-43 of 50 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/72)
+Anticipated ship date: 2026-12-04 · 48 of 57 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/72)
 
 #### 2.2.0 · Later
 
 trusty-mpm 2.2.0 adds Claude Code mods support. A trusty-mpm mod watches sessions from inside Claude Code instead of reading the tmux screen, sends what it sees to the event bus, shows status inside the session, and adds a second, fail-closed layer to pm-guard.
 
-0 of 5 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/125)
+Anticipated ship date: 2026-12-11 · 0 of 5 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/125)
 
 #### cross-harness · Later
 
 Work so trusty-mpm can drive coding harnesses other than Claude Code — Codex and Cursor — each independently usable behind one orchestration layer, without breaking any harness already deployed.
 
-1 of 9 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/99)
+Anticipated ship date: 2026-11-27 · 1 of 10 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/99)
 
 Other open milestones:
 
-- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · 721 of 772 items done
-- [Session, worktree & daemon lifecycle · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/64) · 67 of 82 items done
-- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 59 of 91 items done
+- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 2026-10-16 · 94 of 113 items done
+- [Session, worktree & daemon lifecycle · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/64) · 2026-11-13 · 71 of 83 items done
+- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · Backlog · 737 of 774 items done
 
 ### trusty-secrets
 
@@ -155,127 +163,73 @@ Other open milestones:
 
 trusty-secrets 0.1.0 is secrets as a standalone, public crate with its own releases, like trusty-memory. You keep project and owner secrets in it, starting with the macOS Keychain, and manage them on the console's secrets page. Values stay out of agent transcripts. trusty-mpm and the console use the crate; they do not contain it.
 
-1 of 21 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/123)
-
-### tc-services
-
-Open milestones:
-
-- [Backlog · tc-services](https://github.com/bobmatnyc/trusty-tools/milestone/82) · 1 of 1 items done
+Anticipated ship date: 2026-11-27 · 3 of 23 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/123)
 
 ### trusty-agents
 
 Open milestones:
 
-- [Backlog · agents](https://github.com/bobmatnyc/trusty-tools/milestone/73) · 94 of 109 items done
-- [1.0 — assistant platform](https://github.com/bobmatnyc/trusty-tools/milestone/83) · 36 of 40 items done
-- [trusty agents mvp](https://github.com/bobmatnyc/trusty-tools/milestone/86) · 21 of 29 items done
-- [0.39.5 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/100) · no items yet
-
-### trusty-agents-common
-
-Open milestones:
-
-- [0.8.3 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/101) · no items yet
-
-### trusty-audit
-
-Open milestones:
-
-- [Backlog · audit](https://github.com/bobmatnyc/trusty-tools/milestone/75) · 17 of 17 items done
+- [trusty agents mvp](https://github.com/bobmatnyc/trusty-tools/milestone/86) · 2026-10-23 · 22 of 29 items done
+- [1.0 — assistant platform](https://github.com/bobmatnyc/trusty-tools/milestone/83) · 2026-10-30 · 36 of 40 items done
+- [Backlog · agents](https://github.com/bobmatnyc/trusty-tools/milestone/73) · Backlog · 102 of 113 items done
 
 ### trusty-code
 
 Open milestones:
 
-- [R1 · Reliable independent core](https://github.com/bobmatnyc/trusty-tools/milestone/54) · 19 of 22 items done
-- [R2 · Shared instructions, agents & skills](https://github.com/bobmatnyc/trusty-tools/milestone/59) · 13 of 16 items done
-- [R3 · MCP & channel interoperability](https://github.com/bobmatnyc/trusty-tools/milestone/60) · 2 of 2 items done
-- [Backlog · code](https://github.com/bobmatnyc/trusty-tools/milestone/76) · 15 of 20 items done
-- [v0.7.0 · Claude Code TUI parity + PM-delegated coding tasks](https://github.com/bobmatnyc/trusty-tools/milestone/87) · 29 of 44 items done
-- [0.7.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/102) · 2 of 5 items done
+- [0.7.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/102) · 2026-10-23 · 2 of 5 items done
+- [R1 · Reliable independent core](https://github.com/bobmatnyc/trusty-tools/milestone/54) · 2026-11-06 · 19 of 22 items done
+- [R2 · Shared instructions, agents & skills](https://github.com/bobmatnyc/trusty-tools/milestone/59) · 2026-11-06 · 14 of 16 items done
+- [v0.7.0 · Claude Code TUI parity + PM-delegated coding tasks](https://github.com/bobmatnyc/trusty-tools/milestone/87) · 2026-11-06 · 29 of 44 items done
+- [Backlog · code](https://github.com/bobmatnyc/trusty-tools/milestone/76) · Backlog · 15 of 20 items done
 
 ### trusty-common
 
 Open milestones:
 
-- [0.52.3 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/103) · 3 of 3 items done
+- [0.53.4 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/126) · 2026-10-16 · 0 of 3 items done
 
 ### trusty-console
 
 Open milestones:
 
-- [Backlog · console](https://github.com/bobmatnyc/trusty-tools/milestone/77) · 20 of 24 items done
-- [0.12.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/104) · 1 of 2 items done
-
-### trusty-embedderd
-
-Open milestones:
-
-- [Backlog · embedderd](https://github.com/bobmatnyc/trusty-tools/milestone/78) · 2 of 3 items done
-
-### trusty-embedderd-py
-
-Open milestones:
-
-- [0.1.5 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/105) · no items yet
-
-### trusty-git-analytics
-
-Open milestones:
-
-- [Backlog · tga](https://github.com/bobmatnyc/trusty-tools/milestone/56) · 23 of 23 items done
-
-### trusty-installer
-
-Open milestones:
-
-- [Backlog · installer](https://github.com/bobmatnyc/trusty-tools/milestone/79) · 7 of 8 items done
+- [0.12.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/104) · 2026-10-09 · 1 of 2 items done
+- [Backlog · console](https://github.com/bobmatnyc/trusty-tools/milestone/77) · Backlog · 21 of 24 items done
 
 ### trusty-mcp
 
 Open milestones:
 
-- [Backlog · mcp](https://github.com/bobmatnyc/trusty-tools/milestone/80) · 4 of 7 items done
+- [Backlog · mcp](https://github.com/bobmatnyc/trusty-tools/milestone/80) · Backlog · 4 of 7 items done
 
 ### trusty-memory
 
 Open milestones:
 
-- [Backlog · memory (triaged)](https://github.com/bobmatnyc/trusty-tools/milestone/81) · 19 of 25 items done
-- [0.28.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/118) · 9 of 10 items done
+- [0.28.4 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/127) · 2026-10-16 · 1 of 6 items done
+- [Backlog · memory (triaged)](https://github.com/bobmatnyc/trusty-tools/milestone/81) · Backlog · 20 of 32 items done
 
 ### trusty-review
 
 Open milestones:
 
-- [0.36.1 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/108) · 6 of 7 items done
-- [0.37.0 · feature](https://github.com/bobmatnyc/trusty-tools/milestone/114) · 0 of 1 items done
-- [0.36.3 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/116) · no items yet
+- [0.38.0 · feature](https://github.com/bobmatnyc/trusty-tools/milestone/128) · 2026-10-16 · 0 of 2 items done
 
 ### trusty-search
 
-#### 0.54.3 · Now
+Open milestones:
 
-trusty-search 0.54.3 fixes write paths that fall back to writing inside the repository checkout instead of following the index registry, which can let an ordinary restart overwrite the index a production standby is serving reads from.
-
-2 of 2 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/98)
-
-Other open milestones:
-
-- [Backlog · search](https://github.com/bobmatnyc/trusty-tools/milestone/58) · 68 of 76 items done
-- [0.54.5 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/109) · 26 of 29 items done
-- [0.54.4 · feature](https://github.com/bobmatnyc/trusty-tools/milestone/110) · 0 of 1 items done
+- [0.54.8 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/129) · 2026-10-16 · 6 of 7 items done
+- [0.54.9 · feature](https://github.com/bobmatnyc/trusty-tools/milestone/130) · 2026-10-16 · 3 of 4 items done
+- [Backlog · search](https://github.com/bobmatnyc/trusty-tools/milestone/58) · Backlog · 72 of 77 items done
 
 ### Across the workspace
 
 Open milestones:
 
-- [Advisory exception review — 2026-09](https://github.com/bobmatnyc/trusty-tools/milestone/70) · 0 of 1 items done
-- [Backlog · analyze/review](https://github.com/bobmatnyc/trusty-tools/milestone/74) · 11 of 16 items done
-- [Issue management](https://github.com/bobmatnyc/trusty-tools/milestone/94) · 10 of 14 items done
-- [Instructional content](https://github.com/bobmatnyc/trusty-tools/milestone/95) · 9 of 9 items done
-- [Backlog · optimize](https://github.com/bobmatnyc/trusty-tools/milestone/121) · 10 of 30 items done
+- [Issue management](https://github.com/bobmatnyc/trusty-tools/milestone/94) · 2026-11-06 · 11 of 14 items done
+- [Backlog · analyze/review](https://github.com/bobmatnyc/trusty-tools/milestone/74) · Backlog · 15 of 24 items done
+- [Backlog · optimize](https://github.com/bobmatnyc/trusty-tools/milestone/121) · Backlog · 18 of 32 items done
 
 <!-- END GENERATED: roadmap -->
 

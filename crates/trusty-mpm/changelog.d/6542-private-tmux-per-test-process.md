@@ -1,3 +1,0 @@
-Fixed
-- Test binaries no longer reach the operator's tmux server: each one runs on its own default tmux server under `/tmp/tm-tmux-u<uid>/<pid>`, started config-free on the first tmux use and reaped at exit, and the tests that spawn sessions use a per-test private `-L` server. `TmuxDriver::discover` now honours the `with_tmux_binary` test scope (#6542).
-- The reaper for a killed test run's leftover tmux directory acts only on Unix sockets and private directories owned by the current uid, checked without following symlinks and re-checked just before each `kill-server`, so a planted symlink cannot make a test run kill another tmux server (#6542).

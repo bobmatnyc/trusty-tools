@@ -81,7 +81,7 @@ LANE	features	trusty-memory/daemon
 LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support
-LANE	features	trusty-secrets/api,trusty-secrets/store,trusty-secrets/test-support
+LANE	features	trusty-secrets/api,trusty-secrets/server,trusty-secrets/store,trusty-secrets/test-support
 #
 # ---------------------------------------------------------------------------
 # NO-CFG — gates no `cfg` site in the crate's own src/**, verified per run.
