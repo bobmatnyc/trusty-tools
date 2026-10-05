@@ -1112,54 +1112,53 @@ mod tests {
         }
     }
 
-    /// Restores a directory's mode on drop, so the temp root can be removed.
-    struct Writable(PathBuf);
-    impl Drop for Writable {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
-            drop(std::fs::set_permissions(
-                &self.0,
-                std::fs::Permissions::from_mode(0o755),
-            ));
-        }
+    /// A clone command that starts a staging tree and then fails.
+    fn failing_clone(_src: &Path, staging: &Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "mkdir -p \"$1\" && echo 'no clone' >&2 && exit 1",
+            "sh",
+        ])
+        .arg(staging);
+        cmd
     }
 
-    /// #8794: a replace that fails partway (slot-6: `Directory not empty`)
-    /// leaves a tree in an unknown state. It must write NO marker — the old
-    /// code stamped `ColdDirectory("<error>")`, which read as seeded — and the
-    /// failure is recorded beside the slot instead.
+    /// #8794: a seed that fails partway leaves a tree in an unknown state. It
+    /// must write NO marker — the old code stamped `ColdDirectory("<error>")`,
+    /// which read as seeded — and the failure is recorded beside the slot.
+    /// #9239: the replace is now one rename, so the failure is the clone's.
     #[test]
     fn a_failed_replace_leaves_no_seeded_marker() {
         if !cfg!(target_os = "macos") {
             // No clone runs off macOS, so there is no replace to fail.
             return;
         }
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("temp root");
         let shared = warm_shared(tmp.path());
-        let pool = pool(&tmp.path().join("pool"));
+        let pool = pool(&tmp.path().join("pool")).with_cloner(failing_clone);
         let slot = pool.slot_path(0);
-        let pinned = slot.join("debug/pinned");
-        std::fs::create_dir_all(&pinned).expect("an unseeded slot tree");
-        std::fs::write(pinned.join("artifact.rlib"), b"x").expect("an undeletable file");
-        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555))
-            .expect("make the replace fail");
-        let _restore = Writable(pinned.clone());
+        std::fs::create_dir_all(slot.join("debug")).expect("an unseeded slot tree");
+        std::fs::write(slot.join("debug/artifact.rlib"), b"x").expect("an artifact");
 
         let err = pool
             .seed(0, Some(&shared))
-            .expect_err("a failed replace is a failed seed");
+            .expect_err("a failed clone is a failed seed");
 
         assert!(
-            matches!(&err, SlotPoolError::SeedFailed { detail, .. } if detail.contains("could not replace")),
+            matches!(&err, SlotPoolError::SeedFailed { detail, .. } if detail.contains("cp -c exited")),
             "{err:?}"
+        );
+        assert!(
+            slot.join("debug/artifact.rlib").is_file(),
+            "a failed clone leaves the slot as it was"
         );
         assert!(
             !slot.join(SEED_MARKER).exists(),
             "a failed seed must leave no marker"
         );
         let recorded = std::fs::read_to_string(seed_failure_path(&slot)).expect("the failure");
-        assert!(recorded.contains("could not replace"), "{recorded}");
+        assert!(recorded.contains("no clone"), "{recorded}");
         assert!(matches!(
             pool.reserve_path(0).expect("a writable root"),
             SlotReservation::Seeding(_)
