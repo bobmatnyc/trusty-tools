@@ -36,6 +36,7 @@ use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowe
 mod graph_arm;
 use graph_arm::graph_nearest;
 
+mod quiet_insert;
 mod replay;
 
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
@@ -110,6 +111,10 @@ pub enum HnswStoreError {
     /// A maintenance write outran its deadline and was rolled back (#8749).
     #[error(transparent)]
     WriteDeadline(#[from] WriteTxnError),
+    /// #9187: an insert that `hnsw_rs` prints from could not run with stdout
+    /// silenced, so it did not run.
+    #[error("could not silence stdout around an hnsw_rs insert: {0}")]
+    StdoutGuard(std::io::Error),
     /// Returned by every write method when the store is in snapshot
     /// (read-only) mode. Callers should surface this verbatim — the
     /// message is the canonical guidance for issue #59.
@@ -248,6 +253,8 @@ pub struct HnswStore {
     shadowed: RwLock<std::collections::HashSet<u64>>,
     /// #8749: the palace a deadline abort names; see [`Self::with_palace`].
     palace: Arc<str>,
+    /// #9187: serialises graph inserts so `quiet_insert` reads an exact count.
+    insert_gate: parking_lot::Mutex<()>,
     /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
     ///
     /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
@@ -354,7 +361,7 @@ impl HnswStore {
         }
         // #9141: parallel insert into the single-layer graph (owner ruling
         // 25). See `replay` for what that does and does not guarantee.
-        replay::replay(&index, &live);
+        replay::replay(&index, &live).map_err(HnswStoreError::StdoutGuard)?;
 
         // Also consider the highest mapped id from VECTOR_KEYS in case
         // VECTORS was cleared but the mapping survived (defensive).
@@ -393,6 +400,7 @@ impl HnswStore {
             read_only,
             shadowed: RwLock::new(std::collections::HashSet::new()),
             palace: Arc::from("unnamed palace"),
+            insert_gate: parking_lot::Mutex::new(()),
             #[cfg(test)]
             compact_race_barrier: RwLock::new(None),
             #[cfg(test)]
@@ -526,7 +534,11 @@ impl HnswStore {
         if shadows_previous {
             self.shadowed.write().insert(vector_id);
         }
-        self.index.read().insert((vector, vector_id as usize));
+        // #9187: the redb row is committed either way; on Err the next open
+        // replays it.
+        let _gate = self.insert_gate.lock();
+        quiet_insert::insert_quietly(&self.index.read(), vector, vector_id as usize)
+            .map_err(HnswStoreError::StdoutGuard)?;
 
         Ok(vector_id)
     }
