@@ -272,7 +272,8 @@ pub(crate) struct GateInputs<'a> {
 /// `run_review_enabled_without_a_verifier_withholds_every_finding`,
 /// `run_review_disabled_verification_withholds_every_finding`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`,
-/// `a_confirmed_finding_that_does_not_resolve_is_withheld`.
+/// `run_review_posts_a_confirmed_removal_finding_at_its_deletion_line`,
+/// `run_review_keeps_a_clean_review_byte_for_byte`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,

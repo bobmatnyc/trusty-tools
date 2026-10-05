@@ -318,8 +318,8 @@ async fn run_review_all_withheld_review_carries_no_grade() {
 
 /// #9188 B, end to end: a CONFIRMED finding with one quoted snippet absent
 /// from the file is withheld. The citation gate drops it before the verifier
-/// runs, so this exercises B, not L (L's tests are the `withhold_unresolved_*`
-/// tests and `run_review_withholds_a_survivor_whose_rewritten_range_does_not_resolve`).
+/// runs, so this exercises B, not L; L's tests are the `withhold_unresolved_*`
+/// tests in `withheld_contract_tests.rs`.
 #[tokio::test]
 async fn a_confirmed_finding_with_an_absent_quote_is_withheld() {
     let finding = billing_finding(

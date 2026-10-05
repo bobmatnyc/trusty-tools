@@ -76,6 +76,33 @@ async fn withhold_unresolved_withholds_a_survivor_off_its_line() {
     );
 }
 
+/// #9188 L, failing through L alone: the gate moves a two-line `[code: …]`
+/// range onto a quote spanning three lines and keeps the finding as
+/// re-anchored, but the rewritten range does not contain the whole quote
+/// (#9188 I). Only the re-check withholds it. `run_review` cannot reach this
+/// shape today: `citation_check` (#4042) withholds every ranged locator first.
+#[tokio::test]
+async fn withhold_unresolved_withholds_a_range_the_gate_rewrote_short() {
+    let index = LineIndex::from_filtered(&billing().await);
+    let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
+    result.verdict = Verdict::RequestChanges;
+    result.findings = vec![finding(
+        10,
+        "`amounts.iter().sum::<u64>()` overflows [code: `src/billing.rs:2-3` — \"sum::<u64>(); let value_11 = step_11(input); let value_12\"].",
+    )];
+    gate_posted_findings_with_index(&mut result, &index);
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert!(result.findings[0].description.contains("`src/billing.rs:10-11`"));
+
+    assert_eq!(withhold_unresolved(&mut result, &index), 1);
+    assert!(result.findings.is_empty());
+    assert!(
+        result.withheld_findings[0]
+            .reason
+            .starts_with(UNRESOLVED_AT_HEAD_REASON)
+    );
+}
+
 /// #9188 L, criterion 4: an error reading the cited file withholds, never keeps.
 #[tokio::test]
 async fn withhold_unresolved_fails_closed_on_a_file_outside_the_diff() {
