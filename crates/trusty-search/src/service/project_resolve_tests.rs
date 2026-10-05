@@ -32,6 +32,7 @@ fn cand(
         repo_identity: identity.map(str::to_string),
         kind,
         resident: true,
+        reindexed_unix: None,
         corpus_modified_unix: corpus,
         // Colocated, so a `LiveDisk` read never reaches the real data dir.
         colocated: true,
@@ -50,6 +51,9 @@ const NO_DERIVE: AsBuilt = AsBuilt { derived: None };
 impl Disk for AsBuilt {
     fn kind(&self, c: &Candidate) -> RootKind {
         c.kind
+    }
+    fn reindexed_unix(&self, c: &Candidate) -> Option<u64> {
+        c.reindexed_unix
     }
     fn corpus_modified_unix(&self, c: &Candidate) -> Option<u64> {
         c.corpus_modified_unix
@@ -76,6 +80,10 @@ impl<D: Disk> Disk for Recording<D> {
         self.probed.borrow_mut().push(c.index_id.clone());
         self.inner.kind(c)
     }
+    fn reindexed_unix(&self, c: &Candidate) -> Option<u64> {
+        self.probed.borrow_mut().push(c.index_id.clone());
+        self.inner.reindexed_unix(c)
+    }
     fn corpus_modified_unix(&self, c: &Candidate) -> Option<u64> {
         self.probed.borrow_mut().push(c.index_id.clone());
         self.inner.corpus_modified_unix(c)
@@ -91,6 +99,8 @@ impl<D: Disk> Disk for Recording<D> {
 fn live() -> LiveDisk {
     LiveDisk {
         names: WorktreeDirNames::default(),
+        resident: std::collections::HashMap::new(),
+        runtime: None,
     }
 }
 
@@ -206,7 +216,7 @@ fn an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity() {
 }
 
 /// Why: #9169 — four agents keep an index on a subdirectory of one repo
-/// (`/Users/masa/trusty-agents/<agent>/okg`). Each root has no `.git` of its
+/// (`/Users/test/trusty-agents/<agent>/okg`). Each root has no `.git` of its
 /// own, so each is its own group: none is another's duplicate, and the shared
 /// identity alone cannot choose between them.
 /// Test: this test.
@@ -370,6 +380,182 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     assert!(got.index.corpus_modified_unix > got.duplicates[0].corpus_modified_unix);
 }
 
+/// Why: #9169 — a stamp is written only when a reindex commits, so a stamped
+/// corpus was reindexed after every unstamped one, however recently a load
+/// rewrote the unstamped file; between two stamps the newer wins.
+/// Test: this test.
+#[test]
+fn a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime() {
+    let stamped = |id: &str, stamp: u64| Candidate {
+        reindexed_unix: Some(stamp),
+        ..cand(
+            id,
+            &format!("/r/{id}"),
+            Some(REPO),
+            RootKind::MainCheckout,
+            None,
+        )
+    };
+    let group = vec![
+        cand(
+            "loaded",
+            "/r/loaded",
+            Some(REPO),
+            RootKind::MainCheckout,
+            Some(9_999),
+        ),
+        stamped("older", 100),
+        stamped("newer", 200),
+    ];
+    let got = resolve(&ProjectQuery::Identity(REPO.into()), &group, &NO_DERIVE).expect("resolves");
+    assert_eq!(got.index.index_id, "newer");
+    assert_eq!(ids(&got.duplicates), ["loaded", "older"]);
+}
+
+/// Why: #9169 — live, `apex-9a4a584b` was force-reindexed at 08:02Z and the
+/// stale `apex` was only cold-loaded at 10:00Z, which rewrote its
+/// `index.redb`, so the mtime picked the stale index.
+/// What: reindex A, then B a day later (each commit stamps its corpus), then
+/// load A into a resident handle, which leaves A's file the newest. The
+/// resolver reads A's stamp through the resident store and B's through a
+/// read-only open, picks B, and leaves B's file untouched.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
+    use crate::core::corpus::CorpusStore;
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let now = SystemTime::now();
+    let unix = |age: u64| {
+        (now - Duration::from_secs(age))
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after epoch")
+            .as_secs()
+    };
+    let mut rows = Vec::new();
+    let mut corpora = Vec::new();
+    for (id, dir, age) in [
+        ("apex", "repos/APEX", 2 * 86_400),
+        ("apex-9a4a584b", "duetto/apex", 86_400),
+    ] {
+        let root = tmp.path().join(dir);
+        std::fs::create_dir_all(root.join(".git")).expect(".git");
+        std::fs::create_dir_all(root.join(".trusty-search")).expect("store");
+        let corpus = root.join(".trusty-search/index.redb");
+        CorpusStore::open(&corpus)
+            .expect("open")
+            .write_reindexed_unix_sync(unix(age))
+            .expect("stamp");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&corpus)
+            .expect("open");
+        file.set_modified(now - Duration::from_secs(age))
+            .expect("mtime");
+        rows.push(PersistedIndex {
+            colocated: true,
+            repo_identity: Some("duettoresearch/apex".to_string()),
+            ..PersistedIndex::new(id, root.clone())
+        });
+        corpora.push((root, corpus));
+    }
+    let mtime = |p: &Path| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .expect("mtime")
+    };
+    let (a_root, a_corpus) = &corpora[0];
+    let b_corpus = &corpora[1].1;
+
+    let mut indexer = CodeIndexer::new("apex", a_root.clone());
+    indexer.set_corpus_store(Arc::new(CorpusStore::open(a_corpus).expect("load A")));
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("apex"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        a_root.clone(),
+    ));
+    assert!(
+        mtime(a_corpus) > mtime(b_corpus),
+        "the load left A's file newest"
+    );
+    let b_before = mtime(b_corpus);
+
+    let candidates = gather_candidates(&rows, &[("apex".to_string(), a_root.clone())]);
+    let disk = LiveDisk {
+        names: WorktreeDirNames::default(),
+        resident: [("apex".to_string(), handle)].into_iter().collect(),
+        runtime: Some(tokio::runtime::Handle::current()),
+    };
+    let got = tokio::task::spawn_blocking(move || {
+        let query = ProjectQuery::Identity("duettoresearch/apex".into());
+        let first = resolve(&query, &candidates, &disk).expect("resolves");
+        let second = resolve(&query, &candidates, &disk).expect("resolves again");
+        assert_eq!(first, second, "a resolve must not change the next answer");
+        first
+    })
+    .await
+    .expect("resolve task");
+    assert_eq!(got.index.index_id, "apex-9a4a584b", "{got:?}");
+    assert_eq!(got.index.reindexed_unix, Some(unix(86_400)));
+    assert_eq!(ids(&got.duplicates), ["apex"]);
+    assert_eq!(got.duplicates[0].reindexed_unix, Some(unix(2 * 86_400)));
+    assert_eq!(mtime(b_corpus), b_before, "reading B's stamp rewrote B");
+}
+
+/// Why: #9169 — a repo whose identity group holds only a worktree still has a
+/// live index when a subdirectory of it (no `.git` of its own) is indexed.
+/// Test: this test.
+#[test]
+fn a_subdirectory_index_beats_a_worktree_only_identity_group() {
+    let group = vec![
+        cand("docs", "/x/docs", Some("owner/x"), RootKind::Checkout, None),
+        cand(
+            "feat",
+            "/x/.worktrees/feat",
+            Some("owner/x"),
+            RootKind::Worktree,
+            Some(9),
+        ),
+    ];
+    let got = resolve(
+        &ProjectQuery::Identity("owner/x".into()),
+        &group,
+        &NO_DERIVE,
+    )
+    .expect("resolves");
+    assert_eq!(got.index.index_id, "docs");
+    assert_eq!(ids(&got.duplicates), ["feat"]);
+}
+
+/// Why: #9169 — an unmounted `/Volumes` copy of a repo is never probed, so
+/// it must not beat a live subdirectory index of the same repo; it is listed
+/// as a duplicate instead.
+/// Test: this test.
+#[test]
+fn a_subdirectory_index_beats_an_unmounted_volume_of_the_same_repo() {
+    let group = vec![
+        cand("docs", "/x/docs", Some("owner/x"), RootKind::Checkout, None),
+        cand(
+            "ext",
+            "/Volumes/Ext/x",
+            Some("owner/x"),
+            RootKind::Indeterminate,
+            None,
+        ),
+    ];
+    let got = resolve(
+        &ProjectQuery::Identity("owner/x".into()),
+        &group,
+        &NO_DERIVE,
+    )
+    .expect("resolves");
+    assert_eq!(got.index.index_id, "docs");
+    assert_eq!(ids(&got.duplicates), ["ext"]);
+}
+
 /// Why: a repo indexed only through worktrees has no live index to hand out;
 /// the miss names what is there instead of picking a worktree.
 /// Test: this test.
@@ -398,8 +584,8 @@ fn a_name_shared_by_two_repos_is_ambiguous() {
     let mut fleet = fleet();
     fleet.push(cand(
         "apex",
-        "/Users/masa/Duetto/repos/APEX",
-        Some("masa/apex"),
+        "/Users/test/repos/APEX",
+        Some("test/apex"),
         RootKind::MainCheckout,
         Some(1),
     ));
@@ -489,7 +675,7 @@ fn a_volumes_root_is_indeterminate_and_never_probed_for_another_project() {
     let kemono = cand(
         "kemono",
         "/Volumes/nonexistent-9169/kemono",
-        Some("masa/kemono"),
+        Some("test/kemono"),
         RootKind::Indeterminate,
         None,
     );

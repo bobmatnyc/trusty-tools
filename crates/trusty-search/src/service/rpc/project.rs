@@ -13,8 +13,9 @@
 //! |---|---|---|
 //! | `search.project.resolve` | none | free |
 //!
-//! Free: one registry read and `stat` calls bounded to the matched group and
-//! the five nearest candidates, never a `/Volumes` root (#9169). It is the call
+//! Free: one registry read, `stat` calls bounded to the matched group and the
+//! five nearest candidates, and one `_meta` read per group member, never a
+//! `/Volumes` root (#9169). It is the call
 //! a client makes before any query, so it must not queue behind the queries it
 //! unblocks.
 //!
@@ -54,7 +55,7 @@ pub struct ProjectResolveParams {
 /// Why: the socket entry point for ruling f6 — one answer to "which index is
 /// this project?" so no client guesses an id.
 /// What: decodes [`ProjectResolveParams`], then [`resolve_report`]. A success
-/// is `{index_id, root_path, repo_identity, kind, resident,
+/// is `{index_id, root_path, repo_identity, kind, resident, reindexed_unix,
 /// corpus_modified_unix, matched_by, duplicates}`; a miss is an error frame
 /// whose `data` names the nearest candidates.
 /// Test: `resolve_over_the_socket_answers_by_name_identity_and_path`,
@@ -78,8 +79,8 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 /// What: parses the query (a bad one is `invalid_params`), loads the registry
 /// (an unreadable one is `internal_error`, never an empty map that would turn
 /// every call into a miss), and runs the core on the blocking pool, because it
-/// `stat`s the roots it reports and a path outside every root shells out to
-/// `git` for its identity.
+/// `stat`s the roots it reports, reads their reindex stamps, and shells out to
+/// `git` for the identity of a path outside every root.
 /// Test: `resolve_over_the_socket_answers_by_name_identity_and_path`,
 /// `an_unreadable_registry_is_an_internal_error_not_a_miss`.
 pub async fn resolve_report(
@@ -98,18 +99,21 @@ pub async fn resolve_report(
             format!("could not read the index registry: {e}"),
         )
     })?;
-    let resident: Vec<(String, std::path::PathBuf)> = state
-        .registry
-        .list_handles()
+    let handles = state.registry.list_handles();
+    let resident: Vec<(String, std::path::PathBuf)> = handles
         .iter()
         .map(|h| (h.id.0.clone(), h.root_path.clone()))
         .collect();
     let project = project.to_string();
+    let runtime = tokio::runtime::Handle::current();
     let outcome = tokio::task::spawn_blocking(move || {
         // #9169: no disk read here — `resolve` probes only what it reports.
         let candidates = gather_candidates(&persisted, &resident);
         let disk = LiveDisk {
             names: crate::service::constants::ephemeral_dir_names(),
+            // #9169: a resident corpus's stamp is read through its open store.
+            resident: handles.into_iter().map(|h| (h.id.0.clone(), h)).collect(),
+            runtime: Some(runtime),
         };
         resolve(&query, &candidates, &disk)
     })

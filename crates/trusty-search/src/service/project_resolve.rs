@@ -11,7 +11,7 @@
 //! builds the candidate list from the persisted registry plus the resident
 //! handles without touching disk, and [`resolve`] finds the group the query
 //! names and picks one index from it. The pick follows ruling f7: a
-//! main-checkout root wins, otherwise the most recently written corpus, and a
+//! main-checkout root wins, otherwise the most recently indexed corpus, and a
 //! worktree root never wins. An exact index id or the index owning a path is
 //! returned itself unless it is a worktree or orphaned. Every other index of
 //! the group is reported in `duplicates`, never dropped. A miss carries the
@@ -122,8 +122,12 @@ pub struct Candidate {
     pub kind: RootKind,
     /// Whether the index is loaded, as opposed to cold-parked.
     pub resident: bool,
-    /// Unix mtime of the index's redb corpus — ruling f7's recency. Read only
-    /// for the resolved group; `None` elsewhere and when the corpus is absent.
+    /// When a reindex last committed the corpus (its `_meta` stamp) — ruling
+    /// f7's recency. Read only for the resolved group; `None` elsewhere and
+    /// for a corpus not reindexed since the stamp existed.
+    pub reindexed_unix: Option<u64>,
+    /// Unix mtime of the index's redb corpus, read only when
+    /// `reindexed_unix` is absent. It moves on every open, not only a reindex.
     pub corpus_modified_unix: Option<u64>,
     /// Whether the registry keeps the corpus under the root (`colocated`).
     #[serde(skip)]
@@ -207,6 +211,7 @@ pub fn gather_candidates(
         repo_identity: identity,
         kind: RootKind::Indeterminate,
         resident: resident.iter().any(|(r, _)| r == id),
+        reindexed_unix: None,
         corpus_modified_unix: None,
         colocated,
     };
@@ -309,9 +314,15 @@ pub fn resolve(
 
 /// Resolve the group `key` names, picking its winner by ruling f7.
 ///
-/// What: probes the candidates sharing the identity or root `key`. When none
-/// of them groups under `key` — every one is a subdirectory index — one root
-/// group is used as is and several are ambiguous.
+/// What: probes the candidates sharing the identity or root `key`. When the
+/// group under `key` holds no main checkout, the repo's subdirectory indexes
+/// (each its own root group) decide: one root group joins the `key` group and
+/// the f7 pick runs over both, so the subdirectory index beats a worktree, an
+/// orphan or a `/Volumes` row; several root groups are ambiguous. With no
+/// subdirectory index the `key` group's own pick stands.
+/// Test: `a_subdirectory_index_beats_a_worktree_only_identity_group`,
+/// `a_subdirectory_index_beats_an_unmounted_volume_of_the_same_repo`,
+/// `sibling_subdirectory_indexes_are_never_each_others_duplicates`.
 fn resolve_key(
     key: &str,
     query: &ProjectQuery,
@@ -326,22 +337,29 @@ fn resolve_key(
         disk,
     );
     let mut group = group_of(&members, key);
-    if group.is_empty() {
-        match distinct_keys(&members).as_slice() {
-            [] => {
-                return Err(ResolveMiss::NotFound {
-                    nearest: nearest(query, candidates, disk),
-                })
-            }
-            [only] => group = group_of(&members, only),
-            _ => {
-                return Err(ResolveMiss::Ambiguous {
-                    matches: sorted(members),
-                })
-            }
-        }
+    if group.iter().any(|c| c.kind == RootKind::MainCheckout) {
+        return pick(with_recency(group, disk), matched_by);
     }
-    pick(with_recency(group, disk), matched_by)
+    // #9169: no main checkout under `key`, so a subdirectory index of the repo
+    // is its live index — before a worktree, an orphan or a `/Volumes` row.
+    let subdirs: Vec<Candidate> = members
+        .iter()
+        .filter(|c| c.kind == RootKind::Checkout && c.group_key() != key)
+        .cloned()
+        .collect();
+    match distinct_keys(&subdirs).as_slice() {
+        [] if group.is_empty() => Err(ResolveMiss::NotFound {
+            nearest: nearest(query, candidates, disk),
+        }),
+        [] => pick(with_recency(group, disk), matched_by),
+        [only] => {
+            group.extend(group_of(&subdirs, only));
+            pick(with_recency(group, disk), matched_by)
+        }
+        _ => Err(ResolveMiss::Ambiguous {
+            matches: sorted(members),
+        }),
+    }
 }
 
 /// Resolve from one known index — an exact id or a path's owner (#9169).
@@ -389,13 +407,15 @@ fn resolve_anchored(
 /// Ruling f7: pick one index from one group whose recency is filled in.
 ///
 /// What: a worktree or orphaned root never wins. Among the rest a main
-/// checkout beats any other root, then the newest corpus wins (an absent
-/// corpus sorts last), then the lowest id for determinism.
+/// checkout beats any other root, then the most recently indexed corpus by
+/// [`recency`], then the lowest id for determinism.
 /// Test: `the_main_checkout_beats_a_newer_indeterminate_root`,
 /// `a_worktree_never_wins_even_when_newest`,
 /// `an_absent_corpus_sorts_last_among_main_checkouts`,
 /// `the_most_recently_written_corpus_wins_between_two_main_checkouts`,
-/// `a_repo_with_only_worktree_indexes_has_no_live_index`.
+/// `a_repo_with_only_worktree_indexes_has_no_live_index`,
+/// `a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime`,
+/// `a_reload_of_the_older_corpus_does_not_make_it_the_newest`.
 fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, ResolveMiss> {
     let winner = group
         .iter()
@@ -403,7 +423,7 @@ fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, R
         .min_by(|a, b| {
             a.kind
                 .cmp(&b.kind)
-                .then(b.corpus_modified_unix.cmp(&a.corpus_modified_unix))
+                .then(recency(b).cmp(&recency(a)))
                 .then(a.index_id.cmp(&b.index_id))
         })
         .cloned();
@@ -425,6 +445,21 @@ fn pick(group: Vec<Candidate>, matched_by: &'static str) -> Result<Resolution, R
     })
 }
 
+/// Ruling f7's recency key, compared newest first (#9169).
+///
+/// Why: the stamp is written only when a reindex commits, so every stamp
+/// postdates every reindex that left no stamp: a corpus without one was last
+/// reindexed before stamping shipped. A stamped corpus therefore beats every
+/// unstamped one, whatever the unstamped file's mtime, which a load refreshes.
+/// What: `(true, stamp)` for a stamped corpus, `(false, mtime)` otherwise; an
+/// absent mtime sorts last among the unstamped.
+fn recency(c: &Candidate) -> (bool, Option<u64>) {
+    match c.reindexed_unix {
+        Some(stamp) => (true, Some(stamp)),
+        None => (false, c.corpus_modified_unix),
+    }
+}
+
 /// Clone `candidates` with their root kind read from `disk`.
 fn probed<'a>(candidates: impl Iterator<Item = &'a Candidate>, disk: &impl Disk) -> Vec<Candidate> {
     candidates
@@ -435,10 +470,14 @@ fn probed<'a>(candidates: impl Iterator<Item = &'a Candidate>, disk: &impl Disk)
         .collect()
 }
 
-/// Fill in each group member's corpus recency.
+/// Fill in each group member's recency: the reindex stamp, and the corpus
+/// mtime only when there is no stamp.
 fn with_recency(mut group: Vec<Candidate>, disk: &impl Disk) -> Vec<Candidate> {
     for c in &mut group {
-        c.corpus_modified_unix = disk.corpus_modified_unix(c);
+        c.reindexed_unix = disk.reindexed_unix(c);
+        if c.reindexed_unix.is_none() {
+            c.corpus_modified_unix = disk.corpus_modified_unix(c);
+        }
     }
     group
 }

@@ -32,6 +32,8 @@ pub mod open_failure;
 pub(crate) mod open_guard;
 // #8884: the durable record of refused embeddings, read at restore.
 mod refusal_ops;
+// #9169: when a reindex last committed the corpus, read by project.resolve.
+mod reindex_stamp;
 mod store_impl;
 mod tables;
 // #5357: `_meta` fault injectors for the fail-closed regression tests. Kept out
@@ -46,6 +48,7 @@ mod types;
 pub use self::corpus_ops::{PathRewrite, PathRewriteOutcome};
 pub use self::open_failure::CorpusOpenFailure;
 pub(crate) use self::open_guard::open_serialized;
+pub(crate) use self::reindex_stamp::read_reindexed_unix_at;
 pub use self::store_impl::CorpusStore;
 // #6171: the KG load gate lives in `core::symbol_graph` and needs the format
 // version this crate stamps into `_meta`.
