@@ -1,0 +1,614 @@
+{
+  "about": "A model that finds every labelled defect with a grounded finding and nothing on a clean diff.",
+  "model": "us.anthropic.claude-sonnet-5-5",
+  "outputs": {
+    "L1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "L1-logic",
+            "body": "`.max_by_key(|v| rank(v))` picks the MOST severe verdict, but `verdict_floor` documents the least severe; it should be min_by_key.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-review/src/pipeline/verdict_floor.rs",
+            "line": 20,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "E1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "E1-swallowed-error",
+            "body": "`toml::from_str(&text).unwrap_or_default()` turns a corrupt file into an empty table, and `set` then overwrites every stored credential.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/credentials/table_store.rs",
+            "line": 12,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "E3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "E3-fail-open-lock",
+            "body": "`Err(TryLockError::Error(_)) => {}` falls through to Ok, so an I/O error from try_lock is treated as if the lock were acquired and two sweeps can run.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/memory_core/sweep_lock.rs",
+            "line": 31,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "C1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "C1-toctou-race",
+            "body": "`std::fs::File::create(path)?` runs after a separate exists() check, a TOCTOU race: two daemons can both claim. Use create_new.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/pid_claim.rs",
+            "line": 11,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R1s": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R1s-resource-leak",
+            "body": "`return Err(GhError::TimedOut);` returns without calling kill() or wait() on the child, so a hung gh keeps running and leaks a zombie.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/gh_exec.rs",
+            "line": 28,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "V1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "V1-path-validation",
+            "body": "`candidate.starts_with(root.as_ref())` is a string prefix test, so /data/root-evil counts as inside /data/root; compare path components with Path::starts_with.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-review/src/integrations/root_check.rs",
+            "line": 9,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "V3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "V3-removed-guard",
+            "body": "`if expected.len() < MIN_TOKEN_LEN {` is removed, so an empty expected token now matches an empty presented one and any client authenticates.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/daemon_token.rs",
+            "line": 16,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "B1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "B1-boundary-panic",
+            "body": "`items[offset..offset + limit]` is not clamped to items.len(), so the last partial page panics with a slice index out of range.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/catchup/paging.rs",
+            "line": 8,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "L2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "L2-logic-over-broad-dedup",
+            "body": "`entry.starts_with(p.trim_end_matches('/'))` is a prefix test, so a user's `target/` line makes target-worktree/ look already listed and it is never ignored.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/core/ignore_block.rs",
+            "line": 18,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "L3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "L3-logic-wrong-extreme",
+            "body": "`.max_by_key(|p| p.arrival);` selects the newest aged job, not the oldest, so the longest-waiting job can still starve; use min_by_key.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/service/reindex/aged_pick.rs",
+            "line": 25,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "E2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "E2-swallowed-error",
+            "body": "`Ok(String::new())` is returned once retries are exhausted, dropping last_err; callers parse an empty manifest instead of seeing the error.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-installer/src/download/fetch_retry.rs",
+            "line": 27,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "C2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "C2-lock-held-across-await",
+            "body": "`tokio::time::sleep(Duration::from_millis(25)).await` runs while the std MutexGuard from QUEUE.lock() is still held, so every other waiter blocks its worker thread on the lock.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/service/reindex/turn_gate.rs",
+            "line": 17,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "C3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "C3-lost-update",
+            "body": "`QUEUE_DEPTH.store(n - 1, Ordering::Release);` after a separate load is a lost-update race: two finishing jobs both store the same value, the count never reaches zero and DRAINED never fires. Use fetch_sub.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/service/drain.rs",
+            "line": 14,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R2s": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R2s-resource-leak-temp-file",
+            "body": "`file.write_all(bytes)?;` returns early through ? on a full disk, and the tmp file is never removed; only the rename path calls remove_file.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/atomic_write.rs",
+            "line": 10,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "V2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "V2-path-traversal",
+            "body": "`let dest = dir.join(name);` joins the client-supplied name unsanitised, so ../../.ssh/authorized_keys writes outside dir (path traversal).",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-console/src/chat_attachment.rs",
+            "line": 22,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "B3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "B3-utf-8-boundary-panic",
+            "body": "`&s[..max]` slices by byte, not char, so a multibyte character at the cut panics (not a char boundary).",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-code-tui/src/elide.rs",
+            "line": 8,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "L4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "L4-logic-line-counter",
+            "body": "`Some('-') => {` lines also do next_new += 1, but a removed line has no new-side number, so every comment after a deletion is off by one per deleted line.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-review/src/integrations/github/commentable.rs",
+            "line": 31,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "E4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "E4-fail-open-error-handling",
+            "body": "`.filter_map(Result::ok)` silently drops verifier errors, so a finding whose verification failed is kept as if confirmed: the round fails open.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-review/src/pipeline/verify_round.rs",
+            "line": 21,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "C4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "C4-cancel-safety",
+            "body": "`stream.read_exact(&mut body)` is not cancel-safe: when shutdown fires mid-frame inside select!, the bytes already read are lost and the stream is left mid-frame.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-agents/src/ctrl/frame_reader.rs",
+            "line": 29,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R3s": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R3s-reference-cycle",
+            "body": "`let me = Arc::clone(&handle);` is captured by the hook stored in the handle itself: a reference cycle, so no IndexHandle is ever dropped. Capture a Weak instead.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/core/index_handle.rs",
+            "line": 24,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R4s": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R4s-unbounded-growth",
+            "body": "`Ack::Failed(e) => Err(e),` never removes the entry, so every failed report stays in inflight and the map grows without bound; remove on both arms.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/error_capture/pending.rs",
+            "line": 37,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "V4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "V4-command-injection",
+            "body": "`format!(\"git -C {path} log --format=%s -n {n}\")` is run through sh -c, and the only check on path is exists(), so a directory named x; rm -rf ~ is shell injection. Pass args to git directly.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/git_log.rs",
+            "line": 20,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "B2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "B2-off-by-one",
+            "body": "`for n in (1..keep).rev() {` shifts slots 1..keep-1 only, so slot keep is overwritten each rotation and just keep - 1 old files survive (off-by-one).",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/error_capture/rotate.rs",
+            "line": 15,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "B4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "B4-truncating-division",
+            "body": "`(grace.as_millis() / POLL.as_millis()) as u64` truncates, so a 1000 ms grace gives 2 rounds of 400 ms (800 ms), shorter than the grace period; use div_ceil.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/parent_watch.rs",
+            "line": 10,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R1-resource-leak-async-cancel",
+            "body": "`let _live = LiveJob(my_seq);` is created only at the first poll of wait_for_turn; a task dropped before that leaves its seq in the heap and blocks the queue.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/service/reindex/defer_embed_queue.rs",
+            "line": 410,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R2-fail-open",
+            "body": "`h.canonicalize().ok()` turns a canonicalize failure into None, which silently disables the home-directory guard.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-code/src/cli/tui.rs",
+            "line": 83,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R3-swallowed-error",
+            "body": "`std::fs::read_to_string(&gitignore_path).unwrap_or_default()` treats an unreadable .gitignore as empty, so a second managed block is appended.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/core/scaffold_gitignore.rs",
+            "line": 81,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R4": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R4-over-broad-match-data-loss",
+            "body": "`segment.ends_with(tail)` accepts any segment after the wildcard prefix, so with the settings.local.json* pattern a user file like settings.local.json-notes.md matches and is deleted.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/session_manager/worktree_ignored_output.rs",
+            "line": 149,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R5": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R5-boundary",
+            "body": "`libc::kill(pid as libc::pid_t, 0) == 0` casts a u32 pid unchecked: pid 0 or one above i32::MAX probes a process group, so a corrupt lock reads as alive.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/core/daemon_identity.rs",
+            "line": 96,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R6": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R6-logic-counter-scope",
+            "body": "`let attempt = self.signal.record_attempt();` counts every delegation, not only retries after a failure, so MAX_REDELEGATIONS caps normal work too.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-code/src/run_task/redelegation.rs",
+            "line": 221,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R7": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R7-concurrency-torn-append",
+            "body": "`file.write_all(b\"\\n\")?;` is a second write after the record, so concurrent appenders interleave records and newlines.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/error_capture/store.rs",
+            "line": 291,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R8": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R8-race",
+            "body": "`.set_len(0)` truncates the pid file after try_lock in a separate step, so a losing process can read an empty holder_pid.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/memory_core/maintenance_lease.rs",
+            "line": 149,
+            "code_provable": true
+          }
+        ]
+      }
+    }
+  }
+}

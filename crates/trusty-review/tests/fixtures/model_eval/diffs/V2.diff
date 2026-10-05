@@ -1,0 +1,31 @@
+diff --git a/crates/trusty-console/src/chat_attachment.rs b/crates/trusty-console/src/chat_attachment.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-console/src/chat_attachment.rs
+@@ -0,0 +1,25 @@
++//! Store a chat attachment uploaded by the client.
++
++use std::path::{Path, PathBuf};
++
++/// Largest attachment accepted, in bytes.
++pub const MAX_BYTES: usize = 10 * 1024 * 1024;
++
++/// Why an upload was refused.
++#[derive(Debug)]
++pub enum UploadError {
++    /// Over [`MAX_BYTES`].
++    TooLarge,
++    /// The write failed.
++    Io(std::io::Error),
++}
++
++/// Save `bytes` under `dir` with the client's file `name`.
++pub fn save_attachment(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, UploadError> {
++    if bytes.len() > MAX_BYTES {
++        return Err(UploadError::TooLarge);
++    }
++    let dest = dir.join(name);
++    std::fs::write(&dest, bytes).map_err(UploadError::Io)?;
++    Ok(dest)
++}
