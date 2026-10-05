@@ -135,7 +135,19 @@ async fn review_payload(
     findings: serde_json::Value,
     judgment: &'static str,
 ) -> ReviewResult {
-    let (source, _tmp) = local_diff_source(&billing_diff());
+    review_diff_payload(&billing_diff(), prose, verdict, grade, findings, judgment).await
+}
+
+/// [`review_payload`] over any `diff`.
+async fn review_diff_payload(
+    diff: &str,
+    prose: &str,
+    verdict: &str,
+    grade: &str,
+    findings: serde_json::Value,
+    judgment: &'static str,
+) -> ReviewResult {
+    let (source, _tmp) = local_diff_source(diff);
     let payload = serde_json::json!({
         "verdict": verdict,
         "grade": grade,
@@ -304,10 +316,12 @@ async fn run_review_all_withheld_review_carries_no_grade() {
     assert_eq!(result.grade, None);
 }
 
-/// #9188 L: a verifier CONFIRMED is not a resolve. A confirmed finding whose
-/// citation does not resolve at the head is withheld, not posted.
+/// #9188 B, end to end: a CONFIRMED finding with one quoted snippet absent
+/// from the file is withheld. The citation gate drops it before the verifier
+/// runs, so this exercises B, not L (L's tests are the `withhold_unresolved_*`
+/// tests and `run_review_withholds_a_survivor_whose_rewritten_range_does_not_resolve`).
 #[tokio::test]
-async fn a_confirmed_finding_that_does_not_resolve_is_withheld() {
+async fn a_confirmed_finding_with_an_absent_quote_is_withheld() {
     let finding = billing_finding(
         "overflow",
         "`amounts.iter().sum::<u64>()` overflows before `ledger.reconcile_all()` runs.",
@@ -324,6 +338,43 @@ async fn a_confirmed_finding_that_does_not_resolve_is_withheld() {
     .await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert_ne!(result.verdict, Verdict::Approve);
+}
+
+/// A diff that deletes the admin check from `delete_account`; the deletion
+/// sits at new-side line [`DELETION_LINE`].
+fn removal_diff() -> &'static str {
+    "diff --git a/src/admin.rs b/src/admin.rs\n--- a/src/admin.rs\n+++ b/src/admin.rs\n@@ -10,4 +10,3 @@\n fn delete_account(user: &User, id: u64) -> Result<()> {\n-    require_admin(user)?;\n     accounts::delete(id)?;\n     Ok(())\n"
+}
+
+/// The new-side position of the deleted `require_admin(user)?;` line.
+const DELETION_LINE: u32 = 11;
+
+/// #9188 F, end to end: a CONFIRMED finding about a removal, quoting the
+/// removed code at its deletion's position, is posted. On 0baeb71106 the gate
+/// kept it as "re-anchored" to the line it already cited, the post-verifier
+/// re-check (L) read that as unresolved, and the review turned UNKNOWN.
+#[tokio::test]
+async fn run_review_posts_a_confirmed_removal_finding_at_its_deletion_line() {
+    let finding = serde_json::json!({
+        "title": "missing-admin-check",
+        "body": "This removes `require_admin(user)?;`, so any user can delete any account.",
+        "severity": "high",
+        "confidence": 0.9,
+        "file": "src/admin.rs",
+        "line": DELETION_LINE,
+    });
+    let result = review_diff_payload(
+        removal_diff(),
+        "The admin check is gone from delete_account.",
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert_eq!(result.findings[0].line, Some(DELETION_LINE));
+    assert_ne!(result.verdict, Verdict::Unknown, "{:?}", result.error);
 }
 
 /// Row 5: a dropped finding's citation reaches the posted body by no route —

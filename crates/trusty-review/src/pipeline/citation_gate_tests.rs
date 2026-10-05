@@ -308,15 +308,33 @@ fn a_removed_line_counts_only_at_its_new_side_position() {
         Some(11),
         "Removing `guard.check()?` drops auth.",
     )];
+    // #9188 F: cited at its deletion's position, the removal finding holds as
+    // it stands — no correction, so the post-verifier re-check accepts it.
+    assert_eq!(gate(&mut findings, &index), (0, 0));
+    assert_eq!(findings[0].citation_correction, None);
+    assert_eq!(resolves_at_head(&findings[0], &index), Ok(()));
+}
+
+/// #9188 F with L: a removal finding the gate moved to its deletion's
+/// position resolves there afterwards, so the re-check keeps it.
+#[test]
+fn a_moved_removal_finding_resolves_at_the_head() {
+    let index = LineIndex::from_filtered(&diff(vec![file(
+        "src/a.rs",
+        FileDisposition::Kept,
+        vec![hunk(
+            "@@ -10,3 +10,2 @@",
+            lines(&[" fn run() {", "-    guard.check()?;", "     work();"]),
+        )],
+    )]));
+    let mut findings = vec![finding(
+        "src/a.rs",
+        Some(10),
+        "Removing `guard.check()?` drops auth.",
+    )];
     assert_eq!(gate(&mut findings, &index), (0, 1));
-    assert_eq!(
-        findings[0].citation_correction,
-        Some(CitationCorrection {
-            from_line: Some(11),
-            to_line: 11,
-            removed_code: true,
-        })
-    );
+    assert_eq!(findings[0].line, Some(11));
+    assert_eq!(resolves_at_head(&findings[0], &index), Ok(()));
 }
 
 /// Row 3: `b'e'` inside a double-quoted excerpt is not a snippet of its own.

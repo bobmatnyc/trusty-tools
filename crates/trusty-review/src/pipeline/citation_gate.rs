@@ -170,25 +170,23 @@ fn check_citation(
 ///
 /// #9188 I: the anchor must fall on the cited lines — a single line inside
 /// the occurrence, or a range that contains the whole occurrence.
+/// #9188 F: `found` holds removed occurrences only for a removal finding; one
+/// at its deletion's position on the cited lines holds the citation as it
+/// stands, so the post-verifier re-check (L) accepts it.
 fn place(found: &[Vec<Occ>], span: Option<(u32, u32)>) -> Check {
     if let Some((lo, hi)) = span {
         let on_cited = |o: &Occ| {
-            if lo == hi {
+            if o.removed {
+                // #8905 row 2: removed code counts only at its deletion's position.
+                (lo..=hi).contains(&o.start)
+            } else if lo == hi {
                 o.start <= lo && lo <= o.end
             } else {
                 lo <= o.start && o.end <= hi
             }
         };
-        let mut all = found.iter().flatten();
-        if all.clone().any(|o| !o.removed && on_cited(o)) {
+        if found.iter().flatten().any(on_cited) {
             return Check::Holds;
-        }
-        // #8905 row 2: removed code counts only at its deletion's position.
-        if let Some(o) = all.find(|o| o.removed && (lo..=hi).contains(&o.start)) {
-            return Check::Move {
-                to: o.start,
-                removed: true,
-            };
         }
     }
     // #8905 row 3: move only to an anchor that occurs exactly once.

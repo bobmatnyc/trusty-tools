@@ -1,0 +1,27 @@
+{
+  "leak": "F",
+  "about": "Control: a confirmed finding about a removal quotes the removed code at its deletion's position and survives.",
+  "diff": [
+    "diff --git a/src/admin.rs b/src/admin.rs",
+    "--- a/src/admin.rs",
+    "+++ b/src/admin.rs",
+    "@@ -10,4 +10,3 @@",
+    " fn delete_account(user: &User, id: u64) -> Result<()> {",
+    "-    require_admin(user)?;",
+    "     accounts::delete(id)?;",
+    "     Ok(())"
+  ],
+  "reviewer": {
+    "prose": "The admin check is gone from delete_account.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "D",
+    "findings": [
+      {"title": "missing-admin-check", "body": "This removes `require_admin(user)?;`, so any user can delete any account.", "severity": "high", "confidence": 0.9, "file": "src/admin.rs", "line": 11}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "removals": ["missing-admin-check"],
+  "forbidden_in_body": [],
+  "expect_survivors": 1
+}

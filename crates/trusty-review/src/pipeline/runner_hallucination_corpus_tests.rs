@@ -33,6 +33,10 @@ struct Case {
     reviewer: serde_json::Value,
     verifier: String,
     hallucinated: Vec<String>,
+    /// Titles of findings that are about a removal, by ground truth; their
+    /// quotes resolve against the removed (base) lines too (#9188 F).
+    #[serde(default)]
+    removals: Vec<String>,
     forbidden_in_body: Vec<String>,
     expect_survivors: usize,
 }
@@ -121,46 +125,77 @@ fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// New-side text of every file in `diff`, by line number. Written apart from
-/// the gate so the corpus does not grade the gate with its own code.
-fn head_lines(diff: &str) -> HashMap<String, HashMap<u32, String>> {
-    let mut files: HashMap<String, HashMap<u32, String>> = HashMap::new();
-    let (mut file, mut next) = (String::new(), 0u32);
+/// Line-numbered text of every file in a diff, by new-side line number.
+type Lines = HashMap<String, HashMap<u32, String>>;
+
+/// New-side text of every file in `diff`, and the removed (base) text placed
+/// at the new-side position of its deletion: the next new-side line, or the
+/// hunk's last one for a trailing deletion. Written apart from the gate so the
+/// corpus does not grade the gate with its own code.
+fn diff_lines(diff: &str) -> (Lines, Lines) {
+    let (mut head, mut base) = (Lines::new(), Lines::new());
+    let (mut file, mut next, mut pending) = (String::new(), 0u32, Vec::new());
+    let mut flush = |file: &str, at: u32, pending: &mut Vec<String>| {
+        if !pending.is_empty() {
+            let slot: &mut String = base
+                .entry(file.to_string())
+                .or_default()
+                .entry(at)
+                .or_default();
+            *slot = norm(&format!("{slot} {}", pending.join(" ")));
+            pending.clear();
+        }
+    };
     for line in diff.lines() {
         if let Some(path) = line.strip_prefix("+++ b/") {
             file = path.trim().to_string();
         } else if let Some(rest) = line.strip_prefix("@@ ") {
+            flush(&file, next.saturating_sub(1), &mut pending);
             let new = rest.split_whitespace().find_map(|t| t.strip_prefix('+'));
             next = new
                 .and_then(|n| n.split(',').next())
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(0);
+        } else if let Some(body) = line.strip_prefix("-").filter(|_| !line.starts_with("---")) {
+            pending.push(norm(body));
         } else if let Some(body) = line.strip_prefix('+').or_else(|| line.strip_prefix(' ')) {
-            files
-                .entry(file.clone())
-                .or_default()
-                .insert(next, norm(body));
+            flush(&file, next, &mut pending);
+            head.entry(file.clone()).or_default().insert(next, norm(body));
             next += 1;
         }
     }
-    files
+    flush(&file, next.saturating_sub(1), &mut pending);
+    (head, base)
+}
+
+/// The lines of `file` in `lines`, matched as the gate's caller cites it.
+fn file_lines<'a>(lines: &'a Lines, file: &str) -> Option<&'a HashMap<u32, String>> {
+    lines
+        .iter()
+        .find(|(k, _)| **k == file || k.ends_with(&format!("/{file}")))
+        .map(|(_, v)| v)
 }
 
 /// The corpus's own resolver: the finding's file is at the head, its line
 /// exists there, every backtick code span it quotes is in that file, and one
 /// of them is on the cited line. A finding that quotes no code never resolves.
-fn oracle_resolves(f: &Finding, head: &HashMap<String, HashMap<u32, String>>) -> bool {
-    let Some(lines) = head
-        .iter()
-        .find(|(k, _)| **k == f.file || k.ends_with(&format!("/{}", f.file)))
-        .map(|(_, v)| v)
-    else {
+/// A finding about a removal (`removal`, by ground truth) also resolves its
+/// quotes against the removed lines, placed at their deletion's position.
+fn oracle_resolves(f: &Finding, (head, base): &(Lines, Lines), removal: bool) -> bool {
+    let Some(lines) = file_lines(head, &f.file) else {
         return false;
     };
-    let Some(on_line) = f.line.and_then(|l| lines.get(&l)) else {
+    let removed = file_lines(base, &f.file).filter(|_| removal);
+    let Some(mut on_line) = f.line.and_then(|l| lines.get(&l)).cloned() else {
         return false;
     };
-    let whole: String = lines.values().cloned().collect::<Vec<_>>().join(" ");
+    let mut whole: String = lines.values().cloned().collect::<Vec<_>>().join(" ");
+    if let Some(removed) = removed {
+        whole = format!("{whole} {}", removed.values().cloned().collect::<Vec<_>>().join(" "));
+        if let Some(gone) = f.line.and_then(|l| removed.get(&l)) {
+            on_line = format!("{on_line} {gone}");
+        }
+    }
     let spans: Vec<String> = f
         .description
         .split('`')
@@ -176,11 +211,14 @@ fn oracle_resolves(f: &Finding, head: &HashMap<String, HashMap<u32, String>>) ->
 
 /// Hallucinations in one reviewed case.
 fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
-    let head = head_lines(diff);
+    let lines = diff_lines(diff);
     let survivors = result
         .findings
         .iter()
-        .filter(|f| case.hallucinated.contains(&f.kind) || !oracle_resolves(f, &head))
+        .filter(|f| {
+            case.hallucinated.contains(&f.kind)
+                || !oracle_resolves(f, &lines, case.removals.contains(&f.kind))
+        })
         .count();
     let prose = case
         .forbidden_in_body
