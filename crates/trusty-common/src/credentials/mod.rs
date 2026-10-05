@@ -108,8 +108,8 @@ pub use bounded_store::{
     resolve_env_var_bounded, resolve_provider_bounded_with, store_get_bounded,
 };
 pub use dotenv::{
-    env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
-    read_var_from_env_local, user_env_local_path,
+    SANDBOX_ENV_VAR, env_local_value, find_workspace_env_local, load_env_from_path,
+    load_env_local_once, read_var_from_env_local, sandbox_flag_set, user_env_local_path,
 };
 pub use error::CredentialError;
 pub use file_store::FileKeyStore;

@@ -5,9 +5,11 @@
 //! (`TerminatedByOtherGetUpdates`). A fresh `$HOME` is not isolation: the
 //! credential store and the Keychain belong to the OS user, not to `$HOME`.
 //! What: [`enter`] refuses unless every environment variable is on the closed
-//! [`ENV_ALLOWLIST`], `TRUSTY_DATA_DIR_OVERRIDE` is set, and `$HOME` is not the
-//! account's home. On success it latches
-//! `trusty_mpm::secret_source::enter_sandbox`, so no credential tier is read.
+//! [`ENV_ALLOWLIST`], `TRUSTY_DATA_DIR_OVERRIDE` is set, `TRUSTY_SANDBOX` is
+//! exactly `1` ([`Refusal::SandboxFlagNotSet`] otherwise, so trusty-common reads
+//! no `.env.local`, #9178), and `$HOME` is not the account's home. On success
+//! it latches `trusty_mpm::secret_source::enter_sandbox`, so no credential tier
+//! is read.
 //! [`gate_channel_pollers`] keeps the Telegram bot down. Every check fails
 //! closed: an answer that cannot be determined refuses.
 //! Test: `daemon_sandbox_tests.rs`; end to end, `tests/sandbox_daemon_9121.rs`.
@@ -17,6 +19,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
+use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
 
 /// The only variables a sandbox daemon may inherit, compared exactly.
 ///
@@ -35,6 +38,8 @@ use trusty_common::DATA_DIR_OVERRIDE_ENV;
 /// - `USER`, `LOGNAME`, `SHELL`: the account name and login shell tmux and git
 ///   read; names, not credentials.
 /// - `RUST_LOG`: the log filter.
+/// - `TRUSTY_SANDBOX`: required to be exactly `1`; tells trusty-common to load
+///   no `.env.local` (#9178). A flag, not a credential.
 ///
 /// Plus [`CF_TEXT_ENCODING`], which macOS sets inside the process itself.
 const ENV_ALLOWLIST: &[&str] = &[
@@ -49,6 +54,9 @@ const ENV_ALLOWLIST: &[&str] = &[
     "LOGNAME",
     "SHELL",
     "RUST_LOG",
+    // #9178: the `.env.local` opt-out, required by `refusals`. A literal, not
+    // `SANDBOX_ENV_VAR`: `scripts/sandbox_daemon_selftest.sh` parses this list.
+    "TRUSTY_SANDBOX",
 ];
 
 /// The locale categories allowed by name — the `LC_*` family, closed.
@@ -103,6 +111,8 @@ pub(crate) struct SandboxEnv {
     pub(crate) disallowed_names: Vec<String>,
     /// `TRUSTY_DATA_DIR_OVERRIDE`, when set.
     pub(crate) data_dir_override: Option<OsString>,
+    /// `TRUSTY_SANDBOX`, when set.
+    pub(crate) sandbox_flag: Option<OsString>,
     /// `$HOME`, when set.
     pub(crate) home: Option<PathBuf>,
     /// The account's home from the password database, when it resolves.
@@ -119,6 +129,7 @@ impl SandboxEnv {
         Self {
             disallowed_names: disallowed_names(names),
             data_dir_override: std::env::var_os(DATA_DIR_OVERRIDE_ENV),
+            sandbox_flag: std::env::var_os(SANDBOX_ENV_VAR),
             home: std::env::var_os("HOME").map(PathBuf::from),
             account_home: account_home(),
         }
@@ -132,6 +143,8 @@ pub(crate) enum Refusal {
     DisallowedEnv(Vec<String>),
     /// `TRUSTY_DATA_DIR_OVERRIDE` is unset or empty.
     NoDataDirOverride,
+    /// `TRUSTY_SANDBOX` is not exactly `1`, so `.env.local` would load.
+    SandboxFlagNotSet,
     /// `$HOME` is unset or empty.
     NoHome,
     /// `$HOME` does not resolve to an existing directory.
@@ -152,6 +165,11 @@ impl fmt::Display for Refusal {
                 names.join(", ")
             ),
             Self::NoDataDirOverride => write!(f, "{DATA_DIR_OVERRIDE_ENV} is not set"),
+            Self::SandboxFlagNotSet => write!(
+                f,
+                "{SANDBOX_ENV_VAR} is not set to exactly 1 (value not shown), so \
+                 `.env.local` credentials would load"
+            ),
             Self::NoHome => write!(f, "$HOME is not set"),
             Self::HomeUnresolvable(home) => {
                 write!(f, "$HOME ({}) is not an existing directory", home.display())
@@ -213,7 +231,8 @@ pub(crate) fn enter_with(env: &SandboxEnv, latch: impl FnOnce()) -> anyhow::Resu
 /// Every reason `env` is not an isolated sandbox. Empty means isolated.
 ///
 /// Test: `a_variable_outside_the_allowlist_refuses_and_names_only_the_variables`,
-/// `refuses_without_a_data_dir_override`, `refuses_when_home_is_unset`,
+/// `refuses_without_a_data_dir_override`,
+/// `refuses_unless_the_sandbox_flag_is_exactly_one`, `refuses_when_home_is_unset`,
 /// `refuses_when_home_is_the_account_home`,
 /// `refuses_when_home_symlinks_to_the_account_home`,
 /// `refuses_when_the_account_home_is_unknown`,
@@ -229,6 +248,11 @@ pub(crate) fn refusals(env: &SandboxEnv) -> Vec<Refusal> {
         .is_none_or(|value| value.is_empty())
     {
         out.push(Refusal::NoDataDirOverride);
+    }
+    // #9178: same exact-`1` rule as trusty-common's `.env.local` opt-out; an
+    // absent or non-UTF-8 value is not `1`, so it refuses.
+    if !sandbox_flag_set(env.sandbox_flag.as_deref()) {
+        out.push(Refusal::SandboxFlagNotSet);
     }
     if let Some(refusal) = home_refusal(env.home.as_deref(), env.account_home.as_deref()) {
         out.push(refusal);

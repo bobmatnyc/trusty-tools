@@ -12,11 +12,13 @@ use super::*;
 /// An isolated environment rooted at two fresh directories.
 ///
 /// What: `home` and `account` are distinct, existing directories, the data-dir
-/// override is set, and no secret-shaped variable is present.
+/// override is set, `TRUSTY_SANDBOX` is `1`, and no secret-shaped variable is
+/// present.
 fn isolated(home: &Path, account: &Path) -> SandboxEnv {
     SandboxEnv {
         disallowed_names: Vec::new(),
         data_dir_override: Some(home.join("data").into_os_string()),
+        sandbox_flag: Some(OsString::from("1")),
         home: Some(home.to_path_buf()),
         account_home: Some(account.to_path_buf()),
     }
@@ -53,6 +55,7 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
         "LOGNAME",
         "SHELL",
         "RUST_LOG",
+        "TRUSTY_SANDBOX",
     ];
     let refused = [
         "TELEGRAM_BOT_TOKEN",
@@ -164,6 +167,52 @@ fn refuses_without_a_data_dir_override() {
     }
 }
 
+/// Why (#9178): without `TRUSTY_SANDBOX=1` trusty-common loads `.env.local`,
+/// so the daemon would read the developer's credentials. The rule is
+/// trusty-common's: only the exact value `1` passes.
+/// Test: this test.
+#[test]
+fn refuses_unless_the_sandbox_flag_is_exactly_one() {
+    use std::os::unix::ffi::OsStringExt;
+    let (home, account) = two_dirs();
+    let wrong = [
+        None,
+        Some(OsString::new()),
+        Some(OsString::from("0")),
+        Some(OsString::from("true")),
+        Some(OsString::from("01")),
+        Some(OsString::from(" 1")),
+        Some(OsString::from("1\n")),
+        Some(OsString::from_vec(vec![b'1', 0xff])),
+    ];
+    for value in wrong {
+        let mut env = isolated(home.path(), account.path());
+        env.sandbox_flag = value.clone();
+        assert_eq!(
+            refusals(&env),
+            vec![Refusal::SandboxFlagNotSet],
+            "flag {value:?}"
+        );
+    }
+}
+
+/// Why (#9178): the refusal names the variable, never its value, and a
+/// refused sandbox never latches.
+/// Test: this test.
+#[test]
+fn a_wrong_sandbox_flag_refuses_without_printing_the_value() {
+    let (home, account) = two_dirs();
+    let mut env = isolated(home.path(), account.path());
+    env.sandbox_flag = Some(OsString::from("fake-9178-flag-value"));
+
+    let msg = enter_with(&env, || panic!("a refused sandbox must not latch"))
+        .expect_err("a wrong flag must refuse")
+        .to_string();
+
+    assert!(msg.contains("TRUSTY_SANDBOX"), "{msg}");
+    assert!(!msg.contains("fake-9178-flag-value"), "{msg}");
+}
+
 /// Test: this test.
 #[test]
 fn refuses_when_home_is_unset() {
@@ -248,11 +297,13 @@ fn every_refusal_is_reported_together() {
 
     assert!(msg.contains("TELEGRAM_BOT_TOKEN"), "{msg}");
     assert!(msg.contains(DATA_DIR_OVERRIDE_ENV), "{msg}");
+    assert!(msg.contains(SANDBOX_ENV_VAR), "{msg}");
     assert!(msg.contains("$HOME is not set"), "{msg}");
 }
 
 /// Why: the refusal tests pass trivially if the checks always refused. An
-/// isolated, clean environment enters, and enters exactly once.
+/// isolated, clean environment with `TRUSTY_SANDBOX` exactly `1` enters, and
+/// enters exactly once.
 /// Test: this test.
 #[test]
 fn an_isolated_clean_environment_enters_and_latches() {

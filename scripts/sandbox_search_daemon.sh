@@ -11,7 +11,8 @@
 #   #8149, #8659, #8686, #8777 and #8958 need a daemon that cannot reach the
 #   live one (port 7878, `com.trusty.search`) or its data.
 # What: validates, then runs in the foreground:
-#     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_DATA_DIR=<dir>/data \
+#     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
+#            TRUSTY_DATA_DIR=<dir>/data \
 #            [FASTEMBED_CACHE_DIR=<model cache>] [<KNOBS the caller set>] \
 #            <bin> start --foreground --no-auto-discover \
 #                  --data-dir <dir>/data --port <N>
@@ -22,9 +23,11 @@
 #   TRUSTY_EMBEDDERD_BIN.
 #   Working directory: the daemon runs with cwd <dir>/home. At startup it walks
 #   up from its cwd for a `.env.local` and loads it (`load_env_local_once`,
-#   crates/trusty-common/src/credentials/dotenv.rs); no variable disables that,
-#   so a cwd inside a checkout would reload the very keys `env -i` removed. The
-#   script also refuses a sandbox dir with a `.env.local` in any ancestor.
+#   crates/trusty-common/src/credentials/dotenv.rs). The script refuses a
+#   sandbox dir with a `.env.local` in any ancestor, so a cwd inside a checkout
+#   cannot reload the very keys `env -i` removed.
+#   TRUSTY_SANDBOX=1 (#9178) also tells that loader to read no `.env.local`,
+#   project or $HOME tier, as a second layer behind the refusal above.
 #   Embedder sidecar: with PATH /usr/bin:/bin the daemon finds `trusty-embedderd`
 #   only as a sibling of the `--bin` executable or through TRUSTY_EMBEDDERD_BIN.
 #   `--bin` therefore needs a sibling `trusty-embedderd`, or export
@@ -332,7 +335,7 @@ fi
 # The KNOBS the caller exported, as NAME=value words for env -i. `compgen -e`
 # lists exported names only. Values are read by indirect expansion.
 EXPORTED=" $(compgen -e | tr '\n' ' ') "
-ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data")
+ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data" "TRUSTY_SANDBOX=1")
 if [ -n "$MODEL_CACHE" ]; then
   ENV_WORDS+=("FASTEMBED_CACHE_DIR=$MODEL_CACHE")
 fi

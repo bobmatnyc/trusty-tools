@@ -41,6 +41,8 @@
 //! resolver's, not this module's). [`user_env_local_path`] is the hermetic
 //! core (HOME is injected, not read from the real environment) so the
 //! precedence is unit-testable without `OnceLock`'s once-only semantics.
+//! `TRUSTY_SANDBOX=1` (exactly "1") turns off both `.env.local` tiers and the
+//! read-only inspectors (#9178).
 //! Test: `dotenv_tests` (sibling file).
 
 use std::path::{Path, PathBuf};
@@ -275,24 +277,85 @@ pub fn user_env_local_path(home: &Path) -> Option<PathBuf> {
 /// `dotenvy::from_path`, then does the same for [`user_env_local_path`].
 /// Subsequent calls are a no-op `OnceLock` check. Errors (missing file,
 /// malformed file) are swallowed — a missing `.env.local` is the common case
-/// (production/CI), not a failure.
-/// Test: exercised indirectly via `resolver::resolve_key`'s production path;
-/// the once-only + cwd-search behaviour itself is not independently unit
-/// tested because `OnceLock` fires exactly once per test binary — see
-/// module docs for why precedence tests use [`load_env_from_path`] instead.
+/// (production/CI), not a failure. With `TRUSTY_SANDBOX=1` in the process
+/// environment (#9178) neither tier is loaded; the latch still fires, so a
+/// later call never loads either.
+/// Test: the tier logic through [`load_env_local_tiers`]
+/// (`dotenv_tests::sandbox_flag_skips_project_tier`,
+/// `dotenv_tests::sandbox_flag_skips_home_tier`); this wrapper end to end in
+/// its own process, `sandbox_env_local_9178_reads_no_tier`.
 pub fn load_env_local_once() {
     LOADED.get_or_init(|| {
-        if let Ok(cwd) = std::env::current_dir()
-            && let Some(path) = find_workspace_env_local(&cwd)
-        {
-            let _ = dotenvy::from_path(&path);
-        }
-        if let Some(home) = dirs::home_dir()
-            && let Some(path) = user_env_local_path(&home)
-        {
-            let _ = dotenvy::from_path(&path);
-        }
+        let cwd = std::env::current_dir().ok();
+        let home = dirs::home_dir();
+        // #9178: a sandboxed daemon loads no developer `.env.local`.
+        load_env_local_tiers(
+            cwd.as_deref(),
+            home.as_deref(),
+            env_local_opted_out(),
+            |path| {
+                let _ = dotenvy::from_path(path);
+            },
+        );
     });
+}
+
+/// The process variable whose exact value `1` stops every `.env.local` read.
+///
+/// Why (#9178): `env -i` clears the inherited environment, but the loader
+/// still walks up from the cwd and reads `$HOME/.env.local`, so a sandboxed
+/// daemon picked up the developer's credentials. The sandbox scripts set
+/// this variable.
+pub const SANDBOX_ENV_VAR: &str = "TRUSTY_SANDBOX";
+
+/// Whether the process environment opts out of `.env.local` (#9178).
+///
+/// Why: one reader for the loader and both read-only inspectors, so no tool
+/// reports a tier that resolution skips.
+/// What: `true` only when [`SANDBOX_ENV_VAR`] is set to exactly `1`. Absent,
+/// empty, `0`, `true` or a non-UTF-8 value all answer `false`. `var_os`
+/// cannot fail, so there is no error branch to default either way.
+/// Test: `dotenv_tests::only_exactly_one_opts_out`.
+fn env_local_opted_out() -> bool {
+    sandbox_flag_set(std::env::var_os(SANDBOX_ENV_VAR).as_deref())
+}
+
+/// The pure decision behind [`env_local_opted_out`]: exactly `1` opts out.
+/// Public so `tm daemon --sandbox` refuses on the same rule (#9178).
+/// Test: `dotenv_tests::only_exactly_one_opts_out`.
+pub fn sandbox_flag_set(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+/// Hermetic core of [`load_env_local_once`]: locate both tiers and hand each
+/// found file to `load`.
+///
+/// Why (#9178): cwd, home and the sandbox flag are parameters, so a test
+/// drives the opt-out without the process-wide `OnceLock`, the real `$HOME`
+/// or a process-env mutation.
+/// What: `sandboxed` → returns before either tier is located. Otherwise calls
+/// `load` with the project `.env.local` found upward from `cwd`, then with
+/// `home`'s `.env.local` — project first, so its values win under `dotenvy`'s
+/// never-override rule.
+/// Test: `dotenv_tests::sandbox_flag_skips_project_tier`,
+/// `dotenv_tests::project_tier_loads_without_sandbox_flag`,
+/// `dotenv_tests::sandbox_flag_skips_home_tier`,
+/// `dotenv_tests::home_tier_loads_without_sandbox_flag`.
+fn load_env_local_tiers(
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    sandboxed: bool,
+    mut load: impl FnMut(&Path),
+) {
+    if sandboxed {
+        return;
+    }
+    if let Some(path) = cwd.and_then(find_workspace_env_local) {
+        load(&path);
+    }
+    if let Some(path) = home.and_then(user_env_local_path) {
+        load(&path);
+    }
 }
 
 /// The once-per-process latch [`load_env_local_once`] and the test sandbox's
@@ -328,9 +391,15 @@ pub(crate) fn skip_env_local_load() -> bool {
 /// What: parses `path` with `dotenvy`'s non-mutating iterator, skipping malformed
 /// entries, and returns the first non-empty value bound to `var`, or `None` when
 /// the file is unreadable, has no such key, or binds it to an empty value.
+/// `None` without reading `path` while `TRUSTY_SANDBOX=1` (#9178).
 /// Test: `dotenv_tests::read_var_from_env_local_finds_value`,
-/// `dotenv_tests::read_var_from_env_local_absent_is_none`.
+/// `dotenv_tests::read_var_from_env_local_absent_is_none`,
+/// `sandbox_env_local_9178_reads_no_tier`.
 pub fn read_var_from_env_local(path: &Path, var: &str) -> Option<String> {
+    // #9178: report no `.env.local` value the sandboxed loader would skip.
+    if env_local_opted_out() {
+        return None;
+    }
     let iter = dotenvy::from_path_iter(path).ok()?;
     iter.flatten()
         .find(|(k, _)| k == var)
@@ -347,11 +416,17 @@ pub fn read_var_from_env_local(path: &Path, var: &str) -> Option<String> {
 /// read-only.
 /// What: searches upward from the current working directory via
 /// [`find_workspace_env_local`] and delegates to [`read_var_from_env_local`];
-/// `None` when there is no `.env.local` or it does not bind `var`.
+/// `None` when there is no `.env.local` or it does not bind `var`, and
+/// always `None` while `TRUSTY_SANDBOX=1` (#9178).
 /// Test: covered via `env_local_value_from` (the cwd itself is not
 /// independently unit tested — it is the real cwd, exactly like
-/// [`load_env_local_once`]).
+/// [`load_env_local_once`]); the opt-out end to end in
+/// `sandbox_env_local_9178_reads_no_tier`.
 pub fn env_local_value(var: &str) -> Option<String> {
+    // #9178: same opt-out as the loader, checked before the walk.
+    if env_local_opted_out() {
+        return None;
+    }
     let cwd = std::env::current_dir().ok()?;
     env_local_value_from(&cwd, var)
 }
@@ -957,5 +1032,98 @@ mod tests {
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");
         }
+    }
+
+    /// Runs [`load_env_local_tiers`] and parses every file it hands over into
+    /// a map, so a test observes what would load without touching the process
+    /// environment (#9178).
+    fn tiers_loaded(
+        cwd: Option<&Path>,
+        home: Option<&Path>,
+        sandboxed: bool,
+    ) -> std::collections::HashMap<String, String> {
+        let mut vars = std::collections::HashMap::new();
+        load_env_local_tiers(cwd, home, sandboxed, |path| {
+            vars.extend(dotenvy::from_path_iter(path).unwrap().flatten());
+        });
+        vars
+    }
+
+    /// A repo root (a `.git` directory bounds the walk) holding a canary
+    /// `.env.local`, and a nested cwd under it.
+    fn project_with_canary() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "CANARY_9178=x\n").unwrap();
+        let cwd = tmp.path().join("crates").join("daemon");
+        std::fs::create_dir_all(&cwd).unwrap();
+        (tmp, cwd)
+    }
+
+    /// A home directory holding a canary `.env.local`.
+    fn home_with_canary() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env.local"), "CANARY_9178=x\n").unwrap();
+        tmp
+    }
+
+    /// Why (#9178): a sandboxed daemon must not load the project `.env.local`.
+    /// Test: itself.
+    #[test]
+    fn sandbox_flag_skips_project_tier() {
+        let (_tmp, cwd) = project_with_canary();
+        let vars = tiers_loaded(Some(&cwd), None, true);
+        assert_eq!(vars.get("CANARY_9178"), None);
+    }
+
+    /// Why: the twin of `sandbox_flag_skips_project_tier` — without the flag
+    /// the same tree loads, so the skip is the flag's doing.
+    /// Test: itself.
+    #[test]
+    fn project_tier_loads_without_sandbox_flag() {
+        let (_tmp, cwd) = project_with_canary();
+        let vars = tiers_loaded(Some(&cwd), None, false);
+        assert_eq!(vars.get("CANARY_9178").map(String::as_str), Some("x"));
+    }
+
+    /// Why (#9178): a sandboxed daemon must not load `$HOME/.env.local`.
+    /// Test: itself.
+    #[test]
+    fn sandbox_flag_skips_home_tier() {
+        let home = home_with_canary();
+        let vars = tiers_loaded(None, Some(home.path()), true);
+        assert_eq!(vars.get("CANARY_9178"), None);
+    }
+
+    /// Why: the twin of `sandbox_flag_skips_home_tier`.
+    /// Test: itself.
+    #[test]
+    fn home_tier_loads_without_sandbox_flag() {
+        let home = home_with_canary();
+        let vars = tiers_loaded(None, Some(home.path()), false);
+        assert_eq!(vars.get("CANARY_9178").map(String::as_str), Some("x"));
+    }
+
+    /// Why (#9178): only the exact value `1` opts out. Any other value —
+    /// empty, `0`, `true`, padded, or non-UTF-8 — leaves loading on.
+    /// Test: itself.
+    #[test]
+    fn only_exactly_one_opts_out() {
+        use std::ffi::OsStr;
+        assert!(sandbox_flag_set(Some(OsStr::new("1"))));
+        for value in [
+            "", "0", "true", "TRUE", "yes", " 1", "1 ", "1\n", "01", "11",
+        ] {
+            assert!(
+                !sandbox_flag_set(Some(OsStr::new(value))),
+                "{value:?} must not opt out"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(!sandbox_flag_set(Some(OsStr::from_bytes(b"1\xff"))));
+        }
+        assert!(!sandbox_flag_set(None));
     }
 }
