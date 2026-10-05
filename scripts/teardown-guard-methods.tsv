@@ -39,3 +39,5 @@ clear_reindex_checkpoint_sync	clears the redb-backed reindex checkpoint
 remove_chunk	deletes one chunk from redb (delete_chunks_from_redb) + HNSW
 remove_chunks_from_stores	deletes a batch of chunks from redb + HNSW
 purge_file	deletes a file's chunks from redb + HNSW and its persisted content-hash row (#8922)
+remove_file_with	remove_file with a chosen redb-delete failure mode (#8959)
+purge_file_with	purge_file with a chosen redb-delete failure mode (#8959)
