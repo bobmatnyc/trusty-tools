@@ -61,27 +61,46 @@ fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
 
 /// Why: a config that will not parse must not read as "no config" — that
 /// would send writes to a different backend or vault than the operator chose.
-/// The error reports position only, never the offending text.
+/// The error reports position only, never the offending text. Syntax and
+/// shape errors break both loaders; a bad value breaks the loader whose
+/// section owns that key (each section ignores the other's keys, §6.2).
 /// Test: itself.
 #[test]
 fn config_corrupt_file_fails_closed() {
     let tmp = TempDir::new().unwrap();
+    // (label, body, breaks project loader, breaks machine loader)
     let cases = [
-        ("syntax", "secrets:\n  backend: [unclosed\n"),
-        ("bad backend", "secrets:\n  backend: \"sk-leak value\"\n"),
-        ("bad vault", "secrets:\n  vault: \"trusty/../sk-leak\"\n"),
+        ("syntax", "secrets:\n  backend: [unclosed\n", true, true),
+        ("top level", "- sk-leak\n", true, true),
         (
-            "wrong type",
-            "secrets:\n  default_backend:\n    - sk-leak\n",
+            "bad backend",
+            "secrets:\n  backend: \"sk-leak value\"\n",
+            true,
+            false,
         ),
-        ("top level", "- sk-leak\n"),
+        (
+            "bad vault",
+            "secrets:\n  vault: \"trusty/../sk-leak\"\n",
+            true,
+            false,
+        ),
+        (
+            "bad default",
+            "secrets:\n  default_backend:\n    - sk-leak\n",
+            false,
+            true,
+        ),
     ];
-    for (label, body) in cases {
+    for (label, body, breaks_project, breaks_machine) in cases {
         let path = write(tmp.path(), "config.yaml", body);
-        for err in [
-            load_project_at(&path).unwrap_err(),
-            load_machine_at(&path).unwrap_err(),
-        ] {
+        let mut errors = Vec::new();
+        if breaks_project {
+            errors.push(load_project_at(&path).unwrap_err());
+        }
+        if breaks_machine {
+            errors.push(load_machine_at(&path).unwrap_err());
+        }
+        for err in errors {
             assert!(
                 matches!(err, SecretsError::Config { .. }),
                 "{label}: {err:?}"
