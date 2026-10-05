@@ -65,6 +65,8 @@ pub(super) struct HeredocBodies {
     spans: Vec<(usize, usize)>,
     frames: Vec<(usize, usize)>,
     data: Vec<DataBody>,
+    /// #9155: every body whose delimiter was unquoted, data or shell source.
+    expanding: Vec<(usize, usize)>,
     /// #9150: a delimiter word this scan cannot split as the shell does.
     unscannable: bool,
 }
@@ -76,6 +78,11 @@ enum Abandon {
     NoConfidence,
     /// #9150: a delimiter word the shell reads differently from this scan.
     Delimiter,
+    /// #9155: a code `<<` with no terminator line. The shell runs that body
+    /// to the end of input, so every byte stays live as under
+    /// [`Abandon::NoConfidence`], but the unquoted-delimiter bodies found up
+    /// to there — this one included, to the end of input — still expand.
+    Unterminated(Vec<(usize, usize)>),
 }
 
 /// Deny reason for a here-document delimiter the guard cannot read (#9150).
@@ -94,7 +101,9 @@ impl HeredocBodies {
     /// and the lines after it are consumed as those bodies in order, each
     /// running to its own terminator line. A delimiter with no terminator line
     /// abandons the whole scan and yields no spans, so an unterminated
-    /// here-document and an arithmetic left-shift both leave every byte live.
+    /// here-document and an arithmetic left-shift both leave every byte live;
+    /// #9155: an unterminated code `<<` still records the unquoted bodies, its
+    /// own to the end of input, in [`HeredocBodies::expanding`].
     ///
     /// #6946: each body also contributes a `frames` entry, unless its operator
     /// line names a shell ([`line_runs_a_shell`]) — see
@@ -123,7 +132,7 @@ impl HeredocBodies {
                 found
             }
             Ok(_) | Err(Abandon::NoConfidence) => Self::empty(),
-            Err(Abandon::Delimiter) => Self::settle(Err(Abandon::Delimiter)),
+            Err(why) => Self::settle(Err(why)),
         }
     }
 
@@ -143,6 +152,11 @@ impl HeredocBodies {
     fn settle(collected: Result<Self, Abandon>) -> Self {
         match collected {
             Ok(found) => found,
+            // #9155: claim nothing, but keep what the shell still expands.
+            Err(Abandon::Unterminated(expanding)) => Self {
+                expanding,
+                ..Self::empty()
+            },
             Err(why) => Self {
                 unscannable: matches!(why, Abandon::Delimiter),
                 ..Self::empty()
@@ -152,8 +166,9 @@ impl HeredocBodies {
 
     /// The line walk behind [`HeredocBodies::scan`]: `quotes` is the
     /// whole-command map, or `None` to read each operator line's quotes alone.
-    /// [`Abandon::NoConfidence`] back when a delimiter has no terminator line,
-    /// or an operator line's own quotes do not close; [`Abandon::Delimiter`]
+    /// [`Abandon::Unterminated`] back when a delimiter has no terminator line
+    /// (#9155), [`Abandon::NoConfidence`] when an operator line's own quotes
+    /// do not close; [`Abandon::Delimiter`]
     /// when [`delimiters_on`] cannot read a delimiter word, or an ambiguous
     /// `<<` would claim a body (#9150).
     fn collect(
@@ -165,6 +180,7 @@ impl HeredocBodies {
         let mut spans = Vec::new();
         let mut frames = Vec::new();
         let mut data = Vec::new();
+        let mut expanding = Vec::new();
         let mut line = 0;
         while line < lines.len() {
             let (start, end) = lines[line];
@@ -194,10 +210,21 @@ impl HeredocBodies {
                     }
                     continue;
                 }
-                let body =
-                    body_span(command, &lines, line, &delimiter).ok_or(Abandon::NoConfidence)?;
+                let Some(body) = body_span(command, &lines, line, &delimiter) else {
+                    // #9155: bash runs an unterminated body to end of input, so
+                    // an unquoted one expands there; `X ` never ends `<<X`.
+                    let rest = lines.get(line).map_or(command.len(), |l| l.0);
+                    if !delimiter.quoted && rest < command.len() {
+                        expanding.push((rest, command.len()));
+                    }
+                    return Err(Abandon::Unterminated(expanding));
+                };
                 if body.span.0 < body.span.1 {
                     spans.push(body.span);
+                    if !delimiter.quoted {
+                        // #9155: the shell expands this body whoever runs it.
+                        expanding.push(body.span);
+                    }
                     if framing {
                         // #7266: a body its operator line does not hand to a
                         // shell is data, so no word in it is a path the
@@ -221,6 +248,7 @@ impl HeredocBodies {
             spans,
             frames,
             data,
+            expanding,
             unscannable: false,
         })
     }
@@ -231,6 +259,7 @@ impl HeredocBodies {
             spans: Vec::new(),
             frames: Vec::new(),
             data: Vec::new(),
+            expanding: Vec::new(),
             unscannable: false,
         }
     }
@@ -244,6 +273,31 @@ impl HeredocBodies {
             .iter()
             .find(|span| span.0 == idx && !self.data.iter().any(|d| d.span == **span))
             .map(|span| span.1)
+    }
+
+    /// Every claimed body's half-open span, in order (#9155).
+    pub(super) fn spans(&self) -> &[(usize, usize)] {
+        &self.spans
+    }
+
+    /// The data bodies: those whose operator line hands them to something
+    /// other than a shell (#8756).
+    pub(super) fn data(&self) -> &[DataBody] {
+        &self.data
+    }
+
+    /// Every body whose delimiter was unquoted, in order (#9155).
+    ///
+    /// Why: the shell expands `$( … )` and backticks in such a body before any
+    /// program reads it, so a `'` there is a literal character, not quoting.
+    /// [`Self::data`] omits a body a shell runs (`bash <<X`), which hid a
+    /// single-quoted `$(rm -rf /)` from the delete floor.
+    /// What: the span of every unquoted-delimiter body, data or shell source;
+    /// an unterminated one runs to the end of input, though no span is claimed.
+    /// Test: `heredoc_bodies_record_every_expanding_body_9155`,
+    /// `heredoc_bodies_expand_an_unterminated_unquoted_body_9155`.
+    pub(super) fn expanding(&self) -> &[(usize, usize)] {
+        &self.expanding
     }
 
     /// Whether byte `idx` is here-document body content.

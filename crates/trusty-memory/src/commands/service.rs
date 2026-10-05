@@ -81,6 +81,8 @@ pub const LAUNCHD_LABEL: &str = trusty_common::launchd_labels::MEMORY;
 pub fn handle_service(action: &ServiceAction) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        // #9140: install, start and stop act on the live unit; never under an override.
+        refuse_live_unit_action(action)?;
         match action {
             ServiceAction::Install => service_install(),
             ServiceAction::Start => service_start(),
@@ -96,6 +98,27 @@ pub fn handle_service(action: &ServiceAction) -> Result<()> {
              use your distro's service manager (systemd, OpenRC, etc.) directly."
         );
     }
+}
+
+/// Refuse a `service` action that acts on the live launchd unit while
+/// `TRUSTY_DATA_DIR_OVERRIDE` is set (#9140).
+///
+/// Why: `install` and `start` write and bootstrap the live plist, and `stop`
+/// boots the unit out, whatever data dir the override names. `logs` only
+/// reads, so it runs.
+/// What: maps the action to its command name and defers to
+/// `refuse_live_unit_under_override`; a separate function so a test can check
+/// each action without running `launchctl`.
+/// Test: `service_install_start_and_stop_are_refused_under_a_data_dir_override`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn refuse_live_unit_action(action: &ServiceAction) -> Result<()> {
+    let command = match action {
+        ServiceAction::Install => "service install",
+        ServiceAction::Start => "service start",
+        ServiceAction::Stop => "service stop",
+        ServiceAction::Logs => return Ok(()),
+    };
+    super::stop::sandbox::refuse_live_unit_under_override(command)
 }
 
 /// Resolve the log directory for the launchd-managed daemon.

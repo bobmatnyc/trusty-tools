@@ -36,6 +36,8 @@ use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowe
 mod graph_arm;
 use graph_arm::graph_nearest;
 
+mod replay;
+
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
 /// Why: 16 is the recommended value from the original HNSW paper for
@@ -47,12 +49,8 @@ const HNSW_MAX_NB_CONNECTION: usize = 16;
 /// Why: 200 is the standard "good quality" value from the HNSW paper.
 const HNSW_EF_CONSTRUCTION: usize = 200;
 
-/// Default maximum number of layers in the HNSW graph.
-///
-/// Why: 16 layers comfortably holds tens of millions of vectors; the
-/// `hnsw_rs` implementation caps the effective ceiling at `NB_LAYER_MAX`
-/// internally so picking a generous value is safe.
-const HNSW_MAX_LAYER: usize = 16;
+// #9141: the layer count is `replay::HNSW_LAYERS` (1), not 16 — a multi-layer
+// graph drew its hierarchy from an OS-seeded RNG and differed on every open.
 
 /// Initial expected element count hint passed to `Hnsw::new`. Used only to
 /// pre-allocate; the index grows transparently.
@@ -278,10 +276,13 @@ impl HnswStore {
     /// What: Touches `VECTORS` / `VECTOR_KEYS` / `DELETED_VECTORS` /
     /// `VECTOR_ID_SEQ` to create them if missing, then reads every
     /// `(vector_id, vec)` row from `VECTORS` (skipping tombstoned ids) and
-    /// replays them into a fresh in-memory `Hnsw<f32, DistCosine>` index.
+    /// replays them in parallel into a fresh single-layer
+    /// `Hnsw<f32, DistCosine>` index, so the OS-seeded layer RNG in `hnsw_rs`
+    /// no longer reshapes the graph on every open (#9141).
     /// Raises the persisted `VECTOR_ID_SEQ` counter to at least
     /// `max(VECTORS, VECTOR_KEYS) + 1` (#5005).
-    /// Test: `hydration_restores_index`.
+    /// Test: `hydration_restores_index`,
+    /// `reopening_a_palace_answers_every_query_identically`.
     pub fn open(db: Arc<Database>, dim: usize) -> Result<Self> {
         Self::open_with_mode(db, dim, false)
     }
@@ -309,13 +310,8 @@ impl HnswStore {
             open_init::ensure_schema(&db)?;
         }
 
-        let index = Hnsw::<f32, DistCosine>::new(
-            HNSW_MAX_NB_CONNECTION,
-            HNSW_INITIAL_CAPACITY,
-            HNSW_MAX_LAYER,
-            HNSW_EF_CONSTRUCTION,
-            DistCosine,
-        );
+        // #9141: single-layer, so hnsw_rs's OS-seeded layer RNG cannot vary it.
+        let index = replay::new_index();
 
         // Load tombstones first so we never insert a deleted point into the
         // fresh in-memory graph during hydration.
@@ -333,6 +329,7 @@ impl HnswStore {
         // Replay every live vector into the in-memory graph and find the
         // largest vector_id ever assigned so `next_id` resumes correctly.
         let mut max_seen: u64 = 0;
+        let mut live: Vec<(Vec<f32>, usize)> = Vec::new();
         {
             let rtx = db.begin_read()?;
             let table = rtx.open_table(VECTORS)?;
@@ -352,9 +349,12 @@ impl HnswStore {
                         got: vec.len(),
                     });
                 }
-                index.insert((vec.as_slice(), id as usize));
+                live.push((vec, id as usize));
             }
         }
+        // #9141: parallel insert into the single-layer graph (owner ruling
+        // 25). See `replay` for what that does and does not guarantee.
+        replay::replay(&index, &live);
 
         // Also consider the highest mapped id from VECTOR_KEYS in case
         // VECTORS was cleared but the mapping survived (defensive).
@@ -553,6 +553,8 @@ impl HnswStore {
     /// queries — and because `hnsw_rs` seeds its level RNG from OS entropy,
     /// *which* drawer went missing changed on every palace open. See
     /// [`exhaustive`] for the measurement and the threshold's rationale.
+    /// #9141: the graph is now single-layer, so the layer RNG no longer
+    /// changes which drawers the graph arm misses; see `replay`.
     ///
     /// #5179: above the threshold both graph budgets scale with the collection
     /// rather than sitting at a constant — `ef_search` with the live-drawer
