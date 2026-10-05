@@ -812,7 +812,8 @@ pub(crate) async fn call_chain_report(
 
     let (graph, chunks) = {
         let indexer = handle.indexer.read().await;
-        let graph = indexer.snapshot_symbol_graph().await;
+        // #8959: a call chain reads its own writes; pending ones are flushed.
+        let graph = indexer.fresh_symbol_graph().await;
         // #5917: the entry point is resolved against this snapshot, so an
         // unreadable corpus rendered as `404 entry point not found` — a real
         // symbol reported nonexistent, which reads as an answer about the code.

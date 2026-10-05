@@ -591,7 +591,8 @@ pub(crate) async fn graph_report(
         .ok_or_else(|| unknown_index(&index_id))?;
     let graph = {
         let indexer = handle.indexer.read().await;
-        indexer.snapshot_symbol_graph().await
+        // #8959: an export reads its own writes; pending ones are flushed first.
+        indexer.fresh_symbol_graph().await
     };
 
     let type_filter = parse_filter_set(params.types.as_deref());

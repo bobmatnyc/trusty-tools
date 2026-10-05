@@ -134,7 +134,7 @@ pub(crate) async fn gate(
     }
 }
 
-/// Purge an excluded pushed path: chunks, content hash, then one graph rebuild.
+/// Purge an excluded pushed path: chunks, content hash, then a stale graph mark.
 ///
 /// Why (#8922): a hash left behind makes a reindex hash-skip the file once the
 /// policy admits it again. The reindex keys hashes by root-relative path, so an
@@ -150,7 +150,8 @@ async fn purge_pushed(
         forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
     }
     if removed > 0 {
-        indexer.rebuild_symbol_graph_now().await;
+        // #8959: the graph-refresh ticker rebuilds; no whole-corpus pass per write.
+        indexer.mark_symbol_graph_stale();
     }
     Ok(removed)
 }

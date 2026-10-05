@@ -78,17 +78,18 @@ pub(crate) const PROGRESS_CHUNK_INTERVAL: usize = 32;
 impl CodeIndexer {
     /// Rebuild the symbol graph from the current corpus.
     ///
-    /// Why: called after any mutation (`add_chunk`, `remove_chunk`,
-    /// `index_file`). Rebuilding is O(N + E) over chunks/calls and the
-    /// corpus is small + in-memory, so we favour simplicity over incremental
-    /// maintenance.
-    /// What: snapshots chunk tuples and entity lists under read locks, builds
-    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs
-    /// it — unless the contributed-overlay merge failed, in which case the
-    /// previous serving graph is kept and the failure is returned (#5505).
-    /// Test: every test that calls `add_chunk` or `index_file` exercises the
-    /// rebuild path indirectly; `contrib_load_failure_installs_nothing` covers
-    /// the not-installed arm.
+    /// Why: called after bulk mutations (`add_chunk`, `remove_chunk`, a batch
+    /// commit, a reindex). It is O(N + E) over the WHOLE corpus, so
+    /// single-file writes (`index_file`, `remove_file`) no longer call it
+    /// directly: they mark the graph stale and the graph-refresh ticker runs
+    /// one rebuild per burst (#8959, #9179).
+    /// What: clears the stale mark and counts the pass, snapshots chunk tuples
+    /// and entity lists under read locks, builds a new `SymbolGraph`, persists
+    /// it to the corpus if wired, and installs it — unless the
+    /// contributed-overlay merge failed, in which case the previous serving
+    /// graph is kept and the failure is returned (#5505).
+    /// Test: `test_symbol_graph_rebuilds_after_indexing`;
+    /// `contrib_load_failure_installs_nothing` covers the not-installed arm.
     pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
@@ -104,6 +105,8 @@ impl CodeIndexer {
         // nothing was evicted.
         self.ensure_chunks_loaded().await;
         self.ensure_bm25_entities_loaded().await;
+        // #8959: the snapshot below covers every write marked before this.
+        self.graph_refresh.begin_full_rebuild();
 
         // Issue (180GB RSS fix): the temporary `Vec<ChunkTuple>` snapshot clones
         // every chunk's strings (id, file, function_name, calls, inherits_from)
@@ -276,9 +279,10 @@ impl CodeIndexer {
     /// batched ONNX call, then commits BM25, HNSW, the embeddings cache, and
     /// the corpus under the same lock-window-minimizing path used by the bulk
     /// reindex.
-    /// What: chunk the file, batch-embed all chunks, commit vectors / BM25 /
-    /// corpus, then enrich entities via the NLP helper and rebuild the
-    /// symbol graph once.
+    /// What: chunk the file, batch-embed all chunks, remove the file's chunks
+    /// the new text no longer produces (#8959), commit vectors / BM25 /
+    /// corpus, then enrich entities via the NLP helper and mark the symbol
+    /// graph stale for the deferred rebuild (#8959, #9179).
     ///
     /// Issue #4122: this is the single choke point every INCREMENTAL write
     /// funnels through — the file watcher (`service::watch_loop`), the
@@ -378,7 +382,8 @@ impl CodeIndexer {
             let id = crate::core::registry::IndexId::new(self.index_id.as_str());
             let removed = self.purge_file(&id, file_path).await?;
             if removed > 0 && !self.skip_kg {
-                self.rebuild_symbol_graph().await;
+                // #8959: deferred, not a whole-corpus rebuild per call.
+                self.mark_symbol_graph_stale();
             }
             tracing::warn!(
                 index_id = %self.index_id,
@@ -403,6 +408,10 @@ impl CodeIndexer {
         populate_virtual_terms(&mut chunks, &entities);
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        // #8959: ids this file held whose content the new text no longer has.
+        // Chunk ids embed line spans and symbol names, so an upsert alone
+        // left them searchable beside the new content.
+        let superseded = self.superseded_chunk_ids(file_path, &chunks).await;
 
         // #100: how many of this file's chunks the `TRUSTY_MAX_CHUNKS` cap
         // discarded. Non-zero means the file is NOT fully indexed, and this
@@ -421,6 +430,9 @@ impl CodeIndexer {
             } else {
                 self.embed_chunks_in_batches(&chunks, None, None).await?
             };
+            // #8959: removed after the embed (a failed embed keeps the old
+            // content) and before the commit (freed ids count against the cap).
+            self.remove_superseded_chunks(&superseded).await;
             let parsed = ParsedBatch {
                 chunks,
                 embeddings,
@@ -433,6 +445,9 @@ impl CodeIndexer {
                 .commit_parsed_batch(parsed, true)
                 .await?
                 .chunks_dropped_by_cap;
+        } else {
+            // #8959: content that parses into no chunks leaves none behind.
+            self.remove_superseded_chunks(&superseded).await;
         }
 
         let all_entities = self
@@ -450,8 +465,9 @@ impl CodeIndexer {
         // `rebuild_symbol_graph` — that function is the shared choke point for
         // reindex, remove_file, and the contributed-graph ingest endpoint,
         // whose skip_kg semantics are not this issue's to change.
+        // #8959: mark stale instead of a whole-corpus rebuild per call.
         if !self.skip_kg {
-            self.rebuild_symbol_graph().await;
+            self.mark_symbol_graph_stale();
         }
 
         // #100: the cap used to drop chunks, log a `warn!`, and still return
@@ -478,6 +494,30 @@ impl CodeIndexer {
             );
         }
         Ok(outcome)
+    }
+
+    /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.
+    ///
+    /// Why: `index_file` upserts by chunk id, and an id embeds the chunk's
+    /// line span or symbol name, so an edit that shifts lines or renames a
+    /// symbol left the old-id chunks searchable beside the new ones (#8959).
+    /// What: the file's current ids minus `fresh`'s ids. The scan is the same
+    /// one `remove_file` runs; the result is bounded by the file's chunk count.
+    /// Test: `index_file_replaces_a_files_prior_chunks`.
+    async fn superseded_chunk_ids(&self, file_path: &str, fresh: &[RawChunk]) -> Vec<String> {
+        let keep: std::collections::HashSet<&str> = fresh.iter().map(|c| c.id.as_str()).collect();
+        self.chunk_ids_for_file(file_path)
+            .await
+            .into_iter()
+            .filter(|id| !keep.contains(id.as_str()))
+            .collect()
+    }
+
+    /// Drop superseded ids from the corpus, BM25, HNSW and redb (#8959).
+    async fn remove_superseded_chunks(&self, ids: &[String]) {
+        if !ids.is_empty() {
+            self.remove_chunks_from_stores(ids).await;
+        }
     }
 
     /// Run NER + ConceptCluster passes and merge their entities with the

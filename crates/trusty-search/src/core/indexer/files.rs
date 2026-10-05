@@ -580,9 +580,8 @@ impl CodeIndexer {
     /// in a loop. Calling `remove_file` per file would trigger O(deleted_files)
     /// full KG rebuilds, which is expensive. The reindex orchestrator already
     /// rebuilds the KG once at the end of Phase 3, so the per-file rebuild is
-    /// redundant. This method is identical to `remove_file` except it skips the
-    /// `rebuild_symbol_graph` call, leaving the graph stale until the orchestrator's
-    /// Phase 3 rebuild corrects it.
+    /// redundant. This method is identical to `remove_file` except it does not
+    /// mark the graph stale (#9179); the caller's own rebuild corrects it.
     /// What: removes chunk rows, entity row, and in-memory entity map entry for
     /// `file_path`. Returns the number of chunks removed.
     /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
@@ -610,17 +609,24 @@ impl CodeIndexer {
     /// Why: `index-file` re-indexes a file in place, but file deletion (and
     /// `FileWatcher` rename/remove events) needs to drop all of a file's
     /// chunks at once. Returns the number of chunks removed.
+    /// What: removes the chunks and the entity list, then marks the symbol
+    /// graph stale when anything left (#9179) rather than rebuilding it.
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`.
     pub async fn remove_file(&self, file_path: &str) -> Result<usize> {
         // `chunk_ids_for_file` rehydrates an idle-evicted map first, so the
         // redb delete below still sees the ids it is keyed by.
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
         self.remove_chunks_from_stores(&ids).await;
-        self.entities.write().await.remove(file_path);
+        let had_entities = self.entities.write().await.remove(file_path).is_some();
         // Issue #28: evict the file's entity list from the durable redb store
         // too, or a restart would resurrect it into the symbol graph.
         self.delete_entities_from_redb(file_path).await;
-        self.rebuild_symbol_graph().await;
+        // #9179: was a whole-corpus `rebuild_symbol_graph` per call (60 s and
+        // ~1.2 GB on a 315K-chunk index); the ticker now rebuilds once per burst.
+        if removed > 0 || had_entities {
+            self.mark_symbol_graph_stale();
+        }
         Ok(removed)
     }
 
@@ -687,7 +693,7 @@ impl CodeIndexer {
     /// HNSW deletion is non-fatal in this codebase), then drops the id from
     /// each in-memory structure under a single write lock per structure.
     /// Test: covered indirectly by `test_remove_chunk_removes_from_results`.
-    async fn remove_chunks_from_stores(&self, ids: &[String]) {
+    pub(super) async fn remove_chunks_from_stores(&self, ids: &[String]) {
         self.drop_chunk_ids_from_memory(ids).await;
         // Issue #28: mirror the deletion into the durable redb corpus.
         self.delete_chunks_from_redb(ids).await;

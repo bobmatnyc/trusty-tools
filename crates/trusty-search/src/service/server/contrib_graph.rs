@@ -345,7 +345,8 @@ pub(crate) async fn graph_neighbors_report(
 
     let graph = {
         let indexer = handle.indexer.read().await;
-        indexer.snapshot_symbol_graph().await
+        // #8959: a neighbour query reads its own writes; pending ones are flushed.
+        indexer.fresh_symbol_graph().await
     };
     let neighbors: Vec<NeighborEntry> = graph
         .graph_neighbors(&params.node, dirs, kinds.as_deref(), max_hops)

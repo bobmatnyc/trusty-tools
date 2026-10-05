@@ -44,6 +44,8 @@ mod files;
 // #8266: grep's file set, read without rehydrating an evicted corpus.
 mod file_set;
 pub(crate) mod helpers;
+// #8959/#9179: single-file writes mark the symbol graph stale; a ticker rebuilds.
+pub(crate) mod graph_refresh;
 mod idle_evict;
 mod ingest;
 pub(crate) mod migration_state;
@@ -240,6 +242,9 @@ pub struct CodeIndexer {
 
     /// Call graph derived from the chunk corpus.
     pub(super) symbol_graph: Arc<RwLock<Arc<SymbolGraph>>>,
+
+    /// #8959/#9179: which writes `symbol_graph` misses, for the deferred rebuild.
+    pub(super) graph_refresh: graph_refresh::GraphRefresh,
 
     /// Optional ONNX NER for `NaturalLanguagePhrase` extraction.
     pub(super) ner: crate::core::ner::NerExtractor,
@@ -720,6 +725,7 @@ impl CodeIndexer {
             bm25: Arc::new(RwLock::new(CodeBm25Index::new())),
             query_cache: Arc::new(Mutex::new(LruCache::new(cap))),
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
+            graph_refresh: graph_refresh::GraphRefresh::default(),
             ner: crate::core::ner::NerExtractor::try_load(),
             persist_state: Arc::new(PersistState::default()),
             domain_terms: Vec::new(),
