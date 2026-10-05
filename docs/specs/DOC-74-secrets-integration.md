@@ -198,7 +198,7 @@ regression of it.
 | **Reference key** | `secret://KEY` (project, then owner) or the explicit `secret://<owner>[/<repo>]/KEY` — non-secret, freely printable (§4 T-2, §15.3; amended 2026-10-01). |
 | **Session cache** | The in-process cache of resolved values, kept only for CLI-backed sources and filled on first use (§8.4, amended 2026-10-01). |
 | **Sync target** | A write-only destination such as Vercel or GitHub Actions; it cannot be read back (§15.4). |
-| **Exec grant** | A token `tm secrets exec` registers with the tm daemon (pending owner decision (item 34): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), naming the child pid, the allowed keys and an expiry (§15.8). |
+| **Exec grant** | A token `tm secrets exec` registers on the trusty-secrets socket, next to `secrets.resolve`, by calling `secrets.grant` as a client (S8, #9070; the method name is final per S8; ruling 34, 2026-10-05), naming the child pid, the allowed keys and an expiry (§15.8). |
 | **Detection** | A read-only probe of what secrets tooling exists on the machine — installed, running, configured — never an unlock (§7). |
 
 ---
@@ -536,7 +536,7 @@ posture (`resolver.rs:74-81`, `default_store`'s own fallback chain).
 A new tool, `secrets_get_ref`, joins the daemon's MCP catalog
 (`crates/trusty-mpm/src/mcp/tools/mod.rs` — the pattern is `mod.rs`'s thin
 facade plus a new `secrets.rs` leaf, matching how `disk.rs` was added for
-Disk in #6927) alongside `secrets_list` (pending owner decision (item 34): recommended to stay in the tm daemon's MCP catalog as a client of the socket; returns references, never values). Both return only names/references
+Disk in #6927) alongside `secrets_list`. `secrets_get_ref` stays in the tm daemon's MCP catalog as a client of the trusty-secrets socket and returns references, never values (ruling 34, 2026-10-05). Both return only names/references
 and metadata (`backend`, `imported_at`, `present: bool`) — never a value —
 the same non-goal DOC-64 states for its panel. A tool that resolves an actual
 *value* into a subprocess environment (the MCP equivalent of `tm secrets
@@ -895,7 +895,7 @@ not a per-language library, because a library would need a value-returning
 method.
 
 **Exec grant (tier 3).** `tm secrets exec` mints a random token and registers
-it with the tm daemon (pending owner decision (item 34): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), with the child pid, the allowed keys and an expiry. The
+it on the trusty-secrets socket, next to `secrets.resolve`. tm, the spawner, is the client and registers it by calling `secrets.grant` (S8, #9070; the method name is final per S8; ruling 34, 2026-10-05), with the child pid, the allowed keys and an expiry. The
 child receives the token in its env. `secrets.resolve` answers only when all
 three hold:
 
