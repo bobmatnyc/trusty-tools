@@ -184,6 +184,16 @@ mod tests {
             ("u:p@ss@host:o/r", "u@host:o/r"),
             ("https://github.com/o/r", "https://github.com/o/r"),
             ("/srv/dir@x/repo", "/srv/dir@x/repo"),
+            ("https://u:T@[::1]:8080/x", "https://[::1]:8080/x"),
+            // #9124: an `@` after a userinfo-free authority is path or query.
+            (
+                "https://host:8080/@scope/pkg",
+                "https://host:8080/@scope/pkg",
+            ),
+            ("ssh://h:2222/o/r@x", "ssh://h:2222/o/r@x"),
+            ("https://host:8443/p?who=a@b", "https://host:8443/p?who=a@b"),
+            ("https://[::1]:8080/o/r@x", "https://[::1]:8080/o/r@x"),
+            ("https://[::1]/o/r?who=a@b", "https://[::1]/o/r?who=a@b"),
             ("", ""),
         ] {
             assert_eq!(strip_url_secret(url), want, "{url:?}");
