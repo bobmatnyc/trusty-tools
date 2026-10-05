@@ -289,11 +289,11 @@ an inline status tag. Source paths are cited where known.
 
 **FR-MCP-2 — Tool catalogue** ✅
 - *Vision:* Expose every search lane + index management as MCP tools.
-- *Current:* 19 tools — `search_code`, `search_kg`, `search_semantic`,
+- *Current:* tools include `search_code`, `search_kg`, `search_semantic`,
   `search_lexical`, `search_all`, `search_similar`, `grep`, `get_call_chain`,
   `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`,
-  `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`
-  (`src/mcp/tools.rs`). `grep` now accepts `max_count` as a ripgrep-parity
+  `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`
+  (`src/mcp/tools.rs`). There is no `upgrade` tool (#9169). `grep` now accepts `max_count` as a ripgrep-parity
   alias for `max_results` (#447). `search_similar` re-embeds seed content on
   LRU miss for `skip_kg` indexes (#484).
 - *Gap:* The crate README lists an older subset; the code is authoritative.
@@ -471,8 +471,7 @@ an inline status tag. Source paths are cited where known.
 - *Current:* `trusty-search upgrade [--check] [--yes]` checks crates.io for a
   newer version and, with confirmation (or `--yes`), installs it via
   `cargo install` and restarts the daemon (SIGTERM + launchd respawn). `POST
-  /upgrade` exposes the same workflow over HTTP so the `upgrade` MCP tool can
-  trigger it. `GET /health` includes `update_available` when a newer version is
+  /upgrade` exposes the same workflow over HTTP. `GET /health` includes `update_available` when a newer version is
   detected in the background (#537).
 - *Gap:* None material.
 

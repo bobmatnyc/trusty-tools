@@ -1,5 +1,6 @@
 //! Miscellaneous tool arms: `search_health`, `chat`, `grep`, `get_call_chain`,
-//! `upgrade`, and `console_metrics`. `search_health`'s body lives in
+//! and `console_metrics`. #9169 (ruling f8): the `upgrade` tool was removed —
+//! nothing called it. `search_health`'s body lives in
 //! [`super::health`] (#5264); the arm here only routes to it.
 //!
 //! Why: these tools share no common theme with the search or index groups
@@ -37,14 +38,14 @@ pub(super) const GREP_BOOL_FLAGS: [(&str, &str); 6] = [
     ("word_regexp", "-w: require word boundaries"),
 ];
 
-/// Route one of the five miscellaneous tool names to the correct daemon call.
+/// Route one of the miscellaneous tool names to the correct daemon call.
 ///
 /// Why: keeping these arms separate from search and index tools lets each
 /// submodule stay focused and under the 500-line cap.
 /// What: returns `None` when `tool` is not a misc tool, `Some(Ok(value))` on
 /// success, or `Some(Err(DispatchError))` on failure.
-/// Test: grep tests in `tests.rs`; upgrade and chat are end-to-end tested by
-/// integration tests.
+/// Test: grep tests in `tests.rs`; chat is end-to-end tested by integration
+/// tests.
 pub(super) async fn dispatch_misc_tool(
     server: &McpServer,
     tool: &str,
@@ -194,28 +195,6 @@ pub(super) async fn dispatch_misc_tool(
                 ),
                 None => Some(server.post("/grep", &body).await),
             }
-        }
-        "upgrade" => {
-            // Route to the daemon's /upgrade HTTP endpoint. The body mirrors
-            // the MCP schema: check (default true) and confirm (default false).
-            // #7927: `confirm` installs a new binary — a coerced `"true"`
-            // would be read as `false` and silently report versions instead,
-            // and a coerced `"false"` would install. Both are rejected.
-            let check = match optional_bool(args, "check", "true reports versions only, no install")
-            {
-                Ok(v) => v.unwrap_or(true),
-                Err(e) => return Some(Err(e)),
-            };
-            let confirm = match optional_bool(
-                args,
-                "confirm",
-                "true installs the new version; must be explicit",
-            ) {
-                Ok(v) => v.unwrap_or(false),
-                Err(e) => return Some(Err(e)),
-            };
-            let body = serde_json::json!({ "check": check, "confirm": confirm });
-            Some(server.post("/upgrade", &body).await)
         }
         "console_metrics" => Some(handle_console_metrics(server).await),
         _ => None,

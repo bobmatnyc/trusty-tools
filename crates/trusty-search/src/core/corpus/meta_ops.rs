@@ -421,7 +421,9 @@ impl CorpusStore {
     /// empty transaction).
     /// Test: `copy_all_from_seeds_staging_corpus` in `corpus::tests`.
     pub(crate) fn copy_all_from(&self, source: &CorpusStore) -> Result<()> {
-        use crate::core::migration::{META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION, META_TABLE};
+        use crate::core::migration::{
+            META_KEY_INDEXED_ROOT, META_KEY_REINDEXED_UNIX, META_KEY_SCHEMA_VERSION, META_TABLE,
+        };
 
         // Single read transaction on the source — consistent snapshot.
         let src_txn = source.db.begin_read().context("begin source read txn")?;
@@ -484,7 +486,13 @@ impl CorpusStore {
                 // the rows it describes are not copied, and a stamp without
                 // its rows would claim a format for a graph that is not there.
                 // The end-of-reindex `save_kg_graph` writes both together.
-                for key in &[META_KEY_INDEXED_ROOT, META_KEY_SCHEMA_VERSION] {
+                // #9169: the reindex stamp too, so a resident index serving
+                // its staging corpus still reports when it was last indexed.
+                for key in &[
+                    META_KEY_INDEXED_ROOT,
+                    META_KEY_SCHEMA_VERSION,
+                    META_KEY_REINDEXED_UNIX,
+                ] {
                     if let Some(val) = src_meta
                         .get(key)
                         .with_context(|| format!("read _meta[{key}]"))?

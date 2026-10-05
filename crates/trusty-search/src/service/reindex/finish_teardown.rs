@@ -121,6 +121,10 @@ pub(super) async fn resolve_corpus_swap(
             if force && promoted {
                 super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;
             }
+            // #9169: only a promoted corpus records a reindex commit.
+            if promoted {
+                stamp_reindex_commit(handle, index_id).await;
+            }
             if let Err(e) = handle.write_indexed_root(canonical_root).await {
                 tracing::warn!(
                     "reindex[{}]: failed to persist indexed_root {} ({e}) — \
@@ -145,8 +149,38 @@ pub(super) async fn resolve_corpus_swap(
                 index_id.0,
             );
         }
+        // #9169: the direct-write path committed into the live corpus itself.
+        stamp_reindex_commit(handle, index_id).await;
     }
     promotion_deferred
+}
+
+/// Record in the live corpus that a reindex just committed it (#9169).
+///
+/// Why: `search.project.resolve` picks a repo's most recently indexed index,
+/// and the `index.redb` mtime moves whenever redb opens the file, so a load
+/// looked like a reindex. This stamp moves only here. It is not
+/// `PersistedIndex::last_indexed_unix`, which reconcile reads (#4391).
+/// What: writes the current unix time into the handle's corpus `_meta` on a
+/// blocking worker. A handle with no durable corpus is a no-op; a write
+/// failure is logged and leaves the previous stamp, so the resolver falls
+/// back to that stamp or to the mtime.
+/// Test: `reindex_stamp_tests::a_committed_reindex_stamps_the_corpus_and_a_reload_does_not`,
+/// `reindex_stamp_tests::the_direct_write_path_stamps_the_live_corpus`.
+pub(super) async fn stamp_reindex_commit(handle: &IndexHandle, index_id: &IndexId) {
+    let Some(corpus) = handle.indexer.read().await.corpus_store() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let written = tokio::task::spawn_blocking(move || corpus.write_reindexed_unix_sync(now)).await;
+    match written {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("reindex[{}]: reindex stamp not written: {e:#}", index_id.0),
+        Err(e) => tracing::warn!("reindex[{}]: reindex stamp task failed: {e}", index_id.0),
+    }
 }
 
 /// Resolve the staged HNSW swap: commit or roll back (issue #3970).

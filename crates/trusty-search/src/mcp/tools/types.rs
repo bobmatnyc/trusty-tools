@@ -102,8 +102,8 @@ pub(super) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, Dis
 /// and `delete_data` already rejected; this is the same rule for the rest,
 /// in one place so the surface cannot drift apart again.
 /// What: absent or `null` ⇒ `Ok(None)`, so each caller keeps applying its own
-/// documented default (`false` for most, `true` for `upgrade`'s `check` and
-/// `delete_index`'s `delete_data`) and a forwarding arm can still omit the
+/// documented default (`false` for most, `true` for `delete_index`'s
+/// `delete_data`) and a forwarding arm can still omit the
 /// key entirely. A boolean ⇒ `Ok(Some(b))`. Anything else ⇒ `InvalidParams`
 /// naming the parameter, the expected type, `hint` (what `true` does) and the
 /// offending value.

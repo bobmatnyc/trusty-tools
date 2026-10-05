@@ -125,7 +125,7 @@ export const TOOLS: Tool[] = [
 			{ label: 'Package', value: 'trusty-search' },
 			{ label: 'Default port', value: '7878' },
 			{ label: 'Languages parsed', value: '14 tree-sitter grammars' },
-			{ label: 'MCP tools', value: '21' }
+			{ label: 'MCP tools', value: '20' }
 		],
 		install: { via: 'tctl', target: 'trusty-search' },
 		released: true,

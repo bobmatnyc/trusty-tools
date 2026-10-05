@@ -13,7 +13,7 @@
 //! - [`index`]       — `index_file`, `remove_file`, `list_indexes`,
 //!   `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`
 //! - [`misc`]        — `search_health`, `chat`, `get_call_chain`, `grep`,
-//!   `upgrade`
+//!   `console_metrics`
 //! - [`health`]      — the `search_health` report (#5264): which daemon
 //!   answered, and whether it can serve this project
 //! - [`compact`]     — the `compact` field mode (#7676): drop the hit fields a

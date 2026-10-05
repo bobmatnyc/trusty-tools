@@ -143,6 +143,20 @@ pub(crate) const META_KEY_M005_PLAN: &str = "m005_plan";
 /// Test: `a_restore_after_a_refused_embedding_does_not_demote_the_stage`.
 pub(crate) const META_KEY_VECTOR_REFUSALS: &str = "vector_refusals";
 
+/// When a reindex last committed this corpus, as unix seconds (#9169).
+///
+/// Why: `search.project.resolve` ranks a repo's indexes by "most recently
+/// indexed", and the `index.redb` mtime cannot say that — redb rewrites the
+/// file whenever it is opened. `PersistedIndex::last_indexed_unix` is not used
+/// for this: reconcile reads it (#4391).
+/// What: an 8-byte little-endian `u64`, written only by
+/// `service::reindex::finish_teardown::stamp_reindex_commit` after a reindex
+/// commits. Loading or opening a corpus never writes it. It is in
+/// `CorpusStore::copy_all_from`'s copied-key list, so a staging corpus
+/// carries the live corpus's stamp until its own commit replaces it.
+/// Test: `core::corpus::reindex_stamp::tests::the_stamp_round_trips_and_a_staging_copy_carries_it`.
+pub(crate) const META_KEY_REINDEXED_UNIX: &str = "reindexed_unix";
+
 // ── Error type ────────────────────────────────────────────────────────────────
 
 /// Structured errors from the migration subsystem.
