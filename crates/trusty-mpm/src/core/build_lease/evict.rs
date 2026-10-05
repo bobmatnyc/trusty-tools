@@ -428,7 +428,8 @@ fn evict_one(slot: &PoolSlot, store: &SlotDir) -> Result<(), Outcome> {
 }
 
 /// The infix an evicted, not-yet-deleted tree carries.
-const EVICTING_INFIX: &str = ".evicting.";
+// #9239: shared with the slot pool, whose discarded staging trees use it too.
+pub(crate) const EVICTING_INFIX: &str = ".evicting.";
 
 /// Remove `.slot-K.evicting.<pid>.<nanos>` trees an earlier sweep left.
 ///
@@ -499,7 +500,8 @@ fn live_staging(parent: &Path, index: u32) -> bool {
 }
 
 /// Every `<root>/<owner>/<repo>` directory.
-fn repo_dirs(root: &Path) -> Vec<PathBuf> {
+// #9239: also read by `builder_slot_pool::pool_status`.
+pub(crate) fn repo_dirs(root: &Path) -> Vec<PathBuf> {
     let Ok(owners) = std::fs::read_dir(root) else {
         return Vec::new();
     };
