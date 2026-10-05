@@ -314,6 +314,8 @@ pub async fn finalize_review(
     // verified, so a review whose verifier was unreachable does not read clean.
     // #8904: plus the findings the verifier round withheld unjudged.
     result.unverified_count = count_unverified(&result.findings) + result.withheld_unverified_count;
+    // #9188: the typed withheld counts, synced beside `findings_count`.
+    crate::pipeline::withheld_contract::sync_withheld_counts(&mut result);
 
     // #4044: the narrative summary was written BEFORE the verification round on
     // both paths, so it can still cite a finding the verifier refuted as a merge

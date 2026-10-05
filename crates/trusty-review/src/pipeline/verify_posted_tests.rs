@@ -146,6 +146,7 @@ async fn verify_timeout_withholds_the_finding() {
 }
 
 /// (b) An unparsable verifier reply is not a judgment: the finding is withheld.
+/// AQ-7t (Bob 2026-10-05): the APPROVE* review keeps APPROVE*.
 #[tokio::test]
 async fn verify_unparsable_reply_withholds_the_finding() {
     let mut findings = vec![finding("src/a.rs", 3, "a bug", Effort::Low, 0.7)];
@@ -160,8 +161,8 @@ async fn verify_unparsable_reply_withholds_the_finding() {
     assert_eq!(report.unjudged, 1);
     assert_eq!(
         report.verdict,
-        Verdict::Unknown,
-        "a drop never turns a non-APPROVE verdict into APPROVE"
+        Verdict::ApproveWithReservations,
+        "a drop neither relaxes APPROVE* to APPROVE nor turns it UNKNOWN"
     );
 }
 
@@ -298,10 +299,32 @@ async fn verify_unverifiable_finding_is_withheld_not_posted() {
     assert!(note.contains("2 unverifiable"), "{note}");
 }
 
-/// #4044 keeps the #8949 rule: an APPROVE* review that loses only an advisory
-/// UNVERIFIABLE finding keeps its verdict instead of turning UNKNOWN.
+/// #4044 keeps the #8949 rule while a finding survives: an APPROVE* review
+/// that loses only an advisory UNVERIFIABLE finding keeps its verdict.
 #[tokio::test]
 async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
+    let mut findings = vec![
+        finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6),
+        finding("src/a.rs", 4, "naming", Effort::Low, 0.6),
+    ];
+    let report = run(
+        Arc::new(MarkerVerifier::default()),
+        Verdict::ApproveWithReservations,
+        &mut findings,
+        policy(8, 4),
+    )
+    .await;
+    assert_eq!(findings.len(), 1);
+    assert_eq!(report.unverifiable, 1);
+    // `rederive_verdict` over the surviving Low finding: still approving.
+    assert_eq!(report.verdict, Verdict::Approve);
+}
+
+/// AQ-7t (Bob 2026-10-05; inverts the #9188 A rule for the 2026-10-01 case):
+/// an APPROVE* review whose verifier could not confirm its only, advisory,
+/// finding withholds it and keeps APPROVE*.
+#[tokio::test]
+async fn verify_unverifiable_advisory_with_no_survivor_keeps_approve_star() {
     let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
     let report = run(
         Arc::new(MarkerVerifier::default()),
@@ -313,6 +336,22 @@ async fn verify_unverifiable_advisory_keeps_an_approving_verdict() {
     assert!(findings.is_empty());
     assert_eq!(report.unverifiable, 1);
     assert_eq!(report.verdict, Verdict::ApproveWithReservations);
+}
+
+/// AQ-7t counterpart: a REQUEST_CHANGES review whose verifier could not
+/// confirm its only finding has no verified blocker: `Unknown`, as before.
+#[tokio::test]
+async fn verify_unverifiable_finding_of_a_blocking_review_with_no_survivor_is_unknown() {
+    let mut findings = vec![finding("src/a.rs", 3, OUTSIDE, Effort::Low, 0.6)];
+    let report = run(
+        Arc::new(MarkerVerifier::default()),
+        Verdict::RequestChanges,
+        &mut findings,
+        policy(8, 4),
+    )
+    .await;
+    assert!(findings.is_empty());
+    assert_eq!(report.verdict, Verdict::Unknown);
 }
 
 /// `enforce_outcomes` with nothing dropped re-derives instead of withholding.
