@@ -13,7 +13,10 @@
 //! which drawers went and why. `trusty-memory palace deletions` reads the file
 //! back.
 //! User-initiated deletions (`memory_forget`, the HTTP drawer delete) call
-//! [`PalaceHandle::forget`] directly and never reach this module.
+//! [`PalaceHandle::forget`] and are not recorded, with one exception (#9172):
+//! forgetting a drawer this journal names as a dedup survivor is recorded as
+//! [`DeletionReason::ForgetOfMergedSurvivor`], because merged-in text leaves
+//! with it.
 //!
 //! A failed append does not undo or block the deletion. The full record is
 //! logged at `error` instead, which the default filter keeps. A palace with no
@@ -22,7 +25,7 @@
 //! `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
 //! `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 
-use crate::memory_core::palace::PalaceId;
+use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::retrieval::{ForgetOutcome, PalaceHandle};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -54,6 +57,8 @@ pub enum DeletionReason {
     ExpiredPurge,
     /// The palace-open sweep reclaimed a drawer past its TTL.
     ExpiredPurgeAtOpen,
+    /// #9172: a user forget removed a drawer a dedup merge had kept.
+    ForgetOfMergedSurvivor,
 }
 
 impl DeletionReason {
@@ -66,6 +71,7 @@ impl DeletionReason {
             Self::SemanticConsolidation => "semantic_consolidation",
             Self::ExpiredPurge => "expired_purge",
             Self::ExpiredPurgeAtOpen => "expired_purge_at_open",
+            Self::ForgetOfMergedSurvivor => "forget_of_merged_survivor",
         }
     }
 }
@@ -298,14 +304,65 @@ impl PalaceHandle {
         reason: DeletionReason,
         survivor: Option<(Uuid, Option<f32>)>,
     ) -> Result<ForgetOutcome> {
-        let outcome = self.forget(id).await?;
-        if outcome.is_deleted() {
-            let mut rec = MaintenanceDeletion::new(&self.id, id, reason);
-            if let Some((survivor_id, score)) = survivor {
-                rec = rec.with_survivor(survivor_id, score);
-            }
-            record(self.data_dir.as_deref(), &rec);
+        // #9172: `forget_removing`, not `forget`, so a maintenance deletion of
+        // a survivor writes this one record rather than two.
+        let Some(_removed) = self.forget_removing(id).await? else {
+            return Ok(ForgetOutcome::NotFound);
+        };
+        let mut rec = MaintenanceDeletion::new(&self.id, id, reason);
+        if let Some((survivor_id, score)) = survivor {
+            rec = rec.with_survivor(survivor_id, score);
         }
-        Ok(outcome)
+        record(self.data_dir.as_deref(), &rec);
+        Ok(ForgetOutcome::Deleted)
+    }
+}
+
+/// Record a user forget of `drawer` when the journal names it as a survivor.
+///
+/// Why (#9172): two dedup survivors were later removed with no record, so the
+/// text merged into them could not be traced.
+/// What: a no-op without a data dir or when [`names_survivor`] says no;
+/// otherwise records [`DeletionReason::ForgetOfMergedSurvivor`].
+/// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
+/// `dedup_survivor_tests::forgetting_an_unmerged_drawer_writes_no_record`.
+pub(crate) fn record_survivor_forget(handle: &PalaceHandle, drawer: &Drawer) {
+    let Some(dir) = handle.data_dir.as_deref() else {
+        return;
+    };
+    if names_survivor(dir, drawer) {
+        let rec = MaintenanceDeletion::new(
+            &handle.id,
+            drawer.id,
+            DeletionReason::ForgetOfMergedSurvivor,
+        );
+        record(Some(dir), &rec);
+    }
+}
+
+/// Whether a journal record in `dir` names `drawer` as its survivor.
+///
+/// What: answers `false` without reading when neither journal file was written
+/// after `drawer` was created — no record can name a drawer younger than the
+/// file. An unreadable journal answers `true`: a spare record costs less than
+/// a missing one.
+fn names_survivor(dir: &Path, drawer: &Drawer) -> bool {
+    let created = std::time::SystemTime::from(drawer.created_at);
+    let written_since = [MAINTENANCE_LOG_ROTATED_FILENAME, MAINTENANCE_LOG_FILENAME]
+        .iter()
+        .filter_map(|name| std::fs::metadata(dir.join(name)).ok()?.modified().ok())
+        .any(|modified| modified >= created);
+    if !written_since {
+        return false;
+    }
+    match read_journal(dir) {
+        Ok(journal) => journal
+            .records
+            .iter()
+            .any(|r| r.survivor_id == Some(drawer.id)),
+        Err(e) => {
+            tracing::warn!(drawer_id = %drawer.id, "#9172: journal unreadable; recording the forget: {e:#}");
+            true
+        }
     }
 }

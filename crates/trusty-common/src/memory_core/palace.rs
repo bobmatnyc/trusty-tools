@@ -274,8 +274,8 @@ pub struct Drawer {
     /// Why it is DERIVED, not persisted: the digest is a pure function of
     /// `content`, so storing it in the redb `DrawerRecord` would create a second
     /// source of truth that can disagree with the first. It would, too:
-    /// `dream::helpers::merge_into` rewrites `content` in place on the
-    /// in-memory table. So this field is a cache, recomputed from `content` at
+    /// `dream::helpers::merged_drawer` rewrites `content` on a dedup
+    /// merge. So this field is a cache, recomputed from `content` at
     /// every point a drawer enters memory — [`Self::new`], the redb hydration in
     /// `store::kg_redb::read_ops::load_drawers`, and the L1-snapshot load — and
     /// recomputed on the one path that changes content, [`Self::set_content`].
@@ -353,7 +353,7 @@ impl Drawer {
     /// with it (#5902).
     ///
     /// Why: `content` is private precisely so this is the ONLY way to change a
-    /// body. `dream::helpers::merge_into` — the only production path that
+    /// body. `dream::helpers::merged_drawer` — the only production path that
     /// rewrites content in place — routes through it. A drawer whose digest
     /// disagreed with its content would export under an identity nobody else can
     /// reproduce, so the two must move together.

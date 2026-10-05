@@ -11,7 +11,7 @@
 //! `concurrency_tests::dedup_embeds_in_bounded_chunks`.
 
 use super::helpers::{
-    build_closet_index, is_low_quality_content, merge_into, rebuild_index_from_drawers,
+    build_closet_index, is_low_quality_content, persist_merge, rebuild_index_from_drawers,
 };
 use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::embed::Embedder;
@@ -203,7 +203,8 @@ pub(super) async fn compact_pass(
 /// vectors to search the HNSW index for near-duplicates, and dropping them
 /// before the next chunk. `vector_store.search` returns pure cosine similarity
 /// (1 - distance), so no importance-renormalisation is required. Survivors are
-/// picked by raw `importance`; losers are merged in and forgotten.
+/// picked by `helpers::pick_survivor` (#9172); each merge is persisted before
+/// its loser is forgotten.
 ///
 /// #7106: the chunking is the memory fix. The single whole-corpus `embed_batch`
 /// this replaced held the entire palace, in about six copies, for the length of
@@ -335,11 +336,12 @@ pub(super) async fn dedup_pass_with_embedder(
 /// this file inside their size budgets and leaves the merge rule in one place.
 /// What: searches the HNSW index with `query_vec`, takes the first neighbour
 /// that is a different, not-yet-removed, unprotected drawer scoring at least
-/// `dedup_threshold`, merges the lower-importance side into the higher, and
+/// `dedup_threshold`, persists the merge via `helpers::persist_merge`, then
 /// forgets the loser. Returns 1 when a merge happened, 0 otherwise — at most
 /// one merge per source, which keeps the pass's behaviour predictable.
 /// Test: `dream_cycle_merges_duplicates`,
-/// `concurrency_tests::chunking_preserves_dedup_behaviour`.
+/// `concurrency_tests::chunking_preserves_dedup_behaviour`,
+/// `dedup_survivor_tests::a_failed_merge_persist_keeps_the_duplicate`.
 async fn dedup_one(
     handle: &Arc<PalaceHandle>,
     snapshot: &[Drawer],
@@ -372,24 +374,31 @@ async fn dedup_one(
             continue;
         }
 
-        // Pick survivor (higher importance wins; ties keep `drawer`).
-        let (survivor, loser) = if drawer.importance >= hit_drawer.importance {
-            (drawer, hit_drawer)
-        } else {
-            (hit_drawer, drawer)
+        // #9172: the survivor is chosen on the live rows and the merged text is
+        // persisted BEFORE the loser is deleted. A failed persist deletes
+        // nothing, so the loser stays the durable copy of its own text.
+        let (survivor_id, loser_id) = match persist_merge(handle, drawer.id, hit_drawer.id).await {
+            Ok(Some(pair)) => pair,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    palace = %handle.id, a = %drawer.id, b = %hit_drawer.id,
+                    "#9172: dream dedup merge not persisted; both drawers kept: {e:#}"
+                );
+                return Ok(0);
+            }
         };
-        merge_into(handle, survivor, loser);
         // #5231: surface a failed loser-eviction instead of discarding it —
-        // silently keeping the loser leaves the merged content duplicated.
-        // #8732: the record names the survivor and the score that decided it.
-        let survivor_ref = Some((survivor.id, Some(hit.score)));
+        // the merged text is already durable, so a kept loser is a duplicate,
+        // not a loss. #8732: the record names the survivor and the score.
+        let survivor_ref = Some((survivor_id, Some(hit.score)));
         if let Err(e) = handle
-            .forget_for_maintenance(loser.id, DeletionReason::DreamDedup, survivor_ref)
+            .forget_for_maintenance(loser_id, DeletionReason::DreamDedup, survivor_ref)
             .await
         {
-            tracing::warn!(id = ?loser.id, "dream dedup: loser evict failed: {e:#}");
+            tracing::warn!(id = ?loser_id, "dream dedup: loser evict failed: {e:#}");
         }
-        already_removed.insert(loser.id);
+        already_removed.insert(loser_id);
         return Ok(1);
     }
     Ok(0)

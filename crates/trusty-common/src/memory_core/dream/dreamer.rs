@@ -188,8 +188,8 @@ impl Dreamer {
     ///   1. Content-prune: drop noise drawers matching the blocklist or below
     ///      the minimum word count.
     ///   2. Dedup near-duplicates by L3-searching each drawer; if the top
-    ///      neighbor's score >= `dedup_threshold`, merge into the higher-
-    ///      importance survivor and `forget` the loser.
+    ///      neighbor's score >= `dedup_threshold`, persist the merge into the
+    ///      current drawer (#9172) and `forget` the loser.
     ///   3. Prune drawers whose effective importance falls below
     ///      `prune_importance` AND whose age exceeds 30 days.
     ///   4. Compact orphaned vectors from the HNSW index.

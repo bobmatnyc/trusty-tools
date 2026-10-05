@@ -91,11 +91,12 @@ fn dedup_only_config() -> DreamConfig {
 async fn dream_dedup_records_the_removed_and_surviving_drawer() {
     let (_dir, data_dir, handle) = open_palace("dedup-trail");
     let content = "Rust uses HNSW for vector search";
-    let keep = handle
+    // #9172: the newer of two duplicates survives, whatever its importance.
+    let lose = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.7)
         .await
         .unwrap();
-    let lose = handle
+    let keep = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.6)
         .await
         .unwrap();
@@ -133,11 +134,12 @@ async fn dream_dedup_records_the_removed_and_surviving_drawer() {
 async fn every_maintenance_removal_logs_its_id_and_reason() {
     let (_dir, _data_dir, handle) = open_palace("dedup-log");
     let content = "Dream dedup merges near-duplicate drawers above the threshold";
-    handle
+    // #9172: the older duplicate is the one removed.
+    let lose = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.7)
         .await
         .unwrap();
-    let lose = handle
+    handle
         .remember(content.into(), RoomType::Backend, vec![], 0.6)
         .await
         .unwrap();
