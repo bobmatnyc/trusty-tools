@@ -32,6 +32,12 @@
 //! when it declares neither. Two daemons on disjoint data dirs are not in
 //! conflict and never were.
 //!
+//! The platform default is the CANDIDATE's, read from its own `HOME` (#9232).
+//! Resolving it in the reaper's process made a sandbox `start` under another
+//! HOME treat the live service's default as its own, and kill it. A candidate
+//! whose `HOME` cannot be read is spared. Each signal is preceded by a fresh
+//! scan proving the pid is still the same trusty-search process on our data dir.
+//!
 //! FAIL CLOSED, structurally. [`ConfirmedOrphan`] wraps a pid behind a private
 //! field with no constructor from a bare `u32`, and [`reap`] accepts nothing
 //! else. There is no way to write "signal this pid" for a pid that did not come
@@ -78,16 +84,20 @@ pub enum DaemonIdentity {
 /// be handed an unvetted pid even by a future call site that has forgotten the
 /// rule. The pre-#4395 reaper's whole defect was a `Vec<u32>` that carried no
 /// evidence at all.
-/// What: a newtype over the pid, minted only inside [`plan`].
+/// What: the pid plus the start time it was observed with, minted only inside
+/// [`plan`]. The start time lets [`recheck`] tell a reused pid from the original.
 /// Test: `plan_confirms_only_our_own_data_dir`; the unforgeability itself is a
 /// compile-time property, not a runtime assertion.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfirmedOrphan(u32);
+pub struct ConfirmedOrphan {
+    pid: u32,
+    start_time: u64,
+}
 
 impl ConfirmedOrphan {
     /// The identified pid.
     pub fn pid(&self) -> u32 {
-        self.0
+        self.pid
     }
 }
 
@@ -96,12 +106,14 @@ impl ConfirmedOrphan {
 /// Why: separating the observation from the decision is what makes the decision
 /// testable without spawning daemons — the same seam
 /// `trusty-installer::commands::port_guard` uses for its `lsof` probe.
-/// What: the pid plus the two things identity is read from. Both are `Vec<String>`
+/// What: the pid, its start time (seconds since the epoch, as the process table
+/// reports it), and the two things identity is read from. Both are `Vec<String>`
 /// in the process table's own form: argv words, and `KEY=VALUE` environment
 /// entries.
 #[derive(Clone, Debug)]
 pub struct Candidate {
     pub pid: u32,
+    pub start_time: u64,
     pub argv: Vec<String>,
     pub environ: Vec<String>,
 }
@@ -168,6 +180,46 @@ fn declared_data_dir(argv: &[String], environ: &[String]) -> Result<Option<PathB
     Ok(None)
 }
 
+/// The platform default data dir a candidate uses, from ITS OWN environment
+/// (#9232).
+///
+/// Why: `dirs::data_local_dir()` reads the CALLER's `HOME`. Computing the
+/// default in the reaper meant a sandbox `start` under another HOME resolved
+/// the live service's default to the sandbox's own data dir and classified it
+/// `OwnInstance`. The candidate's own `HOME` is the only correct input.
+/// What: mirrors `dirs::data_local_dir()` over the candidate's `KEY=VALUE`
+/// entries: macOS `$HOME/Library/Application Support`; other unix an absolute
+/// `$XDG_DATA_HOME`, else `$HOME/.local/share`; then `trusty-search`. `Err` when
+/// the needed `HOME` is absent, empty or relative, and on every other platform,
+/// so the caller spares the candidate.
+/// Test: `candidate_default_matches_the_daemons_own_resolution`,
+/// `plan_spares_a_daemon_whose_home_is_unreadable`.
+pub fn candidate_default_data_dir(environ: &[String]) -> Result<PathBuf, String> {
+    let var = |key: &str| {
+        environ
+            .iter()
+            .find_map(|e| e.strip_prefix(key)?.strip_prefix('='))
+            .filter(|v| !v.is_empty())
+    };
+    let under_home = if cfg!(target_os = "macos") {
+        "Library/Application Support"
+    } else if cfg!(unix) {
+        if let Some(xdg) = var("XDG_DATA_HOME").filter(|v| Path::new(v).is_absolute()) {
+            return Ok(PathBuf::from(xdg).join("trusty-search"));
+        }
+        ".local/share"
+    } else {
+        return Err("a candidate's default data dir is not resolvable on this platform".into());
+    };
+    let home = var("HOME")
+        .filter(|v| Path::new(v).is_absolute())
+        .ok_or_else(|| {
+            "process environment carries no absolute HOME, so its default data dir is unknown"
+                .to_string()
+        })?;
+    Ok(PathBuf::from(home).join(under_home).join("trusty-search"))
+}
+
 /// Normalise a data-dir path for comparison.
 ///
 /// Why: `/tmp/ts` and `/tmp/ts/` and a symlinked `/var/…` vs `/private/var/…`
@@ -184,12 +236,12 @@ fn normalise(dir: &Path) -> PathBuf {
 /// Decide whether one candidate is our orphan (#4395).
 ///
 /// Why: the whole policy, pure, so the truth table is testable without a live
-/// process table or a real daemon. `platform_default` is a parameter rather than
-/// a call to `dirs::data_local_dir()` for the same reason.
-/// What: resolves the candidate's data dir per [`declared_data_dir`] (falling
-/// back to `platform_default` when it positively declares none), and compares it
-/// with `our_data_dir` under [`normalise`]. An unreadable observation is
-/// [`DaemonIdentity::Unidentified`] and never a match.
+/// process table or a real daemon.
+/// What: resolves the candidate's data dir per [`declared_data_dir`], falling
+/// back to [`candidate_default_data_dir`] over the candidate's own environment
+/// when it positively declares none, and compares it with `our_data_dir` under
+/// [`normalise`]. An unreadable observation is [`DaemonIdentity::Unidentified`]
+/// and never a match.
 /// Test: `identify_claims_a_daemon_sharing_our_data_dir`,
 /// `identify_spares_a_daemon_with_a_different_data_dir`,
 /// `identify_spares_a_daemon_whose_environment_is_unreadable`,
@@ -197,15 +249,14 @@ fn normalise(dir: &Path) -> PathBuf {
 /// `identify_reads_the_equals_form_of_the_flag`,
 /// `identify_falls_back_to_the_platform_default`,
 /// `identify_treats_a_trailing_slash_as_the_same_dir`.
-pub fn identify(
-    argv: &[String],
-    environ: &[String],
-    our_data_dir: &Path,
-    platform_default: &Path,
-) -> DaemonIdentity {
+pub fn identify(argv: &[String], environ: &[String], our_data_dir: &Path) -> DaemonIdentity {
     let theirs = match declared_data_dir(argv, environ) {
         Ok(Some(dir)) => dir,
-        Ok(None) => platform_default.to_path_buf(),
+        // #9232: the candidate's default comes from its own HOME, never ours.
+        Ok(None) => match candidate_default_data_dir(environ) {
+            Ok(dir) => dir,
+            Err(why) => return DaemonIdentity::Unidentified(why),
+        },
         Err(why) => return DaemonIdentity::Unidentified(why),
     };
     if normalise(&theirs) == normalise(our_data_dir) {
@@ -223,18 +274,17 @@ pub fn identify(
 /// What: applies [`identify`] to each candidate; `OwnInstance` becomes a
 /// confirmed orphan, everything else is spared with its reason recorded.
 /// Test: `plan_confirms_only_our_own_data_dir`,
-/// `plan_spares_an_unidentifiable_candidate`.
-pub fn plan(candidates: &[Candidate], our_data_dir: &Path, platform_default: &Path) -> ReapPlan {
+/// `plan_spares_an_unidentifiable_candidate`,
+/// `plan_spares_a_daemon_under_another_home`.
+pub fn plan(candidates: &[Candidate], our_data_dir: &Path) -> ReapPlan {
     let mut orphans = Vec::new();
     let mut spared = Vec::new();
     for candidate in candidates {
-        match identify(
-            &candidate.argv,
-            &candidate.environ,
-            our_data_dir,
-            platform_default,
-        ) {
-            DaemonIdentity::OwnInstance => orphans.push(ConfirmedOrphan(candidate.pid)),
+        match identify(&candidate.argv, &candidate.environ, our_data_dir) {
+            DaemonIdentity::OwnInstance => orphans.push(ConfirmedOrphan {
+                pid: candidate.pid,
+                start_time: candidate.start_time,
+            }),
             DaemonIdentity::ForeignInstance(dir) => spared.push((
                 candidate.pid,
                 format!("serves a different data dir ({})", dir.display()),
@@ -291,11 +341,74 @@ pub(crate) fn observe_candidates() -> Vec<Candidate> {
             .collect();
         out.push(Candidate {
             pid: raw,
+            start_time: proc_.start_time(),
             argv,
             environ,
         });
     }
     out
+}
+
+/// Re-prove, from a fresh process-table scan, that a confirmed orphan is still
+/// the process [`plan`] confirmed (#9232).
+///
+/// Why: a pid is a number, not an identity. Between the plan and a signal — up
+/// to the whole termination grace before the SIGKILL — the orphan can exit and
+/// its pid can be reused, or its argv can no longer be read. Signalling by
+/// number then hits whatever holds the pid now.
+/// What: `Ok` only when `fresh` holds the same pid with the same start time and
+/// [`identify`] still answers `OwnInstance` against `our_data_dir`. Every other
+/// case is an `Err` naming why, and the caller does not signal.
+/// Test: `recheck_confirms_the_same_process`,
+/// `recheck_refuses_a_pid_that_is_gone_reused_or_foreign`.
+pub fn recheck(
+    orphan: &ConfirmedOrphan,
+    fresh: &[Candidate],
+    our_data_dir: &Path,
+) -> Result<(), String> {
+    let pid = orphan.pid;
+    let Some(now) = fresh.iter().find(|c| c.pid == pid) else {
+        return Err(format!(
+            "pid {pid} is no longer a trusty-search daemon (it exited, or another program \
+             now holds the pid)"
+        ));
+    };
+    if now.start_time != orphan.start_time {
+        return Err(format!(
+            "pid {pid} was reused: it started at {}, the confirmed orphan at {}",
+            now.start_time, orphan.start_time
+        ));
+    }
+    match identify(&now.argv, &now.environ, our_data_dir) {
+        DaemonIdentity::OwnInstance => Ok(()),
+        DaemonIdentity::ForeignInstance(dir) => Err(format!(
+            "pid {pid} now serves a different data dir ({})",
+            dir.display()
+        )),
+        DaemonIdentity::Unidentified(why) => Err(format!(
+            "pid {pid} can no longer be identified as ours ({why})"
+        )),
+    }
+}
+
+/// The orphans a fresh scan still proves ours; each dropped one is logged (#9232).
+#[cfg(unix)]
+fn still_ours<'a>(
+    orphans: &'a [ConfirmedOrphan],
+    our_data_dir: &Path,
+    signal: &str,
+) -> Vec<&'a ConfirmedOrphan> {
+    let fresh = observe_candidates();
+    orphans
+        .iter()
+        .filter(|orphan| match recheck(orphan, &fresh, our_data_dir) {
+            Ok(()) => true,
+            Err(why) => {
+                tracing::warn!("orphan reaper: not sending {signal} — {why} (#9232)");
+                false
+            }
+        })
+        .collect()
 }
 
 /// SIGTERM the confirmed orphans, then SIGKILL whichever survive the window.
@@ -309,44 +422,51 @@ pub(crate) fn observe_candidates() -> Vec<Candidate> {
 /// was a tenth of the flushing daemon's own 30 s per-index floor, so even a
 /// correctly-targeted orphan was SIGKILLed mid-write.
 ///
-/// What: SIGTERM all, poll every 100 ms until all are gone or the window
-/// closes, then SIGKILL the remainder. Returns the pids that had to be killed.
+/// What: SIGTERM each orphan [`recheck`] still confirms, poll every 100 ms until
+/// all are gone or the window closes, then SIGKILL each survivor a second
+/// [`recheck`] still confirms. Returns the pids that had to be killed.
 /// Test: side-effecting; the window it uses is pinned by
-/// `reap_window_covers_the_flush_floor`.
+/// `reap_window_covers_the_flush_floor`, the per-signal proof by the
+/// `recheck_*` tests.
 #[cfg(unix)]
-fn reap(orphans: &[ConfirmedOrphan]) -> Vec<u32> {
+fn reap(orphans: &[ConfirmedOrphan], our_data_dir: &Path) -> Vec<u32> {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
 
     let alive = |pid: u32| kill(Pid::from_raw(pid as i32), None).is_ok();
 
-    for orphan in orphans {
+    // #9232: re-prove ownership from a fresh scan before each signal.
+    let termed = still_ours(orphans, our_data_dir, "SIGTERM");
+    for orphan in &termed {
         let _ = kill(Pid::from_raw(orphan.pid() as i32), Signal::SIGTERM);
     }
     let deadline = std::time::Instant::now() + trusty_common::shutdown::termination_grace();
     loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        if !orphans.iter().any(|o| alive(o.pid())) || std::time::Instant::now() >= deadline {
+        if !termed.iter().any(|o| alive(o.pid())) || std::time::Instant::now() >= deadline {
             break;
         }
     }
+    let survivors: Vec<ConfirmedOrphan> = termed
+        .into_iter()
+        .filter(|o| alive(o.pid()))
+        .cloned()
+        .collect();
     let mut killed = Vec::new();
-    for orphan in orphans {
-        if alive(orphan.pid()) {
-            tracing::warn!(
-                "orphan pid {} ignored SIGTERM for {}s — sending SIGKILL",
-                orphan.pid(),
-                trusty_common::shutdown::termination_grace().as_secs(),
-            );
-            let _ = kill(Pid::from_raw(orphan.pid() as i32), Signal::SIGKILL);
-            killed.push(orphan.pid());
-        }
+    for orphan in still_ours(&survivors, our_data_dir, "SIGKILL") {
+        tracing::warn!(
+            "orphan pid {} ignored SIGTERM for {}s — sending SIGKILL",
+            orphan.pid(),
+            trusty_common::shutdown::termination_grace().as_secs(),
+        );
+        let _ = kill(Pid::from_raw(orphan.pid() as i32), Signal::SIGKILL);
+        killed.push(orphan.pid());
     }
     killed
 }
 
 #[cfg(not(unix))]
-fn reap(_orphans: &[ConfirmedOrphan]) -> Vec<u32> {
+fn reap(_orphans: &[ConfirmedOrphan], _our_data_dir: &Path) -> Vec<u32> {
     Vec::new()
 }
 
@@ -374,27 +494,21 @@ pub fn reap_orphans_before_start() {
         );
         return;
     };
-    let Some(platform_default) = crate::service::daemon::resolve_daemon_dir(None) else {
-        tracing::warn!(
-            "orphan reaper: platform default data dir is unresolvable — skipping the \
-             sweep entirely (#4395)"
-        );
-        return;
-    };
 
     let candidates = observe_candidates();
     if candidates.is_empty() {
         return;
     }
-    let plan = plan(&candidates, &our_data_dir, &platform_default);
+    // #9232: no reaper-side platform default; each candidate's comes from its own HOME.
+    let plan = plan(&candidates, &our_data_dir);
 
     for (pid, reason) in &plan.spared {
         tracing::info!("orphan reaper: leaving pid {pid} alone — {reason} (#4395)");
     }
     if !plan.spared.is_empty() {
         eprintln!(
-            "{} {} other trusty-search daemon(s) are running but serve different data — \
-             leaving them alone",
+            "{} {} other trusty-search daemon(s) are running and are not proven to be on \
+             this data dir — leaving them alone",
             "·".dimmed(),
             plan.spared.len(),
         );
@@ -416,7 +530,7 @@ pub fn reap_orphans_before_start() {
         pids.len(),
     );
 
-    reap(&plan.orphans);
+    reap(&plan.orphans, &our_data_dir);
 
     // Clear the lock/port files the reaped orphans left behind. Only reachable
     // when we actually reaped something on OUR data dir, so this can no longer
