@@ -511,6 +511,7 @@ fn detect_line_contradictions(findings: &[Finding]) -> std::collections::HashSet
 /// A single `[code: `path:line` — "excerpt"]` citation, extracted structurally.
 struct CodeCitation {
     path: String,
+    /// The cited line; `None` for a lineless or ranged locator (#9188).
     line: Option<u32>,
     excerpt: String,
 }
@@ -523,7 +524,8 @@ struct ExtractedCitations {
     /// Free-text backtick/quote spans OUTSIDE any bracket citation, checked
     /// against `f.file`'s content.
     generic: Vec<String>,
-    /// Every `[code: …]` locator that carries a line number, whether or not the
+    /// Every `[code: …]` locator that carries a line number (a range's start,
+    /// #9188), whether or not the
     /// bracket also quotes an excerpt (#4999). `code_citations` only records a
     /// citation that HAS a verifiable excerpt, so an excerpt-free bracket would
     /// otherwise take its line number with it.
@@ -560,10 +562,15 @@ fn extract_citations(f: &Finding) -> ExtractedCitations {
         for caps in CODE_CITATION_RE.captures_iter(text) {
             let locator = caps.get(1).map(|m| m.as_str().trim()).unwrap_or_default();
             let rest = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-            let (path, line) = split_locator(locator);
-            if let Some(line) = line {
-                locators.push((path.clone(), line));
+            let (path, span) = locator_span(locator);
+            if let Some((start, _)) = span {
+                locators.push((path.clone(), start));
             }
+            // #9188: a range's excerpt may quote any line in it, so only a
+            // single-line citation keys the same-line contradiction check.
+            let line = span
+                .filter(|(start, end)| start == end)
+                .map(|(start, _)| start);
             let mut excerpts = Vec::new();
             collect_delimited(rest, '"', &mut excerpts);
             collect_delimited(rest, '\'', &mut excerpts);
@@ -592,20 +599,63 @@ fn extract_citations(f: &Finding) -> ExtractedCitations {
     }
 }
 
-/// Split a `[code: …]` locator into its path and optional trailing line
-/// number.
+/// Split a `[code: …]` locator into its path and optional inclusive line span.
 ///
-/// What: if `locator` ends in `:<digits>`, returns `(path-without-suffix,
-/// Some(n))`; otherwise returns `(locator, None)` unchanged (e.g. a spec file
-/// cited without a line, `docs/specs/foo.md`).
-/// Test: `split_locator_extracts_line`, `split_locator_no_line`.
-fn split_locator(locator: &str) -> (String, Option<u32>) {
-    if let Some((path, line)) = locator.rsplit_once(':')
-        && let Ok(n) = line.trim().parse::<u32>()
-    {
-        return (path.trim().to_string(), Some(n));
+/// Why: #9188: reading only a bare `:N` suffix kept `a.rs:10-20` whole as the
+/// path, so a true citation was withheld as outside the diff and a fabricated
+/// range escaped the past-end check.
+/// What: the suffix after the last `:` (or a `#L` GitHub anchor) is read by
+/// [`line_suffix_span`]; a compiler-style `path:line:col` keeps the line and
+/// drops the column. A locator with no line suffix, or a malformed one, is
+/// returned whole with no span (e.g. `docs/specs/foo.md`).
+/// Test: `split_locator_extracts_line`, `split_locator_no_line`,
+/// `locator_span_reads_ranges_anchors_and_columns`,
+/// `locator_span_leaves_lineless_and_malformed_locators_whole`,
+/// `locator_span_agrees_with_parse_locator`.
+pub(crate) fn locator_span(locator: &str) -> (String, Option<(u32, u32)>) {
+    let whole = || (locator.to_string(), None);
+    let Some(at) = locator.rfind([':', '#']) else {
+        return whole();
+    };
+    let (path, suffix) = (&locator[..at], &locator[at + 1..]);
+    if locator[at..].starts_with('#') && !suffix.starts_with(['L', 'l']) {
+        return whole();
     }
-    (locator.to_string(), None)
+    let Some(Ok(span)) = line_suffix_span(suffix) else {
+        return whole();
+    };
+    // `a.rs:10:5` is line 10, column 5, never the path `a.rs:10`.
+    if suffix.trim().bytes().all(|b| b.is_ascii_digit())
+        && let Some((file, line)) = path.rsplit_once(':')
+        && let Some(Ok(line_span)) = line_suffix_span(line)
+    {
+        return (file.trim().to_string(), Some(line_span));
+    }
+    (path.trim().to_string(), Some(span))
+}
+
+/// The inclusive line span a locator suffix names: `12`, `12-14`, `L3-L5`.
+///
+/// What: `None` when the suffix is not a line reference (no leading digit
+/// after an optional `L`); `Some(Err)` when it is one but does not parse (a
+/// non-numeric end, an overflow). A reversed range collapses to its start.
+/// Shared by [`locator_span`] and the line gate's `parse_locator`, so both
+/// read a suffix by one rule.
+/// Test: `locator_span_agrees_with_parse_locator`,
+/// `parse_locator_reads_lines_and_ranges`.
+pub(crate) fn line_suffix_span(
+    suffix: &str,
+) -> Option<Result<(u32, u32), std::num::ParseIntError>> {
+    let suffix = suffix.trim().trim_start_matches(['L', 'l']);
+    if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let (a, b) = suffix.split_once('-').unwrap_or((suffix, suffix));
+    let parsed = a.trim().parse::<u32>().and_then(|start| {
+        let end = b.trim().trim_start_matches(['L', 'l']).parse::<u32>()?;
+        Ok((start, end.max(start)))
+    });
+    Some(parsed)
 }
 
 /// Collect normalized spans delimited by `delim` from `text` into `out`.

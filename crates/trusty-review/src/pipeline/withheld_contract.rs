@@ -135,9 +135,8 @@ pub fn sync_withheld_counts(result: &mut ReviewResult) {
 /// the grade and records the note as the error. Returns the number withheld.
 /// L is defense in depth: the gate already ran on every survivor, and nothing
 /// edits a finding between the gate and here, so in `run_review` L catches
-/// only a gate pass that is not idempotent. The one such shape known, a
-/// ranged `[code: …]` locator rewritten short, cannot reach it today because
-/// `citation_check` (#4042) withholds ranged locators first.
+/// only a gate pass that is not idempotent. The one such shape known is a
+/// ranged `[code: …]` locator that the gate rewrote short; L withholds it.
 /// Test: `withhold_unresolved_withholds_a_survivor_off_its_line`,
 /// `withhold_unresolved_withholds_a_range_the_gate_rewrote_short`,
 /// `withhold_unresolved_fails_closed_on_a_file_outside_the_diff`.

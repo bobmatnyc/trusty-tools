@@ -610,6 +610,26 @@ fn parse_locator_reads_lines_and_ranges() {
     ));
 }
 
+/// #9188: the two locator parsers agree on every form both accept.
+#[test]
+fn locator_span_agrees_with_parse_locator() {
+    use crate::pipeline::citation_check::locator_span;
+    for locator in [
+        "a.rs:12",
+        "a.rs:10-20",
+        "a.rs:L10",
+        "a.rs:L10-L20",
+        "a.rs:20-10",
+        "src/x/a.rs: 7",
+        "a.rs",
+        "docs/foo.md:section",
+        r"C:\x.rs:5",
+    ] {
+        let gate = parse_locator(locator).expect("both parsers accept this form");
+        assert_eq!(locator_span(locator), gate, "{locator}");
+    }
+}
+
 // ─── Verdict after the gate (#8905 row 4) ──────────────────────────────────────
 
 fn blocking_result(findings: Vec<Finding>) -> ReviewResult {
