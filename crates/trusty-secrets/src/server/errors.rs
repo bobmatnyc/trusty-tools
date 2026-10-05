@@ -9,7 +9,8 @@
 //! [`SecretsError`], and [`ErrorKind::to_rpc`], which renders
 //! `"<method>: <fixed text>"` plus `data: {"kind": "<kind>"}`.
 //! Test: `server_error_text_is_fixed_per_method_and_kind`,
-//! `server_malformed_set_never_echoes_its_value`.
+//! `server_malformed_set_never_echoes_its_value`,
+//! `server_resolver_errors_have_their_own_wire_kinds`.
 
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
 
@@ -59,6 +60,15 @@ pub enum ErrorKind {
     HomeUnavailable,
     /// `copy` named the same backend twice.
     SameBackend,
+    /// An agent-parent process asked for a key not flagged "agents may use".
+    // #7525: its own kind so a refusal never reads as a miss or a failure.
+    AgentUseRefused,
+    /// An env-map entry broke a rule before any resolution started.
+    InvalidEnvEntry,
+    /// A `secret://` reference in an env map did not resolve.
+    EnvResolutionFailed,
+    /// A `.env` line is outside the supported subset.
+    DotenvSyntax,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
@@ -83,6 +93,10 @@ impl ErrorKind {
             Self::ConfigInvalid => "config_invalid",
             Self::HomeUnavailable => "home_unavailable",
             Self::SameBackend => "same_backend",
+            Self::AgentUseRefused => "agent_use_refused",
+            Self::InvalidEnvEntry => "invalid_env_entry",
+            Self::EnvResolutionFailed => "env_resolution_failed",
+            Self::DotenvSyntax => "dotenv_syntax",
             Self::Internal => "internal",
         }
     }
@@ -110,6 +124,12 @@ impl ErrorKind {
             Self::ConfigInvalid => "a `secrets:` config section is invalid",
             Self::HomeUnavailable => "the home directory is unavailable",
             Self::SameBackend => "the source and destination backends are the same",
+            Self::AgentUseRefused => {
+                "the key is not flagged \"agents may use\"; refused under a Claude Code parent"
+            }
+            Self::InvalidEnvEntry => "an env-map entry is invalid",
+            Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",
+            Self::DotenvSyntax => "a `.env` line is outside the supported syntax",
             Self::Internal => "internal error",
         }
     }
@@ -136,6 +156,10 @@ impl ErrorKind {
             Self::HomeUnavailable => -32062,
             Self::SameBackend => -32063,
             Self::OrphanedBackendEntry => -32064,
+            Self::AgentUseRefused => -32065,
+            Self::InvalidEnvEntry => -32066,
+            Self::EnvResolutionFailed => -32067,
+            Self::DotenvSyntax => -32068,
         }
     }
 
@@ -169,6 +193,17 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::LockTimeout { .. } => Self::IndexBusy,
             SecretsError::Config { .. } => Self::ConfigInvalid,
             SecretsError::ScopeUndetermined { .. } => Self::ProjectUnresolved,
+            SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
+            // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
+            // a refusal on the wire.
+            SecretsError::EnvResolution { source, .. }
+                if matches!(*source, SecretsError::AgentUseRefused { .. }) =>
+            {
+                Self::AgentUseRefused
+            }
+            SecretsError::EnvResolution { .. } => Self::EnvResolutionFailed,
+            SecretsError::InvalidEnvEntry { .. } => Self::InvalidEnvEntry,
+            SecretsError::DotenvSyntax { .. } => Self::DotenvSyntax,
             // Exhaustive on purpose: inside this crate `#[non_exhaustive]` does
             // not apply, so a new `SecretsError` variant fails the build here
             // until it is given a kind.
