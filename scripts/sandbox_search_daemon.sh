@@ -101,19 +101,37 @@ usage() {
   exit 2
 }
 
-# real_home: the password-database home for this uid; empty when unknown.
+# Path audit (#9121): a `$(...)` strips trailing newlines, so a path feeding a
+# security decision never goes through one. Paths are produced by `resolve`
+# into $RESOLVED, and the ancestor walk uses parameter expansion. The pid and
+# port files hold digits only; `ps` argv and the mktemp name (random suffix)
+# cannot end in a newline that matters.
+# CDPATH is deliberately not unset: `resolve` runs `cd` on caller-supplied
+# values, and a CDPATH hit could only redirect a relative one (below the bar).
+
+# real_home: the password-database home for this uid; empty when unknown. A
+# home whose name holds a newline cannot be told apart in dscl/getent's
+# line-oriented output; the real-home refusal is defence in depth only.
 real_home() {
   local user
   user="$(id -un)"
   case "$(uname -s)" in
-    Darwin) dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | awk '{print $2}' ;;
+    Darwin) dscl . -read "/Users/$user" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p' ;;
     *) getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6 ;;
   esac
 }
 
-# resolve DIR: the physical path of an existing directory; empty when absent.
+# resolve DIR: sets $RESOLVED to the physical path of an existing directory,
+# empty when absent. A sentinel keeps a trailing newline in the name; the
+# result is never returned through `$(...)`.
+RESOLVED=""
 resolve() {
-  (cd "$1" 2>/dev/null && pwd -P) || true
+  local out
+  RESOLVED=""
+  out="$( (cd "$1" 2>/dev/null && pwd -P && printf x) || true)"
+  [ -n "$out" ] || return 0
+  out="${out%x}"
+  RESOLVED="${out%$'\n'}"
 }
 
 # port_busy N: succeeds when something already listens on 127.0.0.1:N.
@@ -222,7 +240,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "$STOP_DIR" ]; then
-  STOP_RESOLVED="$(resolve "$STOP_DIR")"
+  resolve "$STOP_DIR"
+  STOP_RESOLVED="$RESOLVED"
   [ -n "$STOP_RESOLVED" ] || die "--stop is not an existing directory: $STOP_DIR"
   stop_recorded "$STOP_RESOLVED" || exit 1
   exit 0
@@ -248,26 +267,36 @@ fi
 [ -x "$BIN" ] && [ -f "$BIN" ] || die "--bin is not an executable file: $BIN"
 # Absolute, so the launch works from the sandbox cwd and a sibling
 # trusty-embedderd is found next to it.
-BIN_DIR="$(resolve "$(dirname "$BIN")")"
+case "$BIN" in
+  */*) BIN_DIR="${BIN%/*}"; [ -n "$BIN_DIR" ] || BIN_DIR=/ ;;
+  *) BIN_DIR=. ;;
+esac
+resolve "$BIN_DIR"
+BIN_DIR="$RESOLVED"
 [ -n "$BIN_DIR" ] || die "cannot resolve the directory of --bin: $BIN"
-BIN="$BIN_DIR/$(basename "$BIN")"
+BIN="$BIN_DIR/${BIN##*/}"
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"
-REAL_HOME_RESOLVED="$(resolve "$REAL_HOME")"
+resolve "$REAL_HOME"
+REAL_HOME_RESOLVED="$RESOLVED"
 [ -n "$REAL_HOME_RESOLVED" ] || REAL_HOME_RESOLVED="$REAL_HOME"
 
 if [ -n "$DIR" ]; then
-  SANDBOX="$(resolve "$DIR")"
+  resolve "$DIR"
+  SANDBOX="$RESOLVED"
   [ -n "$SANDBOX" ] || die "--dir is not an existing directory: $DIR"
   [ "$SANDBOX" != "$REAL_HOME_RESOLVED" ] || die "--dir resolves to the real home"
-  if [ -d "$SANDBOX/home" ] && [ "$(resolve "$SANDBOX/home")" = "$REAL_HOME_RESOLVED" ]; then
-    die "<dir>/home resolves to the real home"
+  if [ -d "$SANDBOX/home" ]; then
+    resolve "$SANDBOX/home"
+    [ "$RESOLVED" != "$REAL_HOME_RESOLVED" ] || die "<dir>/home resolves to the real home"
   fi
 elif [ "$DRY_RUN" -eq 1 ]; then
   SANDBOX="<new mktemp -d>"
 else
-  SANDBOX="$(resolve "$(mktemp -d "${TMPDIR:-/tmp}/ts-sandbox.XXXXXX")")"
+  MADE="$(mktemp -d "${TMPDIR:-/tmp}/ts-sandbox.XXXXXX")"
+  resolve "$MADE"
+  SANDBOX="$RESOLVED"
   [ -n "$SANDBOX" ] || die "could not create a sandbox directory"
 fi
 
@@ -276,19 +305,26 @@ fi
 # starts at the physical <dir>/home (a symlinked home must not escape it) and
 # covers <dir>/home/.env.local itself.
 if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
-  anc="$(resolve "$SANDBOX/home")"
-  [ -n "$anc" ] || anc="$SANDBOX"
+  if [ -e "$SANDBOX/home" ] || [ -L "$SANDBOX/home" ]; then
+    resolve "$SANDBOX/home"
+    anc="$RESOLVED"
+    [ -n "$anc" ] || die "<dir>/home exists but cannot be resolved to a directory: $SANDBOX/home"
+  else
+    anc="$SANDBOX"
+  fi
   while :; do
     [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded by the daemon from <dir>/home; pick a --dir outside it"
     [ "$anc" != "/" ] || break
-    anc="$(dirname "$anc")"
+    anc="${anc%/*}"
+    [ -n "$anc" ] || anc=/
   done
 fi
 
 # The model cache: --model-cache wins, then an exported FASTEMBED_CACHE_DIR.
 [ -n "$MODEL_CACHE" ] || MODEL_CACHE="${FASTEMBED_CACHE_DIR:-}"
 if [ -n "$MODEL_CACHE" ]; then
-  MODEL_CACHE_RESOLVED="$(resolve "$MODEL_CACHE")"
+  resolve "$MODEL_CACHE"
+  MODEL_CACHE_RESOLVED="$RESOLVED"
   [ -n "$MODEL_CACHE_RESOLVED" ] || die "model cache is not an existing directory: $MODEL_CACHE"
   MODEL_CACHE="$MODEL_CACHE_RESOLVED"
 fi

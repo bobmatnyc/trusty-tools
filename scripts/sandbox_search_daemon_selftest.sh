@@ -31,6 +31,9 @@
 #                 an ancestor `.env.local` refuses
 #                 a symlinked <dir>/home into a tree under a `.env.local`, and a
 #                 <dir>/home/.env.local itself, refuse
+#                 a --dir under an ancestor whose name ends in a newline and holds
+#                 `.env.local` refuses; a <dir>/home that exists but cannot be
+#                 resolved (a dangling symlink) dies
 #     stop-dead   --stop on a pid already dead says so and removes sandbox.pid
 #     port-range  --port 7850 (within 64 of 7878) refuses
 #     model-cache --model-cache is forwarded as FASTEMBED_CACHE_DIR; a missing
@@ -382,6 +385,24 @@ mkdir -p "$DIR14/home"
 touch "$DIR14/home/.env.local"
 expect_refusal cwd-home-env-local 1 "$DIR14/home/.env.local would be loaded" \
   --bin "$STUB" --dir "$DIR14" --dry-run
+
+# 11d. an ancestor whose name ends in a newline: `$(dirname ...)` would strip
+# it and miss the `.env.local` inside.
+NL_ANC="$TMP_ROOT/nl
+"
+DIR16="$NL_ANC/case16"
+mkdir -p "$DIR16"
+touch "$NL_ANC/.env.local"
+expect_refusal cwd-newline-ancestor 1 ".env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR16" --dry-run
+
+# 11e. a <dir>/home that exists but does not resolve dies (a dangling symlink
+# would otherwise leave <dir>/home/.env.local unchecked).
+DIR17="$TMP_ROOT/case17"
+mkdir -p "$DIR17"
+ln -s "$TMP_ROOT/no-such-target" "$DIR17/home"
+expect_refusal cwd-unresolvable-home 1 "cannot be resolved" \
+  --bin "$STUB" --dir "$DIR17" --dry-run
 
 # 11c. stop-dead: a pid already dead on entry is reported as such.
 DIR15="$TMP_ROOT/case15"
