@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.5] — 2026-10-05
+
+### Added
+
+- `credentials::sandbox_flag_set` and `credentials::SANDBOX_ENV_VAR` are public, so a caller can require the `.env.local` opt-out on the same exact-`1` rule the loader uses (#9178).
+
+### Fixed
+
+- `parent_death`: the watchdog's graceful-shutdown window is now `shutdown::CLEANUP_RESERVE` plus 5 s (10 s), derived from the reserve rather than a separate 5 s literal. The old window equalled the reserve, so a daemon whose parent died could be force-exited during a full-budget exit flush, before it unlinked its socket (#7085).
+- The memory secret filter stores a bare Google Docs/Sheets/Drive document id when the same text names a Google document (`spreadsheet`, `sheet`, `doc`, `drive`, `folder`, …) and the token has Google's exact id shape. A bare id with no such word, and every credential shape tested beside those words, is still refused (#8589).
+- The catch-up digest's warning for a failed `memory_list` prints the whole cause chain (a timeout, a refused socket file, a dead socket) and no longer calls every failure "could not reach trusty-memory" (#9026).
+- `url_userinfo::strip_url_secret` no longer reads an `@` in the path or query as the end of the userinfo when the authority is a plain `host:port` or an IPv6 `[...]` host: `https://host:8080/@scope/pkg` and `ssh://h:2222/o/r@x` are stored unchanged instead of as `https://scope/pkg` and `ssh://h@x`, so `tm register` keeps the clone URL intact (#9124). The log redactor keeps its over-read.
+- `PalaceStore::load_palace` uses the directory it read `palace.json` from as the palace's `data_dir`, not the absolute path recorded at creation. A palace root copied elsewhere no longer opens the original palace's files.
+- A second in-process open of a live palace shares the first handle's recall log (`RecallLog::open_shared`) instead of failing with "Database already open" and running with recall analytics disabled.
+- A cold palace open replays its stored vectors into the HNSW graph in parallel, which was the largest cost of a cold open (#9141).
+- The HNSW graph `HnswStore::open` rebuilds is single-layer. `hnsw_rs` seeds its layer generator from OS entropy, so the 16-layer graph got a new hierarchy on every open and two opens of one palace ranked recalls differently above the 4,096-drawer exact-search limit (#9141). The replay stays parallel after a serial first insert, so no parallel insert can read an empty entry point and be stored with no neighbours, out of reach of every search. Identical results across opens hold while the search finds the exact top k, which `hnsw_rs` does not guarantee.
+- `TRUSTY_SANDBOX=1` in the process environment now stops `load_env_local_once` from loading the project `.env.local` or `$HOME/.env.local`. `env_local_value` and `read_var_from_env_local` answer `None` under the same flag, so no tool reports a tier that resolution skips. Only the exact value `1` opts out; empty, `0`, `true` and non-UTF-8 values do not. Before this, a daemon started under `env -i` still loaded the developer's credentials from `.env.local` (#9178).
+- `classify_model_shape` and `conclusive_shape_mismatch` classify a Bedrock model ARN (`arn:aws:bedrock:<region>:<account>:application-inference-profile/<id>`, `inference-profile/<id>`, or `arn:aws:bedrock:<region>::foundation-model/<id>`) as Bedrock with conclusive evidence. Before, the `/` in the ARN read as an OpenRouter slug and routed the id to OpenRouter. Malformed ARNs, other ARN services and partitions, and ids that only contain `arn:aws:bedrock:` past the start keep their old classification (#9200).
+
+### Security
+
+- `parse_github_path`, `parse_remote_url`, `owner_repo_from_git_remote` and `repo_slug_from_git_remote` strip a remote URL's userinfo before deriving anything, so a token embedded as `https://user:<token>@host/x.git` no longer becomes the owner of a managed-checkout path, a palace id, a log line or an error (#9124). New `url_userinfo::strip_userinfo` and `url_userinfo::userinfo_end`.
+- New `url_userinfo::strip_url_secret` removes only a URL's secret, for a URL that is stored and cloned: the `:password` on any scheme and the whole userinfo on `http(s)://`, keeping the `git@` ssh login. New `url_userinfo::scp_userinfo_end` locates the userinfo of an scp-style `user@host:path` (#9155).
+
 ## [0.53.4] — 2026-10-05
 
 ### Added

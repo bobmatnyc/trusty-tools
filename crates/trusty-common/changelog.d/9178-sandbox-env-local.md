@@ -1,2 +1,0 @@
-Fixed
-- `TRUSTY_SANDBOX=1` in the process environment now stops `load_env_local_once` from loading the project `.env.local` or `$HOME/.env.local`. `env_local_value` and `read_var_from_env_local` answer `None` under the same flag, so no tool reports a tier that resolution skips. Only the exact value `1` opts out; empty, `0`, `true` and non-UTF-8 values do not. Before this, a daemon started under `env -i` still loaded the developer's credentials from `.env.local` (#9178).
