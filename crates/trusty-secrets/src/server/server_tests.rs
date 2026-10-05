@@ -158,7 +158,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 16] = [
+const ALL_KINDS: [ErrorKind; 17] = [
     ErrorKind::InvalidParams,
     ErrorKind::ProjectInvalid,
     ErrorKind::ProjectUnresolved,
@@ -168,6 +168,7 @@ const ALL_KINDS: [ErrorKind; 16] = [
     ErrorKind::Unsupported,
     ErrorKind::UnknownBackend,
     ErrorKind::BackendFailed,
+    ErrorKind::OrphanedBackendEntry,
     ErrorKind::IndexCorrupt,
     ErrorKind::IndexBusy,
     ErrorKind::StorageUnavailable,
@@ -533,6 +534,45 @@ async fn server_error_text_is_fixed_per_method_and_kind() {
         assert!(!text.contains("decode"), "{name}: {text}");
     }
     server.stop().await;
+}
+
+/// Why: a key left in the backend with no index row needs reconciling, so it
+/// must not read as success, `NotFound`, or a plain backend failure, and its
+/// key, vault and causes must stay off the wire (#9065).
+/// Test: itself.
+#[test]
+fn server_orphaned_backend_entry_has_its_own_wire_kind() {
+    let cause = |reason: &str| {
+        Box::new(SecretsError::Backend {
+            backend: SENTINEL.into(),
+            vault: SENTINEL.into(),
+            key: SENTINEL.into(),
+            reason: reason.into(),
+        })
+    };
+    let orphan = SecretsError::OrphanedBackendEntry {
+        backend: SENTINEL.into(),
+        vault: SENTINEL.into(),
+        key: SENTINEL.into(),
+        source: cause(SENTINEL),
+        cleanup: cause(SENTINEL),
+    };
+    let kind = ErrorKind::from(orphan);
+    assert_eq!(kind, ErrorKind::OrphanedBackendEntry);
+    for other in [ErrorKind::NotFound, ErrorKind::BackendFailed] {
+        assert_ne!(kind.code(), other.code());
+        assert_ne!(kind.as_str(), other.as_str());
+    }
+
+    let sent = RpcResponse::failure(json!(1), kind.to_rpc(method::SET));
+    let text = wire(&sent);
+    assert!(!text.contains(SENTINEL), "{text}");
+    let received: RpcResponse = serde_json::from_str(&text).unwrap();
+    assert!(received.result.is_none(), "{text}");
+    assert_eq!(
+        fixed_error(&received, method::SET),
+        ErrorKind::OrphanedBackendEntry
+    );
 }
 
 /// Why: a malformed `set` must not echo its value. serde's own message for

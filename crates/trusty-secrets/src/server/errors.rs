@@ -43,6 +43,10 @@ pub enum ErrorKind {
     UnknownBackend,
     /// The backend failed.
     BackendFailed,
+    /// The backend took a new key, the index write failed, and the cleanup
+    /// delete failed too: the backend may hold an entry no index row lists.
+    // #9065: distinct from `BackendFailed` so a caller knows to reconcile.
+    OrphanedBackendEntry,
     /// The names-only index does not parse. Never reset.
     IndexCorrupt,
     /// The index lock stayed held past its wait bound.
@@ -72,6 +76,7 @@ impl ErrorKind {
             Self::Unsupported => "unsupported",
             Self::UnknownBackend => "unknown_backend",
             Self::BackendFailed => "backend_failed",
+            Self::OrphanedBackendEntry => "orphaned_backend_entry",
             Self::IndexCorrupt => "index_corrupt",
             Self::IndexBusy => "index_busy",
             Self::StorageUnavailable => "storage_unavailable",
@@ -96,6 +101,9 @@ impl ErrorKind {
             Self::Unsupported => "the backend does not support this operation",
             Self::UnknownBackend => "the configured backend is not available in this build",
             Self::BackendFailed => "the secrets backend failed",
+            Self::OrphanedBackendEntry => {
+                "the index write and its cleanup both failed; the backend may hold an entry no index row lists"
+            }
             Self::IndexCorrupt => "the secrets index is corrupt; it was left untouched",
             Self::IndexBusy => "the secrets index is busy; retry",
             Self::StorageUnavailable => "a secrets file could not be read or written",
@@ -108,6 +116,7 @@ impl ErrorKind {
 
     /// The JSON-RPC error code: `-32602` for bad params, `-32603` for
     /// [`ErrorKind::Internal`], and `-32050` minus the kind's index otherwise.
+    /// A new kind takes the next unused code, so no code changes meaning.
     pub fn code(self) -> i64 {
         match self {
             Self::InvalidParams => CODE_INVALID_PARAMS,
@@ -126,6 +135,7 @@ impl ErrorKind {
             Self::ConfigInvalid => -32061,
             Self::HomeUnavailable => -32062,
             Self::SameBackend => -32063,
+            Self::OrphanedBackendEntry => -32064,
         }
     }
 
@@ -151,6 +161,7 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::InvalidValue { .. } => Self::InvalidValue,
             SecretsError::NotFound { .. } => Self::NotFound,
             SecretsError::Backend { .. } => Self::BackendFailed,
+            SecretsError::OrphanedBackendEntry { .. } => Self::OrphanedBackendEntry,
             SecretsError::Unsupported { .. } => Self::Unsupported,
             SecretsError::UnknownBackend { .. } => Self::UnknownBackend,
             SecretsError::IndexCorrupt { .. } => Self::IndexCorrupt,
