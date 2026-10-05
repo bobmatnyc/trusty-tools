@@ -61,6 +61,11 @@ pub struct ManagedMarker {
 /// The trust seed (step 7) writes ONLY into `<claude_config_dir>` — never to
 /// `~/.claude.json` or `~/.claude/` (isolation invariant, WI-7).
 ///
+/// #9124: an entry `tm register` stored before #9124 keeps any token embedded
+/// in its URL, and this clones from the URL as stored, so the token reaches
+/// the clone's `.git/config`. Such entries are not migrated; `tm register
+/// --force <url-without-token> <alias>` replaces one.
+///
 /// Test: `test_marker_write_round_trip` (marker); git operations require network.
 pub fn load_alias(
     alias: &str,
