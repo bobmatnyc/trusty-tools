@@ -718,7 +718,8 @@ impl AppState {
             machine: trusty_common::machine_tier::MachineBudget::detect(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
             // so operators can bound resident-palace RAM without a rebuild.
-            registry: Arc::new(PalaceRegistry::from_env()),
+            // #9173: the dream scheduler walks the root for unopened palaces.
+            registry: Arc::new(PalaceRegistry::from_env().with_data_root(&data_root)),
             data_root,
             default_palace: None,
             chat_provider: Arc::new(OnceCell::new()),
@@ -1107,7 +1108,8 @@ impl AppState {
         self.registry = Arc::new(
             PalaceRegistry::from_env()
                 .with_writer_intent()
-                .with_maintenance_lease(Arc::new(lease)),
+                .with_maintenance_lease(Arc::new(lease))
+                .with_data_root(&self.data_root),
         );
         self
     }

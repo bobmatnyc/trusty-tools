@@ -1,0 +1,2 @@
+Fixed
+- The dream scheduler reaches every palace on disk. Per-palace loops still cover the palaces open at startup (at most `TRUSTY_MEMORY_MAX_OPEN_PALACES`, default 64); a rotation task now dreams the rest, one palace per dream interval, when a palace has not dreamed for an hour. It opens a closed palace through the LRU cache, so the open-handle count stays within its bound, and releases it afterwards (#9173).

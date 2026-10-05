@@ -870,6 +870,31 @@ impl PalaceHandle {
     /// about. Nothing else has been mutated at that point, so the drawer is
     /// left wholly intact rather than half-deleted.
     pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
+        let (removed, l1_saved) = self.forget_removing(id).await?;
+        // #9172: a user forget of a recorded dedup survivor is journalled.
+        if let Some(drawer) = &removed {
+            crate::memory_core::maintenance_log::record_survivor_forget(self, drawer);
+        }
+        // #8729: journalled before the L1 error surfaces; the row is gone.
+        l1_saved?;
+        Ok(if removed.is_some() {
+            ForgetOutcome::Deleted
+        } else {
+            ForgetOutcome::NotFound
+        })
+    }
+
+    /// [`Self::forget`] without the survivor journal; returns the removed row.
+    ///
+    /// Why (#9172): maintenance deletions journal their own record, and the
+    /// removed row is what a journal record copies.
+    /// What: the forget body; the row is `None` when no such drawer existed.
+    /// `Err` means nothing was deleted. #8729: the L1 snapshot save runs after
+    /// the redb delete, so its result comes back beside the row instead of
+    /// replacing it, and the caller can journal the copy before surfacing it.
+    /// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
+    /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
+    pub(crate) async fn forget_removing(&self, id: Uuid) -> Result<(Option<Drawer>, Result<()>)> {
         // Idle-to-disk: a forget is a genuine user access. Suppressed during
         // dream cycles (which forget merged/pruned drawers) via `touch`.
         self.touch();
@@ -902,7 +927,8 @@ impl PalaceHandle {
         // #5231: settle the outcome from the drawer table before mutating
         // anything. Held under the write mutex acquired above, so no concurrent
         // remember/forget can change the answer underneath the removals below.
-        let existed = self.drawers.read().iter().any(|d| d.id == id);
+        let removed = self.drawers.read().iter().find(|d| d.id == id).cloned();
+        let existed = removed.is_some();
 
         // Drop persistent metadata first so cold restart doesn't resurrect this
         // drawer (issue #32). #5231: this runs before the other removals so a
@@ -940,16 +966,15 @@ impl PalaceHandle {
             drawers.retain(|d| d.id != id);
         }
 
-        if let Some(data_dir) = self.data_dir.as_ref() {
-            let snap = self.drawers.read().clone();
-            L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")?;
-        }
+        let l1_saved = match self.data_dir.as_ref() {
+            Some(data_dir) => {
+                let snap = self.drawers.read().clone();
+                L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")
+            }
+            None => Ok(()),
+        };
 
-        Ok(if existed {
-            ForgetOutcome::Deleted
-        } else {
-            ForgetOutcome::NotFound
-        })
+        Ok((removed, l1_saved))
     }
 
     /// List drawers with optional room/tag filters, most important first.
