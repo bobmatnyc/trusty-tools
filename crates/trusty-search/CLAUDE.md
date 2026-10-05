@@ -263,6 +263,24 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   open under an earlier registration of the same index (a deferred embed job
   or an unfinished delete close). Carries `index_id`, `failure_kind`, and
   `retryable: true`; nothing is registered. Retry.
+- **`colocated` (bool, optional, #8147)**: `false` keeps the store at
+  `<data_dir>/indexes/<id>/` even when `<root_path>/.trusty-search/` already
+  holds a corpus, and registration writes nothing under `root_path`. Use it to
+  register a read-only or root-owned root. Omitted or `true` is the #8499
+  placement below. Carried by `POST /indexes` and `search.index.create`; the
+  MCP `create_index` tool and the CLI do not send it.
+- **Response 403** (#8147): the root's `.trusty-search/` holds a corpus the
+  daemon would adopt but cannot write. `error` starts `permission denied:`
+  and names the directory and the `colocated: false` alternative. Nothing is
+  registered or created, so that retry succeeds. This used to be a
+  `500 corpus open failed`.
+- **Response 409** (#8147): `colocated: false` for an id registered colocated
+  at the same `root_path`, resident or recorded in `indexes.toml`. A
+  registration never changes an index's layout. The body carries
+  `registered_colocated: true` and `requested_colocated: false`; nothing
+  changes. Checked before embedder readiness, so a `503` never hides it. If
+  `indexes.toml` cannot be read for this check the answer is `500` and nothing
+  is registered.
 
 Concurrent registrations and relocates wait for each other only when they
 share an id or their roots are equal or nested; unrelated roots register in
