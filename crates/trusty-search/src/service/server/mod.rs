@@ -132,6 +132,9 @@ mod tests_8134;
 // #8105: a reindex of a write-quarantined index is refused, not queued.
 #[cfg(test)]
 mod tests_8105;
+// #8883: a serve-only index refuses every reindex and gets no watcher.
+#[cfg(test)]
+mod serve_only_8883_tests;
 // #8889: one reindex per index through the HTTP handler.
 #[cfg(test)]
 mod tests_8889;

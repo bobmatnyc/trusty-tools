@@ -742,6 +742,8 @@ pub(crate) async fn create_index_report(
             indexed_head_sha: None,
             // #4390: no deferred-embed pass has been queued for a new index.
             deferred_embed_pending: false,
+            // #8883: serve-only is set in `indexes.toml`, never at create.
+            serve_only: false,
         },
     ) {
         tracing::warn!("could not persist index registry for {}: {e}", req.id);
@@ -861,6 +863,7 @@ pub(crate) async fn create_index_report(
         lexical_only,
         skip_kg,
         skip_vector,
+        serve_only: false,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

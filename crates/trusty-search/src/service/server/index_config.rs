@@ -404,6 +404,8 @@ pub(crate) async fn patch_index_config_report(
         lexical_only: existing.lexical_only,
         skip_kg: transition.new_skip_kg,
         skip_vector: transition.new_skip_vector,
+        // #8883: a config edit never lifts or sets the serve-only mark.
+        serve_only: existing.serve_only,
         defer_embed: existing.defer_embed,
         stages: Arc::clone(&existing.stages),
         search_pressure: Arc::clone(&existing.search_pressure),

@@ -235,3 +235,55 @@ async fn restore_drops_the_marker_for_a_skip_vector_index() {
          not re-armed on every boot forever (#4390)"
     );
 }
+
+/// #8883: restore carries `serve_only` onto the handle, and the restore-time
+/// writers leave a serve-only index alone.
+///
+/// Why: the mark is only real if the handle the refusals read carries it, and
+/// restore itself starts two writers with no request: the file watcher and
+/// the #4390 deferred-embed re-arm.
+/// What: a serve-only entry carrying the #4390 marker. The handle must carry
+/// the mark, get no watcher, and its semantic stage must not reach `Ready`
+/// within the window `restore_rearms_an_interrupted_deferred_embed_pass`
+/// needs. The marker stays on disk so lifting the mark still owes the pass.
+/// Against code without the gates the watcher starts and the pass runs.
+/// Test: this IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn restore_carries_serve_only_onto_the_handle() {
+    let (dir, _sha) = git_repo_with_commit("e.rs", "fn e() {}");
+    let id = "start-restore-8883-serve-only";
+    let mut entry = entry_for(id, dir.path());
+    entry.serve_only = true;
+    entry.deferred_embed_pending = true;
+    upsert_index_registry_entry(entry.clone()).expect("persist entry");
+    let state = SearchAppState::new(IndexRegistry::new());
+    let embedder: Arc<dyn crate::core::Embedder> = Arc::new(TestEmbedder);
+    restore_one_index(&state, &embedder, entry, RelocationScan::Unavailable).await;
+    let handle = state
+        .registry
+        .get(&IndexId::new(id))
+        .expect("restore must register the index");
+
+    assert!(
+        handle.serve_only,
+        "the persisted mark must reach the handle"
+    );
+    assert!(
+        !state.watcher_manager.is_watching(&handle.id).await,
+        "#8883: a serve-only index must get no file watcher"
+    );
+    for _ in 0..40 {
+        assert_ne!(
+            handle.stages.read().await.semantic.status,
+            StageStatus::Ready,
+            "#8883: restore must not run an embed pass on a serve-only index"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        read_entry(id).deferred_embed_pending,
+        "the owed pass stays recorded for when the mark is lifted"
+    );
+    state.watcher_manager.stop_all().await;
+}

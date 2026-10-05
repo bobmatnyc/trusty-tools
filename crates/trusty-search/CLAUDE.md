@@ -330,6 +330,35 @@ racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
 
+###### Serve-only indexes (issue #8883)
+
+A serving daemon that loads an index built on a dedicated indexer can mark it
+serve-only, so a stray reindex never rebuilds it locally and replaces it. Set
+the mark on the index's `indexes.toml` entry and restart the daemon; the flag
+is read at restore, and no route sets it:
+
+```toml
+[[index]]
+id = "my-project"
+root_path = "/srv/my-project"
+serve_only = true
+```
+
+For a serve-only index the daemon:
+
+- refuses every reindex with `403 index_serve_only` — HTTP, the socket, the
+  MCP `reindex` tool, the CLI, and the catch-up a config PATCH starts;
+- starts no file watcher, so saves under its root are not indexed;
+- skips it in the boot reconcile (no stuck-walk retry, git delta, mtime
+  catch-up or full reindex);
+- queues no boot deferred-embed re-arm and no vector-gap backfill. A gap in the
+  shipped vectors marks `stages.semantic` `failed` with a reason naming the mark.
+
+Search and every other read are unaffected. Explicit per-file writes
+(`index-file`, `remove-file`), `PATCH /indexes/:id/config` component toggles,
+`quantize` and relocate are not gated. To rebuild, reindex on the indexer and
+ship the result, or remove the line and restart.
+
 ##### `DELETE /indexes/:id[?delete_data=true]`
 
 Drop an index from the in-memory registry and from `indexes.toml` / `roots.toml`.
@@ -844,6 +873,13 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
 - **Response 409** `index_held` (#9059): an `exclude_globs` entry does not
   parse, so the index takes no reindex. Same body as `index-file`'s 409, plus
   `queued: false`. Fix the globs with `PATCH /indexes/:id/config`.
+- **Response 403** `index_serve_only` (#8883): the index is serve-only on this
+  daemon (see "Serve-only indexes" below), so it is never rebuilt here.
+  Nothing is queued and the corpus is unchanged. The body carries `index_id`,
+  `reason: "serve_only"`, a `message` naming the index and both remedies,
+  `queued: false`, and `retryable: false`. The socket's
+  `search.index.reindex` answers `CODE_FORBIDDEN` with the same message, and
+  the MCP `reindex` tool and `trusty-search index --force` / `reindex` relay it.
 
 ##### `GET /indexes/:id/reindex/stream`
 

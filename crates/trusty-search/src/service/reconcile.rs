@@ -361,6 +361,13 @@ pub(crate) async fn reconcile_one_index(
 ) {
     let index_id = handle.id.0.clone();
 
+    // #8883: a serve-only index is never rebuilt here — no stuck-walk retry,
+    // full reindex, git delta or mtime catch-up. Its freshness is the indexer's.
+    if handle.serve_only {
+        tracing::info!("reconcile[{index_id}]: skipped, the index is serve-only (#8883)");
+        return;
+    }
+
     // #4680: a never-walked index is stuck, not up-to-date — re-drive the walk
     // before any staleness marker is consulted.
     //
