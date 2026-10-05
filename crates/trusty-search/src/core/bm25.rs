@@ -69,6 +69,11 @@ impl CodeBm25Index {
         self.inner.is_empty()
     }
 
+    /// The corpus cap the shared core enforces on new documents (#9235).
+    pub fn corpus_cap() -> usize {
+        trusty_common::bm25::effective_corpus_cap()
+    }
+
     /// Insert or replace the document for `chunk_id`.
     ///
     /// Why: the ingest, commit, and persist-restore paths all re-index a chunk
@@ -146,9 +151,42 @@ impl Default for CodeBm25Index {
     }
 }
 
+/// How much of the resident corpus the BM25 lane is missing (#9235).
+///
+/// Why: the chunk cap (`TRUSTY_MAX_CHUNKS`) exceeds the BM25 corpus cap at the
+/// top of every memory tier, so a large index can hold chunks that BM25
+/// silently refused. `bm25_lane_degraded` means "not converged yet"; this is
+/// the separate, steady-state "converged but truncated" signal.
+/// What: `docs_dropped = chunk_count - bm25_len`, saturating at 0;
+/// `truncated` is `docs_dropped > 0`; `corpus_cap` is the cap in force.
+/// Test: `truncation_saturates_and_flags_only_a_shortfall`,
+/// `every_tier_reports_truncation_when_its_chunk_cap_exceeds_its_bm25_cap`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Bm25Truncation {
+    /// `true` when at least one resident chunk is absent from BM25.
+    pub truncated: bool,
+    /// Resident chunks absent from BM25.
+    pub docs_dropped: u64,
+    /// The BM25 corpus cap upserts enforce right now.
+    pub corpus_cap: u64,
+}
+
+impl Bm25Truncation {
+    /// Build the report from a chunk count, a BM25 live-doc count and a cap.
+    pub fn from_counts(chunk_count: usize, bm25_len: usize, corpus_cap: usize) -> Self {
+        let docs_dropped = chunk_count.saturating_sub(bm25_len) as u64;
+        Self {
+            truncated: docs_dropped > 0,
+            docs_dropped,
+            corpus_cap: corpus_cap as u64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CodeBm25Index;
+    use super::{Bm25Truncation, CodeBm25Index};
 
     /// A chunk indexed through the wrapper must be findable by one of its
     /// terms, with a positive score — the delegation carries scoring through.
@@ -219,5 +257,23 @@ mod tests {
             .score_query_all("authenticate", 5)
             .iter()
             .any(|(id, _)| id == "a.rs:1:1"));
+    }
+
+    /// #9235: a shortfall reports truncation and its size; an equal or larger
+    /// BM25 count (mid-rehydrate, before the chunk map fills) saturates to 0.
+    #[test]
+    fn truncation_saturates_and_flags_only_a_shortfall() {
+        let over = Bm25Truncation::from_counts(250_000, 200_000, 200_000);
+        assert!(over.truncated);
+        assert_eq!(over.docs_dropped, 50_000);
+        assert_eq!(over.corpus_cap, 200_000);
+
+        let under = Bm25Truncation::from_counts(10, 10, 200_000);
+        assert!(!under.truncated);
+        assert_eq!(under.docs_dropped, 0);
+
+        let ahead = Bm25Truncation::from_counts(0, 10, 200_000);
+        assert!(!ahead.truncated);
+        assert_eq!(ahead.docs_dropped, 0);
     }
 }

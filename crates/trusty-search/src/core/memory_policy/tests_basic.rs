@@ -274,3 +274,52 @@ fn test_supported_24gb_target_defaults() {
     assert_eq!(d.max_batch_size, 432);
     assert_eq!(d.embedding_cache, 1_000);
 }
+
+/// #9235 tier coupling: at the top of every memory band the chunk cap can
+/// exceed the BM25 corpus cap, so a full index holds chunks BM25 refused. The
+/// truncation report must say so whenever the two caps diverge, and stay quiet
+/// when they do not.
+/// What: for each tier at its band's top RAM, feeds the report the index BM25
+/// would hold at the chunk cap (`min(max_chunks, bm25_corpus_cap)`) and checks
+/// `truncated`, `docs_dropped` and `corpus_cap` against the tier's own caps.
+/// Test: this test.
+#[test]
+fn every_tier_reports_truncation_when_its_chunk_cap_exceeds_its_bm25_cap() {
+    use crate::core::bm25::Bm25Truncation;
+    let band_tops = [
+        (MemoryTier::Degraded, 16 * 1024 - 1),
+        (MemoryTier::Medium, 32 * 1024 - 1),
+        (MemoryTier::Large, 64 * 1024 - 1),
+        (MemoryTier::XLarge, 128 * 1024),
+    ];
+    let mut diverging = Vec::new();
+    for (tier, ram_mb) in band_tops {
+        assert_eq!(MemoryTier::from_total_ram_mb(ram_mb), tier);
+        let d = tier_defaults(
+            tier,
+            compute_memory_limit_mb(ram_mb),
+            compute_index_memory_limit_mb(ram_mb),
+        );
+        let bm25_len = d.max_chunks.min(d.bm25_corpus_cap);
+        let report = Bm25Truncation::from_counts(d.max_chunks, bm25_len, d.bm25_corpus_cap);
+        let gap = d.max_chunks.saturating_sub(d.bm25_corpus_cap) as u64;
+        assert_eq!(
+            report.truncated,
+            gap > 0,
+            "{tier}: chunk cap {} vs BM25 cap {} must report truncation iff they diverge",
+            d.max_chunks,
+            d.bm25_corpus_cap
+        );
+        assert_eq!(report.docs_dropped, gap, "{tier}: dropped is the cap gap");
+        assert_eq!(report.corpus_cap, d.bm25_corpus_cap as u64, "{tier}");
+        if gap > 0 {
+            diverging.push(tier);
+        }
+    }
+    // The #9235 finding: every band diverges at its top today. If a cap change
+    // closes the gap, this premise changed and the report may be redundant.
+    assert!(
+        !diverging.is_empty(),
+        "no tier's chunk cap exceeds its BM25 cap — revisit #9235"
+    );
+}

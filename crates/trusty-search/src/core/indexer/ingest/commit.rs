@@ -451,6 +451,39 @@ impl CodeIndexer {
         self.chunks.try_read().map(|g| g.len()).unwrap_or(0)
     }
 
+    /// How many resident chunks the BM25 lane is missing, and under which cap.
+    ///
+    /// Why: #9235 — the chunk cap exceeds the BM25 corpus cap at the top of
+    /// every memory tier, so a converged index can hold chunks BM25 refused.
+    /// Only the rehydrate path counted them, and only into a gauge;
+    /// `index_status` and the search `meta` block need the figure too.
+    /// What: resident, `chunks.len() - bm25.len()` (saturating). Evicted (either
+    /// map), there is nothing resident to compare, so it reports what the next
+    /// rehydrate admits: the durable chunk count minus the cap, saturating.
+    /// Test: `ingest_over_the_bm25_cap_reports_truncation`,
+    /// `ingest_under_the_bm25_cap_reports_no_truncation`,
+    /// `rehydrate_over_the_bm25_cap_reports_truncation`,
+    /// `rehydrate_under_the_bm25_cap_reports_no_truncation`.
+    pub async fn bm25_truncation(&self) -> crate::core::bm25::Bm25Truncation {
+        use crate::core::bm25::{Bm25Truncation, CodeBm25Index};
+        use std::sync::atomic::Ordering;
+        let cap = CodeBm25Index::corpus_cap();
+        let evicted = self.chunks_evicted.load(Ordering::Acquire)
+            || self.bm25_entities_evicted.load(Ordering::Acquire);
+        if let (true, Some(corpus)) = (evicted, self.corpus.as_ref()) {
+            let durable = corpus
+                .chunk_count()
+                .inspect_err(|e| {
+                    tracing::warn!(index = %self.index_id, "bm25_truncation: corpus count: {e:#}")
+                })
+                .unwrap_or(0);
+            return Bm25Truncation::from_counts(durable, durable.min(cap), cap);
+        }
+        let chunk_count = self.chunks.read().await.len();
+        let bm25_len = self.bm25.read().await.len();
+        Bm25Truncation::from_counts(chunk_count, bm25_len, cap)
+    }
+
     /// Snapshot the current symbol graph. Cheap (`Arc::clone`); intended for
     /// read-only KG queries from concurrent search handlers.
     ///
