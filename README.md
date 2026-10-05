@@ -91,7 +91,7 @@ trusty-search index ~/Projects/myproj --name myproj
 trusty-search query "fn authenticate" --index myproj
 ```
 
-**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `upgrade`, `console_metrics`
+**MCP tools:** `search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `search_similar`, `grep`, `typeahead`, `get_call_chain`, `index_file`, `remove_file`, `list_indexes`, `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`, `search_health`, `chat`, `console_metrics`
 
 See [crates/trusty-search/README.md](crates/trusty-search/README.md) for full documentation.
 
