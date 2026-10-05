@@ -354,6 +354,9 @@ pub async fn finalize_review(
         result.cost_estimate_usd,
     );
     result.review_body.push_str(&footer);
+    // #9200: mask an ARN model's account id once the footer has read the raw
+    // id, so the posted VerdictBlock JSON and every later reader see it masked.
+    result.model = crate::llm::bedrock::arn::mask_account_ids(&result.model).into_owned();
 
     let is_github = !post_ctx.owner.is_empty() && post_ctx.owner != "local";
     let mut action = decide_action(config.dry_run, trigger, allow_posting, is_github);

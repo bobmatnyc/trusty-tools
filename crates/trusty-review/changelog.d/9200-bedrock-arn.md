@@ -13,7 +13,8 @@ Fixed
   its model, so a warning log line reports it as unpriced and the review footer
   shows `est. unpriced` in place of a dollar estimate (#9200).
 - An ARN's 12-digit account id is masked as `****` in the review footer, in
-  Bedrock error messages (including ARNs that AWS quotes back), in the
+  the review result's `model` field (and so in the posted comment's verdict
+  JSON, the MCP review JSON and the CLI output), in Bedrock error messages (including ARNs that AWS quotes back), in the
   model-id validation error and in Bedrock log lines. The ARN sent to AWS is
   not masked. The validation error now says a Bedrock model ARN is accepted
   (#9200).

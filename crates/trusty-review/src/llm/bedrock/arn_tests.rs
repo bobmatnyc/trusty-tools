@@ -412,3 +412,50 @@ fn footer_masks_the_account_and_says_unpriced_for_an_application_profile() {
         assert!(!footer.contains("unpriced"), "{footer}");
     }
 }
+
+/// Run `finalize_review` on the log path for a result whose model is `model`,
+/// and render the comment body that would be posted.
+async fn finalized_comment(model: &str) -> (crate::models::ReviewResult, String) {
+    use crate::integrations::github::RunMode;
+    use crate::integrations::github::posting::build_review_comment_body;
+    use crate::pipeline::post::{PostContext, finalize_review};
+    use crate::pipeline::trigger::TriggerDecision;
+
+    let mut result = crate::models::ReviewResult::new("local", "repo", 1, "t", "u");
+    result.model = model.to_string();
+    let out = finalize_review(
+        result,
+        &ReviewConfig::load(None),
+        TriggerDecision::None,
+        false,
+        false,
+        false,
+        PostContext {
+            owner: "local",
+            repo: "repo",
+            pr: 1,
+            head_sha: "",
+            run_mode: RunMode::Cli,
+            dedup: None,
+        },
+    )
+    .await;
+    let body = build_review_comment_body(&out);
+    (out, body)
+}
+
+/// The posted comment, VerdictBlock JSON included, carries no account id for
+/// an ARN model; the footer still reads the raw id, so it still says unpriced.
+#[tokio::test]
+async fn posted_comment_masks_the_arn_account_everywhere() {
+    let (out, body) = finalized_comment(APP_PROFILE_ARN).await;
+    assert_eq!(out.model, MASKED_APP_PROFILE_ARN);
+    assert!(!body.contains(ACCOUNT), "account id in the comment: {body}");
+    assert!(body.contains(MASKED_APP_PROFILE_ARN), "{body}");
+    assert!(body.contains("est. unpriced"), "{body}");
+
+    let plain = "us.anthropic.claude-sonnet-4-6";
+    let (out, body) = finalized_comment(plain).await;
+    assert_eq!(out.model, plain, "a plain id is never rewritten");
+    assert!(body.contains(&format!("`{plain}`")), "{body}");
+}
