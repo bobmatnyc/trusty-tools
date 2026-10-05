@@ -1,0 +1,3 @@
+Fixed
+- `ctrl::socket::tests::racing_starters_on_a_stale_socket_never_both_bind` no longer flakes when a sibling test forks: its stale-socket fixture now binds a stream socket and never listens, so a descriptor copy a child inherits between `fork` and `exec` refuses connects instead of reading as a live controller (#9217). Test-only; production behaviour is unchanged.
+- `telegram_gateway_status_snapshot_reports_a_live_lock_holder` no longer flakes when a sibling test forks: it waits up to 5 s for the gateway lock to read as released, because a child in its fork-to-exec window holds the lock until it execs. A new guard test proves the lock descriptor does not survive `exec` (#9220). Test-only; production behaviour is unchanged.

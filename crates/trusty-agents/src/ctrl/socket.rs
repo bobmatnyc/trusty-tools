@@ -665,11 +665,93 @@ mod tests {
             .and_then(|e| e.downcast_ref::<trusty_common::uds::UdsSecurityError>())
     }
 
-    /// A socket file nothing serves: `std`'s listener does not unlink on drop.
+    /// A socket file nothing serves, closed before the caller sees it.
     fn dead_socket(path: &Path) {
-        trusty_common::uds::prepare_socket_dir(path.parent().expect("parent")).expect("dir");
-        drop(std::os::unix::net::UnixListener::bind(path).expect("bind corpse"));
+        drop(corpse_socket(path));
     }
+
+    /// A socket file nothing serves, plus the bound descriptor behind it.
+    ///
+    /// Why (#9217): a sibling test's child, between `fork` and `exec`, holds a
+    /// copy of every descriptor this process has open. A corpse made by
+    /// binding a `UnixListener` is LISTENING for that window, so a probe
+    /// connects and reads the path as served.
+    /// What: `socket(AF_UNIX, SOCK_STREAM)` with close-on-exec, then `bind`,
+    /// and never `listen` — a connect gets ECONNREFUSED while any copy of the
+    /// descriptor is open, and after the last one closes.
+    /// Test: `racing_starters_on_a_corpse_a_child_inherited_still_bind_once`.
+    fn corpse_socket(path: &Path) -> std::os::fd::OwnedFd {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        trusty_common::uds::prepare_socket_dir(path.parent().expect("parent")).expect("dir");
+        // macOS has no SOCK_CLOEXEC; the flag is set right after instead.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let kind = libc::SOCK_STREAM;
+        // SAFETY: `socket` takes no pointers; a negative return is checked.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+        assert!(raw >= 0, "socket: {}", io::Error::last_os_error());
+        // SAFETY: `raw` is a fresh descriptor nothing else owns.
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            // SAFETY: `fcntl(F_SETFD)` on a descriptor `fd` keeps open.
+            let rc = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+            assert_eq!(rc, 0, "FD_CLOEXEC: {}", io::Error::last_os_error());
+        }
+
+        // SAFETY: an all-zero `sockaddr_un` is a valid value of the type.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let name = path.as_os_str().as_bytes();
+        assert!(name.len() < addr.sun_path.len(), "socket path too long");
+        for (dst, src) in addr.sun_path.iter_mut().zip(name) {
+            *dst = *src as libc::c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        // SAFETY: `addr` is an initialized, NUL-terminated `sockaddr_un` that
+        // outlives the call, and `len` is its exact size.
+        let rc = unsafe { libc::bind(fd.as_raw_fd(), (&raw const addr).cast(), len) };
+        assert_eq!(rc, 0, "bind corpse: {}", io::Error::last_os_error());
+        fd
+    }
+
+    /// Run [`STARTERS`] concurrent `bind_singleton` calls on `sock` and count
+    /// the ones that came back `Bound`. Each holds what it bound until all
+    /// have finished, so two owners cannot hide behind an early drop.
+    fn race_bind_singleton(sock: &Path) -> usize {
+        let start = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
+        let done = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
+        let starters: Vec<_> = (0..STARTERS)
+            .map(|_| {
+                let (sock, start, done) = (sock.to_path_buf(), start.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime");
+                    rt.block_on(async {
+                        start.wait();
+                        let outcome =
+                            CtrlSocket::bind_singleton(&sock, Duration::from_millis(200)).await;
+                        let bound = matches!(outcome, Ok(BindOutcome::Bound(_)));
+                        done.wait();
+                        bound
+                    })
+                })
+            })
+            .collect();
+        starters
+            .into_iter()
+            .map(|t| t.join().expect("starter thread"))
+            .filter(|b| *b)
+            .count()
+    }
+
+    /// Starters per [`race_bind_singleton`] round.
+    const STARTERS: usize = 4;
 
     /// #8870 regression: a starter that finds another starter mid-bind — the
     /// `<socket>.lock` flock held — must refuse, not bind beside it. Against
@@ -771,37 +853,35 @@ mod tests {
     /// up as two `Bound` outcomes.
     #[test]
     fn racing_starters_on_a_stale_socket_never_both_bind() {
-        const STARTERS: usize = 4;
         for round in 0..64 {
             let tmp = tempfile::tempdir().expect("tempdir");
             let sock = tmp.path().join("sockets").join("race.ctrl.sock");
             dead_socket(&sock);
-            let start = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
-            let done = std::sync::Arc::new(std::sync::Barrier::new(STARTERS));
-            let starters: Vec<_> = (0..STARTERS)
-                .map(|_| {
-                    let (sock, start, done) = (sock.clone(), start.clone(), done.clone());
-                    std::thread::spawn(move || {
-                        let rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_all()
-                            .build()
-                            .expect("runtime");
-                        rt.block_on(async {
-                            start.wait();
-                            let outcome =
-                                CtrlSocket::bind_singleton(&sock, Duration::from_millis(200)).await;
-                            let bound = matches!(outcome, Ok(BindOutcome::Bound(_)));
-                            done.wait();
-                            bound
-                        })
-                    })
-                })
-                .collect();
-            let bound = starters
-                .into_iter()
-                .map(|t| t.join().expect("starter thread"))
-                .filter(|b| *b)
-                .count();
+            let bound = race_bind_singleton(&sock);
+            assert_eq!(bound, 1, "round {round}: {bound} starters own the socket");
+        }
+    }
+
+    /// #9217 regression: a corpse whose descriptor a forked child still holds
+    /// is still taken over by exactly one starter.
+    ///
+    /// Why: CI runs every lib test as a thread of one process, so a sibling's
+    /// child can inherit the corpse fixture's descriptor between `fork` and
+    /// `exec`. A listening corpse then reads as served and nobody binds.
+    /// What: keeps a `try_clone` of the corpse descriptor — the child's copy —
+    /// open across every round's race. Against the listening fixture every
+    /// round found 0 owners.
+    /// Test: this test.
+    #[test]
+    fn racing_starters_on_a_corpse_a_child_inherited_still_bind_once() {
+        for round in 0..8 {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let sock = tmp.path().join("sockets").join("race.ctrl.sock");
+            let corpse = corpse_socket(&sock);
+            let inherited = corpse.try_clone().expect("the child's copy");
+            drop(corpse);
+            let bound = race_bind_singleton(&sock);
+            drop(inherited);
             assert_eq!(bound, 1, "round {round}: {bound} starters own the socket");
         }
     }
