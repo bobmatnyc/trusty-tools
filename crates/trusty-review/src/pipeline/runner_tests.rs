@@ -2761,3 +2761,7 @@ mod citation_gate;
 // #8904: every posted finding has passed the verifier.
 #[path = "runner_verify_coverage_tests.rs"]
 mod verify_coverage;
+
+// #9188: the offline zero-hallucination corpus runner.
+#[path = "runner_hallucination_corpus_tests.rs"]
+mod hallucination_corpus;

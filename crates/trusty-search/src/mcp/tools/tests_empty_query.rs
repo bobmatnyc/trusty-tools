@@ -1,17 +1,36 @@
 //! Issue #882 — MCP tool tests for empty / whitespace-only query rejection.
 //!
-//! Why: the daemon returns HTTP 400 for empty queries; we must verify that the
-//! MCP layer maps that 400 to a clean InvalidParams error (bare-method) or
-//! `isError: true` (tools/call) rather than an opaque Transport failure.
-//! What: spins up a tiny mock daemon per test and drives the McpServer dispatcher.
-//! Each test wires a `tokio::sync::oneshot` shutdown channel into axum's graceful
-//! shutdown so the listener is torn down deterministically at the end of the test,
-//! preventing port leaks under parallel test runs.
+//! Why: the daemon refuses an empty query as invalid params (HTTP 400's
+//! socket twin); we must verify that the MCP layer maps that refusal to a
+//! clean InvalidParams error (bare-method) or `isError: true` (tools/call)
+//! rather than an opaque Transport failure.
+//! What: a mock socket daemon per test (#9168) drives the McpServer
+//! dispatcher. Dropping the mock at the end of the test stops its accept loop
+//! and its `TempDir` removes the socket.
 //! Test: this file.
 
 use serde_json::Value;
 
-use super::{error_codes, McpServer, Request};
+use super::test_daemon::{mock_daemon, refusal, MockDaemon};
+use super::{error_codes, Request};
+
+/// A daemon that refuses every search as empty and answers status with
+/// `status` — the 400 `{"error": "query must not be empty"}` the real search
+/// route sends, rendered the way the daemon renders it on the socket.
+async fn empty_query_daemon(status: Value) -> MockDaemon {
+    mock_daemon(move |method, params| match method {
+        "search.index.status" => {
+            let mut v = status.clone();
+            v["index_id"] = params["index_id"].clone();
+            Ok(v)
+        }
+        _ => Err(refusal(
+            400,
+            &serde_json::json!({ "error": "query must not be empty" }),
+        )),
+    })
+    .await
+}
 
 fn req(method: &str, params: Value) -> Request {
     Request {
@@ -22,39 +41,17 @@ fn req(method: &str, params: Value) -> Request {
     }
 }
 
-/// Why: when the daemon returns HTTP 400 for an empty query, the MCP `search`
+/// Why: when the daemon refuses an empty query as invalid params, the MCP `search`
 /// tool must surface it as a clean InvalidParams / tool error rather than an
 /// opaque transport failure, so the LLM can react with a helpful message.
-/// What: spins up a mock daemon that returns 400 for any search request, then
-/// asserts the bare-method form returns INVALID_PARAMS and the `tools/call`
-/// form returns `isError: true`. Graceful shutdown via oneshot channel.
+/// What: a mock daemon refuses every search as invalid params, then the
+/// bare-method form must return INVALID_PARAMS and the `tools/call` form
+/// `isError: true`.
 /// Test: this test.
 #[tokio::test]
 async fn search_tool_empty_query_surfaces_as_invalid_params() {
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use tokio::sync::oneshot;
-
-    async fn bad_search(Json(_body): Json<Value>) -> (axum::http::StatusCode, Json<Value>) {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
-        )
-    }
-
-    let app = Router::new().route("/indexes/demo/search", post(bad_search));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            })
-            .await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
+    let daemon = empty_query_daemon(serde_json::json!({})).await;
+    let server = daemon.server();
 
     // Bare-method form: expect INVALID_PARAMS JSON-RPC error.
     let resp = server
@@ -91,60 +88,26 @@ async fn search_tool_empty_query_surfaces_as_invalid_params() {
         result["isError"], true,
         "whitespace-only query must return isError=true"
     );
-
-    let _ = shutdown_tx.send(());
-    let _ = handle.await;
 }
 
 /// Why: per-lane tools (`search_lexical`, `search_semantic`, `search_kg`,
-/// `search_all`) share the same POST path — confirm they too return a clean
+/// `search_all`) share the same `search.query` call — confirm they too return a clean
 /// InvalidParams / tool error when the daemon rejects an empty query.
-/// What: mock daemon returns 400 for any search; asserts `search_lexical`
+/// What: mock daemon refuses any search; asserts `search_lexical`
 /// returns INVALID_PARAMS (bare-method) and isError=true (tools/call).
-/// Graceful shutdown via oneshot channel.
 /// Test: this test.
 #[tokio::test]
 async fn search_lexical_empty_query_surfaces_as_invalid_params() {
-    use axum::routing::{get, post};
-    use axum::{extract::Path, Json, Router};
-    use tokio::sync::oneshot;
-
-    async fn bad_search(
-        Path(_id): Path<String>,
-        Json(_body): Json<Value>,
-    ) -> (axum::http::StatusCode, Json<Value>) {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
-        )
-    }
-    async fn status_ok(Path(id): Path<String>) -> Json<Value> {
-        Json(serde_json::json!({
-            "index_id": id,
-            "search_capabilities": ["bm25", "literal"],
-            "stages": {
-                "lexical": { "status": "ready" },
-                "semantic": { "status": "pending" },
-                "graph":   { "status": "pending" },
-            }
-        }))
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}/search", post(bad_search))
-        .route("/indexes/{id}/status", get(status_ok));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            })
-            .await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
+    let daemon = empty_query_daemon(serde_json::json!({
+        "search_capabilities": ["bm25", "literal"],
+        "stages": {
+            "lexical": { "status": "ready" },
+            "semantic": { "status": "pending" },
+            "graph":   { "status": "pending" },
+        }
+    }))
+    .await;
+    let server = daemon.server();
 
     // Bare method — expect INVALID_PARAMS.
     let resp = server
@@ -168,65 +131,31 @@ async fn search_lexical_empty_query_surfaces_as_invalid_params() {
         .await;
     let result = resp.result.expect("result envelope");
     assert_eq!(result["isError"], true);
-
-    let _ = shutdown_tx.send(());
-    let _ = handle.await;
 }
 
-/// Why: `search_semantic` goes through the same `run_lane_search` / `post()`
-/// pipeline as `search_lexical`; the 400→InvalidParams mapping must fire even
+/// Why: `search_semantic` goes through the same `run_lane_search` / `call_scoped()`
+/// pipeline as `search_lexical`; the invalid-params mapping must fire even
 /// after the pre-flight stage check passes. This guards regressions where a
 /// future refactor adds an early-exit path that skips the empty-query guard.
 /// What: mock daemon reports `vector` capability ready (so the pre-flight
-/// passes) but returns 400 on the actual search POST. Asserts both the
-/// bare-method and `tools/call` forms surface InvalidParams / isError=true.
-/// Graceful shutdown via oneshot channel.
+/// passes) but refuses the actual search. Asserts both the bare-method and
+/// `tools/call` forms surface InvalidParams / isError=true.
 /// Test: this test.
 #[tokio::test]
 async fn search_semantic_empty_query_surfaces_as_invalid_params() {
-    use axum::routing::{get, post};
-    use axum::{extract::Path, Json, Router};
-    use tokio::sync::oneshot;
+    let daemon = empty_query_daemon(serde_json::json!({
+        "search_capabilities": ["bm25", "literal", "vector"],
+        "stages": {
+            "lexical":  { "status": "ready" },
+            "semantic": { "status": "ready" },
+            "graph":    { "status": "pending" },
+        }
+    }))
+    .await;
+    let server = daemon.server();
 
-    async fn bad_search(
-        Path(_id): Path<String>,
-        Json(_body): Json<Value>,
-    ) -> (axum::http::StatusCode, Json<Value>) {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
-        )
-    }
-    async fn status_vector_ready(Path(id): Path<String>) -> Json<Value> {
-        Json(serde_json::json!({
-            "index_id": id,
-            "search_capabilities": ["bm25", "literal", "vector"],
-            "stages": {
-                "lexical":  { "status": "ready" },
-                "semantic": { "status": "ready" },
-                "graph":    { "status": "pending" },
-            }
-        }))
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}/search", post(bad_search))
-        .route("/indexes/{id}/status", get(status_vector_ready));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            })
-            .await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
-
-    // Bare-method form — the pre-flight passes (vector ready) but the POST
-    // returns 400; the MCP layer must map it to INVALID_PARAMS.
+    // Bare-method form — the pre-flight passes (vector ready) but the search
+    // is refused; the MCP layer must map it to INVALID_PARAMS.
     let resp = server
         .dispatch(req(
             "search_semantic",
@@ -256,50 +185,20 @@ async fn search_semantic_empty_query_surfaces_as_invalid_params() {
         result["isError"], true,
         "search_semantic whitespace-only query must return isError=true"
     );
-
-    let _ = shutdown_tx.send(());
-    let _ = handle.await;
 }
 
 /// Why: `search_all` with an `index_id` routes through `run_lane_search` with
 /// no stage pre-check (the All lane has no required capability). The
-/// 400→InvalidParams mapping must still fire when the daemon rejects an empty
-/// query, verifying the guard lives in the shared `post()` helper and not just
-/// in the pre-flight branch.
-/// What: mock daemon returns 400 for any search POST. Asserts both the
-/// bare-method and `tools/call` forms surface InvalidParams / isError=true.
-/// Graceful shutdown via oneshot channel.
+/// invalid-params mapping must still fire when the daemon rejects an empty
+/// query, verifying the guard lives in the shared transport and not just in
+/// the pre-flight branch.
+/// What: mock daemon refuses any search. Asserts both the bare-method and
+/// `tools/call` forms surface InvalidParams / isError=true.
 /// Test: this test.
 #[tokio::test]
 async fn search_all_empty_query_surfaces_as_invalid_params() {
-    use axum::routing::post;
-    use axum::{extract::Path, Json, Router};
-    use tokio::sync::oneshot;
-
-    async fn bad_search(
-        Path(_id): Path<String>,
-        Json(_body): Json<Value>,
-    ) -> (axum::http::StatusCode, Json<Value>) {
-        (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "query must not be empty" })),
-        )
-    }
-
-    // search_all with index_id routes to /indexes/{id}/search (no status probe).
-    let app = Router::new().route("/indexes/{id}/search", post(bad_search));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                shutdown_rx.await.ok();
-            })
-            .await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
+    let daemon = empty_query_daemon(serde_json::json!({})).await;
+    let server = daemon.server();
 
     // Bare-method form.
     let resp = server
@@ -331,7 +230,4 @@ async fn search_all_empty_query_surfaces_as_invalid_params() {
         result["isError"], true,
         "search_all whitespace-only query must return isError=true"
     );
-
-    let _ = shutdown_tx.send(());
-    let _ = handle.await;
 }
