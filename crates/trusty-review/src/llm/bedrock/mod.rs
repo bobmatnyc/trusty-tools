@@ -18,14 +18,16 @@
 //! returned as `LlmResponse.text` — clean, directly deserializable JSON
 //! with no fence-stripping required.
 //!
-//! Region resolution: `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
+//! Region resolution: an explicit region > the region inside a Bedrock model
+//! ARN > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
 //! Credentials: standard AWS credential chain (env vars, `~/.aws/credentials`,
 //! instance metadata/IMDS, SSO) — no API key needed.
 //!
 //! Model-id validation: the `us.` cross-region inference-profile prefix is
 //! required.  Bedrock will reject a bare foundation-model id (e.g.
 //! `anthropic.claude-sonnet-4-6`) with a ValidationException; we surface this
-//! early as [`LlmError::Validation`] so operators see it immediately.
+//! early as [`LlmError::Validation`] so operators see it immediately. A
+//! well-formed Bedrock model ARN is accepted too (#9200, see [`arn`]).
 //!
 //! Test: `bedrock_region_resolution`, `bedrock_us_prefix_validation`,
 //! `bedrock_cost_estimate_*`, `bedrock_converse_request_construction`,
@@ -33,6 +35,7 @@
 //! `bedrock_request_includes_tool_config_when_schema_set` (all unit-level,
 //! no real AWS calls).
 
+mod arn;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
@@ -81,20 +84,24 @@ pub use trusty_common::inference::bedrock::resolve_bedrock_region;
 
 // ─── Model id validation ──────────────────────────────────────────────────────
 
-/// Validate that `model_id` has a cross-region inference-profile prefix.
+/// Validate that `model_id` has a cross-region inference-profile prefix, or is
+/// a Bedrock model ARN.
 ///
 /// Why: Bedrock will reject bare foundation-model ids at runtime with a
 /// ValidationException; we surface the error at construction time so operators
 /// see it immediately (same behaviour as `us.`-prefix validation in
 /// trusty-analyze).
-/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches;
-/// `Err(LlmError::Validation)` otherwise.
-/// Test: `bedrock_us_prefix_validation`.
+/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches or
+/// [`arn::parse`] accepts the id; `Err(LlmError::Validation)` otherwise.
+/// Test: `bedrock_us_prefix_validation`,
+/// `application_inference_profile_arn_routes_to_bedrock`,
+/// `inference_profile_arn_routes_to_bedrock`, `foundation_model_arn_routes_to_bedrock`.
 fn validate_model_id(model_id: &str) -> Result<(), LlmError> {
     let has_profile_prefix = INFERENCE_PROFILE_PREFIXES
         .iter()
         .any(|pfx| model_id.starts_with(pfx));
-    if has_profile_prefix {
+    // #9200: a Bedrock model ARN names its resource and region in full.
+    if has_profile_prefix || arn::parse(model_id).is_some() {
         return Ok(());
     }
     Err(LlmError::Validation(format!(
@@ -139,19 +146,38 @@ impl BedrockProvider {
     /// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`),
     /// `~/.aws/credentials` profiles, IMDS v2, and SSO — covering both local
     /// dev and production deployments without code changes.
-    /// What: validates the model id (requires an inference-profile prefix) and
-    /// builds a [`BedrockAdapter`] for the ambient region (`TRUSTY_AWS_REGION` >
-    /// `AWS_REGION` > `us-east-1`).  Returns `LlmError::Validation` if the model
-    /// id is invalid.  #5469: synchronous, because the adapter builds its AWS
-    /// client lazily on the first `Converse` call; the explicit-region parameter
-    /// went with it, since every caller passed `None`.
+    /// What: [`Self::new_in_region`] with no explicit region, so the region is
+    /// the one inside a Bedrock model ARN, else the ambient walk
+    /// (`TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`).  Returns
+    /// `LlmError::Validation` if the model id is invalid.  #5469: synchronous,
+    /// because the adapter builds its AWS client lazily on the first `Converse`
+    /// call.
     /// Test: `bedrock_us_prefix_validation` (validation path, no network);
     /// real-credentials path tested in ignored integration tests.
     pub fn new(model: impl Into<String>) -> Result<Self, LlmError> {
+        Self::new_in_region(model, None)
+    }
+
+    /// Construct a `BedrockProvider`, optionally pinning the AWS region.
+    ///
+    /// Why: a Bedrock model ARN carries the region its resource lives in, and
+    /// Converse resolves an ARN only in that region, so an ambient
+    /// `AWS_REGION` set for other work must not send the call elsewhere
+    /// (#9200). A caller that passes a region on purpose still wins: that is a
+    /// per-call decision, where the env vars are machine-wide defaults.
+    /// What: validates the model id, then resolves the region as `region` (when
+    /// non-empty) > the ARN's region field > `TRUSTY_AWS_REGION` >
+    /// `AWS_REGION` > `us-east-1`. A plain model id has no ARN tier, so with
+    /// `region = None` it resolves exactly as [`Self::new`] did before ARNs.
+    /// Test: `arn_region_wins_over_ambient_and_explicit_region_wins_over_arn`.
+    pub fn new_in_region(model: impl Into<String>, region: Option<&str>) -> Result<Self, LlmError> {
         let model = model.into();
         validate_model_id(&model)?;
+        // #9200: explicit > ARN region > env walk inside `BedrockAdapter::new`.
+        let explicit = region.filter(|r| !r.trim().is_empty());
+        let region = explicit.or_else(|| arn::parse(&model).map(|a| a.region));
         Ok(Self {
-            adapter: BedrockAdapter::new(None),
+            adapter: BedrockAdapter::new(region),
             model,
         })
     }
