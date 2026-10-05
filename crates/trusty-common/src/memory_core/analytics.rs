@@ -193,6 +193,65 @@ impl RecallLog {
         })
     }
 
+    /// Open the recall log at `path`, sharing the instance this process
+    /// already holds for the same file.
+    ///
+    /// Why (#9140 batch, live 2026-10-04T14:31:51Z): redb's exclusive lock
+    /// refuses a second same-process open with `DatabaseAlreadyOpen`. The KG
+    /// and vector stores share their open database through a process-wide
+    /// weak cache, so a second `PalaceHandle::open` of a live palace succeeded
+    /// for them while its recall log failed and the handle ran with analytics
+    /// disabled for its whole life. The whole `RecallLog` is shared, not just
+    /// the `Database`, because `next_id` must be one counter per file or two
+    /// instances mint the same key and overwrite each other's rows.
+    /// What: resolves the redb path, canonicalises its parent, and returns the
+    /// live `Arc` from a `Weak` slot keyed by that path, or opens a new log
+    /// and caches it. The process-wide map lock covers only the slot lookup;
+    /// the open runs under that file's own slot lock, so two racing callers
+    /// cannot both open one file and an open of one file never waits on
+    /// another's.
+    /// Test: `second_open_of_a_live_palace_shares_its_recall_log`.
+    pub fn open_shared(path: &Path) -> Result<Arc<Self>> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock, Weak};
+        type Slot = Arc<Mutex<Weak<RecallLog>>>;
+        static CACHE: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
+        let redb_path = resolve_redb_path(path);
+        let key = match (redb_path.parent(), redb_path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                std::fs::create_dir_all(parent).ok();
+                std::fs::canonicalize(parent)
+                    .map(|p| p.join(name))
+                    .unwrap_or_else(|_| redb_path.clone())
+            }
+            _ => redb_path.clone(),
+        };
+        // #9140: holding the map lock across `Self::open` (a redb create plus a
+        // write commit) serialised every palace's open process-wide; trusty-
+        // memory's `perf_palace_cold_open_within_budget` took 0.8-4 s against
+        // its 750 ms budget under a concurrent run.
+        let slot = {
+            let mut cache = CACHE
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Prune a slot only when no caller holds it (the map's Arc is the
+            // only one) and its log is gone; `try_lock` then never contends.
+            cache.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot.try_lock().map_or(true, |weak| weak.strong_count() > 0)
+            });
+            Arc::clone(cache.entry(key.clone()).or_default())
+        };
+        let mut weak = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(live) = weak.upgrade() {
+            return Ok(live);
+        }
+        let log = Arc::new(Self::open(&key)?);
+        *weak = Arc::downgrade(&log);
+        Ok(log)
+    }
+
     /// Allocate the next monotonic event id.
     ///
     /// Why: Multiple recall events can land in the same millisecond. Using the

@@ -18,7 +18,8 @@
 //! Test: `cargo test -p trusty-memory -- console_metrics` exercises the
 //! descriptor shape and handler via the existing `dispatch_tool` harness.
 
-mod disk_stats;
+// #9141: also read by the recall-all fan-out to skip empty palaces unopened.
+pub(crate) mod disk_stats;
 mod usage;
 
 use anyhow::Result;

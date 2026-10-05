@@ -12,6 +12,9 @@
 //! - `store` — the [`store::SecretBackend`] trait and its Keychain
 //!   implementation, the names-only [`store::NamesIndex`], scope resolution,
 //!   [`store::mask_secret`], and config resolution.
+//! - `server` — the `secrets.*` methods on an on-demand Unix socket, the
+//!   `trusty-secrets` binary that serves them, and the client helper that
+//!   spawns it ([`server`]; Unix only).
 //!
 //! No item in this crate prints, logs, or formats a secret value. Errors and
 //! `Debug` output carry names and locations only.
@@ -27,6 +30,9 @@
 pub mod api;
 #[cfg(feature = "store")]
 pub mod store;
+// #9065: S2 — the on-demand socket. trusty-common's UDS stack is Unix-only.
+#[cfg(all(unix, feature = "server"))]
+pub mod server;
 
 #[cfg(feature = "api")]
 pub use api::{

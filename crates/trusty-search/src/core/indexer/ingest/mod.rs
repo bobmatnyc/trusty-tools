@@ -20,6 +20,8 @@ pub(crate) mod embed;
 pub(crate) mod outcome;
 // #8884: refused embeddings survive a restart so restore does not re-demote.
 pub(crate) mod refusals;
+// #8959: replacing a file's prior chunks — fail-closed delete, per-path lock.
+pub(crate) mod supersede;
 
 use anyhow::{Context, Result};
 
@@ -78,17 +80,18 @@ pub(crate) const PROGRESS_CHUNK_INTERVAL: usize = 32;
 impl CodeIndexer {
     /// Rebuild the symbol graph from the current corpus.
     ///
-    /// Why: called after any mutation (`add_chunk`, `remove_chunk`,
-    /// `index_file`). Rebuilding is O(N + E) over chunks/calls and the
-    /// corpus is small + in-memory, so we favour simplicity over incremental
-    /// maintenance.
-    /// What: snapshots chunk tuples and entity lists under read locks, builds
-    /// a new `SymbolGraph`, persists it to the corpus if wired, and installs
-    /// it — unless the contributed-overlay merge failed, in which case the
-    /// previous serving graph is kept and the failure is returned (#5505).
-    /// Test: every test that calls `add_chunk` or `index_file` exercises the
-    /// rebuild path indirectly; `contrib_load_failure_installs_nothing` covers
-    /// the not-installed arm.
+    /// Why: called after bulk mutations (`add_chunk`, `remove_chunk`, a batch
+    /// commit, a reindex). It is O(N + E) over the WHOLE corpus, so
+    /// single-file writes (`index_file`, `remove_file`) no longer call it
+    /// directly: they mark the graph stale and the graph-refresh ticker runs
+    /// one rebuild per burst (#8959, #9179).
+    /// What: clears the stale mark and counts the pass, snapshots chunk tuples
+    /// and entity lists under read locks, builds a new `SymbolGraph`, persists
+    /// it to the corpus if wired, and installs it — unless the
+    /// contributed-overlay merge failed, in which case the previous serving
+    /// graph is kept and the failure is returned (#5505).
+    /// Test: `test_symbol_graph_rebuilds_after_indexing`;
+    /// `contrib_load_failure_installs_nothing` covers the not-installed arm.
     pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
@@ -104,6 +107,8 @@ impl CodeIndexer {
         // nothing was evicted.
         self.ensure_chunks_loaded().await;
         self.ensure_bm25_entities_loaded().await;
+        // #8959: the snapshot below covers every write marked before this.
+        let ticket = self.graph_refresh.begin_full_rebuild();
 
         // Issue (180GB RSS fix): the temporary `Vec<ChunkTuple>` snapshot clones
         // every chunk's strings (id, file, function_name, calls, inherits_from)
@@ -198,6 +203,13 @@ impl CodeIndexer {
         )
         .await;
 
+        // #8959: the derived graph is durable now (the save precedes the merge),
+        // so the durable stale mark it covers can go. A lost save/merge task
+        // also reports no persist error, so an uninstallable graph keeps it.
+        if outcome.persist_error.is_none() && new_graph.is_some() {
+            self.clear_graph_dirty_mark(ticket).await;
+        }
+
         // #5505: install nothing rather than a graph known to be missing the
         // contributed overlay — the caller reports the failure instead.
         match new_graph {
@@ -276,9 +288,10 @@ impl CodeIndexer {
     /// batched ONNX call, then commits BM25, HNSW, the embeddings cache, and
     /// the corpus under the same lock-window-minimizing path used by the bulk
     /// reindex.
-    /// What: chunk the file, batch-embed all chunks, commit vectors / BM25 /
-    /// corpus, then enrich entities via the NLP helper and rebuild the
-    /// symbol graph once.
+    /// What: chunk the file, batch-embed all chunks, remove the file's chunks
+    /// the new text no longer produces (#8959), commit vectors / BM25 /
+    /// corpus, then enrich entities via the NLP helper and mark the symbol
+    /// graph stale for the deferred rebuild (#8959, #9179).
     ///
     /// Issue #4122: this is the single choke point every INCREMENTAL write
     /// funnels through — the file watcher (`service::watch_loop`), the
@@ -344,12 +357,15 @@ impl CodeIndexer {
     /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
     /// `Empty`, JSON above the window ceiling `TooLarge`, a tombstone
     /// `Removed`, sops-encrypted content `SopsEncrypted` after its old chunks
-    /// are removed (#8922). Every `Err` arm is unchanged.
+    /// are removed (#8922). A failed redb chunk delete on the tombstone or
+    /// sops arm is an `Err` with the old ids kept for a retry (#8959).
     /// Test: `index_file_on_large_json_lands_chunks`,
     /// `index_file_refuses_sops_content_and_drops_its_old_chunks`,
     /// `index_file_on_blank_content_reports_empty`, and
     /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
-    /// `indexer::tests::zero_chunk_8976`.
+    /// `indexer::tests::zero_chunk_8976`; the #8959 error arms by
+    /// `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`
+    /// and `a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen`.
     pub async fn index_file_outcome(
         &self,
         file_path: &str,
@@ -365,8 +381,15 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #8959: one write per path at a time, from the superseded-id snapshot
+        // below through the commit; otherwise two writes each removed only
+        // the ids they saw and both versions stayed indexed.
+        let _path_lock = self.path_write_locks.lock(file_path).await;
         if trusty_common::knowledge_document::is_tombstone(content) {
-            self.remove_file(file_path).await?;
+            // #8959: a failed redb delete fails the write with the ids still in
+            // memory, so a retry removes them instead of a reopen loading them.
+            self.remove_file_with(file_path, super::RedbChunkDelete::FailClosed)
+                .await?;
             return Ok(IndexFileOutcome::Removed);
         }
         // #8922: a sops-encrypted file is never indexed, and a file that became
@@ -376,10 +399,12 @@ impl CodeIndexer {
             // when it is decrypted again; the graph is rebuilt only when chunks
             // actually left.
             let id = crate::core::registry::IndexId::new(self.index_id.as_str());
-            let removed = self.purge_file(&id, file_path).await?;
-            if removed > 0 && !self.skip_kg {
-                self.rebuild_symbol_graph().await;
-            }
+            // #8959: `purge_file_with` stamps the durable stale mark. Fail
+            // closed, or a failed redb delete answered `SopsEncrypted` and the
+            // plaintext chunks came back at the next boot.
+            let removed = self
+                .purge_file_with(&id, file_path, super::RedbChunkDelete::FailClosed)
+                .await?;
             tracing::warn!(
                 index_id = %self.index_id,
                 file = %file_path,
@@ -403,24 +428,42 @@ impl CodeIndexer {
         populate_virtual_terms(&mut chunks, &entities);
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        // #8959: ids this file held whose content the new text no longer has.
+        // Chunk ids embed line spans and symbol names, so an upsert alone
+        // left them searchable beside the new content.
+        let superseded = self.superseded_chunk_ids(file_path, &chunks).await;
+
+        // #3048: a vector-disabled index must not embed on the incremental
+        // path either. All-`None` embeddings are exactly what
+        // `parse_files_only` hands `commit_parsed_batch` on the batch reindex
+        // path, and `commit_parsed_batch` already treats that as the BM25-only
+        // case (including evicting any stale vector for a re-committed id).
+        let embeddings = if chunks.is_empty() {
+            None
+        } else if self.skip_vector {
+            Some(vec![None; chunks.len()])
+        } else {
+            Some(self.embed_chunks_in_batches(&chunks, None, None).await?)
+        };
+        // #8959: durable stale mark before anything below mutates the corpus;
+        // the guard sets the in-memory mark when the write ends.
+        let _graph_write = if self.skip_kg {
+            None
+        } else {
+            Some(self.begin_graph_write().await?)
+        };
+        // #8959: after the embed, so a failed embed leaves the old chunks in
+        // place; before the commit, since freed ids count against the cap. A
+        // failed redb delete fails the write here, before the commit, with
+        // the old ids still in memory and redb for a retry to find.
+        self.remove_superseded_chunks(&superseded).await?;
 
         // #100: how many of this file's chunks the `TRUSTY_MAX_CHUNKS` cap
         // discarded. Non-zero means the file is NOT fully indexed, and this
         // call must report that rather than answer `Ok` — see the refusal at
         // the end of the function for why it is deferred to there.
         let mut dropped_by_cap = 0usize;
-        if !chunks.is_empty() {
-            // #3048: a vector-disabled index must not embed on the incremental
-            // path either. All-`None` embeddings are exactly what
-            // `parse_files_only` hands `commit_parsed_batch` on the batch
-            // reindex path, and `commit_parsed_batch` already treats that as
-            // the BM25-only case (including evicting any stale vector for a
-            // re-committed chunk id).
-            let embeddings = if self.skip_vector {
-                vec![None; chunks.len()]
-            } else {
-                self.embed_chunks_in_batches(&chunks, None, None).await?
-            };
+        if let Some(embeddings) = embeddings {
             let parsed = ParsedBatch {
                 chunks,
                 embeddings,
@@ -443,16 +486,12 @@ impl CodeIndexer {
             .write()
             .await
             .insert(file_path.to_string(), all_entities);
-        // #3048: skip_kg parity. `finish::finish_reindex` already skips KG
-        // construction for a skip_kg index; this path did not, so every
-        // watcher save rebuilt AND persisted the full graph for an index whose
-        // whole point was not to hold one. Gated here rather than inside
-        // `rebuild_symbol_graph` — that function is the shared choke point for
-        // reindex, remove_file, and the contributed-graph ingest endpoint,
-        // whose skip_kg semantics are not this issue's to change.
-        if !self.skip_kg {
-            self.rebuild_symbol_graph().await;
-        }
+        // #3048: skip_kg parity — `_graph_write` is `None` for a skip_kg
+        // index, so this path never marks (or later rebuilds) its graph. Gated
+        // here rather than inside `rebuild_symbol_graph`, the shared choke
+        // point for reindex, remove_file and the contributed-graph ingest.
+        // #8959: otherwise `_graph_write` marks the graph stale for the
+        // deferred rebuild when this function returns.
 
         // #100: the cap used to drop chunks, log a `warn!`, and still return
         // `Ok` — so `POST /index-file` answered `"indexed": true` for a write

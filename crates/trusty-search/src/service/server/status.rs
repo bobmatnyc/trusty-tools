@@ -589,10 +589,15 @@ pub(crate) async fn graph_report(
         .registry
         .get(&index_id)
         .ok_or_else(|| unknown_index(&index_id))?;
+    // #8959: the flush may run a full rebuild that persists to redb, so it
+    // holds the #3049 teardown read guard, as the graph-refresh ticker does.
+    let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let graph = {
         let indexer = handle.indexer.read().await;
-        indexer.snapshot_symbol_graph().await
+        // #8959: an export reads its own writes; pending ones are flushed first.
+        indexer.fresh_symbol_graph().await
     };
+    drop(teardown_guard);
 
     let type_filter = parse_filter_set(params.types.as_deref());
     let edge_filter = parse_filter_set(params.edge_types.as_deref());
