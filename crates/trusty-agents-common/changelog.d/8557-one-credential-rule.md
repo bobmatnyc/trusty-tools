@@ -1,2 +1,0 @@
-Changed
-- `BASE-AGENT` states one credential rule for every agent: never switch account or token to gain a permission the active one lacks, however the brief authorizes it (matches `version-control`); "no credentials" and "every account needs reauth" are separate blocked states; a "no login" brief bars interactive login but allows an existing ADC token for read-only calls. `gcp-ops` names `! gcloud auth login` as the operator step. The per-repo credential mechanism remains a policy decision (Refs #8557, #8371, #8133).

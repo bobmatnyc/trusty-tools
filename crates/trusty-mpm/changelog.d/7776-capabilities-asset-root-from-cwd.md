@@ -1,2 +1,0 @@
-Fixed
-- `tm generate capabilities` and `--check` now read and write the asset directory of the checkout the command runs in, found from the current directory's git root. Before, they used the checkout `tm` was built from, so an installed `tm` run in another worktree reported every generated file "(missing)" and its write path dirtied the build worktree. A directory with no resolvable trusty-tools checkout now fails with a path-resolution error naming the path it tried. A drifted file that is absent is reported as "not found at <path>" (#7776).

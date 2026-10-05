@@ -1,2 +1,0 @@
-Fixed
-- The build-slot notice no longer contradicts the "never override `CARGO_TARGET_DIR`" rule. `tm build-lease`'s `slot N — CARGO_TARGET_DIR=<dir>` notice, `CLAUDE.md` and `docs/reference/agent-cost-controls.md` now state one rule: never override `CARGO_TARGET_DIR` except with the builder slot the hook grants, which the lease sets for the build itself (Refs [#8261](https://github.com/bobmatnyc/trusty-tools/issues/8261)).

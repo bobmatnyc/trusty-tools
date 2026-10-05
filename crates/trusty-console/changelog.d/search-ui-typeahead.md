@@ -1,2 +1,0 @@
-Added
-- Search dashboard: the query box suggests symbols and files as you type (150 ms debounce, superseded requests aborted, stale answers dropped), as an ARIA combobox driven by ↑/↓/Enter/Esc; choosing a suggestion runs the search. A polite live region announces how many suggestions arrived. Under the console it uses the `GET /indexes/{id}/typeahead` → `search.typeahead` row in `search_uds/map.rs` (#9028); against an older console that answers 501 the box stops asking.

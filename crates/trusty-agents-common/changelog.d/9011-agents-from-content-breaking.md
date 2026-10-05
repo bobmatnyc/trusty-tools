@@ -1,4 +1,0 @@
-Breaking
-- The agent roster and harness-understanding docs are no longer compiled in (#9011, ADR-0064). `agent_assets` is removed: its 43 consts, `AGENT_ASSETS` and `AGENT_ASSETS_DIR`. The `harness_doc` free functions (`agnostic`, `mpm_session_manager`, `tcode`, `overseer`, `harness_understanding`) are removed.
-- New `agent_content` module: `resolve_content`, `resolve_content_in` and `checkout_content` pick the content source (a trusty-tools checkout, else the installed bundle); `AgentRoster::load` reads `agents/*.md`; `harness_doc::HarnessDoc::load` reads the four harness docs from `instructions/harness_understanding/` or the content-v0.1.0 `harness_understanding/` key. Every failure is an `AgentContentError` naming `tm content install` or `tm content update`; a source with no agents is `EmptyRoster`, never an empty roster.
-- trusty-common is now required with its `content-resolver` feature.

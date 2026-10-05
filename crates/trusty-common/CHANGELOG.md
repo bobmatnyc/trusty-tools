@@ -6,6 +6,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.4] — 2026-10-05
+
+### Added
+
+- `SpawnSpec::stderr_to(path)` appends a detached child's stderr to an owner-only (`0600`) log file instead of inheriting the caller's. An existing file is set to `0600` as well, and a file past 8 MiB is moved to `<path>.1` at spawn so the log stays bounded. A file that cannot be opened fails the spawn with the new `SupervisorError::StderrLog` before any child starts. `OnDemandAnalyze::quiet()` uses it to send a probe-started analyze server's stderr to `trusty-analyze.stderr.log` beside its socket; `analyze_stderr_log` names that path (#8103).
+- `catchup::resolve` resolves a relaunched session's own snapshot by its tmux
+  session name when the window route misses, and reports it as
+  `ResolutionPath::TmuxSession` (`"tmux_session"`). A relaunch recreates the
+  tmux window, so the window id the caller holds afterwards never matched its
+  last pause. The route needs the caller's tmux `#{session_created}`
+  (`CallerIdentity::with_tmux_session_created`, used by the new
+  `resolve_snapshot_for_identity`) and matches only snapshots paused after it,
+  so a later session reusing the name never claims an earlier session's
+  snapshot. `resolve_snapshot_for_caller` carries no creation time and never
+  takes this route. A digits-only session name never matches.
+  `catchup::resolve::session_name_of` is the new parser.
+- `redact_sessions_not_owned_by` grants ownership by tmux session name only
+  to the one snapshot the resolver answered, never to every entry sharing the
+  name.
+- `credentials::test_sandbox` behind the new `credential-test-sandbox` feature
+  (dev-dependencies only): `CredentialSandbox::enter()` clears every
+  credential-shaped environment variable, points `HOME`, the XDG dirs,
+  `GH_CONFIG_DIR` and `TRUSTY_DATA_DIR_OVERRIDE` at a temp tree, sets
+  `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, keeps the one-time
+  `.env.local` loader from reading a file, and panics when isolation does not
+  take. While a sandbox is live, `default_store()` skips the OS keychain and
+  `env_local_value()` returns `None`; a build without the feature cannot turn
+  either tier off. `assert_secret_eq` prints only a redacted preview on
+  mismatch. The crate's own unit tests use the sandbox too: the
+  `resolved_secret_values` scrub test now resolves one synthetic key instead
+  of every real secret on the machine (#9123).
+
+### Fixed
+
+- The catch-up digest treats a `memory_list` not-found refusal (a palace that was never created) as an empty palace. It no longer writes "could not reach trusty-memory" to stderr on every run for such a project, or renders the memory section as unreachable. Any other refusal still reports the daemon unreachable (#9026).
+
+### Changed
+
+- Every drawer a maintenance pass deletes (dream dedup, content prune, prune, room consolidation, TTL purge) is now logged on its own `warn` line naming the palace, drawer id and reason, beside its journal record. Before, the log showed only a per-pass count (#8729).
+- `content::DEV_CLASS_SOURCES` reads `skills`, `instructions`, `instructions/output-styles` and `instructions/sm_instructions` from `content/`, where #9012 moved them; every destination now lives under the checkout's `content/` tree.
+
 ## [0.53.1] — 2026-10-03
 
 ### Changed

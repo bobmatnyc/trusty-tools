@@ -1,2 +1,0 @@
-Fixed
-- The `a_held_cargo_lock_marks_the_directory_busy` test no longer fails under the full suite. It released its `.cargo-lock` flock by closing the file, and a child that another test thread was spawning still held a copy of the descriptor, so the lock read as held. The test now releases with `LOCK_UN`, as the build slots do, and holds a second copy of the descriptor across the release so it always covers that case (#8850).

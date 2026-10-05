@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.1] — 2026-10-05
+
+### Added
+
+- Search dashboard: clicking a hit's path opens its indexed line range in a viewer with syntax highlighting and line numbers from the hit's first line, using the shared Foundry `CodeView` component. The dialog keeps Tab focus inside it, and highlight.js loads on first open, one grammar chunk per language, so the main bundle does not carry it. The whole file and its git diff are not shown: no route the dashboard can reach returns them.
+- Search dashboard: the query box suggests symbols and files as you type (150 ms debounce, superseded requests aborted, stale answers dropped), as an ARIA combobox driven by ↑/↓/Enter/Esc; choosing a suggestion runs the search. A polite live region announces how many suggestions arrived. Under the console it uses the `GET /indexes/{id}/typeahead` → `search.typeahead` row in `search_uds/map.rs` (#9028); against an older console that answers 501 the box stops asking.
+- `POST /api/search/chat` (and the deprecated `/proxy/search/chat`) now reaches trusty-search's `search.chat` socket method instead of answering `501`. The shape matches the daemon's own route: a JSON `ChatRequest` body (`index_id`, `message` or `question`, optional `history`, `model`, `top_k`, `api_key`) in, one JSON envelope out — not an event stream, because the daemon collects the model's deltas before it answers. A chat call may run up to 5 minutes; every other unary call keeps the 30 s budget. A dead socket is `502`; a body with no `index_id`, or no body, is the daemon's `400`. The search dashboard still hides its chat panel when served by the console; lifting that needs a provider-availability signal the socket does not report yet.
+- `/api/search/warm` (POST) and `/api/search/warm/status` (GET) map to trusty-search's `search.warm.start` and `search.warm.status` socket methods (#9027).
+- `GET /api/search/indexes/{id}/typeahead` now reaches trusty-search's `search.typeahead` socket method instead of answering `501`, so the search dashboard's query box gets suggestions through the console. `limit` arrives as an integer; the typed prefix `q` always stays text, so a prefix such as `404` or `true` is not refused as `invalid_params`. A dead socket is `502`; a malformed parameter is the daemon's `400`.
+
+### Fixed
+
+- `trusty-console service --help` named `com.trusty.trusty-console.plist`, a launchd unit that does not exist; it now names the live `com.trusty.console.plist`, and a test fails if the help text drifts from the launchd label registry (closes the console half of #8253)
+- `a_slow_open_and_a_silent_first_frame_share_one_budget` no longer fails on a loaded host or CI runner: it runs on tokio's paused clock, so encoding its 4 MiB request frame no longer eats the 400 ms margin inside the 1 s open budget. The test still fails when the open and the first-frame read take separate deadlines. No production behaviour changed (refs [#8271](https://github.com/bobmatnyc/trusty-tools/issues/8271))
+- Search dashboard "Daemon details" no longer shows a default "Daemon port 7878" or the console's own origin as "API base URL". It states how the page reaches the daemon (the console's `/api/search/` bridge to the Unix socket, or the daemon's own HTTP listener with the port the daemon injected), and shows a socket path or listener only when the daemon reports one (field proposed in #9030). The page counts as console-served only when `__SEARCH_BASE__` is its own origin under `/api/search/`, so a custom override pointing elsewhere is not mistaken for the console. The chat hint no longer tells console users to set `OPENROUTER_API_KEY`: no socket method serves `/chat` (#6285).
+- Search dashboard: an index trusty-search holds because a restored exclude glob does not parse (#9059) now shows a banner naming the index, the reason, and the fix. The index settings page reads `invalid_exclude_globs` from `GET /indexes/{id}/config` and lists the bad globs; the roster's expanded row reads `status: "held"` and the daemon's reason from `GET /indexes/{id}/status`, reports the index as `Held` instead of `Healthy`, and links to its settings. A save that releases the hold says the catch-up reindex started, and the settings page no longer offers a reindex the daemon would refuse while the index is held.
+
+### Changed
+
+- The trusty-mpm connector detects an install by the `tm` binary on PATH
+  instead of `trusty-mpm`, which is now only a compatibility alias of `tm`.
+
+### Security
+
+- `trusty-console --tailscale`: the tailnet listener now serves only nodes owned by this machine's own Tailscale login. Every route on that listener, reads and writes alike, answers `403` to a node owned by another login, to a tagged node, and to any peer whose identity `tailscale whois` cannot confirm (tailscaled down, lookup error, or no answer within 2 s); each refusal is logged at WARN with the peer address. Lookups are cached per peer address (30 s, failures 5 s), so a request burst runs one `tailscale whois`. The loopback listener is unchanged.
+- `trusty-console --tailscale`: an allowed tailnet peer must also address the listener by its own name. A request whose `Host` is not the tailnet `ip:port` or the node's MagicDNS name and port answers `403`, which defeats DNS rebinding. Only the full MagicDNS name (FQDN) is accepted, never the short name. A write from a page loaded by the MagicDNS name is still refused by the existing write-origin guard, so use the tailnet IP to write. A request on any method, `GET` included, whose `Origin` is not that same `http://` self-origin answers `403`, so a foreign page in the owner's browser on another tailnet device cannot read console or `/proxy/*` responses. A repeated or unreadable `Host` or `Origin` is refused. The loopback listener is unchanged.
+
 ## [0.12.0] — 2026-09-18
 
 ### Fixed

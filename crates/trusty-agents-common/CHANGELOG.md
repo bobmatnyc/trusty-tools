@@ -6,6 +6,34 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.0] — 2026-10-05
+
+### Breaking
+
+- The agent roster and harness-understanding docs are no longer compiled in (#9011, ADR-0064). `agent_assets` is removed: its 43 consts, `AGENT_ASSETS` and `AGENT_ASSETS_DIR`. The `harness_doc` free functions (`agnostic`, `mpm_session_manager`, `tcode`, `overseer`, `harness_understanding`) are removed.
+- New `agent_content` module: `resolve_content`, `resolve_content_in` and `checkout_content` pick the content source (a trusty-tools checkout, else the installed bundle); `AgentRoster::load` reads `agents/*.md`; `harness_doc::HarnessDoc::load` reads the four harness docs from `instructions/harness_understanding/` or the content-v0.1.0 `harness_understanding/` key. Every failure is an `AgentContentError` naming `tm content install` or `tm content update`; a source with no agents is `EmptyRoster`, never an empty roster.
+- trusty-common is now required with its `content-resolver` feature.
+
+### Added
+
+- `report_not_installed` logs "no instructional content is installed" as one ERROR per process and tells the caller to add no line of its own; `mark_not_installed_reported` records that the caller printed it itself; `AgentContentError::is_not_installed` names the case (#9011).
+- `AgentContentError::Invalid` names a required content file this binary cannot use, such as a PM instruction package from a newer content release, and points at `tm content update` or a tm upgrade (#9012).
+
+### Fixed
+
+- `ticketing` agent prompt: the agent never modifies repository files (no `sed -i`, no redirect into a tracked file); it writes only issue and PR text and scratch files (Refs #8384).
+
+### Changed
+
+- `BASE-AGENT` rule: an agent writes scratch files only in the scratch directory its brief names (`<scratchpad>/<issue>-<round>/` or `<scratchpad>/<agent-id>/`), never at the scratchpad root or in another agent's directory (Refs #7791).
+- `BASE-AGENT` states one credential rule for every agent: never switch account or token to gain a permission the active one lacks, however the brief authorizes it (matches `version-control`); "no credentials" and "every account needs reauth" are separate blocked states; a "no login" brief bars interactive login but allows an existing ADC token for read-only calls. `gcp-ops` names `! gcloud auth login` as the operator step. The per-repo credential mechanism remains a policy decision (Refs #8557, #8371, #8133).
+- `code-critic` agent prompt: gates are read-only (cite the engineer's reported gate output, never re-run one), and the brief carries `PR: <n>|none`; with `none` the critic posts nothing and makes no PR lookup (Refs #8584).
+- The agent composer passes a `metadata:` map (block or flow form) through
+  an `extends:` chain, per key child-wins, and emits it last, so a deployed
+  agent keeps its `metadata.version`. `agent_schema` lists `metadata` as a
+  composer key and no longer reads its indented `version:` child as the
+  claude-mpm top-level `version:` marker (#9011).
+
 ## [0.8.5] — 2026-09-28
 
 ### Changed
