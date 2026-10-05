@@ -105,7 +105,7 @@ published summary shows it with its stage: Now, Next or Later. Other
 milestones are listed as links. GitHub supplies the progress counts each time
 this section is generated.
 
-trusty-git-analytics and trusty-audit moved to their own repository: [bobmatnyc/trusty-git-analytics](https://github.com/bobmatnyc/trusty-git-analytics).
+trusty-git-analytics and trusty-audit moved to their own repository (bobmatnyc/trusty-git-analytics).
 
 Ship dates are anticipated targets taken from GitHub milestone due dates, not
 commitments. TBD means a versioned milestone has no due date yet. Backlog
@@ -153,9 +153,9 @@ Anticipated ship date: 2026-11-27 · 1 of 10 items done · [follow on GitHub](ht
 
 Other open milestones:
 
-- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 2026-10-16 · 93 of 113 items done
+- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/122) · 2026-10-16 · 94 of 113 items done
 - [Session, worktree & daemon lifecycle · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/64) · 2026-11-13 · 71 of 83 items done
-- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · Backlog · 737 of 773 items done
+- [Backlog · mpm/core](https://github.com/bobmatnyc/trusty-tools/milestone/55) · Backlog · 737 of 774 items done
 
 ### trusty-secrets
 
