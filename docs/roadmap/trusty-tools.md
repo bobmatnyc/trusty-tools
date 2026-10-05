@@ -324,7 +324,7 @@ and the #9030 backend routes (owner ruling). Those are now merged.
 |---|---|---|
 | S0 | PRD-SECRETS-01 and the DOC-74 amendment | in-progress |
 | S1 | `trusty-secrets` crate (standalone, published) with the Keychain backend | not started |
-| S2 | tm daemon `secrets.*` UDS methods | not started |
+| S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client | not started |
 | S3a | Console bridge and hardening | not started |
 | S3b | Tailnet identity gate; also fixes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) | not started |
 | S4 | Console `/tools/secrets` UI with the per-key "agents may use" flag | not started |
