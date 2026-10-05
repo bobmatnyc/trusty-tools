@@ -3210,6 +3210,8 @@ fn cli_parses_memory_remember_with_tags() {
         "ledger",
         "--room",
         "Planning",
+        "--fact-key=ws:s1/resume",
+        "--expires-at=2026-10-06T12:00:00Z",
     ])
     .expect("`tm memory remember <text>` must parse");
     match cli.command.unwrap() {
@@ -3227,10 +3229,8 @@ fn cli_parses_memory_remember_with_tags() {
                 },
         } => {
             assert_eq!(text, "the ledger is owned by ops");
-            assert!(
-                fact_key.is_none() && expires_at.is_none(),
-                "#9142: optional"
-            );
+            assert_eq!(fact_key.as_deref(), Some("ws:s1/resume")); // #9142
+            assert_eq!(expires_at.as_deref(), Some("2026-10-06T12:00:00Z"));
             assert!(palace.is_none());
             assert_eq!(room.as_deref(), Some("Planning"));
             assert_eq!(tags, vec!["ownership".to_string(), "ledger".to_string()]);
@@ -3253,10 +3253,6 @@ fn cli_parses_memory_note() {
         "--palace",
         "p",
         "--json",
-        "--fact-key",
-        "pr:9254/state",
-        "--expires-at",
-        "2026-10-06T12:00:00Z",
     ])
     .expect("`tm memory note <content>` must parse");
     match cli.command.unwrap() {
@@ -3267,8 +3263,6 @@ fn cli_parses_memory_note() {
                     palace,
                     tags,
                     json,
-                    fact_key,
-                    expires_at,
                     ..
                 },
         } => {
@@ -3276,9 +3270,6 @@ fn cli_parses_memory_note() {
             assert_eq!(palace.as_deref(), Some("p"));
             assert!(tags.is_empty());
             assert!(json);
-            // #9142: the slot flags parse.
-            assert_eq!(fact_key.as_deref(), Some("pr:9254/state"));
-            assert_eq!(expires_at.as_deref(), Some("2026-10-06T12:00:00Z"));
         }
         other => panic!("expected Memory/Note, got {other:?}"),
     }
