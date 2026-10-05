@@ -8,6 +8,7 @@
 //! `TRUSTY_SECRETS_INDEX_DIR`, `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`), serves
 //! with the real backends, and exits 0 on idle or SIGTERM/SIGINT. A refused
 //! bind — a live instance already serving — exits 1 without touching it.
+//! The git redirect variables are removed from its environment at start.
 //! Test: `tests/on_demand_server.rs`.
 
 use std::process::ExitCode;
@@ -20,8 +21,30 @@ fn main() -> ExitCode {
 }
 
 #[cfg(unix)]
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // #9065: a detached server keeps its first spawner's environment for its
+    // whole life. Drop the git redirect variables before any thread exists;
+    // every git call also scrubs them itself.
+    for var in trusty_secrets::store::git_redirect_vars(std::env::vars_os().map(|(k, _)| k)) {
+        // SAFETY: no other thread exists yet — the runtime starts below.
+        unsafe { std::env::remove_var(var) };
+    }
+    match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime.block_on(run()),
+        Err(e) => {
+            eprintln!("trusty-secrets: cannot start the runtime: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Parse the command line and serve until idle or a signal.
+#[cfg(unix)]
+async fn run() -> ExitCode {
     use trusty_secrets::server::{ServerSettings, default_backends, serve};
 
     let settings = match ServerSettings::from_args(std::env::args_os().skip(1), |name| {

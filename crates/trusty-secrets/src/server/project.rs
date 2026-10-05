@@ -17,14 +17,13 @@
 //! `server_vault_outside_the_project_is_refused`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use super::errors::ErrorKind;
 use super::router::State;
 use crate::api::{SecretsError, VaultName};
 use crate::store::config::{self, ProjectSecretsConfig, ResolvedConfig};
-use crate::store::{ScopeSet, SecretBackend};
+use crate::store::{ScopeSet, SecretBackend, platform};
 
 /// The project's `secrets:` config file, relative to the checkout root.
 pub const PROJECT_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-secrets.yaml";
@@ -116,12 +115,13 @@ impl ProjectContext {
 
 /// The top level of the checkout containing `dir`, or `None` outside one.
 ///
-/// What: `git -C <dir> rev-parse --show-toplevel`; a missing `git` reads as
-/// `None`. No network, and the output is never logged.
+/// What: `git -C <dir> rev-parse --show-toplevel` with the git redirect
+/// variables removed; a missing `git` reads as `None`. No network, and the
+/// output is never logged.
 fn checkout_root(dir: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
+    // #9065: through the scrubbed helper, so an inherited `GIT_DIR` cannot
+    // pick the checkout.
+    let output = platform::git_command(dir)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()?;

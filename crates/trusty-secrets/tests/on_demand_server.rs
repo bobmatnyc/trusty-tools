@@ -22,7 +22,7 @@ use trusty_secrets::server::OnDemandSecrets;
 const BIN: &str = env!("CARGO_BIN_EXE_trusty-secrets");
 
 struct Paths {
-    _tmp: TempDir,
+    tmp: TempDir,
     socket: PathBuf,
     index: PathBuf,
     machine: PathBuf,
@@ -34,12 +34,13 @@ fn paths() -> Paths {
         socket: tmp.path().join("run").join("s.sock"),
         index: tmp.path().join("index"),
         machine: tmp.path().join("machine.yaml"),
-        _tmp: tmp,
+        tmp,
     }
 }
 
-fn spawn_server(p: &Paths, idle_secs: u64) -> Child {
-    Command::new(BIN)
+fn server_command(p: &Paths, idle_secs: u64) -> Command {
+    let mut command = Command::new(BIN);
+    command
         .args(["serve", "--socket"])
         .arg(&p.socket)
         .arg("--index-dir")
@@ -51,9 +52,12 @@ fn spawn_server(p: &Paths, idle_secs: u64) -> Child {
         .env_remove("TRUSTY_SECRETS_INDEX_DIR")
         .env_remove("TRUSTY_SECRETS_IDLE_TIMEOUT_SECS")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::null());
+    command
+}
+
+fn spawn_server(p: &Paths, idle_secs: u64) -> Child {
+    server_command(p, idle_secs).spawn().unwrap()
 }
 
 async fn wait_serving(socket: &Path) {
@@ -173,4 +177,61 @@ async fn on_demand_client_spawns_the_server_and_it_exits_when_idle() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// A checkout at `dir` whose `origin` is `url`.
+fn repo(dir: &Path, url: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    for args in [vec!["init", "-q"], vec!["remote", "add", "origin", url]] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(&args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+}
+
+/// Why: the detached server keeps its first spawner's environment for its
+/// whole life. An inherited `GIT_DIR` or a `GIT_CONFIG_KEY_n` override of
+/// `remote.origin.url` must not make every project resolve to one vault.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inherited_git_redirect_env_never_reaches_the_servers_git_calls() {
+    let p = paths();
+    let decoy = p.tmp.path().join("decoy");
+    let alpha = p.tmp.path().join("alpha");
+    let beta = p.tmp.path().join("beta");
+    repo(&decoy, "git@github.com:evil/decoy.git");
+    repo(&alpha, "git@github.com:acme/alpha.git");
+    repo(&beta, "git@github.com:acme/beta.git");
+
+    let mut child = server_command(&p, 30)
+        .env("GIT_DIR", decoy.join(".git"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "remote.origin.url")
+        .env("GIT_CONFIG_VALUE_0", "git@github.com:evil/override.git")
+        .spawn()
+        .unwrap();
+    wait_serving(&p.socket).await;
+    let mut vaults = Vec::new();
+    for project in [&alpha, &beta] {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "secrets.scopes",
+                             "params": {"project": project.display().to_string()}});
+        let response: RpcResponse =
+            send_framed_request(&p.socket, &request, Duration::from_secs(10))
+                .await
+                .unwrap();
+        vaults.push(match response.result {
+            Some(result) => result["scopes"][0]["vault"].clone(),
+            None => json!(format!("error: {:?}", response.error)),
+        });
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(
+        vaults,
+        [json!("trusty/acme/alpha"), json!("trusty/acme/beta")]
+    );
 }
