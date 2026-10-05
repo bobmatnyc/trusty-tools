@@ -172,7 +172,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 17] = [
+const ALL_KINDS: [ErrorKind; 21] = [
     ErrorKind::InvalidParams,
     ErrorKind::ProjectInvalid,
     ErrorKind::ProjectUnresolved,
@@ -189,6 +189,10 @@ const ALL_KINDS: [ErrorKind; 17] = [
     ErrorKind::ConfigInvalid,
     ErrorKind::HomeUnavailable,
     ErrorKind::SameBackend,
+    ErrorKind::AgentUseRefused,
+    ErrorKind::InvalidEnvEntry,
+    ErrorKind::EnvResolutionFailed,
+    ErrorKind::DotenvSyntax,
     ErrorKind::Internal,
 ];
 
@@ -790,6 +794,64 @@ fn server_orphaned_backend_entry_has_its_own_wire_kind() {
         fixed_error(&received, method::SET),
         ErrorKind::OrphanedBackendEntry
     );
+}
+
+/// Why: the #7525 resolver errors each need a kind of their own, an
+/// agent-parent refusal must read as a refusal even when `resolve_env` wraps
+/// it, and no key, vault, name or reference may reach the wire.
+/// Test: itself.
+#[test]
+fn server_resolver_errors_have_their_own_wire_kinds() {
+    let refused = || SecretsError::AgentUseRefused {
+        key: SENTINEL.into(),
+        vault: SENTINEL.into(),
+    };
+    let wrapped = |source: SecretsError| SecretsError::EnvResolution {
+        name: SENTINEL.into(),
+        reference: SENTINEL.into(),
+        source: Box::new(source),
+    };
+    let missing = SecretsError::NotFound {
+        key: SENTINEL.into(),
+        searched: SENTINEL.into(),
+    };
+    let cases = [
+        (refused(), ErrorKind::AgentUseRefused),
+        (wrapped(refused()), ErrorKind::AgentUseRefused),
+        (wrapped(missing), ErrorKind::EnvResolutionFailed),
+        (
+            SecretsError::InvalidEnvEntry {
+                position: 1,
+                reason: SENTINEL,
+            },
+            ErrorKind::InvalidEnvEntry,
+        ),
+        (
+            SecretsError::DotenvSyntax {
+                line: 1,
+                reason: SENTINEL,
+            },
+            ErrorKind::DotenvSyntax,
+        ),
+    ];
+    for (error, expected) in cases {
+        let kind = ErrorKind::from(error);
+        assert_eq!(kind, expected);
+        let sent = RpcResponse::failure(json!(1), kind.to_rpc(method::LIST));
+        let text = wire(&sent);
+        assert!(!text.contains(SENTINEL), "{text}");
+        let received: RpcResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(fixed_error(&received, method::LIST), expected);
+    }
+    for other in [
+        ErrorKind::NotFound,
+        ErrorKind::VaultOutOfScope,
+        ErrorKind::BackendFailed,
+        ErrorKind::EnvResolutionFailed,
+    ] {
+        assert_ne!(ErrorKind::AgentUseRefused.code(), other.code());
+        assert_ne!(ErrorKind::AgentUseRefused.as_str(), other.as_str());
+    }
 }
 
 /// Why: a malformed `set` must not echo its value. serde's own message for
