@@ -60,7 +60,7 @@ the value.
   session. An agent never receives one in a tool result.
 - **Console-first entry.** Secrets are their own service page in the
   trusty-console dashboard, scoped to a project or an owner.
-- **Lightweight and fast.** A library crate served over an existing UDS
+- **Lightweight and fast.** A library crate that serves its own on-demand UDS
   socket. No new daemon, no startup work, no background task. Daemon here
   means a resident, supervised process started at login or by launchd. An
   on-demand trusty-secrets socket that spawns on the first call, holds no
@@ -139,8 +139,10 @@ owner key with the same name.
 **Status:** Draft  
 **Priority:** Must  
 
-The service is a library crate, `trusty-secrets`. The tm daemon hosts its
-methods on its existing UDS socket. The crate does no work at startup.
+The service is a library crate, `trusty-secrets`. It owns and serves its own
+on-demand socket (owner ruling 24, 2026-10-02); the tm daemon and the console
+are clients of it. The socket is ~/.trusty-tools/trusty-secrets/secrets.sock under a 0700 parent directory; clients spawn it on demand through `uds::on_demand`, with no launchd job, and it exits after 60 s idle (ruling 31, 2026-10-05; DOC-74 §15.2).
+The crate does no work at startup.
 
 **Why:** Owner rulings: "Secrets doesn't need to be a daemon. A crate accessed
 over UDS" and "Should be lightweight and fast."
@@ -269,7 +271,7 @@ the console.
 - [ ] No API or UI offers a machine scope.
 
 **PRD-SECRETS-04 (Library crate over UDS)**
-- [ ] The tm daemon serves `secrets.*` methods on its existing socket; no new listener exists.
+- [ ] `trusty-secrets` serves `secrets.*` on its own on-demand socket; the tm daemon and the console are clients and host no `secrets.*` method (socket and spawn contract per ruling 31, 2026-10-05).
 - [ ] Daemon start does no secrets work.
 
 **PRD-SECRETS-05 (Integrations)**
@@ -310,7 +312,7 @@ the console.
 
 ### In Scope
 
-- The `trusty-secrets` crate and its tm-daemon methods.
+- The `trusty-secrets` crate, its on-demand socket, and the tm daemon's client.
 - The console page, bridge, and browser hardening.
 - The tailnet gate for secrets routes.
 - Keychain, then 1Password, Vercel, GitHub Actions and Keeper.
@@ -355,7 +357,7 @@ Implementation starts after the search dashboard backend items
 [#9030](https://github.com/bobmatnyc/trusty-tools/issues/9030)) finish.
 DOC-74 §15.9 holds the slice table with test-ladder rungs.
 
-1. **Keychain through the console** — S0 docs, S1 crate, S2 daemon methods,
+1. **Keychain through the console** — S0 docs, S1 crate, S2 secrets socket and tm client,
    S3a console bridge and hardening, S3b tailnet gate, S4 UI (with the
    "agents may use" toggle), S5 agent/skill text.
 2. **Integrations** — S6+, one PR each: 1Password, Vercel, GitHub Actions,
