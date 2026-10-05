@@ -17,6 +17,8 @@
 
 use std::borrow::Cow;
 
+use trusty_common::url_userinfo::{ends_authority, ends_url, userinfo_end};
+
 /// What a URL's userinfo is replaced with.
 pub const REDACTED: &str = "***";
 
@@ -55,16 +57,6 @@ impl std::fmt::Debug for RedactedUrl {
     }
 }
 
-/// Characters that end a URL when it sits inside free text.
-fn ends_url(c: char) -> bool {
-    matches!(c, '\'' | '"' | '<' | '>' | '`') || c.is_whitespace()
-}
-
-/// Characters that end a URL authority when it sits inside free text.
-fn ends_authority(c: char) -> bool {
-    matches!(c, '/' | '?' | '#') || ends_url(c)
-}
-
 /// `text` with every URL credential replaced by [`REDACTED`]: the userinfo of
 /// each `scheme://userinfo@host`, and the value of each [`TOKEN_KEYS`] query
 /// parameter.
@@ -89,13 +81,11 @@ pub fn redact_url(text: &str) -> Cow<'_, str> {
 
 /// The userinfo pass of [`redact_url`].
 ///
-/// What: for each `://`, the authority runs to the first [`ends_authority`]
-/// char; when it holds an `@`, everything before the LAST `@` (the userinfo,
-/// as a URL parser splits it) is replaced. When it holds none but has a `:`,
-/// the userinfo may be `user:pa/ss` — git accepts a raw `/`, `?` or `#` in a
-/// password, which ends the authority early — so it runs to the last `@` in
-/// the rest of the URL. That over-redacts `host:port/path@x`, which is the
-/// safe direction.
+/// What: for each `://`, the userinfo is everything before the `@` that
+/// [`userinfo_end`] finds, and is replaced. That boundary is trusty-common's,
+/// shared with the stripper that runs before identity derivation (#9124), so
+/// the two cannot disagree on where a credential ends; see its docs for the
+/// raw-`/` password rule.
 fn redact_userinfo(text: &str) -> Cow<'_, str> {
     if !text.contains("://") || !text.contains('@') {
         return Cow::Borrowed(text);
@@ -106,19 +96,15 @@ fn redact_userinfo(text: &str) -> Cow<'_, str> {
     while let Some(at) = rest.find("://") {
         let (head, tail) = rest.split_at(at + 3);
         out.push_str(head);
-        let end = tail.find(ends_authority).unwrap_or(tail.len());
-        let authority = &tail[..end];
-        let cut = authority
-            .rfind('@')
-            .or_else(|| slashed_userinfo_end(tail, authority));
-        match cut {
+        match userinfo_end(tail) {
             Some(cut) => {
                 out.push_str(REDACTED);
                 rest = &tail[cut..];
                 changed = true;
             }
             None => {
-                out.push_str(authority);
+                let end = tail.find(ends_authority).unwrap_or(tail.len());
+                out.push_str(&tail[..end]);
                 rest = &tail[end..];
             }
         }
@@ -129,19 +115,6 @@ fn redact_userinfo(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
-}
-
-/// Where a `user:pa/ss@host` userinfo ends in `tail`, when `authority` (the
-/// prefix of `tail` up to its first `/`, `?` or `#`) holds a `:` and no `@`.
-///
-/// #9124 delta critic: a raw `?` or `#` in the password ends the authority as
-/// a raw `/` does, so the search runs to the end of the URL, not to its query
-/// or fragment, and takes the LAST `@`. That over-redacts a path, query or
-/// fragment holding an `@`, which is the safe direction.
-fn slashed_userinfo_end(tail: &str, authority: &str) -> Option<usize> {
-    let colon = authority.find(':')?;
-    let url_end = tail.find(ends_url).unwrap_or(tail.len());
-    tail.get(colon..url_end)?.rfind('@').map(|i| colon + i)
 }
 
 /// The query pass of [`redact_url`]: the value after each `?key=` / `&key=`

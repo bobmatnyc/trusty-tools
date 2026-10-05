@@ -74,12 +74,17 @@ pub struct ManagedRegistry {
 pub enum RegistryError {
     /// The alias is already registered with a different URL and `--force` was
     /// not passed.
-    #[error("alias '{alias}' is already registered as '{existing_url}'; use --force to overwrite")]
+    // #9124: an entry stored before the fix may carry a token.
+    #[error(
+        "alias '{alias}' is already registered as '{}'; use --force to overwrite",
+        crate::core::remote_url_redact::redact_url(.existing_url)
+    )]
     DuplicateAlias {
         /// The alias that collides.
         alias: String,
-        /// The URL already stored for that alias.
-        existing_url: String,
+        /// The URL already stored for that alias. #9155: a `RedactedUrl`, so
+        /// the derived `Debug` masks a token an entry stored before #9124 holds.
+        existing_url: crate::core::remote_url_redact::RedactedUrl,
     },
     /// The alias string does not match the allowed pattern.
     #[error("invalid alias '{alias}': must match ^[a-z0-9][a-z0-9._-]*$")]
@@ -200,7 +205,7 @@ impl ManagedRegistry {
             if !force {
                 return Err(RegistryError::DuplicateAlias {
                     alias: alias.to_string(),
-                    existing_url: existing.url.clone(),
+                    existing_url: existing.url.clone().into(),
                 });
             }
             self.entries.retain(|e| e.alias != alias);
@@ -525,5 +530,20 @@ mod tests {
             "https://github.com/org/b",
             "URL must be updated after --force overwrite"
         );
+    }
+
+    /// #9155: neither the message nor the derived `Debug` of a collision
+    /// shows the token an entry stored before #9124 still holds.
+    #[test]
+    fn duplicate_alias_error_never_shows_a_stored_token_9155() {
+        let (_dir, root) = tmp_root();
+        let mut reg = ManagedRegistry::load(&root).unwrap();
+        reg.add("myproj", "https://qauser:SECRETQATOKEN2@h/org/a", false)
+            .unwrap();
+        let err = reg.add("myproj", "https://h/org/b", false).unwrap_err();
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains("SECRETQATOKEN2"), "{text}");
+            assert!(text.contains("h/org/a"), "{text}");
+        }
     }
 }

@@ -167,12 +167,17 @@ pub const UNKNOWN_OWNER: &str = "unknown-owner";
 /// slugified. When only one trailing segment is parseable (no owner) the repo is
 /// kept and `owner` falls back to [`UNKNOWN_OWNER`] so the result is always a
 /// two-segment path. Returns `None` only when no non-empty `repo` slug can be
-/// produced (empty input, host-only URL).
+/// produced (empty input, host-only URL). Any userinfo leaves first
+/// ([`crate::url_userinfo::strip_userinfo`], #9124), so no part of an embedded
+/// credential reaches either segment.
 /// Test: `parse_ssh_github`, `parse_https_github_with_and_without_dot_git`,
 /// `parse_non_github_host`, `parse_trailing_slash`, `parse_nested_group_takes_last_two`,
-/// `parse_repo_only_uses_unknown_owner`, `parse_empty_returns_none`.
+/// `parse_repo_only_uses_unknown_owner`, `parse_empty_returns_none`,
+/// `parse_never_derives_from_userinfo_9124`.
 pub fn parse_github_path(url: &str) -> Option<GithubPath> {
-    let trimmed = url.trim();
+    // #9124: `https://u:TOK@host/x.git` made `TOK@host` the owner.
+    let stripped = crate::url_userinfo::strip_userinfo(url.trim());
+    let trimmed = stripped.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -365,13 +370,18 @@ impl std::error::Error for RemoteUrlError {}
 /// the host. The path must be EXACTLY two non-empty segments, so a GitLab
 /// subgroup path (`group/subgroup/repo`) is refused rather than collapsed into
 /// an owner containing a slash. Everything else — a bare word, a filesystem
-/// path, a host with no path — is [`RemoteUrlError::Malformed`].
-/// Test: `parse_remote_url_table`.
+/// path, a host with no path — is [`RemoteUrlError::Malformed`]. Any userinfo
+/// leaves first, so neither the result nor the error carries a credential
+/// (#9124).
+/// Test: `parse_remote_url_table`, `parse_never_derives_from_userinfo_9124`.
 ///
 /// # Errors
-/// [`RemoteUrlError::Malformed`], naming the input and the reason.
+/// [`RemoteUrlError::Malformed`], naming the input (userinfo removed) and the
+/// reason.
 pub fn parse_remote_url(url: &str) -> Result<RemoteRepo, RemoteUrlError> {
-    let trimmed = url.trim();
+    // #9124: the error echoes the URL, and a raw `/` in a password split it.
+    let stripped = crate::url_userinfo::strip_userinfo(url.trim());
+    let trimmed = stripped.trim();
     let malformed = |reason: &'static str| RemoteUrlError::Malformed {
         url: trimmed.to_string(),
         reason,
@@ -498,6 +508,27 @@ mod tests {
         let gp = parse_github_path("git@host:repo.git").unwrap();
         assert_eq!(gp.owner, UNKNOWN_OWNER);
         assert_eq!(gp.repo, "repo");
+    }
+
+    /// #9124: no part of an embedded credential reaches an owner, a repo, a
+    /// host, or the error, checked case-insensitively since the slug lowercases.
+    #[test]
+    fn parse_never_derives_from_userinfo_9124() {
+        for url in [
+            "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+            "https://qauser:SECRETQATOKEN2@example.invalid/x.git",
+            "https://qauser:SECRETQATOKEN2@example.invalid/",
+            "https://qauser:SECRET/QATOKEN2@example.invalid/x.git",
+            "qauser:SECRETQATOKEN2@example.invalid:x.git",
+        ] {
+            let rendered = format!("{:?} {:?}", parse_github_path(url), parse_remote_url(url));
+            let lowered = rendered.to_ascii_lowercase();
+            for part in ["secretqatoken2", "qatoken2", "qauser"] {
+                assert!(!lowered.contains(part), "{url:?} -> {rendered}");
+            }
+        }
+        let gp = parse_github_path("https://u:SECRETQATOKEN2@example.invalid/x.git").unwrap();
+        assert_eq!((gp.owner.as_str(), gp.repo.as_str()), (UNKNOWN_OWNER, "x"));
     }
 
     /// Why: empty / host-only inputs have no extractable identity and must

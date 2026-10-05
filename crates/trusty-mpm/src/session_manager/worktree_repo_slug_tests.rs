@@ -248,6 +248,22 @@ fn an_unparseable_origin_refuses_and_quotes_the_url() {
     assert!(reason.contains("/tmp/fixtures/remote.git"), "{reason}");
 }
 
+/// #9124: both refusal arms name the origin with its credentials redacted,
+/// since `worktree_reclaim` logs the refusal on every poll.
+#[test]
+fn a_refusal_never_quotes_the_origin_credentials_9124() {
+    let url = "https://qauser:SECRETQATOKEN2@gh-work/o/r";
+    for why in [
+        SlugRefusal::NoRepository,
+        SlugRefusal::UnresolvedSshAlias("gh-work".to_string()),
+    ] {
+        let reason = refusal(Path::new("/srv/x"), url, &why);
+        assert!(!reason.contains("SECRETQATOKEN2"), "{reason}");
+        assert!(!reason.contains("qauser"), "{reason}");
+        assert!(reason.contains("gh-work/o/r"), "{reason}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSH `Host` aliases (#7196)
 // ---------------------------------------------------------------------------
