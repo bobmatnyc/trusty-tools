@@ -127,9 +127,19 @@ pub struct McpServer {
 
 impl McpServer {
     /// Construct a dispatcher that reaches the daemon through `daemon`.
+    ///
+    /// #9168: replaces the client's per-call budget with the query budget
+    /// `TRUSTY_QUERY_TIMEOUT_SECS` implies ([`transport::query_call_budget`]);
+    /// writes and chat override it per call with no limit.
     pub fn new(daemon: DaemonClient) -> Self {
+        let raw = std::env::var(crate::service::query_timeout::QUERY_TIMEOUT_ENV).ok();
+        Self::with_query_budget(daemon, transport::query_call_budget(raw.as_deref()))
+    }
+
+    /// [`Self::new`] with an explicit query budget instead of the env's.
+    pub fn with_query_budget(daemon: DaemonClient, budget: std::time::Duration) -> Self {
         Self {
-            daemon,
+            daemon: daemon.with_timeout(budget),
             pinned_index: None,
         }
     }
@@ -395,6 +405,9 @@ impl McpServer {
     /// Test: all tool-dispatch tests in `tests.rs` and `tests_lane.rs` exercise
     /// this routing.
     async fn route_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
+        // #9168: a tool that ignores `project` refuses it instead of falling
+        // back to the session pin.
+        project::refuse_unread_project(tool, args)?;
         if let Some(result) = search::dispatch_search_tool(self, tool, args).await {
             return result;
         }

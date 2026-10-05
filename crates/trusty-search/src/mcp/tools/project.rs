@@ -72,6 +72,31 @@ pub(super) fn project_arg(args: &Value) -> Result<Option<&str>, DispatchError> {
     }
 }
 
+/// Refuse `project` on a known tool outside [`PROJECT_TOOLS`] (#9168).
+///
+/// Why: those tools never read `project`, so a pinned session's
+/// `delete_index {project: "other-repo"}` would act on the PINNED index.
+/// What: `InvalidParams` when `tool` is advertised, is not in
+/// [`PROJECT_TOOLS`], and `project` is present and non-null; `Ok` otherwise,
+/// so an unknown tool still reports itself as unknown. The caller checks this
+/// before any daemon call.
+/// Test: `project_on_a_tool_that_does_not_read_it_is_refused`.
+pub(super) fn refuse_unread_project(tool: &str, args: &Value) -> Result<(), DispatchError> {
+    let named = args.get("project").is_some_and(|v| !v.is_null());
+    if !named || PROJECT_TOOLS.contains(&tool) {
+        return Ok(());
+    }
+    let known = super::tool_descriptors()
+        .as_array()
+        .is_some_and(|defs| defs.iter().any(|d| d["name"].as_str() == Some(tool)));
+    if !known {
+        return Ok(());
+    }
+    Err(DispatchError::InvalidParams(format!(
+        "project is not accepted on {tool}; pass index_id"
+    )))
+}
+
 impl McpServer {
     /// Resolve the index a read tool targets: `index_id`, else `project`, else
     /// the session pin (#9168).

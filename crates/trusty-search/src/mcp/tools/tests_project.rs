@@ -230,3 +230,35 @@ fn project_tools_are_all_read_scoped() {
         );
     }
 }
+
+/// A tool that does not read `project` refuses it and calls nothing (#9168).
+///
+/// Why: those tools would fall back to the session pin, so a pinned
+/// `delete_index {project: "other-repo"}` deleted the PINNED index.
+#[tokio::test]
+async fn project_on_a_tool_that_does_not_read_it_is_refused() {
+    for (tool, args) in [
+        ("delete_index", json!({})),
+        (
+            "index_file",
+            json!({ "path": "a.rs", "content": "fn a() {}" }),
+        ),
+        ("remove_file", json!({ "path": "a.rs" })),
+        ("reindex", json!({})),
+        ("create_index", json!({ "id": "x", "root_path": "/tmp/x" })),
+        ("chat", json!({ "message": "how?" })),
+    ] {
+        let (daemon, calls) = recording_daemon(resolving).await;
+        let server = daemon.server().with_pinned_index("pinned-index");
+        let mut with_project = args.clone();
+        with_project["project"] = json!("x");
+        let resp = server.dispatch(req(tool, with_project)).await;
+        let err = resp.error.expect("refused");
+        assert_eq!(err.code, error_codes::INVALID_PARAMS, "{tool}");
+        assert_eq!(
+            err.message,
+            format!("project is not accepted on {tool}; pass index_id")
+        );
+        assert!(methods(&calls).is_empty(), "{tool}: {:?}", methods(&calls));
+    }
+}

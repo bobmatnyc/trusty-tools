@@ -215,19 +215,27 @@ pub(crate) fn decide_auto_pin(candidate: &CwdCandidate, verdict: Confirmation) -
     }
 }
 
+/// Budget for the startup pin confirmation — the 5 s request timeout the
+/// HTTP probe had (#9168).
+pub(crate) const PIN_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Fetch the daemon's index list over its socket (#9168).
 ///
 /// Why: the startup pin must be confirmed against the SAME daemon the session
-/// will query, and the session reaches it only through `daemon`. The socket
-/// client's 60 s call budget bounds the wait, so a wedged daemon cannot hang
-/// `serve` forever.
+/// will query, and the session reaches it only through `daemon`.
+/// [`PIN_CONFIRM_TIMEOUT`] bounds the wait, so a wedged daemon cannot hang
+/// `serve` startup.
 /// What: `search.indexes.list` with `details: true`, parsed by
 /// [`parse_index_entries`]. Errors propagate so the caller can report the
 /// session as unpinned rather than guessing.
 /// Test: `fetch_reads_entries_from_a_live_server` binds a scratch socket.
 pub(crate) async fn fetch_index_entries(daemon: &DaemonClient) -> anyhow::Result<Vec<DaemonIndex>> {
     let body = daemon
-        .call(METHOD_INDEXES_LIST, serde_json::json!({ "details": true }))
+        .call_with_timeout(
+            METHOD_INDEXES_LIST,
+            serde_json::json!({ "details": true }),
+            PIN_CONFIRM_TIMEOUT,
+        )
         .await?;
     Ok(parse_index_entries(&body))
 }

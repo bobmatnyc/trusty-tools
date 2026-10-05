@@ -271,3 +271,95 @@ async fn invalid_params_refusal_stays_a_parameter_error() {
     assert_eq!(err.code, error_codes::INVALID_PARAMS);
     assert_eq!(err.message, "limit out of range");
 }
+
+/// A mock daemon that answers every method after its delay.
+struct Slow(std::time::Duration);
+
+#[async_trait::async_trait]
+impl trusty_common::uds::server::RpcFallback for Slow {
+    async fn call(
+        &self,
+        _method: &str,
+        _params: Value,
+    ) -> Result<Value, trusty_common::uds::server::RpcError> {
+        tokio::time::sleep(self.0).await;
+        Ok(json!({ "ok": true, "results": [], "total": 0 }))
+    }
+}
+
+/// A daemon that answers after `delay`, behind a bridge with `budget`.
+async fn slow_bridge(
+    delay: std::time::Duration,
+    budget: std::time::Duration,
+) -> (MockDaemon, super::McpServer) {
+    let daemon = crate::service::daemon_client::tests::mock_daemon_with(Slow(delay)).await;
+    let server = super::McpServer::with_query_budget(daemon.client.clone(), budget);
+    (daemon, server)
+}
+
+/// Writes and chat get no client-side limit (#9168).
+///
+/// Why: the daemon puts no deadline on them, so a client limit reports a
+/// timeout for work that still lands — and a retried delete then answers
+/// `not found`.
+#[tokio::test]
+async fn writes_and_chat_outlast_the_query_budget() {
+    let ms = std::time::Duration::from_millis;
+    let (_daemon, server) = slow_bridge(ms(400), ms(100)).await;
+    for (tool, args) in [
+        (
+            "create_index",
+            json!({ "id": "demo", "root_path": "/tmp/demo" }),
+        ),
+        ("delete_index", json!({ "index_id": "demo" })),
+        ("reindex", json!({ "index_id": "demo" })),
+        (
+            "index_file",
+            json!({ "index_id": "demo", "path": "a.rs", "content": "fn a() {}" }),
+        ),
+        ("remove_file", json!({ "index_id": "demo", "path": "a.rs" })),
+        ("chat", json!({ "index_id": "demo", "message": "how?" })),
+    ] {
+        let resp = server.dispatch(req(tool, args)).await;
+        assert!(resp.error.is_none(), "{tool}: {:?}", resp.error);
+    }
+}
+
+/// A query still times out at the query budget (#9168).
+#[tokio::test]
+async fn a_query_over_the_budget_still_times_out() {
+    let ms = std::time::Duration::from_millis;
+    let (_daemon, server) = slow_bridge(ms(400), ms(100)).await;
+    let resp = server
+        .dispatch(req(
+            "search",
+            json!({ "index_id": "demo", "query": "fn main" }),
+        ))
+        .await;
+    let err = resp.error.expect("the query budget expired");
+    assert_eq!(err.code, error_codes::INTERNAL_ERROR);
+    assert!(
+        err.message.contains("did not complete the exchange"),
+        "{}",
+        err.message
+    );
+}
+
+/// The query budget follows `TRUSTY_QUERY_TIMEOUT_SECS`, never below 60 s.
+///
+/// Why (#9168): a fixed 60 s cut a query off before the daemon's own deadline
+/// whenever an operator raised that value past 60 s.
+#[test]
+fn query_budget_tracks_the_daemon_deadline() {
+    use super::transport::query_call_budget;
+    let s = std::time::Duration::from_secs;
+    assert_eq!(query_call_budget(None), s(60));
+    assert_eq!(query_call_budget(Some("30")), s(60));
+    assert_eq!(query_call_budget(Some("not a number")), s(60));
+    assert_eq!(query_call_budget(Some("10")), s(60));
+    assert_eq!(query_call_budget(Some("120")), s(150));
+    assert_eq!(
+        query_call_budget(Some(&u64::MAX.to_string())),
+        std::time::Duration::MAX
+    );
+}
