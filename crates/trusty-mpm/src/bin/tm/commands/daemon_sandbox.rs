@@ -35,6 +35,8 @@ use trusty_common::DATA_DIR_OVERRIDE_ENV;
 /// - `USER`, `LOGNAME`, `SHELL`: the account name and login shell tmux and git
 ///   read; names, not credentials.
 /// - `RUST_LOG`: the log filter.
+/// - `TRUSTY_SANDBOX`: set to `1` by `scripts/sandbox_daemon.sh`; tells
+///   trusty-common to load no `.env.local` (#9178). A flag, not a credential.
 ///
 /// Plus [`CF_TEXT_ENCODING`], which macOS sets inside the process itself.
 const ENV_ALLOWLIST: &[&str] = &[
@@ -49,6 +51,8 @@ const ENV_ALLOWLIST: &[&str] = &[
     "LOGNAME",
     "SHELL",
     "RUST_LOG",
+    // #9178: the sandbox script's `.env.local` opt-out.
+    "TRUSTY_SANDBOX",
 ];
 
 /// The locale categories allowed by name — the `LC_*` family, closed.

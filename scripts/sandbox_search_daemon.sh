@@ -332,7 +332,7 @@ fi
 # The KNOBS the caller exported, as NAME=value words for env -i. `compgen -e`
 # lists exported names only. Values are read by indirect expansion.
 EXPORTED=" $(compgen -e | tr '\n' ' ') "
-ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data")
+ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data" "TRUSTY_SANDBOX=1")
 if [ -n "$MODEL_CACHE" ]; then
   ENV_WORDS+=("FASTEMBED_CACHE_DIR=$MODEL_CACHE")
 fi

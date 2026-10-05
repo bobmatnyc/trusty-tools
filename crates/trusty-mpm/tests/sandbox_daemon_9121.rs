@@ -101,7 +101,11 @@ fn wait_bounded(mut child: Child) -> (bool, String, String) {
 #[test]
 fn an_allowlisted_environment_passes_the_allowlist_check() {
     let home = tempfile::tempdir().expect("scratch home");
-    let mut cmd = sandbox_command(home.path(), &[("LANG", "C"), ("RUST_LOG", "warn")]);
+    // #9178: `TRUSTY_SANDBOX=1` is what `scripts/sandbox_daemon.sh` passes.
+    let mut cmd = sandbox_command(
+        home.path(),
+        &[("LANG", "C"), ("RUST_LOG", "warn"), ("TRUSTY_SANDBOX", "1")],
+    );
     cmd.env_remove("TRUSTY_DATA_DIR_OVERRIDE");
 
     let (success, _stdout, stderr) = wait_bounded(cmd.spawn().expect("spawn"));

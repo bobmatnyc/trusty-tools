@@ -53,6 +53,7 @@ fn disallowed_names_admits_only_the_closed_allowlist() {
         "LOGNAME",
         "SHELL",
         "RUST_LOG",
+        "TRUSTY_SANDBOX",
     ];
     let refused = [
         "TELEGRAM_BOT_TOKEN",
