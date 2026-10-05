@@ -1,16 +1,18 @@
 //! The OS Keychain backend over the `keyring` crate (DOC-74 §15.4).
 //!
 //! Why: the Keychain is the zero-configuration default backend (DOC-74 §6.1)
-//! and ships first (§15.4 "Order"). macOS is the tested platform; Linux
-//! (Secret Service) and Windows (Credential Manager) compile through the
-//! workspace `keyring` features.
+//! and ships first (§15.4 "Order"). macOS is the only supported platform.
 //! What: [`KeychainBackend`] maps a vault to the entry's service and the key
 //! to its account: service `trusty/<owner>/<repo>`, account `KEY`. Every read
 //! goes to the OS; nothing is cached (§15.5). `keyring` errors are mapped to
-//! fixed diagnostic text by [`keyring_reason`], which drops the bytes a
-//! `BadEncoding` error carries.
-//! Test: `keychain_tests.rs` beside this file (error mapping, no OS access);
-//! the ignored `keychain_real_roundtrip_store_list_remove` touches the OS.
+//! fixed diagnostic text by `keyring_reason`, which drops the bytes a
+//! `BadEncoding` error carries. On any target but macOS the crate links no
+//! `keyring` (#9064), and every operation fails closed with
+//! [`SecretsError::UnknownBackend`] rather than reaching `keyring`'s
+//! in-memory mock store.
+//! Test: `keychain_tests.rs` beside this file (error mapping and the
+//! no-backend arm, no OS access); the ignored
+//! `keychain_real_roundtrip_store_list_remove` touches the OS.
 
 use super::{Capabilities, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
@@ -32,6 +34,7 @@ impl KeychainBackend {
         Self::default()
     }
 
+    #[cfg(target_os = "macos")]
     fn entry(&self, vault: &VaultName, key: &SecretKey) -> Result<keyring::Entry, SecretsError> {
         keyring::Entry::new(vault.as_str(), key.as_str()).map_err(|e| failure(vault, key, &e))
     }
@@ -47,6 +50,7 @@ impl KeychainBackend {
 /// message (an OS status, never the value); attribute errors name the
 /// attribute only. Unknown future variants get a fixed sentence.
 /// Test: `keychain_error_text_never_carries_value_bytes`.
+#[cfg(target_os = "macos")]
 pub(crate) fn keyring_reason(err: &keyring::Error) -> String {
     match err {
         keyring::Error::PlatformFailure(e) => format!("platform secure-storage failure: {e}"),
@@ -63,6 +67,7 @@ pub(crate) fn keyring_reason(err: &keyring::Error) -> String {
 }
 
 /// A [`SecretsError::Backend`] for a failed Keychain call.
+#[cfg(target_os = "macos")]
 pub(crate) fn failure(vault: &VaultName, key: &SecretKey, err: &keyring::Error) -> SecretsError {
     SecretsError::Backend {
         backend: BackendId::KEYCHAIN.to_string(),
@@ -75,6 +80,7 @@ pub(crate) fn failure(vault: &VaultName, key: &SecretKey, err: &keyring::Error) 
 /// Map a `get_password` result: `NoEntry` is a miss, anything else an error.
 ///
 /// Test: `keychain_get_maps_no_entry_to_none_and_failures_to_errors`.
+#[cfg(target_os = "macos")]
 pub(crate) fn map_get(
     vault: &VaultName,
     key: &SecretKey,
@@ -90,6 +96,7 @@ pub(crate) fn map_get(
 /// Map a `delete_credential` result: `NoEntry` is "nothing existed".
 ///
 /// Test: `keychain_delete_maps_no_entry_to_false_and_failures_to_errors`.
+#[cfg(target_os = "macos")]
 pub(crate) fn map_delete(
     vault: &VaultName,
     key: &SecretKey,
@@ -111,10 +118,17 @@ impl SecretBackend for KeychainBackend {
         Capabilities::READ | Capabilities::WRITE
     }
 
+    #[cfg(target_os = "macos")]
     fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
         map_get(vault, key, self.entry(vault, key)?.get_password())
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn get(&self, _: &VaultName, _: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        Err(no_os_backend())
+    }
+
+    #[cfg(target_os = "macos")]
     fn set(
         &self,
         vault: &VaultName,
@@ -126,8 +140,36 @@ impl SecretBackend for KeychainBackend {
             .map_err(|e| failure(vault, key, &e))
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn set(&self, _: &VaultName, _: &SecretKey, _: &SecretValue) -> Result<(), SecretsError> {
+        Err(no_os_backend())
+    }
+
+    #[cfg(target_os = "macos")]
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         map_delete(vault, key, self.entry(vault, key)?.delete_credential())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn delete(&self, _: &VaultName, _: &SecretKey) -> Result<bool, SecretsError> {
+        Err(no_os_backend())
+    }
+}
+
+/// The error every Keychain operation returns on a target with no OS backend.
+///
+/// Why: #9064 — `keyring` with no platform feature falls back to an
+/// in-memory mock that accepts a write and loses it at exit. A store that
+/// reported success there would lose secrets silently, so this build links no
+/// `keyring` off macOS and refuses instead.
+/// What: [`SecretsError::UnknownBackend`] naming `keychain`. Compiled on every
+/// target so the macOS test suite covers it too.
+/// Test: `keychain_without_os_backend_fails_closed`,
+/// `keychain_backend_fails_closed_off_macos`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) fn no_os_backend() -> SecretsError {
+    SecretsError::UnknownBackend {
+        backend: BackendId::KEYCHAIN.to_string(),
     }
 }
 

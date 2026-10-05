@@ -1,5 +1,7 @@
-//! Unit tests for the Keychain backend's result mapping. None touches the OS
-//! keychain; the real round trip is the ignored integration test.
+//! Unit tests for the Keychain backend's result mapping (macOS, where
+//! `keyring` is linked) and its no-backend arm (every other target). None
+//! touches the OS keychain; the real round trip is the ignored integration
+//! test.
 //!
 //! Test: itself.
 
@@ -31,6 +33,7 @@ fn keychain_capabilities_are_read_write_only() {
 /// fails this test.
 /// Test: itself.
 #[test]
+#[cfg(target_os = "macos")]
 fn keychain_get_maps_no_entry_to_none_and_failures_to_errors() {
     let (vault, key) = names();
     let hit = map_get(&vault, &key, Ok(FAKE_VALUE.to_string())).unwrap();
@@ -64,6 +67,7 @@ fn keychain_get_maps_no_entry_to_none_and_failures_to_errors() {
 /// as "already gone".
 /// Test: itself.
 #[test]
+#[cfg(target_os = "macos")]
 fn keychain_delete_maps_no_entry_to_false_and_failures_to_errors() {
     let (vault, key) = names();
     assert!(map_delete(&vault, &key, Ok(())).unwrap());
@@ -81,6 +85,7 @@ fn keychain_delete_maps_no_entry_to_false_and_failures_to_errors() {
 /// error, in both `Display` and `Debug`, must not contain them.
 /// Test: itself.
 #[test]
+#[cfg(target_os = "macos")]
 fn keychain_error_text_never_carries_value_bytes() {
     let (vault, key) = names();
     let leaked = keyring::Error::BadEncoding(FAKE_VALUE.as_bytes().to_vec());
@@ -91,4 +96,36 @@ fn keychain_error_text_never_carries_value_bytes() {
 
     let invalid = keyring::Error::Invalid("user".into(), FAKE_VALUE.into());
     assert!(!keyring_reason(&invalid).contains(FAKE_VALUE));
+}
+
+/// Why: #9064 — the no-backend arm must be an error, never a silent success.
+/// What: the error names the `keychain` backend as unavailable in this build.
+/// Test: itself.
+#[test]
+fn keychain_without_os_backend_fails_closed() {
+    match no_os_backend() {
+        SecretsError::UnknownBackend { backend } => assert_eq!(backend, "keychain"),
+        other => panic!("expected UnknownBackend, got {other:?}"),
+    }
+}
+
+/// Why: #9064 — off macOS no `keyring` is linked. A build that fell back to
+/// `keyring`'s in-memory mock would accept the write and return the value on
+/// read; this test fails on either.
+/// Test: itself.
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn keychain_backend_fails_closed_off_macos() {
+    let (vault, key) = names();
+    let backend = KeychainBackend::new();
+    let value = SecretValue::new(FAKE_VALUE.to_string());
+    let unavailable = |r: Result<(), SecretsError>| {
+        assert!(
+            matches!(r, Err(SecretsError::UnknownBackend { ref backend }) if backend == "keychain"),
+            "{r:?}"
+        );
+    };
+    unavailable(backend.set(&vault, &key, &value));
+    unavailable(backend.get(&vault, &key).map(|_| ()));
+    unavailable(backend.delete(&vault, &key).map(|_| ()));
 }

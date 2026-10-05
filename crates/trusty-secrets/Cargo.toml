@@ -25,11 +25,19 @@ test-support = ["store"]
 [dependencies]
 serde = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
-keyring = { workspace = true, optional = true }
 fd-lock = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 serde_yaml = { workspace = true, optional = true }
 dirs = { workspace = true, optional = true }
+
+# #9064: macOS only, `apple-native` only. Not the workspace `keyring` entry:
+# its `sync-secret-service` feature pulls libdbus-sys, which fails to build on
+# a runner without libdbus-1-dev, and `workspace = true` can only add features.
+# On any other target there is no `keyring` at all, so its in-memory mock
+# store can never be selected; `KeychainBackend` returns
+# `SecretsError::UnknownBackend` instead (see store/keychain.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
