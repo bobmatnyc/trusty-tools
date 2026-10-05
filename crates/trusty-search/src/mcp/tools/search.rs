@@ -19,6 +19,8 @@ use super::{
     types::{optional_bool, require_str, DispatchError},
     McpServer,
 };
+use crate::service::rpc::queries::{METHOD_QUERY, METHOD_QUERY_ALL, METHOD_SIMILAR};
+use crate::service::rpc::reads::METHOD_INDEX_STATUS;
 
 /// What `exclude_archived: true` does, for the rejection message (#7927).
 ///
@@ -56,7 +58,8 @@ pub(super) async fn dispatch_search_tool(
             // The pinned-index resolution (#1373) means a trusty-mpm session
             // scoped to one project never silently sweeps every registered
             // index — it runs the per-index hybrid against its own index.
-            if server.resolve_index_id(args).is_some() {
+            // #9168: a `project` names an index too, so it never fans out.
+            if server.names_a_target(args) {
                 return Some(server.run_lane_search(args, SearchLane::All).await);
             }
             let query = match require_str(args, "query") {
@@ -113,7 +116,8 @@ pub(super) async fn dispatch_search_tool(
             if let Some(repos) = args.get("repos") {
                 body["repos"] = repos.clone();
             }
-            let mut resp = match server.post("/search", &body).await {
+            // #9168: `POST /search`'s socket twin.
+            let mut resp = match server.call(METHOD_QUERY_ALL, body).await {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -124,13 +128,15 @@ pub(super) async fn dispatch_search_tool(
         }
         "search" => {
             // Default `index_id` to the session's pinned index when omitted
-            // (#1373); an explicit caller-supplied id still wins.
-            let index_id = match server.resolve_index_id(args) {
-                Some(v) => v,
+            // (#1373); an explicit caller-supplied id still wins, and #9168 adds
+            // `project`, resolved by the daemon, between the two.
+            let index_id = match server.resolve_target(args).await {
+                Ok(Some(v)) => v,
+                Err(e) => return Some(Err(e)),
                 // #6317: nothing resolved — answer with the indexes that exist
                 // plus a retry hint, as a success. #5213's error named
                 // `list_indexes`; this returns what that call would have said.
-                None => {
+                Ok(None) => {
                     return Some(super::index_directory::index_directory(server, "search").await)
                 }
             };
@@ -202,14 +208,16 @@ pub(super) async fn dispatch_search_tool(
             if want_compact {
                 body["compact"] = Value::Bool(true);
             }
-            // Issue #4715: scoped POST so a 404 on the session's advertised
-            // index surfaces as INDEX_NOT_READY, not "unknown index".
+            // Issue #4715: scoped call so a not-found on the session's
+            // advertised index surfaces as INDEX_NOT_READY, not "unknown index".
+            let query_text = body
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let params = serde_json::json!({ "index_id": index_id, "body": body });
             let mut resp = match server
-                .post_scoped(
-                    &format!("/indexes/{index_id}/search"),
-                    &body,
-                    Some(&index_id),
-                )
+                .call_scoped(METHOD_QUERY, params, Some(&index_id))
                 .await
             {
                 Ok(v) => v,
@@ -217,7 +225,6 @@ pub(super) async fn dispatch_search_tool(
             };
             // Mirror the daemon's per-query INFO log (issue #125) so the
             // MCP transport surfaces the same query/intent/latency line.
-            let query_text = body.get("text").and_then(Value::as_str).unwrap_or_default();
             let log_intent = resp
                 .get("intent")
                 .and_then(Value::as_str)
@@ -233,7 +240,7 @@ pub(super) async fn dispatch_search_tool(
                 intent = %log_intent,
                 latency_ms = log_latency,
                 results = log_results,
-                query = %crate::truncate_at_char_boundary(query_text, 80),
+                query = %crate::truncate_at_char_boundary(&query_text, 80),
                 "search"
             );
             if want_compact {
@@ -259,11 +266,8 @@ pub(super) async fn dispatch_search_tool(
             if let Some(k) = args.get("top_k").and_then(Value::as_u64) {
                 body["top_k"] = Value::from(k);
             }
-            Some(
-                server
-                    .post(&format!("/indexes/{index_id}/search_similar"), &body)
-                    .await,
-            )
+            let params = serde_json::json!({ "index_id": index_id, "body": body });
+            Some(server.call(METHOD_SIMILAR, params).await)
         }
         _ => None,
     }
@@ -281,15 +285,15 @@ impl McpServer {
     /// error shape, and logging.
     ///
     /// What: validates args; for lanes that require a stage beyond Stage
-    /// 1 (`Semantic` needs `vector`, `Graph` needs `kg`), fetches `GET
-    /// /indexes/:id/status` and inspects `search_capabilities`. If the
+    /// 1 (`Semantic` needs `vector`, `Graph` needs `kg`), calls
+    /// `search.index.status` and inspects `search_capabilities`. If the
     /// prerequisite lane is missing, returns
     /// `DispatchError::StageNotReady` carrying a human-readable message,
     /// the full stages snapshot, and a `suggested_tools` retry hint.
     /// Otherwise constructs the search body (including lane-specific
     /// `stage` and `expand_graph` settings), forwards optional caller
     /// fields (`top_k`, `mode`, branch-aware boost, archive filter),
-    /// POSTs the request, and mirrors the daemon's per-query INFO log.
+    /// calls `search.query`, and mirrors the daemon's per-query INFO log.
     ///
     /// Test: unit tests in `tests_lane.rs` exercise each tool's happy
     /// path, stage-not-ready path, and routing shape.
@@ -302,7 +306,8 @@ impl McpServer {
         // an explicit caller-supplied id still wins.
         // #6317: with neither, return the index directory as a success rather
         // than #5213's error — these lanes are reads.
-        let Some(index_id) = self.resolve_index_id(args) else {
+        // #9168: `project` resolves through the daemon between the two.
+        let Some(index_id) = self.resolve_target(args).await? else {
             return super::index_directory::index_directory(self, lane.tool_name()).await;
         };
         let query_text = require_str(args, "query")?;
@@ -318,7 +323,11 @@ impl McpServer {
             // #4715: index-scoped, so a never-indexed pin answers "too early"
             // rather than leaking the daemon's "unknown index" 404.
             let status = self
-                .get_scoped(&format!("/indexes/{index_id}/status"), Some(&index_id))
+                .call_scoped(
+                    METHOD_INDEX_STATUS,
+                    serde_json::json!({ "index_id": index_id }),
+                    Some(&index_id),
+                )
                 .await?;
             let caps: Vec<String> = status
                 .get("search_capabilities")
@@ -415,12 +424,9 @@ impl McpServer {
             body["compact"] = Value::Bool(true);
         }
 
+        let params = serde_json::json!({ "index_id": index_id, "body": body });
         let mut resp = self
-            .post_scoped(
-                &format!("/indexes/{index_id}/search"),
-                &body,
-                Some(&index_id),
-            )
+            .call_scoped(METHOD_QUERY, params, Some(&index_id))
             .await?;
         // Mirror the daemon's per-query INFO log.
         let log_intent = resp
