@@ -141,7 +141,7 @@ owner key with the same name.
 
 The service is a library crate, `trusty-secrets`. It owns and serves its own
 on-demand socket (owner ruling 24, 2026-10-02); the tm daemon and the console
-are clients of it. The socket path and the spawn contract are pending owner decision (socket path, spawn contract).
+are clients of it. The socket is ~/.trusty-tools/trusty-secrets/secrets.sock under a 0700 parent directory; clients spawn it on demand through `uds::on_demand`, with no launchd job, and it exits after 60 s idle (ruling 31, 2026-10-05; DOC-74 §15.2).
 The crate does no work at startup.
 
 **Why:** Owner rulings: "Secrets doesn't need to be a daemon. A crate accessed
@@ -271,7 +271,7 @@ the console.
 - [ ] No API or UI offers a machine scope.
 
 **PRD-SECRETS-04 (Library crate over UDS)**
-- [ ] `trusty-secrets` serves `secrets.*` on its own on-demand socket; the tm daemon and the console are clients and host no `secrets.*` method (socket path, spawn contract: pending owner decision).
+- [ ] `trusty-secrets` serves `secrets.*` on its own on-demand socket; the tm daemon and the console are clients and host no `secrets.*` method (socket and spawn contract per ruling 31, 2026-10-05).
 - [ ] Daemon start does no secrets work.
 
 **PRD-SECRETS-05 (Integrations)**

@@ -198,7 +198,7 @@ regression of it.
 | **Reference key** | `secret://KEY` (project, then owner) or the explicit `secret://<owner>[/<repo>]/KEY` — non-secret, freely printable (§4 T-2, §15.3; amended 2026-10-01). |
 | **Session cache** | The in-process cache of resolved values, kept only for CLI-backed sources and filled on first use (§8.4, amended 2026-10-01). |
 | **Sync target** | A write-only destination such as Vercel or GitHub Actions; it cannot be read back (§15.4). |
-| **Exec grant** | A token `tm secrets exec` registers with the tm daemon (pending owner decision (point 1): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), naming the child pid, the allowed keys and an expiry (§15.8). |
+| **Exec grant** | A token `tm secrets exec` registers with the tm daemon (pending owner decision (item 34): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), naming the child pid, the allowed keys and an expiry (§15.8). |
 | **Detection** | A read-only probe of what secrets tooling exists on the machine — installed, running, configured — never an unlock (§7). |
 
 ---
@@ -536,7 +536,7 @@ posture (`resolver.rs:74-81`, `default_store`'s own fallback chain).
 A new tool, `secrets_get_ref`, joins the daemon's MCP catalog
 (`crates/trusty-mpm/src/mcp/tools/mod.rs` — the pattern is `mod.rs`'s thin
 facade plus a new `secrets.rs` leaf, matching how `disk.rs` was added for
-Disk in #6927) alongside `secrets_list` (pending owner decision (point 1): recommended to stay in the tm daemon's MCP catalog as a client of the socket; returns references, never values). Both return only names/references
+Disk in #6927) alongside `secrets_list` (pending owner decision (item 34): recommended to stay in the tm daemon's MCP catalog as a client of the socket; returns references, never values). Both return only names/references
 and metadata (`backend`, `imported_at`, `present: bool`) — never a value —
 the same non-goal DOC-64 states for its panel. A tool that resolves an actual
 *value* into a subprocess environment (the MCP equivalent of `tm secrets
@@ -739,8 +739,7 @@ resolution, masking and the exec-grant logic. It has three features:
 own on-demand socket. The tm daemon and the console are clients of that socket;
 neither hosts a `secrets.*` method. The socket spawns on the first call, holds
 no background task and exits when idle, so it is not a daemon (owner ruling 28).
-There is no new resident daemon and no TCP listener. The socket path and the
-spawn contract are pending owner decision (socket path, spawn contract).
+There is no new resident daemon and no TCP listener. The socket is ~/.trusty-tools/trusty-secrets/secrets.sock under a 0700 parent directory, bound with trusty-common `prepare_socket_dir` plus `bind_singleton_hardened`. Clients spawn it on demand through `uds::on_demand`; there is no launchd job. It exits after 60 s idle, with an env override (name per S2) (ruling 31, 2026-10-05).
 An earlier draft placed the methods on the tm daemon's existing UDS socket
 (`build_router`); ruling 24 supersedes that placement.
 
@@ -822,7 +821,7 @@ Every CLI-backed integration needs the stdin-capable CLI runner (§8.2) first.
 ### 15.6 Console bridge, page, masking and hardening (S3a, S4)
 
 trusty-console adds a `secrets_uds` bridge at `/api/secrets/*` and a page at
-`/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket path and spawn contract: pending owner decision (socket path, spawn contract)).
+`/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket and spawn contract per ruling 31, 2026-10-05: §15.2).
 The console never opens a store.
 
 **Masking.** A new `mask_secret` in `trusty-secrets`:
@@ -896,7 +895,7 @@ not a per-language library, because a library would need a value-returning
 method.
 
 **Exec grant (tier 3).** `tm secrets exec` mints a random token and registers
-it with the tm daemon (pending owner decision (point 1): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), with the child pid, the allowed keys and an expiry. The
+it with the tm daemon (pending owner decision (item 34): recommended to move to the trusty-secrets socket, with tm registering grants as a client; binds S8 #9070), with the child pid, the allowed keys and an expiry. The
 child receives the token in its env. `secrets.resolve` answers only when all
 three hold:
 
@@ -945,11 +944,13 @@ per registry.
 
 Rungs follow the [Rust Test Ladder](../../CLAUDE.md#rust-test-ladder).
 
+Owner ruling 30 makes this S-series the master sequence for milestone 123.
+
 | Slice | Scope | Rung | Gate or dependency |
 |---|---|---|---|
 | S0 | This amendment and PRD-SECRETS-01 | 1 | — |
 | S1 | `trusty-secrets` crate: `api` and `store` features, scopes, `mask_secret`, Keychain backend | 4 | S0 |
-| S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client (path and spawn contract: pending owner decision) | 5 | S1 |
+| S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client (socket and spawn contract per ruling 31, 2026-10-05) | 5 | S1 |
 | S3a | Console `secrets_uds` bridge and hardening (§15.6) | 5 | S2 |
 | S3b | Tailnet gate (§15.7); closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for secrets routes | 5 | S3a |
 | S4 | `/tools/secrets/` page, including the "agents may use" toggle | 6 | S3a; tailnet access waits on S3b |
