@@ -246,7 +246,9 @@ fn parse_owner_repo_slugs(url: &str) -> Option<(Option<String>, String)> {
     // first `/` after the scheme's `//` for URL syntax. We normalise by
     // stripping a leading scheme, then splitting on the first `:` or `/` that
     // follows the host.
-    let without_scheme = strip_scheme(trimmed);
+    // #9124: userinfo is never identity; `u:TOK@host/x` made `TOK@host` the owner.
+    let stripped = crate::url_userinfo::strip_userinfo(trimmed);
+    let without_scheme = strip_scheme(&stripped);
     let path = host_relative_path(without_scheme);
 
     // Strip a trailing `.git` and any trailing slashes, then split on `/`.
@@ -431,6 +433,27 @@ mod tests {
 
     use super::*;
     use std::path::{Path, PathBuf};
+
+    /// #9124: an embedded credential never reaches a palace id or a repo slug.
+    #[test]
+    fn owner_repo_never_derives_from_userinfo_9124() {
+        for url in [
+            "https://qauser:SECRETQATOKEN2@example.invalid/x.git",
+            "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+            "qauser:SECRETQATOKEN2@example.invalid:x.git",
+        ] {
+            let id = owner_repo_from_git_remote(url).unwrap_or_default();
+            let slug = repo_slug_from_git_remote(url).unwrap_or_default();
+            for got in [&id, &slug] {
+                assert!(!got.contains("secretqatoken2"), "{url:?} -> {got}");
+                assert!(!got.contains("qauser"), "{url:?} -> {got}");
+            }
+        }
+        assert_eq!(
+            owner_repo_from_git_remote("https://u:SECRETQATOKEN2@example.invalid/x.git").as_deref(),
+            Some("x")
+        );
+    }
 
     // -----------------------------------------------------------------------
     // owner_repo_from_git_remote — URL variants

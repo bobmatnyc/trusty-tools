@@ -117,9 +117,11 @@ pub(crate) fn classify_run_target_with_account(
     let gh = parse_owner_repo(spec)
         .or_else(|| parse_github_path(&clone_url))
         .ok_or_else(|| {
+            // #9124: the spec may embed `user:token@`.
             anyhow::anyhow!(
-                "cannot derive an owner/repo identity from '{spec}'. \
-                 Pass <owner>/<repo>, or a full repository URL."
+                "cannot derive an owner/repo identity from '{}'. \
+                 Pass <owner>/<repo>, or a full repository URL.",
+                super::register_args::shown(spec)
             )
         })?;
     let account = super::register_args::resolve_account(
