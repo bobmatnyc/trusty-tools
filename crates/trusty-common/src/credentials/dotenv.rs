@@ -306,7 +306,7 @@ pub fn load_env_local_once() {
 /// still walks up from the cwd and reads `$HOME/.env.local`, so a sandboxed
 /// daemon picked up the developer's credentials. The sandbox scripts set
 /// this variable.
-const SANDBOX_ENV_VAR: &str = "TRUSTY_SANDBOX";
+pub const SANDBOX_ENV_VAR: &str = "TRUSTY_SANDBOX";
 
 /// Whether the process environment opts out of `.env.local` (#9178).
 ///
@@ -321,8 +321,9 @@ fn env_local_opted_out() -> bool {
 }
 
 /// The pure decision behind [`env_local_opted_out`]: exactly `1` opts out.
+/// Public so `tm daemon --sandbox` refuses on the same rule (#9178).
 /// Test: `dotenv_tests::only_exactly_one_opts_out`.
-fn sandbox_flag_set(value: Option<&std::ffi::OsStr>) -> bool {
+pub fn sandbox_flag_set(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
 
