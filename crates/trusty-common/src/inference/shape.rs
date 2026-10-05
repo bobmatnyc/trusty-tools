@@ -28,7 +28,8 @@
 //! a provider to a model id, this maps a model id back to its provider.
 //!
 //! 🔴 **Call this only on an id whose routing prefix you have already
-//! stripped.** Slash-form is read as an OpenRouter slug here, while
+//! stripped.** Slash-form is read as an OpenRouter slug here (a Bedrock model
+//! ARN excepted, #9200), while
 //! [`ProviderId::from_slug_prefix`] reads the same `anthropic/…` string as the
 //! Anthropic first-party family. Both are right for their own question — a
 //! routing prefix is what the OPERATOR wrote to pin a provider, an id shape is
@@ -80,6 +81,62 @@ const BEDROCK_VENDOR_SEGMENTS: &[&str] = &[
 /// The provider-native prefix every Fireworks model id carries.
 const FIREWORKS_NATIVE_PREFIX: &str = "accounts/fireworks/models/";
 
+/// The partition and service every Bedrock model ARN opens with. Commercial
+/// `aws` partition only: nothing here resolves GovCloud or China regions.
+const BEDROCK_ARN_HEAD: &str = "arn:aws:bedrock:";
+
+/// Bedrock ARN resource types that name a runnable model, each with whether
+/// its ARN carries a 12-digit account id (`foundation-model` ARNs leave it
+/// empty). Another resource type (`agent/…`, `knowledge-base/…`) is not a model.
+const BEDROCK_ARN_MODEL_RESOURCES: &[(&str, bool)] = &[
+    ("application-inference-profile", true),
+    ("inference-profile", true),
+    ("foundation-model", false),
+];
+
+/// Whether `id` is a well-formed Bedrock model ARN.
+///
+/// Why: an ARN contains `/`, which every other rule here reads as an
+/// OpenRouter slug, so a tagged application inference profile routed to
+/// OpenRouter (#9200).
+/// What: `arn:aws:bedrock:<region>:<account>:<type>/<name>` anchored at the
+/// start of `id`, with `<type>` in [`BEDROCK_ARN_MODEL_RESOURCES`], a
+/// lowercase region, the account its type requires, and a non-empty `<name>`
+/// with no whitespace or `/`. Anything else is `false`, so a malformed ARN
+/// falls through to the rules it met before #9200 and never becomes Bedrock.
+/// Test: `every_bedrock_model_arn_is_conclusive_in_both_checks`,
+/// `malformed_bedrock_arn_keeps_its_pre_9200_classification`.
+fn is_bedrock_model_arn(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix(BEDROCK_ARN_HEAD) else {
+        return false;
+    };
+    // `<name>` may itself hold `:` (`amazon.nova-pro-v1:0`), so split twice only.
+    let mut fields = rest.splitn(3, ':');
+    let (Some(region), Some(account), Some(resource)) =
+        (fields.next(), fields.next(), fields.next())
+    else {
+        return false;
+    };
+    let Some((kind, name)) = resource.split_once('/') else {
+        return false;
+    };
+    let Some(&(_, has_account)) = BEDROCK_ARN_MODEL_RESOURCES.iter().find(|(k, _)| *k == kind)
+    else {
+        return false;
+    };
+    let region_ok = !region.is_empty()
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let account_ok = if has_account {
+        account.len() == 12 && account.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        account.is_empty()
+    };
+    let name_ok = !name.is_empty() && !name.contains('/') && !name.contains(char::is_whitespace);
+    region_ok && account_ok && name_ok
+}
+
 /// How strongly a model id's spelling names its provider.
 ///
 /// Why: not every signal here is equally good, and the difference decides
@@ -93,8 +150,8 @@ const FIREWORKS_NATIVE_PREFIX: &str = "accounts/fireworks/models/";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShapeEvidence {
     /// The spelling belongs to exactly one provider's catalogue: a
-    /// `vendor/model` slug, the Fireworks-native path, or a region-scoped
-    /// Bedrock inference profile.
+    /// `vendor/model` slug, the Fireworks-native path, a region-scoped
+    /// Bedrock inference profile, or a Bedrock model ARN.
     Conclusive,
     /// A dotted `vendor.model` id whose first segment is a known Bedrock
     /// vendor. Strong enough to outrank a standing config default, not strong
@@ -114,7 +171,9 @@ pub enum ShapeEvidence {
 /// The input must already have had the caller's own routing prefix stripped —
 /// see the module docs.
 /// Test: `slug_and_profile_evidence_is_conclusive`,
-/// `dotted_vendor_evidence_is_probable`.
+/// `dotted_vendor_evidence_is_probable`, `shape_classification_table`,
+/// `application_inference_profile_arn_is_conclusive_bedrock`,
+/// `non_bedrock_arns_and_look_alikes_keep_their_classification`.
 pub fn classify_model_shape(model: &str) -> Option<(ProviderId, ShapeEvidence)> {
     let id = model.trim();
     if id.is_empty() {
@@ -122,6 +181,10 @@ pub fn classify_model_shape(model: &str) -> Option<(ProviderId, ShapeEvidence)> 
     }
     if id.starts_with(FIREWORKS_NATIVE_PREFIX) {
         return Some((ProviderId::Fireworks, ShapeEvidence::Conclusive));
+    }
+    // #9200: before the `/` rule — a Bedrock ARN's `/` is not a slug separator.
+    if is_bedrock_model_arn(id) {
+        return Some((ProviderId::Bedrock, ShapeEvidence::Conclusive));
     }
     if id.contains('/') {
         return Some((ProviderId::OpenRouter, ShapeEvidence::Conclusive));
@@ -375,5 +438,206 @@ mod tests {
             ),
             Some(ProviderId::Fireworks)
         );
+    }
+
+    /// Shaped like the owner-ruling-59 pilot profile; the account id is AWS's
+    /// documentation placeholder, not a real account.
+    const PILOT_SHAPED_ARN: &str =
+        "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751";
+
+    /// #9200 regression: the `/` in an application-inference-profile ARN read
+    /// as an OpenRouter slug, so a tagged Bedrock profile routed to OpenRouter.
+    #[test]
+    fn application_inference_profile_arn_is_conclusive_bedrock() {
+        assert_eq!(
+            classify_model_shape(PILOT_SHAPED_ARN),
+            Some((ProviderId::Bedrock, ShapeEvidence::Conclusive)),
+            "#9200: a Bedrock application-inference-profile ARN is Bedrock's catalogue"
+        );
+    }
+
+    #[test]
+    fn every_bedrock_model_arn_is_conclusive_in_both_checks() {
+        for arn in [
+            PILOT_SHAPED_ARN,
+            "arn:aws:bedrock:us-east-1:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6",
+            "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0",
+            "  arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5  ",
+        ] {
+            assert_eq!(
+                classify_model_shape(arn),
+                Some((ProviderId::Bedrock, ShapeEvidence::Conclusive)),
+                "{arn}"
+            );
+            assert_eq!(
+                conclusive_shape_mismatch(ProviderId::OpenRouter, arn),
+                Some(ProviderId::Bedrock),
+                "{arn}: no aggregator can run a Bedrock ARN"
+            );
+            assert_eq!(
+                conclusive_shape_mismatch(ProviderId::Bedrock, arn),
+                None,
+                "{arn}: a Bedrock ARN on Bedrock is no mismatch"
+            );
+        }
+    }
+
+    /// Every classification, before and after #9200. Only the rows marked
+    /// `#9200` changed; each was `Some((OpenRouter, Conclusive))` before.
+    #[test]
+    fn shape_classification_table() {
+        use ProviderId::{Bedrock, Fireworks, OpenRouter};
+        use ShapeEvidence::{Conclusive, Probable};
+        let table: &[(&str, Option<(ProviderId, ShapeEvidence)>)] = &[
+            ("", None),
+            ("   ", None),
+            ("claude-opus-4-5-20260101", None),
+            ("claude-opus-4-8", None),
+            ("gpt-5.4-mini", None),
+            ("llama-3.1-70b", None),
+            ("anthropic/claude-opus-4.8", Some((OpenRouter, Conclusive))),
+            (
+                "anthropic/claude-sonnet-4.6",
+                Some((OpenRouter, Conclusive)),
+            ),
+            (
+                "openai/gpt-5.4-mini-20260317",
+                Some((OpenRouter, Conclusive)),
+            ),
+            (
+                "us.anthropic.claude-sonnet-4-6",
+                Some((Bedrock, Conclusive)),
+            ),
+            ("eu.anthropic.claude-haiku-4-5", Some((Bedrock, Conclusive))),
+            ("ap.anthropic.claude-haiku-4-5", Some((Bedrock, Conclusive))),
+            ("jp.anthropic.claude-haiku-4-5", Some((Bedrock, Conclusive))),
+            (
+                "global.anthropic.claude-opus-4-8",
+                Some((Bedrock, Conclusive)),
+            ),
+            ("anthropic.claude-sonnet-4-6", Some((Bedrock, Probable))),
+            ("amazon.nova-pro-v1:0", Some((Bedrock, Probable))),
+            (
+                "accounts/fireworks/models/llama-v3p1-70b-instruct",
+                Some((Fireworks, Conclusive)),
+            ),
+            // #9200
+            (PILOT_SHAPED_ARN, Some((Bedrock, Conclusive))),
+            // #9200
+            (
+                "arn:aws:bedrock:us-east-1:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6",
+                Some((Bedrock, Conclusive)),
+            ),
+            // #9200
+            (
+                "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0",
+                Some((Bedrock, Conclusive)),
+            ),
+        ];
+        for (id, expected) in table {
+            assert_eq!(classify_model_shape(id), *expected, "{id:?}");
+        }
+    }
+
+    /// #9200: the ARN rule anchors on `arn:aws:bedrock:` at the start of the
+    /// id and on a model resource type. Everything else keeps its pre-#9200
+    /// classification — and none of it becomes Bedrock.
+    #[test]
+    fn non_bedrock_arns_and_look_alikes_keep_their_classification() {
+        let slug = Some((ProviderId::OpenRouter, ShapeEvidence::Conclusive));
+        for (id, expected) in [
+            (
+                "arn:aws:sagemaker:us-west-2:111122223333:endpoint/my-endpoint",
+                slug,
+            ),
+            (
+                "arn:aws:bedrock-agent:us-west-2:111122223333:agent/AGENT12345",
+                slug,
+            ),
+            // Service `bedrock`, but an agent is not a model Converse runs.
+            (
+                "arn:aws:bedrock:us-west-2:111122223333:agent/AGENT12345",
+                slug,
+            ),
+            (format!("x{PILOT_SHAPED_ARN}").as_str(), slug),
+            (format!("profile={PILOT_SHAPED_ARN}").as_str(), slug),
+            // The module never strips a routing prefix; a consumer does.
+            (format!("openrouter/{PILOT_SHAPED_ARN}").as_str(), slug),
+            // Partition choice: only the commercial `aws` partition.
+            (
+                "arn:aws-us-gov:bedrock:us-gov-west-1:111122223333:application-inference-profile/abc",
+                slug,
+            ),
+            (
+                "ARN:AWS:BEDROCK:US-WEST-2:111122223333:APPLICATION-INFERENCE-PROFILE/ABC",
+                slug,
+            ),
+            ("anthropic/claude-sonnet-4.6", slug),
+        ] {
+            assert_eq!(classify_model_shape(id), expected, "{id:?}");
+            assert_ne!(
+                conclusive_shape_mismatch(ProviderId::OpenRouter, id),
+                Some(ProviderId::Bedrock),
+                "{id:?} must not be claimed for Bedrock"
+            );
+        }
+    }
+
+    /// #9200 fail-open check: a malformed `arn:aws:bedrock:` string is never
+    /// Bedrock — it keeps exactly the classification it had before #9200.
+    #[test]
+    fn malformed_bedrock_arn_keeps_its_pre_9200_classification() {
+        let slug = Some((ProviderId::OpenRouter, ShapeEvidence::Conclusive));
+        for (id, expected) in [
+            // Missing resource segment entirely.
+            ("arn:aws:bedrock:us-west-2:111122223333", None),
+            ("arn:aws:bedrock:", None),
+            // Resource type with no `/<id>`.
+            (
+                "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile",
+                None,
+            ),
+            // Empty resource id.
+            (
+                "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/",
+                slug,
+            ),
+            ("arn:aws:bedrock:us-east-1::foundation-model/", slug),
+            // Empty resource type.
+            ("arn:aws:bedrock:us-west-2:111122223333:/9iatxd8u1751", slug),
+            // Empty or malformed region.
+            (
+                "arn:aws:bedrock::111122223333:application-inference-profile/abc",
+                slug,
+            ),
+            (
+                "arn:aws:bedrock:US_WEST:111122223333:application-inference-profile/abc",
+                slug,
+            ),
+            // Account id wrong for the resource type.
+            (
+                "arn:aws:bedrock:us-west-2:12345:application-inference-profile/abc",
+                slug,
+            ),
+            (
+                "arn:aws:bedrock:us-west-2::application-inference-profile/abc",
+                slug,
+            ),
+            (
+                "arn:aws:bedrock:us-east-1:111122223333:foundation-model/amazon.nova-pro-v1:0",
+                slug,
+            ),
+            // Whitespace or a further `/` inside the resource id.
+            (
+                "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/ab cd",
+                slug,
+            ),
+            (
+                "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/a/b",
+                slug,
+            ),
+        ] {
+            assert_eq!(classify_model_shape(id), expected, "{id:?}");
+        }
     }
 }
