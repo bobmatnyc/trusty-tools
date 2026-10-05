@@ -74,8 +74,6 @@ fn flag_rows() -> Vec<(&'static str, &'static str, Value)> {
             "delete_data",
             serde_json::json!({ "index_id": "demo" }),
         ),
-        ("upgrade", "check", serde_json::json!({})),
-        ("upgrade", "confirm", serde_json::json!({})),
     ];
     for (key, _) in GREP_BOOL_FLAGS {
         rows.push((
@@ -136,7 +134,6 @@ async fn spawn_capture_daemon() -> (String, Captured) {
     let app = Router::new()
         .route("/indexes/demo/grep", post(handler))
         .route("/search", post(handler))
-        .route("/upgrade", post(handler))
         .with_state(Arc::clone(&captured));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -210,9 +207,4 @@ async fn an_absent_boolean_flag_keeps_the_documented_default() {
     .await;
     assert_eq!(body["full_content"], Value::Bool(false), "body {body}");
     assert!(body.get("serial").is_none(), "body {body}");
-
-    // upgrade: check defaults to true, confirm to false.
-    let body = forwarded_body(&server, &captured, "upgrade", serde_json::json!({})).await;
-    assert_eq!(body["check"], Value::Bool(true), "body {body}");
-    assert_eq!(body["confirm"], Value::Bool(false), "body {body}");
 }

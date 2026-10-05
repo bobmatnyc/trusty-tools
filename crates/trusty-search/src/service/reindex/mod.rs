@@ -332,3 +332,6 @@ mod progress_race_tests;
 // orchestration tests.
 #[cfg(test)]
 mod completion_tests;
+// #9169: a reindex commit stamps its corpus; a load never does.
+#[cfg(test)]
+mod reindex_stamp_tests;
