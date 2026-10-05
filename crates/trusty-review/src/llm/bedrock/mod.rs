@@ -35,7 +35,7 @@
 //! `bedrock_request_includes_tool_config_when_schema_set` (all unit-level,
 //! no real AWS calls).
 
-mod arn;
+pub(crate) mod arn;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
@@ -104,9 +104,11 @@ fn validate_model_id(model_id: &str) -> Result<(), LlmError> {
     if has_profile_prefix || arn::parse(model_id).is_some() {
         return Ok(());
     }
+    // #9200: the id may be a near-ARN; never echo its account id.
+    let shown = arn::mask_account_ids(model_id);
     Err(LlmError::Validation(format!(
-        "Bedrock model id {model_id:?} must start with a cross-region inference-profile \
-         prefix (us., eu., ap., jp., or global.). \
+        "Bedrock model id {shown:?} must start with a cross-region inference-profile \
+         prefix (us., eu., ap., jp., or global.), or be a Bedrock model ARN. \
          Example: \"us.anthropic.claude-sonnet-4-6\". \
          Bare foundation-model ids are not supported."
     )))
@@ -289,50 +291,10 @@ impl BedrockProvider {
             sdk_req = sdk_req.tool_config(tool_config);
         }
 
-        let resp = sdk_req.send().await.map_err(|sdk_err| {
-            // #6912: SdkError's own Display flattens a service error to the bare
-            // word "service error"; read the AWS code and message instead.
-            let msg = describe_sdk_error(&sdk_err);
-            let lower = msg.to_lowercase();
-            // Map SDK errors to LlmError variants using the error message text.
-            if lower.contains("resourcenotfound") || lower.contains("no such model") {
-                LlmError::ModelNotFound(format!("model={model}: {msg}"))
-            } else if lower.contains("accessdenied")
-                || lower.contains("unauthorized")
-                || lower.contains("credential")
-                || lower.contains("not authorized")
-            {
-                LlmError::AccessDenied(format!(
-                    "AWS Bedrock access denied (model={model}, region={}): {msg}. \
-                     Ensure AWS credentials are configured and the account has \
-                     bedrock:InvokeModel permission.",
-                    self.adapter.region()
-                ))
-            } else if lower.contains("validationexception") || lower.contains("validation") {
-                LlmError::Validation(msg)
-            } else if lower.contains("throttlingexception")
-                || lower.contains("throttled")
-                || lower.contains("rate")
-            {
-                LlmError::RateLimited
-            } else if lower.contains("serviceunavailable")
-                || lower.contains("internalserver")
-                || lower.contains("modelnotready")
-                    && (lower.contains("creating") || lower.contains("failed"))
-            {
-                LlmError::Upstream {
-                    status: 503,
-                    body: msg,
-                }
-            } else if lower.contains("modelnotready") || lower.contains("not in active") {
-                LlmError::ModelNotReady(msg)
-            } else {
-                LlmError::Transport(format!(
-                    "Bedrock Converse SDK error (model={model}, region={}): {msg}",
-                    self.adapter.region()
-                ))
-            }
-        })?;
+        let resp = sdk_req
+            .send()
+            .await
+            .map_err(|sdk_err| map_converse_error(&sdk_err, model, self.adapter.region()))?;
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -383,8 +345,10 @@ impl LlmProvider for BedrockProvider {
     /// where `is_retryable()` is true; immediately returns all other errors.
     /// Test: `bedrock_converse_request_construction` (unit, no real AWS calls).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #9200: log the model with any ARN account id masked.
+        let shown = arn::mask_account_ids(req.effective_model(&self.model));
         debug!(
-            model = %req.effective_model(&self.model),
+            model = %shown,
             provider = "bedrock",
             region = %self.adapter.region(),
             structured = req.response_schema.is_some(),
@@ -396,7 +360,7 @@ impl LlmProvider for BedrockProvider {
             match self.call_once(&req).await {
                 Ok(resp) => {
                     debug!(
-                        model = %resp.model,
+                        model = %shown,
                         input_tokens = resp.input_tokens,
                         output_tokens = resp.output_tokens,
                         latency_ms = resp.latency_ms,
@@ -411,7 +375,7 @@ impl LlmProvider for BedrockProvider {
                     warn!(
                         attempt,
                         backoff_ms,
-                        model = %req.effective_model(&self.model),
+                        model = %shown,
                         "bedrock transient error — retrying: {err}"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
@@ -423,6 +387,63 @@ impl LlmProvider for BedrockProvider {
 }
 
 // ─── Error rendering ──────────────────────────────────────────────────────────
+
+/// Map a failed Converse send to an [`LlmError`], with ARN account ids masked.
+///
+/// Why: extracted from `call_once` so the mapping is testable without AWS, and
+/// so every message it builds passes one mask: an ARN model id, and any ARN
+/// AWS quotes back, would otherwise put an account id in the error (#9200).
+/// What: renders the SDK error via [`describe_sdk_error`], masks it and the
+/// model id with [`arn::mask_account_ids`], and classifies the message text
+/// into a variant exactly as `call_once` did before the extraction.
+/// Test: `converse_errors_mask_the_arn_account_id`.
+fn map_converse_error<E, R>(sdk_err: &SdkError<E, R>, model: &str, region: &str) -> LlmError
+where
+    E: ProvideErrorMetadata + std::fmt::Display,
+{
+    // #9200: the unmasked id still goes to AWS; only this text is masked.
+    let model = arn::mask_account_ids(model);
+    // #6912: SdkError's own Display flattens a service error to the bare
+    // word "service error"; read the AWS code and message instead.
+    let msg = arn::mask_account_ids(&describe_sdk_error(sdk_err)).into_owned();
+    let lower = msg.to_lowercase();
+    // Map SDK errors to LlmError variants using the error message text.
+    if lower.contains("resourcenotfound") || lower.contains("no such model") {
+        LlmError::ModelNotFound(format!("model={model}: {msg}"))
+    } else if lower.contains("accessdenied")
+        || lower.contains("unauthorized")
+        || lower.contains("credential")
+        || lower.contains("not authorized")
+    {
+        LlmError::AccessDenied(format!(
+            "AWS Bedrock access denied (model={model}, region={region}): {msg}. \
+             Ensure AWS credentials are configured and the account has \
+             bedrock:InvokeModel permission."
+        ))
+    } else if lower.contains("validationexception") || lower.contains("validation") {
+        LlmError::Validation(msg)
+    } else if lower.contains("throttlingexception")
+        || lower.contains("throttled")
+        || lower.contains("rate")
+    {
+        LlmError::RateLimited
+    } else if lower.contains("serviceunavailable")
+        || lower.contains("internalserver")
+        || lower.contains("modelnotready")
+            && (lower.contains("creating") || lower.contains("failed"))
+    {
+        LlmError::Upstream {
+            status: 503,
+            body: msg,
+        }
+    } else if lower.contains("modelnotready") || lower.contains("not in active") {
+        LlmError::ModelNotReady(msg)
+    } else {
+        LlmError::Transport(format!(
+            "Bedrock Converse SDK error (model={model}, region={region}): {msg}"
+        ))
+    }
+}
 
 /// Render an `SdkError` with the AWS error code and message attached.
 ///

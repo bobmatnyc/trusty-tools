@@ -6,10 +6,20 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::{ArnKind, BedrockArn, parse};
+use aws_sdk_bedrockruntime::config::interceptors::BeforeSerializationInterceptorContextRef;
+use aws_sdk_bedrockruntime::config::{BehaviorVersion, ConfigBag, Intercept, Region};
+use aws_sdk_bedrockruntime::error::SdkError;
+use aws_sdk_bedrockruntime::operation::converse::{ConverseError, ConverseInput};
+use aws_sdk_bedrockruntime::types::error::{AccessDeniedException, ResourceNotFoundException};
+use aws_smithy_types::error::ErrorMetadata;
+
+use super::{ArnKind, BedrockArn, mask_account_ids, parse};
 use crate::config::{Provider, ReviewConfig};
-use crate::llm::bedrock::{BedrockProvider, estimate_bedrock_cost_usd};
-use crate::llm::{build_provider, resolve_model};
+use crate::llm::bedrock::{
+    BedrockProvider, estimate_bedrock_cost_usd, map_converse_error, validate_model_id,
+};
+use crate::llm::{ChatMessage, LlmError, LlmRequest, build_provider, resolve_model};
+use crate::pipeline::post::format_review_footer;
 
 /// Shaped like the owner-ruling-59 pilot profile; the account id is AWS's
 /// documentation placeholder, not a real account.
@@ -17,6 +27,10 @@ const APP_PROFILE_ARN: &str =
     "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751";
 const INFERENCE_PROFILE_ARN: &str =
     "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6";
+/// The documentation placeholder account id the ARNs above carry.
+const ACCOUNT: &str = "111122223333";
+const MASKED_APP_PROFILE_ARN: &str =
+    "arn:aws:bedrock:us-west-2:****:application-inference-profile/9iatxd8u1751";
 const FOUNDATION_MODEL_ARN: &str =
     "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0";
 
@@ -193,7 +207,208 @@ fn arn_pricing_resolves_the_embedded_model_or_reports_unpriced() {
     let (cost, log) = cost_and_log(APP_PROFILE_ARN);
     assert_eq!(cost, 0.0);
     assert!(
-        log.contains("WARN") && log.contains("unpriced") && log.contains(APP_PROFILE_ARN),
+        log.contains("WARN") && log.contains("unpriced") && log.contains(MASKED_APP_PROFILE_ARN),
         "an unpriced ARN must say so at warn level: {log:?}"
     );
+    assert!(
+        !log.contains(ACCOUNT),
+        "the warn line leaks the account: {log:?}"
+    );
+}
+
+// ── Account-id masking (#9200, architect ruling 2026-10-05) ──────────────
+
+#[test]
+fn mask_hides_the_account_of_every_arn_form() {
+    assert_eq!(mask_account_ids(APP_PROFILE_ARN), MASKED_APP_PROFILE_ARN);
+    assert_eq!(
+        mask_account_ids(INFERENCE_PROFILE_ARN),
+        "arn:aws:bedrock:us-east-2:****:inference-profile/us.anthropic.claude-sonnet-4-6"
+    );
+    // A foundation-model ARN has no account id, so nothing changes.
+    assert_eq!(mask_account_ids(FOUNDATION_MODEL_ARN), FOUNDATION_MODEL_ARN);
+    // Inside longer text, every ARN is masked, including ones AWS quotes back.
+    let text =
+        format!("User: arn:aws:sts::{ACCOUNT}:assumed-role/r/s cannot invoke {APP_PROFILE_ARN}.");
+    assert_eq!(
+        mask_account_ids(&text),
+        format!("User: arn:aws:sts::****:assumed-role/r/s cannot invoke {MASKED_APP_PROFILE_ARN}.")
+    );
+}
+
+#[test]
+fn mask_leaves_plain_ids_and_non_arn_text_unchanged() {
+    for text in [
+        "",
+        "claude-sonnet-5-5",
+        "us.anthropic.claude-sonnet-4-6",
+        "anthropic/claude-sonnet-4.6",
+        "accounts/fireworks/models/llama-v3p1-70b-instruct",
+        "order 111122223333 shipped",
+        "the arn: field is empty",
+    ] {
+        assert_eq!(mask_account_ids(text), text, "{text:?}");
+    }
+}
+
+#[test]
+fn mask_survives_malformed_and_truncated_input() {
+    for text in [
+        "arn:",
+        "arn:aws",
+        "arn:aws:bedrock:us-west-2:",
+        "arn:aws:bedrock:us-west-2:11112222333",
+        "arn:aws:bedrock:us-west-2:1111222233334:x/y",
+        "arn:aws:bedrock:us-west-2:11112222333a:x/y",
+        "arn:aws:bedrock:US-WEST-2:111122223333:x/y",
+        "arnarn:arn:arn:",
+        "arn:aws:bedrock:us-west-2:111122223333",
+        "arn:\u{e9}:bedrock:us-west-2:111122223333:x/y",
+    ] {
+        assert_eq!(mask_account_ids(text), text, "{text:?}");
+    }
+    // A truncated second ARN does not undo the mask on the first.
+    let text = format!("{APP_PROFILE_ARN} arn:aws:bedrock:us-west-2:1111");
+    assert_eq!(
+        mask_account_ids(&text),
+        format!("{MASKED_APP_PROFILE_ARN} arn:aws:bedrock:us-west-2:1111")
+    );
+}
+
+/// A Converse service error carrying `code` and `message` in its metadata.
+fn service_error(code: &str, message: &str) -> SdkError<ConverseError, ()> {
+    let meta = ErrorMetadata::builder().code(code).message(message).build();
+    let err = match code {
+        "AccessDeniedException" => ConverseError::AccessDeniedException(
+            AccessDeniedException::builder()
+                .message(message)
+                .meta(meta)
+                .build(),
+        ),
+        _ => ConverseError::ResourceNotFoundException(
+            ResourceNotFoundException::builder()
+                .message(message)
+                .meta(meta)
+                .build(),
+        ),
+    };
+    SdkError::service_error(err, ())
+}
+
+/// ModelNotFound, AccessDenied and the validation error name the model; none
+/// may carry the account id, whether it came from the model or from AWS.
+#[test]
+fn converse_errors_mask_the_arn_account_id() {
+    let not_found = service_error(
+        "ResourceNotFoundException",
+        &format!("{APP_PROFILE_ARN} is not found"),
+    );
+    let err = map_converse_error(&not_found, APP_PROFILE_ARN, "us-west-2");
+    assert!(matches!(err, LlmError::ModelNotFound(_)), "{err:?}");
+    assert!(err.to_string().contains(MASKED_APP_PROFILE_ARN), "{err}");
+    assert!(!err.to_string().contains(ACCOUNT), "account leaked: {err}");
+
+    let denied = service_error(
+        "AccessDeniedException",
+        &format!("User: arn:aws:sts::{ACCOUNT}:assumed-role/r/s is not authorized"),
+    );
+    let err = map_converse_error(&denied, APP_PROFILE_ARN, "us-west-2");
+    assert!(matches!(err, LlmError::AccessDenied(_)), "{err:?}");
+    assert!(err.to_string().contains(MASKED_APP_PROFILE_ARN), "{err}");
+    assert!(!err.to_string().contains(ACCOUNT), "account leaked: {err}");
+
+    // A near-ARN the validator rejects is echoed masked, and the message
+    // names the ARN form it would have accepted.
+    let near = format!("arn:aws:bedrock:us-west-2:{ACCOUNT}:agent/AGENT12345");
+    let err = validate_model_id(&near).expect_err("an agent ARN is not a model");
+    let text = err.to_string();
+    assert!(
+        text.contains("arn:aws:bedrock:us-west-2:****:agent/AGENT12345"),
+        "{text}"
+    );
+    assert!(text.contains("Bedrock model ARN"), "{text}");
+    assert!(!text.contains(ACCOUNT), "account leaked: {text}");
+}
+
+/// Captures the model id the SDK built into the Converse request, then halts.
+#[derive(Debug, Clone, Default)]
+struct CaptureModelId(Arc<Mutex<Option<String>>>);
+
+impl Intercept for CaptureModelId {
+    fn name(&self) -> &'static str {
+        "CaptureModelId"
+    }
+
+    fn read_before_execution(
+        &self,
+        context: &BeforeSerializationInterceptorContextRef<'_>,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let input = context
+            .input()
+            .downcast_ref::<ConverseInput>()
+            .ok_or("operation input is not a ConverseInput")?;
+        *self.0.lock().expect("capture lock") = input.model_id().map(str::to_string);
+        Err("request captured; halting before any network I/O".into())
+    }
+}
+
+/// The mask is display-only: Converse receives the ARN with its account id.
+#[tokio::test]
+async fn converse_receives_the_unmasked_arn() {
+    let capture = CaptureModelId::default();
+    let conf = aws_sdk_bedrockruntime::Config::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-west-2"))
+        .interceptor(capture.clone())
+        .build();
+    let client = aws_sdk_bedrockruntime::Client::from_conf(conf);
+    let provider = BedrockProvider::from_client(client, APP_PROFILE_ARN, "us-west-2");
+    let req = LlmRequest {
+        model: String::new(),
+        system: String::new(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        }],
+        temperature: 0.0,
+        max_tokens: 16,
+        response_schema: None,
+    };
+
+    let err = provider
+        .call_once(&req)
+        .await
+        .expect_err("the interceptor halts the call");
+    let sent = capture.0.lock().expect("capture lock").take();
+    assert_eq!(sent.as_deref(), Some(APP_PROFILE_ARN));
+    assert!(!err.to_string().contains(ACCOUNT), "account leaked: {err}");
+}
+
+/// The posted footer masks the account and prints `est. unpriced` for an
+/// application inference profile; other models keep their dollar figure.
+#[test]
+fn footer_masks_the_account_and_says_unpriced_for_an_application_profile() {
+    for model in [
+        APP_PROFILE_ARN.to_string(),
+        format!("bedrock/{APP_PROFILE_ARN}"),
+    ] {
+        let footer = format_review_footer(None, &model, 1_000, 200, 0.0);
+        assert!(footer.contains(MASKED_APP_PROFILE_ARN), "{footer}");
+        assert!(footer.contains("est. unpriced"), "{footer}");
+        assert!(!footer.contains(ACCOUNT), "{footer}");
+        assert!(
+            !footer.contains('$'),
+            "an unpriced model has no $ figure: {footer}"
+        );
+    }
+    for model in [
+        INFERENCE_PROFILE_ARN,
+        FOUNDATION_MODEL_ARN,
+        "us.anthropic.claude-sonnet-4-6",
+    ] {
+        let footer = format_review_footer(None, model, 1_000, 200, 0.066);
+        assert!(footer.contains("est. $0.066"), "{footer}");
+        assert!(!footer.contains("unpriced"), "{footer}");
+    }
 }

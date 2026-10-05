@@ -57,7 +57,7 @@ pub(super) fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
             Some(embedded) => embedded,
             None => {
                 warn!(
-                    model = %model,
+                    model = %arn::mask_account_ids(model),
                     "Bedrock application inference profile is unpriced: its ARN does not \
                      name the model it runs, so cost_usd 0.0 is not a measured cost"
                 );

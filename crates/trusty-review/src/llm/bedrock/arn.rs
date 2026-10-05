@@ -10,7 +10,11 @@
 //! resource name. Well-formedness is decided by
 //! [`trusty_common::inference::classify_model_shape`], so this crate and the
 //! shared router never disagree about which strings are ARNs.
+//! [`mask_account_ids`] hides the account id of any ARN in display and log
+//! text; the id sent to AWS is never masked.
 //! Test: `arn_tests.rs`.
+
+use std::borrow::Cow;
 
 use trusty_common::inference::{ProviderId, ShapeEvidence, classify_model_shape};
 
@@ -91,6 +95,77 @@ pub(crate) fn parse(id: &str) -> Option<BedrockArn<'_>> {
         _ => return None,
     };
     Some(BedrockArn { region, kind, name })
+}
+
+/// Whether `model` is an application-inference-profile ARN, which no price
+/// table can price because its id does not name the model it runs.
+///
+/// Test: `footer_masks_the_account_and_says_unpriced_for_an_application_profile`.
+pub(crate) fn is_unpriced(model: &str) -> bool {
+    parse(model).is_some_and(|arn| arn.priced_model().is_none())
+}
+
+/// What replaces an ARN's 12-digit account id in display and log text.
+const ACCOUNT_MASK: &str = "****";
+
+/// Replace the 12-digit account id of every ARN inside `text` with `****`.
+///
+/// Why: an ARN's account id identifies the AWS account behind a review, and it
+/// would otherwise reach the posted PR footer, error strings and logs (#9200,
+/// architect ruling 2026-10-05). AWS's own error messages can quote other ARNs
+/// (an `sts` assumed role, say), so every ARN is masked, not only Bedrock's.
+/// What: scans for `arn:<partition>:<service>:<region>:<12 digits>:` anywhere
+/// in `text` and masks the digits. A region may be empty (`iam`, `sts`); an
+/// empty account (a `foundation-model` ARN) has nothing to mask. Text with no
+/// such span is returned borrowed and unchanged. Byte offsets only ever land
+/// on ASCII bytes, so no input can panic it.
+/// Test: `mask_hides_the_account_of_every_arn_form`,
+/// `mask_leaves_plain_ids_and_non_arn_text_unchanged`,
+/// `mask_survives_malformed_and_truncated_input`.
+pub(crate) fn mask_account_ids(text: &str) -> Cow<'_, str> {
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut search = 0;
+    while let Some(offset) = text[search..].find("arn:") {
+        let start = search + offset;
+        search = start + "arn:".len();
+        if let Some((from, to)) = account_span(&text[start..]) {
+            out.push_str(&text[copied..start + from]);
+            out.push_str(ACCOUNT_MASK);
+            copied = start + to;
+            search = copied;
+        }
+    }
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    Cow::Owned(out)
+}
+
+/// The byte range of the account id in `arn`, which starts with `arn:`.
+///
+/// What: three `:`-terminated fields of `[a-z0-9-]` — partition and service
+/// non-empty, region possibly empty — then exactly 12 ASCII digits and a `:`.
+fn account_span(arn: &str) -> Option<(usize, usize)> {
+    let bytes = arn.as_bytes();
+    let mut i = "arn:".len();
+    for min_len in [1, 1, 0] {
+        let start = i;
+        while bytes
+            .get(i)
+            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+        {
+            i += 1;
+        }
+        if i - start < min_len || bytes.get(i) != Some(&b':') {
+            return None;
+        }
+        i += 1;
+    }
+    let end = i + 12;
+    let account = bytes.get(i..end)?;
+    (account.iter().all(u8::is_ascii_digit) && bytes.get(end) == Some(&b':')).then_some((i, end))
 }
 
 #[cfg(test)]

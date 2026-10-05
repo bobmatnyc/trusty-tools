@@ -53,9 +53,13 @@ use crate::{
 /// where the grade prefix is included when `grade` is `Some`, token counts use
 /// thousands separators, and cost is rounded to 3 decimal places (e.g. `$0.066`).
 /// An empty model string is rendered as `(unknown)` so the line is always well-formed.
+/// A Bedrock ARN model shows with its account id masked, and an
+/// application-inference-profile ARN, which no price table can price, shows
+/// `est. unpriced` in place of a dollar figure (#9200).
 /// Test: `footer_format_known_tuple` (exact-string regression for the sample
 /// tuple from #728), `footer_format_with_grade` (grade-prefixed form from #732),
-/// `footer_thousands_separator` (boundary at 1 000).
+/// `footer_thousands_separator` (boundary at 1 000),
+/// `footer_masks_the_account_and_says_unpriced_for_an_application_profile`.
 pub fn format_review_footer(
     grade: Option<&str>,
     model: &str,
@@ -63,22 +67,29 @@ pub fn format_review_footer(
     output_tokens: u32,
     cost_usd: f64,
 ) -> String {
+    // #9200: the footer is posted publicly; never show an ARN's account id.
     let model_display = if model.is_empty() {
         "(unknown)".to_string()
     } else {
-        model.to_string()
+        crate::llm::bedrock::arn::mask_account_ids(model).into_owned()
     };
     // Format token counts with locale-style thousands separators (groups of 3).
     let in_fmt = format_with_thousands(input_tokens);
     let out_fmt = format_with_thousands(output_tokens);
     // Round cost to 3 decimal places; strip trailing zeros after the 3rd digit.
-    let cost_fmt = format_cost(cost_usd);
+    // #9200: an application inference profile's $0 is not a measured cost.
+    let bare_model = crate::llm::strip_provider_prefix(model);
+    let cost_fmt = if crate::llm::bedrock::arn::is_unpriced(bare_model) {
+        "unpriced".to_string()
+    } else {
+        format!("${}", format_cost(cost_usd))
+    };
     let grade_prefix = match grade {
         Some(g) if !g.is_empty() => format!("Grade: {g} · "),
         _ => String::new(),
     };
     format!(
-        "\n---\n{grade_prefix}🤖 Reviewed by Trusty-Review (`{model_display}`) · tokens ↑{in_fmt} ↓{out_fmt} · est. ${cost_fmt}"
+        "\n---\n{grade_prefix}🤖 Reviewed by Trusty-Review (`{model_display}`) · tokens ↑{in_fmt} ↓{out_fmt} · est. {cost_fmt}"
     )
 }
 

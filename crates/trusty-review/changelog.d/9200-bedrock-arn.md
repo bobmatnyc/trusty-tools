@@ -10,5 +10,10 @@ Fixed
   over the ARN's (#9200).
 - Cost for an `inference-profile` or `foundation-model` ARN is priced as the
   model id the ARN names. An `application-inference-profile` ARN does not name
-  its model, so a warning log line reports it as unpriced. The review footer
-  still shows an estimate of $0 for it (#9200).
+  its model, so a warning log line reports it as unpriced and the review footer
+  shows `est. unpriced` in place of a dollar estimate (#9200).
+- An ARN's 12-digit account id is masked as `****` in the review footer, in
+  Bedrock error messages (including ARNs that AWS quotes back), in the
+  model-id validation error and in Bedrock log lines. The ARN sent to AWS is
+  not masked. The validation error now says a Bedrock model ARN is accepted
+  (#9200).
