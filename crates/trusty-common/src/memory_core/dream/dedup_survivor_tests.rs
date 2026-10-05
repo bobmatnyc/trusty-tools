@@ -71,6 +71,11 @@ struct Spec {
 
 /// Write `spec` to redb, the vector index (as [`unit`]) and the drawer table.
 async fn put(handle: &Arc<PalaceHandle>, spec: &Spec) -> Uuid {
+    put_with_vector(handle, spec, unit()).await
+}
+
+/// [`put`] with an explicit stored vector.
+async fn put_with_vector(handle: &Arc<PalaceHandle>, spec: &Spec, vector: Vec<f32>) -> Uuid {
     let mut d = Drawer::new(Uuid::new_v4(), spec.content);
     d.importance = spec.importance;
     d.created_at = Utc::now() - ChronoDuration::days(spec.age_days);
@@ -78,7 +83,7 @@ async fn put(handle: &Arc<PalaceHandle>, spec: &Spec) -> Uuid {
     d.fact_key = spec.fact_key.map(str::to_string);
     let id = d.id;
     handle.kg.upsert_drawer(&d).await.unwrap();
-    handle.vector_store.upsert(id, unit()).await.unwrap();
+    handle.vector_store.upsert(id, vector).await.unwrap();
     handle.add_drawer(d);
     id
 }
@@ -393,4 +398,144 @@ async fn forgetting_an_unmerged_drawer_writes_no_record() {
         .unwrap();
     assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
     assert!(read_journal(&palace.data_dir).unwrap().records.is_empty());
+}
+
+/// The vector the process-wide mock embedder gives `text` in a dream cycle.
+async fn mock_vector(text: &str) -> Vec<f32> {
+    let mock = crate::embedder::MockEmbedder::new(EMBED_DIM);
+    mock.embed_batch(&[text.to_string()])
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (norm(a) * norm(b))
+}
+
+/// Why (#9172 review): two dream cycles on one palace interleaved. A merged
+/// Y into X; B merged Z into Y; A then deleted Y, and B deleted Z, so Z's text
+/// left the live palace.
+/// What: cycle A pauses at the seam after persisting X+Y. Z is written, and
+/// cycle B starts on the same handle. If B reaches the seam too (it merged
+/// Y+Z), A is resumed first and then B: the interleaving above. Every text
+/// must still be in a live drawer afterwards. The stored vectors make Y's
+/// nearest neighbour X while only X and Y exist, and Z once Z exists; X's own
+/// query matches neither, so A cannot fold Z in after it resumes.
+#[tokio::test]
+async fn a_second_dream_cycle_on_a_dreaming_palace_loses_no_text() {
+    use super::cycle::merge_seam;
+    use super::{DreamConfig, Dreamer};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::{Notify, mpsc};
+
+    let (y_text, x_text, z_text) = (
+        "alpha beta gamma delta epsilon zeta",
+        "ZULU 4040 QUEBEC 7777 XRAY 0000",
+        "omega sigma kappa lambda theta iota",
+    );
+    let y_query = mock_vector(y_text).await;
+    assert!(
+        cosine(&mock_vector(x_text).await, &y_query) < 0.9,
+        "X must not match Z"
+    );
+    // X's stored vector: Y's query plus an orthogonal component, cosine ~0.96.
+    let norm = y_query.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mut x_vec: Vec<f32> = y_query.iter().map(|x| x / norm).collect();
+    let free = x_vec.iter().position(|x| *x == 0.0).expect("a zero slot");
+    x_vec[free] = 0.3;
+
+    let dir = tempdir().unwrap();
+    let palace = palace_in(&dir, "single-flight-dream");
+    let handle = open(&palace);
+    let spec = |content, age_days| Spec {
+        content,
+        importance: 0.5,
+        age_days,
+        tags: &[],
+        fact_key: None,
+    };
+    put_with_vector(&handle, &spec(y_text, 1), y_query.clone()).await;
+    put_with_vector(&handle, &spec(x_text, 0), x_vec).await;
+
+    let (paused_tx, mut paused) = mpsc::unbounded_channel::<usize>();
+    let releases: Arc<[Notify; 2]> = Arc::new([Notify::new(), Notify::new()]);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook: merge_seam::Hook = {
+        let releases = releases.clone();
+        Arc::new(move || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            let (tx, releases) = (paused_tx.clone(), releases.clone());
+            Box::pin(async move {
+                let _ = tx.send(n);
+                if let Some(release) = releases.get(n) {
+                    release.notified().await;
+                }
+            })
+        })
+    };
+    merge_seam::HOOKS
+        .lock()
+        .unwrap()
+        .insert(palace.id.as_str().to_string(), hook);
+
+    let dreamer = Arc::new(Dreamer::new(DreamConfig {
+        dedup_threshold: 0.9,
+        recall_benchmark_enabled: false,
+        compact: false,
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    }));
+    let cycle = |dreamer: Arc<Dreamer>, handle: Arc<PalaceHandle>| {
+        tokio::spawn(async move { dreamer.dream_cycle(&handle).await })
+    };
+    let wait = Duration::from_secs(30);
+
+    let a = cycle(dreamer.clone(), handle.clone());
+    let first = tokio::time::timeout(wait, paused.recv()).await.unwrap();
+    assert_eq!(first, Some(0), "cycle A merges X and Y");
+    put_with_vector(&handle, &spec(z_text, 2), y_query.clone()).await;
+
+    let mut b = cycle(dreamer.clone(), handle.clone());
+    let b_paused = tokio::time::timeout(wait, async {
+        tokio::select! {
+            n = paused.recv() => { assert_eq!(n, Some(1)); true }
+            joined = &mut b => { joined.unwrap().unwrap(); false }
+        }
+    })
+    .await
+    .unwrap();
+    releases[0].notify_one();
+    tokio::time::timeout(wait, a)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    if b_paused {
+        releases[1].notify_one();
+        tokio::time::timeout(wait, b)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    merge_seam::HOOKS.lock().unwrap().remove(palace.id.as_str());
+
+    let live: Vec<String> = handle
+        .drawers
+        .read()
+        .iter()
+        .map(|d| d.content().to_string())
+        .collect();
+    for text in [x_text, y_text, z_text] {
+        assert!(
+            live.iter().any(|c| c.contains(text)),
+            "{text:?} left the live palace (B interleaved: {b_paused}): {live:?}"
+        );
+    }
 }

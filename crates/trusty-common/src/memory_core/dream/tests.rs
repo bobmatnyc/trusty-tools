@@ -477,8 +477,10 @@ async fn dream_cycle_toggles_is_compacting() {
 
     // Direct guard exercise — the in-flight `true` window.
     {
-        let _g = CompactionGuard::new(handle.is_compacting.clone());
+        let _g = CompactionGuard::try_claim(handle.is_compacting.clone()).expect("free flag");
         assert!(handle.is_compacting(), "guard must set the flag");
+        // #9172: the claim is exclusive while the first guard lives.
+        assert!(CompactionGuard::try_claim(handle.is_compacting.clone()).is_none());
     }
     assert!(!handle.is_compacting(), "guard must clear on drop");
 

@@ -201,10 +201,14 @@ impl Dreamer {
     ///      inference backend is configured.
     ///   7. Flush the L1 snapshot.
     ///
+    /// #9172: a cycle that finds another one running on `handle` returns
+    /// `DreamStats::default()` without running any pass.
+    ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
     /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
     /// `dream_cycle_semantic_consolidation_no_inference`,
-    /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`.
+    /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`,
+    /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         // #7106: wait for a slot in the process-wide bound before doing any
         // work. The daemon runs one loop per resident palace and they all woke
@@ -212,15 +216,22 @@ impl Dreamer {
         // however many palaces were resident. The permit releases on drop, so
         // every `?` and early return below returns it.
         let _permit = acquire_dream_permit().await;
-        // Counted independently of the permit on purpose — see `DreamCycleGauge`.
-        let _in_flight = DreamCycleGauge::enter();
-        let started = std::time::Instant::now();
-        let budget = Duration::from_millis(self.config.max_cycle_ms);
         // Mark the palace as compacting for the entirety of this cycle so the
         // operator dashboard can render the dreaming spinner. The guard clears
         // the flag on drop, which keeps it correct on early-return errors and
         // panics alike.
-        let _compaction_guard = CompactionGuard::new(handle.is_compacting.clone());
+        // #9172: the claim is exclusive. A second cycle on this handle (the
+        // idle loop, the #9173 rotation, `dream_run`) skips instead of
+        // interleaving its deletions with the running cycle's merges.
+        let Some(_compaction_guard) = CompactionGuard::try_claim(handle.is_compacting.clone())
+        else {
+            tracing::info!(palace = %handle.id, "dream cycle skipped: one is already running");
+            return Ok(DreamStats::default());
+        };
+        // Counted independently of the permit on purpose — see `DreamCycleGauge`.
+        let _in_flight = DreamCycleGauge::enter();
+        let started = std::time::Instant::now();
+        let budget = Duration::from_millis(self.config.max_cycle_ms);
 
         // ── Effectiveness metric: pre-cycle snapshot (issue #1530) ────────────
         // Count drawers before any pass so we can compute the compression ratio.
