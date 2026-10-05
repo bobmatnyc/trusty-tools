@@ -389,3 +389,49 @@ async fn run_review_body_carries_no_dropped_citation() {
         result.review_body
     );
 }
+
+/// Prose that names locations no finding backs and that are not diff
+/// citations: an address, a host, a path outside the diff, and a range whose
+/// start is not the survivor's line (MEDIUM-1 on #9188).
+const CLEAN_PROSE: &str = "Overflow risk at src/billing.rs:29-31 on large invoices. The billing daemon binds 127.0.0.1:8080, calls example.com:443, and is configured in config/app.toml:12.";
+
+/// #9188 compatibility: a review with nothing withheld keeps the model's
+/// prose and findings byte for byte through the real pipeline.
+#[tokio::test]
+async fn run_review_keeps_a_clean_review_byte_for_byte() {
+    let body = "`amounts.iter().sum::<u64>()` can overflow on large invoices.";
+    let finding = billing_finding("overflow", body, "medium", SUM_LINE);
+    let result = review_payload(
+        CLEAN_PROSE,
+        "REQUEST_CHANGES",
+        "C",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert!(
+        result.withheld_findings.is_empty(),
+        "{:?}",
+        result.withheld_findings
+    );
+    // The model's prose verbatim, then its fenced payload (findings array
+    // stripped, #8905 row 5), as before #9188; no rebuilt summary.
+    let body_prefix = format!("{CLEAN_PROSE}\n\n```json\n");
+    assert!(
+        result.review_body.starts_with(&body_prefix),
+        "{}",
+        result.review_body
+    );
+    assert!(
+        !result.review_body.contains("withheld"),
+        "{}",
+        result.review_body
+    );
+    assert_eq!(result.findings.len(), 1);
+    let f = &result.findings[0];
+    assert_eq!(
+        (f.file.as_str(), f.line, f.kind.as_str(), f.description.as_str()),
+        ("src/billing.rs", Some(SUM_LINE), "overflow", body)
+    );
+    assert_eq!(f.citation_correction, None);
+}

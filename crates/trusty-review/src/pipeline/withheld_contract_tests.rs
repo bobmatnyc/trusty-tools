@@ -140,6 +140,44 @@ fn settle_no_survivors_withholds_the_verdict_only_when_something_was_withheld() 
     );
 }
 
+/// Restore `prose` over a review whose one survivor is `survivor`, with
+/// nothing withheld; returns the body.
+fn restored(prose: &str, survivor: Finding, index: &LineIndex) -> String {
+    let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
+    result.review_body = prose.to_string();
+    result.findings = vec![survivor];
+    let narrative = take_narrative(&mut result, prose).expect("non-empty prose");
+    restore_narrative(&mut result, narrative, index);
+    result.review_body
+}
+
+/// #9188 C, MEDIUM-1: on a review with nothing withheld, `host:port`
+/// strings, a path outside the diff, and a range holding a survivor's line
+/// are not unbacked citations, so the prose is returned unchanged. A diff
+/// location no survivor backs still replaces it.
+#[tokio::test]
+async fn a_clean_review_keeps_prose_with_non_diff_locations() {
+    let index = LineIndex::from_filtered(&billing().await);
+    let survivor = || finding(10, "`amounts.iter().sum::<u64>()` can overflow.");
+    for prose in [
+        "Binds 127.0.0.1:8080 and calls example.com:443.",
+        "See config/app.toml:12 for the limit.",
+        "Overflow at src/billing.rs:9-11.",
+        "Overflow at billing.rs:10.",
+    ] {
+        assert_eq!(restored(prose, survivor(), &index), prose);
+    }
+    let bracketed = finding(
+        10,
+        "Overflow [code: `src/billing.rs:9-11` — \"amounts.iter().sum::<u64>()\"].",
+    );
+    let prose = "Overflow at src/billing.rs:11.";
+    assert_eq!(restored(prose, bracketed, &index), prose);
+
+    let unbacked = "Overflow at src/billing.rs:3.";
+    assert_ne!(restored(unbacked, survivor(), &index), unbacked);
+}
+
 #[test]
 fn reason_class_names_every_producer() {
     for (reason, class) in [

@@ -32,7 +32,7 @@ use tracing::warn;
 use crate::models::{Finding, ReviewResult, Verdict, WithheldFinding};
 use crate::pipeline::{
     absence_claim::ABSENCE_REASON,
-    citation_check::{CITATION_REASON, normalize_path},
+    citation_check::{CITATION_REASON, CODE_CITATION_RE},
     citation_gate::{
         LineIndex, resolves_at_head,
         verdict::{scrub_body, settle_withheld},
@@ -226,14 +226,14 @@ pub(crate) fn take_narrative(result: &mut ReviewResult, narrative: &str) -> Opti
 /// whose finding was withheld, or one no finding ever carried; `scrub_body`
 /// removed only literal `file:line` strings and JSON.
 /// What: keeps the prose (with its fenced findings JSON stripped, as before)
-/// when nothing but duplicates was withheld and every `path:line` it cites is
-/// a survivor's location; otherwise puts [`rebuilt_narrative`] in its place.
-/// When the prose could not be located in the body, a rebuild replaces the
-/// whole body (fail closed).
+/// when nothing but duplicates was withheld and every diff location it cites
+/// is backed by a survivor ([`narrative_is_backed`]); otherwise puts
+/// [`rebuilt_narrative`] in its place. When the prose could not be located in
+/// the body, a rebuild replaces the whole body (fail closed).
 /// Test: `a_withheld_defect_named_in_the_summary_never_reaches_the_body`,
 /// `a_clean_review_keeps_its_prose`.
-pub(crate) fn restore_narrative(result: &mut ReviewResult, narrative: Narrative) {
-    let keep = narrative_is_backed(&narrative.text, result);
+pub(crate) fn restore_narrative(result: &mut ReviewResult, narrative: Narrative, index: &LineIndex) {
+    let keep = narrative_is_backed(&narrative.text, result, index);
     if keep {
         if narrative.slotted {
             let text = scrub_body(&narrative.text, &[]);
@@ -249,15 +249,39 @@ pub(crate) fn restore_narrative(result: &mut ReviewResult, narrative: Narrative)
     };
 }
 
-/// A `path.ext:line` location in prose.
+/// A `path.ext:line` or `path.ext:start-end` location in prose.
 static LOCATION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+):L?(\d+)")
+    Regex::new(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+):L?(\d+)(?:-L?(\d+))?")
         .expect("location regex is a valid literal")
 });
 
+/// Every location in `text`: its path and inclusive line span.
+fn locations(text: &str) -> impl Iterator<Item = (&str, u32, u32)> {
+    LOCATION_RE.captures_iter(text).filter_map(|caps| {
+        let path = caps.get(1)?.as_str();
+        let lo = caps.get(2)?.as_str().parse::<u32>().ok()?;
+        let hi = caps
+            .get(3)
+            .and_then(|m| m.as_str().parse::<u32>().ok())
+            .map_or(lo, |hi| hi.max(lo));
+        Some((path, lo, hi))
+    })
+}
+
 /// Whether the prose may stand: nothing withheld but duplicates, and every
-/// location it cites is a survivor's `file:line`.
-fn narrative_is_backed(text: &str, result: &ReviewResult) -> bool {
+/// location it cites in a diff file overlaps a survivor's line or one of its
+/// `[code: …]` spans.
+///
+/// Why: #9188 C keeps the model's prose only when it names no unbacked
+/// defect; the critic's MEDIUM-1 showed the old match also read
+/// `127.0.0.1:8080`, `example.com:443` and paths outside the diff as
+/// citations, and a range `a.rs:42-45` as line 42 only.
+/// What: a location whose path `index` does not resolve to a diff file is not
+/// a citation; one that does is backed when a survivor in that file has its
+/// line, or a `[code: …]` locator span, overlapping the cited span.
+/// Test: `a_clean_review_keeps_prose_with_non_diff_locations`,
+/// `run_review_keeps_a_clean_review_byte_for_byte`.
+fn narrative_is_backed(text: &str, result: &ReviewResult, index: &LineIndex) -> bool {
     if result
         .withheld_findings
         .iter()
@@ -265,13 +289,27 @@ fn narrative_is_backed(text: &str, result: &ReviewResult) -> bool {
     {
         return false;
     }
-    LOCATION_RE.captures_iter(text).all(|caps| {
-        let path = normalize_path(caps.get(1).map_or("", |m| m.as_str()));
-        let line = caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
-        result.findings.iter().any(|f| {
-            let file = normalize_path(&f.file);
-            let same = file == path || file.ends_with(&format!("/{path}"));
-            same && line.is_some() && f.line == line
+    let mut spans: Vec<(&str, u32, u32)> = Vec::new();
+    for f in &result.findings {
+        if let (Some(key), Some(line)) = (index.file_key(&f.file), f.line) {
+            spans.push((key, line, line));
+        }
+        for text in [f.description.as_str(), f.consequence.as_str()] {
+            let locators = CODE_CITATION_RE
+                .captures_iter(text)
+                .filter_map(|caps| caps.get(1));
+            for (path, lo, hi) in locators.flat_map(|m| locations(m.as_str())) {
+                if let Some(key) = index.file_key(path) {
+                    spans.push((key, lo, hi));
+                }
+            }
+        }
+    }
+    locations(text).all(|(path, lo, hi)| {
+        index.file_key(path).is_none_or(|key| {
+            spans
+                .iter()
+                .any(|&(file, a, b)| file == key && a <= hi && lo <= b)
         })
     })
 }

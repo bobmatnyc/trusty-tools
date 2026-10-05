@@ -286,7 +286,7 @@ pub(crate) async fn gate_then_verify(
     contract::withhold_unresolved(result, &index); // #9188 L
     contract::settle_no_survivors(result); // #9188 A, J
     if let Some(narrative) = narrative {
-        contract::restore_narrative(result, narrative); // #9188 C
+        contract::restore_narrative(result, narrative, &index); // #9188 C
     }
 }
 

@@ -186,6 +186,12 @@ impl LineIndex {
             })
     }
 
+    /// The diff file `path` names, readable or not, as the gate resolves it;
+    /// `None` when it names no file of the reviewed diff (#9188 C).
+    pub(crate) fn file_key(&self, path: &str) -> Option<&str> {
+        resolve_path_key(&self.files, path)
+    }
+
     pub(super) fn lines_for(&self, path: &str) -> Result<(&[Run], Option<u32>), GateError> {
         let key = resolve_path_key(&self.files, path)
             .ok_or_else(|| GateError::FileNotInDiff(path.to_string()))?;
