@@ -11238,7 +11238,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.53.4"
+version = "0.53.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11559,7 +11559,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.7.10"
+version = "1.7.11"
 dependencies = [
  "anyhow",
  "async-trait",
