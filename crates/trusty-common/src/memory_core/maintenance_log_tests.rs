@@ -91,11 +91,12 @@ fn dedup_only_config() -> DreamConfig {
 async fn dream_dedup_records_the_removed_and_surviving_drawer() {
     let (_dir, data_dir, handle) = open_palace("dedup-trail");
     let content = "Rust uses HNSW for vector search";
-    let keep = handle
+    // #9172: the newer of two duplicates survives, whatever its importance.
+    let lose = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.7)
         .await
         .unwrap();
-    let lose = handle
+    let keep = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.6)
         .await
         .unwrap();
@@ -133,11 +134,12 @@ async fn dream_dedup_records_the_removed_and_surviving_drawer() {
 async fn every_maintenance_removal_logs_its_id_and_reason() {
     let (_dir, _data_dir, handle) = open_palace("dedup-log");
     let content = "Dream dedup merges near-duplicate drawers above the threshold";
-    handle
+    // #9172: the older duplicate is the one removed.
+    let lose = handle
         .remember(content.into(), RoomType::Backend, vec![], 0.7)
         .await
         .unwrap();
-    let lose = handle
+    handle
         .remember(content.into(), RoomType::Backend, vec![], 0.6)
         .await
         .unwrap();
@@ -255,12 +257,51 @@ async fn a_failed_record_write_logs_the_record_and_still_deletes() {
         &survivor.to_string(),
         "dream_dedup",
         "0.97",
+        // #8729: the stand-in record carries the drawer copy too.
+        "a drawer dedup will remove",
     ] {
         assert!(text.contains(needle), "missing {needle} in {text}");
     }
 
     let rec = MaintenanceDeletion::new(&handle.id, doomed_id, DeletionReason::DreamPrune);
     assert_eq!(record(Some(&data_dir), &rec), RecordOutcome::LoggedOnly);
+}
+
+/// Why (#8729): the L1 snapshot save runs after the redb delete. Its error
+/// used to replace the removed row, so the drawer was gone and nothing was
+/// journalled.
+/// What: a directory where the L1 snapshot file belongs makes the save fail;
+/// the maintenance forget must still report the error, delete the drawer and
+/// journal its copy.
+#[tokio::test]
+async fn a_failed_snapshot_save_after_the_delete_still_journals_the_copy() {
+    let (_dir, data_dir, handle) = open_palace("broken-snapshot");
+    let content = "a drawer whose snapshot save will fail";
+    let id = handle
+        .remember(content.into(), RoomType::General, vec![], 0.5)
+        .await
+        .unwrap();
+    let snapshot = data_dir.join("l1_cache.json");
+    let _ = std::fs::remove_file(&snapshot);
+    std::fs::create_dir_all(snapshot.join("occupied")).unwrap();
+
+    let err = handle
+        .forget_for_maintenance(id, DeletionReason::DreamPrune, None)
+        .await
+        .expect_err("the failed snapshot save is reported");
+    assert!(format!("{err:#}").contains("L1 snapshot"), "{err:#}");
+
+    assert!(handle.drawers.read().iter().all(|d| d.id != id));
+    let journal = read_journal(&data_dir).unwrap();
+    let rec = journal
+        .records
+        .iter()
+        .find(|r| r.drawer_id == id)
+        .unwrap_or_else(|| panic!("no record for the removed drawer: {:?}", journal.records));
+    assert_eq!(
+        rec.drawer.as_ref().map(|d| d.content.as_str()),
+        Some(content)
+    );
 }
 
 /// Why: the journal is bounded by one rotation, and a reader must see both
@@ -361,4 +402,76 @@ fn a_lock_or_rotation_failure_still_appends_the_record() {
     let live = std::fs::read_to_string(journal_path(dir.path())).unwrap();
     assert!(live.contains(&first.drawer_id.to_string()), "{live}");
     assert!(live.contains(&second.drawer_id.to_string()), "{live}");
+}
+
+/// Why (#8729): the journal named each drawer a dream pass removed but held
+/// none of its text, so a wrongly removed drawer could be identified and not
+/// recovered.
+/// What: one dream cycle removes a duplicate (dedup), a two-word drawer
+/// (content prune) and an aged, unimportant drawer (prune). Every journal
+/// line, read as raw JSON, must carry the removed drawer's content, tags and
+/// importance under `drawer`.
+#[tokio::test]
+async fn every_dream_removal_journals_a_recoverable_copy() {
+    use super::retrieval::RememberOptions;
+    let (_dir, data_dir, handle) = open_palace("recoverable");
+    let dup = "Rust uses HNSW for vector search";
+    let short = "hello world";
+    let stale = "very stale fact nobody cares about";
+    for content in [dup, dup] {
+        handle
+            .remember(content.into(), RoomType::Backend, vec!["rust".into()], 0.6)
+            .await
+            .unwrap();
+    }
+    handle
+        .remember_with_options(
+            short.into(),
+            RoomType::General,
+            vec![],
+            0.5,
+            RememberOptions::forced(),
+        )
+        .await
+        .unwrap();
+    let stale_id = handle
+        .remember(stale.into(), RoomType::General, vec![], 0.01)
+        .await
+        .unwrap();
+    for d in handle.drawers.write().iter_mut() {
+        if d.id == stale_id {
+            d.created_at = Utc::now() - Duration::days(60);
+        }
+    }
+    let originals: std::collections::HashMap<String, (String, Vec<String>)> = handle
+        .drawers
+        .read()
+        .iter()
+        .map(|d| (d.id.to_string(), (d.content().to_string(), d.tags.clone())))
+        .collect();
+
+    let stats = Dreamer::new(dedup_only_config())
+        .dream_cycle(&handle)
+        .await
+        .unwrap();
+    assert_eq!(
+        (stats.merged, stats.content_pruned, stats.pruned),
+        (1, 1, 1),
+        "{stats:?}"
+    );
+
+    let raw = std::fs::read_to_string(journal_path(&data_dir)).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 3, "{raw}");
+    for line in &lines {
+        let id = line["drawer_id"].as_str().unwrap();
+        let (content, tags) = &originals[id];
+        let copy = &line["drawer"];
+        assert_eq!(copy["content"], content.as_str(), "{line}");
+        assert_eq!(copy["tags"], serde_json::json!(tags), "{line}");
+        assert!(copy["importance"].is_number(), "{line}");
+    }
 }

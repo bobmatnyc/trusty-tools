@@ -3,7 +3,7 @@
 //! Why: Extracted from dream.rs to keep each file under the 500-SLOC cap
 //! (#607). These are stateless helpers shared by the Dreamer passes.
 //! What: `extract_keywords`, `is_low_quality_content`, `now_secs`,
-//! `merge_into`, `rebuild_index_from_drawers`, content blocklist, stop-words.
+//! `merged_drawer`, `pick_survivor`, `persist_merge`, `rebuild_index_from_drawers`, content blocklist, stop-words.
 //! Test: Indirectly via dream cycle and closet tests.
 
 use crate::memory_core::palace::Drawer;
@@ -85,24 +85,19 @@ pub(crate) fn is_low_quality_content(content: &str, min_words: usize) -> bool {
     word_count < min_words
 }
 
-/// Byte cap applied to a merged drawer's content by [`merge_into`].
-pub(crate) const MERGED_CONTENT_CAP: usize = 500;
-
 /// Largest prefix of `s` that fits in `max_bytes` and ends on a UTF-8 char
 /// boundary.
 ///
-/// Why (#5187): the dream passes cap drawer text at fixed byte counts — the
-/// merge cap in [`merge_into`] and the log preview in the semantic pass.
-/// Applied as a raw byte offset, either one panics the moment the cap lands
-/// inside a multi-byte `char` (`assertion failed: self.is_char_boundary`),
-/// which killed a `tokio-rt-worker` in the shipped `com.trusty.memory`
-/// daemon. Drawer content is arbitrary user text, so CJK, Cyrillic, emoji,
-/// and accented Latin all reach these caps.
+/// Why (#5187): the semantic pass caps its log preview of drawer text at a
+/// fixed byte count. Applied as a raw byte offset, the cap panics the moment it
+/// lands inside a multi-byte `char` (`assertion failed: self.is_char_boundary`),
+/// which killed a `tokio-rt-worker` in the shipped `com.trusty.memory` daemon.
+/// Drawer content is arbitrary user text, so CJK, Cyrillic, emoji, and
+/// accented Latin all reach the cap.
 /// What: rounds `max_bytes` DOWN to the nearest char boundary via
 /// `str::floor_char_boundary`, so the result never exceeds `max_bytes` and
 /// never splits a `char`. Returns all of `s` when `s` already fits.
-/// Test: `char_safe_prefix_stops_below_a_multibyte_char`,
-/// `dream_merge_into_caps_multibyte_content_without_panicking`.
+/// Test: `char_safe_prefix_stops_below_a_multibyte_char`.
 pub(crate) fn char_safe_prefix(s: &str, max_bytes: usize) -> &str {
     &s[..s.floor_char_boundary(max_bytes)]
 }
@@ -115,36 +110,141 @@ pub(crate) fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Merge `loser` content into `survivor` (in-memory drawer table only).
+/// Tag that marks a drawer as an owner ruling (#9172).
+pub(crate) const RULING_TAG: &str = "ruling";
+
+/// Largest content, in bytes, a dedup merge may write into its survivor.
 ///
-/// Why: Dreaming consolidates duplicates without losing information; we
-/// concatenate the loser's content into the survivor (capped) and union tags.
-/// What: Updates the in-memory drawer entry for `survivor.id`. The vector
-/// store entry remains keyed to the survivor; the loser's vector is removed
-/// by the caller via `handle.forget`.
-pub(crate) fn merge_into(handle: &Arc<PalaceHandle>, survivor: &Drawer, loser: &Drawer) {
-    let mut drawers = handle.drawers.write();
-    if let Some(target) = drawers.iter_mut().find(|d| d.id == survivor.id) {
-        let mut combined = target.content().to_string();
-        combined.push_str("\n\nAlso: ");
-        combined.push_str(loser.content());
-        // #5187: cut on a char boundary — `truncate` at a raw byte offset
-        // panics when the cap lands inside a multi-byte char.
-        let cut = char_safe_prefix(&combined, MERGED_CONTENT_CAP).len();
-        combined.truncate(cut);
-        // #5902: `set_content` rather than a bare field assignment — the merged
-        // body is a new fact, so its content digest must move with it. This is
-        // the only production path that rewrites a stored drawer's content in
-        // place, and a direct assignment here would leave the drawer exporting
-        // under the pre-merge identity.
-        target.set_content(combined);
-        target.importance = target.importance.max(loser.importance);
-        for tag in &loser.tags {
-            if !target.tags.contains(tag) {
-                target.tags.push(tag.clone());
-            }
+/// Why (#9172): without the old 500-byte cut, a near-duplicate that keeps
+/// coming back is appended to the same survivor on every cycle, and the drawer
+/// grows without bound. The survivor is not re-embedded, and the embedder
+/// reads only its first 128 tokens, about 512 bytes of English. 4 KiB is eight
+/// of those windows: past it, at least seven eighths of the drawer is
+/// reachable by keyword search only, so a further merge adds text that vector
+/// recall cannot rank.
+/// What: [`merged_drawer`] refuses a merge that would append past this bound.
+/// Test: `a_merge_is_skipped_past_the_byte_bound`,
+/// `dedup_survivor_tests::a_merge_past_the_byte_bound_keeps_both_drawers`.
+pub(crate) const MERGE_MAX_BYTES: usize = 4 * 1024;
+
+/// Text a merge puts between the survivor's body and the loser's.
+const MERGE_SEPARATOR: &str = "\n\nAlso: ";
+
+/// The survivor `loser` leaves behind when a dedup merge folds it in.
+///
+/// Why (#9172): the merge used to cut the combined text at 500 bytes, which
+/// dropped the loser's text and, past the cap, the survivor's own. A dedup
+/// merge must not lose text, and must not grow a drawer without bound.
+/// What: a copy of `survivor` whose content is its own body plus
+/// `"\n\nAlso: " + loser` — skipped when the survivor already contains the
+/// loser's text (exact duplicates) — with the higher importance and the union
+/// of both tag sets. Nothing is truncated. `None` when the appended content
+/// would exceed [`MERGE_MAX_BYTES`]; the caller then keeps both drawers. A
+/// merge that appends nothing adds no bytes and is not bounded.
+/// Test: `dedup_survivor_tests::a_dedup_merge_survives_a_palace_reopen`,
+/// `a_merge_keeps_multibyte_loser_text_whole`,
+/// `merge_into_keeps_the_content_hash_in_step`,
+/// `a_merge_is_skipped_past_the_byte_bound`.
+pub(crate) fn merged_drawer(survivor: &Drawer, loser: &Drawer) -> Option<Drawer> {
+    let mut merged = survivor.clone();
+    if !survivor.content().contains(loser.content()) {
+        // #9172: past the bound the merge is skipped, never truncated.
+        let len = survivor.content().len() + MERGE_SEPARATOR.len() + loser.content().len();
+        if len > MERGE_MAX_BYTES {
+            return None;
+        }
+        // #5902: `set_content`, so the content digest moves with the body.
+        merged.set_content(format!(
+            "{}{MERGE_SEPARATOR}{}",
+            survivor.content(),
+            loser.content()
+        ));
+    }
+    merged.importance = merged.importance.max(loser.importance);
+    for tag in &loser.tags {
+        if !merged.tags.contains(tag) {
+            merged.tags.push(tag.clone());
         }
     }
+    Some(merged)
+}
+
+/// Order a near-duplicate pair as `(survivor, loser)`, or refuse to merge it.
+///
+/// Why (#9172): importance alone let an older note replace the current one.
+/// A drawer holding a `fact_key` slot is the live fact for that slot; deleting
+/// it releases the slot.
+/// What: returns `None` when both drawers hold a slot. Otherwise the survivor
+/// is the drawer that ranks higher on, in order: holds a slot, carries
+/// [`RULING_TAG`], newer `created_at`, higher importance. A full tie keeps `a`.
+/// Test: `dedup_survivor_tests::a_newer_status_note_survives_an_older_higher_importance_duplicate`,
+/// `dedup_survivor_tests::a_slot_holder_or_ruling_outlives_a_more_important_duplicate`.
+pub(crate) fn pick_survivor<'a>(a: &'a Drawer, b: &'a Drawer) -> Option<(&'a Drawer, &'a Drawer)> {
+    if a.is_tier_c() && b.is_tier_c() {
+        return None;
+    }
+    let rank = |d: &Drawer| (d.is_tier_c(), d.tags.iter().any(|t| t == RULING_TAG));
+    let order = rank(a)
+        .cmp(&rank(b))
+        .then(a.created_at.cmp(&b.created_at))
+        .then(a.importance.total_cmp(&b.importance));
+    Some(if order.is_lt() { (b, a) } else { (a, b) })
+}
+
+/// Merge the pair `a`/`b` and persist the survivor; returns `(survivor, loser)`.
+///
+/// Why (#9172): the merge changed only the in-memory table, so the loser's
+/// text was lost at the next open while its row was already deleted.
+/// What: under the palace write mutex and then the commit-order guard (the
+/// write pipeline's lock order), reads both drawers from the live table,
+/// picks the survivor with [`pick_survivor`], writes [`merged_drawer`] to redb,
+/// and only then mirrors it into the table. Returns `Ok(None)` when either
+/// drawer is gone, the pair must not merge, or the merged text would pass
+/// [`MERGE_MAX_BYTES`]. The caller deletes the loser
+/// only after `Ok(Some(_))`: a failed persist leaves both drawers intact.
+/// Test: `dedup_survivor_tests::a_dedup_merge_survives_a_palace_reopen`,
+/// `dedup_survivor_tests::a_failed_merge_persist_keeps_the_duplicate`.
+pub(crate) async fn persist_merge(
+    handle: &Arc<PalaceHandle>,
+    a: Uuid,
+    b: Uuid,
+) -> Result<Option<(Uuid, Uuid)>> {
+    let _write_guard = timeouts::lock_with_timeout(
+        &handle.write_mutex,
+        timeouts::write_lock_timeout(),
+        handle.id.as_str(),
+    )
+    .await?;
+    let _order = handle.commit_mutex.lock().await;
+    let (a, b) = {
+        let drawers = handle.drawers.read();
+        let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned();
+        (find(a), find(b))
+    };
+    let (Some(a), Some(b)) = (a, b) else {
+        return Ok(None);
+    };
+    let Some((survivor, loser)) = pick_survivor(&a, &b) else {
+        return Ok(None);
+    };
+    // #9172: an over-bound merge is skipped; both drawers stay whole.
+    let Some(merged) = merged_drawer(survivor, loser) else {
+        tracing::info!(
+            palace = %handle.id, survivor = %survivor.id, loser = %loser.id,
+            "dream dedup: merge would pass {MERGE_MAX_BYTES} bytes; both drawers kept"
+        );
+        return Ok(None);
+    };
+    handle
+        .kg
+        .upsert_drawer(&merged)
+        .await
+        .with_context(|| format!("persist merged dedup survivor {}", merged.id))?;
+    let pair = (survivor.id, loser.id);
+    if let Some(row) = handle.drawers.write().iter_mut().find(|d| d.id == pair.0) {
+        *row = merged;
+    }
+    Ok(Some(pair))
 }
 
 /// Reset the vector index and re-upsert every drawer from the in-memory

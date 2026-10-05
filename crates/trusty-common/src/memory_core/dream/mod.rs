@@ -24,6 +24,9 @@ mod semantic;
 
 #[cfg(test)]
 mod concurrency_tests;
+// #9172: merge persistence, survivor choice, survivor-forget journal.
+#[cfg(test)]
+mod dedup_survivor_tests;
 #[cfg(test)]
 mod maintenance_election_tests;
 // #8733: atomic `dream_stats.json` publication.
