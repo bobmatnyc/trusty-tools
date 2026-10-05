@@ -1705,3 +1705,93 @@ fn a_failed_stdout_redirect_skips_the_closure_and_leaves_stdout_alone() {
         "fd 1 moved after a failed redirect"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #9174 — a drawer the graph cannot reach is still found.
+// ---------------------------------------------------------------------------
+
+/// `anchor` moved by a small seeded offset and re-normalised: a unique vector
+/// whose nearest neighbours are all copies of `anchor`.
+fn near_anchor(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let offset = spread_vec(anchor.len(), seed);
+    let raw: Vec<f32> = anchor
+        .iter()
+        .zip(&offset)
+        .map(|(a, o)| a + 0.15 * o)
+        .collect();
+    let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    raw.into_iter().map(|v| v / norm).collect()
+}
+
+/// A seeded unit vector with a negative cosine to `anchor`.
+fn far_from(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let v = spread_vec(anchor.len(), seed);
+    let dot: f32 = v.iter().zip(anchor).map(|(a, b)| a * b).sum();
+    let raw: Vec<f32> = v
+        .iter()
+        .zip(anchor)
+        .map(|(x, a)| x - (dot.max(0.0) + 0.5) * a)
+        .collect();
+    let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+    raw.into_iter().map(|x| x / norm).collect()
+}
+
+/// Why (#9174): above the exhaustive threshold the vector lane missed live
+/// drawers queried with their own vector. On a copy of the trusty-tools
+/// palace (6,931 live drawers), every miss that was not a tie between
+/// bit-identical vectors was a point no traversal from the entry point
+/// reaches, even with `ef` equal to the point count. `hnsw_rs` prunes a
+/// candidate that is no farther from an already-chosen neighbour than from
+/// the new point, so a point whose nearest neighbours are copies of one vector
+/// keeps one out-edge and no in-edge.
+/// What: seeds 1,000 copies of one vector, 40 unique drawers next to them, and
+/// enough spread drawers to pass the threshold. Asserts each unique drawer is
+/// in its own top 10 after a reopen (the replay path), and that 20 more
+/// unique drawers upserted into the open store are found too (the upsert
+/// path). The tie case — one of 1,000 identical drawers ranking in a top 10 —
+/// is not asserted; no index can rank it.
+/// Test: this test itself is the verification.
+#[test]
+fn search_finds_drawers_the_graph_cannot_reach() {
+    let dim = 16;
+    let anchor = spread_vec(dim, 424_242);
+    let (clump, probes) = (1_000usize, 40u64);
+    let mut pool = vec![anchor.clone(); clump];
+    pool.extend((0..probes).map(|i| near_anchor(&anchor, 600_000 + i)));
+    // Far side of the sphere, so no spread drawer links to a probe and gives
+    // it the in-edge the clump denies it; real embeddings near the clump of
+    // identical turns were just as sparse.
+    pool.extend((0..3_200u64).map(|i| far_from(&anchor, 700_000 + i)));
+    assert!(pool.len() > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS);
+
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
+    let found = |uuid: &str, v: &[f32]| {
+        reopened
+            .search(v, 10)
+            .expect("search")
+            .iter()
+            .any(|(u, _)| u == uuid)
+    };
+    let missed: Vec<usize> = (clump..clump + probes as usize)
+        .filter(|i| !found(&format!("drawer-{i:05}"), &pool[*i]))
+        .collect();
+
+    let late: Vec<(String, Vec<f32>)> = (0..20u64)
+        .map(|j| (format!("late-{j}"), near_anchor(&anchor, 800_000 + j)))
+        .collect();
+    for (uuid, v) in &late {
+        reopened.upsert(uuid, v).expect("upsert");
+    }
+    let missed_late: Vec<&str> = late
+        .iter()
+        .filter(|(uuid, v)| !found(uuid, v))
+        .map(|(uuid, _)| uuid.as_str())
+        .collect();
+    assert!(
+        missed.is_empty() && missed_late.is_empty(),
+        "replayed drawers missing from their own top 10: {missed:?}; \
+         upserted: {missed_late:?}"
+    );
+}
