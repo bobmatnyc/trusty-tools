@@ -75,6 +75,27 @@ pub enum SecretsError {
         reason: String,
     },
 
+    /// The index write failed after a new key reached the backend, and the
+    /// delete that should have undone it failed too. The backend may still
+    /// hold an entry that no index row lists.
+    #[error(
+        "{backend} backend may still hold {key} in {vault} with no index row: \
+         the index write failed ({source}) and the cleanup delete failed ({cleanup})"
+    )]
+    OrphanedBackendEntry {
+        /// Backend id.
+        backend: String,
+        /// The vault addressed.
+        vault: String,
+        /// The key that may be orphaned.
+        key: String,
+        /// The index publish failure.
+        #[source]
+        source: Box<SecretsError>,
+        /// The failed cleanup delete.
+        cleanup: Box<SecretsError>,
+    },
+
     /// The backend lacks the capability an operation needs.
     #[error("{backend} backend does not support {operation}")]
     Unsupported {

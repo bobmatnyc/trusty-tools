@@ -76,12 +76,15 @@ impl SecretStore {
     /// `updated_at`; the agents flag is kept on update, OFF when new). A
     /// corrupt index or a lock timeout fails before the backend is touched; a
     /// backend failure leaves the index untouched. If the index publish fails
-    /// after a new key reached the backend, the entry is deleted again.
+    /// after a new key reached the backend, the entry is deleted again while
+    /// the lock is held; the caller gets the publish error, or
+    /// [`SecretsError::OrphanedBackendEntry`] when that delete fails too.
     /// Returns the outcome and the one-time [`mask_secret`] confirmation.
     /// Test: `store_set_reports_outcome_and_mask_once`,
     /// `store_backend_errors_are_never_downgraded`,
     /// `store_set_fails_closed_on_the_index_before_the_backend_write`,
-    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`.
+    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`,
+    /// `store_set_reports_an_orphan_when_compensation_fails`.
     pub fn set(
         &self,
         vault: &VaultName,
@@ -92,31 +95,50 @@ impl SecretStore {
             return Err(SecretsError::InvalidValue { reason: "is empty" });
         }
         self.require(Capabilities::WRITE, "write")?;
-        // #9064: the backend write runs inside the index lock, after the read.
-        let mut wrote_new_key = false;
-        let result = self.index.upsert_with(
+        // #9064: the backend write and its undo both run inside the index lock.
+        let outcome = self.index.upsert_with(
             vault,
             key,
             value.char_len(),
             platform::now_unix(),
-            |outcome| {
-                self.backend.set(vault, key, value)?;
-                wrote_new_key = outcome == SetOutcome::New;
-                Ok(())
+            |_| self.backend.set(vault, key, value),
+            |outcome, publish| self.compensate(vault, key, outcome, publish),
+        )?;
+        Ok(SetResponse {
+            outcome,
+            masked: mask_secret(value.expose()),
+        })
+    }
+
+    /// Undo a new key's backend write after the index publish failed.
+    ///
+    /// Why: #9064 — without the undo, the backend holds an entry no index row
+    /// lists; a failed undo must be reported, not dropped.
+    /// What: an updated key is left as written (the old value was never
+    /// read, so it cannot be restored) and the publish error returned. A new
+    /// key is deleted; on success the publish error is returned, on failure
+    /// [`SecretsError::OrphanedBackendEntry`] carrying both errors.
+    /// Test: `store_set_compensates_a_new_key_when_the_index_publish_fails`,
+    /// `store_set_reports_an_orphan_when_compensation_fails`.
+    fn compensate(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        outcome: SetOutcome,
+        publish: SecretsError,
+    ) -> SecretsError {
+        if outcome != SetOutcome::New {
+            return publish;
+        }
+        match self.backend.delete(vault, key) {
+            Ok(_) => publish,
+            Err(cleanup) => SecretsError::OrphanedBackendEntry {
+                backend: self.backend.id().to_string(),
+                vault: vault.to_string(),
+                key: key.to_string(),
+                source: Box::new(publish),
+                cleanup: Box::new(cleanup),
             },
-        );
-        match result {
-            Ok(outcome) => Ok(SetResponse {
-                outcome,
-                masked: mask_secret(value.expose()),
-            }),
-            Err(err) => {
-                if wrote_new_key {
-                    // Best effort: the publish error is the one the caller sees.
-                    let _ = self.backend.delete(vault, key);
-                }
-                Err(err)
-            }
         }
     }
 

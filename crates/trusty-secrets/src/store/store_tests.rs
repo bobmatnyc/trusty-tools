@@ -400,3 +400,69 @@ fn store_set_compensates_a_new_key_when_the_index_publish_fails() {
     assert!(backend.get(&project(), &key("SECOND")).unwrap().is_none());
     assert!(backend.get(&project(), &key("FIRST")).unwrap().is_some());
 }
+
+/// A memory backend whose `delete` always fails, so a compensation fails.
+#[derive(Debug, Default)]
+struct UndeletableBackend(MemoryBackend);
+
+impl SecretBackend for UndeletableBackend {
+    fn id(&self) -> BackendId {
+        BackendId::new("undeletable").unwrap()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.0.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.0.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Err(FailingBackend::failure(vault, key))
+    }
+}
+
+/// Why: #9064 — when the index publish fails and the compensating delete
+/// fails too, the orphaned backend entry must be reported with its vault and
+/// key, never swallowed, and the report must not carry the value.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn store_set_reports_an_orphan_when_compensation_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let backend = Arc::new(UndeletableBackend::default());
+    let (_tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("FIRST"), &value).unwrap();
+
+    // 0500: the lock sidecar opens, but the scratch file cannot be created.
+    let root = store.index().root().to_path_buf();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = store.set(&project(), &key("SECOND"), &value);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let err = result.unwrap_err();
+    let shown = format!("{err} / {err:?}");
+    match &err {
+        SecretsError::OrphanedBackendEntry {
+            vault, key, source, ..
+        } => {
+            assert_eq!(vault, "trusty/acme/web");
+            assert_eq!(key, "SECOND");
+            assert!(matches!(**source, SecretsError::Io { .. }), "{source:?}");
+        }
+        other => panic!("expected OrphanedBackendEntry, got {other:?}"),
+    }
+    assert!(shown.contains("no index row"), "{shown}");
+    assert!(
+        !shown.contains(FAKE_VALUE),
+        "the report leaked the value: {shown}"
+    );
+    assert!(backend.0.get(&project(), &key("SECOND")).unwrap().is_some());
+}

@@ -144,7 +144,7 @@ impl NamesIndex {
         length: usize,
         now: u64,
     ) -> Result<SetOutcome, SecretsError> {
-        self.upsert_with(vault, key, length, now, |_| Ok(()))
+        self.upsert_with(vault, key, length, now, |_| Ok(()), |_, err| err)
     }
 
     /// [`NamesIndex::upsert`], running `write` under the index lock first.
@@ -155,11 +155,14 @@ impl NamesIndex {
     /// What: takes the lock, re-reads the index (a corrupt file or a lock
     /// timeout fails here, before `write` runs), calls `write` with the
     /// outcome the upsert will have, and only on its success mutates and
-    /// publishes the row. A `write` error leaves the index untouched. A
-    /// publish error after `write` succeeded is returned to the caller, which
-    /// owns any compensation.
+    /// publishes the row. A `write` error leaves the index untouched. If the
+    /// publish fails after `write` succeeded, `compensate` runs with the
+    /// outcome and the publish error while the lock is still held, so no
+    /// other writer can commit between the failed publish and the undo; its
+    /// return value is the error the caller sees.
     /// Test: `store_set_fails_closed_on_the_index_before_the_backend_write`,
-    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`.
+    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`,
+    /// `store_set_reports_an_orphan_when_compensation_fails`.
     pub(crate) fn upsert_with(
         &self,
         vault: &VaultName,
@@ -167,8 +170,9 @@ impl NamesIndex {
         length: usize,
         now: u64,
         write: impl FnOnce(SetOutcome) -> Result<(), SecretsError>,
+        compensate: impl FnOnce(SetOutcome, SecretsError) -> SecretsError,
     ) -> Result<SetOutcome, SecretsError> {
-        self.update(vault, |file| {
+        self.update_or(vault, compensate, |file| {
             let outcome = if file.keys.contains_key(key.as_str()) {
                 SetOutcome::Updated
             } else {
@@ -224,9 +228,28 @@ impl NamesIndex {
     /// only if `mutate` succeeded.
     /// Test: `index_concurrent_writers_never_lose_a_name`,
     /// `index_corrupt_file_fails_closed_and_is_never_reset`.
-    fn update<R>(
+    fn update<R: Copy>(
         &self,
         vault: &VaultName,
+        mutate: impl FnOnce(&mut IndexFile) -> Result<R, SecretsError>,
+    ) -> Result<R, SecretsError> {
+        self.update_or(vault, |_, err| err, mutate)
+    }
+
+    /// [`NamesIndex::update`], mapping a publish failure through
+    /// `on_publish_error` while the lock is still held.
+    ///
+    /// Why: #9064 — a caller that wrote outside the index inside `mutate`
+    /// must undo that write before another writer can take the lock.
+    /// What: `on_publish_error` runs only when `mutate` succeeded and the
+    /// serialise-or-publish step then failed; it receives `mutate`'s result
+    /// and the publish error and returns the error to report.
+    /// Test: `store_set_compensates_a_new_key_when_the_index_publish_fails`,
+    /// `store_set_reports_an_orphan_when_compensation_fails`.
+    fn update_or<R: Copy>(
+        &self,
+        vault: &VaultName,
+        on_publish_error: impl FnOnce(R, SecretsError) -> SecretsError,
         mutate: impl FnOnce(&mut IndexFile) -> Result<R, SecretsError>,
     ) -> Result<R, SecretsError> {
         platform::create_private_dir(&self.root)?;
@@ -234,12 +257,16 @@ impl NamesIndex {
         platform::with_exclusive_lock(&path, self.lock_timeout, || {
             let mut file = read_file(&path, vault)?;
             let result = mutate(&mut file)?;
-            let json = serde_json::to_vec_pretty(&file).map_err(|e| SecretsError::Io {
-                path: path.clone(),
-                source: std::io::Error::other(e.to_string()),
-            })?;
-            platform::write_private_atomic(&path, &json)?;
-            Ok(result)
+            let published = serde_json::to_vec_pretty(&file)
+                .map_err(|e| SecretsError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::other(e.to_string()),
+                })
+                .and_then(|json| platform::write_private_atomic(&path, &json));
+            match published {
+                Ok(()) => Ok(result),
+                Err(err) => Err(on_publish_error(result, err)),
+            }
         })
     }
 }
