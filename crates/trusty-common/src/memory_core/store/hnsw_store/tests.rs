@@ -1538,3 +1538,53 @@ fn reopening_a_palace_answers_every_query_identically() {
         }
     }
 }
+
+/// Origin ids of the points in `index` whose layer-0 neighbour list is empty.
+fn points_without_neighbours(index: &Hnsw<'static, f32, DistCosine>) -> Vec<usize> {
+    index
+        .get_point_indexation()
+        .into_iter()
+        .filter(|p| p.get_neighborhood_id()[0].is_empty())
+        .map(|p| p.get_origin_id())
+        .collect()
+}
+
+/// Why (#9141): an `hnsw_rs` insert that reads no entry point sets one and
+/// returns with no neighbours. Under `parallel_insert_slice` several of the
+/// first inserts can read no entry point at once; every one but the winner is
+/// stored with no edges in or out, so the graph arm can never return it.
+/// What: 200 `replay` builds of 4,500 rows each; every point of every build
+/// must have a non-empty layer-0 neighbour list (only a 1-point graph may
+/// not). The race window is a few hundred nanoseconds: the fully parallel
+/// replay passed all 200 builds in this test, so the assertion's ability to
+/// fail was shown by building with zero connections per point.
+/// Test: this test itself is the verification.
+#[test]
+fn replay_leaves_no_point_without_neighbours() {
+    let dim = 16;
+    let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 404;
+    let live: Vec<(Vec<f32>, usize)> = (0..n)
+        .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
+        .collect();
+    let mut bad_builds = Vec::new();
+    for build in 0..200 {
+        let index = replay::new_index();
+        replay::replay(&index, &live);
+        assert_eq!(index.get_nb_point(), n, "build {build}: point count");
+        let orphans = points_without_neighbours(&index);
+        if !orphans.is_empty() {
+            bad_builds.push((
+                build,
+                orphans.len(),
+                orphans[..orphans.len().min(10)].to_vec(),
+            ));
+        }
+    }
+    assert!(
+        bad_builds.is_empty(),
+        "{} of 200 builds left points with no layer-0 neighbours; first \
+         (build, count, first ids): {:?}",
+        bad_builds.len(),
+        bad_builds.first()
+    );
+}

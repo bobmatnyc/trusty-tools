@@ -23,7 +23,8 @@
 //!
 //! What: [`new_index`] builds a SINGLE-layer graph. With `max_layer = 1`,
 //! `LayerGenerator::generate` maps every draw to layer 0, so the OS-seeded RNG
-//! no longer shapes the graph. [`replay`] inserts the live rows on rayon.
+//! no longer shapes the graph. [`replay`] inserts the first live row serially,
+//! so the entry point exists, and the rest on rayon.
 //!
 //! Guarantee: a parallel build's neighbour lists still depend on thread
 //! scheduling, so two opens return the same top k only while the search
@@ -31,7 +32,8 @@
 //! but `hnsw_rs` cannot promise it. Owner ruling 25 (#9141) accepted this
 //! trade for the open cost: ~0.45 s parallel against ~4.2–5.2 s serial for
 //! 6,661 384-dim rows in the dev profile.
-//! Test: `reopening_a_palace_answers_every_query_identically`.
+//! Test: `reopening_a_palace_answers_every_query_identically`,
+//! `replay_leaves_no_point_without_neighbours`.
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 
@@ -62,14 +64,26 @@ pub(super) fn new_index() -> Hnsw<'static, f32, DistCosine> {
     )
 }
 
-/// Insert `live` into `index` in parallel.
+/// Insert `live` into `index`: the first row serially, the rest in parallel.
 ///
 /// Why (#9141): the serial replay was the dominant cost of a cold palace open
 /// (2.4 s of a 3 s open at 6,644 vectors). Owner ruling 25 chose the parallel
 /// insert over the serial one; see the module header for what that gives up.
-/// What: one `parallel_insert_slice` over every row.
-/// Test: `reopening_a_palace_answers_every_query_identically`.
+/// An `hnsw_rs` 0.3.4 insert that reads no entry point sets one and returns
+/// with no neighbours (`hnsw.rs:1083-1098`). In a parallel insert into an
+/// empty graph several first inserts can read no entry point at once, and
+/// every one but the winner is stored with no edges, so no search reaches it.
+/// What: `insert_slice` for the first row sets the entry point; one
+/// `parallel_insert_slice` inserts the rest, each of which then links to the
+/// graph.
+/// Test: `reopening_a_palace_answers_every_query_identically`,
+/// `replay_leaves_no_point_without_neighbours`.
 pub(super) fn replay(index: &Hnsw<'static, f32, DistCosine>, live: &[(Vec<f32>, usize)]) {
-    let refs: Vec<(&[f32], usize)> = live.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
+    let Some(((first, first_id), rest)) = live.split_first() else {
+        return;
+    };
+    // See #9141: the entry point exists before any parallel insert reads it.
+    index.insert_slice((first.as_slice(), *first_id));
+    let refs: Vec<(&[f32], usize)> = rest.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
     index.parallel_insert_slice(&refs);
 }
