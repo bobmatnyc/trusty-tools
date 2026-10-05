@@ -106,6 +106,7 @@ fn make_handle_with(root: &Path, id: &str, indexer: CodeIndexer) -> Arc<IndexHan
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

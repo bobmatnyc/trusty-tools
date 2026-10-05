@@ -330,6 +330,8 @@ pub(crate) async fn relocate_index_report(
             .as_ref()
             .map(|e| e.deferred_embed_pending)
             .unwrap_or(false),
+        // #8883: moving the root does not lift the serve-only mark.
+        serve_only: existing.serve_only,
     };
 
     // Rebuild the indexer from the new entry so the colocated HNSW/redb at
@@ -435,6 +437,7 @@ pub(crate) async fn relocate_index_report(
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
         skip_vector: existing.skip_vector,
+        serve_only: existing.serve_only,
         defer_embed: existing.defer_embed,
         stages: Arc::clone(&existing.stages),
         search_pressure: Arc::clone(&existing.search_pressure),

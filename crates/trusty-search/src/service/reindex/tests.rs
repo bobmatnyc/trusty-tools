@@ -48,6 +48,7 @@ async fn reindex_honours_include_paths_filter() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -132,6 +133,7 @@ async fn reindex_honours_path_filter() {
         lexical_only: false,
         skip_kg: false,
         skip_vector: false,
+        serve_only: false,
         defer_embed: true,
         stages: Arc::new(tokio::sync::RwLock::new(IndexStages::default())),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -885,6 +887,7 @@ fn make_handle_with_flags(
         lexical_only,
         skip_kg,
         skip_vector: false,
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),
@@ -945,6 +948,7 @@ fn make_handle_with_skip_vector(
         // attempt synchronous embedding for a non-`skip_vector` control run —
         // exercising the `batch.rs` fast-pass gate, not just the deferred
         // background-pass gate the default `defer_embed=true` would hit.
+        serve_only: false,
         defer_embed: false,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

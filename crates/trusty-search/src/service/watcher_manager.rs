@@ -193,6 +193,12 @@ impl WatcherManager {
         handle: &Arc<IndexHandle>,
         mount_kind: MountKind,
     ) {
+        // #8883: a watcher writes every save into the index; a serve-only
+        // index must stay the one it was shipped. Debug: search re-asks per query.
+        if handle.serve_only {
+            tracing::debug!(index_id = %handle.id, "serve-only index: no file watcher (#8883)");
+            return;
+        }
         // Refuse to start a watcher whose root is positively identified as
         // network-mounted (EFS/NFS/SMB/CIFS). inotify/FSEvents cannot observe
         // another host's writes to a shared network mount — starting the
