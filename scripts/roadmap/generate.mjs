@@ -49,6 +49,10 @@
  * target file is an error, never created. Splicing never reads the region it
  * replaces, so regenerating from the same milestones is byte-identical.
  *
+ * Every milestone shows its anticipated ship date: the GitHub `due_on` as
+ * YYYY-MM-DD, or `TBD` when null (owner instruction 2026-10-05). A date is
+ * never derived or invented.
+ *
  * A crate name that prefixes a milestone's title is dropped from the rendered
  * heading, since the crate section already names it (`trusty-mpm 2.0.0` ->
  * `2.0.0`); any other title is left as-is.
@@ -89,7 +93,6 @@ const DEFAULT_REPO = "trusty-tools";
  */
 const AREA_CRATES = {
   agents: "trusty-agents",
-  audit: "trusty-audit",
   code: "trusty-code",
   console: "trusty-console",
   embedderd: "trusty-embedderd",
@@ -99,7 +102,6 @@ const AREA_CRATES = {
   "mpm/core": "trusty-mpm",
   search: "trusty-search",
   "tc-services": "tc-services",
-  tga: "trusty-git-analytics",
 };
 
 const TITLE_CRATE = /^trusty[- ]([a-z0-9]+(?:-[a-z0-9]+)*)(?=[\s:]|$)/i;
@@ -304,6 +306,19 @@ function groupByCrate(milestones) {
   return crates.map((crate) => ({ crate, groups: bucket(byCrate.get(crate)) }));
 }
 
+/**
+ * The anticipated ship date: the milestone's GitHub `due_on` as YYYY-MM-DD
+ * (UTC), or `TBD` when it is null, empty or unparseable. Never derived.
+ */
+function shipDateText(milestone) {
+  const due = milestone.due_on;
+  if (typeof due !== "string" || due === "") {
+    return "TBD";
+  }
+  const parsed = new Date(due);
+  return Number.isNaN(parsed.getTime()) ? "TBD" : parsed.toISOString().slice(0, 10);
+}
+
 function progressText(milestone) {
   const closed = milestone.closed_issues ?? 0;
   const total = (milestone.open_issues ?? 0) + closed;
@@ -317,14 +332,16 @@ function renderMilestoneBlock(milestone, crate) {
   if (milestone.roadmapBody) {
     parts.push(milestone.roadmapBody);
   }
-  parts.push(`${progressText(milestone)} · [follow on GitHub](${milestone.html_url})`);
+  parts.push(
+    `Anticipated ship date: ${shipDateText(milestone)} · ${progressText(milestone)} · [follow on GitHub](${milestone.html_url})`,
+  );
   return parts.join("\n\n");
 }
 
 /** An untagged milestone: one list line, no prose. */
 function renderMilestoneLine(milestone, crate) {
   const label = displayTitle(milestone.title, crate).replace(/[[\]]/g, "\\$&");
-  return `- [${label}](${milestone.html_url}) · ${progressText(milestone)}`;
+  return `- [${label}](${milestone.html_url}) · ${shipDateText(milestone)} · ${progressText(milestone)}`;
 }
 
 function renderCrateSection({ crate, groups }) {
@@ -484,6 +501,7 @@ export {
   classify,
   groupByStage,
   groupByCrate,
+  shipDateText,
   renderMilestoneBlock,
   renderRegion,
   spliceRegion,

@@ -37,6 +37,7 @@ import {
   spliceRegion,
   groupByStage,
   parseReleaseOrder,
+  shipDateText,
   main,
 } from "./generate.mjs";
 
@@ -124,7 +125,7 @@ test("a milestone with no Roadmap: line is listed as a link and publishes no pro
   const region = renderRegion([tagged, untagged]);
 
   assert.ok(region.includes("#### 9.9.9 · Next"));
-  assert.ok(region.includes("- [8.8.8](https://github.com/bobmatnyc/trusty-tools/milestone/2) · 1 of 4 items done"));
+  assert.ok(region.includes("- [8.8.8](https://github.com/bobmatnyc/trusty-tools/milestone/2) · TBD · 1 of 4 items done"));
   assert.ok(!region.includes("Plain prose"), "an untagged description is never published");
 });
 
@@ -357,9 +358,9 @@ test("grouping: a crate's Roadmap milestones precede its other-milestones list",
   assert.equal(
     region,
     "### trusty-mpm\n\n#### 2.0.0 · Next\n\nA public paragraph.\n\n" +
-      "1 of 4 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/1)\n\n" +
+      "Anticipated ship date: TBD · 1 of 4 items done · [follow on GitHub](https://github.com/bobmatnyc/trusty-tools/milestone/1)\n\n" +
       "Other open milestones:\n\n" +
-      "- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/9) · 1 of 4 items done",
+      "- [1.7.10 · bugfix](https://github.com/bobmatnyc/trusty-tools/milestone/9) · TBD · 1 of 4 items done",
   );
 });
 
@@ -383,4 +384,21 @@ test("grouping: closed milestones are dropped and input order never changes the 
 test("an empty milestone reads 'no items yet', not '0 of 0'", () => {
   const region = renderRegion([untagged(7, "trusty-review 0.36.3 · bugfix", { open_issues: 0, closed_issues: 0 })]);
   assert.ok(region.endsWith("· no items yet"));
+});
+
+test("ship date: due_on renders as YYYY-MM-DD, null or bad renders TBD, in both layouts", () => {
+  assert.equal(shipDateText({ due_on: "2026-11-27T00:00:00Z" }), "2026-11-27");
+  assert.equal(shipDateText({ due_on: null }), "TBD");
+  assert.equal(shipDateText({ due_on: "not a date" }), "TBD");
+
+  const dated = milestoneFixture({ due_on: "2026-11-27T00:00:00Z" });
+  const undated = milestoneFixture({
+    number: 2,
+    title: "trusty-mpm Backlog",
+    description: "",
+    html_url: "https://github.com/bobmatnyc/trusty-tools/milestone/2",
+  });
+  const out = renderRegion([dated, undated]);
+  assert.match(out, /Anticipated ship date: 2026-11-27 · 1 of 4 items done/);
+  assert.match(out, /\/milestone\/2\) · TBD · 1 of 4 items done/);
 });
