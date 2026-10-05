@@ -23,6 +23,13 @@
 #   missing data-dir override, or HOME equal to the password-database home.
 #   The real home is read from the password database (dscl on macOS, getent
 #   elsewhere), never from $HOME.
+#   Working directory (#9161): the daemon runs with cwd <dir>/home. trusty-common
+#   loads the first `.env.local` found walking up from the cwd
+#   (`load_env_local_once`, crates/trusty-common/src/credentials/dotenv.rs), and
+#   from a worktree that walk reaches the main checkout's `.env.local` (#2474).
+#   The script therefore never runs the daemon from the caller's cwd, and
+#   refuses when the physical <dir>/home or any ancestor holds a `.env.local`.
+#   It does not rely on the daemon's sandbox latch to ignore that file.
 #   Output names variables and the paths this script chose; it never prints a
 #   value it inherited.
 #
@@ -32,7 +39,8 @@
 #               ephemeral port when it is busy and records the real one in
 #               <dir>/home/.trusty-mpm/daemon.lock)
 #   --dir DIR   an existing sandbox directory (default: a new `mktemp -d`);
-#               must not be, or resolve to, the real home
+#               must not be, or resolve to, the real home, nor sit under a
+#               `.env.local`
 #   --dry-run   validate and print what would run; create and start nothing
 # Exit: the daemon's status; 1 on a refusal; 2 on a usage error.
 #
@@ -99,6 +107,10 @@ if [ -z "$BIN" ]; then
   [ -n "$BIN" ] || die "no tm binary on PATH; pass --bin"
 fi
 [ -x "$BIN" ] || die "--bin is not an executable file: $BIN"
+# Absolute, so a relative --bin still names the same file from the sandbox cwd.
+BIN_DIR="$(resolve "$(dirname "$BIN")")"
+[ -n "$BIN_DIR" ] || die "cannot resolve the directory of --bin: $BIN"
+BIN="$BIN_DIR/$(basename "$BIN")"
 
 REAL_HOME="$(real_home)"
 [ -n "$REAL_HOME" ] || die "the password database names no home for this user"
@@ -117,6 +129,30 @@ elif [ "$DRY_RUN" -eq 1 ]; then
 else
   SANDBOX="$(resolve "$(mktemp -d "${TMPDIR:-/tmp}/tm-sandbox.XXXXXX")")"
   [ -n "$SANDBOX" ] || die "could not create a sandbox directory"
+fi
+
+# #9161: the daemon's cwd is <dir>/home, and `current_dir()` is the physical
+# path, so the walk starts at the physical <dir>/home (a symlinked home must
+# not escape the check) and covers <dir>/home/.env.local itself. It climbs to
+# /, past every boundary the loader stops at, so it covers the loader's reach.
+# Only an absent <dir>/home (mkdir creates it below) starts the walk at <dir>.
+# `${anc%/*}`, not `$(dirname)`: command substitution strips a trailing newline
+# from a directory name and would skip that directory.
+if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
+  if [ -e "$SANDBOX/home" ] || [ -L "$SANDBOX/home" ]; then
+    anc="$(resolve "$SANDBOX/home")"
+    [ -n "$anc" ] || die "cannot resolve <dir>/home: $SANDBOX/home"
+    # `$(resolve)` strips a trailing newline, so the result can name another dir.
+    [ "$anc" -ef "$SANDBOX/home" ] || die "cannot resolve <dir>/home: $SANDBOX/home"
+  else
+    anc="$SANDBOX"
+  fi
+  while :; do
+    [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded by the daemon from <dir>/home; pick a --dir outside it"
+    [ "$anc" != "/" ] || break
+    anc="${anc%/*}"
+    [ -n "$anc" ] || anc=/
+  done
 fi
 
 ADDR="127.0.0.1:$PORT"
@@ -138,6 +174,7 @@ done
 echo "sandbox_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_daemon: daemon address: $ADDR"
 echo "sandbox_daemon: variables passed (names only): $PASSED_NAMES"
+echo "sandbox_daemon: working directory: $SANDBOX/home"
 echo "sandbox_daemon: command: env -i $PASSED_NAMES $BIN daemon --sandbox"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -146,6 +183,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
+# #9161: never the caller's cwd; see the Working directory note in the header.
+# CDPATH stays set: the path is absolute, and CDPATH never rewrites one.
+cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"
 # `${EXTRA[@]+...}`: bash 3.2 treats an empty array as unset under `set -u`.
 exec env -i \
   HOME="$SANDBOX/home" \

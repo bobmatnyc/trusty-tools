@@ -42,8 +42,9 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 **A live check needing an isolated daemon starts it with
   `scripts/sandbox_daemon.sh` (tm) or `scripts/sandbox_search_daemon.sh`
-  (trusty-search) only (#9121)** — a hand-built daemon inherits bot tokens
-  and reaches the per-user Keychain.
+  (trusty-search) only (#9121)** — a hand-built daemon inherits bot tokens,
+  loads the `.env.local` at or above its cwd (#9161), and reaches the
+  per-user Keychain.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
