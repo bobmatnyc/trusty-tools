@@ -34,6 +34,16 @@
 				}
 			})();
 		</script>
+		<!-- Google tag (gtag.js), GA4 G-58NTDG8CNK. Single shell for every route. Refs #8021. -->
+		<script async src="https://www.googletagmanager.com/gtag/js?id=G-58NTDG8CNK"></script>
+		<script>
+			window.dataLayer = window.dataLayer || [];
+			function gtag() {
+				dataLayer.push(arguments);
+			}
+			gtag('js', new Date());
+			gtag('config', 'G-58NTDG8CNK');
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover" class="min-h-full">

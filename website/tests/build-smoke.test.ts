@@ -181,6 +181,8 @@ beforeAll(() => {
 	landingPage = readFileSync(path.join(STATIC, 'index.html'), 'utf8');
 });
 
+const GOOGLE_TAG_SRC = 'https://www.googletagmanager.com/gtag/js?id=G-58NTDG8CNK';
+
 describe('production build', () => {
 	it('emits the Vercel Build Output API layout', () => {
 		expect(existsSync(path.join(OUTPUT, 'config.json'))).toBe(true);
@@ -513,10 +515,12 @@ describe('production build', () => {
 			const subresources = [
 				...html.matchAll(/<(?:script|img|source|iframe)\b[^>]*\bsrc="([^"]+)"/g)
 			].map((match) => match[1]);
+			// The Google tag (#8021) is the one sanctioned third-party script; it must
+			// appear exactly once per page, and nothing else off-site may.
 			const offSite = [...subresources, ...linkHrefs].filter((url) =>
 				/^(?:https?:)?\/\//.test(url)
 			);
-			expect(offSite, `${name} loads ${offSite.join(', ')}`).toEqual([]);
+			expect(offSite, `${name} loads ${offSite.join(', ')}`).toEqual([GOOGLE_TAG_SRC]);
 			expect(html).not.toContain('@import url(http');
 		}
 	});
