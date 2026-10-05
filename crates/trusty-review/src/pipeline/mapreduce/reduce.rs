@@ -122,7 +122,6 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
         // Map-stage token total; the synthesis pass adds its own call on top.
         tokens,
         withheld_findings,
-        wiped_model_verdict: None, // set by `run_map_reduce` (#9188)
     }
 }
 

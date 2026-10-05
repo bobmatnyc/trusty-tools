@@ -442,7 +442,7 @@ pub(super) fn ground_parsed_findings(
         &mut withheld,
     );
 
-    let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+    let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,
         &mut parsed.grade,
         findings_before,

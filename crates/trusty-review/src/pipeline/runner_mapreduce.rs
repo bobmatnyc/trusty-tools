@@ -28,7 +28,7 @@ use crate::{
     pipeline::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
-        mapreduce::{MapContext, ReducedReview, run_map_reduce},
+        mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{CallerContext, ReviewDeps, ReviewInput},
@@ -116,8 +116,8 @@ pub(super) async fn run_mapreduce_branch(
         files = run.filtered.files.len(),
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
-    let mut reduced: ReducedReview =
-        run_map_reduce(&run.filtered, &deps.llm, &ctx, mr_config).await;
+    let (mut reduced, wiped_model_verdict): (ReducedReview, _) =
+        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config).await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -201,7 +201,7 @@ pub(super) async fn run_mapreduce_branch(
         &run,
         ReduceFacts {
             synthesis_active,
-            wiped_model_verdict: reduced.wiped_model_verdict.clone(),
+            wiped_model_verdict,
         },
     )
     .await;
@@ -323,7 +323,7 @@ pub(super) fn restore_caller_context(
 struct ReduceFacts {
     /// The synthesis pass (#1663) ran and floored the verdict itself.
     synthesis_active: bool,
-    /// `ReducedReview::wiped_model_verdict`, for `settle_no_survivors` (#9188).
+    /// From `run_map_reduce_with_wiped`, for `settle_no_survivors` (#9188).
     wiped_model_verdict: Option<crate::models::Verdict>,
 }
 
