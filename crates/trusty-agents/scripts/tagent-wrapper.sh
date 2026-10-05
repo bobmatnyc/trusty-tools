@@ -17,11 +17,16 @@ fi
 
 # Load API keys from project .env.local if present.
 # Parse line-by-line to skip malformed entries gracefully.
-if [[ -f "${TAGENT_PROJECT}/.env.local" ]]; then
+# #9224: TRUSTY_SANDBOX exactly "1" exports nothing from the file, matching
+# trusty-common's loader; the expansion has no error branch to fail open on.
+if [[ "${TRUSTY_SANDBOX-}" != "1" && -f "${TAGENT_PROJECT}/.env.local" ]]; then
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" =~ ^[[:space:]]*# ]] && continue
     [[ -z "${line// }" ]] && continue
     if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      # #9224: the file never sets or overwrites the opt-out itself.
+      [[ "${line%%=*}" == "TRUSTY_SANDBOX" ]] && continue
+      # shellcheck disable=SC2163 # exports the NAME=value pair in $line
       export "$line" 2>/dev/null || true
     fi
   done < "${TAGENT_PROJECT}/.env.local"

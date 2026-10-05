@@ -278,6 +278,11 @@ jobs:
       - name: Sandbox-daemon launcher selftest (#9121)
         run: bash scripts/sandbox_daemon_selftest.sh
 
+      # #9224: the installed tagent wrapper must not export `.env.local` under
+      # TRUSTY_SANDBOX=1. Its selftest drives a stub tagent, so it needs no build.
+      - name: tagent wrapper selftest (#9224)
+        run: bash crates/trusty-agents/scripts/tagent_wrapper_selftest.sh
+
       # #7424: the startup-context size gate. It is a STEP of this existing job
       # rather than a job of its own — promoting a new required context wedges
       # every open PR that predates it (#5962), and this job already runs on
