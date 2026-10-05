@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use super::platform;
 use super::*;
 use crate::api::methods::SetOutcome;
 use crate::api::{BackendId, SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
@@ -328,4 +329,74 @@ fn mask_secret_table() {
     assert_eq!(mask_secret("123456789"), "12345678… [9 chars]");
     assert_eq!(mask_secret("ééééééééé"), "éééééééé… [9 chars]");
     assert!(!mask_secret("12345678").contains('1'));
+}
+
+/// A store over a fresh memory backend whose index waits `lock_ms` at most.
+fn fixture_with_lock_timeout(lock_ms: u64) -> (TempDir, Arc<MemoryBackend>, SecretStore) {
+    let tmp = TempDir::new().unwrap();
+    let backend = Arc::new(MemoryBackend::new());
+    let index = NamesIndex::at(tmp.path().join("index"))
+        .with_lock_timeout(std::time::Duration::from_millis(lock_ms));
+    let store = SecretStore::new(Arc::clone(&backend) as Arc<dyn SecretBackend>, index);
+    (tmp, backend, store)
+}
+
+/// Why: #9064 — `set` used to write the backend before reading or locking
+/// the index, so a corrupt or locked index left an orphaned Keychain entry
+/// while the caller was told the set failed. Both index failures must now
+/// surface before the backend is touched.
+/// Test: itself.
+#[test]
+fn store_set_fails_closed_on_the_index_before_the_backend_write() {
+    let (_tmp, backend, store) = fixture_with_lock_timeout(60);
+    let index_file = store.index().path_for(&project());
+    std::fs::create_dir_all(store.index().root()).unwrap();
+    std::fs::write(&index_file, "{ not json").unwrap();
+    let err = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::IndexCorrupt { .. }), "{err:?}");
+    assert_eq!(
+        backend.len(),
+        0,
+        "a corrupt index must stop the backend write"
+    );
+
+    std::fs::remove_file(&index_file).unwrap();
+    let held = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(platform::lock_path(&index_file))
+        .unwrap();
+    let mut lock = fd_lock::RwLock::new(held);
+    let _guard = lock.try_write().unwrap();
+    let err = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::LockTimeout { .. }), "{err:?}");
+    assert_eq!(backend.len(), 0, "a held lock must stop the backend write");
+}
+
+/// Why: #9064 — if the index publish fails after a NEW key reached the
+/// backend, the backend entry is removed again so nothing is orphaned.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn store_set_compensates_a_new_key_when_the_index_publish_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_tmp, backend, store) = fixture();
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("FIRST"), &value).unwrap();
+
+    // 0500: the lock sidecar opens, but the scratch file cannot be created.
+    let root = store.index().root().to_path_buf();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = store.set(&project(), &key("SECOND"), &value);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(matches!(result, Err(SecretsError::Io { .. })), "{result:?}");
+    assert_eq!(backend.len(), 1, "the new key must be deleted again");
+    assert!(backend.get(&project(), &key("SECOND")).unwrap().is_none());
+    assert!(backend.get(&project(), &key("FIRST")).unwrap().is_some());
 }

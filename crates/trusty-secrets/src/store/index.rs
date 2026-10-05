@@ -144,25 +144,44 @@ impl NamesIndex {
         length: usize,
         now: u64,
     ) -> Result<SetOutcome, SecretsError> {
+        self.upsert_with(vault, key, length, now, |_| Ok(()))
+    }
+
+    /// [`NamesIndex::upsert`], running `write` under the index lock first.
+    ///
+    /// Why: #9064 — the backend write must happen only once the index is
+    /// known to be readable and is locked. Writing the backend first left an
+    /// orphaned Keychain entry whenever the index was corrupt or locked.
+    /// What: takes the lock, re-reads the index (a corrupt file or a lock
+    /// timeout fails here, before `write` runs), calls `write` with the
+    /// outcome the upsert will have, and only on its success mutates and
+    /// publishes the row. A `write` error leaves the index untouched. A
+    /// publish error after `write` succeeded is returned to the caller, which
+    /// owns any compensation.
+    /// Test: `store_set_fails_closed_on_the_index_before_the_backend_write`,
+    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`.
+    pub(crate) fn upsert_with(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        length: usize,
+        now: u64,
+        write: impl FnOnce(SetOutcome) -> Result<(), SecretsError>,
+    ) -> Result<SetOutcome, SecretsError> {
         self.update(vault, |file| {
-            let outcome = match file.keys.get_mut(key.as_str()) {
-                Some(row) => {
-                    row.length = length;
-                    row.updated_at = now;
-                    SetOutcome::Updated
-                }
-                None => {
-                    file.keys.insert(
-                        key.to_string(),
-                        IndexRow {
-                            length,
-                            updated_at: now,
-                            agents_may_use: false,
-                        },
-                    );
-                    SetOutcome::New
-                }
+            let outcome = if file.keys.contains_key(key.as_str()) {
+                SetOutcome::Updated
+            } else {
+                SetOutcome::New
             };
+            write(outcome)?;
+            let row = file.keys.entry(key.to_string()).or_insert(IndexRow {
+                length,
+                updated_at: now,
+                agents_may_use: false,
+            });
+            row.length = length;
+            row.updated_at = now;
             Ok(outcome)
         })
     }

@@ -5,15 +5,16 @@
 //! stored. This type is that order, and the place reference resolution runs.
 //! What: `set`/`list`/`delete`/`set_agents_may_use` for one vault, plus
 //! `locate`/`read` for `secret://` references against a [`ScopeSet`].
-//! Writes go to the backend first and the index second, so an index row never
-//! claims a value the backend refused.
+//! A `set` writes the backend inside the index lock, after the index read, so
+//! a corrupt or locked index fails before any value is stored and an index
+//! row never claims a value the backend refused.
 //! Test: `store_tests.rs` beside this file.
 
 use std::fmt;
 use std::sync::Arc;
 
 use super::{Capabilities, NamesIndex, ScopeSet, SecretBackend, mask_secret, platform};
-use crate::api::methods::{DeleteResponse, KeyMeta, SetResponse};
+use crate::api::methods::{DeleteResponse, KeyMeta, SetOutcome, SetResponse};
 use crate::api::{SecretKey, SecretRef, SecretValue, SecretsError, VaultName};
 
 /// A backend and its names-only index.
@@ -70,13 +71,17 @@ impl SecretStore {
 
     /// Upsert `key` in `vault` (`secrets.set`).
     ///
-    /// What: refuses an empty value and a backend without `WRITE`; writes the
-    /// backend, then the index row (length, `updated_at`; the agents flag is
-    /// kept on update, OFF when new). Returns the outcome and the one-time
-    /// [`mask_secret`] confirmation. A backend failure leaves the index
-    /// untouched.
+    /// What: refuses an empty value and a backend without `WRITE`; then,
+    /// under the index lock, writes the backend and the index row (length,
+    /// `updated_at`; the agents flag is kept on update, OFF when new). A
+    /// corrupt index or a lock timeout fails before the backend is touched; a
+    /// backend failure leaves the index untouched. If the index publish fails
+    /// after a new key reached the backend, the entry is deleted again.
+    /// Returns the outcome and the one-time [`mask_secret`] confirmation.
     /// Test: `store_set_reports_outcome_and_mask_once`,
-    /// `store_backend_errors_are_never_downgraded`.
+    /// `store_backend_errors_are_never_downgraded`,
+    /// `store_set_fails_closed_on_the_index_before_the_backend_write`,
+    /// `store_set_compensates_a_new_key_when_the_index_publish_fails`.
     pub fn set(
         &self,
         vault: &VaultName,
@@ -87,14 +92,32 @@ impl SecretStore {
             return Err(SecretsError::InvalidValue { reason: "is empty" });
         }
         self.require(Capabilities::WRITE, "write")?;
-        self.backend.set(vault, key, value)?;
-        let outcome = self
-            .index
-            .upsert(vault, key, value.char_len(), platform::now_unix())?;
-        Ok(SetResponse {
-            outcome,
-            masked: mask_secret(value.expose()),
-        })
+        // #9064: the backend write runs inside the index lock, after the read.
+        let mut wrote_new_key = false;
+        let result = self.index.upsert_with(
+            vault,
+            key,
+            value.char_len(),
+            platform::now_unix(),
+            |outcome| {
+                self.backend.set(vault, key, value)?;
+                wrote_new_key = outcome == SetOutcome::New;
+                Ok(())
+            },
+        );
+        match result {
+            Ok(outcome) => Ok(SetResponse {
+                outcome,
+                masked: mask_secret(value.expose()),
+            }),
+            Err(err) => {
+                if wrote_new_key {
+                    // Best effort: the publish error is the one the caller sees.
+                    let _ = self.backend.delete(vault, key);
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Every key in `vault` with its metadata (`secrets.list`).
