@@ -72,6 +72,8 @@ pub(crate) use ingest::deferred::VectorCoverage;
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
 pub(crate) use ingest::embed::resolve_embed_inflight;
+/// #8959: how a file removal treats a failed redb chunk delete.
+pub(crate) use ingest::supersede::RedbChunkDelete;
 /// Re-export for the reindex orchestrator's progress-interval gate.
 pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]

@@ -421,6 +421,85 @@ async fn a_rewrite_after_a_failed_delete_leaves_no_old_ids_after_reopen() {
     );
 }
 
+/// Write `first`, fail one `removal` write on an injected redb delete, retry it
+/// clean, reopen the corpus; returns the first write's ids and the ids the
+/// reopened corpus holds for `path`. Asserts the failed write is an `Err`
+/// that left memory unchanged, and that the retry emptied the path.
+async fn fail_then_retry_removal(
+    id: &str,
+    path: &str,
+    first: &str,
+    removal: &str,
+) -> (Vec<String>, Vec<crate::core::chunker::RawChunk>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let redb = dir.path().join("index.redb");
+    let old_ids = {
+        let idx = corpus_indexer(id, &redb);
+        idx.index_file(path, first).await.expect("first write");
+        let mut old_ids = idx.chunk_ids_for_file(path).await;
+        old_ids.sort();
+        assert!(!old_ids.is_empty(), "the fixture must land chunks");
+        {
+            let _fault = FailChunkDelete::arm(id);
+            assert!(
+                idx.index_file(path, removal).await.is_err(),
+                "a failed redb delete must fail the write, not answer Ok"
+            );
+        }
+        let mut held = idx.chunk_ids_for_file(path).await;
+        held.sort();
+        assert_eq!(held, old_ids, "a failed removal keeps the ids for a retry");
+        idx.index_file(path, removal).await.expect("retry");
+        assert!(idx.chunk_ids_for_file(path).await.is_empty());
+        old_ids
+    };
+    let idx = corpus_indexer(id, &redb);
+    idx.load_chunks_from_redb().await.expect("warm boot");
+    let held: Vec<_> = idx
+        .chunks
+        .read()
+        .await
+        .values()
+        .filter(|c| c.file == path)
+        .cloned()
+        .collect();
+    (old_ids, held)
+}
+
+/// #8959, `index_file`'s tombstone arm: a failed redb delete fails the write
+/// and a retry removes the ids for good. Fails with the arm on the warn-only
+/// removal: the write answered `Ok` and the reopen loaded the old ids back.
+#[tokio::test]
+async fn a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen() {
+    const TOMBSTONE: &str = "---\nsource_id: zoo-8959\nsource_status: deleted\n---\n";
+    let (old_ids, held) =
+        fail_then_retry_removal("lifecycle-8959-tombstone-err", PATH, OLD, TOMBSTONE).await;
+    assert!(
+        held.iter().all(|c| !old_ids.contains(&c.id)),
+        "old ids came back from redb after a reopen: {held:?}"
+    );
+}
+
+/// #8959, `index_file`'s sops arm: a failed redb delete fails the write
+/// instead of answering `SopsEncrypted`, and a retry removes the plaintext
+/// for good. Fails with the arm on the warn-only purge: the write answered
+/// `Ok` and the reopen loaded the plaintext chunks back.
+#[tokio::test]
+async fn a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen() {
+    let (old_ids, held) = fail_then_retry_removal(
+        "lifecycle-8959-sops-err",
+        "config/secrets.yaml",
+        "db_password: hunter2\nhost: db.internal\n",
+        &crate::core::sops::sample_sops_yaml(),
+    )
+    .await;
+    assert!(
+        held.iter()
+            .all(|c| !old_ids.contains(&c.id) && !c.content.contains("hunter2")),
+        "plaintext chunks came back from redb after a reopen: {held:?}"
+    );
+}
+
 /// An embedder that blocks every batch on a gate the test opens one permit at
 /// a time, and counts the batches that reached it.
 struct GatedEmbedder {

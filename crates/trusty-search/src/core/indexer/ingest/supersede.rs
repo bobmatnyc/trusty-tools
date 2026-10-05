@@ -14,7 +14,9 @@
 //! snapshot through the commit.
 //! Test: `index_file_replaces_a_files_prior_chunks`,
 //! `a_failed_superseded_delete_fails_the_write_and_stays_retryable`,
-//! `a_rewrite_after_a_failed_delete_leaves_no_old_ids_after_reopen` and
+//! `a_rewrite_after_a_failed_delete_leaves_no_old_ids_after_reopen`,
+//! `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`,
+//! `a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen` and
 //! `concurrent_writes_to_one_path_keep_only_the_last_version` in
 //! `indexer::tests::file_lifecycle_8959`.
 
@@ -30,6 +32,16 @@ use super::super::CodeIndexer;
 #[cfg(test)]
 pub(crate) static TEST_FAIL_CHUNK_DELETE: std::sync::Mutex<Vec<String>> =
     std::sync::Mutex::new(Vec::new());
+
+/// How a file removal treats a failed redb chunk delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RedbChunkDelete {
+    /// Drop from memory, then delete from redb and only log a failure.
+    WarnOnly,
+    /// #8959: delete from redb first; a failure is returned with memory
+    /// untouched, so a retry finds the same ids.
+    FailClosed,
+}
 
 /// Number of lock stripes; two paths sharing a stripe only serialize.
 const PATH_LOCK_STRIPES: usize = 64;
@@ -86,6 +98,34 @@ impl CodeIndexer {
             .into_iter()
             .filter(|id| !keep.contains(id.as_str()))
             .collect()
+    }
+
+    /// Remove every chunk id from the HNSW store, corpus, embedding cache,
+    /// and BM25 index.
+    ///
+    /// Why: shared between `remove_file` (bulk per-file deletion) and could
+    /// be reused for future bulk-deletion paths. Each lock is acquired once
+    /// for the whole batch to bound write-lock contention.
+    /// What: `WarnOnly` drops the ids from memory, then deletes them from redb
+    /// and only logs a failure. `FailClosed` deletes from redb first and
+    /// returns its failure with memory untouched (#8959).
+    /// Test: `test_remove_chunk_removes_from_results`;
+    /// `FailClosed` by `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`.
+    pub(crate) async fn remove_chunks_from_stores(
+        &self,
+        ids: &[String],
+        mode: RedbChunkDelete,
+    ) -> Result<()> {
+        match mode {
+            RedbChunkDelete::WarnOnly => {
+                self.drop_chunk_ids_from_memory(ids).await;
+                // Issue #28: mirror the deletion into the durable redb corpus.
+                self.delete_chunks_from_redb(ids).await;
+                Ok(())
+            }
+            // #8959: redb first, so a failure leaves the ids for a retry.
+            RedbChunkDelete::FailClosed => self.remove_superseded_chunks(ids).await,
+        }
     }
 
     /// Drop superseded ids from redb, then the corpus map, BM25 and HNSW.

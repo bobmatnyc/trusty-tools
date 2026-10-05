@@ -357,12 +357,15 @@ impl CodeIndexer {
     /// and returns [`IndexFileOutcome::NoChunks`], blank content returns
     /// `Empty`, JSON above the window ceiling `TooLarge`, a tombstone
     /// `Removed`, sops-encrypted content `SopsEncrypted` after its old chunks
-    /// are removed (#8922). Every `Err` arm is unchanged.
+    /// are removed (#8922). A failed redb chunk delete on the tombstone or
+    /// sops arm is an `Err` with the old ids kept for a retry (#8959).
     /// Test: `index_file_on_large_json_lands_chunks`,
     /// `index_file_refuses_sops_content_and_drops_its_old_chunks`,
     /// `index_file_on_blank_content_reports_empty`, and
     /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
-    /// `indexer::tests::zero_chunk_8976`.
+    /// `indexer::tests::zero_chunk_8976`; the #8959 error arms by
+    /// `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`
+    /// and `a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen`.
     pub async fn index_file_outcome(
         &self,
         file_path: &str,
@@ -383,7 +386,10 @@ impl CodeIndexer {
         // the ids they saw and both versions stayed indexed.
         let _path_lock = self.path_write_locks.lock(file_path).await;
         if trusty_common::knowledge_document::is_tombstone(content) {
-            self.remove_file(file_path).await?;
+            // #8959: a failed redb delete fails the write with the ids still in
+            // memory, so a retry removes them instead of a reopen loading them.
+            self.remove_file_with(file_path, super::RedbChunkDelete::FailClosed)
+                .await?;
             return Ok(IndexFileOutcome::Removed);
         }
         // #8922: a sops-encrypted file is never indexed, and a file that became
@@ -401,7 +407,11 @@ impl CodeIndexer {
                 } else {
                     Some(self.begin_graph_write().await?)
                 };
-            let removed = self.purge_file(&id, file_path).await?;
+            // #8959: fail closed, or a failed redb delete answered
+            // `SopsEncrypted` and the plaintext chunks came back at the next boot.
+            let removed = self
+                .purge_file_with(&id, file_path, super::RedbChunkDelete::FailClosed)
+                .await?;
             tracing::warn!(
                 index_id = %self.index_id,
                 file = %file_path,
