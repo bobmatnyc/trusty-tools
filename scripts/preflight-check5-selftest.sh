@@ -119,6 +119,9 @@
 #                               and a symlink into the tree: [FAIL] "break
 #                               computed but record could not be written", stops,
 #                               and creates nothing.
+#     (s1-4) large gate log     a log far past a pipe buffer still counts its
+#                               CHECK lines (1 permits; 0 and 2 stop) and still
+#                               sees NO VERDICT — no SIGPIPE false read.
 #   The unrelated (i) full_mode_version_is_manifest cases below are unchanged
 #   by this ruling: a version argument that disagrees with the manifest is
 #   still refused on a full run, independent of what CHECK 5 decides.
@@ -735,6 +738,43 @@ else
   pass_case "record/(r7) refused locations write nothing in the tree, cwd or record root"
 fi
 rm -f "${RECORDS}/into-tree"
+
+# --- (s1)-(s4) A gate log far larger than a pipe buffer. Under pipefail,
+#          `printf "$clean" | grep -q` let grep exit at its first match and
+#          SIGPIPE the writer, so a 1-CHECK log read as "found 1" and failed
+#          (s1), and a NO VERDICT line read as absent and the break recorded
+#          (s4). (s2)/(s3) pin that the count still refuses 0 and 2.
+BIG="$(mktemp -d "${TMPDIR:-/tmp}/preflight-check5-big.XXXXXX")"
+trap 'rm -rf "$SCRATCH" "$RECORDS" "$BIG"' EXIT
+# make_big <fixture> <pad-after-line> <keep|drop|dup> <out> — the fixture with
+# ~1.5 MB of build-progress lines after one line, its CHECK line kept,
+# dropped or doubled.
+make_big() {
+  awk -v after="$2" -v mode="$3" '
+    /^CHECK / { if (mode == "drop") next; if (mode == "dup") print }
+    { print }
+    NR == after {
+      for (i = 0; i < 15000; i++)
+        printf "   Compiling padding-crate-%06d v0.1.0 (registry+https://github.com/rust-lang/crates.io-index)\n", i
+    }' "${FIXTURES}/$1" > "${BIG}/$4"
+}
+make_big break-lints.out 11 keep one-check.out
+make_big break-lints.out 11 drop zero-check.out
+make_big break-lints.out 11 dup two-check.out
+make_big break-no-verdict.out 123 keep no-verdict.out
+rm -rf "${RECORDS:?}"/*
+raw="$(FIXTURES="$BIG" run_mpm one-check.out 1)"
+check_raw "sigpipe/(s1) large log, one CHECK line, records the break" 0 "break list does not parse" \
+  "[WARN] semver: RECORDED BREAK"
+raw="$(FIXTURES="$BIG" run_mpm zero-check.out 1)"
+check_raw "sigpipe/(s2) large log, zero CHECK lines, stops" 1 "RECORDED BREAK" \
+  'expected exactly one "CHECK trusty-mpm:" comparison, found 0'
+raw="$(FIXTURES="$BIG" run_mpm two-check.out 1)"
+check_raw "sigpipe/(s3) large log, two CHECK lines, stops" 1 "RECORDED BREAK" \
+  'expected exactly one "CHECK trusty-mpm:" comparison, found 2'
+raw="$(FIXTURES="$BIG" run_mpm no-verdict.out 1)"
+check_raw "sigpipe/(s4) large log, NO VERDICT after the CHECK line, stops" 1 "RECORDED BREAK" \
+  "part of the API was never compared"
 
 # --- (i) A full run whose version argument is not the manifest version is
 #         refused; --check-only keeps the hypothetical-version preview.
