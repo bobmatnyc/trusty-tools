@@ -816,7 +816,8 @@ async fn test_symbol_graph_rebuilds_after_indexing() {
     idx.index_file("a.rs", "fn alpha() { beta(); }\nfn beta() {}\n")
         .await
         .unwrap();
-    let g = idx.symbol_graph().await;
+    // #8959: `index_file` defers the rebuild; the flushing read runs it.
+    let g = idx.fresh_symbol_graph().await;
     assert!(g.node_count() >= 2, "graph should hold alpha + beta");
     assert!(
         !g.callees_of("alpha", 1).is_empty(),

@@ -127,6 +127,12 @@ pub(crate) const KG_GRAPH_FORMAT_VERSION: u32 = 1;
 /// Test: `unstamped_graph_is_rejected_and_rebuilt`.
 pub(crate) const META_KEY_KG_GRAPH_FORMAT_VERSION: &str = "kg_graph_format_version";
 
+/// `_meta` key for the durable "persisted symbol graph is stale" mark (#8959).
+///
+/// What: an 8-byte little-endian write generation; absent means the persisted
+/// graph covers every committed write. See `kg_dirty_ops`.
+pub(crate) const META_KEY_KG_GRAPH_DIRTY: &str = "kg_graph_dirty";
+
 /// redb table holding the forward (source → targets) KG adjacency list.
 ///
 /// Why: BFS expansion walks outgoing edges by symbol; storing the full edge

@@ -24,6 +24,8 @@
 
 pub mod contrib;
 mod corpus_ops;
+// #8959: durable "persisted symbol graph is stale" mark.
+mod kg_dirty_ops;
 mod kg_ops;
 mod meta_ops;
 // #4333: typed classification of *why* a corpus open failed, so a transient

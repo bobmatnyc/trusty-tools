@@ -810,9 +810,13 @@ pub(crate) async fn call_chain_report(
         return Err((status, body.0));
     }
 
+    // #8959: the flush may run a full rebuild that persists to redb, so it
+    // holds the #3049 teardown read guard, as the graph-refresh ticker does.
+    let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let (graph, chunks) = {
         let indexer = handle.indexer.read().await;
-        let graph = indexer.snapshot_symbol_graph().await;
+        // #8959: a call chain reads its own writes; pending ones are flushed.
+        let graph = indexer.fresh_symbol_graph().await;
         // #5917: the entry point is resolved against this snapshot, so an
         // unreadable corpus rendered as `404 entry point not found` — a real
         // symbol reported nonexistent, which reads as an answer about the code.
@@ -822,6 +826,7 @@ pub(crate) async fn call_chain_report(
         })?;
         (graph, chunks)
     };
+    drop(teardown_guard);
 
     render_call_chain(&validated, graph.as_ref(), &chunks)
         .map_err(|e| (StatusCode::NOT_FOUND, serde_json::json!({ "error": e })))

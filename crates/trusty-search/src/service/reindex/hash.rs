@@ -12,6 +12,7 @@
 //! Test: covered indirectly by `reindex_walks_directory_and_emits_events` (the
 //! second reindex run on an unchanged workspace must skip all files).
 
+use crate::core::indexer::RedbChunkDelete;
 use crate::core::registry::IndexId;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
@@ -130,13 +131,30 @@ pub(crate) async fn forget_file_hash(
 impl crate::core::CodeIndexer {
     /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
     /// then its content hash. Returns the chunks removed; the caller rebuilds
-    /// the graph once, and only when something was removed.
+    /// the graph once, and only when something was removed. Stamps the
+    /// durable graph-dirty mark first (#8959).
     ///
     /// A method, not a free function, so `scripts/check_teardown_guard.sh`
     /// sees every `.purge_file(` call site: both writes are durable and each
     /// caller must hold the teardown guard (#3049).
     pub(crate) async fn purge_file(&self, index_id: &IndexId, rel: &str) -> anyhow::Result<usize> {
-        let removed = self.remove_file_no_kg_rebuild(rel).await?;
+        self.purge_file_with(index_id, rel, RedbChunkDelete::WarnOnly)
+            .await
+    }
+
+    /// [`Self::purge_file`] with the redb chunk-delete failure mode chosen by
+    /// the caller; `index_file`'s sops arm uses `FailClosed` (#8959), so a
+    /// failed delete keeps the plaintext ids and the hash for a retry.
+    pub(crate) async fn purge_file_with(
+        &self,
+        index_id: &IndexId,
+        rel: &str,
+        mode: RedbChunkDelete,
+    ) -> anyhow::Result<usize> {
+        // #8959: durable stale mark before anything leaves, so a crash before
+        // the caller's per-pass rebuild still rebuilds at the next boot.
+        let _graph_write = self.begin_graph_write_for_removal(rel).await?;
+        let removed = self.remove_file_no_kg_rebuild_with(rel, mode).await?;
         forget_file_hash(index_id, self, rel).await?;
         Ok(removed)
     }

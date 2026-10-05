@@ -846,8 +846,12 @@ git diff --name-status "$PREV_HEAD" HEAD | while IFS=$'\t' read -r status path n
 done
 ```
 
-Note: `index_file` triggers a full `rebuild_symbol_graph` per call
-(`core/indexer/ingest/mod.rs`) — fine for a handful of files per push. There is
+Note: `index_file` replaces the file's prior chunks, and neither it nor
+`remove_file` rebuilds the symbol graph per call (#8959, #9179). Each marks the
+graph stale; the daemon rebuilds it once the index has been quiet for 2 s, or
+after 60 s under a continuous write stream. Search reads the last built graph
+in the meantime; `GET /graph`, `call_chain` and `graph/neighbors` flush pending
+writes first. There is
 currently no HTTP/MCP-exposed batch variant (the internal
 `index_files_batch_no_rebuild` fast path is only used by the full-reindex
 pipeline); a consumer that needs to apply a LARGE batch of per-file changes at

@@ -31,6 +31,8 @@ mod fanout;
 // #9027: per-index deadline and one query embed for the all-index fan-out.
 mod fanout_deadline;
 mod files;
+// #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
+mod graph_refresh_ticker;
 mod health;
 pub(crate) mod helpers;
 mod index_config;
@@ -413,6 +415,7 @@ pub fn build_router_on(
     spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
     spawn_residency_sweep_ticker(Arc::clone(&state_arc));
     spawn_memory_pressure_ticker(Arc::clone(&state_arc));
+    graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(&state_arc));
     // #4250: drive indexes parked by a warm-boot restore timeout back into the
     // registry. Nothing else will — they are absent from `list_indexes`, so a
     // client that discovers indexes by listing never names them, and boot

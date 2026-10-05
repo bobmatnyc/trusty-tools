@@ -358,7 +358,10 @@ impl CodeIndexer {
     /// `CorpusStore` is wired, calls `SymbolGraph::load_from_corpus` on a
     /// blocking worker. On `Ok(Some)` installs that graph directly; on
     /// `Ok(None)` or `Err` (logged at `warn`) falls back to
-    /// `rebuild_symbol_graph`.
+    /// `rebuild_symbol_graph`. #8959: a durable dirty mark (deferred writes
+    /// the persisted graph misses) installs the loaded graph AND marks it
+    /// stale, so the graph-refresh ticker rebuilds it
+    /// (`a_deferred_rebuild_survives_a_reopen`).
     /// Test: `core::indexer::tests::branch_and_corpus::skip_kg_true_warm_boot_never_loads_persisted_graph`
     /// and `skip_kg_true_skips_rebuild_fallback_when_no_corpus_wired` cover
     /// the new guard; `skip_kg_false_warm_boot_still_loads_persisted_graph`
@@ -379,27 +382,40 @@ impl CodeIndexer {
         };
         let index_id = self.index_id.clone();
         let join = tokio::task::spawn_blocking(move || {
-            crate::core::symbol_graph::SymbolGraph::load_from_corpus(&corpus)
+            // #8959: read the durable stale mark in the same worker.
+            let dirty = corpus.kg_graph_dirty();
+            (
+                dirty,
+                crate::core::symbol_graph::SymbolGraph::load_from_corpus(&corpus),
+            )
         })
         .await;
+        // #8959: seed the write generation before any rebuild below can run,
+        // so that rebuild (or the scheduled one) clears the stored mark.
+        let join = join.map(|(dirty, load)| (self.adopt_graph_dirty_mark(&dirty), load));
         match join {
-            Ok(Ok(Some(graph))) => {
+            Ok((stale, Ok(Some(graph)))) => {
                 tracing::info!(
                     "warm-boot: loaded persisted symbol graph for '{index_id}' \
-                     ({} nodes / {} edges)",
+                     ({} nodes / {} edges, stale={stale})",
                     graph.node_count(),
                     graph.edge_count()
                 );
                 *self.symbol_graph.write().await = std::sync::Arc::new(graph);
+                if stale {
+                    // #8959: deferred writes the persisted graph misses; the
+                    // graph-refresh ticker rebuilds it like any other.
+                    self.mark_symbol_graph_stale();
+                }
             }
-            Ok(Ok(None)) => {
+            Ok((_, Ok(None))) => {
                 tracing::info!(
                     "warm-boot: no persisted KG for '{index_id}' — \
                      rebuilding from chunk corpus"
                 );
                 self.rebuild_symbol_graph().await;
             }
-            Ok(Err(e)) => {
+            Ok((_, Err(e))) => {
                 tracing::warn!(
                     "warm-boot: KG load for '{index_id}' failed ({e}) — \
                      falling back to rebuild_symbol_graph"

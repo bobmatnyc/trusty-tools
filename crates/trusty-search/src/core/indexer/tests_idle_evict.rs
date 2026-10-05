@@ -333,8 +333,9 @@ async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
 
     // The guard inside `rebuild_symbol_graph` must have rehydrated entities
     // before snapshotting, so the untouched owner/target Documents edge must
-    // still be present.
-    let g_after = idx.snapshot_symbol_graph().await;
+    // still be present. #8959: `remove_file` defers the rebuild; the flushing
+    // read runs it through the same `rebuild_symbol_graph` choke point.
+    let g_after = idx.fresh_symbol_graph().await;
     let docs_after = g_after.neighbors_by_edge("prose_owner", &[EdgeKind::Documents], 1);
     assert!(
         docs_after.iter().any(|(n, _, _)| n == "target"),

@@ -1705,8 +1705,9 @@ async fn skip_kg_index_file_never_rebuilds_the_symbol_graph() {
         .await
         .expect("index_file");
 
+    // #8959: the flushing read, so a deferred rebuild would show up here.
     assert_eq!(
-        idx.snapshot_symbol_graph().await.node_count(),
+        idx.fresh_symbol_graph().await.node_count(),
         0,
         "a skip_kg index must not build a symbol graph on an incremental \
          write (#3048)"
@@ -1728,8 +1729,9 @@ async fn skip_kg_false_index_file_still_rebuilds_the_symbol_graph() {
         .await
         .expect("index_file");
 
+    // #8959: the rebuild is deferred; the flushing read runs it.
     assert!(
-        idx.snapshot_symbol_graph().await.node_count() > 0,
+        idx.fresh_symbol_graph().await.node_count() > 0,
         "a KG-enabled index must still rebuild the graph on the incremental \
          path — otherwise the gate above proves nothing"
     );

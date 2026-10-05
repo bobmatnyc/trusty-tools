@@ -343,10 +343,15 @@ pub(crate) async fn graph_neighbors_report(
         return Err((status, body.0));
     }
 
+    // #8959: the flush may run a full rebuild that persists to redb, so it
+    // holds the #3049 teardown read guard, as the graph-refresh ticker does.
+    let teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let graph = {
         let indexer = handle.indexer.read().await;
-        indexer.snapshot_symbol_graph().await
+        // #8959: a neighbour query reads its own writes; pending ones are flushed.
+        indexer.fresh_symbol_graph().await
     };
+    drop(teardown_guard);
     let neighbors: Vec<NeighborEntry> = graph
         .graph_neighbors(&params.node, dirs, kinds.as_deref(), max_hops)
         .into_iter()
