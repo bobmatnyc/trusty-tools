@@ -38,6 +38,20 @@ use std::sync::Arc;
 /// will not fire first, and stalled-embedder requests are detected quickly.
 const DEFAULT_QUERY_TIMEOUT_SECS: u64 = 30;
 
+/// The environment variable that sets the interactive-query deadline.
+pub const QUERY_TIMEOUT_ENV: &str = "TRUSTY_QUERY_TIMEOUT_SECS";
+
+/// The deadline, in seconds, a `TRUSTY_QUERY_TIMEOUT_SECS` value names.
+///
+/// Why (#9168): the MCP bridge sizes its client-side query budget from the
+/// same value the daemon enforces, so both must parse it the same way.
+/// What: the value as `u64`; the 30 s default when absent or unparsable.
+/// Test: `query_budget_tracks_the_daemon_deadline`.
+pub fn query_timeout_secs(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_QUERY_TIMEOUT_SECS)
+}
+
 /// Shared timeout config installed as an axum `Extension` on the interactive
 /// query router subtree.
 ///
@@ -61,10 +75,7 @@ impl QueryTimeoutConfig {
     /// What: reads env var, parses as u64, falls back to `DEFAULT_QUERY_TIMEOUT_SECS`.
     /// Test: daemon-boot integration path; unit-tested via `from_secs`.
     pub fn from_env() -> Arc<Self> {
-        let secs = std::env::var("TRUSTY_QUERY_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_QUERY_TIMEOUT_SECS);
+        let secs = query_timeout_secs(std::env::var(QUERY_TIMEOUT_ENV).ok().as_deref());
         tracing::info!("query timeout: {}s (TRUSTY_QUERY_TIMEOUT_SECS)", secs);
         Arc::new(Self {
             timeout: std::time::Duration::from_secs(secs),

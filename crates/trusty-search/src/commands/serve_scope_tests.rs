@@ -6,16 +6,18 @@
 //! session, reported as success. The refusal branches carry most of the risk
 //! and get most of the assertions here.
 //!
-//! Hermetic by construction: the two tests that speak HTTP bind an ephemeral
-//! port and serve their own fixture, so nothing here can reach the machine's
-//! real trusty-search daemon on 7878.
+//! Hermetic by construction: the tests that talk to a daemon serve their own
+//! fixture on a scratch socket (`commands::mock_socket`, #9168), so nothing
+//! here can reach the machine's real trusty-search daemon.
 //!
 //! Test: `cargo test -p trusty-search --bin trusty-search scope_tests`
 
+use crate::commands::mock_socket::{mock_daemon, MockDaemon};
 use crate::commands::serve_scope::*;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// A unique empty scratch directory for one test.
 fn scratch(tag: &str) -> PathBuf {
@@ -430,27 +432,18 @@ fn parse_entries_empty_when_shape_unexpected() {
 }
 
 // ---------------------------------------------------------------------------
-// Transport — hermetic, ephemeral port only
+// Transport — hermetic, scratch socket only
 // ---------------------------------------------------------------------------
 
-/// Spawn a fixture daemon on an ephemeral port returning `body` for
-/// `GET /indexes`. Never binds 7878, so the machine's real daemon is untouched.
-async fn fixture_daemon(body: serde_json::Value) -> String {
-    let app = axum::Router::new().route(
-        "/indexes",
-        axum::routing::get(move || {
-            let body = body.clone();
-            async move { axum::Json(body) }
-        }),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    format!("http://{addr}")
+/// A fixture daemon on a scratch socket answering `search.indexes.list` with
+/// `body` (#9168). Never dials the machine's real daemon socket.
+async fn fixture_daemon(body: serde_json::Value) -> MockDaemon {
+    mock_daemon(move |method, params| {
+        assert_eq!(method, "search.indexes.list");
+        assert_eq!(params["details"], json!(true), "the root needs details");
+        Ok(body.clone())
+    })
+    .await
 }
 
 /// Why: proves the `?details=true` round-trip actually yields the `root_path`
@@ -462,12 +455,14 @@ async fn fetch_reads_entries_from_a_live_server() {
     ]}))
     .await;
 
-    let entries = fetch_index_entries(&base).await.expect("fetch succeeds");
+    let entries = fetch_index_entries(&base.client)
+        .await
+        .expect("fetch succeeds");
     assert_eq!(entries, vec![entry("api", "/work/acme/api")]);
 }
 
 /// Why: the end-to-end shape every project-scoped tool inherits. A real
-/// directory, a real HTTP round-trip, and a pin that names its source.
+/// directory, a real socket round-trip, and a pin that names its source.
 #[tokio::test(flavor = "multi_thread")]
 async fn auto_pin_confirms_against_a_live_server() {
     let root = scratch("e2e-ok");
@@ -478,7 +473,7 @@ async fn auto_pin_confirms_against_a_live_server() {
     ]}))
     .await;
 
-    let pin = auto_pin_from_cwd(&base, &root)
+    let pin = auto_pin_from_cwd(&base.client, &root)
         .await
         .expect("a real directory yields a candidate");
     let choice = pin.choice().expect("matching root confirms the pin");
@@ -501,7 +496,9 @@ async fn auto_pin_refuses_a_colliding_index_end_to_end() {
     ]}))
     .await;
 
-    let pin = auto_pin_from_cwd(&base, &root).await.expect("a candidate");
+    let pin = auto_pin_from_cwd(&base.client, &root)
+        .await
+        .expect("a candidate");
     assert!(
         pin.choice().is_none(),
         "a same-id different-root index must leave the session unpinned"
@@ -528,7 +525,9 @@ async fn auto_pin_substitutes_the_index_rooted_at_the_cwd_end_to_end() {
     ]}))
     .await;
 
-    let pin = auto_pin_from_cwd(&base, &root).await.expect("a candidate");
+    let pin = auto_pin_from_cwd(&base.client, &root)
+        .await
+        .expect("a candidate");
     let choice = pin
         .choice()
         .expect("an index registered at this root must pin the session (#6864)");
@@ -548,8 +547,9 @@ async fn auto_pin_substitutes_the_index_rooted_at_the_cwd_end_to_end() {
 async fn auto_pin_refuses_when_the_daemon_cannot_be_listed() {
     let root = scratch("e2e-nodaemon");
     git_init(&root);
-    // Port 1 on loopback refuses immediately; no fixture is served here.
-    let pin = auto_pin_from_cwd("http://127.0.0.1:1", &root)
+    // A socket path nothing serves fails the dial at once.
+    let absent = DaemonClient::at(root.join("absent.sock"));
+    let pin = auto_pin_from_cwd(&absent, &root)
         .await
         .expect("a candidate is still derived");
     assert!(

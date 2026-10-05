@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use super::tests::{req, spawn_mock_daemon};
-use super::{McpServer, STAGE_NOT_READY_CODE};
+use super::STAGE_NOT_READY_CODE;
 
 /// `search_lexical` pins `stage=lexical` and `expand_graph=false` on
 /// the dispatched SearchQuery. Always-available — no status pre-check
@@ -32,8 +32,8 @@ async fn search_lexical_tool_routes_to_lexical_stage_only() {
         "intent": "Definition",
         "latency_ms": 1,
     });
-    let (base, bodies, paths) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, paths) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "search_lexical",
@@ -46,15 +46,15 @@ async fn search_lexical_tool_routes_to_lexical_stage_only() {
         .await;
     assert!(resp.error.is_none(), "lexical tool must not error");
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     assert_eq!(bodies.len(), 1, "exactly one search dispatched");
     let dispatched = &bodies[0];
     assert_eq!(dispatched["stage"], "lexical");
     assert_eq!(dispatched["expand_graph"], false);
     assert_eq!(dispatched["text"], "apply_archive_downrank");
     assert_eq!(dispatched["top_k"], 5);
-    let paths = paths.lock().await;
-    assert_eq!(paths[0], "/indexes/demo/search");
+    let paths = paths.lock().expect("captured");
+    assert_eq!(paths[0], "search.query demo");
 }
 
 /// `search_semantic` pins `stage=semantic` and `expand_graph=false`.
@@ -75,8 +75,8 @@ async fn search_semantic_tool_routes_to_semantic_stage_when_stage_2_ready() {
         "intent": "Conceptual",
         "latency_ms": 7,
     });
-    let (base, bodies, _paths) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _paths) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "search_semantic",
@@ -88,7 +88,7 @@ async fn search_semantic_tool_routes_to_semantic_stage_when_stage_2_ready() {
         .await;
     assert!(resp.error.is_none());
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     let dispatched = &bodies[0];
     assert_eq!(dispatched["stage"], "semantic");
     assert_eq!(dispatched["expand_graph"], false);
@@ -108,8 +108,8 @@ async fn search_semantic_tool_returns_stage_not_ready_when_stage_2_missing() {
         "search_capabilities": ["bm25", "literal", "exact_match"],
     });
     let search = serde_json::json!({ "results": [] });
-    let (base, bodies, _) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
 
     // Bare-method form returns a JSON-RPC error with code STAGE_NOT_READY_CODE.
     let resp = server
@@ -136,7 +136,7 @@ async fn search_semantic_tool_returns_stage_not_ready_when_stage_2_missing() {
     assert_eq!(data["current_stages"]["semantic"]["status"], "in_progress");
 
     // No daemon search call must have happened — the pre-check short-circuited.
-    assert!(bodies.lock().await.is_empty());
+    assert!(bodies.lock().expect("captured").is_empty());
 
     // `tools/call` form returns the same condition as
     // `{ isError: true, _meta: { error_code: ... } }`.
@@ -177,8 +177,8 @@ async fn search_kg_tool_routes_to_graph_stage_when_stage_3_ready() {
         "intent": "Usage",
         "latency_ms": 12,
     });
-    let (base, bodies, _) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "search_kg",
@@ -190,7 +190,7 @@ async fn search_kg_tool_routes_to_graph_stage_when_stage_3_ready() {
         .await;
     assert!(resp.error.is_none());
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     let dispatched = &bodies[0];
     assert_eq!(dispatched["stage"], "graph");
     assert_eq!(dispatched["expand_graph"], true);
@@ -209,8 +209,8 @@ async fn search_kg_tool_returns_stage_not_ready_when_stage_3_missing() {
         "search_capabilities": ["bm25", "literal", "exact_match", "vector"],
     });
     let search = serde_json::json!({ "results": [] });
-    let (base, bodies, _) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "search_kg",
@@ -234,7 +234,7 @@ async fn search_kg_tool_returns_stage_not_ready_when_stage_3_missing() {
         "stage 3 missing with stage 2 ready should suggest search_semantic first"
     );
     // No search was dispatched.
-    assert!(bodies.lock().await.is_empty());
+    assert!(bodies.lock().expect("captured").is_empty());
 }
 
 /// `search_all` with `index_id` runs the per-index full hybrid: no
@@ -254,8 +254,8 @@ async fn search_all_with_index_id_routes_to_full_hybrid() {
         "intent": "Conceptual",
         "latency_ms": 8,
     });
-    let (base, bodies, paths) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, paths) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "search_all",
@@ -267,7 +267,7 @@ async fn search_all_with_index_id_routes_to_full_hybrid() {
         .await;
     assert!(resp.error.is_none());
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     let dispatched = &bodies[0];
     // No stage pin (full hybrid adaptive).
     assert!(
@@ -275,8 +275,8 @@ async fn search_all_with_index_id_routes_to_full_hybrid() {
         "search_all must not pin a stage: got {dispatched:?}"
     );
     assert_eq!(dispatched["expand_graph"], true);
-    let paths = paths.lock().await;
-    assert_eq!(paths[0], "/indexes/demo/search");
+    let paths = paths.lock().expect("captured");
+    assert_eq!(paths[0], "search.query demo");
 }
 
 /// `search_all` and the legacy `search` tool produce identical
@@ -293,8 +293,8 @@ async fn search_all_and_legacy_search_dispatch_equivalent_bodies() {
         "search_capabilities": ["bm25", "vector", "kg"],
     });
     let search = serde_json::json!({ "results": [] });
-    let (base, bodies, _) = spawn_mock_daemon(status, search).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _) = spawn_mock_daemon(status, search).await;
+    let server = daemon.server();
     let args = serde_json::json!({
         "index_id": "demo",
         "query": "find the AuthValidator",
@@ -303,7 +303,7 @@ async fn search_all_and_legacy_search_dispatch_equivalent_bodies() {
     let _ = server.dispatch(req("search_all", args.clone())).await;
     let _ = server.dispatch(req("search", args.clone())).await;
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     assert_eq!(bodies.len(), 2, "both tools must dispatch a search");
     // Compare text / top_k / expand_graph. `search_all` explicitly
     // sets `expand_graph=true`; the legacy `search` tool does NOT set
