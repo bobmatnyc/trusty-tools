@@ -1,0 +1,5 @@
+Changed
+- `trusty-search serve` (the MCP bridge, stdio and `--with-http`) now reaches the daemon only through its Unix socket, never over `http://127.0.0.1:7878`. Every MCP tool calls its `search.*` socket method; tool names, input schemas and result shapes are unchanged. Stdio `serve` auto-starts the daemon and waits for the socket, not the HTTP address (#9168).
+- Index-unavailable errors keep their structured fields (`index_id`, `retryable`, `restore_via`, `reason`, `transient`, `stages`, plus `error_code` and `http_status: 503`) from the socket refusal's `data`. MCP error text names the daemon socket instead of a URL (#9168).
+- `search_health` reports the answering daemon as `daemon.socket` (was `daemon.base_url`). A daemon that answers badly reports `daemon.rpc_code` and `daemon.error` (were `http_status` and `body`) (#9168).
+- `McpServer::new` takes a `DaemonClient`; `McpServer::with_client` and `McpServer::base_url` are removed, and `McpServer::daemon` returns the client (#9168).
