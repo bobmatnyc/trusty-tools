@@ -159,7 +159,8 @@ async fn on_demand_client_spawns_the_server_and_it_exits_when_idle() {
             OsString::from("--machine-config"),
             p.machine.clone().into_os_string(),
             OsString::from("--idle-timeout-secs"),
-            OsString::from("1"),
+            // #9065: 3 s, so the liveness asserts below beat the idle exit under CI load.
+            OsString::from("3"),
         ]);
     let report = client.call("secrets.doctor", Value::Null).await.unwrap();
     assert_eq!(report["index_root"], p.index.display().to_string());
