@@ -110,9 +110,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Why: the point of routing through SIGTERM is that the daemon's own handler
 /// flushes its indexes and unlinks its socket. A daemon that is wedged must
 /// still not survive its parent, so the grace window is bounded rather than
-/// open-ended. 5 s clears trusty-memory's BM25 exit flush on a temp data dir
-/// while keeping the worst-case orphan lifetime in single-digit seconds.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// open-ended.
+/// What: [`crate::shutdown::CLEANUP_RESERVE`] plus [`SHUTDOWN_HEADROOM`]. The
+/// reserve is what trusty-memory's BM25 exit flush may spend before the socket
+/// unlink runs; the headroom covers the drain before it and the unlink after.
+/// Test: `shutdown_grace_leaves_the_cleanup_reserve_intact`.
+// #7085: a 5 s literal equalled the 5 s reserve, so a full-budget flush was
+// hard-exited before the socket unlink. Derived so the two cannot drift.
+const SHUTDOWN_GRACE: Duration = crate::shutdown::CLEANUP_RESERVE.saturating_add(SHUTDOWN_HEADROOM);
+
+/// Time [`SHUTDOWN_GRACE`] grants beyond the cleanup reserve.
+///
+/// Why: 5 s past the reserve keeps the worst-case orphan lifetime near 10 s.
+const SHUTDOWN_HEADROOM: Duration = Duration::from_secs(5);
 
 /// How long the watchdog waits for the process to install a SIGTERM handler
 /// before giving up on a graceful exit.
@@ -881,5 +891,20 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         handle.join().expect("watchdog thread must not panic");
+    }
+
+    /// #7085: the watchdog's grace must outlast the daemon's own cleanup
+    /// reserve, or a full-budget exit flush is hard-exited before the socket
+    /// unlink that follows it. The 5 s margin is a literal on purpose — reusing
+    /// the production headroom constant would make this assertion a tautology.
+    #[test]
+    fn shutdown_grace_leaves_the_cleanup_reserve_intact() {
+        let reserve = crate::shutdown::CLEANUP_RESERVE;
+        assert!(
+            SHUTDOWN_GRACE >= reserve + Duration::from_secs(5),
+            "SHUTDOWN_GRACE ({SHUTDOWN_GRACE:?}) must exceed CLEANUP_RESERVE \
+             ({reserve:?}) by at least 5 s, so the post-flush socket unlink \
+             still runs before the forced exit"
+        );
     }
 }
