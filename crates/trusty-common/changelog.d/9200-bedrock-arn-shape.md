@@ -1,2 +1,0 @@
-Fixed
-- `classify_model_shape` and `conclusive_shape_mismatch` classify a Bedrock model ARN (`arn:aws:bedrock:<region>:<account>:application-inference-profile/<id>`, `inference-profile/<id>`, or `arn:aws:bedrock:<region>::foundation-model/<id>`) as Bedrock with conclusive evidence. Before, the `/` in the ARN read as an OpenRouter slug and routed the id to OpenRouter. Malformed ARNs, other ARN services and partitions, and ids that only contain `arn:aws:bedrock:` past the start keep their old classification (#9200).
