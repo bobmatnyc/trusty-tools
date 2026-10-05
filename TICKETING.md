@@ -368,9 +368,11 @@ on verification. A hit there is prior art worth reading.
   "Improvement recommendations" block.
 - A PM or agent "Prompt feedback" addendum item.
 
-Each is fixed in the surfacing PR, dropped, or logged as a dated comment on the
-rollup issue [#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021),
-deduplicated against earlier comments. HIGH+ or independently schedulable work
+Each one that meets the PM's Completion Standard fix bar (`tm-workflow`) is
+fixed in the surfacing PR. Any other is one comment on the PR or existing
+issue, dropped, or logged as a dated comment on the rollup issue
+[#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021), deduplicated
+against earlier comments — never a fix round of its own. HIGH+ or independently schedulable work
 may still be filed — search first.
 
 ## Title and body

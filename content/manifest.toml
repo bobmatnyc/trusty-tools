@@ -40,7 +40,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/code-analyzer.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/code-critic.md"
@@ -208,7 +208,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/code-review-standards.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
@@ -320,7 +320,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-delegation-patterns.md"
-version = "1.1.0"
+version = "1.1.1"
 
 [[member]]
 path = "skills/tm-doctor.md"

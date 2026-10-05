@@ -3,7 +3,7 @@ name: code-review-standards
 description: Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference.
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: agent-reference
 tags: [code-review, severity, verdict, quality-gate, code-critic]
 effort: low
@@ -59,16 +59,19 @@ Notes section rather than asserting a severity you can't back up.
 ## Finding Disposition
 
 Every finding ends in exactly one of three states, and the review STATES which
-one. **The default is the framework's existing rule: a review finding is
-fixed in the surfacing PR, or dropped.** `Promote` is the narrow third exit
-that rule leaves implicit — work that is genuinely separable, not a home for
-every LOW or MEDIUM finding that doesn't obviously fit the first two.
+one. **The default follows the PM's Completion Standard fix bar
+(`tm-workflow`): a finding that blocks is fixed in the surfacing PR; every
+other finding is one PR comment, or dropped.** `Promote` is the narrow third
+exit — work that is genuinely separable, not a home for every LOW or MEDIUM
+finding that doesn't obviously fit the first two.
 
-1. **`Fix here`** — corrected in the surfacing PR. The default for correctness,
-   security, acceptance criteria, regression coverage, and any small in-scope
-   repair.
-2. **`Parent`** — kept with the work already in flight, as a PR comment or a
-   checklist item on the parent issue. No durable artifact is created.
+1. **`Fix here`** — corrected in the surfacing PR. Only for a finding that
+   causes, or leaves unguarded, wrong behaviour against the acceptance
+   criteria, a security or credential exposure, data loss or corruption, a
+   crash, hang or leaked process, a resource pileup, or a broken gate or CI.
+2. **`Parent`** — kept with the work already in flight, in ONE PR comment or a
+   checklist item on the parent issue. The default for every other finding,
+   missing tests on non-safety paths included. It starts no fix round.
 3. **`Promote`** — reserved for a defect that is genuinely separable work
    someone would schedule on its own, never the default landing spot for a
    LOW finding that just doesn't feel worth fixing right now. The critic only
@@ -79,7 +82,7 @@ every LOW or MEDIUM finding that doesn't obviously fit the first two.
 
 **An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
 and zero HIGH findings; the MEDIUM/LOW observations that remain default to
-`Fix here` or `Parent`. `Promote` on an approved review is a recommendation for
+`Parent`, or `Fix here` only when one meets the fix bar. `Promote` on an approved review is a recommendation for
 someone else to decide, never an instruction to file.
 
 ## Fail-Open Check
@@ -262,7 +265,7 @@ correct, and complete outcome — do not manufacture findings to look thorough.
 - Do not leave a finding without a disposition. "Noted" is not one of the
   three.
 - Do not default LOW/MEDIUM polish to `Promote` because it's easier than
-  deciding — the default is `Fix here` or dropped; `Promote` is for defects
+  deciding — the default is `Parent` or dropped; `Promote` is for defects
   that are genuinely separable, schedulable work, not a catch-all.
 - Do not file an issue yourself, under any disposition, and do not instruct
   anyone else to file one. `Promote` is a recommendation to the PM — never an

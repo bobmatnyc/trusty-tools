@@ -15,13 +15,26 @@
 - 🔴 The hard line: never turn red green by deleting coverage. No `#[ignore]`,
   no cfg-gating, no `--exclude`, no narrowing to `--lib`. Going fast licenses
   running fewer gates, never making a failing gate report success.
-- A branch that has drawn 3+ review rounds is evidence to close and fold, not
-  to attempt round 4.
-- Branch = workstream, durable. Worktree = writer, ephemeral.
+
+## Completion Standard
+
+Ship and close. Work beyond this needs an explicit user request.
+
+- **Done** (all four, then stop): (1) acceptance criteria met; (2) required
+  gates pass: tests for the changed behaviour, required CI, a critic with no
+  open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
+  rung's live check; (4) shipped by the normal path, issue closed with evidence.
+- **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
+  wrong behaviour against the criteria, a security or credential exposure,
+  data loss or corruption, a crash, hang or leaked process, a resource pileup,
+  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
+  review round, issue or fix round.
+- **Limits:** after the first review, at most one fix round and one delta
+  review; a blocker left after that goes to the Architect. Never widen scope.
+  Detail: `Skill(skill="tm-workflow")`.
 
 ## Risk — the second input to every skip condition
 
-- Skip conditions live in the CORE phase table; risk is their second input.
 - **Low** — docs, comments, mechanical metadata.
 - **Normal** — a localized behaviour change inside one package.
 - **High** — security, destructive or irreversible paths, persisted state,
@@ -34,15 +47,14 @@
   dispatch-brief templates and the rest of the delivery chain:
   `Skill(skill="tm-workflow")`.
 
-### Fail-Open Check (BLOCKING wherever a failure branch exists)
+### Fail-Open Check (BLOCKING: a fix-bar class)
 
-- A failure branch is an operation that can fail, whose failure is downgraded to
-  a warning, a default, or a `false`, while state advances anyway.
-- Where a change adds or touches one, it is not reviewed until an error-arm
-  regression test exists that FAILS against the pre-fix commit.
-- Name the Fail-Open Check in the dispatch brief for `code-analyzer` or
-  `code-critic`; the five checks that find it are in the `code-review-standards`
-  skill both agents already load.
+- A failure branch is an operation whose failure is downgraded to a warning, a
+  default, or a `false`, while state advances anyway.
+- A change that adds or touches one is not reviewed until an error-arm
+  regression test FAILS against the pre-fix commit.
+- Name the Fail-Open Check in the brief for `code-analyzer` or `code-critic`;
+  its five checks are in the `code-review-standards` skill.
 
 ## Layout ADRs Are Defaults, Not Mandates
 
@@ -69,9 +81,7 @@ update it when the work lands or blocks. Detail: `Skill(skill="tm-ticketing")`.
   branch point as your own additions.
 - Verify the base ref BEFORE diffing (#7748): compare `git rev-parse
   refs/remotes/origin/main` with `git ls-remote origin refs/heads/main`, and
-  `git fetch origin main` when they disagree. A stale base widened one measured
-  scan to ~1,270 unrelated paths; a comparison you cannot make is not a scan
-  that passed.
+  `git fetch origin main` when they disagree.
 - The branch protection it sits inside, and the review and changelog gates:
   `Skill(skill="tm-workflow")`.
 

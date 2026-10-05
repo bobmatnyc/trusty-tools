@@ -3,7 +3,7 @@ name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -347,9 +347,14 @@ Ladder in `CLAUDE.md`) — never a parallel risk axis invented for the decision.
 Enum changes and spelling fixes are rung 1–3. No critic.
 
 **Escalate to required regardless of rung:** the change can start, refuse, or
-gate a session; it touches a trust boundary or an injection defense; it rewrites
-history or force-pushes; or the PR is already at review round 3+ — evidence
-something is being missed.
+gate a session; it touches a trust boundary or an injection defense; or it
+rewrites history or force-pushes.
+
+**A critic round counts against the round limit.** After the first review, a PR
+gets at most one fix round and one delta review. A blocking finding left after
+that goes to the Architect, never to another critic round. Only findings in the
+fix bar's blocking classes earn the fix round (`tm-workflow`, "Completion
+Standard").
 
 **A code-critic brief states the PR and the gates (#8584).** It carries
 `PR: <n>|none`; with `none` the critic posts nothing and looks up no PR. It also
