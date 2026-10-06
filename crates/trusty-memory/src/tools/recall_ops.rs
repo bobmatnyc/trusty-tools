@@ -36,7 +36,8 @@ use super::helpers::open_palace_handle;
 use super::palace_index::{resolve_palace_or_index, PalaceScope};
 // #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
 use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
-use super::recall_rulings::{fetch_user_rulings, fold_rulings, RulingsDegraded};
+use super::recall_rulings::{fetch_user_rulings, fold_rulings, RulingsFold};
+use super::recall_rulings_floor::apply_rulings_floor;
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
@@ -211,7 +212,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, Vec::new()));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
     }
 
     let embedder = state.embedder().await?;
@@ -242,12 +243,12 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     }
     // #9143: user-scope rulings join at L1, after fusion so they compete on
     // the fused scale; failed rulings palaces are reported, never fatal.
-    let degraded = fold_rulings(&mut results, rulings, top_k, min_score);
+    let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, degraded))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold))
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
@@ -282,7 +283,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, Vec::new()));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
     }
 
     let embedder = state.embedder().await?;
@@ -302,10 +303,10 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // `fetch_k`, not `top_k` — see the `memory_recall` sibling.
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
-    let degraded = fold_rulings(&mut results, rulings, top_k, min_score);
+    let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, degraded))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold))
 }
 
 /// The caller's cut for a single-palace recall: count, floor and tag view.
@@ -328,16 +329,20 @@ impl RecallCut {
         }
     }
 
-    /// Demote stale snapshots (#8246), apply the floor, cut to `top_k`, and
-    /// serialize with any failed rulings palaces (#9143).
+    /// Demote stale snapshots (#8246), lift answering rulings into reserved
+    /// slots (#9143), apply the floor, cut to `top_k`, and serialize with any
+    /// failed rulings palaces (#9143).
     fn rank_and_serialize(
         &self,
         palace: &str,
         query: &str,
         mut results: Vec<RecallResult>,
-        rulings_degraded: Vec<RulingsDegraded>,
+        rulings: RulingsFold,
     ) -> Value {
         demote_stale_snapshots(&mut results, chrono::Utc::now());
+        // #9143 AC2: after the score sort, before the floor and the cut, so
+        // the reserved slots sit inside `top_k`.
+        apply_rulings_floor(&mut results, &rulings.floored, self.top_k);
         let dropped_below_floor = apply_score_floor(&mut results, self.min_score, self.top_k);
         serialize_recall(
             palace,
@@ -346,7 +351,7 @@ impl RecallCut {
             &RecallProjection {
                 include_creator_tags: self.include_creator_tags,
                 dropped_below_floor,
-                rulings_degraded,
+                rulings_degraded: rulings.degraded,
             },
         )
     }

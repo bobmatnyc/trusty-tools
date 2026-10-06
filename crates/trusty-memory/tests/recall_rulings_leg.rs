@@ -539,3 +539,113 @@ async fn rulings_get_the_same_bm25_fusion_as_project_hits() {
         "the ruling must carry its palace's RRF bonus: fused {fused}, bare {bare}"
     );
 }
+
+/// The AC2 query, as the #9143 live check asked it.
+const Q15: &str = "Q15 standing rule: issue titles name the symptom, not the presumed cause";
+
+/// The Q15 rule as a rulings palace holds it: same subject, other wording.
+const Q15_RULE: &str =
+    "Standing rule Q15 (owner): name the symptom in issue titles, never the presumed cause";
+
+/// A large, noisy project palace: `strong` drawers that restate the Q15 query
+/// almost verbatim, so they outscore the differently worded rule on raw
+/// score, plus `noise` unrelated drawers.
+async fn noisy_project(state: &AppState, strong: usize, noise: usize) {
+    for i in 0..strong {
+        let text = format!("{Q15} - triage note {i} on how the backlog applied it");
+        remember(state, "project-a", &text, &[], None).await;
+    }
+    for i in 0..noise {
+        let text = format!("Basalt columns form when lava cools slowly; field log {i}");
+        remember(state, "project-a", &text, &[], None).await;
+    }
+}
+
+/// `(drawer id, score, layer)` of every hit.
+fn scored(results: &[Value]) -> Vec<(String, f64, u64)> {
+    results
+        .iter()
+        .map(|r| {
+            let id = r["drawer_id"].as_str().or(r["id"].as_str()).expect("id");
+            let score = r["score"].as_f64().expect("score");
+            (id.to_string(), score, r["layer"].as_u64().expect("layer"))
+        })
+        .collect()
+}
+
+/// Why (#9143 AC2, live check 2026-10-06): in the real trusty-tools palace the
+/// Q15 rule scored about 0.47 against project hits of 0.5 to 0.6, missed
+/// `top_k` 10 and ranked 30th at `top_k` 40. A small palace hid this.
+/// What: 160 project drawers, 40 of them restating the query, and a rulings
+/// palace with the Q15 rule worded differently, five off-topic rulings and an
+/// on-topic note. Every layer-2 hit returned outscores the rule, yet the rule
+/// is in the top 3 at layer 1 at `top_k` 10 and 40. The leg still adds at
+/// most `ceil(top_k / 3)` drawers and never the note (AC1, AC3).
+#[tokio::test]
+async fn a_ruling_that_answers_the_query_ranks_top_3_in_a_large_noisy_palace() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a", "rulings-a"], &["rulings-a"]).await;
+    noisy_project(&state, 40, 120).await;
+    let tags = ["bob-ruling", "standing-rule"];
+    let ruling = remember(&state, "rulings-a", Q15_RULE, &tags, None).await;
+    let mut leg_ids = vec![ruling.to_string()];
+    for i in 0..5 {
+        let text = format!("Commits never land on local main; release train rule {i}");
+        let id = remember(&state, "rulings-a", &text, &["bob-ruling"], None).await;
+        leg_ids.push(id.to_string());
+    }
+    let note = format!("{Q15} - drafted, not yet ruled");
+    let note = remember(&state, "rulings-a", &note, &["note"], None).await;
+
+    for top_k in [10_u64, 40] {
+        let args = json!({ "palace": "project-a", "query": Q15, "top_k": top_k });
+        let envelope = recall_envelope(&state, args).await;
+        let results = envelope["results"].as_array().expect("results");
+        let r = rank_of(results, ruling)
+            .unwrap_or_else(|| panic!("top_k {top_k}: Q15 rule not recalled: {results:#?}"));
+        assert!(
+            r < 3,
+            "top_k {top_k}: Q15 rule ranked {}, want top 3",
+            r + 1
+        );
+        let hits = scored(results);
+        assert_eq!(hits[r].2, 1, "the ruling joins at L1");
+        let l2 = hits.iter().filter(|h| h.2 == 2).count();
+        let outscoring = hits.iter().filter(|h| h.2 == 2 && h.1 > hits[r].1).count();
+        assert!(
+            l2 >= 7 && outscoring == l2,
+            "top_k {top_k}: every L2 hit must outscore the rule ({outscoring} of {l2}): {hits:#?}"
+        );
+        let from_leg = hits.iter().filter(|h| leg_ids.contains(&h.0)).count();
+        assert!(
+            from_leg as u64 <= top_k.div_ceil(3),
+            "cap: {from_leg} rulings"
+        );
+        assert_eq!(rank_of(results, note), None, "a non-ruling never crosses");
+    }
+}
+
+/// Why (#9143 AC2 relevance condition): the floor overrides score order, so a
+/// ruling the query is not about must keep its score rank, not take rank 3.
+/// What: a project palace answering a basalt question and a rulings palace
+/// holding only the Q15 rule. The leg folds the rule, but it answers nothing
+/// asked, so the list stays in score order and the rule is not in the top 3.
+#[tokio::test]
+async fn a_ruling_that_does_not_answer_the_query_is_not_lifted() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a", "rulings-a"], &["rulings-a"]).await;
+    noisy_project(&state, 0, 40).await;
+    let ruling = remember(&state, "rulings-a", Q15_RULE, &["bob-ruling"], None).await;
+
+    let query = "how do basalt columns form when lava cools";
+    let results = recall(&state, "project-a", query, 10).await;
+    let hits = scored(&results);
+    assert!(
+        hits.windows(2).all(|w| w[0].1 >= w[1].1),
+        "no hit was lifted out of score order: {hits:#?}"
+    );
+    assert!(
+        rank_of(&results, ruling).is_none_or(|r| r >= 3),
+        "an off-topic ruling took a reserved slot: {hits:#?}"
+    );
+}
