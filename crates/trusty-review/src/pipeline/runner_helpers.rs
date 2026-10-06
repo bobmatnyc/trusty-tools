@@ -512,7 +512,7 @@ pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> Claim
 /// `(owner, repo, pr, head_sha)` and maps the outcome through
 /// [`classify_claim`]: `Continue(result)` proceeds, `Break(result)` is the
 /// finished result the runner returns. Every other case is `Continue`.
-/// Test: `run_review_dedup_skips_completed`,
+/// Test: `run_review_live_post_and_dedup_skip_integration`,
 /// `stranded_in_progress_claim_is_not_a_duplicate_skip`,
 /// `failed_claim_abort_does_not_delete_another_processes_record`.
 pub(super) async fn claim_slot(
