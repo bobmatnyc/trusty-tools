@@ -63,7 +63,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_builds() {
-        let server = McpServer::new("http://127.0.0.1:1");
+        let server = crate::mcp::tools::test_daemon::unreachable_server();
         let _r: Router = router(server);
     }
 }

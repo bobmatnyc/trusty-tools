@@ -14,18 +14,25 @@
 //!
 //! When `LlmRequest.response_schema` is set, the provider builds a
 //! `ToolConfiguration` with a single tool and forces `toolChoice = TOOL`
-//! (the named tool).  The model's `toolUse.input` JSON is extracted and
-//! returned as `LlmResponse.text` — clean, directly deserializable JSON
-//! with no fence-stripping required.
+//! (the named tool), or sets `toolChoice = auto` plus one system-prompt line
+//! for a model that rejects forcing (#9292, see
+//! `tool_use::supports_forced_tool_choice`).  The model's `toolUse.input`
+//! JSON is extracted and returned as `LlmResponse.text` — clean, directly
+//! deserializable JSON with no fence-stripping required.
 //!
-//! Region resolution: `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
+//! `temperature` is omitted for a model that rejects it (#9304, see
+//! `accepts_temperature`).
+//!
+//! Region resolution: an explicit region > the region inside a Bedrock model
+//! ARN > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
 //! Credentials: standard AWS credential chain (env vars, `~/.aws/credentials`,
 //! instance metadata/IMDS, SSO) — no API key needed.
 //!
 //! Model-id validation: the `us.` cross-region inference-profile prefix is
 //! required.  Bedrock will reject a bare foundation-model id (e.g.
 //! `anthropic.claude-sonnet-4-6`) with a ValidationException; we surface this
-//! early as [`LlmError::Validation`] so operators see it immediately.
+//! early as [`LlmError::Validation`] so operators see it immediately. A
+//! well-formed Bedrock model ARN is accepted too (#9200, see [`arn`]).
 //!
 //! Test: `bedrock_region_resolution`, `bedrock_us_prefix_validation`,
 //! `bedrock_cost_estimate_*`, `bedrock_converse_request_construction`,
@@ -33,6 +40,7 @@
 //! `bedrock_request_includes_tool_config_when_schema_set` (all unit-level,
 //! no real AWS calls).
 
+pub(crate) mod arn;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
@@ -81,25 +89,31 @@ pub use trusty_common::inference::bedrock::resolve_bedrock_region;
 
 // ─── Model id validation ──────────────────────────────────────────────────────
 
-/// Validate that `model_id` has a cross-region inference-profile prefix.
+/// Validate that `model_id` has a cross-region inference-profile prefix, or is
+/// a Bedrock model ARN.
 ///
 /// Why: Bedrock will reject bare foundation-model ids at runtime with a
 /// ValidationException; we surface the error at construction time so operators
 /// see it immediately (same behaviour as `us.`-prefix validation in
 /// trusty-analyze).
-/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches;
-/// `Err(LlmError::Validation)` otherwise.
-/// Test: `bedrock_us_prefix_validation`.
+/// What: returns `Ok(())` if any `INFERENCE_PROFILE_PREFIXES` matches or
+/// [`arn::parse`] accepts the id; `Err(LlmError::Validation)` otherwise.
+/// Test: `bedrock_us_prefix_validation`,
+/// `application_inference_profile_arn_routes_to_bedrock`,
+/// `inference_profile_arn_routes_to_bedrock`, `foundation_model_arn_routes_to_bedrock`.
 fn validate_model_id(model_id: &str) -> Result<(), LlmError> {
     let has_profile_prefix = INFERENCE_PROFILE_PREFIXES
         .iter()
         .any(|pfx| model_id.starts_with(pfx));
-    if has_profile_prefix {
+    // #9200: a Bedrock model ARN names its resource and region in full.
+    if has_profile_prefix || arn::parse(model_id).is_some() {
         return Ok(());
     }
+    // #9200: the id may be a near-ARN; never echo its account id.
+    let shown = arn::mask_account_ids(model_id);
     Err(LlmError::Validation(format!(
-        "Bedrock model id {model_id:?} must start with a cross-region inference-profile \
-         prefix (us., eu., ap., jp., or global.). \
+        "Bedrock model id {shown:?} must start with a cross-region inference-profile \
+         prefix (us., eu., ap., jp., or global.), or be a Bedrock model ARN. \
          Example: \"us.anthropic.claude-sonnet-4-6\". \
          Bare foundation-model ids are not supported."
     )))
@@ -139,19 +153,38 @@ impl BedrockProvider {
     /// (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`),
     /// `~/.aws/credentials` profiles, IMDS v2, and SSO — covering both local
     /// dev and production deployments without code changes.
-    /// What: validates the model id (requires an inference-profile prefix) and
-    /// builds a [`BedrockAdapter`] for the ambient region (`TRUSTY_AWS_REGION` >
-    /// `AWS_REGION` > `us-east-1`).  Returns `LlmError::Validation` if the model
-    /// id is invalid.  #5469: synchronous, because the adapter builds its AWS
-    /// client lazily on the first `Converse` call; the explicit-region parameter
-    /// went with it, since every caller passed `None`.
+    /// What: [`Self::new_in_region`] with no explicit region, so the region is
+    /// the one inside a Bedrock model ARN, else the ambient walk
+    /// (`TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`).  Returns
+    /// `LlmError::Validation` if the model id is invalid.  #5469: synchronous,
+    /// because the adapter builds its AWS client lazily on the first `Converse`
+    /// call.
     /// Test: `bedrock_us_prefix_validation` (validation path, no network);
     /// real-credentials path tested in ignored integration tests.
     pub fn new(model: impl Into<String>) -> Result<Self, LlmError> {
+        Self::new_in_region(model, None)
+    }
+
+    /// Construct a `BedrockProvider`, optionally pinning the AWS region.
+    ///
+    /// Why: a Bedrock model ARN carries the region its resource lives in, and
+    /// Converse resolves an ARN only in that region, so an ambient
+    /// `AWS_REGION` set for other work must not send the call elsewhere
+    /// (#9200). A caller that passes a region on purpose still wins: that is a
+    /// per-call decision, where the env vars are machine-wide defaults.
+    /// What: validates the model id, then resolves the region as `region` (when
+    /// non-empty) > the ARN's region field > `TRUSTY_AWS_REGION` >
+    /// `AWS_REGION` > `us-east-1`. A plain model id has no ARN tier, so with
+    /// `region = None` it resolves exactly as [`Self::new`] did before ARNs.
+    /// Test: `arn_region_wins_over_ambient_and_explicit_region_wins_over_arn`.
+    pub fn new_in_region(model: impl Into<String>, region: Option<&str>) -> Result<Self, LlmError> {
         let model = model.into();
         validate_model_id(&model)?;
+        // #9200: explicit > ARN region > env walk inside `BedrockAdapter::new`.
+        let explicit = region.filter(|r| !r.trim().is_empty());
+        let region = explicit.or_else(|| arn::parse(&model).map(|a| a.region));
         Ok(Self {
-            adapter: BedrockAdapter::new(None),
+            adapter: BedrockAdapter::new(region),
             model,
         })
     }
@@ -209,10 +242,7 @@ impl BedrockProvider {
         let model = req.effective_model(&self.model);
 
         // Build system blocks and conversation messages from the LlmRequest.
-        let mut system_blocks: Vec<SystemContentBlock> = Vec::new();
-        if !req.system.is_empty() {
-            system_blocks.push(SystemContentBlock::Text(req.system.clone()));
-        }
+        let system_blocks = system_blocks(req, model);
 
         let mut converse_messages: Vec<Message> = Vec::new();
         for msg in &req.messages {
@@ -235,10 +265,7 @@ impl BedrockProvider {
             ));
         }
 
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(req.max_tokens as i32)
-            .temperature(req.temperature)
-            .build();
+        let inference = inference_config(req, model);
 
         let mut sdk_req = client
             .converse()
@@ -257,70 +284,22 @@ impl BedrockProvider {
             sdk_req = sdk_req.request_metadata(key, value);
         }
 
-        // When a response_schema is set, inject tool-use forcing.
+        // When a response_schema is set, inject tool-use forcing — or `auto`
+        // for a model that rejects forcing (#9292).
         if let Some(ref schema) = req.response_schema {
-            let tool_config = build_tool_config(&schema.name, &schema.schema)?;
+            let tool_config =
+                tool_use::build_tool_config_for_model(model, &schema.name, &schema.schema)?;
             sdk_req = sdk_req.tool_config(tool_config);
         }
 
-        let resp = sdk_req.send().await.map_err(|sdk_err| {
-            // #6912: SdkError's own Display flattens a service error to the bare
-            // word "service error"; read the AWS code and message instead.
-            let msg = describe_sdk_error(&sdk_err);
-            let lower = msg.to_lowercase();
-            // Map SDK errors to LlmError variants using the error message text.
-            if lower.contains("resourcenotfound") || lower.contains("no such model") {
-                LlmError::ModelNotFound(format!("model={model}: {msg}"))
-            } else if lower.contains("accessdenied")
-                || lower.contains("unauthorized")
-                || lower.contains("credential")
-                || lower.contains("not authorized")
-            {
-                LlmError::AccessDenied(format!(
-                    "AWS Bedrock access denied (model={model}, region={}): {msg}. \
-                     Ensure AWS credentials are configured and the account has \
-                     bedrock:InvokeModel permission.",
-                    self.adapter.region()
-                ))
-            } else if lower.contains("validationexception") || lower.contains("validation") {
-                LlmError::Validation(msg)
-            } else if lower.contains("throttlingexception")
-                || lower.contains("throttled")
-                || lower.contains("rate")
-            {
-                LlmError::RateLimited
-            } else if lower.contains("serviceunavailable")
-                || lower.contains("internalserver")
-                || lower.contains("modelnotready")
-                    && (lower.contains("creating") || lower.contains("failed"))
-            {
-                LlmError::Upstream {
-                    status: 503,
-                    body: msg,
-                }
-            } else if lower.contains("modelnotready") || lower.contains("not in active") {
-                LlmError::ModelNotReady(msg)
-            } else {
-                LlmError::Transport(format!(
-                    "Bedrock Converse SDK error (model={model}, region={}): {msg}",
-                    self.adapter.region()
-                ))
-            }
-        })?;
+        let resp = sdk_req
+            .send()
+            .await
+            .map_err(|sdk_err| map_converse_error(&sdk_err, model, self.adapter.region()))?;
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        // Extract text: prefer toolUse.input (structured) over plain text.
-        let text = if req.response_schema.is_some() {
-            // When tool-use forcing is active, the model MUST emit a ToolUse
-            // block.  Extract the input JSON directly.  If the block is absent
-            // (unexpected), fall back to plain text extraction.
-            tool_use::extract_tool_use_json(&resp)
-                .or_else(|| extract_converse_text(&resp))
-                .unwrap_or_default()
-        } else {
-            extract_converse_text(&resp).unwrap_or_default()
-        };
+        let text = response_text(&resp, req.response_schema.is_some());
 
         let (input_tokens, output_tokens) = extract_token_usage(&resp);
         let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
@@ -357,8 +336,10 @@ impl LlmProvider for BedrockProvider {
     /// where `is_retryable()` is true; immediately returns all other errors.
     /// Test: `bedrock_converse_request_construction` (unit, no real AWS calls).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        // #9200: log the model with any ARN account id masked.
+        let shown = arn::mask_account_ids(req.effective_model(&self.model));
         debug!(
-            model = %req.effective_model(&self.model),
+            model = %shown,
             provider = "bedrock",
             region = %self.adapter.region(),
             structured = req.response_schema.is_some(),
@@ -370,7 +351,7 @@ impl LlmProvider for BedrockProvider {
             match self.call_once(&req).await {
                 Ok(resp) => {
                     debug!(
-                        model = %resp.model,
+                        model = %shown,
                         input_tokens = resp.input_tokens,
                         output_tokens = resp.output_tokens,
                         latency_ms = resp.latency_ms,
@@ -385,7 +366,7 @@ impl LlmProvider for BedrockProvider {
                     warn!(
                         attempt,
                         backoff_ms,
-                        model = %req.effective_model(&self.model),
+                        model = %shown,
                         "bedrock transient error — retrying: {err}"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
@@ -397,6 +378,63 @@ impl LlmProvider for BedrockProvider {
 }
 
 // ─── Error rendering ──────────────────────────────────────────────────────────
+
+/// Map a failed Converse send to an [`LlmError`], with ARN account ids masked.
+///
+/// Why: extracted from `call_once` so the mapping is testable without AWS, and
+/// so every message it builds passes one mask: an ARN model id, and any ARN
+/// AWS quotes back, would otherwise put an account id in the error (#9200).
+/// What: renders the SDK error via [`describe_sdk_error`], masks it and the
+/// model id with [`arn::mask_account_ids`], and classifies the message text
+/// into a variant exactly as `call_once` did before the extraction.
+/// Test: `converse_errors_mask_the_arn_account_id`.
+fn map_converse_error<E, R>(sdk_err: &SdkError<E, R>, model: &str, region: &str) -> LlmError
+where
+    E: ProvideErrorMetadata + std::fmt::Display,
+{
+    // #9200: the unmasked id still goes to AWS; only this text is masked.
+    let model = arn::mask_account_ids(model);
+    // #6912: SdkError's own Display flattens a service error to the bare
+    // word "service error"; read the AWS code and message instead.
+    let msg = arn::mask_account_ids(&describe_sdk_error(sdk_err)).into_owned();
+    let lower = msg.to_lowercase();
+    // Map SDK errors to LlmError variants using the error message text.
+    if lower.contains("resourcenotfound") || lower.contains("no such model") {
+        LlmError::ModelNotFound(format!("model={model}: {msg}"))
+    } else if lower.contains("accessdenied")
+        || lower.contains("unauthorized")
+        || lower.contains("credential")
+        || lower.contains("not authorized")
+    {
+        LlmError::AccessDenied(format!(
+            "AWS Bedrock access denied (model={model}, region={region}): {msg}. \
+             Ensure AWS credentials are configured and the account has \
+             bedrock:InvokeModel permission."
+        ))
+    } else if lower.contains("validationexception") || lower.contains("validation") {
+        LlmError::Validation(msg)
+    } else if lower.contains("throttlingexception")
+        || lower.contains("throttled")
+        || lower.contains("rate")
+    {
+        LlmError::RateLimited
+    } else if lower.contains("serviceunavailable")
+        || lower.contains("internalserver")
+        || lower.contains("modelnotready")
+            && (lower.contains("creating") || lower.contains("failed"))
+    {
+        LlmError::Upstream {
+            status: 503,
+            body: msg,
+        }
+    } else if lower.contains("modelnotready") || lower.contains("not in active") {
+        LlmError::ModelNotReady(msg)
+    } else {
+        LlmError::Transport(format!(
+            "Bedrock Converse SDK error (model={model}, region={region}): {msg}"
+        ))
+    }
+}
 
 /// Render an `SdkError` with the AWS error code and message attached.
 ///
@@ -431,7 +469,94 @@ where
     }
 }
 
+// ─── Request helpers ──────────────────────────────────────────────────────────
+
+/// The Converse system blocks for `req` sent to `model`.
+///
+/// Why: a model that rejects a forced `toolChoice` gets `auto` instead, and
+/// `auto` alone no longer requires a tool call, so the request asks for it in
+/// the system prompt (#9292).
+/// What: `req.system` as one block when non-empty; then, only for a
+/// structured request to a model that rejects forcing, one more block holding
+/// [`tool_use::auto_tool_instruction`]. Any other request gets exactly the
+/// blocks it had before #9292.
+/// Test: `system_blocks_add_the_tool_line_only_for_auto_models`.
+fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
+    let mut blocks = Vec::new();
+    if !req.system.is_empty() {
+        blocks.push(SystemContentBlock::Text(req.system.clone()));
+    }
+    if let Some(schema) = &req.response_schema
+        && !tool_use::supports_forced_tool_choice(model)
+    {
+        blocks.push(SystemContentBlock::Text(tool_use::auto_tool_instruction(
+            &schema.name,
+        )));
+    }
+    blocks
+}
+
+/// Model families whose Bedrock Converse API rejects `temperature` with
+/// `ValidationException` (#9304).
+const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+
+/// Whether `model` accepts a `temperature` on Bedrock Converse.
+///
+/// Why: Opus 5.5 rejects `temperature` ("`temperature` is deprecated for this
+/// model"), and Sonnet 5.5 rejects any non-default value, so every review
+/// call to either failed (#9304).
+/// What: `false` only for a family in [`NO_TEMPERATURE_FAMILIES`], read with
+/// the #9292 parser [`tool_use::bedrock_model_family`]. An id that parser
+/// cannot read — an application-inference-profile ARN — keeps `temperature`:
+/// for a model that accepts it, dropping it silently swaps the configured
+/// value for the model default, while a wrong `true` fails loudly with the
+/// same `ValidationException` this fix removes.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`.
+fn accepts_temperature(model: &str) -> bool {
+    tool_use::bedrock_model_family(model).is_none_or(|f| !NO_TEMPERATURE_FAMILIES.contains(&f))
+}
+
+/// The Converse inference configuration for `req` sent to `model`.
+///
+/// What: `max_tokens` always; `temperature` only when
+/// [`accepts_temperature`] holds.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`,
+/// `inference_config_temperature_covers_every_compare_candidate`.
+fn inference_config(req: &LlmRequest, model: &str) -> InferenceConfiguration {
+    // #9304: the 5.5 families reject `temperature`; omit the field for them.
+    let temperature = accepts_temperature(model).then_some(req.temperature);
+    InferenceConfiguration::builder()
+        .max_tokens(req.max_tokens as i32)
+        .set_temperature(temperature)
+        .build()
+}
+
 // ─── Response helpers ─────────────────────────────────────────────────────────
+
+/// The reply text the pipeline parses: the `toolUse.input` JSON for a
+/// structured request, else the joined text blocks.
+///
+/// Why: a forced call always answers with a `toolUse` block, but an `auto`
+/// call (#9292) may answer in prose; that prose must reach the caller's
+/// parser, which parses JSON text or fails closed, never an empty string
+/// read as success.
+/// What: when `structured`, [`tool_use::extract_tool_use_json`], falling back
+/// to [`extract_converse_text`]; otherwise the text alone. Empty when neither
+/// yields anything.
+/// Test: `auto_mode_free_text_reply_reaches_the_review_parser`.
+fn response_text(
+    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+    structured: bool,
+) -> String {
+    let tool_json = if structured {
+        tool_use::extract_tool_use_json(resp)
+    } else {
+        None
+    };
+    tool_json
+        .or_else(|| extract_converse_text(resp))
+        .unwrap_or_default()
+}
 
 /// Extract joined text from a Converse response output.
 ///

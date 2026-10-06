@@ -14,7 +14,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+// #9192: the optional-context ledger `run_review_with` returns.
+pub mod context_source;
 pub mod status;
+pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use status::ReviewStatus;
 
 use crate::config::constants::REVIEW_VERSION;

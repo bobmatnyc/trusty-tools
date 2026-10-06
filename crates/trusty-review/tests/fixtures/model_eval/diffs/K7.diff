@@ -1,0 +1,48 @@
+diff --git a/crates/trusty-search/src/service/inflight.rs b/crates/trusty-search/src/service/inflight.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/service/inflight.rs
+@@ -0,0 +1,42 @@
++//! Mark an index busy for the life of a guard.
++
++use std::collections::HashSet;
++use std::sync::Mutex;
++
++/// Indexes with a reindex in flight.
++pub static BUSY: Mutex<Option<HashSet<String>>> = Mutex::new(None);
++
++/// Removes its index from [`BUSY`] when dropped, on every exit path.
++pub struct BusyGuard(String);
++
++impl BusyGuard {
++    /// Mark `id` busy; `None` when it already is.
++    pub fn claim(id: &str) -> Option<Self> {
++        let mut busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
++        busy.get_or_insert_with(HashSet::new)
++            .insert(id.to_string())
++            .then(|| Self(id.to_string()))
++    }
++}
++
++impl Drop for BusyGuard {
++    fn drop(&mut self) {
++        let mut busy = BUSY.lock().unwrap_or_else(|e| e.into_inner());
++        if let Some(set) = busy.as_mut() {
++            set.remove(&self.0);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn a_dropped_guard_frees_its_index() {
++        let g = BusyGuard::claim("idx-k7").expect("free");
++        assert!(BusyGuard::claim("idx-k7").is_none());
++        drop(g);
++        assert!(BusyGuard::claim("idx-k7").is_some());
++    }
++}

@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.56.0] — 2026-10-05
+
+### Added
+
+- The MCP read tools that take one index (`search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `grep`, `typeahead`, `index_status`, `list_chunks`, `get_call_chain`) accept an optional `project`: a project name, `owner/repo`, or path, resolved by the daemon's `search.project.resolve`. An explicit `index_id` still wins; `project` outranks the session pin. A miss returns `PROJECT_UNRESOLVED` (JSON-RPC `-32014` in the bare form) with the daemon's candidates. `index_id` is no longer listed as required on `list_chunks` and `get_call_chain`, so a schema-checking client can send `project` alone; a call with neither still errors as before (#9168).
+- A tool outside that list (`delete_index`, `index_file`, `remove_file`, `reindex`, `create_index`, `chat`, and the rest) refuses a `project` argument with invalid params ("project is not accepted on <tool>; pass index_id") and sends nothing to the daemon. It no longer ignores `project` and acts on the session's pinned index (#9168).
+
+### Changed
+
+- `trusty-search serve` (the MCP bridge, stdio and `--with-http`) now reaches the daemon only through its Unix socket, never over `http://127.0.0.1:7878`. Every MCP tool calls its `search.*` socket method; tool names, input schemas and result shapes are unchanged. Stdio `serve` auto-starts the daemon and waits for the socket, not the HTTP address (#9168).
+- Index-unavailable errors keep their structured fields (`index_id`, `retryable`, `restore_via`, `reason`, `transient`, `stages`, plus `error_code` and `http_status: 503`) from the socket refusal's `data`. MCP error text names the daemon socket instead of a URL (#9168).
+- `search_health` reports the answering daemon as `daemon.socket` (was `daemon.base_url`). A daemon that answers badly reports `daemon.rpc_code` and `daemon.error` (were `http_status` and `body`) (#9168).
+- `McpServer::new` takes a `DaemonClient`; `McpServer::with_client` and `McpServer::base_url` are removed, and `McpServer::daemon` returns the client (#9168).
+- The bridge's client-side time limits follow the daemon's own. Index create/delete/reindex, `index_file`, `remove_file` and `chat` have no client-side limit, as over HTTP, because the daemon puts no deadline on them. Every other call is bounded by the daemon's query deadline (`TRUSTY_QUERY_TIMEOUT_SECS`) plus 30 s of admission headroom, never below 60 s, so a deadline set above 60 s is honoured. Startup pin confirmation keeps its 5 s limit (#9168).
+
 ## [0.55.0] — 2026-10-05
 
 ### Added

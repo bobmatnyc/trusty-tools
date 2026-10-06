@@ -1,0 +1,17 @@
+diff --git a/crates/trusty-mpm/src/session/latest.rs b/crates/trusty-mpm/src/session/latest.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-mpm/src/session/latest.rs
+@@ -0,0 +1,11 @@
++//! The newest session snapshot.
++
++/// The newest of `stamps` (RFC 3339 strings sort chronologically), or
++/// `None` when there is none.
++pub fn latest(stamps: &[String]) -> Option<&String> {
++    if stamps.is_empty() {
++        return None;
++    }
++    let newest = stamps.iter().max().expect("non-empty: checked above");
++    Some(newest)
++}

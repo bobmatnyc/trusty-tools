@@ -1,0 +1,29 @@
+diff --git a/crates/trusty-common/src/parent_watch.rs b/crates/trusty-common/src/parent_watch.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/parent_watch.rs
+@@ -0,0 +1,23 @@
++//! Exit when the parent process dies, after a grace period.
++
++use std::time::Duration;
++
++/// How often the parent is polled.
++pub const POLL: Duration = Duration::from_millis(400);
++
++/// Poll rounds that cover at least `grace`.
++pub fn rounds_for(grace: Duration) -> u64 {
++    (grace.as_millis() / POLL.as_millis()) as u64
++}
++
++/// Wait out `grace` while `parent_alive` says the parent is gone; true when
++/// it came back.
++pub fn wait_grace(grace: Duration, mut parent_alive: impl FnMut() -> bool) -> bool {
++    for _ in 0..rounds_for(grace) {
++        std::thread::sleep(POLL);
++        if parent_alive() {
++            return true;
++        }
++    }
++    false
++}

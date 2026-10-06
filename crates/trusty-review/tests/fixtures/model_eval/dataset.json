@@ -1,0 +1,812 @@
+[
+  {
+    "id": "L1",
+    "tier": "seeded",
+    "diff_file": "diffs/L1.diff",
+    "about": "verdict_floor is meant to return the least severe of the per-finding verdicts but uses max",
+    "label": {
+      "file": "crates/trusty-review/src/pipeline/verdict_floor.rs",
+      "spans": [
+        [
+          17,
+          21
+        ]
+      ],
+      "anchors": [
+        "verdict_floor",
+        "max_by_key",
+        "min_by_key"
+      ],
+      "removal": false,
+      "kind": "logic"
+    }
+  },
+  {
+    "id": "E1",
+    "tier": "seeded",
+    "diff_file": "diffs/E1.diff",
+    "about": "load_table applies unwrap_or_default to both the read and the TOML parse, so a corrupt file is overwritten on the next set",
+    "label": {
+      "file": "crates/trusty-common/src/credentials/table_store.rs",
+      "spans": [
+        [
+          10,
+          16
+        ]
+      ],
+      "anchors": [
+        "unwrap_or_default",
+        "corrupt",
+        "overwrit"
+      ],
+      "removal": false,
+      "kind": "swallowed error"
+    }
+  },
+  {
+    "id": "E3",
+    "tier": "seeded",
+    "diff_file": "diffs/E3.diff",
+    "about": "acquire treats an I/O error from try_lock as if the lock were taken",
+    "label": {
+      "file": "crates/trusty-common/src/memory_core/sweep_lock.rs",
+      "spans": [
+        [
+          28,
+          33
+        ]
+      ],
+      "anchors": [
+        "TryLockError::Error",
+        "try_lock"
+      ],
+      "removal": false,
+      "kind": "fail-open lock"
+    }
+  },
+  {
+    "id": "C1",
+    "tier": "seeded",
+    "diff_file": "diffs/C1.diff",
+    "about": "the pid-file claim checks exists() then creates, a race; create_new is needed",
+    "label": {
+      "file": "crates/trusty-common/src/pid_claim.rs",
+      "spans": [
+        [
+          8,
+          11
+        ]
+      ],
+      "anchors": [
+        "exists()",
+        "create_new",
+        "TOCTOU"
+      ],
+      "removal": false,
+      "kind": "TOCTOU race"
+    }
+  },
+  {
+    "id": "R1s",
+    "tier": "seeded",
+    "diff_file": "diffs/R1s.diff",
+    "about": "on timeout the child process is neither killed nor waited",
+    "label": {
+      "file": "crates/trusty-common/src/gh_exec.rs",
+      "spans": [
+        [
+          27,
+          28
+        ]
+      ],
+      "anchors": [
+        "kill()",
+        "wait()",
+        "zombie"
+      ],
+      "removal": false,
+      "kind": "resource leak"
+    }
+  },
+  {
+    "id": "V1",
+    "tier": "seeded",
+    "diff_file": "diffs/V1.diff",
+    "about": "is_inside_root compares strings with starts_with, so /data/root-evil passes as inside /data/root",
+    "label": {
+      "file": "crates/trusty-review/src/integrations/root_check.rs",
+      "spans": [
+        [
+          7,
+          9
+        ]
+      ],
+      "anchors": [
+        "starts_with",
+        "root-evil",
+        "component"
+      ],
+      "removal": false,
+      "kind": "path validation"
+    }
+  },
+  {
+    "id": "V3",
+    "tier": "seeded",
+    "diff_file": "diffs/V3.diff",
+    "about": "the MIN_TOKEN_LEN guard is removed, so an empty expected token matches an empty presented one",
+    "label": {
+      "file": "crates/trusty-common/src/daemon_token.rs",
+      "spans": [
+        [
+          15,
+          16
+        ]
+      ],
+      "anchors": [
+        "MIN_TOKEN_LEN",
+        "empty expected token"
+      ],
+      "removal": true,
+      "kind": "removed guard"
+    }
+  },
+  {
+    "id": "B1",
+    "tier": "seeded",
+    "diff_file": "diffs/B1.diff",
+    "about": "the page slice is not clamped and panics on the last page",
+    "label": {
+      "file": "crates/trusty-mpm/src/catchup/paging.rs",
+      "spans": [
+        [
+          4,
+          8
+        ]
+      ],
+      "anchors": [
+        "offset + limit",
+        "clamp",
+        "out of range",
+        "last page"
+      ],
+      "removal": false,
+      "kind": "boundary panic"
+    }
+  },
+  {
+    "id": "L2",
+    "tier": "seeded",
+    "diff_file": "diffs/L2.diff",
+    "about": "dedup uses starts_with, so an existing `target/` entry suppresses `target-worktree/`",
+    "label": {
+      "file": "crates/trusty-mpm/src/core/ignore_block.rs",
+      "spans": [
+        [
+          17,
+          19
+        ]
+      ],
+      "anchors": [
+        "starts_with",
+        "target-worktree"
+      ],
+      "removal": false,
+      "kind": "logic (over-broad dedup)"
+    }
+  },
+  {
+    "id": "L3",
+    "tier": "seeded",
+    "diff_file": "diffs/L3.diff",
+    "about": "the aged-job pick uses max_by_key(arrival), selecting the newest job instead of the oldest",
+    "label": {
+      "file": "crates/trusty-search/src/service/reindex/aged_pick.rs",
+      "spans": [
+        [
+          22,
+          27
+        ]
+      ],
+      "anchors": [
+        "max_by_key",
+        "min_by_key",
+        "newest",
+        "oldest"
+      ],
+      "removal": false,
+      "kind": "logic (wrong extreme)"
+    }
+  },
+  {
+    "id": "E2",
+    "tier": "seeded",
+    "diff_file": "diffs/E2.diff",
+    "about": "when retries are exhausted the function returns Ok(String::new()) and drops the last error",
+    "label": {
+      "file": "crates/trusty-installer/src/download/fetch_retry.rs",
+      "spans": [
+        [
+          26,
+          27
+        ]
+      ],
+      "anchors": [
+        "Ok(String::new())",
+        "last_err"
+      ],
+      "removal": false,
+      "kind": "swallowed error"
+    }
+  },
+  {
+    "id": "C2",
+    "tier": "seeded",
+    "diff_file": "diffs/C2.diff",
+    "about": "a std MutexGuard is held across .await",
+    "label": {
+      "file": "crates/trusty-search/src/service/reindex/turn_gate.rs",
+      "spans": [
+        [
+          13,
+          18
+        ]
+      ],
+      "anchors": [
+        "MutexGuard",
+        "QUEUE.lock()"
+      ],
+      "removal": false,
+      "kind": "lock held across await"
+    }
+  },
+  {
+    "id": "C3",
+    "tier": "seeded",
+    "diff_file": "diffs/C3.diff",
+    "about": "a load followed by store(n-1) instead of fetch_sub, so the drained notification never fires",
+    "label": {
+      "file": "crates/trusty-search/src/service/drain.rs",
+      "spans": [
+        [
+          13,
+          15
+        ]
+      ],
+      "anchors": [
+        "fetch_sub",
+        "lost-update",
+        "lost update"
+      ],
+      "removal": false,
+      "kind": "lost update"
+    }
+  },
+  {
+    "id": "R2s",
+    "tier": "seeded",
+    "diff_file": "diffs/R2s.diff",
+    "about": "when write_all fails through `?`, the tmp file is never removed",
+    "label": {
+      "file": "crates/trusty-common/src/atomic_write.rs",
+      "spans": [
+        [
+          9,
+          11
+        ]
+      ],
+      "anchors": [
+        "write_all",
+        "remove_file",
+        "tmp file"
+      ],
+      "removal": false,
+      "kind": "resource leak (temp file)"
+    }
+  },
+  {
+    "id": "V2",
+    "tier": "seeded",
+    "diff_file": "diffs/V2.diff",
+    "about": "the client-supplied name is joined unsanitised, allowing ../ traversal",
+    "label": {
+      "file": "crates/trusty-console/src/chat_attachment.rs",
+      "spans": [
+        [
+          22,
+          23
+        ]
+      ],
+      "anchors": [
+        "traversal",
+        "unsanitised",
+        "unsanitized"
+      ],
+      "removal": false,
+      "kind": "path traversal"
+    }
+  },
+  {
+    "id": "B3",
+    "tier": "seeded",
+    "diff_file": "diffs/B3.diff",
+    "about": "a byte slice &s[..max] panics on a multibyte character",
+    "label": {
+      "file": "crates/trusty-code-tui/src/elide.rs",
+      "spans": [
+        [
+          4,
+          8
+        ]
+      ],
+      "anchors": [
+        "&s[..max]",
+        "char boundary",
+        "multibyte"
+      ],
+      "removal": false,
+      "kind": "UTF-8 boundary panic"
+    }
+  },
+  {
+    "id": "L4",
+    "tier": "seeded",
+    "diff_file": "diffs/L4.diff",
+    "about": "the new-side line counter advances on `-` lines, so inline comments land on the wrong line",
+    "label": {
+      "file": "crates/trusty-review/src/integrations/github/commentable.rs",
+      "spans": [
+        [
+          26,
+          34
+        ]
+      ],
+      "anchors": [
+        "next_new",
+        "removed line",
+        "deletion"
+      ],
+      "removal": false,
+      "kind": "logic (line counter)"
+    }
+  },
+  {
+    "id": "E4",
+    "tier": "seeded",
+    "diff_file": "diffs/E4.diff",
+    "about": "filter_map(Result::ok) drops failed verifications, so a finding whose check errored is kept as verified",
+    "label": {
+      "file": "crates/trusty-review/src/pipeline/verify_round.rs",
+      "spans": [
+        [
+          19,
+          25
+        ]
+      ],
+      "anchors": [
+        "filter_map",
+        "Result::ok",
+        "fails open"
+      ],
+      "removal": false,
+      "kind": "fail-open error handling"
+    }
+  },
+  {
+    "id": "C4",
+    "tier": "seeded",
+    "diff_file": "diffs/C4.diff",
+    "about": "select! between shutdown and read_exact, which is not cancel-safe, so a partial frame is lost",
+    "label": {
+      "file": "crates/trusty-agents/src/ctrl/frame_reader.rs",
+      "spans": [
+        [
+          26,
+          31
+        ]
+      ],
+      "anchors": [
+        "read_exact",
+        "cancel-safe",
+        "select!"
+      ],
+      "removal": false,
+      "kind": "cancel safety"
+    }
+  },
+  {
+    "id": "R3s",
+    "tier": "seeded",
+    "diff_file": "diffs/R3s.diff",
+    "about": "a callback captures Arc<Self> and is stored in Self, creating a cycle; Weak is needed",
+    "label": {
+      "file": "crates/trusty-search/src/core/index_handle.rs",
+      "spans": [
+        [
+          24,
+          29
+        ]
+      ],
+      "anchors": [
+        "Arc::clone",
+        "Weak",
+        "reference cycle"
+      ],
+      "removal": false,
+      "kind": "reference cycle"
+    }
+  },
+  {
+    "id": "R4s",
+    "tier": "seeded",
+    "diff_file": "diffs/R4s.diff",
+    "about": "the pending map is inserted into on every request but removed from only on success",
+    "label": {
+      "file": "crates/trusty-common/src/error_capture/pending.rs",
+      "spans": [
+        [
+          26,
+          37
+        ]
+      ],
+      "anchors": [
+        "inflight",
+        "without bound",
+        "unbounded"
+      ],
+      "removal": false,
+      "kind": "unbounded growth"
+    }
+  },
+  {
+    "id": "V4",
+    "tier": "seeded",
+    "diff_file": "diffs/V4.diff",
+    "about": "sh -c runs a format!-built git command line, and the only check on the path is exists()",
+    "label": {
+      "file": "crates/trusty-common/src/git_log.rs",
+      "spans": [
+        [
+          20,
+          24
+        ]
+      ],
+      "anchors": [
+        "sh -c",
+        "injection"
+      ],
+      "removal": false,
+      "kind": "command injection"
+    }
+  },
+  {
+    "id": "B2",
+    "tier": "seeded",
+    "diff_file": "diffs/B2.diff",
+    "about": "the shift loop stops one slot short, (1..keep - 1).rev(), so only keep - 1 rotated files survive",
+    "label": {
+      "file": "crates/trusty-common/src/error_capture/rotate.rs",
+      "spans": [
+        [
+          15,
+          21
+        ]
+      ],
+      "anchors": [
+        "1..keep - 1",
+        "off-by-one",
+        "keep - 1 rotated"
+      ],
+      "removal": false,
+      "kind": "off-by-one"
+    }
+  },
+  {
+    "id": "B4",
+    "tier": "seeded",
+    "diff_file": "diffs/B4.diff",
+    "about": "as_millis division truncates instead of taking the ceiling, so the wait is shorter than the grace period",
+    "label": {
+      "file": "crates/trusty-common/src/parent_watch.rs",
+      "spans": [
+        [
+          9,
+          16
+        ]
+      ],
+      "anchors": [
+        "as_millis",
+        "div_ceil",
+        "truncates"
+      ],
+      "removal": false,
+      "kind": "truncating division"
+    }
+  },
+  {
+    "id": "K1",
+    "tier": "clean",
+    "diff_file": "diffs/K1.diff",
+    "about": "a #[serde(default)] config field with a test"
+  },
+  {
+    "id": "K2",
+    "tier": "clean",
+    "diff_file": "diffs/K2.diff",
+    "about": "expect() guarded by an explicit is_empty early return"
+  },
+  {
+    "id": "K3",
+    "tier": "clean",
+    "diff_file": "diffs/K3.diff",
+    "about": "an intentional `let _ = file.sync_all();` with a best-effort comment"
+  },
+  {
+    "id": "K4",
+    "tier": "clean",
+    "diff_file": "diffs/K4.diff",
+    "about": "a mechanical extraction of a pure function, no logic change"
+  },
+  {
+    "id": "K5",
+    "tier": "clean",
+    "diff_file": "diffs/K5.diff",
+    "about": "a std MutexGuard scoped in a block that closes before the .await"
+  },
+  {
+    "id": "K6",
+    "tier": "clean",
+    "diff_file": "diffs/K6.diff",
+    "about": "correct saturating_sub and a bounded `as` cast"
+  },
+  {
+    "id": "K7",
+    "tier": "clean",
+    "diff_file": "diffs/K7.diff",
+    "about": "a correct Drop guard that removes its map entry, with a test"
+  },
+  {
+    "id": "K8",
+    "tier": "clean",
+    "diff_file": "diffs/K8.diff",
+    "about": "a docs-and-test-only change"
+  },
+  {
+    "id": "R1",
+    "tier": "real",
+    "diff_file": "diffs/R1.diff",
+    "about": "#8788: LiveJob is created at first poll, and its Drop does not remove the seq; a task dropped before its first poll blocks the queue forever",
+    "source": {
+      "fix_pr": 8788,
+      "introducing_sha": "6ec27bba3e",
+      "parent": "f58e8f8f51",
+      "regenerate": "git diff f58e8f8f51 6ec27bba3e -- crates/trusty-search/src/service/reindex/defer_embed_queue.rs"
+    },
+    "label": {
+      "file": "crates/trusty-search/src/service/reindex/defer_embed_queue.rs",
+      "spans": [
+        [
+          195,
+          205
+        ],
+        [
+          410,
+          410
+        ]
+      ],
+      "anchors": [
+        "LiveJob",
+        "wait_for_turn"
+      ],
+      "removal": false,
+      "kind": "resource leak / async cancel"
+    }
+  },
+  {
+    "id": "R2",
+    "tier": "real",
+    "diff_file": "diffs/R2.diff",
+    "about": "#8247: canonicalize().ok() turns a failure into None, which silently disables the guard against indexing the home directory",
+    "source": {
+      "fix_pr": 8247,
+      "introducing_sha": "e6de61cd4c",
+      "parent": "7ec7cb2b72",
+      "regenerate": "git diff 7ec7cb2b72 e6de61cd4c -- crates/trusty-code/src/cli/tui.rs"
+    },
+    "label": {
+      "file": "crates/trusty-code/src/cli/tui.rs",
+      "spans": [
+        [
+          81,
+          83
+        ],
+        [
+          186,
+          186
+        ]
+      ],
+      "anchors": [
+        "canonicalize",
+        "home_dir"
+      ],
+      "removal": false,
+      "kind": "fail-open"
+    }
+  },
+  {
+    "id": "R3",
+    "tier": "real",
+    "diff_file": "diffs/R3.diff",
+    "about": "#7957: an unreadable .gitignore is treated as empty, so a second managed block gets appended",
+    "source": {
+      "fix_pr": 7957,
+      "introducing_sha": "ae7dc329ab",
+      "parent": "9affef4192",
+      "regenerate": "git diff 9affef4192 ae7dc329ab -- crates/trusty-mpm/src/core/scaffold_gitignore.rs"
+    },
+    "label": {
+      "file": "crates/trusty-mpm/src/core/scaffold_gitignore.rs",
+      "spans": [
+        [
+          81,
+          81
+        ]
+      ],
+      "anchors": [
+        "unwrap_or_default",
+        "read_to_string",
+        ".gitignore",
+        "unreadable"
+      ],
+      "removal": false,
+      "kind": "swallowed error"
+    }
+  },
+  {
+    "id": "R4",
+    "tier": "real",
+    "diff_file": "diffs/R4.diff",
+    "about": "#9100: the settings*.json* wildcard matches user files such as settings.local.json-notes.md, and removal deletes them",
+    "source": {
+      "fix_pr": 9100,
+      "introducing_sha": "ec1d3bae4a",
+      "parent": "db257f03c3",
+      "regenerate": "git diff db257f03c3 ec1d3bae4a -- crates/trusty-mpm/src/session_manager/worktree_ignored_output.rs"
+    },
+    "label": {
+      "file": "crates/trusty-mpm/src/session_manager/worktree_ignored_output.rs",
+      "spans": [
+        [
+          68,
+          72
+        ],
+        [
+          141,
+          152
+        ]
+      ],
+      "anchors": [
+        "settings.local.json",
+        "wildcard"
+      ],
+      "removal": false,
+      "kind": "over-broad match, data loss"
+    }
+  },
+  {
+    "id": "R5",
+    "tier": "real",
+    "diff_file": "diffs/R5.diff",
+    "about": "#9154: pid 0, or a pid above i32::MAX, makes kill(.,0) probe a process group, so a corrupt lock reads as alive",
+    "source": {
+      "fix_pr": 9154,
+      "introducing_sha": "a4e629e0b7",
+      "parent": "0723e96fcb",
+      "regenerate": "git diff 0723e96fcb a4e629e0b7 -- crates/trusty-mpm/src/core/daemon_identity.rs"
+    },
+    "label": {
+      "file": "crates/trusty-mpm/src/core/daemon_identity.rs",
+      "spans": [
+        [
+          91,
+          97
+        ]
+      ],
+      "anchors": [
+        "libc::pid_t",
+        "process group",
+        "i32::MAX"
+      ],
+      "removal": false,
+      "kind": "boundary"
+    }
+  },
+  {
+    "id": "R6",
+    "tier": "real",
+    "diff_file": "diffs/R6.diff",
+    "about": "#2856: the cap is meant to bound retries after a failure, but it counts every delegation",
+    "source": {
+      "fix_pr": 2856,
+      "introducing_sha": "2e214e1418",
+      "parent": "6b9ae4ab17",
+      "regenerate": "git diff 6b9ae4ab17 2e214e1418 -- crates/trusty-code/src/run_task/redelegation.rs"
+    },
+    "label": {
+      "file": "crates/trusty-code/src/run_task/redelegation.rs",
+      "spans": [
+        [
+          105,
+          115
+        ],
+        [
+          219,
+          231
+        ]
+      ],
+      "anchors": [
+        "record_attempt",
+        "fetch_add",
+        "MAX_REDELEGATIONS"
+      ],
+      "removal": false,
+      "kind": "logic (counter scope)"
+    }
+  },
+  {
+    "id": "R7",
+    "tier": "real",
+    "diff_file": "diffs/R7.diff",
+    "about": "#8910: the record and its newline go out as two writes, so concurrent writers interleave; the file is also unbounded",
+    "source": {
+      "fix_pr": 8910,
+      "introducing_sha": "10c953672e",
+      "parent": "c656a62002",
+      "regenerate": "git diff c656a62002 10c953672e -- crates/trusty-common/src/error_capture/store.rs"
+    },
+    "label": {
+      "file": "crates/trusty-common/src/error_capture/store.rs",
+      "spans": [
+        [
+          283,
+          293
+        ]
+      ],
+      "anchors": [
+        "write_all",
+        "newline",
+        "interleave"
+      ],
+      "removal": false,
+      "kind": "concurrency (torn append)"
+    }
+  },
+  {
+    "id": "R8",
+    "tier": "real",
+    "diff_file": "diffs/R8.diff",
+    "about": "#8762: the pid is written in separate steps after try_lock, so a loser can read an empty or stale pid",
+    "source": {
+      "fix_pr": 8762,
+      "introducing_sha": "7808808805",
+      "parent": "6977463bdb",
+      "regenerate": "git diff 6977463bdb 7808808805 -- crates/trusty-common/src/memory_core/maintenance_lease.rs"
+    },
+    "label": {
+      "file": "crates/trusty-common/src/memory_core/maintenance_lease.rs",
+      "spans": [
+        [
+          138,
+          153
+        ]
+      ],
+      "anchors": [
+        "try_lock",
+        "set_len",
+        "holder_pid"
+      ],
+      "removal": false,
+      "kind": "race"
+    }
+  }
+]

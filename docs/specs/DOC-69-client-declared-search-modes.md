@@ -5,6 +5,14 @@ spec_refs: []
 # DOC-69 — Client-Declared Search Modes: Un-Fused Lanes, Paging, and the Cosine Sort
 
 **Status:** Draft
+**Status note (2026-10-06, owner ruling AQ-cq):** Draft, re-scoped as additive.
+trusty-search 1.0 freezes today's search response shape: a flat fused result
+list with `score`. A caller that declares a mode gets labelled result sets; an
+undeclared query keeps the flat fused list and `score`. Removing the fused
+`score`, the flat-to-labelled envelope change for undeclared queries (§3), and
+making KG traversal opt-in with dropping classifier routing (§6) are deferred
+to 2.0. No implementation work is scheduled now. See
+[ADR-0046](../adr/0046-client-declared-search-modes-replace-the-fused-score.md).
 **Spec ID:** `SPEC-DECLSEARCH-01~draft` … `SPEC-DECLSEARCH-09~draft`
 **Subsystem:** `trusty-search` — the search entry point (`ChunkIndexer::search`),
 lane selection, the HTTP and MCP search surfaces, and the result envelope.

@@ -252,14 +252,16 @@ fn manual_static_verify_full_roster() {
     std::fs::create_dir_all(&fw.skills).unwrap();
 
     // Copy the REAL bundled raw sources into the framework source dirs.
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for (src, dst) in [
         (
             crate::core::content_source::test_support::repo_agents_dir(),
             &fw.agents,
         ),
-        // #9012: the skills are the checkout's content.
-        (manifest.join("../../content/skills"), &fw.skills),
+        // #9012: the skills are the checkout's content; #9298: resolved at runtime.
+        (
+            crate::core::content_source::test_support::repo_root().join("content/skills"),
+            &fw.skills,
+        ),
     ] {
         for entry in std::fs::read_dir(&src).unwrap() {
             let entry = entry.unwrap();

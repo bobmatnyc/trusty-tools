@@ -40,6 +40,8 @@ pub(crate) mod divert_worker;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #9239: the read-only `status` and `--census` views of `tm build-lease`.
+pub(crate) mod build_lease_status;
 pub(crate) mod doctor_builder_cap;
 // #8451: the slot pool's volume against its eviction threshold.
 pub(crate) mod doctor_slot_pool;

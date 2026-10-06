@@ -1,0 +1,21 @@
+diff --git a/crates/trusty-mpm/src/budget/remaining.rs b/crates/trusty-mpm/src/budget/remaining.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-mpm/src/budget/remaining.rs
+@@ -0,0 +1,15 @@
++//! Token budget arithmetic.
++
++/// Tokens left of `budget` after `used`; zero when over.
++pub fn remaining(budget: u64, used: u64) -> u64 {
++    budget.saturating_sub(used)
++}
++
++/// Percent of `budget` used, 0-100.
++pub fn percent_used(budget: u64, used: u64) -> u8 {
++    if budget == 0 {
++        return 100;
++    }
++    let pct = used.min(budget) * 100 / budget;
++    pct as u8
++}

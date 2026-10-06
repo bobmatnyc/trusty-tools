@@ -1,0 +1,29 @@
+diff --git a/crates/trusty-common/src/error_capture/rotate.rs b/crates/trusty-common/src/error_capture/rotate.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/error_capture/rotate.rs
+@@ -0,0 +1,23 @@
++//! Rotate the error log: errors.log -> errors.log.1 -> ... -> errors.log.<keep>.
++
++use std::path::{Path, PathBuf};
++
++fn numbered(base: &Path, n: usize) -> PathBuf {
++    PathBuf::from(format!("{}.{n}", base.display()))
++}
++
++/// Shift each rotated file up one slot, keeping `keep` rotated files, then
++/// move the live log to slot 1.
++pub fn rotate(base: &Path, keep: usize) -> std::io::Result<()> {
++    if keep == 0 {
++        return std::fs::remove_file(base);
++    }
++    for n in (1..keep - 1).rev() {
++        let from = numbered(base, n);
++        if from.exists() {
++            std::fs::rename(&from, numbered(base, n + 1))?;
++        }
++    }
++    let _ = std::fs::remove_file(numbered(base, keep + 1));
++    std::fs::rename(base, numbered(base, 1))
++}

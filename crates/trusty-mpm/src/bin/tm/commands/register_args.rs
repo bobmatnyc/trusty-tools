@@ -470,17 +470,11 @@ fn derive_alias(url: &str) -> anyhow::Result<String> {
 
 /// A positional as an error message may show it: every URL credential
 /// redacted (#9124), since `tm register` and `tm run` echo what they were given.
-/// An scp-style `user:token@host:path` has no `://` for `redact_url` to find,
-/// so a userinfo holding a `:` there is masked whole; a bare `git@` is kept.
+/// The scp form `user:token@host:path` is masked whole; a bare `git@` is kept.
 /// Test: `register_errors_never_echo_an_embedded_token_9124`,
 /// `shown_masks_an_scp_style_password_9124`.
 pub(crate) fn shown(s: &str) -> std::borrow::Cow<'_, str> {
-    use trusty_mpm::core::remote_url_redact::{REDACTED, redact_url};
-    // #9124: `redact_url` needs a `://`; the scp form carries none.
-    match trusty_common::url_userinfo::scp_userinfo_end(s) {
-        Some(at) if s[..at].contains(':') => format!("{REDACTED}{}", &s[at..]).into(),
-        _ => redact_url(s),
-    }
+    trusty_mpm::core::remote_url_redact::redact_stored_url(s)
 }
 
 /// Split a URL into its host-relative path segments.

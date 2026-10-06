@@ -1,0 +1,40 @@
+diff --git a/crates/trusty-common/src/memory_core/sweep_lock.rs b/crates/trusty-common/src/memory_core/sweep_lock.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/memory_core/sweep_lock.rs
+@@ -0,0 +1,34 @@
++//! An advisory lock that serialises sweeps across processes.
++
++use std::fs::{File, OpenOptions, TryLockError};
++use std::path::PathBuf;
++
++/// Why a sweep could not start.
++#[derive(Debug)]
++pub enum SweepBlocked {
++    /// Another process holds the lock.
++    Busy,
++    /// The lock file could not be opened.
++    Io(std::io::Error),
++}
++
++/// A held sweep lock; dropping the file releases it.
++pub struct SweepLock {
++    _file: File,
++}
++
++/// Take the sweep lock at `path`, or say why not.
++pub fn acquire(path: PathBuf) -> Result<SweepLock, SweepBlocked> {
++    let file = OpenOptions::new()
++        .create(true)
++        .truncate(false)
++        .write(true)
++        .open(&path)
++        .map_err(SweepBlocked::Io)?;
++    match file.try_lock() {
++        Ok(()) => {}
++        Err(TryLockError::WouldBlock) => return Err(SweepBlocked::Busy),
++        Err(TryLockError::Error(_)) => {}
++    }
++    Ok(SweepLock { _file: file })
++}

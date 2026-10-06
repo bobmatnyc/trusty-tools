@@ -61,7 +61,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{inproject, inproject_hygiene};
-use crate::core::remote_url_redact::redact_url;
+use crate::core::remote_url_redact::redact_stored_url;
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// How many working-tree entries a skipped-refresh notice lists before it
@@ -294,7 +294,7 @@ fn verify_remote_matches(
 ) -> Result<(), ColdStartError> {
     // #9124: either URL may embed `user:token@`. The error carries them
     // redacted, so neither its Display nor its Debug can log the token.
-    let shown = |url: &str| redact_url(url).into_owned();
+    let shown = |url: &str| redact_stored_url(url).into_owned();
     let found = inproject::get_origin_url(base_path).map_err(|reason| {
         ColdStartError::OriginUnreadable {
             path: base_path.to_path_buf(),

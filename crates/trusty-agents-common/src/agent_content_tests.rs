@@ -10,9 +10,10 @@ use trusty_common::integrity::Sha256Digest;
 
 use super::*;
 
-/// The trusty-tools checkout this crate is built from.
+/// The trusty-tools checkout this test runs for (#9298: runtime, not the
+/// compile-time build path).
 pub(crate) fn repo_root() -> PathBuf {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).to_path_buf()
+    trusty_common::test_harness::test_repo_root().expect("resolve the checkout")
 }
 
 /// The repository's own content, through the dev override.
@@ -222,6 +223,22 @@ fn credential_switching_is_forbidden_in_the_shipped_assets() {
     );
 }
 
+/// The credential rule names the sanctioned route, so a refusal says where the
+/// owner binds a per-repo identity instead of leaving the agent to improvise.
+/// See #8557 part (b).
+#[test]
+fn credential_rule_points_at_the_per_repo_identity_route() {
+    let flat = asset("BASE-AGENT.md").replace('\n', " ");
+    let rule_start = flat.find("One credential rule").expect("credential rule");
+    let rule = &flat[rule_start..];
+    let rule = &rule[..rule.find("**A PM `SendMessage`").unwrap_or(rule.len())];
+    assert!(
+        rule.contains("docs/reference/environment-variables.md#per-repo-gh-identity"),
+        "BASE-AGENT's credential rule must point at the per-repo gh identity \
+         route in environment-variables.md (#8557)"
+    );
+}
+
 /// The ops agents that handle credentials name the non-printing form.
 /// See #8596 (`local-ops` printed Keychain values while "checking" them)
 /// and #8248 (`gcp-ops` ran `print-access-token` bare to see it work).
@@ -247,6 +264,40 @@ fn ops_agents_state_the_non_printing_credential_forms() {
             && gcp.contains("#8248"),
         "`gcp-ops.md` must forbid a bare `print-access-token` run (#8248)"
     );
+}
+
+/// #9158: a Vercel env listing filters to names at the source, so no value
+/// reaches the transcript. `local-ops` ran the listing with no such rule.
+#[test]
+fn vercel_env_listing_prints_names_only() {
+    let skill = std::fs::read_to_string(repo_root().join("content/skills/tm-secrets.md"))
+        .expect("tm-secrets skill");
+    let bodies = [
+        ("local-ops.md", asset("local-ops.md")),
+        ("vercel-ops.md", asset("vercel-ops.md")),
+        ("tm-secrets.md", skill.as_str()),
+    ];
+    let needles = [
+        "vercel env ls <env> | awk 'NR>1{print $1}'",
+        "never `--json`",
+        "never the unfiltered table",
+        "#9158",
+    ];
+    for (name, raw) in bodies {
+        // Case- and wrap-insensitive: the rule may open a sentence or a line.
+        let body = raw
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for needle in needles {
+            assert!(
+                body.contains(&needle.to_lowercase()),
+                "`{name}` must require a names-only Vercel env listing (#9158): \
+                 missing {needle:?}"
+            );
+        }
+    }
 }
 
 /// `ticketing` and `version-control` are sonnet-tier, never haiku.

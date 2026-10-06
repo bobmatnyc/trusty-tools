@@ -124,8 +124,8 @@ fn assert_compact_shape(payload: &Value, tool: &str) {
 /// replace the `content` it drops.
 #[tokio::test]
 async fn search_compact_hit_omits_the_dropped_keys() {
-    let (base, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+    let server = daemon.server();
 
     let (payload, _) = call(
         &server,
@@ -135,7 +135,7 @@ async fn search_compact_hit_omits_the_dropped_keys() {
     .await;
     assert_compact_shape(&payload, "search");
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     assert_eq!(
         bodies[0]["compact"], true,
         "the daemon body pins compact so the snippet exists"
@@ -145,8 +145,8 @@ async fn search_compact_hit_omits_the_dropped_keys() {
 /// Same guarantee on the lexical lane.
 #[tokio::test]
 async fn search_lexical_compact_hit_omits_the_dropped_keys() {
-    let (base, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+    let server = daemon.server();
 
     let (payload, _) = call(
         &server,
@@ -156,7 +156,7 @@ async fn search_lexical_compact_hit_omits_the_dropped_keys() {
     .await;
     assert_compact_shape(&payload, "search_lexical");
 
-    let bodies = bodies.lock().await;
+    let bodies = bodies.lock().expect("captured");
     assert_eq!(bodies[0]["compact"], true);
     assert_eq!(bodies[0]["stage"], "lexical", "the lane pin still holds");
 }
@@ -166,8 +166,8 @@ async fn search_lexical_compact_hit_omits_the_dropped_keys() {
 #[tokio::test]
 async fn semantic_and_kg_lanes_honour_compact() {
     for tool in ["search_semantic", "search_kg"] {
-        let (base, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-        let server = McpServer::new(base);
+        let (daemon, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+        let server = daemon.server();
         let (payload, _) = call(
             &server,
             tool,
@@ -175,7 +175,7 @@ async fn semantic_and_kg_lanes_honour_compact() {
         )
         .await;
         assert_compact_shape(&payload, tool);
-        assert_eq!(bodies.lock().await[0]["compact"], true);
+        assert_eq!(bodies.lock().expect("captured")[0]["compact"], true);
     }
 }
 
@@ -183,8 +183,8 @@ async fn semantic_and_kg_lanes_honour_compact() {
 /// win over `full_content` — the two ask for opposite things.
 #[tokio::test]
 async fn search_all_fanout_compact_hit_omits_the_dropped_keys() {
-    let (base, bodies, paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-    let server = McpServer::new(base);
+    let (daemon, bodies, paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+    let server = daemon.server();
 
     let (payload, _) = call(
         &server,
@@ -194,8 +194,12 @@ async fn search_all_fanout_compact_hit_omits_the_dropped_keys() {
     .await;
     assert_compact_shape(&payload, "search_all");
 
-    assert_eq!(paths.lock().await[0], "/search", "no index → fan-out path");
-    let bodies = bodies.lock().await;
+    assert_eq!(
+        paths.lock().expect("captured")[0],
+        "search.query.all",
+        "no index → fan-out path"
+    );
+    let bodies = bodies.lock().expect("captured");
     assert_eq!(
         bodies[0]["full_content"], false,
         "compact overrides full_content, so the fan-out still builds a snippet"
@@ -244,8 +248,8 @@ async fn default_calls_keep_the_legacy_hit_shape() {
         ),
         ("search_all", serde_json::json!({ "query": "handler" })),
     ] {
-        let (base, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-        let server = McpServer::new(base);
+        let (daemon, bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+        let server = daemon.server();
         let (payload, _) = call(&server, tool, args).await;
         assert_eq!(
             hit_keys(&payload),
@@ -253,7 +257,7 @@ async fn default_calls_keep_the_legacy_hit_shape() {
             "{tool}: a default call must return the daemon's hit verbatim"
         );
         assert!(
-            bodies.lock().await[0].get("compact").is_none(),
+            bodies.lock().expect("captured")[0].get("compact").is_none(),
             "{tool}: a default call must not inject `compact` into the daemon body"
         );
         // #7493: the byte ceiling adds `meta.truncated: false` and nothing else.
@@ -276,8 +280,8 @@ async fn default_calls_keep_the_legacy_hit_shape() {
 /// bytes in compact mode.
 #[tokio::test]
 async fn compact_halves_the_bytes_of_a_ten_hit_search() {
-    let (base, _bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(10)).await;
-    let server = McpServer::new(base);
+    let (daemon, _bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(10)).await;
+    let server = daemon.server();
     let args = serde_json::json!({ "index_id": "demo", "query": "handler" });
 
     let (_, full_len) = call(&server, "search", args.clone()).await;
@@ -337,8 +341,8 @@ async fn a_non_boolean_compact_is_rejected() {
         ),
         ("search_all", serde_json::json!({ "query": "handler" })),
     ] {
-        let (base, _bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
-        let server = McpServer::new(base);
+        let (daemon, _bodies, _paths) = spawn_mock_daemon(ready_status(), search_body(1)).await;
+        let server = daemon.server();
         args["compact"] = Value::String("true".into());
         let msg = call_err(&server, tool, args).await;
         assert!(msg.contains("compact must be a boolean"), "{tool}: {msg}");

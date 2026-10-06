@@ -1,0 +1,20 @@
+diff --git a/crates/trusty-common/src/journal_flush.rs b/crates/trusty-common/src/journal_flush.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/journal_flush.rs
+@@ -0,0 +1,14 @@
++//! Append a line to the advisory journal.
++
++use std::io::Write;
++use std::path::Path;
++
++/// Append `line` to the journal at `path`.
++pub fn append(path: &Path, line: &str) -> std::io::Result<()> {
++    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
++    writeln!(file, "{line}")?;
++    // Best effort: the journal is advisory and rebuilt on start, so a failed
++    // fsync loses nothing that matters; the write itself already succeeded.
++    let _ = file.sync_all();
++    Ok(())
++}

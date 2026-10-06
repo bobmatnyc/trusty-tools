@@ -1,0 +1,26 @@
+diff --git a/crates/trusty-memory/README.md b/crates/trusty-memory/README.md
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-memory/README.md
+@@ -0,0 +1,6 @@
++# trusty-memory
++
++## Recall order
++
++`recall` ranks drawers by relevance. When two drawers score the same, the
++newer one comes first, so a current ruling outranks a stale snapshot of it.
+diff --git a/crates/trusty-memory/tests/recall_order.rs b/crates/trusty-memory/tests/recall_order.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-memory/tests/recall_order.rs
+@@ -0,0 +1,8 @@
++//! Recall returns newer drawers first when scores tie.
++
++#[test]
++fn ties_sort_newest_first() {
++    let mut drawers = vec![(0.5_f32, 1_u64), (0.5, 3), (0.5, 2)];
++    drawers.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
++    assert_eq!(drawers.iter().map(|d| d.1).collect::<Vec<_>>(), vec![3, 2, 1]);
++}
