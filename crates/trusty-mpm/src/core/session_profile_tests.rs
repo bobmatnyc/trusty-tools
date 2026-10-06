@@ -226,6 +226,8 @@ fn every_kept_item_reaches_the_supervisor_prompt() {
         ("evidence labels", "**reported**"),
         ("evidence labels", "**verified**"),
         ("decisions as options", "\"(Recommended)\""),
+        // #9289: the question-id rule, pinned by its hex wrap step.
+        ("question ids", "`ff` is followed by `01`"),
         ("completion standard", "Clear a PR when Done items 1-3 hold"),
         ("monitoring", "## Monitoring and Heartbeat"),
         ("heartbeat", "Run exactly one heartbeat"),
