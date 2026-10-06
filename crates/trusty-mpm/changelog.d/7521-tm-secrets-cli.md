@@ -1,0 +1,2 @@
+Added
+- `tm secrets` stores project and owner secrets through the trusty-secrets socket, starting the server on first use (#7521). `set KEY [group]` reads the value from the clipboard (or stdin with `--value -`, never an argument), refuses an empty clipboard, and confirms with the first 8 characters and the length, or only the length for 8 characters or fewer. `list` prints key names only. `doctor` reports socket and backend reachability. No verb prints a value.

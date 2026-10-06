@@ -861,6 +861,14 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
+    /// Store project and owner secrets: `set`, `list`, `doctor`. No verb
+    /// prints a value.
+    // #7521. Test: `cli_parses_every_secrets_verb`.
+    Secrets {
+        /// Secrets action to perform.
+        #[command(subcommand)]
+        action: SecretsAction,
+    },
     /// Install, update and inspect the runtime instructional content.
     ///
     /// `install --from` is offline; `update` fetches a `content-v*` release;
