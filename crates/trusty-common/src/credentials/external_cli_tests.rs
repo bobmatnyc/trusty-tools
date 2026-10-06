@@ -309,10 +309,12 @@ async fn async_dropped_future_kills_the_child() {
 
 #[test]
 fn output_without_stdin_sees_eof_and_wraps_stdout() {
-    // `cat` on a null stdin ends at once. The value rides argv here only to
-    // stand in for `op read` printing a secret on stdout.
+    // `cat` on a null stdin ends at once. The value rides the env overlay
+    // only to stand in for `op read` printing a secret on stdout; not argv,
+    // which Debug of the output renders.
     let out = ExternalCliCommand::new("sh")
-        .args(["-c", r#"cat; printf '%s' "$1""#, "probe", VALUE])
+        .args(["-c", r#"cat; printf '%s' "$VALUE_9311""#])
+        .env("VALUE_9311", VALUE)
         .output_blocking()
         .expect("run");
     assert!(out.success);
