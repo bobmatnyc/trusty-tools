@@ -46,5 +46,6 @@
   "timestamp": "<timestamp>",
   "unverified_count": 0,
   "verdict": "REQUEST_CHANGES",
+  "verdict_status": "parsed",
   "withheld_unverified_count": 0
 }

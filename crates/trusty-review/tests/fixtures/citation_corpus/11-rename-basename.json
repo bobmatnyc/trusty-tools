@@ -21,5 +21,5 @@
   "hallucinated": ["legacy-overflow"],
   "forbidden_in_body": ["legacy module"],
   "expect_survivors": 0,
-  "expect_verdict": "UNKNOWN"
+  "expect_verdict": "REQUEST_CHANGES"
 }

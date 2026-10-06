@@ -116,7 +116,8 @@ fn summary_findings(result: &ReviewResult) -> Vec<&crate::models::Finding> {
 /// is NOT generated here — `finalize_review` appends it to `result.review_body`
 /// before this is called (single source of truth for #728 + #732).
 /// Test: `body_contains_prose_and_json_block`, `body_contains_signature`,
-/// `body_omits_inline_findings_from_summary`.
+/// `body_omits_inline_findings_from_summary`,
+/// `heading_names_a_non_parsed_verdict_status`.
 pub fn build_review_comment_body(result: &ReviewResult) -> String {
     let mut md = String::with_capacity(1024);
     md.push_str(REVIEW_SIGNATURE);
@@ -128,8 +129,14 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         .as_deref()
         .map(|g| format!("Grade: {g} | "))
         .unwrap_or_default();
+    // #9310: name any outcome other than a plain parsed verdict beside it.
+    let status = result
+        .verdict_status
+        .filter(|s| *s != crate::models::VerdictStatus::Parsed)
+        .map(|s| format!(" · `{s}`"))
+        .unwrap_or_default();
     md.push_str(&format!(
-        "## trusty-review: {}`{}`\n\n",
+        "## trusty-review: {}`{}`{status}\n\n",
         grade_prefix, result.verdict
     ));
 
@@ -356,6 +363,22 @@ mod tests {
         f.line = Some(42);
         r.findings.push(f);
         r
+    }
+
+    /// #9310: the heading names a status other than `parsed` beside the
+    /// verdict, and a parsed review's heading is unchanged.
+    #[test]
+    fn heading_names_a_non_parsed_verdict_status() {
+        let mut result = sample_result();
+        result.verdict_status = Some(crate::models::VerdictStatus::Parsed);
+        let body = build_review_comment_body(&result);
+        assert!(body.contains("`REQUEST_CHANGES`\n"), "{body}");
+        result.verdict_status = Some(crate::models::VerdictStatus::SuppressedReject);
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains("`REQUEST_CHANGES` · `suppressed_reject`\n"),
+            "{body}"
+        );
     }
 
     #[test]

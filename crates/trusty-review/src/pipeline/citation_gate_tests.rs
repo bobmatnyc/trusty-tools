@@ -654,10 +654,14 @@ fn gate_posted_findings_withholds_when_it_drops_every_finding() {
     assert!(result.findings.is_empty());
     assert_eq!(result.verdict, Verdict::Unknown);
     assert_eq!(result.grade, None);
+    // #9310: the gate records its note as the error; the body headline is
+    // written once, from the array, by `gate_then_verify`.
+    assert_eq!(
+        result.error.as_deref(),
+        Some("1 findings withheld: citation unverifiable")
+    );
     assert!(
-        result
-            .review_body
-            .starts_with("1 findings withheld: citation unverifiable"),
+        !result.review_body.contains("findings withheld"),
         "{}",
         result.review_body
     );
@@ -776,10 +780,14 @@ fn a_partial_finding_is_withheld_from_a_blocking_review() {
 
     assert!(result.findings.is_empty());
     assert_eq!(result.verdict, Verdict::Unknown);
+    // #9310: the gate records its note as the error; the body headline is
+    // written once, from the array, by `gate_then_verify`.
+    assert_eq!(
+        result.error.as_deref(),
+        Some("1 findings withheld: citation unverifiable")
+    );
     assert!(
-        result
-            .review_body
-            .starts_with("1 findings withheld: citation unverifiable"),
+        !result.review_body.contains("findings withheld"),
         "{}",
         result.review_body
     );

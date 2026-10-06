@@ -163,10 +163,12 @@ pub fn score(entry: &Entry, diff: &str, result: &ReviewResult) -> DiffScore {
         })
         .collect();
     let verdict = result.verdict.to_string();
+    let status = result.verdict_status.map(|s| s.to_string()); // #9310
     let shaped = oracle::withheld_shapes_verdict(
         result.findings.len(),
         result.withheld_findings.len(),
         &verdict,
+        status.as_deref(),
         result.grade.as_deref(),
     );
     let hits = |l: &Label| {
