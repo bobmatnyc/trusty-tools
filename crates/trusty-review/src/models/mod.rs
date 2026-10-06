@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
 pub mod status;
+pub mod verdict_status; // #9310
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use status::ReviewStatus;
+pub use verdict_status::VerdictStatus;
 
 use crate::config::constants::REVIEW_VERSION;
 
@@ -380,8 +382,10 @@ pub const UNKNOWN_FILE_PLACEHOLDER: &str = "unknown";
 /// What: a direct port of `FixSuggestion` from spec §07 REV-602.  The
 /// `verified` and `issue_eligible` fields are transient pipeline state; they
 /// are serialised for the review log but not required on deserialisation.
+/// `#[non_exhaustive]` (#9310): build one with `Finding::new`.
 /// Test: `finding_confidence_clamping`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Finding {
     /// Changed file path this finding refers to.
     pub file: String,
@@ -592,8 +596,10 @@ pub struct InlineCommentOut {
 /// What: a subset of spec §07 REV-600 fields covering the MVP verdict loop.
 /// The full field set (JIRA/Confluence context, multi-pass tokens, etc.)
 /// will be added in later stages.
+/// `#[non_exhaustive]` (#9310): build one with `ReviewResult::new`.
 /// Test: `review_result_serde_roundtrip`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReviewResult {
     // ── PR identity ───────────────────────────────────────────────────────
     /// GitHub organisation.
@@ -697,18 +703,24 @@ pub struct ReviewResult {
     /// `pipeline::withheld_contract::reason_class`. Absent when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub withheld_by_reason: BTreeMap<String, usize>,
-    /// `"no_verified_findings"` when no finding survived and at least one was
-    /// withheld (#9188 K); absent otherwise.
+    /// What kind of outcome `verdict` reports (#9310): `parsed`,
+    /// `parse_failed`, `no_reviewer_output`, `all_withheld` or
+    /// `suppressed_reject`; see [`VerdictStatus`].
     ///
-    /// Why: AQ-7t (Bob 2026-10-05) keeps an all-withheld APPROVE as APPROVE
-    /// with exit 0, so `run --json` needs its own signal that nothing was
-    /// verified; a field here reaches `run --json` and the MCP text alike.
-    /// What: set by `withheld_contract::sync_withheld_counts` at the same two
-    /// exit points as `withheld_count`.
-    /// Test: `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
-    /// `run_json_for_a_non_withheld_review_is_unchanged_by_9188`.
+    /// Why: UNKNOWN used to mean both "no judgment" and "a suppressed
+    /// rejection", and AQ-7t keeps an all-withheld APPROVE as APPROVE, so the
+    /// verdict alone cannot tell a caller what happened; this field reaches
+    /// `run --json`, the MCP envelope and the PR comment heading alike.
+    /// What: set on every exit path — `abort_dry` (`no_reviewer_output`
+    /// unless already set) and `finalize_review` (`parsed` unless a stage set
+    /// another). `None` only on a record written before #9188 or a result
+    /// built by hand and never finalized.
+    /// Test: `a_clean_review_reads_parsed_approve`,
+    /// `an_unparsed_reply_reads_parse_failed`,
+    /// `no_reviewer_reply_reads_no_reviewer_output`,
+    /// `run_review_all_withheld_approve_stays_approve_and_exits_zero`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdict_status: Option<String>,
+    pub verdict_status: Option<VerdictStatus>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///

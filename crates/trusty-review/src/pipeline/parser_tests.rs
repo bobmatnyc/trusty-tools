@@ -1069,3 +1069,53 @@ fn parse_error_reason_never_echoes_reply_content() {
         assert!(reason.contains(" at line "), "{reason}");
     }
 }
+
+/// A reply with `finish_reason`, the shape a provider hands the parser.
+fn reply(text: &str, finish_reason: Option<&str>) -> crate::llm::LlmResponse {
+    crate::llm::LlmResponse {
+        text: text.to_string(),
+        model: "m".to_string(),
+        input_tokens: 1,
+        output_tokens: 1,
+        latency_ms: 1,
+        cost_usd: 0.0,
+        finish_reason: finish_reason.map(str::to_string),
+    }
+}
+
+/// #9310: a tool-call reply is parsed from its tool input alone — no fence,
+/// no keyword annotation — while the same text as a plain reply keeps every
+/// strategy.
+#[test]
+fn parse_review_reply_reads_only_the_tool_input() {
+    let text = "{\"verdict\":\"APPROVE\",\"findings\":[{\"title\":\"t\"}]}\n\n\
+                ```json\n{\"verdict\":\"APPROVE\",\"summary\":\"ok\",\"findings\":[]}\n```";
+    let tool = parse_review_reply(&reply(text, Some("tool_use")));
+    assert!(tool.is_fail_safe);
+    assert_eq!(tool.verdict, Verdict::Unknown);
+    let reason = tool.fail_safe_reason.unwrap_or_default();
+    assert!(
+        reason.contains("tool input did not deserialize"),
+        "{reason}"
+    );
+    assert!(!reason.contains("keyword scan"), "{reason}");
+
+    let plain = parse_review_reply(&reply(text, Some("end_turn")));
+    assert!(!plain.is_fail_safe, "a text reply keeps the fence strategy");
+    assert_eq!(plain.verdict, Verdict::Approve);
+
+    for (input, why) in [("  ", "carried no input"), ("[1]", "not a JSON object")] {
+        let parsed = parse_review_reply(&reply(input, Some("tool_use")));
+        assert!(parsed.is_fail_safe, "{why}");
+        assert!(
+            parsed.fail_safe_reason.unwrap_or_default().contains(why),
+            "{why}"
+        );
+    }
+    let valid = parse_review_reply(&reply(
+        r#"{"verdict":"BLOCK","findings":[]}"#,
+        Some("tool_use"),
+    ));
+    assert!(!valid.is_fail_safe);
+    assert_eq!(valid.verdict, Verdict::Block);
+}

@@ -15,8 +15,8 @@
 //! each and recording each in `ReviewResult::withheld_findings`. A dropped
 //! finding is never posted; the verdict then follows the #8905 withhold policy
 //! (`citation_gate::verdict::settle_withheld`), so a drop never turns a
-//! non-APPROVE verdict into APPROVE, and the body leads with
-//! "N findings withheld: …".
+//! non-APPROVE verdict into APPROVE, and the body leads with one
+//! "N findings withheld:" headline counting every withheld finding (#9310).
 //! Test: `verify_posted_tests.rs`.
 
 use std::sync::Arc;
@@ -30,6 +30,7 @@ use crate::{
     pipeline::{
         citation_gate::{LineIndex, gate_posted_findings_with_index, verdict as withhold},
         diff_analyzer::models::FilteredDiff,
+        verdict_status::apply_withheld_outcome,
         verify::{VerifierReach, apply_outcome, maybe_verify, rederive_verdict},
         withheld_contract as contract,
     },
@@ -254,6 +255,9 @@ pub(crate) struct GateInputs<'a> {
     /// The model's verdict when `relax_verdict_if_evidence_wiped` relaxed it
     /// before grading; `settle_no_survivors` decides from it (#9188, option A).
     pub(crate) wiped_model_verdict: Option<Verdict>,
+    /// #9310: the reviewer's own verdict (`verdict_status::judged_verdict`),
+    /// which the withheld mapping reads.
+    pub(crate) model_verdict: Verdict,
 }
 
 /// Gate citations, then verify the survivors, on a graded review (#8904).
@@ -265,36 +269,46 @@ pub(crate) struct GateInputs<'a> {
 /// `result.verdict` as the primary verdict. Records the unjudged, over-cap and
 /// unverifiable drops in `result.withheld_unverified_count`, and every drop
 /// with its reason in `result.withheld_findings` (#4044). When the round
-/// withheld findings, scrubs their citations from the body, prepends the
-/// report's note, and on `Unknown` clears the grade and records the note as
-/// the error — the same shape the citation gate uses. When no round ran,
+/// withheld findings, scrubs their citations from the body, and on `Unknown`
+/// clears the grade and records the round's note as the error — the same
+/// shape the citation gate uses. When no round ran,
 /// [`withhold_unverified`] withholds every finding (Bob's "withhold all"
 /// ruling, 2026-09-30); a blocking review is UNKNOWN, an approving one keeps
 /// its verdict (AQ-7t). #9188 then re-checks every
 /// survivor at the head (L), makes a blocking review with no survivor
 /// `Unknown` (A, J; an approving one keeps its verdict, AQ-7t), and keeps the model's prose only when it rests on survivors (C).
+/// #9310: then `verdict_status::apply_withheld_outcome` maps a withheld
+/// review from the reviewer's own verdict (`all_withheld` APPROVE,
+/// `suppressed_reject` REQUEST_CHANGES), and one headline counting
+/// `withheld_findings` leads the body (`prepend_withheld_headline`).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
 /// `run_review_enabled_without_a_verifier_withholds_every_finding`,
 /// `run_review_disabled_verification_withholds_every_finding`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`,
 /// `run_review_posts_a_confirmed_removal_finding_at_its_deletion_line`,
-/// `run_review_keeps_a_clean_review_byte_for_byte`.
+/// `run_review_keeps_a_clean_review_byte_for_byte`,
+/// `run_review_all_withheld_request_changes_is_suppressed_reject`,
+/// `the_withheld_headline_counts_the_whole_array`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,
     result: &mut ReviewResult,
     inputs: &GateInputs<'_>,
 ) {
+    let error_before = result.error.clone(); // #9310: restored if the mapping replaces UNKNOWN
     let narrative = contract::take_narrative(result, inputs.narrative);
     let index = LineIndex::from_filtered(inputs.filtered).with_refs(inputs.refs);
     gate_posted_findings_with_index(result, &index); // #8905 runs first.
     verify_survivors(config, verifier, result, inputs).await;
     contract::withhold_unresolved(result, &index); // #9188 L
     contract::settle_no_survivors(result, inputs.wiped_model_verdict.as_ref()); // #9188 A, J
+    // #9310: the withheld mapping, last, from the reviewer's own verdict.
+    apply_withheld_outcome(result, &inputs.model_verdict, error_before);
     if let Some(narrative) = narrative {
         contract::restore_narrative(result, narrative, &index); // #9188 C
     }
+    contract::prepend_withheld_headline(result); // #9310: one total, from the array
 }
 
 /// The #8904 verifier round on the gate's survivors, and its withhold policy.
@@ -329,7 +343,7 @@ async fn verify_survivors(
         return;
     };
     result.review_body = withhold::scrub_body(&result.review_body, &report.withheld);
-    result.review_body = format!("{note}\n\n{}", result.review_body);
+    // #9310: no per-stage headline; `prepend_withheld_headline` counts the array.
     if result.verdict == Verdict::Unknown {
         result.grade = None;
         result.error.get_or_insert(note);
@@ -352,7 +366,8 @@ pub const NO_VERIFIER_REASON: &str = "no verifier";
 /// finding is posted, so with no round nothing is.
 /// What: no findings → nothing to do, verdict untouched. Otherwise moves every
 /// finding into `result.withheld_findings` with reason [`NO_VERIFIER_REASON`],
-/// prepends "N findings withheld: no verifier (<why>)", and settles the
+/// keeps "N findings withheld: no verifier (<why>)" as the error note (the
+/// body headline is written once, #9310), and settles the
 /// verdict with `settle_withheld` and no survivors: APPROVE / APPROVE* keeps
 /// its verdict and exits 0 (AQ-7t, Bob 2026-10-05); any other verdict is
 /// `Unknown` with no grade and the note as the error, so no blocking verdict
@@ -389,7 +404,7 @@ fn withhold_unverified(result: &mut ReviewResult, enabled: bool) {
     }
     let note = format!("{count} findings withheld: no verifier ({why})");
     result.review_body = withhold::scrub_body(&result.review_body, &cites);
-    result.review_body = format!("{note}\n\n{}", result.review_body);
+    // #9310: no per-stage headline; `prepend_withheld_headline` counts the array.
     // AQ-7t (Bob 2026-10-05): keep APPROVE, as on the verifier path.
     result.verdict = withhold::settle_withheld(result.verdict.clone(), &[]);
     if result.verdict == Verdict::Unknown {

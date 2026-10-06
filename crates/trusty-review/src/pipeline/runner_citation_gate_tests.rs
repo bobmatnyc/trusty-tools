@@ -96,11 +96,18 @@ async fn run_review_drops_a_finding_whose_quoted_code_is_absent() {
     let result = review_one("`flush_all()` is never awaited.", SUM_LINE).await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     // #8905 row 4: a review the gate emptied is withheld, never APPROVE.
-    assert_eq!(result.verdict, Verdict::Unknown);
+    // #9310: the reviewer asked for changes, so it is a suppressed rejection.
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: citation unverifiable")
+            .starts_with("1 findings withheld:\n- 1 citation unverifiable"),
+        "{}",
+        result.review_body
     );
 }
 
@@ -117,11 +124,18 @@ async fn run_review_drops_a_finding_with_no_anchor() {
     let result = review_one("This total can overflow on large invoices.", SUM_LINE).await;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     // #8905 row 4: a review the gate emptied is withheld, never APPROVE.
-    assert_eq!(result.verdict, Verdict::Unknown);
+    // #9310: the reviewer asked for changes, so it is a suppressed rejection.
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: citation unverifiable")
+            .starts_with("1 findings withheld:\n- 1 citation unverifiable"),
+        "{}",
+        result.review_body
     );
 }
 
@@ -333,7 +347,7 @@ async fn run_review_all_withheld_approve_stays_approve_and_exits_zero() {
         result.error
     );
     assert_eq!(json["verdict"], "APPROVE");
-    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}"); // #9310
     assert_eq!(json["grade"], "A+", "graded from no survivor, not the A-");
     assert_eq!(json["withheld_count"], 1);
     assert_eq!(json["withheld_by_reason"]["line_citation"], 1, "{json}");
@@ -379,19 +393,22 @@ async fn run_review_all_withheld_approve_star_stays_approve_star_and_exits_zero(
         result.error
     );
     assert_eq!(json["verdict"], "APPROVE*");
-    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}"); // #9310
     assert_eq!(json["grade"], "C+");
     assert_eq!(json["withheld_by_reason"]["unverifiable"], 1, "{json}");
     assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
 /// AQ-7t counterpart: a REQUEST_CHANGES review whose only finding was withheld
-/// still becomes UNKNOWN with no grade and an error, so `run --json` exits
-/// non-zero. Pins the blocking path against the two approving ones above.
+/// never approves. #9310 (Architect ruling 2026-10-06 16:50Z): it is
+/// REQUEST_CHANGES with `verdict_status: suppressed_reject`, no longer
+/// UNKNOWN; it carries no error, so `run --json` exits as any REQUEST_CHANGES
+/// review does, and its grade is the REQUEST_CHANGES band's best (`D+`).
 /// The short quote reaches the #8905 gate; a longer absent quote is dropped
-/// before grading (`run_review_blocking_review_wiped_before_grading_is_unknown`).
+/// before grading
+/// (`run_review_blocking_review_wiped_before_grading_is_suppressed_reject`).
 #[tokio::test]
-async fn run_review_all_withheld_request_changes_is_unknown() {
+async fn run_review_all_withheld_request_changes_is_suppressed_reject() {
     let bug = billing_finding(
         "data-loss",
         "`flush_all()` loses the total.",
@@ -407,20 +424,76 @@ async fn run_review_all_withheld_request_changes_is_unknown() {
     )
     .await;
     let (verdict, fails, json) = run_json(&result);
-    assert_eq!(verdict, Verdict::Unknown);
-    assert!(fails, "an all-withheld blocking review exits non-zero");
-    assert_eq!(result.grade, None);
-    assert!(result.error.is_some());
-    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(verdict, Verdict::RequestChanges, "{json}");
+    assert!(!fails, "no error is recorded: {:?}", result.error);
+    assert_eq!(json["grade"], "D+", "{json}");
+    assert_eq!(json["verdict_status"], "suppressed_reject", "{json}");
     assert!(result.findings.is_empty(), "{:?}", result.findings);
+}
+
+/// An APPROVE graded `grade` whose one high-severity finding the #8905 gate
+/// withholds (#9310).
+async fn approve_graded_with_its_finding_withheld(grade: &str) -> ReviewResult {
+    let bug = billing_finding(
+        "data-loss",
+        "`flush_all()` loses the total.",
+        "high",
+        SUM_LINE,
+    );
+    review_payload(
+        "The flush loses data.",
+        "APPROVE",
+        grade,
+        serde_json::json!([bug]),
+        "CONFIRMED",
+    )
+    .await
+}
+
+/// Assert `result` is REQUEST_CHANGES / `suppressed_reject` with no survivor.
+fn assert_suppressed_reject(result: &ReviewResult) {
+    let (verdict, _fails, json) = run_json(result);
+    assert_eq!(verdict, Verdict::RequestChanges, "{json}");
+    assert_eq!(json["verdict_status"], "suppressed_reject", "{json}");
+    assert_eq!(json["withheld_count"], 1, "{json}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+}
+
+/// #9310: an APPROVE graded F is a rejection (`derive_verdict_with_grade`), so
+/// with its one finding withheld it is REQUEST_CHANGES / `suppressed_reject`.
+/// Before the fix the mapping read the bare APPROVE: APPROVE / `all_withheld`,
+/// regraded A+, exit 0.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_f_is_suppressed_reject() {
+    assert_suppressed_reject(&approve_graded_with_its_finding_withheld("F").await);
+}
+
+/// #9310: an APPROVE graded D floors to REQUEST_CHANGES, so it maps as the F
+/// case does.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_d_is_suppressed_reject() {
+    assert_suppressed_reject(&approve_graded_with_its_finding_withheld("D").await);
+}
+
+/// #9310: an APPROVE with a passing grade and its one finding withheld stays
+/// APPROVE / `all_withheld` and exits 0.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_a_stays_approve() {
+    let result = approve_graded_with_its_finding_withheld("A-").await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::Approve, "{json}");
+    assert!(!fails, "{:?}", result.error);
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}");
+    assert_eq!(json["withheld_count"], 1, "{json}");
 }
 
 /// #9188 (Architect ruling, option A), single-pass path: a REQUEST_CHANGES
 /// review whose only finding quotes code absent from the diff loses it before
 /// grading. #4042 relaxes the verdict to APPROVE, but the final check decides
-/// from the model's verdict: UNKNOWN, no grade, and `run --json` exits non-zero.
+/// from the model's verdict. #9310: REQUEST_CHANGES, `suppressed_reject`,
+/// never APPROVE and no longer UNKNOWN.
 #[tokio::test]
-async fn run_review_blocking_review_wiped_before_grading_is_unknown() {
+async fn run_review_blocking_review_wiped_before_grading_is_suppressed_reject() {
     let bug = billing_finding(
         "data-loss",
         "`ledger.flush_all()` loses the total.",
@@ -435,15 +508,14 @@ async fn run_review_blocking_review_wiped_before_grading_is_unknown() {
         "CONFIRMED",
     )
     .await;
-    let (verdict, fails, json) = run_json(&result);
-    assert_eq!(verdict, Verdict::Unknown, "{json}");
-    assert!(fails, "a wiped blocking review exits non-zero");
-    assert_eq!(result.grade, None);
+    let (verdict, _fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::RequestChanges, "{json}");
+    assert_eq!(json["grade"], "D+", "{json}");
     assert_eq!(
         json["withheld_by_reason"]["citation_integrity"], 1,
         "{json}"
     );
-    assert_eq!(json["verdict_status"], "no_verified_findings", "{json}");
+    assert_eq!(json["verdict_status"], "suppressed_reject", "{json}");
 }
 
 /// #9188 B, end to end: a CONFIRMED finding with one quoted snippet absent

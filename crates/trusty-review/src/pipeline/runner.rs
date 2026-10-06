@@ -49,12 +49,13 @@ use crate::{
             ledger::ContextLedger,
             seams::{load_diff_via, pr_meta_via},
         },
-        parser::parse_review_response,
+        parser::parse_review_reply, // #9310: tool-call replies parse their input only
         post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
+        verdict_status::judged_verdict, // #9310
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors, // #9188 J
@@ -657,8 +658,11 @@ async fn run_pipeline(
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
-    let mut parsed = parse_review_response(&llm_resp.text);
+    let mut parsed = parse_review_reply(&llm_resp);
+    // #9310: the reviewer's own verdict and grade, read before grounding edits them.
+    let (model_verdict, model_grade) = (parsed.verdict.clone(), parsed.grade.clone());
     if parsed.is_fail_safe {
+        result.verdict_status = Some(super::verdict_status::unparsed_status(&llm_resp.text));
         // #9310: record what the unparsed reply looked like; the raw text is not kept.
         let shape = crate::pipeline::reply_shape::describe_reply(&llm_resp);
         warn!(
@@ -751,6 +755,11 @@ async fn run_pipeline(
         refs: &refs,
         narrative: &narrative,
         wiped_model_verdict,
+        model_verdict: judged_verdict(
+            model_verdict,
+            model_grade.as_deref(),
+            coverage_contrib.as_ref(),
+        ),
     };
     gate_then_verify(config, deps.verifier.as_ref(), &mut result, &inputs).await;
 

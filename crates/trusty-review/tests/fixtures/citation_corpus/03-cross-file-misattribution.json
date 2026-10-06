@@ -27,5 +27,5 @@
   "hallucinated": ["alloc"],
   "forbidden_in_body": ["allocates per row"],
   "expect_survivors": 0,
-  "expect_verdict": "UNKNOWN"
+  "expect_verdict": "REQUEST_CHANGES"
 }

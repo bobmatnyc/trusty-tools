@@ -1172,7 +1172,7 @@ fn conformance_floor(findings: &[&&Finding], thresholds: &Thresholds) -> Verdict
 /// separate terminal case handled before `stricter_of` is called.
 /// Test: `grade_floor_overrides_model_approve`,
 /// `grade_model_block_kept_when_no_critical_finding`.
-fn stricter_of(a: Verdict, b: Verdict) -> Verdict {
+pub(crate) fn stricter_of(a: Verdict, b: Verdict) -> Verdict {
     if b.ordinal() > a.ordinal() { b } else { a }
 }
 

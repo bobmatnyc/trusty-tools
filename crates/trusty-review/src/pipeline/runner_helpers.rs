@@ -274,13 +274,15 @@ pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Opti
 /// or LLM transport error) must never be posted live — it carries only a
 /// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
-/// What: syncs `findings_count` to `findings.len()` (#1877), releases the
+/// What: syncs `findings_count` to `findings.len()` (#1877), sets a missing
+/// `verdict_status` to `no_reviewer_output` (#9310), releases the
 /// in-progress dedup claim when `claim` is `Held` (fail-safe on error), writes
 /// the dry-run log so the failure is inspectable, prints when requested, and
 /// returns the result flagged `dry_run = true`.
 /// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
 /// `findings_count_matches_len_on_abort`,
-/// `failed_claim_abort_does_not_delete_another_processes_record`.
+/// `failed_claim_abort_does_not_delete_another_processes_record`,
+/// `no_reviewer_reply_reads_no_reviewer_output`.
 pub(super) async fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -296,6 +298,10 @@ pub(super) async fn abort_dry(
     // it too rather than leaving a stale zero.
     result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
         + result.withheld_unverified_count; // #8904
+    // #9310: an abort has no parsed reviewer reply, unless a stage said otherwise.
+    result
+        .verdict_status
+        .get_or_insert(crate::models::VerdictStatus::NoReviewerOutput);
     crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
@@ -547,6 +553,8 @@ pub(super) async fn claim_slot(
             // yet) but keep the sync explicit rather than relying on the
             // `ReviewResult::new()` default staying 0 forever.
             result.findings_count = result.findings.len();
+            // #9310: no reviewer ran for this result; the verdict is the skip's.
+            result.verdict_status = Some(crate::models::VerdictStatus::NoReviewerOutput);
             ControlFlow::Break(result)
         }
         // #5126: the slot is held by someone else, so this review never

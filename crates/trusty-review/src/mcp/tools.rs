@@ -30,7 +30,7 @@ use crate::{
     models::{ReviewResult, ReviewStatus},
     pipeline::{
         DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
-        withheld_contract::{verdict_status, withheld_by_reason},
+        withheld_contract::withheld_by_reason,
     },
     service::{
         AppState,
@@ -546,14 +546,15 @@ const MCP_STATUS_DEGRADED_CONTEXT: &str = "degraded_context";
 /// What: serialises `ReviewResult` to pretty JSON inside a text content block,
 /// then stamps the `mcp_status` sentinel for an infra outage or a degraded
 /// verdict. #9188 K: when any finding was withheld, adds `withheld`
-/// (`count`, `by_reason`), and `verdict_status: "no_verified_findings"` when
-/// none survived, whatever the verdict (AQ-7t); both are absent otherwise,
-/// and `isError` is unchanged.
+/// (`count`, `by_reason`); absent otherwise, and `isError` is unchanged.
+/// #9310: adds the result's `verdict_status` (`parsed`, `parse_failed`,
+/// `no_reviewer_output`, `all_withheld`, `suppressed_reject`) whenever set.
 /// Test: `wrap_result_never_carries_a_reviewer_model_fallback`,
 /// `wrap_result_infra_unavailable_sets_error_and_sentinel`,
 /// `wrap_result_degraded_stays_isError_false` (in `tools_tests.rs`),
-/// `wrap_result_names_a_withheld_unknown_without_is_error`,
-/// `wrap_result_names_an_all_withheld_approve`.
+/// `wrap_result_names_a_suppressed_reject_without_is_error`,
+/// `wrap_result_names_an_all_withheld_approve`,
+/// `wrap_result_names_the_status_of_a_clean_review`.
 fn wrap_result(result: &ReviewResult) -> Value {
     let payload = serde_json::to_value(result).unwrap_or(Value::Null);
     let text = serde_json::to_string_pretty(&payload)
@@ -575,13 +576,15 @@ fn wrap_result(result: &ReviewResult) -> Value {
             "withheld".to_string(),
             serde_json::json!({ "count": result.withheld_findings.len(), "by_reason": by_reason }),
         );
-        // AQ-7t: also on an all-withheld APPROVE, which keeps its verdict.
-        if let Some(status) = verdict_status(result) {
-            obj.insert(
-                "verdict_status".to_string(),
-                Value::String(status.to_string()),
-            );
-        }
+    }
+    // #9310: every result names its outcome class, withheld or not.
+    if let Some(status) = result.verdict_status
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        obj.insert(
+            "verdict_status".to_string(),
+            Value::String(status.to_string()),
+        );
     }
     if infra_unavailable && let Some(obj) = envelope.as_object_mut() {
         obj.insert(

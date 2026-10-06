@@ -490,7 +490,7 @@ pub fn gate_posted_findings_with_index(result: &mut ReviewResult, index: &LineIn
         .extend(report.withheld_findings.iter().cloned());
     result.review_body = verdict::scrub_body(&result.review_body, &report.withheld);
     if let Some(note) = verdict::withhold_verdict(&mut result.verdict, &report, &result.findings) {
-        result.review_body = format!("{note}\n\n{}", result.review_body);
+        // #9310: no per-stage headline; `prepend_withheld_headline` counts the array.
         if result.verdict == Verdict::Unknown {
             result.grade = None;
             result.error.get_or_insert(note);

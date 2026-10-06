@@ -15,13 +15,13 @@
 //! [`ERROR_MARKER`] (alarm class) and [`TRANSPORT_MARKER`] (retryable), returns
 //! unparseable text on [`TRUNCATE_MARKER`], refutes [`REFUTE_MARKER`], answers
 //! UNVERIFIABLE on `UNSURE_MARKER`, and confirms every other finding.
-//! Test: `run_review_truncated_blocker_beside_refuted_nit_is_withheld_as_unknown`,
-//! `run_review_errored_blocker_beside_refuted_nit_is_withheld_as_unknown`,
-//! `run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_unknown`,
+//! Test: `run_review_truncated_blocker_beside_refuted_nit_is_suppressed_reject`,
+//! `run_review_errored_blocker_beside_refuted_nit_is_suppressed_reject`,
+//! `run_review_retry_exhausted_blocker_beside_refuted_nit_is_suppressed_reject`,
 //! `run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes`,
 //! `run_review_withheld_blocker_keeps_its_block_floor`,
 //! `run_review_partial_verifier_outage_reports_the_withheld_count`,
-//! `run_review_refuted_blocker_beside_refuted_nit_is_withheld_as_unknown`.
+//! `run_review_refuted_blocker_beside_refuted_nit_is_suppressed_reject`.
 
 use super::*;
 
@@ -137,35 +137,41 @@ fn refuted_nit() -> String {
 }
 
 /// #8904: a blocker whose verification failed is withheld (fail closed), not
-/// posted; beside a refuted nit nothing survives, so the review is UNKNOWN —
-/// never the APPROVE #8653 guarded against, and no grade.
-fn assert_withheld_as_unknown(result: &ReviewResult) {
+/// posted; beside a refuted nit nothing survives — never the APPROVE #8653
+/// guarded against. #9310 (Architect ruling 2026-10-06 16:50Z): the reviewer
+/// blocked, so the review is REQUEST_CHANGES (`suppressed_reject`), no longer
+/// UNKNOWN, graded the REQUEST_CHANGES band's best.
+fn assert_withheld_as_suppressed_reject(result: &ReviewResult) {
     assert!(result.findings.is_empty(), "{:?}", result.findings);
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
+    assert_eq!(result.grade.as_deref(), Some("D+"));
 }
 
 /// #8653 (a), #8904 form: the blocker's verifier answer was cut off and an
 /// unrelated nit is cleanly refuted. Pre-#8653 this returned APPROVE.
 #[tokio::test]
-async fn run_review_truncated_blocker_beside_refuted_nit_is_withheld_as_unknown() {
+async fn run_review_truncated_blocker_beside_refuted_nit_is_suppressed_reject() {
     let result =
         review_with_infra(&format!("{},{}", blocker(TRUNCATE_MARKER), refuted_nit())).await;
-    assert_withheld_as_unknown(&result);
+    assert_withheld_as_suppressed_reject(&result);
 }
 
 /// #8653 (b), #8904 form: as (a), but the blocker's verifier call errored.
 #[tokio::test]
-async fn run_review_errored_blocker_beside_refuted_nit_is_withheld_as_unknown() {
+async fn run_review_errored_blocker_beside_refuted_nit_is_suppressed_reject() {
     let result = review_with_infra(&format!("{},{}", blocker(ERROR_MARKER), refuted_nit())).await;
-    assert_withheld_as_unknown(&result);
+    assert_withheld_as_suppressed_reject(&result);
 }
 
 /// #8653, #8904 form: as (a), but every verifier call for the blocker failed
 /// with a retryable transport error until the retry budget ran out. One
 /// attempt keeps the test free of backoff sleeps.
 #[tokio::test]
-async fn run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_unknown() {
+async fn run_review_retry_exhausted_blocker_beside_refuted_nit_is_suppressed_reject() {
     let mut config = default_config();
     config.verification.max_attempts = 1;
     let result = review_with_infra_config(
@@ -173,19 +179,19 @@ async fn run_review_retry_exhausted_blocker_beside_refuted_nit_is_withheld_as_un
         &format!("{},{}", blocker(TRANSPORT_MARKER), refuted_nit()),
     )
     .await;
-    assert_withheld_as_unknown(&result);
+    assert_withheld_as_suppressed_reject(&result);
 }
 
 /// Control: a blocker the verifier itself judged UNVERIFIABLE (#5309) is a
 /// judgment, not a failure. Since #4044 (owner ruling on #8905, 2026-09-30)
 /// only CONFIRMED findings are posted, so it is withheld as "unverifiable"
-/// beside the refuted nit, and the emptied BLOCK review is withheld as
-/// UNKNOWN (#8904, the #8905 policy) — not floored, since nothing failed.
+/// beside the refuted nit, and the emptied BLOCK review is a suppressed
+/// rejection (#9310; UNKNOWN before) — not floored, since nothing failed.
 #[tokio::test]
 async fn run_review_verifier_judged_unverifiable_blocker_beside_refuted_nit_relaxes() {
     let result = review_with_infra(&format!("{},{}", blocker(UNSURE_MARKER), refuted_nit())).await;
 
-    assert_withheld_as_unknown(&result);
+    assert_withheld_as_suppressed_reject(&result);
     let unverifiable: Vec<_> = result
         .withheld_findings
         .iter()
@@ -244,7 +250,7 @@ async fn run_review_partial_verifier_outage_reports_the_withheld_count() {
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: not verified (1 the verifier could not judge)"),
+            .starts_with("1 findings withheld:\n- 1 the verifier could not judge"),
         "{}",
         result.review_body
     );
@@ -252,9 +258,10 @@ async fn run_review_partial_verifier_outage_reports_the_withheld_count() {
 
 /// Control: a CLEANLY refuted blocker beside a refuted nit. Before #8904 both
 /// stayed on the result and the review relaxed to APPROVE; now both are
-/// withheld and the emptied review is UNKNOWN. No verifier failure, no floor.
+/// withheld and the emptied review is a suppressed rejection (#9310, formerly
+/// UNKNOWN). No verifier failure, no floor.
 #[tokio::test]
-async fn run_review_refuted_blocker_beside_refuted_nit_is_withheld_as_unknown() {
+async fn run_review_refuted_blocker_beside_refuted_nit_is_suppressed_reject() {
     let result = review_with_infra(&format!("{},{}", blocker(REFUTE_MARKER), refuted_nit())).await;
-    assert_withheld_as_unknown(&result);
+    assert_withheld_as_suppressed_reject(&result);
 }

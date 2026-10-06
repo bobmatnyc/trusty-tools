@@ -1,0 +1,5 @@
+crate   trusty-review
+version 0.38.0
+reason  Architect ruling 2026-10-06 (#9310): accept marking ReviewResult and Finding #[non_exhaustive] as one break, with the verdict_status type change inside it; trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  struct_marked_non_exhaustive ReviewResult
+accept  struct_marked_non_exhaustive Finding

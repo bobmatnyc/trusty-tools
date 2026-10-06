@@ -692,9 +692,13 @@ async fn run_review_outer_and_embedded_verdict_agree_after_severity_floor() {
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
+    // #9310: the finding must survive to raise the verdict; a withheld one
+    // cannot move a review its reviewer approved (all_withheld stays APPROVE).
     let deps = ready_deps(
         Arc::new(FakeLlm::self_approves_with_blocking_finding()),
-        None,
+        Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
     );
 
     let result = run_review(&config, input, deps).await;
@@ -1716,14 +1720,19 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
     );
 
     let result = run_review(&config, input, deps).await;
-    // #8904: the refuted finding is withheld, and an emptied review is
-    // UNKNOWN — dropping a finding never yields APPROVE.
-    assert_eq!(result.verdict, Verdict::Unknown);
+    // #8904: the refuted finding is withheld — dropping a finding never yields
+    // APPROVE. #9310: the reviewer asked for changes, so the emptied review is
+    // REQUEST_CHANGES (`suppressed_reject`), no longer UNKNOWN.
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: not verified (1 refuted by the verifier)"),
+            .starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
         "{}",
         result.review_body
     );
@@ -1814,7 +1823,8 @@ async fn run_review_verification_disabled_skips_round() {
         result.withheld_findings[0].finding.verified.is_none(),
         "disabled verification must not mark any finding"
     );
-    assert_eq!(result.verdict, Verdict::Unknown);
+    // #9310: a suppressed rejection, no longer UNKNOWN.
+    assert_eq!(result.verdict, Verdict::RequestChanges);
 }
 
 /// Live post + dedup-skip end-to-end requires a real PR + GitHub creds, so
@@ -1884,11 +1894,15 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
 
     let result = run_review(&config, input, deps).await;
 
-    // #8904: the refuted finding is withheld, the emptied review is UNKNOWN,
-    // and an UNKNOWN review carries no grade (#1474) — so neither the
-    // pre-verification F nor an APPROVE grade survives.
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None, "#1474: UNKNOWN carries no grade");
+    // #8904: the refuted finding is withheld. #9310: the reviewer approved,
+    // so the emptied review is APPROVE (`all_withheld`), graded from no
+    // survivor — the pre-verification F does not survive.
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::AllWithheld)
+    );
+    assert_eq!(result.grade.as_deref(), Some("A+"));
     assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
@@ -2395,16 +2409,21 @@ async fn run_review_refuted_finding_does_not_drive_grade_or_summary() {
 
     let result = run_review(&default_config(), input, deps).await;
 
-    // #8904: the refuted finding is withheld. The emptied review is UNKNOWN
-    // with no grade, so the model's F cannot stand (#4044), and the body leads
-    // with the withheld note so the prose's "finding #1" is qualified.
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None, "the model's F must not survive (#4044)");
+    // #8904: the refuted finding is withheld. #9310: the emptied BLOCK review
+    // is REQUEST_CHANGES (`suppressed_reject`), graded from no survivor, so
+    // the model's F cannot stand (#4044), and the body leads with the withheld
+    // headline so the prose's "finding #1" is qualified.
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.grade.as_deref(),
+        Some("D+"),
+        "the model's F must not survive (#4044)"
+    );
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(
         result
             .review_body
-            .contains("1 findings withheld: not verified"),
+            .starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
         "the summary predates verification and must be qualified (#4044):\n{}",
         result.review_body
     );
@@ -2783,3 +2802,7 @@ mod optional_context_off;
 // #9192: `include_pr_body` and the source ledger.
 #[path = "runner_pr_body_tests.rs"]
 mod pr_body;
+
+// #9310: `verdict_status`, the withheld headline, and tool-call-only parsing.
+#[path = "runner_verdict_status_tests.rs"]
+mod verdict_status;

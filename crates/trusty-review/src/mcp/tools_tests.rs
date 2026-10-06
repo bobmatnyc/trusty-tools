@@ -490,12 +490,15 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
 }
 
 #[test]
-fn wrap_result_names_a_withheld_unknown_without_is_error() {
+fn wrap_result_names_a_suppressed_reject_without_is_error() {
     // #9188 K: a review whose every finding was withheld says so on the
     // envelope with typed counts; `isError` stays false (Architect ruling
-    // 2026-10-05: isError is for real failures only).
+    // 2026-10-05: isError is for real failures only). #9310: the blocking
+    // review is REQUEST_CHANGES with `suppressed_reject`, no longer UNKNOWN
+    // with `no_verified_findings`.
     let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
-    result.verdict = Verdict::Unknown;
+    result.verdict = Verdict::RequestChanges;
+    result.verdict_status = Some(crate::models::VerdictStatus::SuppressedReject);
     result
         .withheld_findings
         .push(crate::models::WithheldFinding {
@@ -520,17 +523,19 @@ fn wrap_result_names_a_withheld_unknown_without_is_error() {
         "{envelope}"
     );
     assert_eq!(
-        envelope["verdict_status"], "no_verified_findings",
+        envelope["verdict_status"], "suppressed_reject",
         "{envelope}"
     );
 }
 
 /// AQ-7t (Bob 2026-10-05): an APPROVE whose every finding was withheld keeps
-/// APPROVE, and the envelope still names it `no_verified_findings`.
+/// APPROVE, and the envelope names it `all_withheld` (#9310, formerly
+/// `no_verified_findings`).
 #[test]
 fn wrap_result_names_an_all_withheld_approve() {
     let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
     result.verdict = Verdict::Approve;
+    result.verdict_status = Some(crate::models::VerdictStatus::AllWithheld);
     result.grade = Some("A+".to_string());
     result
         .withheld_findings
@@ -550,11 +555,20 @@ fn wrap_result_names_an_all_withheld_approve() {
     let envelope = wrap_result(&result);
 
     assert_eq!(envelope["isError"], false, "{envelope}");
-    assert_eq!(
-        envelope["verdict_status"], "no_verified_findings",
-        "{envelope}"
-    );
+    assert_eq!(envelope["verdict_status"], "all_withheld", "{envelope}");
     assert_eq!(envelope["withheld"]["by_reason"]["unverifiable"], 1);
+}
+
+/// #9310: every finalized result names its status on the envelope, a clean
+/// one included; nothing withheld still means no `withheld` key.
+#[test]
+fn wrap_result_names_the_status_of_a_clean_review() {
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::Approve;
+    result.verdict_status = Some(crate::models::VerdictStatus::Parsed);
+    let envelope = wrap_result(&result);
+    assert_eq!(envelope["verdict_status"], "parsed", "{envelope}");
+    assert!(envelope.get("withheld").is_none(), "{envelope}");
 }
 
 /// #9188 compatibility (Bob, 2026-10-05 02:48Z): a review that withheld
