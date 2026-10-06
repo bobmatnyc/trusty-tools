@@ -13,3 +13,7 @@ Breaking
   review whose findings were all withheld reads `all_withheld`; a stored
   record that holds `no_verified_findings` still deserializes, as
   `all_withheld` (#9310).
+- `run --json` now exits 0 for a review whose findings were all withheld and
+  whose reviewer asked for changes (`suppressed_reject`, REQUEST_CHANGES); it
+  exited non-zero as UNKNOWN before. Gate on `verdict` / `verdict_status`, not
+  the exit code alone (#9310).

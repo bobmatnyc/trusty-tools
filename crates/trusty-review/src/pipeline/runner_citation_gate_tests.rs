@@ -431,6 +431,62 @@ async fn run_review_all_withheld_request_changes_is_suppressed_reject() {
     assert!(result.findings.is_empty(), "{:?}", result.findings);
 }
 
+/// An APPROVE graded `grade` whose one high-severity finding the #8905 gate
+/// withholds (#9310).
+async fn approve_graded_with_its_finding_withheld(grade: &str) -> ReviewResult {
+    let bug = billing_finding(
+        "data-loss",
+        "`flush_all()` loses the total.",
+        "high",
+        SUM_LINE,
+    );
+    review_payload(
+        "The flush loses data.",
+        "APPROVE",
+        grade,
+        serde_json::json!([bug]),
+        "CONFIRMED",
+    )
+    .await
+}
+
+/// Assert `result` is REQUEST_CHANGES / `suppressed_reject` with no survivor.
+fn assert_suppressed_reject(result: &ReviewResult) {
+    let (verdict, _fails, json) = run_json(result);
+    assert_eq!(verdict, Verdict::RequestChanges, "{json}");
+    assert_eq!(json["verdict_status"], "suppressed_reject", "{json}");
+    assert_eq!(json["withheld_count"], 1, "{json}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+}
+
+/// #9310: an APPROVE graded F is a rejection (`derive_verdict_with_grade`), so
+/// with its one finding withheld it is REQUEST_CHANGES / `suppressed_reject`.
+/// Before the fix the mapping read the bare APPROVE: APPROVE / `all_withheld`,
+/// regraded A+, exit 0.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_f_is_suppressed_reject() {
+    assert_suppressed_reject(&approve_graded_with_its_finding_withheld("F").await);
+}
+
+/// #9310: an APPROVE graded D floors to REQUEST_CHANGES, so it maps as the F
+/// case does.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_d_is_suppressed_reject() {
+    assert_suppressed_reject(&approve_graded_with_its_finding_withheld("D").await);
+}
+
+/// #9310: an APPROVE with a passing grade and its one finding withheld stays
+/// APPROVE / `all_withheld` and exits 0.
+#[tokio::test]
+async fn run_review_all_withheld_approve_graded_a_stays_approve() {
+    let result = approve_graded_with_its_finding_withheld("A-").await;
+    let (verdict, fails, json) = run_json(&result);
+    assert_eq!(verdict, Verdict::Approve, "{json}");
+    assert!(!fails, "{:?}", result.error);
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}");
+    assert_eq!(json["withheld_count"], 1, "{json}");
+}
+
 /// #9188 (Architect ruling, option A), single-pass path: a REQUEST_CHANGES
 /// review whose only finding quotes code absent from the diff loses it before
 /// grading. #4042 relaxes the verdict to APPROVE, but the final check decides

@@ -659,7 +659,8 @@ async fn run_pipeline(
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
     let mut parsed = parse_review_reply(&llm_resp);
-    let model_verdict = parsed.verdict.clone(); // #9310: the reviewer's own verdict
+    // #9310: the reviewer's own verdict and grade, read before grounding edits them.
+    let (model_verdict, model_grade) = (parsed.verdict.clone(), parsed.grade.clone());
     if parsed.is_fail_safe {
         result.verdict_status = Some(super::verdict_status::unparsed_status(&llm_resp.text));
         // #9310: record what the unparsed reply looked like; the raw text is not kept.
@@ -754,7 +755,11 @@ async fn run_pipeline(
         refs: &refs,
         narrative: &narrative,
         wiped_model_verdict,
-        model_verdict: judged_verdict(model_verdict, coverage_contrib.as_ref()),
+        model_verdict: judged_verdict(
+            model_verdict,
+            model_grade.as_deref(),
+            coverage_contrib.as_ref(),
+        ),
     };
     gate_then_verify(config, deps.verifier.as_ref(), &mut result, &inputs).await;
 

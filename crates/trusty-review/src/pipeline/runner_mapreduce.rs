@@ -159,7 +159,12 @@ pub(super) async fn run_mapreduce_branch(
         result.verdict_status = Some(crate::models::VerdictStatus::ParseFailed);
     }
     let model_verdict = reviewer_verdict(&reduced.verdict, wiped_model_verdict.as_ref());
-    let model_verdict = judged_verdict(model_verdict, run.coverage_contrib.as_ref());
+    // #9310: the synthesis grade floors the reviewers' verdict, as in `run_review`.
+    let model_verdict = judged_verdict(
+        model_verdict,
+        reduced.grade.as_deref(),
+        run.coverage_contrib.as_ref(),
+    );
     let synthesis_active = reduced.grade.is_some();
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),

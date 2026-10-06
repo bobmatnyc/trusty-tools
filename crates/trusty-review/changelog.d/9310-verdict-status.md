@@ -4,7 +4,12 @@ Fixed
   reply (`no_reviewer_output`: a call error, an empty or truncated reply, or a
   review stopped before the call). A blocking review whose supporting findings
   were all withheld is REQUEST_CHANGES with `suppressed_reject`, never APPROVE;
-  an approving one stays APPROVE with `all_withheld`. The PR comment heading
+  an approving one stays APPROVE with `all_withheld`. The reviewer's grade
+  counts toward its verdict: an APPROVE graded D or F is a rejection, so with
+  every finding withheld it reads REQUEST_CHANGES / `suppressed_reject`, on
+  the map-reduce synthesis path too. A rejection whose findings were all
+  withheld reads the same even when the gates had approved it, for example
+  because every finding was advisory. The PR comment heading
   names any status other than `parsed` beside the verdict (#9310).
 - The "N findings withheld" headline counts every withheld finding, read from
   `withheld_findings`, with one line per reason class below it. Each gate used

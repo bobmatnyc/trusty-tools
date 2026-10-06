@@ -36,7 +36,9 @@ fn withheld_outcome_maps_every_reviewer_verdict() {
             Verdict::ApproveWithReservations,
             Some((Verdict::ApproveWithReservations, VerdictStatus::AllWithheld)),
         ),
-        // A severity floor raised APPROVE on a finding later withheld.
+        // A severity floor raised APPROVE on a finding later withheld. A
+        // failing grade is not this row: `judged_verdict` makes that model a
+        // rejection, one of the rows below.
         (
             Verdict::Approve,
             Verdict::Unknown,
@@ -45,6 +47,18 @@ fn withheld_outcome_maps_every_reviewer_verdict() {
         (
             Verdict::RequestChanges,
             Verdict::Unknown,
+            Some((Verdict::RequestChanges, VerdictStatus::SuppressedReject)),
+        ),
+        // A rejection the gates left approving, with no survivor: a synthesis
+        // APPROVE beside its own failing grade, or the advisory ceiling.
+        (
+            Verdict::Block,
+            Verdict::Approve,
+            Some((Verdict::RequestChanges, VerdictStatus::SuppressedReject)),
+        ),
+        (
+            Verdict::RequestChanges,
+            Verdict::ApproveWithReservations,
             Some((Verdict::RequestChanges, VerdictStatus::SuppressedReject)),
         ),
         (
@@ -141,12 +155,43 @@ fn judged_verdict_keeps_the_coverage_floor() {
         summary: "new code 10% < 80%".to_string(),
     };
     assert_eq!(
-        judged_verdict(Verdict::Approve, Some(&fail)),
+        judged_verdict(Verdict::Approve, None, Some(&fail)),
         Verdict::RequestChanges
     );
-    assert_eq!(judged_verdict(Verdict::Approve, None), Verdict::Approve);
     assert_eq!(
-        judged_verdict(Verdict::Unknown, Some(&fail)),
+        judged_verdict(Verdict::Approve, None, None),
+        Verdict::Approve
+    );
+    assert_eq!(
+        judged_verdict(Verdict::Unknown, None, Some(&fail)),
         Verdict::Unknown
     );
+}
+
+/// #9310: the reviewer's grade floors its verdict as `derive_verdict_with_grade`
+/// does, so an APPROVE graded D or F is a rejection; a passing, absent or
+/// unparseable grade leaves it, and UNKNOWN stays UNKNOWN.
+#[test]
+fn judged_verdict_applies_the_grade_floor() {
+    let cases = [
+        (Verdict::Approve, Some("F"), Verdict::Block),
+        (Verdict::Approve, Some("D"), Verdict::RequestChanges),
+        (
+            Verdict::Approve,
+            Some("C"),
+            Verdict::ApproveWithReservations,
+        ),
+        (Verdict::Approve, Some("A-"), Verdict::Approve),
+        (Verdict::Approve, None, Verdict::Approve),
+        (Verdict::Approve, Some("excellent"), Verdict::Approve),
+        (Verdict::Block, Some("A+"), Verdict::Block),
+        (Verdict::Unknown, Some("F"), Verdict::Unknown),
+    ];
+    for (model, grade, expected) in cases {
+        assert_eq!(
+            judged_verdict(model.clone(), grade, None),
+            expected,
+            "model {model}, grade {grade:?}"
+        );
+    }
 }

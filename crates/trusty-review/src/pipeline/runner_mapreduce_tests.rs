@@ -525,6 +525,64 @@ async fn mapreduce_phantom_missing_file_finding_does_not_block() {
     );
 }
 
+/// Approves every chunk, with one low-severity finding on the chunk carrying
+/// `marker`; the synthesis call answers APPROVE graded F (#9310).
+struct GradedFSynthesisReviewer {
+    marker: String,
+}
+
+#[async_trait]
+impl LlmProvider for GradedFSynthesisReviewer {
+    fn name(&self) -> &str {
+        "graded-f-synthesis"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"APPROVE","grade":"F","summary":"the build is unsound."}"#
+        } else if body.contains(self.marker.as_str()) {
+            r#"{"verdict":"APPROVE","summary":"one note","findings":[{"title":"slow build","body":"`build` recomputes the sum on every call.","severity":"low","confidence":0.9,"file":"src/big.rs","line":1}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// #9310: synthesis may answer APPROVE beside a failing grade, and its
+/// verdict is used as is. With every finding withheld (no verifier ran) the
+/// grade makes it a rejection: REQUEST_CHANGES / `suppressed_reject`, never
+/// APPROVE / `all_withheld`.
+#[tokio::test]
+async fn mapreduce_synthesis_approve_graded_f_all_withheld_is_suppressed_reject() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(GradedFSynthesisReviewer {
+        marker: tail_signature.to_string(),
+    });
+    let result = run_review(&ReviewConfig::load(None), input(source), deps(llm)).await;
+    assert!(!result.withheld_findings.is_empty(), "{result:?}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
+}
+
 /// Selectively fails for prompts containing `fail_marker`, succeeds otherwise.
 /// Lets us inject exactly ONE LLM-error failure into a multi-chunk map-reduce
 /// run without failing every chunk.
