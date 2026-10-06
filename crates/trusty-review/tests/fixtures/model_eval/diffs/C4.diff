@@ -1,0 +1,39 @@
+diff --git a/crates/trusty-agents/src/ctrl/frame_reader.rs b/crates/trusty-agents/src/ctrl/frame_reader.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-agents/src/ctrl/frame_reader.rs
+@@ -0,0 +1,33 @@
++//! Read length-prefixed control frames until shutdown.
++
++use tokio::io::{AsyncRead, AsyncReadExt};
++use tokio::sync::watch;
++
++/// Largest frame accepted.
++pub const MAX_FRAME: usize = 1 << 20;
++
++/// Read frames from `stream` and hand each to `on_frame` until `shutdown`
++/// flips or the peer closes.
++pub async fn read_frames<R: AsyncRead + Unpin>(
++    mut stream: R,
++    mut shutdown: watch::Receiver<bool>,
++    mut on_frame: impl FnMut(Vec<u8>),
++) -> std::io::Result<()> {
++    loop {
++        let mut len = [0u8; 4];
++        tokio::select! {
++            _ = shutdown.changed() => return Ok(()),
++            read = stream.read_exact(&mut len) => { read?; }
++        }
++        let n = u32::from_be_bytes(len) as usize;
++        if n > MAX_FRAME {
++            return Err(std::io::Error::other("frame too large"));
++        }
++        let mut body = vec![0u8; n];
++        tokio::select! {
++            _ = shutdown.changed() => return Ok(()),
++            read = stream.read_exact(&mut body) => { read?; }
++        }
++        on_frame(body);
++    }
++}

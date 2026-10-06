@@ -1,0 +1,24 @@
+diff --git a/crates/trusty-search/src/service/drain.rs b/crates/trusty-search/src/service/drain.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/service/drain.rs
+@@ -0,0 +1,18 @@
++//! Count in-flight jobs and wake the shutdown waiter when they drain.
++
++use std::sync::atomic::{AtomicUsize, Ordering};
++use tokio::sync::Notify;
++
++/// Jobs in flight.
++pub static QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
++/// Woken when the depth reaches zero.
++pub static DRAINED: Notify = Notify::const_new();
++
++/// Mark one job finished.
++pub fn job_done() {
++    let n = QUEUE_DEPTH.load(Ordering::Acquire);
++    QUEUE_DEPTH.store(n - 1, Ordering::Release);
++    if n - 1 == 0 {
++        DRAINED.notify_waiters();
++    }
++}

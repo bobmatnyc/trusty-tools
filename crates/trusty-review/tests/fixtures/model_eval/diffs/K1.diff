@@ -1,0 +1,33 @@
+diff --git a/crates/trusty-review/src/config/retry.rs b/crates/trusty-review/src/config/retry.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-review/src/config/retry.rs
+@@ -0,0 +1,27 @@
++//! Retry settings for provider calls.
++
++use serde::Deserialize;
++
++/// Retries when the file does not set `max_retries`.
++fn default_max_retries() -> u32 {
++    3
++}
++
++/// The `[retry]` table.
++#[derive(Debug, Deserialize, PartialEq)]
++pub struct RetryConfig {
++    /// Attempts after the first.
++    #[serde(default = "default_max_retries")]
++    pub max_retries: u32,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn missing_field_takes_the_default() {
++        let cfg: RetryConfig = toml::from_str("").expect("empty table parses");
++        assert_eq!(cfg.max_retries, 3);
++    }
++}

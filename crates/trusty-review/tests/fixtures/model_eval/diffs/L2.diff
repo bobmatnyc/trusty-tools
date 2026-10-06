@@ -1,0 +1,32 @@
+diff --git a/crates/trusty-mpm/src/core/ignore_block.rs b/crates/trusty-mpm/src/core/ignore_block.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-mpm/src/core/ignore_block.rs
+@@ -0,0 +1,26 @@
++//! Render the managed block of a project's .gitignore.
++
++/// Entries the managed block always carries.
++pub const MANAGED: &[&str] = &[".trusty-mpm/", "target/", "target-worktree/", ".claude/settings.local.json"];
++
++/// The managed block for a .gitignore whose existing lines are `existing`.
++///
++/// An entry the user already lists is left out of the block so it is not
++/// written twice.
++pub fn render_block_for(existing: &str) -> String {
++    let present: Vec<&str> = existing
++        .lines()
++        .map(str::trim)
++        .filter(|l| !l.is_empty() && !l.starts_with('#'))
++        .collect();
++    let mut out = String::from("# >>> trusty-mpm managed\n");
++    for entry in MANAGED {
++        let listed = present.iter().any(|p| entry.starts_with(p.trim_end_matches('/')));
++        if !listed {
++            out.push_str(entry);
++            out.push('\n');
++        }
++    }
++    out.push_str("# <<< trusty-mpm managed\n");
++    out
++}
