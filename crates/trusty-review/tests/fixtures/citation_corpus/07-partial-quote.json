@@ -14,5 +14,5 @@
   "hallucinated": ["late-reconcile"],
   "forbidden_in_body": ["reconciled too late"],
   "expect_survivors": 0,
-  "expect_verdict": "UNKNOWN"
+  "expect_verdict": "REQUEST_CHANGES"
 }
