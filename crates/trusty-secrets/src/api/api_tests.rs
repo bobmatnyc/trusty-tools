@@ -221,3 +221,44 @@ fn api_debug_of_value_carrying_types_hides_the_value() {
     let shown = format!("{request:?} {request:#?}");
     assert!(!shown.contains(FAKE_VALUE), "{shown}");
 }
+
+/// Why: #9073 — callers build requests through constructors, so a
+/// constructor's defaults must equal what the wire decodes when the optional
+/// fields are omitted, and its output must decode on a server that denies
+/// unknown fields.
+/// Test: itself.
+#[test]
+fn api_request_constructors_match_the_wire_shape() {
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(request: &T) -> T {
+        serde_json::from_value(serde_json::to_value(request).unwrap()).unwrap()
+    }
+    let vault = VaultName::new("trusty/acme/web").unwrap();
+    let key = SecretKey::new("API_KEY").unwrap();
+    let (keychain, other) = (
+        BackendId::keychain(),
+        BackendId::new("onepassword").unwrap(),
+    );
+
+    let list = ListRequest::new(vault.clone());
+    assert_eq!(round_trip(&list), list);
+    let delete = DeleteRequest::new(vault.clone(), key.clone());
+    assert_eq!(round_trip(&delete), delete);
+    let set = round_trip(&SetRequest::new(
+        vault,
+        key.clone(),
+        SecretValue::new(FAKE_VALUE),
+    ));
+    assert_eq!((set.key, set.value.expose()), (key.clone(), FAKE_VALUE));
+
+    let every: CopyRequest =
+        serde_json::from_str(r#"{"from_backend":"keychain","to_backend":"onepassword"}"#).unwrap();
+    let copy = CopyRequest::new(keychain, other);
+    assert_eq!(
+        copy, every,
+        "an omitted `keys` and `new` both mean every key"
+    );
+    assert_eq!(round_trip(&copy), copy);
+    let narrowed = copy.with_keys([key.clone()]);
+    assert_eq!(narrowed.keys, vec![key]);
+    assert_eq!(round_trip(&narrowed), narrowed);
+}
