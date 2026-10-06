@@ -14,10 +14,13 @@
 //! What: `spawn_idle_evict_ticker` reads `TRUSTY_MEMORY_IDLE_EVICT_SECS`
 //! (default 300; `0` disables) and, when enabled, spawns a background task that
 //! evicts palaces idle past that threshold every `min(threshold, 60)` seconds.
+//! A sweep skips its tick while the drawer-count snapshot holds the
+//! [`EvictGate`] (#9283).
 //!
 //! Test: `tests::idle_evict_secs_from_env_defaults_and_parses`,
 //! `tests::spawn_disabled_returns_none`,
-//! `tests::ticker_evicts_idle_palace`.
+//! `tests::ticker_evicts_idle_palace`,
+//! `tests::evict_tick_skips_while_a_snapshot_holds_the_gate`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +28,39 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::info;
 use trusty_common::memory_core::PalaceRegistry;
+
+/// Serialises the idle-evict sweep against the drawer-count snapshot (#9283).
+///
+/// Why: `evict_idle` takes handles out of the registry first and drops them
+/// after, so during a sweep the daemon still holds a palace's `kg.redb` while
+/// `PalaceRegistry::peek` misses. A snapshot running then could neither use
+/// the resident handle nor read the file, and recorded 61 of 102 live palaces
+/// as unavailable.
+/// What: a plain mutex. The snapshot holds it for its whole run; a sweep
+/// `try_lock`s it and skips the tick when the snapshot has it.
+pub type EvictGate = Arc<parking_lot::Mutex<()>>;
+
+/// A fresh, unheld [`EvictGate`].
+pub fn new_evict_gate() -> EvictGate {
+    Arc::new(parking_lot::Mutex::new(()))
+}
+
+/// One sweep, unless a drawer-count snapshot holds `gate`.
+///
+/// Why: see [`EvictGate`]. Skipping costs at most one tick of eviction
+/// latency; blocking would park a runtime worker for the snapshot's length.
+/// What: `try_lock` the gate; on success `evict_idle(threshold)` with the gate
+/// held (the evicted handles drop inside that call), else evict nothing.
+/// Returns the evicted count.
+/// Test: `tests::evict_tick_skips_while_a_snapshot_holds_the_gate`.
+pub fn evict_tick(registry: &PalaceRegistry, gate: &EvictGate, threshold: Duration) -> usize {
+    // #9283: never evict while a snapshot is counting resident handles.
+    let Some(_held) = gate.try_lock() else {
+        tracing::debug!("#9283: idle-evict tick skipped; drawer-count snapshot running");
+        return 0;
+    };
+    registry.evict_idle(threshold)
+}
 
 /// Environment variable controlling the idle-to-disk eviction TTL, in seconds.
 ///
@@ -70,6 +106,7 @@ pub fn idle_evict_secs_from_env() -> u64 {
 /// Test: `tests::spawn_disabled_returns_none`.
 pub fn spawn_idle_evict_ticker(
     registry: Arc<PalaceRegistry>,
+    gate: EvictGate,
     shutdown_rx: watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let secs = idle_evict_secs_from_env();
@@ -80,7 +117,12 @@ pub fn spawn_idle_evict_ticker(
         );
         return None;
     }
-    Some(spawn_idle_evict_ticker_with(registry, secs, shutdown_rx))
+    Some(spawn_idle_evict_ticker_with(
+        registry,
+        gate,
+        secs,
+        shutdown_rx,
+    ))
 }
 
 /// Spawn the idle-evict ticker with an explicit TTL (seconds).
@@ -88,8 +130,8 @@ pub fn spawn_idle_evict_ticker(
 /// Why: separated from the env wrapper so tests can drive a short, deterministic
 /// threshold without mutating process env.
 /// What: spawns a background task that, every `min(threshold_secs, 60)` seconds
-/// (bounded so eviction latency never exceeds ~a minute), calls
-/// [`PalaceRegistry::evict_idle`] with the TTL. The loop races its sleep against
+/// (bounded so eviction latency never exceeds ~a minute), runs [`evict_tick`]
+/// with the TTL. The loop races its sleep against
 /// `shutdown_rx`; a `true` value (or a closed sender) exits cleanly. A
 /// `threshold_secs` of `0` is treated as disabled by `evict_idle` itself, so the
 /// task simply no-ops, but callers should prefer `spawn_idle_evict_ticker` which
@@ -97,6 +139,7 @@ pub fn spawn_idle_evict_ticker(
 /// Test: `tests::ticker_evicts_idle_palace`.
 pub fn spawn_idle_evict_ticker_with(
     registry: Arc<PalaceRegistry>,
+    gate: EvictGate,
     threshold_secs: u64,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
@@ -122,7 +165,7 @@ pub fn spawn_idle_evict_ticker_with(
                 info!("idle-evict ticker shutting down");
                 return;
             }
-            let evicted = registry.evict_idle(threshold);
+            let evicted = evict_tick(&registry, &gate, threshold);
             if evicted > 0 {
                 info!(
                     evicted,
@@ -187,7 +230,7 @@ mod tests {
         }
         let registry = Arc::new(PalaceRegistry::new());
         let (_tx, rx) = watch::channel(false);
-        let handle = spawn_idle_evict_ticker(registry, rx);
+        let handle = spawn_idle_evict_ticker(registry, new_evict_gate(), rx);
         unsafe {
             std::env::remove_var(IDLE_EVICT_ENV);
         }
@@ -221,7 +264,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
 
         let (_tx, rx) = watch::channel(false);
-        let _join = spawn_idle_evict_ticker_with(registry.clone(), 1, rx);
+        let _join = spawn_idle_evict_ticker_with(registry.clone(), new_evict_gate(), 1, rx);
 
         // Poll until the ticker drops the idle palace (bounded to avoid hangs).
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -235,5 +278,42 @@ mod tests {
             registry.get(&id).is_none(),
             "idle palace must be evicted by the ticker"
         );
+    }
+
+    /// Why (#9283, Fail-Open Check): a sweep during the drawer-count snapshot
+    /// takes resident handles out of the registry while their `kg.redb` is
+    /// still held, so the snapshot recorded them unavailable.
+    /// What: an idle, unreferenced palace survives a tick while the gate is
+    /// held, and is evicted by the next tick once it is released.
+    /// Test: this test.
+    #[test]
+    fn evict_tick_skips_while_a_snapshot_holds_the_gate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = PalaceRegistry::new();
+        let id = PalaceId::new("gated");
+        let palace = Palace {
+            id: id.clone(),
+            name: "gated".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: tmp.path().join(id.as_str()),
+        };
+        let handle = registry
+            .create_palace(tmp.path(), palace)
+            .expect("create palace");
+        handle.last_accessed.store(0, Ordering::Relaxed);
+        drop(handle);
+        let gate = new_evict_gate();
+        let threshold = Duration::from_secs(1);
+
+        let snapshot = gate.lock();
+        assert_eq!(evict_tick(&registry, &gate, threshold), 0);
+        assert!(
+            registry.peek(&id).is_some(),
+            "a sweep during a snapshot must leave the resident handle in place"
+        );
+        drop(snapshot);
+        assert_eq!(evict_tick(&registry, &gate, threshold), 1);
+        assert!(registry.peek(&id).is_none());
     }
 }

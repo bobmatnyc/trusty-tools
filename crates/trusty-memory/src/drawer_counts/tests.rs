@@ -99,8 +99,66 @@ fn snapshot_records_unavailable_not_zero_for_a_write_held_palace() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert_eq!(got[0].drawers, None);
     assert_eq!(got[0].src, CountSource::Unavailable);
+    // #9283: the line names why, so doctor can show it.
+    let reason = got[0].reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("kg.redb"), "{got:?}");
     let raw = std::fs::read_to_string(history_path(tmp.path())).expect("read");
     assert!(raw.contains(r#""drawers":null"#), "{raw}");
+}
+
+/// Why (#9283): a resident count and a disk count of one palace must agree,
+/// or a palace counted resident one day and from disk the next shows a drop
+/// no journal explains. The in-memory list also holds L1-snapshot drawers the
+/// store has deleted.
+/// What: a resident palace with 3 stored drawers and one extra drawer only in
+/// its in-memory list is counted as 3, from the handle.
+#[test]
+fn resident_count_matches_disk_not_the_in_memory_list() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let daemon = PalaceRegistry::with_max_open(4);
+    seed(tmp.path(), "hot", 3, Some(&daemon));
+    let handle = daemon.peek(&PalaceId::new("hot")).expect("resident handle");
+    handle.drawers.write().push(Drawer::new(
+        uuid::Uuid::new_v4(),
+        "L1-only ghost".to_string(),
+    ));
+    drop(handle);
+    take_snapshot(&daemon, tmp.path(), Utc::now()).expect("snapshot");
+    let got = lines(tmp.path());
+    assert_eq!(
+        (got[0].drawers, got[0].src),
+        (Some(3), CountSource::Cache),
+        "{got:?}"
+    );
+}
+
+/// Why (#9283, Fail-Open Check): the idle-evict sweep takes a handle out of
+/// the registry before dropping it, so for a moment the daemon holds
+/// `kg.redb` while `peek` misses. One read per palace recorded 61 of 102 live
+/// palaces unavailable.
+/// What: a 3-drawer palace whose handle has left the registry but is still
+/// open, released 400 ms into the snapshot, is counted from disk.
+#[test]
+fn snapshot_counts_a_palace_whose_handle_is_still_closing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let daemon = PalaceRegistry::with_max_open(4);
+    seed(tmp.path(), "closing", 3, Some(&daemon));
+    let id = PalaceId::new("closing");
+    let leaving = daemon.peek(&id).expect("resident handle");
+    daemon.remove(&id);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(leaving);
+    });
+    take_snapshot(&daemon, tmp.path(), Utc::now()).expect("snapshot");
+    release.join().expect("release thread");
+    let got = lines(tmp.path());
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(
+        (got[0].drawers, got[0].src),
+        (Some(3), CountSource::Disk),
+        "{got:?}"
+    );
 }
 
 /// Why (design §3): the history is bounded to 90 days; a line exactly 90
@@ -117,6 +175,7 @@ fn history_prunes_to_ninety_days() {
         drawers: Some(1),
         src: CountSource::Disk,
         ack: None,
+        reason: None,
     };
     let text: String = [91, 90, 89, 1]
         .iter()
@@ -152,6 +211,7 @@ fn an_ack_explains_an_unjournaled_drop() {
         drawers: Some(n),
         src: CountSource::Disk,
         ack: None,
+        reason: None,
     };
     let text = format!(
         "{}\n{}\n",
@@ -185,6 +245,7 @@ async fn snapshot_loop_writes_at_start_and_stops_on_shutdown() {
     let (tx, rx) = watch::channel(false);
     let task = spawn_snapshot_loop(
         Arc::new(PalaceRegistry::with_max_open(4)),
+        crate::idle_evict::new_evict_gate(),
         tmp.path().to_path_buf(),
         Duration::ZERO,
         Duration::from_secs(3600),

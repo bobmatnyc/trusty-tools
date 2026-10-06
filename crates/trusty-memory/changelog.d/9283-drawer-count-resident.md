@@ -1,0 +1,6 @@
+Fixed
+- The daily drawer-count snapshot no longer records palaces the daemon itself holds open as unavailable (#9283). The snapshot and the idle-evict sweep now share a gate, so a sweep cannot take a resident handle out of the registry mid-count, and an unreadable palace is re-tried three times before it is recorded. On the reporting host this was 61 of 102 palaces, which could never turn the check red.
+- A resident palace is counted from its store's `DRAWERS` rows through the daemon's own handle, the figure a disk read gives (#9283). Its in-memory list can also hold deleted L1-snapshot drawers, so a palace counted resident one day and from disk the next showed a drop no journal explains.
+- A palace whose count is still unavailable is logged at `warn` with its reason, the reason is stored on its `drawer_counts.jsonl` line, and `trusty-memory doctor` warns with `N palace(s) uncountable: <palace>: <reason>` instead of passing (#9283).
+- The drawer-count check also warns, naming the palace and the error, when a palace's deletion journal cannot be read; it used to pass with the palace listed only in a trailing note (#9283).
+- `trusty-memory doctor` no longer exits 1 on the first day of drawer-count history: one snapshot per palace is now a `baseline pending` warning, not an undetermined check (#9283).

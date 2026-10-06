@@ -322,9 +322,16 @@ pub fn spawn_background_maintenance(
 ) -> usize {
     let idle_evict_rx = dream_shutdown_rx.clone();
     let loops = spawn_dream_scheduler(registry, dream_shutdown_rx);
-    // #9283: the daily drawer-count snapshot rides the same shutdown watch.
-    crate::drawer_counts::spawn_snapshot_task(registry.clone(), idle_evict_rx.clone());
-    crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), idle_evict_rx);
+    // #9283: the daily drawer-count snapshot rides the same shutdown watch,
+    // and shares a gate with the idle-evict sweep so a sweep never pulls a
+    // resident handle out from under a count.
+    let gate = crate::idle_evict::new_evict_gate();
+    crate::drawer_counts::spawn_snapshot_task(
+        registry.clone(),
+        gate.clone(),
+        idle_evict_rx.clone(),
+    );
+    crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), gate, idle_evict_rx);
     // Bridge is spawned AFTER the loops exist (see #1529 ordering note).
     spawn_shutdown_bridge(dtx);
     loops
