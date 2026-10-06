@@ -36,7 +36,9 @@ hallucinations and cost. The harness is `tests/model_eval.rs`; scoring is in
 - **Incomplete rows are not scored.** A row is incomplete when the cost cap
   refused its reviewer or a verifier call, when the reviewer call failed (a
   throttle included; the runner does not retry it), or when a verifier call
-  failed with `LlmError::Validation`. It counts in no score: not defects, not
+  failed with `LlmError::Validation`, or when a finding was withheld as
+  unjudged (the verifier was denied, missing, not ready, failed after
+  retries, or answered unparsably). It counts in no score: not defects, not
   catches, not false positives, not hallucinations. The report counts
   incomplete rows per model and pass. Its cost still counts.
 
@@ -47,9 +49,11 @@ cargo test -p trusty-review --test model_eval --no-fail-fast
 ```
 
 This makes no network call. The config is built field by field
-(`eval_config`): it reads neither `~/.config/trusty-review/config.toml` nor the
-environment, and every external context source (Jira, Confluence, GitHub
-issues, conformance, PR history) is disabled.
+(`eval_config`): building it reads no config file and no environment
+variable, and every external context source (Jira, Confluence, GitHub issues,
+conformance, PR history) is disabled. The review pipeline itself still reads
+its `TRUSTY_REVIEW_*` tuning variables, such as the grade thresholds and the
+truncation ratio, so an operator who sets them changes the offline scores.
 
 ## Live leg
 
@@ -87,14 +91,17 @@ output tokens each come to about $1.10. The run
 refuses to start if any model has no Bedrock price, because an unpriced model
 would meter as $0 and never reach the cap.
 
-**Comparison.** Models are compared only on the passes every model completed:
-a row for every diff, and none cut short by the cap. The line printed above the table and
-`compared_passes` in the JSON say how many passes that was.
+**Comparison.** Every model is scored on the same cells: the (pass, diff)
+pairs every model completed. A cell one model did not complete (throttled,
+cut by the cap, unjudged, or never scheduled) is dropped for all models. The
+line printed above the table, and `compared_cells` and
+`dropped_cells_by_model` in the JSON, say how many cells were compared and how
+many each model lost.
 
 **Output.** `<out>/<UTC timestamp>.json` holds the config, the git SHA, the
-spend, any stop reason, `compared_passes`, incomplete rows per model and pass,
-a per-model summary over the compared passes, and one row per model, pass and
-diff. Each row has: caught, false positives, extras, hallucinations and the
+spend, any stop reason, `compared_cells`, `dropped_cells_by_model`, incomplete
+rows per model and pass, a per-model summary over the common cells, and one
+row per model, pass and diff. Each row has: caught, false positives, extras, hallucinations and the
 unresolved survivors, the `incomplete` reason, withheld findings by reason, reviewer and verifier
 tokens, cost and latency, and wall time. A markdown summary table is printed
 to stdout.

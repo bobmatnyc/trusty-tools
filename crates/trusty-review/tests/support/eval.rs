@@ -19,6 +19,8 @@ use trusty_review::config::{InvocationSurface, ReviewConfig};
 use trusty_review::integrations::github::RunMode;
 use trusty_review::llm::LlmProvider;
 use trusty_review::models::ReviewResult;
+use trusty_review::pipeline::verify_posted::UNJUDGED_REASON;
+use trusty_review::pipeline::withheld_contract::reason_class;
 use trusty_review::pipeline::{
     CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
 };
@@ -236,8 +238,15 @@ impl Row {
 /// findings the model did report.
 /// What: incomplete when the reviewer was refused by the cap, never returned,
 /// or errored (a throttle included); or when a verifier call was refused by
-/// the cap or failed with `LlmError::Validation`.
-pub fn incomplete_reason(reviewer: &Usage, verifier: &Usage) -> Option<String> {
+/// the cap or failed with `LlmError::Validation`; or when a finding was
+/// withheld as unjudged (`UNJUDGED_REASON`: the verifier was denied, missing,
+/// not ready, failed after retries, or answered unparsably).
+pub fn incomplete_reason(
+    reviewer: &Usage,
+    verifier: &Usage,
+    withheld_by_reason: &BTreeMap<String, usize>,
+) -> Option<String> {
+    let unjudged = reason_class(UNJUDGED_REASON);
     if reviewer.refused > 0 {
         Some("cost cap refused the reviewer".into())
     } else if reviewer.errors > 0 || reviewer.calls == 0 {
@@ -246,6 +255,8 @@ pub fn incomplete_reason(reviewer: &Usage, verifier: &Usage) -> Option<String> {
         Some("cost cap refused the verifier".into())
     } else if verifier.validation_errors > 0 {
         Some("verifier call failed validation".into())
+    } else if withheld_by_reason.get(unjudged).is_some_and(|n| *n > 0) {
+        Some("the verifier could not judge a finding".into())
     } else {
         None
     }
@@ -368,8 +379,8 @@ pub async fn review_diff(
         diff: entry.id.clone(),
         tier: entry.tier,
         kind: entry.label.as_ref().map(|l| l.kind.clone()),
+        incomplete: incomplete_reason(&reviewer, &verifier, &result.withheld_by_reason),
         score: score(entry, &diff, &result),
-        incomplete: incomplete_reason(&reviewer, &verifier),
         reviewer,
         verifier,
         wall_ms,

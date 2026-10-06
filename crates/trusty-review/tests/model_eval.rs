@@ -406,6 +406,45 @@ async fn incomplete_rows_are_left_out_of_recall() {
     );
 }
 
+/// A verifier the account may not call.
+struct Denied;
+
+#[async_trait]
+impl LlmProvider for Denied {
+    fn name(&self) -> &str {
+        "denied"
+    }
+    async fn complete(&self, _: LlmRequest) -> Result<LlmResponse, LlmError> {
+        Err(LlmError::AccessDenied("not authorized to invoke".into()))
+    }
+}
+
+/// A verifier that cannot judge (here AccessDenied) withholds L3's finding as
+/// unjudged; that is the verifier's failure, not the model's miss.
+#[tokio::test]
+async fn unjudged_row_is_incomplete() {
+    let rec = load_recording("perfect");
+    let config = eval_config(trusty_review::llm::models::DEFAULT_VERIFIER_MODEL);
+    let entry = &entries(&["L3"])[0];
+    let llm = Arc::new(FakeLlm {
+        response: reply_text(&rec.outputs["L3"].reviewer),
+    });
+    let row = review_diff(
+        &config,
+        entry,
+        &rec.model,
+        1,
+        llm,
+        Arc::new(Denied),
+        &Budget::unbounded(),
+    )
+    .await;
+    let rows = vec![row];
+    eprintln!("{}", dump(&rows));
+    assert!(rows[0].incomplete.is_some(), "{}", dump(&rows));
+    assert_eq!(Totals::of(&rows).defects, 0);
+}
+
 // ── Metering and the cost cap ───────────────────────────────────────────
 
 /// A provider that approves with fixed token counts for a fixed model.
@@ -570,7 +609,8 @@ async fn live_leg_refuses_an_unpriced_model() {
 /// The live driver with fake providers. Each review costs $0.0022 (1k input
 /// tokens at Sonnet 5.5's $2.20/M), so a $0.005 cap lets pass 1 (L1, K1)
 /// finish and pass 2's L1 spend the rest; K1 of pass 2 is never scheduled.
-/// The report compares on pass 1 only and carries config, git SHA and rows.
+/// The three completed cells are compared (one model, so none is dropped);
+/// the report carries config, git SHA and rows.
 #[tokio::test]
 async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     let out = tempfile::tempdir().expect("tempdir");
@@ -606,11 +646,9 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("JSON");
     assert_eq!(json["config"]["passes"], 3);
-    assert_eq!(json["compared_passes"], 1, "only pass 1 finished");
-    assert_eq!(
-        json["summary"][0]["totals"]["diffs"], 2,
-        "pass 2 is not compared"
-    );
+    assert_eq!(json["compared_cells"], 3, "(1,L1), (1,K1), (2,L1)");
+    assert_eq!(json["summary"][0]["totals"]["diffs"], 3);
+    assert_eq!(json["dropped_cells_by_model"][SONNET_55], 0);
     assert_eq!(json["incomplete_by_model_pass"][1]["rows"], 1);
     assert!(json.get("git_sha").is_some());
     let row = &json["rows"][0];
@@ -628,6 +666,79 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
         "incomplete",
     ] {
         assert!(row.get(key).is_some(), "row lacks `{key}`: {row}");
+    }
+}
+
+/// A reviewer throttled on K1's diff (`config/retry.rs`), priced as
+/// Sonnet 4.6, but approves the rest.
+struct ThrottledOnK1;
+
+#[async_trait]
+impl LlmProvider for ThrottledOnK1 {
+    fn name(&self) -> &str {
+        "throttled"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        if req
+            .messages
+            .iter()
+            .any(|m| m.content.contains("config/retry.rs"))
+        {
+            return Err(LlmError::RateLimited);
+        }
+        Priced {
+            model: SONNET_46,
+            input: 1_000,
+            output: 0,
+        }
+        .complete(req)
+        .await
+    }
+}
+
+const SONNET_46: &str = "us.anthropic.claude-sonnet-4-6";
+
+/// Two models, one throttled on K1: K1 is dropped for BOTH, so each is
+/// scored on the same single cell, L1.
+#[tokio::test]
+async fn models_are_scored_on_common_cells() {
+    let out = tempfile::tempdir().expect("tempdir");
+    let out_dir = out.path().to_string_lossy().into_owned();
+    let models = format!("{SONNET_55},{SONNET_46}");
+    let env = env_of(&[
+        ("TRUSTY_EVAL_LIVE", "1"),
+        ("TRUSTY_EVAL_MODELS", &models),
+        ("TRUSTY_EVAL_PASSES", "1"),
+        ("TRUSTY_EVAL_ONLY", "L1,K1"),
+        ("TRUSTY_EVAL_OUT_DIR", &out_dir),
+    ]);
+    let factory = |model: &str| -> Result<Arc<dyn LlmProvider>, String> {
+        if model == SONNET_46 {
+            return Ok(Arc::new(ThrottledOnK1));
+        }
+        Ok(Arc::new(Priced {
+            model: SONNET_55,
+            input: 1_000,
+            output: 0,
+        }))
+    };
+    let LiveOutcome::Ran { report, rows, .. } = run_live(&env, &factory).await.expect("runs")
+    else {
+        panic!("enabled run skipped");
+    };
+    assert_eq!(rows, 4);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("JSON");
+    assert_eq!(json["compared_cells"], 1, "only L1 is common");
+    for (i, model) in [SONNET_55, SONNET_46].into_iter().enumerate() {
+        let t = &json["summary"][i]["totals"];
+        assert_eq!(json["summary"][i]["model"], model);
+        assert_eq!(
+            (&t["diffs"], &t["defects"], &t["incomplete"]),
+            (&1.into(), &1.into(), &0.into()),
+            "{model}: {t}"
+        );
+        assert_eq!(json["dropped_cells_by_model"][model], 1, "{model} loses K1");
     }
 }
 

@@ -8,14 +8,16 @@
 //! `TRUSTY_EVAL_LIVE=1`; [`run_live`] checks every model is priced, then runs
 //! passes x models x diffs through [`review_diff`] with providers from the
 //! injected factory, and schedules nothing new once the shared [`Budget`] is
-//! spent. It compares models only on [`compared_passes`], the passes every
-//! model completed, with incomplete rows left out and counted per model and
-//! pass. It writes `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
+//! spent. It scores every model on the same [`common_cells`], the
+//! (pass, diff) cells every model completed; incomplete rows are counted per
+//! model and pass, and dropped cells per model. It writes `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
 //! only place a network provider is built, and it is never called when the
 //! opt-in is absent.
 //! Test: `live_leg_is_inert_without_opt_in`, `live_settings_read_overrides`,
-//! `live_leg_refuses_an_unpriced_model`, `live_leg_writes_a_report_and_stops_at_the_cap`.
+//! `live_leg_refuses_an_unpriced_model`, `live_leg_writes_a_report_and_stops_at_the_cap`,
+//! `models_are_scored_on_common_cells`.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -186,20 +188,23 @@ async fn model_pass(
     Ok(rows)
 }
 
-/// Passes every model completed: a row for each of `entries` diffs, and no
-/// row cut short by the cost cap. Models are compared on these passes only.
-pub fn compared_passes(rows: &[Row], models: &[String], passes: u32, entries: usize) -> Vec<u32> {
-    (1..=passes)
-        .filter(|&p| {
-            models.iter().all(|m| {
-                let mine: Vec<&Row> = rows
-                    .iter()
-                    .filter(|r| r.pass == p && &r.model == m)
-                    .collect();
-                mine.len() == entries && !mine.iter().any(|r| r.cut_by_cap())
-            })
-        })
-        .collect()
+/// The (pass, diff) cells every model completed: each model has a row there
+/// and none of those rows is incomplete. Every model is scored on exactly
+/// these cells, so one model's throttle or cap cut drops that cell for all.
+pub fn common_cells(rows: &[Row], models: &[String]) -> BTreeSet<(u32, String)> {
+    let done = |m: &String| -> BTreeSet<(u32, String)> {
+        rows.iter()
+            .filter(|r| &r.model == m && r.incomplete.is_none())
+            .map(|r| (r.pass, r.diff.clone()))
+            .collect()
+    };
+    let mut models = models.iter();
+    let Some(first) = models.next() else {
+        return BTreeSet::new();
+    };
+    models.fold(done(first), |acc, m| {
+        acc.intersection(&done(m)).cloned().collect()
+    })
 }
 
 /// Rows run and incomplete rows, per model and pass, for the report.
@@ -262,23 +267,34 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
             }
         }
     }
-    let compared = compared_passes(&rows, &settings.models, settings.passes, entries.len());
+    let cells = common_cells(&rows, &settings.models);
+    let in_cells = |r: &Row| cells.contains(&(r.pass, r.diff.clone()));
+    let passes_in_cells = cells.iter().map(|(p, _)| *p).collect::<BTreeSet<_>>().len() as u32;
     let summary: Vec<(String, u32, Totals)> = settings
         .models
         .iter()
         .map(|m| {
-            let mine = rows
+            let mine = rows.iter().filter(|r| &r.model == m && in_cells(r));
+            (m.clone(), passes_in_cells, Totals::of(mine))
+        })
+        .collect();
+    let dropped: serde_json::Map<String, serde_json::Value> = settings
+        .models
+        .iter()
+        .map(|m| {
+            let n = rows
                 .iter()
-                .filter(|r| &r.model == m && compared.contains(&r.pass));
-            (m.clone(), compared.len() as u32, Totals::of(mine))
+                .filter(|r| &r.model == m && !in_cells(r))
+                .count();
+            (m.clone(), n.into())
         })
         .collect();
     let incomplete = incomplete_by_pass(&rows, &settings.models, settings.passes);
     let table = markdown_table(&summary);
     println!(
-        "compared on {} of {} passes, the passes every model completed",
-        compared.len(),
-        settings.passes
+        "compared on {} (pass, diff) cells every model completed; dropped per model: {}",
+        cells.len(),
+        serde_json::Value::Object(dropped.clone())
     );
     println!("{table}");
     if let Some(why) = &stopped {
@@ -292,8 +308,8 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
         "finished_utc": chrono::Utc::now().to_rfc3339(),
         "spent_usd": budget.spent(),
         "stopped_reason": stopped,
-        "compared_passes": compared.len(),
-        "compared_pass_numbers": compared,
+        "compared_cells": cells.len(),
+        "dropped_cells_by_model": dropped,
         "incomplete_by_model_pass": incomplete,
         "summary": summary.iter().map(|(model, passes, totals)| serde_json::json!({
             "model": model, "passes": passes, "recall": totals.recall(), "totals": totals,
