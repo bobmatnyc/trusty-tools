@@ -41,6 +41,8 @@
 //! no real AWS calls).
 
 pub(crate) mod arn;
+// #9310: opt-in raw capture of reviewer replies.
+mod capture;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
@@ -299,41 +301,15 @@ impl BedrockProvider {
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        let text = response_text(&resp, req.response_schema.is_some());
-
-        let (input_tokens, output_tokens) = extract_token_usage(&resp);
-        let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
-
-        // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
-        // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
-        // is the truncation case the runner keys off.
-        let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
-
-        // #9310: a structured reply with no toolUse block reaches the parser as
-        // text; log its block kinds, which the runner's record cannot see.
-        if req.response_schema.is_some() {
-            let blocks = tool_use::reply_block_kinds(&resp);
-            if !blocks.contains(&"tool_use") {
-                warn!(
-                    model = %arn::mask_account_ids(model),
-                    blocks = ?blocks,
-                    stop = finish_reason.as_deref().unwrap_or("none"),
-                    output_tokens,
-                    text_chars = text.chars().count(),
-                    "structured Bedrock reply carried no toolUse block; the caller parses its text (#9310)"
-                );
-            }
-        }
-
-        Ok(LlmResponse {
-            text,
-            model: model.to_string(),
-            input_tokens,
-            output_tokens,
+        // #9310: read per call, so capture needs no restart; off when unset.
+        let capture = capture::capture_dir(&|key| std::env::var(key).ok());
+        Ok(llm_response(
+            req,
+            model,
+            &resp,
             latency_ms,
-            cost_usd,
-            finish_reason,
-        })
+            capture.as_deref(),
+        ))
     }
 }
 
@@ -548,6 +524,63 @@ fn inference_config(req: &LlmRequest, model: &str) -> InferenceConfiguration {
 }
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
+
+/// The `LlmResponse` for one Converse reply, capturing it when `capture` is set.
+///
+/// Why: one place builds the response, so the opt-in capture (#9310) can be
+/// shown not to change it.
+/// What: the parser text from [`response_text`], token usage, cost, and the
+/// lowercase stop reason (#1357); `warn!`s the block kinds of a structured
+/// reply with no `toolUse` block. With `capture` set, a reviewer reply is also
+/// written by `capture::capture_reply`, which never fails the call.
+/// Test: `capture_write_failure_leaves_the_response_identical`,
+/// `capture_on_writes_one_private_file_per_reviewer_call`.
+fn llm_response(
+    req: &LlmRequest,
+    model: &str,
+    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+    latency_ms: u64,
+    capture: Option<&std::path::Path>,
+) -> LlmResponse {
+    let text = response_text(resp, req.response_schema.is_some());
+
+    let (input_tokens, output_tokens) = extract_token_usage(resp);
+    let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
+
+    // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
+    // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
+    // is the truncation case the runner keys off.
+    let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
+
+    // #9310: a structured reply with no toolUse block reaches the parser as
+    // text; log its block kinds, which the runner's record cannot see.
+    if req.response_schema.is_some() {
+        let blocks = tool_use::reply_block_kinds(resp);
+        if !blocks.contains(&"tool_use") {
+            warn!(
+                model = %arn::mask_account_ids(model),
+                blocks = ?blocks,
+                stop = finish_reason.as_deref().unwrap_or("none"),
+                output_tokens,
+                text_chars = text.chars().count(),
+                "structured Bedrock reply carried no toolUse block; the caller parses its text (#9310)"
+            );
+        }
+    }
+
+    if let Some(dir) = capture {
+        capture::capture_reply(dir, req, model, resp, &text);
+    }
+    LlmResponse {
+        text,
+        model: model.to_string(),
+        input_tokens,
+        output_tokens,
+        latency_ms,
+        cost_usd,
+        finish_reason,
+    }
+}
 
 /// The reply text the pipeline parses: the `toolUse.input` JSON for a
 /// structured request, else the joined text blocks.

@@ -998,3 +998,161 @@ fn bedrock_timeout_error_keeps_sdk_rendering() {
         "failed to construct request"
     );
 }
+
+// ── Opt-in raw reply capture (#9310) ──────────────────────────────────────
+
+/// The model id the capture tests send.
+const CAPTURE_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
+
+/// A reply holding a text block, then a `toolUse` block with an APPROVE input.
+fn text_and_tool_reply() -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("Preamble.".to_string()),
+        tool_use_block(serde_json::json!({
+            "verdict": "APPROVE", "summary": "Clean.", "findings": []
+        })),
+    ])
+}
+
+/// The capture files in `dir`, sorted by name; empty when `dir` is absent.
+fn capture_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Capture is off unless the env var names a directory (#9310).
+///
+/// Why: the files hold raw replies, so capture must be an explicit opt-in.
+/// What: unset and blank values are off; a set value is the directory.
+/// Test: this test.
+#[test]
+fn capture_dir_is_off_unless_the_env_var_names_a_dir() {
+    use super::capture::{CAPTURE_DIR_ENV, capture_dir};
+    assert_eq!(capture_dir(&|_| None), None, "unset is off");
+    assert_eq!(
+        capture_dir(&|_| Some("  ".to_string())),
+        None,
+        "blank is off"
+    );
+    let on = capture_dir(&|key| (key == CAPTURE_DIR_ENV).then(|| "/tmp/cap".to_string()));
+    assert_eq!(on, Some(std::path::PathBuf::from("/tmp/cap")));
+}
+
+/// With capture off, a reviewer reply writes nothing (#9310).
+///
+/// What: the default environment gives no capture dir, and the response
+/// builder then leaves an empty directory empty.
+/// Test: this test.
+#[test]
+fn capture_off_by_default_writes_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let capture = super::capture::capture_dir(&|_| None);
+    let req = structured_request("reviewer");
+    super::llm_response(
+        &req,
+        CAPTURE_MODEL,
+        &text_and_tool_reply(),
+        1,
+        capture.as_deref(),
+    );
+    assert!(capture_files(tmp.path()).is_empty());
+}
+
+/// With capture on, each reviewer call writes one new private file holding
+/// the raw reply and its metadata (#9310).
+///
+/// Why: part 2 of #9310 needs the raw replies, joinable to a harness row.
+/// What: two calls into a missing directory; the directory is 0700, each file
+/// is 0600, neither overwrites the other, and the record carries every field.
+/// Test: this test.
+#[test]
+fn capture_on_writes_one_private_file_per_reviewer_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let first = super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    let files = capture_files(&dir);
+    assert_eq!(files.len(), 2, "one file per call, none overwritten");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&dir), 0o700, "the capture dir is private");
+        for file in &files {
+            assert_eq!(mode(file), 0o600, "{}", file.display());
+        }
+    }
+    let raw = std::fs::read_to_string(&files[0]).expect("capture file reads");
+    let record: serde_json::Value = serde_json::from_str(&raw).expect("capture is JSON");
+    assert_eq!(record["reply"], first.text.as_str(), "the parser's text");
+    assert_eq!(record["model"], CAPTURE_MODEL);
+    assert_eq!(record["stop_reason"], "end_turn");
+    assert_eq!(record["output_tokens"], 5);
+    assert_eq!(record["tool_use"], true);
+    assert_eq!(record["tool_use_input"]["verdict"], "APPROVE");
+    assert_eq!(record["text"], "Preamble.");
+    assert!(
+        record["captured_utc"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+    let name = files[0].file_name().and_then(|n| n.to_str()).unwrap_or("");
+    assert_eq!(
+        format!("{}.json", record["id"].as_str().unwrap_or("")),
+        name,
+        "the id is the file stem"
+    );
+}
+
+/// Only reviewer calls are captured (#9310).
+///
+/// What: a verifier-schema call and an unstructured call write nothing and
+/// create no directory.
+/// Test: this test.
+#[test]
+fn capture_skips_non_reviewer_calls() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let mut verifier = structured_request("verifier");
+    if let Some(schema) = verifier.response_schema.as_mut() {
+        schema.name = "finding_verification".to_string();
+    }
+    let mut plain = structured_request("plain");
+    plain.response_schema = None;
+    for req in [verifier, plain] {
+        super::llm_response(&req, CAPTURE_MODEL, &text_and_tool_reply(), 1, Some(&dir));
+    }
+    assert!(!dir.exists(), "no capture for a non-reviewer call");
+}
+
+/// A capture that cannot be written leaves the response identical (#9310).
+///
+/// Why: capture is diagnostic and fail-open; it must never fail or change a
+/// review.
+/// What: the capture dir sits under a regular file, so creating it fails; the
+/// response equals the one built with capture off.
+/// Test: this test.
+#[test]
+fn capture_write_failure_leaves_the_response_identical() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, "x").expect("blocker file");
+    let dir = blocker.join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let off = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, None);
+    let failed = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, Some(&dir));
+    assert_eq!(
+        serde_json::to_value(&failed).expect("serialises"),
+        serde_json::to_value(&off).expect("serialises"),
+        "a failed capture must not change the response"
+    );
+    assert!(!dir.exists());
+}
