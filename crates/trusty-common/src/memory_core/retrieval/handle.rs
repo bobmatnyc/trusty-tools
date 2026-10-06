@@ -1077,45 +1077,47 @@ impl PalaceHandle {
     /// keeps logging off the critical path while still capturing every event.
     /// What: If `handle.recall_log` is set, spawns a task that records one event
     /// per non-L0 result, or a single miss event when `results` only contains the
-    /// L0 identity (no real recall hits).
-    /// Test: `recall_logs_events_when_log_present` confirms the log row appears.
+    /// L0 identity (no real recall hits). #9141: all of one recall's events go
+    /// in ONE `record_batch` commit, and a failed write is logged at `warn`
+    /// with the row count it lost — the recall itself still succeeds.
+    /// Test: `recall_logs_events_when_log_present`,
+    /// `log_recall_writes_every_hit_in_one_commit`,
+    /// `log_recall_reports_a_failed_write`.
     pub(super) fn log_recall(&self, query: &str, results: &[super::types::RecallResult]) {
         let Some(log) = self.recall_log.clone() else {
             return;
         };
         let palace_id = self.id.as_str().to_string();
-        let q_hash = query_hash(query);
+        let query_hash = query_hash(query);
+        let occurred_at = chrono::Utc::now();
         // Only count L1+ entries — the synthetic L0 identity is always present
         // and would otherwise drown out genuine miss signals.
-        let logged: Vec<super::types::RecallResult> =
-            results.iter().filter(|r| r.layer > 0).cloned().collect();
-
+        let mut events: Vec<RecallEvent> = results
+            .iter()
+            .filter(|r| r.layer > 0)
+            .map(|r| RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: r.layer,
+                drawer_id: Some(r.drawer.id),
+                score: r.score,
+                occurred_at,
+            })
+            .collect();
+        if events.is_empty() {
+            events.push(RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: 3,
+                drawer_id: None,
+                score: 0.0,
+                occurred_at,
+            });
+        }
         tokio::spawn(async move {
-            let now = chrono::Utc::now();
-            if logged.is_empty() {
-                let _ = log
-                    .record(RecallEvent {
-                        palace_id,
-                        query_hash: q_hash,
-                        layer: 3,
-                        drawer_id: None,
-                        score: 0.0,
-                        occurred_at: now,
-                    })
-                    .await;
-            } else {
-                for r in &logged {
-                    let _ = log
-                        .record(RecallEvent {
-                            palace_id: palace_id.clone(),
-                            query_hash: q_hash,
-                            layer: r.layer,
-                            drawer_id: Some(r.drawer.id),
-                            score: r.score,
-                            occurred_at: now,
-                        })
-                        .await;
-                }
+            let rows = events.len();
+            if let Err(e) = log.record_batch(events).await {
+                tracing::warn!(palace = %palace_id, rows, "recall log write failed: {e:#}");
             }
         });
     }

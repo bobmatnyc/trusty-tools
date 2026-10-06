@@ -1795,3 +1795,84 @@ fn search_finds_drawers_the_graph_cannot_reach() {
          upserted: {missed_late:?}"
     );
 }
+
+/// Uuids of `store`'s top `k` hits for `query`, in rank order.
+fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
+    let hits = store.search(query, k).expect("search");
+    hits.into_iter().map(|(uuid, _)| uuid).collect()
+}
+
+/// Why (#9141): `search` re-read every `VECTOR_KEYS` and `DELETED_VECTORS` row
+/// on each call — on the ~7k-drawer trusty-tools palace, one `String` per
+/// drawer per recall. The map must come from a cache that only a store write
+/// refreshes.
+/// What: after a first search, removes a drawer's `VECTOR_KEYS` row straight
+/// through redb, behind every `HnswStore` writer. A second search must still
+/// resolve the drawer, because it reads the cached map, not the table. A store
+/// write then refreshes the map, and the raw removal shows.
+/// Test: this test.
+#[test]
+fn search_reads_vector_keys_once_until_a_store_write() {
+    let (_dir, store) = open_store(8);
+    let (a, b) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+    store.upsert(&a, &unit_vec(8, 1)).unwrap();
+    store.upsert(&b, &unit_vec(8, 100)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 1), vec![a.clone()]);
+
+    let wtx = store.db.begin_write().unwrap();
+    {
+        let mut keys = wtx.open_table(VECTOR_KEYS).unwrap();
+        keys.remove(a.as_str()).unwrap();
+    }
+    wtx.commit().unwrap();
+
+    assert_eq!(
+        hit_uuids(&store, &unit_vec(8, 1), 1),
+        vec![a.clone()],
+        "the second search re-read VECTOR_KEYS instead of its cached map"
+    );
+    store
+        .upsert(&Uuid::new_v4().to_string(), &unit_vec(8, 300))
+        .unwrap();
+    assert!(
+        !hit_uuids(&store, &unit_vec(8, 1), 3).contains(&a),
+        "a store write must refresh the cached map"
+    );
+}
+
+/// Why (#9141): the cached map replaces a per-search read, so every write that
+/// used to show on the next search still has to — including one made through
+/// a second store over the same file, a configuration
+/// `two_live_stores_over_one_file_never_alias_ids` exercises.
+/// What: builds the cache, then deletes, re-adds, deletes through a second
+/// store, and compacts, searching after each step.
+/// Test: this test.
+#[test]
+fn search_cache_follows_writes_from_every_store_on_the_file() {
+    let (_dir, store) = open_store(8);
+    let other = HnswStore::open(Arc::clone(&store.db), 8).expect("second store");
+    let (a, b, c) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    store.upsert(&a, &unit_vec(8, 1)).unwrap();
+    store.upsert(&b, &unit_vec(8, 100)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 2).len(), 2);
+
+    assert!(store.delete(&a).unwrap());
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 3), vec![b.clone()]);
+
+    store.upsert(&c, &unit_vec(8, 200)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 200), 1), vec![c.clone()]);
+
+    assert!(other.delete(&b).unwrap(), "delete through the second store");
+    assert_eq!(
+        hit_uuids(&store, &unit_vec(8, 100), 3),
+        vec![c.clone()],
+        "a delete through another store on the file must reach this store's map"
+    );
+
+    store.compact_orphans().unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 200), 3), vec![c]);
+}

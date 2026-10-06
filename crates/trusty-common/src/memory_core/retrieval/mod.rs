@@ -37,6 +37,8 @@ mod write_pipeline;
 #[cfg(test)]
 pub(crate) mod embed_repair_tests;
 #[cfg(test)]
+mod recall_log_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tier_c_tests;
