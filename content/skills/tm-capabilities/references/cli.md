@@ -180,6 +180,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)
   - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
   - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `rebind` — Re-bind a session's record to its live tmux pane (#9313)
   - `reconcile-worktrees` — Report every git-registered worktree against `sessions.json` (#4288)
   - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)
@@ -215,6 +216,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `prune` — Prune managed sessions by state + compact tombstones (#1508)
   - `prune-idle` — Reclaim idle managed sessions: stop idle, decommission done (#1313)
   - `prune-worktrees` — Remove orphaned per-session git worktree directories (#1840)
+  - `rebind` — Re-bind a session's record to its live tmux pane (#9313)
   - `reconcile-worktrees` — Report every git-registered worktree against `sessions.json` (#4288)
   - `rename` — Rename a managed session — from the list OR from within a session
   - `resume` — Resume a stopped/paused session (managed or project session)

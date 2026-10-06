@@ -476,6 +476,21 @@ pub trait ManagedTmuxDriver: Send + Sync {
         )))
     }
 
+    /// The `%N` id of every pane in session `name`, across all its windows
+    /// (#9313).
+    ///
+    /// Why: a rebind may bind a record only to the ONE pane a session holds;
+    /// it must see every pane to tell one from many.
+    /// What: the default is `Err`, so a driver that cannot list panes never
+    /// rebinds a record. [`super::real_tmux::RealTmuxDriver`] runs
+    /// `list-panes -s -t '=name:'`.
+    /// Test: `a_pane_list_error_leaves_that_record_unchanged_and_rebinds_the_rest`.
+    fn session_pane_ids(&self, name: &str) -> Result<Vec<String>, ManagedError> {
+        Err(ManagedError::TmuxUnavailable(format!(
+            "this driver cannot list the panes of session '{name}'"
+        )))
+    }
+
     /// Kill the session whose `$N` id is `session_id`, which carries `name`,
     /// unless the [`Self::supervisor_floor`] refuses `name` (#9004).
     ///

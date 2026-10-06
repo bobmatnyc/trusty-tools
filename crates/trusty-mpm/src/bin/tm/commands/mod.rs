@@ -205,6 +205,8 @@ pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
+// #9313: `tm sessions rebind` — re-bind a record to its live tmux pane.
+pub(crate) mod rebind;
 pub(crate) mod reconcile_worktrees;
 // #4912: `tm register` positional resolution — URL first, alias optional, with
 // the legacy alias-first order still accepted.

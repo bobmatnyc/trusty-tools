@@ -396,6 +396,28 @@ pub(crate) enum SessionAction {
         /// (resolved from `$TM_MANAGED_SESSION_ID`).
         arg2: Option<String>,
     },
+    /// Re-bind a session's record to its live tmux pane (#9313).
+    ///
+    /// Why: after a tmux server replacement a live session's record names a
+    /// dead pane and server, so `tm ls` shows it stopped; `resume` would start
+    /// a second Claude. Rebinding updates the record only.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/rebind` (with `?tmux=` when
+    /// `--tmux` is given), or `/api/v1/sessions/managed/rebind` for `--all`,
+    /// and prints each session's outcome: rebound, current, no match,
+    /// ambiguous or error. Exactly one of `id`/`--all` may be given.
+    /// Test: `cli_parses_sessions_rebind`, `cli_parses_sessions_rebind_all`.
+    Rebind {
+        /// Managed session id or name.
+        #[arg(conflicts_with = "all", required_unless_present = "all")]
+        id: Option<String>,
+        /// The live tmux session to bind to, when it is not the record's own
+        /// name (a session renamed in tmux).
+        #[arg(long, conflicts_with = "all")]
+        tmux: Option<String>,
+        /// Re-bind every active or stopped session instead of one.
+        #[arg(long)]
+        all: bool,
+    },
     /// Reclaim idle managed sessions: stop idle, decommission done (#1313).
     ///
     /// Why: paused orchestration sessions leave behind idle SM tmux sessions that

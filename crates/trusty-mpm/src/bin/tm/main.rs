@@ -105,6 +105,11 @@ mod tests_behavior_d_stop_delete;
 #[path = "tests_behavior_d_f_cli_tests.rs"]
 mod tests_behavior_d_f_cli;
 
+// #9313: `tm sessions rebind` parse tests; `tests_behavior_d_tests.rs` is full.
+#[cfg(test)]
+#[path = "tests_behavior_rebind_tests.rs"]
+mod tests_behavior_rebind;
+
 #[cfg(test)]
 #[path = "tests_behavior_e_tests.rs"]
 mod tests_behavior_e;

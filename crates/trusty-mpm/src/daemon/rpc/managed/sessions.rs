@@ -35,6 +35,8 @@
 //! | `mpm.managed.reactivate` | `POST /api/v1/sessions/managed/{id}/reactivate` |
 //! | `mpm.managed.decommission` | `POST /api/v1/sessions/managed/{id}/decommission` |
 //! | `mpm.managed.delete` | `POST /api/v1/sessions/managed/{id}/delete` |
+//! | `mpm.managed.rebind` | `POST /api/v1/sessions/managed/{id}/rebind` |
+//! | `mpm.managed.rebind_all` | `POST /api/v1/sessions/managed/rebind` |
 //!
 //! `mpm.managed.stop` and `mpm.managed.runtime_stop` name the same body, because
 //! the `DELETE` route is a legacy alias that delegates to runtime-stop. Both
@@ -50,8 +52,8 @@ use trusty_common::uds::server::RpcRouter;
 use crate::daemon::managed_routes::prune::{PruneRequest, PruneWorktreesRequest};
 use crate::daemon::managed_routes::{
     AdoptExistingRequest, AnswerRequest, ReactivateQuery, RenameRequest, SendInputRequest,
-    SpawnRequest, activity, cores, delete, fleet, provision_status, prune, reactivate, reconcile,
-    rename, residency, supervisor, sync_assets,
+    SpawnRequest, activity, cores, delete, fleet, provision_status, prune, reactivate, rebind,
+    reconcile, rename, residency, supervisor, sync_assets,
 };
 use crate::daemon::state::DaemonState;
 
@@ -158,7 +160,36 @@ pub struct NoParams {}
 /// it names without making either easier to read.
 pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let router = register_fleet_wide(router, state);
+    let router = register_rebind(router, state);
     register_per_session(router, state)
+}
+
+/// `mpm.managed.rebind` parameters: the id plus the optional `?tmux=`.
+#[derive(Debug, Deserialize)]
+pub struct RebindParams {
+    /// The managed-session id.
+    pub id: String,
+    /// The live tmux session to bind to, when not the record's own name.
+    #[serde(default)]
+    pub tmux: Option<String>,
+}
+
+/// #9313: the two `tm sessions rebind` methods.
+fn register_rebind(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
+    let (one_s, all_s) = (Arc::clone(state), Arc::clone(state));
+    router
+        .typed("mpm.managed.rebind", move |req: RebindParams| {
+            let state = Arc::clone(&one_s);
+            async move {
+                rebind::rebind_core(&state, &req.id, req.tmux.as_deref())
+                    .await
+                    .into_rpc()
+            }
+        })
+        .typed("mpm.managed.rebind_all", move |_: NoParams| {
+            let state = Arc::clone(&all_s);
+            async move { rebind::rebind_all_core(&state).await.into_rpc() }
+        })
 }
 
 /// The methods that address the fleet rather than one session.

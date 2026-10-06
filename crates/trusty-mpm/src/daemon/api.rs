@@ -346,6 +346,8 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // (`tm sessions sync-assets <id>|--all`), merged as a sub-router —
         // mirrors the `provision_status::router()` merge immediately above.
         .merge(super::managed_routes::sync_assets::router())
+        // #9313: `tm sessions rebind <id>|--all` — a record update only.
+        .merge(super::managed_routes::rebind::router())
         .route(
             "/api/v1/sessions/managed/{id}/answer",
             post(answer_session_decision),
