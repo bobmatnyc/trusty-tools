@@ -12,10 +12,11 @@
 //! concurrently, each on the blocking pool under [`RULINGS_TIMEOUT`];
 //! [`fold_rulings`] keeps ruling-tagged drawers
 //! ([`super::recall_rank::is_ruling`]), drops duplicates, caps the leg's share
-//! and merges the rest into the project recall at layer 1. Every palace that
-//! contributed nothing comes back as a [`RulingsDegraded`] entry with a fixed
-//! [`DegradedReason`] code, which the recall envelope reports as
-//! `rulings_degraded`; the project's own hits are always returned.
+//! and merges the rest into the project recall at layer 1, naming the ones
+//! that answer the query for the rank floor (`super::recall_rulings_floor`).
+//! Every palace that contributed nothing comes back as a [`RulingsDegraded`]
+//! entry with a fixed [`DegradedReason`] code, which the recall envelope
+//! reports as `rulings_degraded`; the project's own hits are always returned.
 //! Test: `tests/recall_rulings_leg.rs`; `tools::recall_rulings_tests`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -29,10 +30,12 @@ use trusty_common::memory_core::registry::PalaceRegistry;
 use trusty_common::memory_core::retrieval::{
     expand_query, retrieve_l2_scoped, RecallResult, RecallScope,
 };
+use uuid::Uuid;
 
 use super::bm25::{bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 use super::recall_rank::is_ruling;
+use super::recall_rulings_floor::ruling_answers_query;
 use crate::commands::prompt_context::BODY_DEADLINE;
 use crate::AppState;
 
@@ -495,27 +498,40 @@ fn search_palace(
     })
 }
 
+/// What the fold hands the caller's cut (#9143).
+#[derive(Debug, Default)]
+pub(crate) struct RulingsFold {
+    /// Rulings palaces that contributed nothing, and why.
+    pub degraded: Vec<RulingsDegraded>,
+    /// Drawer ids of folded rulings that answer the query, best first; the cut
+    /// gives them reserved slots (`super::recall_rulings_floor`).
+    pub floored: Vec<Uuid>,
+}
+
 /// Merge the rulings leg's outcomes into `results` and report the failures.
 ///
 /// Why: layer 1 marks the hits as grounding rather than a project search hit,
 /// matching #9143's "at L1". `min_score` is applied here because
 /// `apply_score_floor` exempts layer 1 by design. The cap keeps the leg from
 /// crowding the project's own answer (#9143 review).
-/// What: every `Err` is returned as is. From the `Ok` hits it keeps
+/// What: every `Err` is returned in `degraded`. From the `Ok` hits it keeps
 /// ruling-tagged drawers at or above `min_score` whose drawer id and content
 /// hash are new — against `results` and against every earlier ruling, so one
 /// ruling stored in two palaces appears once — then the best
-/// `ceil(top_k / 3)` by score, appended as layer 1. `results` is never
-/// shortened; the caller re-sorts.
+/// `ceil(top_k / 3)` by score, appended as layer 1. Of those, the ones that
+/// answer `query` ([`ruling_answers_query`]) are listed in `floored`.
+/// `results` is never shortened; the caller re-sorts.
 /// Test: `a_search_error_degrades_and_keeps_every_primary_hit`,
 /// `the_same_ruling_from_two_palaces_appears_once`,
-/// `rulings_contribute_at_most_a_third_of_top_k`.
+/// `rulings_contribute_at_most_a_third_of_top_k`,
+/// `only_capped_rulings_that_answer_the_query_are_floored`.
 pub(crate) fn fold_rulings(
     results: &mut Vec<RecallResult>,
     outcomes: Vec<PalaceOutcome>,
+    query: &str,
     top_k: usize,
     min_score: Option<f32>,
-) -> Vec<RulingsDegraded> {
+) -> RulingsFold {
     let mut degraded = Vec::new();
     let mut ids: HashSet<_> = results.iter().map(|r| r.drawer.id).collect();
     let mut hashes: HashSet<_> = results.iter().map(|r| r.drawer.content_hash()).collect();
@@ -540,11 +556,16 @@ pub(crate) fn fold_rulings(
     rulings.sort_by(|a, b| b.score.total_cmp(&a.score));
     // #9143: the leg contributes at most ceil(top_k / 3) hits.
     rulings.truncate(top_k.div_ceil(3));
+    let mut floored = Vec::new();
     for mut hit in rulings {
+        // #9143 AC2: only a capped ruling that answers the query is floored.
+        if ruling_answers_query(query, hit.drawer.content()) {
+            floored.push(hit.drawer.id);
+        }
         hit.layer = 1;
         results.push(hit);
     }
-    degraded
+    RulingsFold { degraded, floored }
 }
 
 #[cfg(test)]
