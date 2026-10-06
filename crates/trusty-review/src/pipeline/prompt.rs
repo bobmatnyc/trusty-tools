@@ -60,7 +60,8 @@ const GEMINI_MAX_TOKENS: u32 = 8192;
 // ─── Review output schema ─────────────────────────────────────────────────────
 
 /// The name used for the structured-output tool/schema.
-const REVIEW_SCHEMA_NAME: &str = "review_output";
+// #9310: crate-visible so the Bedrock capture can tell a reviewer call.
+pub(crate) const REVIEW_SCHEMA_NAME: &str = "review_output";
 
 /// Build the JSON Schema for the review output structure.
 ///
