@@ -1569,7 +1569,7 @@ fn replay_leaves_no_point_without_neighbours() {
     let mut bad_builds = Vec::new();
     for build in 0..200 {
         let index = replay::new_index();
-        replay::replay(&index, &live);
+        replay::replay(&index, &live).expect("replay");
         assert_eq!(index.get_nb_point(), n, "build {build}: point count");
         let orphans = points_without_neighbours(&index);
         if !orphans.is_empty() {
@@ -1586,5 +1586,212 @@ fn replay_leaves_no_point_without_neighbours() {
          (build, count, first ids): {:?}",
         bad_builds.len(),
         bad_builds.first()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #9187 — no HNSW insert writes to stdout, the MCP stdio channel.
+// ---------------------------------------------------------------------------
+
+/// `hnsw_rs` 0.3.4 `println!`s at every insert that makes its point count a
+/// multiple of this (`hnsw.rs:519-520`).
+const HNSW_RS_PRINT_PERIOD: usize = 50_000;
+
+/// Set in the child process [`no_hnsw_insert_writes_to_stdout`] spawns.
+const STDOUT_CHILD_ENV: &str = "TRUSTY_HNSW_STDOUT_CHILD";
+
+/// Child half of [`no_hnsw_insert_writes_to_stdout`]; a no-op unless the
+/// parent spawned it.
+///
+/// What: drives both insert paths across `hnsw_rs`'s print point — a replay of
+/// exactly [`HNSW_RS_PRINT_PERIOD`] rows, and a replay of one fewer followed by
+/// one `upsert`. Dim 4 bounds the debug-profile cost; the print depends only
+/// on the point count.
+/// Test: run by `no_hnsw_insert_writes_to_stdout`.
+#[test]
+fn stdout_child_crosses_the_hnsw_print_period() {
+    if std::env::var_os(STDOUT_CHILD_ENV).is_none() {
+        return;
+    }
+    let dim = 4;
+    let pool: Vec<Vec<f32>> = (0..HNSW_RS_PRINT_PERIOD)
+        .map(|i| spread_vec(dim, 31_000 + i as u64))
+        .collect();
+
+    // Replay path: the last replayed row is the print point.
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("replay open");
+    assert_eq!(reopened.index.read().get_nb_point(), HNSW_RS_PRINT_PERIOD);
+    drop(reopened);
+
+    // Upsert path: the replay stops one short, and the upsert is the print point.
+    let (_dir2, store2) = open_store(dim);
+    seed_rows(&store2.db, &pool[..HNSW_RS_PRINT_PERIOD - 1]);
+    let reopened = HnswStore::open(Arc::clone(&store2.db), dim).expect("upsert open");
+    reopened
+        .upsert("drawer-print-point", &spread_vec(dim, 7))
+        .expect("upsert");
+    assert_eq!(reopened.index.read().get_nb_point(), HNSW_RS_PRINT_PERIOD);
+}
+
+/// Why (#9187): stdout is the JSON-RPC channel of a stdio MCP server, and
+/// `hnsw_rs` 0.3.4 prints to it once per 50,000 inserted points, so opening or
+/// growing a palace past that size corrupts the protocol stream.
+/// What: re-runs this test binary on [`stdout_child_crosses_the_hnsw_print_period`]
+/// with `--nocapture`, so a `println!` reaches the child's real fd 1, and
+/// asserts the child passed and its stdout carries no `hnsw_rs` line. The
+/// harness's own `running 1 test` lines are expected there; the assertion is on
+/// the library's text.
+/// Test: this test itself is the verification.
+#[test]
+fn no_hnsw_insert_writes_to_stdout() {
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "memory_core::store::hnsw_store::tests::stdout_child_crosses_the_hnsw_print_period",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STDOUT_CHILD_ENV, "1")
+        .output()
+        .expect("spawn child test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "child failed: status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
+    assert!(
+        !stdout.contains("setting number of points"),
+        "an hnsw_rs insert wrote to stdout:\n{stdout}"
+    );
+}
+
+/// `(st_dev, st_ino)` of whatever fd 1 points at now.
+#[cfg(unix)]
+fn stdout_identity() -> (u64, u64) {
+    // SAFETY: `fstat` writes into a zeroed, correctly sized `stat`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstat(libc::STDOUT_FILENO, &mut st) };
+    assert_eq!(rc, 0, "fstat(1): {}", std::io::Error::last_os_error());
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+/// Why (#9187, fail-open check): a guard that cannot redirect stdout must not
+/// run the insert anyway, because that insert is the one `hnsw_rs` prints from.
+/// What: points the redirect at a sink that cannot be opened and asserts the
+/// guard returns `Err`, never ran the closure, and left fd 1 on the same file.
+/// Test: this test itself is the verification.
+#[cfg(unix)]
+#[test]
+fn a_failed_stdout_redirect_skips_the_closure_and_leaves_stdout_alone() {
+    let before = stdout_identity();
+    let mut ran = false;
+    let result = quiet_insert::with_stdout_redirected_to(
+        std::path::Path::new("/nonexistent-9187/sink"),
+        || ran = true,
+    );
+    assert!(
+        result.is_err(),
+        "the redirect cannot succeed, so the guard must fail"
+    );
+    assert!(!ran, "the guarded closure ran with stdout unsilenced");
+    assert_eq!(
+        stdout_identity(),
+        before,
+        "fd 1 moved after a failed redirect"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #9174 — a drawer the graph cannot reach is still found.
+// ---------------------------------------------------------------------------
+
+/// `anchor` moved by a small seeded offset and re-normalised: a unique vector
+/// whose nearest neighbours are all copies of `anchor`.
+fn near_anchor(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let offset = spread_vec(anchor.len(), seed);
+    let raw: Vec<f32> = anchor
+        .iter()
+        .zip(&offset)
+        .map(|(a, o)| a + 0.15 * o)
+        .collect();
+    let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    raw.into_iter().map(|v| v / norm).collect()
+}
+
+/// A seeded unit vector with a negative cosine to `anchor`.
+fn far_from(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let v = spread_vec(anchor.len(), seed);
+    let dot: f32 = v.iter().zip(anchor).map(|(a, b)| a * b).sum();
+    let raw: Vec<f32> = v
+        .iter()
+        .zip(anchor)
+        .map(|(x, a)| x - (dot.max(0.0) + 0.5) * a)
+        .collect();
+    let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+    raw.into_iter().map(|x| x / norm).collect()
+}
+
+/// Why (#9174): above the exhaustive threshold the vector lane missed live
+/// drawers queried with their own vector. On a copy of the trusty-tools
+/// palace (6,931 live drawers), every miss that was not a tie between
+/// bit-identical vectors was a point no traversal from the entry point
+/// reaches, even with `ef` equal to the point count. `hnsw_rs` prunes a
+/// candidate that is no farther from an already-chosen neighbour than from
+/// the new point, so a point whose nearest neighbours are copies of one vector
+/// keeps one out-edge and no in-edge.
+/// What: seeds 1,000 copies of one vector, 40 unique drawers next to them, and
+/// enough spread drawers to pass the threshold. Asserts each unique drawer is
+/// in its own top 10 after a reopen (the replay path), and that 20 more
+/// unique drawers upserted into the open store are found too (the upsert
+/// path). The tie case — one of 1,000 identical drawers ranking in a top 10 —
+/// is not asserted; no index can rank it.
+/// Test: this test itself is the verification.
+#[test]
+fn search_finds_drawers_the_graph_cannot_reach() {
+    let dim = 16;
+    let anchor = spread_vec(dim, 424_242);
+    let (clump, probes) = (1_000usize, 40u64);
+    let mut pool = vec![anchor.clone(); clump];
+    pool.extend((0..probes).map(|i| near_anchor(&anchor, 600_000 + i)));
+    // Far side of the sphere, so no spread drawer links to a probe and gives
+    // it the in-edge the clump denies it; real embeddings near the clump of
+    // identical turns were just as sparse.
+    pool.extend((0..3_200u64).map(|i| far_from(&anchor, 700_000 + i)));
+    assert!(pool.len() > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS);
+
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
+    let found = |uuid: &str, v: &[f32]| {
+        reopened
+            .search(v, 10)
+            .expect("search")
+            .iter()
+            .any(|(u, _)| u == uuid)
+    };
+    let missed: Vec<usize> = (clump..clump + probes as usize)
+        .filter(|i| !found(&format!("drawer-{i:05}"), &pool[*i]))
+        .collect();
+
+    let late: Vec<(String, Vec<f32>)> = (0..20u64)
+        .map(|j| (format!("late-{j}"), near_anchor(&anchor, 800_000 + j)))
+        .collect();
+    for (uuid, v) in &late {
+        reopened.upsert(uuid, v).expect("upsert");
+    }
+    let missed_late: Vec<&str> = late
+        .iter()
+        .filter(|(uuid, v)| !found(uuid, v))
+        .map(|(uuid, _)| uuid.as_str())
+        .collect();
+    assert!(
+        missed.is_empty() && missed_late.is_empty(),
+        "replayed drawers missing from their own top 10: {missed:?}; \
+         upserted: {missed_late:?}"
     );
 }
