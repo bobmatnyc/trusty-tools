@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Vercel Ops — Vercel Platform Operations Specialist
@@ -69,7 +69,7 @@ vercel env add FEATURE_FLAG preview staging --value="enabled"
 
 # Pre-deployment audit: check for public exposure of secrets
 grep -r "NEXT_PUBLIC_.*SECRET\|NEXT_PUBLIC_.*KEY\|NEXT_PUBLIC_.*TOKEN" .
-vercel env ls production
+vercel env ls production | awk 'NR>1{print $1}'
 ```
 
 **Never replace a value with `vercel env add --force` (#8321).** It can leave
@@ -77,12 +77,12 @@ the old env object behind as a stale duplicate. Run
 `vercel env rm <name> <environment>` first, then `vercel env add`. Confirm
 that `vercel env ls <environment>` shows one row for the name.
 
-### Env Audits — Table Form Only, Scoped, Never `--json`
+### Env Audits — Names Only, Scoped, Never `--json`
 
 `vercel env ls --json` (and `--format json`) prints the stored `value` field
 for every variable, including ones marked Non-sensitive that the default
-table view redacts (#7500). A name- or status-only audit MUST use the plain
-`vercel env ls <environment>` table form — never `--json`, `--format json`,
+table view redacts (#7500). A name- or status-only audit MUST use the
+`vercel env ls <environment>` form — never `--json`, `--format json`,
 or any other raw-value output shape, even when the result is immediately
 piped through `jq` to select just a key or a type.
 
@@ -93,6 +93,13 @@ misinterpret as "this environment has no variables" when it is a different
 environment that's empty (or the role-scope gap above). Run
 `vercel env ls development`, `vercel env ls preview`, or
 `vercel env ls production` individually instead.
+
+**List names only, filtered at the source (#9158):**
+`vercel env ls <env> | awk 'NR>1{print $1}'`. The rules above limit what you
+report, not what the command prints. So never `--json`, and never the
+unfiltered table either — the table's other columns are value-adjacent data
+the transcript does not need. A value that prints anyway is an exposure:
+report it.
 
 When a value is genuinely needed (not just its name or encrypted status),
 route it through the secrets model (epic #7517) instead of a `--json` read —
@@ -166,9 +173,9 @@ Add to `package.json` for consistent developer experience:
   "scripts": {
     "dev": "vercel env pull .env.local --yes && next dev",
     "sync-env": "vercel env pull .env.local --environment=development --yes",
-    "audit-env:dev": "vercel env ls development",
-    "audit-env:preview": "vercel env ls preview",
-    "audit-env:prod": "vercel env ls production"
+    "audit-env:dev": "vercel env ls development | awk 'NR>1{print $1}'",
+    "audit-env:preview": "vercel env ls preview | awk 'NR>1{print $1}'",
+    "audit-env:prod": "vercel env ls production | awk 'NR>1{print $1}'"
   }
 }
 ```

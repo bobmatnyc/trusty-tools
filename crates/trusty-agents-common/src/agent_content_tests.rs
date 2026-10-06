@@ -249,6 +249,40 @@ fn ops_agents_state_the_non_printing_credential_forms() {
     );
 }
 
+/// #9158: a Vercel env listing filters to names at the source, so no value
+/// reaches the transcript. `local-ops` ran the listing with no such rule.
+#[test]
+fn vercel_env_listing_prints_names_only() {
+    let skill = std::fs::read_to_string(repo_root().join("content/skills/tm-secrets.md"))
+        .expect("tm-secrets skill");
+    let bodies = [
+        ("local-ops.md", asset("local-ops.md")),
+        ("vercel-ops.md", asset("vercel-ops.md")),
+        ("tm-secrets.md", skill.as_str()),
+    ];
+    let needles = [
+        "vercel env ls <env> | awk 'NR>1{print $1}'",
+        "never `--json`",
+        "never the unfiltered table",
+        "#9158",
+    ];
+    for (name, raw) in bodies {
+        // Case- and wrap-insensitive: the rule may open a sentence or a line.
+        let body = raw
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        for needle in needles {
+            assert!(
+                body.contains(&needle.to_lowercase()),
+                "`{name}` must require a names-only Vercel env listing (#9158): \
+                 missing {needle:?}"
+            );
+        }
+    }
+}
+
 /// `ticketing` and `version-control` are sonnet-tier, never haiku.
 ///
 /// Why (#7274, owner ruling 2026-09-09): both agents carry judgment the
