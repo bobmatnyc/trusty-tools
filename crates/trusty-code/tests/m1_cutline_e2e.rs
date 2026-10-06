@@ -43,7 +43,7 @@
 //! Test: this file IS the M1 acceptance suite (spec §9 R3); see `support`
 //! for the shared process/protocol plumbing.
 
-mod support;
+use crate::support;
 
 use std::collections::HashSet;
 use std::time::Duration;

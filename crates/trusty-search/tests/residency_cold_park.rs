@@ -11,7 +11,7 @@
 //! search-result comparison — repeated twice to prove the park→reload→park
 //! cycle is lossless, not just the first hop.
 //!
-//! Test: `cargo test -p trusty-search --test residency_cold_park`
+//! Test: `cargo test -p trusty-search --test integration residency_cold_park::`
 
 use std::path::PathBuf;
 use std::sync::Arc;
