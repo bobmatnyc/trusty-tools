@@ -13,12 +13,15 @@
 //! resolved by the §6.1 precedence. #9328 (owner ruling 06 R2): the project
 //! file is tracked, so its `vault` may only pick a vault under the remote's
 //! owner; a wider override comes only from the untracked machine config.
+//! #9326: likewise, on a Keychain build the project file may not select the
+//! `file` backend; only the machine config may.
 //! Test: `server_scopes_round_trip_over_a_real_socket`,
 //! `server_project_without_a_remote_is_a_fixed_error`,
 //! `server_project_config_overrides_the_project_vault`,
 //! `server_vault_outside_the_project_is_refused`,
 //! `server_tracked_vault_override_outside_the_owner_is_refused`,
-//! `server_non_github_remote_is_a_fixed_error`.
+//! `server_non_github_remote_is_a_fixed_error`,
+//! `server_tracked_file_backend_is_refused_on_a_keychain_build`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,7 +62,8 @@ impl ProjectContext {
     /// not parse fails closed. Every failure folds to a fixed [`ErrorKind`].
     /// Test: `server_project_without_a_remote_is_a_fixed_error`,
     /// `server_project_path_must_be_an_absolute_directory`,
-    /// `server_tracked_vault_override_outside_the_owner_is_refused`.
+    /// `server_tracked_vault_override_outside_the_owner_is_refused`,
+    /// `server_tracked_file_backend_is_refused_on_a_keychain_build`.
     pub fn resolve(state: &State, dir: &Path) -> Result<Self, ErrorKind> {
         if !dir.is_absolute() || !dir.is_dir() {
             return Err(ErrorKind::ProjectInvalid);
@@ -68,7 +72,10 @@ impl ProjectContext {
             dir: dir.to_path_buf(),
             reason: "not inside a git checkout",
         })?;
-        let config = config::load_project_at(&root.join(PROJECT_CONFIG_SUBPATH))?;
+        let config_path = root.join(PROJECT_CONFIG_SUBPATH);
+        let config = config::load_project_at(&config_path)?;
+        // #9326: on a Keychain build only the machine config may pick `file`.
+        config::check_project_backend(config.as_ref(), &config_path)?;
         let machine = config::load_machine_at(&state.settings.machine_config)?;
         // #9328: the tracked `vault` is checked against the remote's owner;
         // only the machine config may pick a vault outside it.
