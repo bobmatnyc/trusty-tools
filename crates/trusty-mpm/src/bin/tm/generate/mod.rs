@@ -51,10 +51,12 @@ pub(crate) type GeneratedSet = BTreeMap<&'static str, String>;
 /// `tm-capabilities/references/{cli,mcp-tools,agents,skills,doctor,framework}.md`.
 /// `references/workflows.md` is deliberately absent from this set — it is
 /// hand-authored (issue #2913 brief §E) and never regenerated or diffed.
+/// `start` locates the checkout `framework.md` probes for docs (#9298).
 /// Test: `generated_set_has_seven_entries`, `generated_set_is_deterministic`.
 pub(crate) fn generate(
     roster: &trusty_mpm::core::content_source::AgentRoster,
     content: &trusty_mpm::core::content_source::FrameworkContent,
+    start: &Path,
 ) -> GeneratedSet {
     let mut set = GeneratedSet::new();
     set.insert("tm-capabilities.md", entry::render(roster, content));
@@ -74,7 +76,7 @@ pub(crate) fn generate(
     set.insert("tm-capabilities/references/doctor.md", doctor::render());
     set.insert(
         "tm-capabilities/references/framework.md",
-        framework::render(),
+        framework::render(start),
     );
     set
 }
@@ -206,7 +208,8 @@ pub(crate) fn run_capabilities_at(
     roster: &trusty_mpm::core::content_source::AgentRoster,
     content: &trusty_mpm::core::content_source::FrameworkContent,
 ) -> anyhow::Result<()> {
-    let set = generate(roster, content);
+    // #9298: `root` sits inside the checkout the command runs in.
+    let set = generate(roster, content, root);
     if check {
         let drifted = diff(&set, root);
         if drifted.is_empty() {
@@ -243,11 +246,17 @@ pub(crate) fn run_capabilities_at(
 mod tests {
     use super::*;
 
+    /// The checkout this test runs for (#9298: runtime, not compile-time).
+    fn test_checkout() -> PathBuf {
+        trusty_common::test_harness::test_repo_root().expect("resolve the checkout")
+    }
+
     #[test]
     fn generated_set_has_seven_entries() {
         let set = generate(
             crate::commands::install::test_roster_ref(),
             crate::commands::install::test_content_ref(),
+            &test_checkout(),
         );
         assert_eq!(set.len(), 7);
         assert!(set.contains_key("tm-capabilities.md"));
@@ -264,10 +273,12 @@ mod tests {
         let a = generate(
             crate::commands::install::test_roster_ref(),
             crate::commands::install::test_content_ref(),
+            &test_checkout(),
         );
         let b = generate(
             crate::commands::install::test_roster_ref(),
             crate::commands::install::test_content_ref(),
+            &test_checkout(),
         );
         assert_eq!(a, b);
     }
@@ -277,6 +288,7 @@ mod tests {
         for (path, content) in generate(
             crate::commands::install::test_roster_ref(),
             crate::commands::install::test_content_ref(),
+            &test_checkout(),
         ) {
             assert!(!content.trim().is_empty(), "{path} generated empty content");
         }
@@ -385,6 +397,7 @@ mod tests {
         let set = generate(
             crate::commands::install::test_roster_ref(),
             crate::commands::install::test_content_ref(),
+            &test_checkout(),
         );
         write(&set, tmp.path()).expect("write succeeds");
         let drifted = diff(&set, tmp.path());
