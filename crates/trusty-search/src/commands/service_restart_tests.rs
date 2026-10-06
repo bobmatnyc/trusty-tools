@@ -16,7 +16,7 @@ use super::service_restart::{
     restart_unit, restart_with, scoped_daemon_pids, terminate_scoped, unit_data_dir_override,
     unit_socket_path, version_from_health, RestartEffects,
 };
-use super::start::reap_orphans::Candidate;
+use super::start::reap_orphans::{candidate_default_data_dir, Candidate};
 
 const DETACHED: u32 = 1685;
 
@@ -104,6 +104,7 @@ fn health_version_is_read_from_the_report() {
 fn daemon(pid: u32, data_dir: &str) -> Candidate {
     Candidate {
         pid,
+        start_time: 0,
         argv: [
             "trusty-search",
             "start",
@@ -125,11 +126,37 @@ fn daemon(pid: u32, data_dir: &str) -> Candidate {
 fn a_daemon_on_another_data_dir_is_not_targeted() {
     let table = [daemon(10, "/data/unit"), daemon(20, "/data/other")];
     assert_eq!(
-        scoped_daemon_pids(
-            &table,
-            Path::new("/data/unit"),
-            Path::new("/platform/default")
-        ),
+        scoped_daemon_pids(&table, Path::new("/data/unit")),
+        vec![10]
+    );
+}
+
+/// #9232: a restart run under another HOME (a sandbox) for a unit with no
+/// `--data-dir` resolves the unit's dir from that HOME. The live service, which
+/// also declares no data dir, resolves its default from its own HOME and is
+/// never in the kill set.
+#[test]
+fn a_default_daemon_under_another_home_is_not_targeted() {
+    let default_for = |home: &str| {
+        candidate_default_data_dir(&[format!("HOME={home}")]).expect("an absolute HOME")
+    };
+    let plain = |pid: u32, home: &str| Candidate {
+        pid,
+        start_time: 0,
+        argv: [
+            "trusty-search",
+            "start",
+            "--foreground",
+            "--no-auto-discover",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        environ: vec![format!("HOME={home}")],
+    };
+    let table = [plain(10, "/tmp/sandbox-home"), plain(20, "/Users/live")];
+    assert_eq!(
+        scoped_daemon_pids(&table, &default_for("/tmp/sandbox-home")),
         vec![10]
     );
 }
