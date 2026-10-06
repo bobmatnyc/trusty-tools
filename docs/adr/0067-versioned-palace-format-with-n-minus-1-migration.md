@@ -1,4 +1,4 @@
-# 0070. Version the palace format; refuse newer, migrate N-1 behind a verified backup
+# 0067. Version the palace format; refuse newer, migrate N-1 behind a verified backup
 
 - **Status:** Accepted
 - **Date:** 2026-10-06
@@ -22,7 +22,7 @@
 - **Supersedes / Superseded by:** —
 
 Issue: [#9274](https://github.com/bobmatnyc/trusty-tools/issues/9274) (E6).
-Contract: [ADR-0069](0069-trusty-memory-1x-compatibility-contract.md)
+Contract: [ADR-0066](0066-trusty-memory-1x-compatibility-contract.md)
 surface 3.
 
 ## Context
@@ -118,7 +118,7 @@ the reader (`read_project_pin`, `crates/trusty-common/src/palace_resolve.rs:340`
 never checks the value, and the only writer
 (`write_project_pin`, `crates/trusty-memory/src/project_root/pin_file.rs:46`)
 re-serialises the whole struct, which drops unknown fields; both change before
-1.0.0. ADR-0069 surface 2 points here.
+1.0.0. ADR-0066 surface 2 points here.
 
 The sync connector's state directory sits beside the palaces, not inside
 them (DOC-80 §3), and is outside this format.
@@ -316,8 +316,8 @@ None remaining at review (2026-10-06).
 
 Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
 
-- **ADR-0069 (trusty-memory 1.x compatibility contract):** Extends. This ADR
-  is ADR-0069's surface 3.
+- **ADR-0066 (trusty-memory 1.x compatibility contract):** Extends. This ADR
+  is ADR-0066's surface 3.
 - **ADR-0027 (Rooms, wings and closets):** Consistent. Its additive,
   at-open, fail-open backfill stays legal for changes that need no bump
   (D3). A format migration may re-encode rows but never reclassifies,
@@ -331,7 +331,7 @@ Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
 - **ADR-0007 (Tool contract versioning):** Consistent. The format version is
   a monotonic integer, in line with ADR-0007's level model. It is separate
   from tctl's `contract_version`.
-- **ADR-0066 / 0067 / 0068 (memory sync; Proposed, PR
+- **ADR-0068 / 0069 / 0070 (memory sync; Proposed, PR
   [#9176](https://github.com/bobmatnyc/trusty-tools/pull/9176), unmerged):**
   Consistent. Sync's palace-side changes land as one N → N+1 migration
   (D6). The connector state directory and the sync wire format are outside

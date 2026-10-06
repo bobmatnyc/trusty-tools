@@ -1,4 +1,4 @@
-# 0069. trusty-memory 1.x freezes four surfaces: MCP tools, CLI, palace format, engine API
+# 0066. trusty-memory 1.x freezes four surfaces: MCP tools, CLI, palace format, engine API
 
 - **Status:** Accepted
 - **Date:** 2026-10-06
@@ -47,7 +47,7 @@ trusty-memory is at 0.28.x. Its surfaces change without a stated rule:
 - **CLI.** About 33 subcommands. Exit codes are ad hoc: `1` from `main` on
   error, `2` from clap and from `commands/note.rs`, `0` from the
   `prompt-context` hook. No table documents them.
-- **On-disk format.** Versioned only in parts. ADR-0070 covers it.
+- **On-disk format.** Versioned only in parts. ADR-0067 covers it.
 - **Engine.** The engine is `trusty_common::memory_core`, behind the
   `memory-core` feature (crate decision 0001). trusty-common is 0.54.x and
   publishes a minor on most releases, so any engine consumer sees breaks at
@@ -99,13 +99,13 @@ responses); exit codes. Exit codes in 1.x: `0` success, `1` runtime failure,
 may be added only for a new subcommand or flag, never for an existing
 condition. The documented environment variables and the project pin file
 (`.trusty-tools/trusty-memory.yaml`, whose `schema_version` follows the
-pin-file refuse-newer rule in ADR-0070 D2) are part of this surface.
+pin-file refuse-newer rule in ADR-0067 D2) are part of this surface.
 
 **3. On-disk palace format.** Frozen by reference to
-[ADR-0070](0070-versioned-palace-format-with-n-minus-1-migration.md): the
+[ADR-0067](0067-versioned-palace-format-with-n-minus-1-migration.md): the
 palace format version, the refuse-newer and N-1 migration rules, and the
 export format (`SHARE_FORMAT_VERSION`). A format change in 1.x is legal only
-as an N → N+1 migration under ADR-0070.
+as an N → N+1 migration under ADR-0067.
 
 **4. Engine Rust API.** The engine ships inside trusty-memory as a library
 plus binaries: the `trusty_memory` lib, with `trusty_memory::engine::*` built
@@ -163,7 +163,7 @@ These may change in any release:
 - recall ranking order beyond the thresholds of the recall eval gate
   ([#9281](https://github.com/bobmatnyc/trusty-tools/issues/9281), E13);
 - the daemon socket (D1.5);
-- derived on-disk files, which ADR-0070 lets a release rebuild.
+- derived on-disk files, which ADR-0067 lets a release rebuild.
 
 ### D3. Change rules in 1.x
 
@@ -177,7 +177,7 @@ These may change in any release:
   | MCP | The tool or param description opens with `DEPRECATED since 1.y; removed in 2.0: use <replacement>.` The tool's `_meta` object carries `"deprecated": true` for machine readers. |
   | CLI | One line on stderr per invocation, never stdout (stdout carries MCP framing under `serve --stdio`): `warning: '<item>' is deprecated since 1.y and is removed in 2.0; use '<replacement>'`. Help keeps the item, marked `(deprecated)`. |
   | Engine | rustdoc `#[deprecated(since = "1.y.0", note = "use <replacement>")]`. |
-  | Format | Formats are never deprecated in 1.x. ADR-0070 migrates them. |
+  | Format | Formats are never deprecated in 1.x. ADR-0067 migrates them. |
 
 - **Removal needs Bob's override (D6),** and the release type is Bob's call
   when he gives it.
@@ -304,7 +304,7 @@ review:
   `trusty-crate-contracts`) are not protected by this contract and need a
   tight version requirement on trusty-memory.
 
-**Follow-up:** E1–E5 and E8–E10 implement this ADR; ADR-0070 and E6
+**Follow-up:** E1–E5 and E8–E10 implement this ADR; ADR-0067 and E6
 implement surface 3; the `protocol_version` handshake (D1.5) is tracked by
 its own issue
 ([#9288](https://github.com/bobmatnyc/trusty-tools/issues/9288)) on milestone
@@ -341,7 +341,7 @@ Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
   contract. D1.5 reuses its monotonic-integer model for the socket.
 - **ADR-0028 (Memory recall tiers):** Consistent. `fact_key` and the Tier C
   slot semantics become frozen behaviour of the MCP write tools and of the
-  format (ADR-0070). This ADR changes neither.
+  format (ADR-0067). This ADR changes neither.
 - **ADR-0029 (MSRV 1.94 and edition policy):** Consistent. An MSRV raise is
   allowed in a 1.x minor under ADR-0029's process.
 - **ADR-0032 (Console is the only HTTP surface):** Consistent. The socket
@@ -352,12 +352,12 @@ Vetted against `docs/adr/INDEX.md` and prior decisions on 2026-10-06:
 - **ADR-0051 (Palace id stays hyphen-joined):** Consistent. The
   `#[non_exhaustive]` `Palace` record and its optional fields fit the
   struct rule in D1.4.
-- **ADR-0066 / 0067 / 0068 (memory sync; Proposed, PR
+- **ADR-0068 / 0069 / 0070 (memory sync; Proposed, PR
   [#9176](https://github.com/bobmatnyc/trusty-tools/pull/9176), unmerged):**
   Consistent. Sync adds MCP tools, CLI verbs and a format migration, all
-  additive under D3 and ADR-0070. The sync wire crate of ADR-0067 is
+  additive under D3 and ADR-0067. The sync wire crate of ADR-0069 is
   versioned on its own and is not part of this contract.
-- **ADR-0070 (Versioned palace format):** Extends. ADR-0070 defines
+- **ADR-0067 (Versioned palace format):** Extends. ADR-0067 defines
   surface 3.
 - **trusty-memory crate decision 0001 (Frontend/core split):** Amends on
   acceptance. The engine leaves trusty-common's `memory-core` feature and
