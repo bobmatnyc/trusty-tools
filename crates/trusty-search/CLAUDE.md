@@ -137,7 +137,14 @@ pub struct CodeChunk {
   `http_status` — so `error`, `index_id`, `retryable`, `restore_via`, `reason`,
   `transient`, and `stages` read exactly as the HTTP table above describes
   them. A `503` with no JSON body, or any other status, still reaches the
-  caller as the plain transport error it always did.
+  caller as the plain transport error it always did. Since #9168 the bridge
+  (`trusty-search serve`) reaches the daemon only over its Unix socket: the
+  `503` body arrives as the refusal's `data` member and is relayed unchanged,
+  and every MCP error names the daemon socket rather than a URL. The read
+  tools that take one index also accept an optional `project` (name,
+  `owner/repo`, or path), resolved by the daemon's `search.project.resolve`;
+  a miss answers `PROJECT_UNRESOLVED` (bare-method code `-32014`) carrying the
+  daemon's `candidates`.
 - **CORS**: permissive (`*`) for browser-based admin UIs.
 - **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 
@@ -1033,7 +1040,7 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **20 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1042,23 +1049,22 @@ this table is generated from it, not maintained by hand.
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
-| `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
-| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
+| `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
+| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
-| `index_status` | `index_id?` | Get stats for an index (chunk count, root path). |
-| `list_chunks` | `index_id`, `after?`, `full?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?` | Paginated enumeration of every chunk in an index (issue #54). |
+| `index_status` | `index_id?`, `project?` | Get stats for an index (chunk count, root path). |
+| `list_chunks` | `after?`, `full?`, `index_id?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?`, `project?` | Paginated enumeration of every chunk in an index (issue #54). |
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
-| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
-| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
-| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
-| `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
-| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
+| `typeahead` | `query`, `index_id?`, `limit?`, `mode?`, `project?` | Fast per-keystroke autocomplete suggestions for an index. |
 <!-- END GENERATED: mcp-tools -->
 
 ## Stack

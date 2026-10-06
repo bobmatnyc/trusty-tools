@@ -1,3 +1,0 @@
-Security
-- `parse_github_path`, `parse_remote_url`, `owner_repo_from_git_remote` and `repo_slug_from_git_remote` strip a remote URL's userinfo before deriving anything, so a token embedded as `https://user:<token>@host/x.git` no longer becomes the owner of a managed-checkout path, a palace id, a log line or an error (#9124). New `url_userinfo::strip_userinfo` and `url_userinfo::userinfo_end`.
-- New `url_userinfo::strip_url_secret` removes only a URL's secret, for a URL that is stored and cloned: the `:password` on any scheme and the whole userinfo on `http(s)://`, keeping the `git@` ssh login. New `url_userinfo::scp_userinfo_end` locates the userinfo of an scp-style `user@host:path` (#9155).

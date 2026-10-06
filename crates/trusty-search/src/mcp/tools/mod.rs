@@ -1,19 +1,20 @@
-//! MCP tool dispatcher: JSON-RPC 2.0 over a daemon HTTP back-end.
+//! MCP tool dispatcher: JSON-RPC 2.0 over the daemon's Unix socket.
 //!
 //! Why: Claude Code speaks MCP/JSON-RPC; the trusty-search daemon speaks
-//! REST. This module is a pure translator. It owns no state beyond a
-//! `reqwest::Client` and a base URL, so the same dispatcher can be driven
-//! from `stdio` (one process per session) or `sse` (long-lived axum task).
+//! JSON-RPC on its socket (#9168, ADR-0032). This module is a pure
+//! translator. It owns no state beyond a `DaemonClient`, so the same
+//! dispatcher can be driven from `stdio` (one process per session) or `sse`
+//! (long-lived axum task).
 //!
 //! What: [`McpServer::dispatch`] takes a [`Request`] and returns a
-//! [`Response`]. Tool calls map 1:1 to daemon endpoints. Tool arms are
+//! [`Response`]. Tool calls map 1:1 to `search.*` socket methods. Tool arms are
 //! split across focused submodules:
 //! - [`search`]      — `search`, `search_lexical`, `search_semantic`, `search_kg`,
 //!   `search_all`, `search_similar`
 //! - [`index`]       — `index_file`, `remove_file`, `list_indexes`,
 //!   `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`
 //! - [`misc`]        — `search_health`, `chat`, `get_call_chain`, `grep`,
-//!   `upgrade`
+//!   `console_metrics`
 //! - [`health`]      — the `search_health` report (#5264): which daemon
 //!   answered, and whether it can serve this project
 //! - [`compact`]     — the `compact` field mode (#7676): drop the hit fields a
@@ -31,7 +32,9 @@
 //! - [`unavailable`] — the `INDEX_UNAVAILABLE` contract (issue #5350): a daemon
 //!   503 carries a structured availability verdict, which must reach the caller
 //!   as data rather than as a flattened prose string
-//! - [`http`]        — shared HTTP transport helpers (`get`, `post`, `delete`, …)
+//! - [`transport`]   — the socket call and its refusal mapping (#9168)
+//! - [`project`]     — the optional `project` argument, resolved by the daemon
+//!   through `search.project.resolve` (#9168)
 //! - [`types`]       — `DispatchError`, `require_str`, response-wrapping helpers
 //!
 //! Test: `cargo test -p trusty-search` covers JSON-RPC parsing, error
@@ -39,6 +42,8 @@
 //! params), and dispatch routing without hitting a real daemon.
 
 use serde_json::Value;
+
+use crate::service::daemon_client::DaemonClient;
 
 // JSON-RPC 2.0 primitives from the shared `trusty-common` crate.
 // Re-exported here to keep `pub use` consumers (and `crate::mcp::tools::error_codes`
@@ -51,13 +56,16 @@ pub(crate) mod descriptors;
 pub(crate) mod health;
 // #9059: the pure verdict helpers split out of `health` for the SLOC cap.
 mod health_verdicts;
-pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod index_directory;
 pub(crate) mod misc;
 pub(crate) mod not_ready;
+// #9168: `project` → index id through the daemon's resolver.
+pub(crate) mod project;
 pub(crate) mod search;
 pub(crate) mod typeahead;
+// #9168: the socket transport that replaced the HTTP verb helpers.
+pub(crate) mod transport;
 pub(crate) mod types;
 pub(crate) mod unavailable;
 
@@ -67,11 +75,13 @@ pub use health::{
     HEALTH_INDEX_NOT_REGISTERED, HEALTH_INDEX_UNKNOWN, HEALTH_OK,
 };
 pub use not_ready::{INDEX_NOT_READY, INDEX_NOT_READY_CODE};
+pub use project::{PROJECT_UNRESOLVED, PROJECT_UNRESOLVED_CODE};
 pub use unavailable::{INDEX_UNAVAILABLE, INDEX_UNAVAILABLE_CODE};
 
 use not_ready::wrap_index_not_ready_error;
 use types::{
-    wrap_stage_not_ready_error, wrap_text_content, wrap_tool_error, wrap_tool_result, DispatchError,
+    wrap_stage_not_ready_error, wrap_structured_error, wrap_text_content, wrap_tool_error,
+    wrap_tool_result, DispatchError,
 };
 use unavailable::wrap_index_unavailable_error;
 
@@ -91,19 +101,20 @@ use unavailable::wrap_index_unavailable_error;
 /// and `search_kg_tool_returns_stage_not_ready_when_*` in `tests_lane.rs`.
 pub const STAGE_NOT_READY_CODE: i32 = -32010;
 
-/// Tool dispatcher backed by an HTTP client targeting the daemon.
+/// Tool dispatcher backed by a client on the daemon's Unix socket.
 ///
-/// Why: decouples the MCP wire protocol from the HTTP daemon API so the
-/// same dispatcher can be used from both `stdio` and `sse` transports.
-/// What: holds the daemon base URL and a `reqwest::Client`; `dispatch`
-/// translates JSON-RPC requests into HTTP calls and wraps the response.
-/// Test: instantiated in every test with a fake base URL or a local mock
-/// daemon; the `with_client` constructor allows injecting a pre-built
-/// client for connection pooling.
+/// Why: decouples the MCP wire protocol from the daemon's own JSON-RPC
+/// surface so the same dispatcher can be used from both `stdio` and `sse`
+/// transports. #9168: the client is a [`DaemonClient`], which never falls back
+/// to TCP, so no tool call can reach the daemon over HTTP.
+/// What: holds the socket client and the optional session pin; `dispatch`
+/// translates JSON-RPC requests into socket calls and wraps the response.
+/// Test: every dispatch test builds one on a mock socket daemon
+/// (`test_daemon.rs`); `the_mcp_bridge_builds_no_http_url` sweeps the source.
 #[derive(Clone)]
 pub struct McpServer {
-    pub(crate) base_url: String,
-    pub(crate) http: reqwest::Client,
+    /// The daemon socket every tool call goes through (#9168).
+    pub(crate) daemon: DaemonClient,
     /// Index id this MCP session is pinned to, if any (issue #1373).
     ///
     /// `Some(id)` when `trusty-search serve --index <id>` (or `--project`) was
@@ -115,21 +126,20 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Construct a dispatcher pointing at the daemon's base URL
-    /// (e.g. `http://127.0.0.1:7878`).
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into(),
-            http: reqwest::Client::new(),
-            pinned_index: None,
-        }
+    /// Construct a dispatcher that reaches the daemon through `daemon`.
+    ///
+    /// #9168: replaces the client's per-call budget with the query budget
+    /// `TRUSTY_QUERY_TIMEOUT_SECS` implies ([`transport::query_call_budget`]);
+    /// writes and chat override it per call with no limit.
+    pub fn new(daemon: DaemonClient) -> Self {
+        let raw = std::env::var(crate::service::query_timeout::QUERY_TIMEOUT_ENV).ok();
+        Self::with_query_budget(daemon, transport::query_call_budget(raw.as_deref()))
     }
 
-    /// Inject a pre-built reqwest client (useful for tests / pooling).
-    pub fn with_client(base_url: impl Into<String>, http: reqwest::Client) -> Self {
+    /// [`Self::new`] with an explicit query budget instead of the env's.
+    pub fn with_query_budget(daemon: DaemonClient, budget: std::time::Duration) -> Self {
         Self {
-            base_url: base_url.into(),
-            http,
+            daemon: daemon.with_timeout(budget),
             pinned_index: None,
         }
     }
@@ -152,9 +162,9 @@ impl McpServer {
         self
     }
 
-    /// Daemon base URL.
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+    /// The socket client this dispatcher calls.
+    pub fn daemon(&self) -> &DaemonClient {
+        &self.daemon
     }
 
     /// Resolve the effective index id for a tool call (issue #1373).
@@ -177,7 +187,7 @@ impl McpServer {
         self.pinned_index.clone()
     }
 
-    /// Translate a JSON-RPC request into a daemon HTTP call and wrap the
+    /// Translate a JSON-RPC request into a daemon socket call and wrap the
     /// response.
     ///
     /// Why: all MCP clients go through a single entry point so protocol
@@ -297,6 +307,10 @@ impl McpServer {
                 Err(DispatchError::IndexUnavailable { message, payload }) => {
                     Response::ok(id, wrap_index_unavailable_error(&message, &payload))
                 }
+                // #9168: an unresolved `project` carries the daemon's candidates.
+                Err(DispatchError::ProjectUnresolved { message, payload }) => {
+                    Response::ok(id, wrap_structured_error(&message, &payload))
+                }
             }
         } else {
             match outcome {
@@ -353,6 +367,14 @@ impl McpServer {
                     }
                     resp
                 }
+                // #9168: same shape for an unresolved `project`.
+                Err(DispatchError::ProjectUnresolved { message, payload }) => {
+                    let mut resp = Response::err(id, PROJECT_UNRESOLVED_CODE, message);
+                    if let Some(ref mut e) = resp.error {
+                        e.data = Some(payload);
+                    }
+                    resp
+                }
             }
         }
     }
@@ -383,6 +405,9 @@ impl McpServer {
     /// Test: all tool-dispatch tests in `tests.rs` and `tests_lane.rs` exercise
     /// this routing.
     async fn route_tool(&self, tool: &str, args: &Value) -> Result<Value, DispatchError> {
+        // #9168: a tool that ignores `project` refuses it instead of falling
+        // back to the session pin.
+        project::refuse_unread_project(tool, args)?;
         if let Some(result) = search::dispatch_search_tool(self, tool, args).await {
             return result;
         }
@@ -433,3 +458,12 @@ mod tests_health_cwd_8229;
 // #6317: the NO_INDEX_RESOLVED directory answer, and the write tools it spares.
 #[cfg(test)]
 mod tests_index_directory;
+// #9168: the mock socket daemon every dispatch test drives.
+#[cfg(test)]
+pub(crate) mod test_daemon;
+// #9168: the socket transport's refusal mapping.
+#[cfg(test)]
+mod tests_transport;
+// #9168: the optional `project` argument.
+#[cfg(test)]
+mod tests_project;

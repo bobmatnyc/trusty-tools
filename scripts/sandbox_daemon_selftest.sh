@@ -11,7 +11,8 @@
 #   and arguments it received, from a caller environment (built with `env -i`,
 #   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the four pinned names plus the
+#     allowlist     the stub sees exactly the five pinned names (HOME, PATH,
+#                   TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR, TRUSTY_SANDBOX) plus the
 #                   forwarded names the caller set (LANG, RUST_LOG), never the
 #                   fake secrets or `LC_API_KEY` (plus the names /bin/sh adds
 #                   itself), and `daemon --sandbox`
@@ -127,7 +128,7 @@ elif [ ! -f "$DIR1/home/stub-env-names" ]; then
 else
   # /bin/sh exports PWD, SHLVL, OLDPWD and _ on its own; they are not inherited.
   GOT="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR1/home/stub-env-names" | tr '\n' ' ')"
-  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR "
+  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX "
   if [ "$GOT" != "$WANT" ]; then
     fail allowlist "stub saw [$GOT], want [$WANT]"
   elif [ "$(tr '\n' ' ' < "$DIR1/home/stub-args")" != "daemon --sandbox " ]; then
@@ -153,7 +154,7 @@ if [ "$STATUS2" -ne 0 ]; then
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
 elif ! printf '%s' "$OUT2" \
-    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR LANG RUST_LOG"; then
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX LANG RUST_LOG"; then
   fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in

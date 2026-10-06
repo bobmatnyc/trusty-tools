@@ -1,0 +1,18 @@
+{
+  "leak": "-",
+  "about": "The quote is real but cited 6 lines off; the gate moves it to the line that holds it.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "One overflow risk.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "overflow", "body": "`amounts.iter().sum::<u64>()` can overflow on large invoices.", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 4}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 1,
+  "expect_verdict": "REQUEST_CHANGES"
+}

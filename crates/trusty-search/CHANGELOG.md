@@ -6,6 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.56.0] — 2026-10-05
+
+### Added
+
+- The MCP read tools that take one index (`search`, `search_lexical`, `search_semantic`, `search_kg`, `search_all`, `grep`, `typeahead`, `index_status`, `list_chunks`, `get_call_chain`) accept an optional `project`: a project name, `owner/repo`, or path, resolved by the daemon's `search.project.resolve`. An explicit `index_id` still wins; `project` outranks the session pin. A miss returns `PROJECT_UNRESOLVED` (JSON-RPC `-32014` in the bare form) with the daemon's candidates. `index_id` is no longer listed as required on `list_chunks` and `get_call_chain`, so a schema-checking client can send `project` alone; a call with neither still errors as before (#9168).
+- A tool outside that list (`delete_index`, `index_file`, `remove_file`, `reindex`, `create_index`, `chat`, and the rest) refuses a `project` argument with invalid params ("project is not accepted on <tool>; pass index_id") and sends nothing to the daemon. It no longer ignores `project` and acts on the session's pinned index (#9168).
+
+### Changed
+
+- `trusty-search serve` (the MCP bridge, stdio and `--with-http`) now reaches the daemon only through its Unix socket, never over `http://127.0.0.1:7878`. Every MCP tool calls its `search.*` socket method; tool names, input schemas and result shapes are unchanged. Stdio `serve` auto-starts the daemon and waits for the socket, not the HTTP address (#9168).
+- Index-unavailable errors keep their structured fields (`index_id`, `retryable`, `restore_via`, `reason`, `transient`, `stages`, plus `error_code` and `http_status: 503`) from the socket refusal's `data`. MCP error text names the daemon socket instead of a URL (#9168).
+- `search_health` reports the answering daemon as `daemon.socket` (was `daemon.base_url`). A daemon that answers badly reports `daemon.rpc_code` and `daemon.error` (were `http_status` and `body`) (#9168).
+- `McpServer::new` takes a `DaemonClient`; `McpServer::with_client` and `McpServer::base_url` are removed, and `McpServer::daemon` returns the client (#9168).
+- The bridge's client-side time limits follow the daemon's own. Index create/delete/reindex, `index_file`, `remove_file` and `chat` have no client-side limit, as over HTTP, because the daemon puts no deadline on them. Every other call is bounded by the daemon's query deadline (`TRUSTY_QUERY_TIMEOUT_SECS`) plus 30 s of admission headroom, never below 60 s, so a deadline set above 60 s is honoured. Startup pin confirmation keeps its 5 s limit (#9168).
+
+## [0.55.0] — 2026-10-05
+
+### Added
+
+- Serve-only indexes. Set `serve_only = true` on an index's `indexes.toml` entry and restart the daemon: every reindex of that index is refused with `403 index_serve_only` (socket `CODE_FORBIDDEN`), naming the index, why, and how to lift it. HTTP, the socket, the MCP `reindex` tool and `trusty-search index --force` / `reindex` all get that answer, and nothing is queued. The daemon also starts no file watcher for it, skips it in the boot reconcile, and queues no boot deferred-embed or vector-gap backfill for it. Search is unaffected. A `POST /indexes` over an already-registered id, live or cold, keeps the mark. Indexes without the mark reindex as before (#8883).
+- `IndexHandle::serve_only`, `PersistedIndex::serve_only` and `ReindexClaimError::ServeOnly` are new public items (#8883).
+- `search.project.resolve` socket method: send `{"project": …}` with a project name or index id, an `owner/repo`, or an absolute path, and get back the one live index for that project (`index_id`, `root_path`, `repo_identity`, `kind`, `resident`, `reindexed_unix`, `corpus_modified_unix`, `matched_by`). An exact index id, or the index whose root holds the path, is returned itself unless it is a worktree or an orphaned root. Otherwise the main checkout wins, then the most recently indexed one; a worktree root never wins. "Most recently indexed" is a `reindexed_unix` stamp each committed reindex writes into the corpus; loading or opening an index never writes it. A stamped index beats an unstamped one, and an index not reindexed since this release falls back to its corpus file mtime. A subdirectory index (a root with no `.git` of its own) is grouped by its root, not its repo; when the repo has no main checkout, a single subdirectory index wins over its worktree, orphaned or `/Volumes` indexes, and several are ambiguous. Every other index of the group is listed in `duplicates`. A miss answers an error whose `data` carries `error` (`project_not_found`, `project_ambiguous` or `no_live_index`) and the nearest `candidates`. A resolve reads disk only for the matched group and the five nearest candidates, and never reads a `/Volumes` root, which reports `kind: "indeterminate"`. Socket-only, in the free lane (#9169).
+
+### Fixed
+
+- `index_file` (HTTP, socket, MCP and boot reconcile) now replaces a file's earlier chunks. Before, an edit that shifted lines or renamed a symbol left the old chunks searchable beside the new ones in the corpus, BM25, HNSW and the symbol graph (#8959).
+- `index_file` and `remove_file` no longer rebuild the whole symbol graph on every call. They mark the graph stale, and the daemon rebuilds it once per burst of writes: after 2 s without a write, or after 60 s of continuous writes. On a 315K-chunk index one `remove_file` took over 60 s and allocated about 1.2 GB for that rebuild (#8959, #9179).
+- A restart, park or crash before a deferred symbol-graph rebuild ran no longer boots the old persisted graph as current. Each write stores a stale mark in the index's corpus before it changes anything, and the next load schedules the rebuild (#8959).
+- `index_file` now fails when the file's replaced chunks cannot be deleted from the durable corpus. Before, it answered success and a restart brought the old chunks back; a retry now removes them (#8959).
+- A tombstone or sops-encrypted `index_file` write now fails when the file's chunks cannot be deleted from the durable corpus. Before, it answered success and a restart brought the old chunks back, for a sops file its plaintext; a retry now removes them (#8959).
+- Concurrent `index_file` writes to the same path now end with only the last write's chunks on that path (#8959).
+- `GET /indexes/:id/graph`, `call_chain` and `graph/neighbors` hold the index teardown guard while they flush pending graph writes, so a concurrent `DELETE` cannot remove the data directory during the rebuild (#8959).
+- A file the watcher rescan or the git reconcile pass removes now stores the stale mark before its chunks leave. Before, a crash before that pass rebuilt the symbol graph booted the old graph, which still answered the removed file's symbols (#8959).
+
+### Removed
+
+- The `upgrade` MCP tool. Nothing in the workspace, the tm prompts and skills, or the docs called it. `trusty-search upgrade` and the daemon's `POST /upgrade` route are unchanged (#9169).
+
 ## [0.54.8] — 2026-10-05
 
 ### Breaking

@@ -28,7 +28,7 @@ use crate::{
     pipeline::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
-        mapreduce::{MapContext, ReducedReview, run_map_reduce},
+        mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{CallerContext, ReviewDeps, ReviewInput},
@@ -36,8 +36,9 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
-        verify_posted::gate_then_verify,
+        verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
+        withheld_contract::{refs_corpus, regrade_from_survivors},
     },
 };
 
@@ -70,7 +71,7 @@ pub(super) struct MapReduceRun {
 ///
 /// Why: this is the REAL fix for over-cap diffs — every file is reviewed with
 /// its own LLM call so no changed code is ever invisible (the #1638 symptom).
-/// What: runs split → map → reduce via `run_map_reduce`, then folds the
+/// What: runs split → map → reduce via `run_map_reduce_with_wiped`, then folds the
 /// `ReducedReview` into `result` and runs the SAME post-LLM chain as the unified
 /// path (grade floor, coverage floor, verification, grade clamp, inline comments,
 /// finalize).  When the reduce stage assessed NOTHING (no reviewed chunks), the
@@ -115,8 +116,8 @@ pub(super) async fn run_mapreduce_branch(
         files = run.filtered.files.len(),
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
-    let mut reduced: ReducedReview =
-        run_map_reduce(&run.filtered, &deps.llm, &ctx, mr_config).await;
+    let (mut reduced, wiped_model_verdict): (ReducedReview, _) =
+        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config).await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -198,7 +199,10 @@ pub(super) async fn run_mapreduce_branch(
         &mut result,
         parsed,
         &run,
-        synthesis_active,
+        ReduceFacts {
+            synthesis_active,
+            wiped_model_verdict,
+        },
     )
     .await;
 
@@ -315,6 +319,14 @@ pub(super) fn restore_caller_context(
     restored
 }
 
+/// What the reduce stage knew that the post-LLM chain needs besides the parse.
+struct ReduceFacts {
+    /// The synthesis pass (#1663) ran and floored the verdict itself.
+    synthesis_active: bool,
+    /// From `run_map_reduce_with_wiped`, for `settle_no_survivors` (#9188).
+    wiped_model_verdict: Option<crate::models::Verdict>,
+}
+
 /// Apply the post-LLM grade/verify/inline chain to a reduced parse.
 ///
 /// Why: the reduce output must go through the severity floor, coverage floor,
@@ -338,7 +350,7 @@ async fn fold_reduced_into_result(
     result: &mut ReviewResult,
     parsed: ParsedReview,
     run: &MapReduceRun,
-    synthesis_active: bool,
+    facts: ReduceFacts,
 ) {
     // Derive (final_verdict, final_grade, original_llm_grade) depending on path.
     //
@@ -353,7 +365,7 @@ async fn fold_reduced_into_result(
     // Both grades are Option<Grade> (#1474 parity): None for an UNKNOWN verdict.
     // The synthesis path is always a real verdict (not UNKNOWN), so Some() wraps
     // the concrete grades to keep the type consistent with apply_grade_and_floor.
-    let (final_verdict, final_grade, original_llm_grade) = if synthesis_active {
+    let (final_verdict, final_grade, original_llm_grade) = if facts.synthesis_active {
         // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
         // floor.  Use the synthesis verdict + grade directly instead.
@@ -397,16 +409,25 @@ async fn fold_reduced_into_result(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    gate_then_verify(
-        config,
-        deps.verifier.as_ref(),
-        result,
-        &run.filtered,
-        &run.raw_diff,
-        true,
-        author_rationale.as_deref(),
-    )
-    .await;
+    // #9188 D: context citations resolve in what the reviewer was shown.
+    let refs = refs_corpus(&[
+        Some(&run.pr_meta.title),
+        Some(&run.pr_meta.body),
+        Some(&run.external_context),
+        run.context.pr_description.as_deref(),
+        run.context.pr_discussion.as_deref(),
+        run.context.referenced_code.as_deref(),
+    ]);
+    let inputs = GateInputs {
+        filtered: &run.filtered,
+        diff: &run.raw_diff,
+        per_file: true,
+        author_rationale: author_rationale.as_deref(),
+        refs: &refs,
+        narrative: &parsed.summary, // #9188 C: the synthesis summary
+        wiped_model_verdict: facts.wiped_model_verdict,
+    };
+    gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 
     // Envelope grade: reconcile the original (pre-floor) grade with the post-
     // verification verdict (closes #1486 parity with the unified path).
@@ -419,6 +440,7 @@ async fn fold_reduced_into_result(
         original_llm_grade.filter(|_| result.verdict != crate::models::Verdict::Unknown);
     result.grade =
         original_llm_grade.map(|g| reconcile_grade_with_verdict(g, &result.verdict).to_string());
+    regrade_from_survivors(result); // #9188 J: withheld findings never shape it
 
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);

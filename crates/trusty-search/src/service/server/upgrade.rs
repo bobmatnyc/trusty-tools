@@ -6,8 +6,8 @@
 //! self-restart, and nothing but the axum `State` type is common to them.
 //! What: `upgrade_handler` and its typed request body, moved verbatim.
 //! Test: unchanged by the move — the handler reaches crates.io and `cargo
-//! install`, so its coverage is the MCP `upgrade` tool's end-to-end path and
-//! the manual `curl` in `upgrade_handler`'s own doc.
+//! install`, so its coverage is the manual `curl` in `upgrade_handler`'s own
+//! doc.
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
@@ -19,8 +19,8 @@ use super::state::SearchAppState;
 ///
 /// Why: typed body avoids raw JSON field extraction in the handler, and serde
 /// provides friendly error messages for malformed requests.
-/// What: mirrors the MCP tool schema: `check` (default true) and `confirm`.
-/// Test: the MCP `upgrade` tool calls this endpoint.
+/// What: `check` (default true) and `confirm`.
+/// Test: manual, via the `curl` in [`upgrade_handler`]'s doc.
 #[derive(Deserialize)]
 pub(super) struct UpgradeRequest {
     #[serde(default = "bool_true")]
@@ -31,9 +31,9 @@ pub(super) struct UpgradeRequest {
 
 /// `POST /upgrade` — check for or install a new trusty-search version (issue #537).
 ///
-/// Why: Exposes the upgrade workflow over HTTP so the MCP dispatcher (which
-/// calls the daemon's REST API) can trigger an upgrade and receive the response
-/// before the daemon self-exits. Never silently auto-installs.
+/// Why: Exposes the upgrade workflow over HTTP so an HTTP client can trigger
+/// an upgrade and receive the response before the daemon self-exits. Never
+/// silently auto-installs.
 ///
 /// What:
 /// - `check=true` or `confirm=false`: query crates.io and return version info.

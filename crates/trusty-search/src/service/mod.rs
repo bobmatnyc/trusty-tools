@@ -42,6 +42,8 @@ pub mod orphan_report;
 pub mod persistence;
 pub mod persistence_loader;
 pub mod persistence_timestamps;
+// #9169: project (name, owner/repo, path) → its one live index.
+pub mod project_resolve;
 pub mod query_timeout;
 pub mod reconcile;
 pub mod reindex;

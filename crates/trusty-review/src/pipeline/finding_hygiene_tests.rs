@@ -308,7 +308,12 @@ fn relaxes_verdict_when_all_findings_wiped_this_run() {
     // must have its OWN raw verdict/grade relaxed too — not just the floor.
     let mut verdict = Verdict::Block;
     let mut grade = Some("F".to_string());
-    relax_verdict_if_evidence_wiped(&mut verdict, &mut grade, 3, &[]);
+    let original = relax_wiped_verdict(&mut verdict, &mut grade, 3, &[]);
+    assert_eq!(
+        original,
+        Some(Verdict::Block),
+        "#9188: the model's verdict is returned"
+    );
     assert_eq!(verdict, Verdict::Approve);
     assert_eq!(grade, None);
 }
@@ -342,7 +347,8 @@ fn does_not_relax_when_findings_survive() {
 fn does_not_touch_an_already_approve_verdict() {
     let mut verdict = Verdict::Approve;
     let mut grade = Some("A-".to_string());
-    relax_verdict_if_evidence_wiped(&mut verdict, &mut grade, 2, &[]);
+    let original = relax_wiped_verdict(&mut verdict, &mut grade, 2, &[]);
+    assert_eq!(original, None);
     assert_eq!(verdict, Verdict::Approve);
     assert_eq!(grade.as_deref(), Some("A-"), "no-op — nothing to relax");
 }

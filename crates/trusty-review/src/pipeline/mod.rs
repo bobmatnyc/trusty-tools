@@ -85,6 +85,9 @@ pub mod verification_notice;
 // under the 500-line cap (#610).  Exposes `build_voice_config` for use by the
 // runner and for direct testing.
 pub mod voice_config;
+// #9188: the zero-hallucination result contract — what survives, what the
+// prose may say, and the typed withheld counts.
+pub mod withheld_contract;
 // Why: coverage data loading extracted from runner.rs to keep that file under
 // the 500-line cap (#610) after adding coverage-gating pipeline (#1014).
 pub mod runner_coverage;

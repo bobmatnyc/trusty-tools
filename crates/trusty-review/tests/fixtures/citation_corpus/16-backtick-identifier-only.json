@@ -1,0 +1,18 @@
+{
+  "leak": "E",
+  "about": "The finding's only quote is a bare backtick identifier that is in the file; it names code without quoting it.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "An error is discarded.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "discarded-error", "body": "The call to `step_4` discards its error.", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 4}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["discarded-error"],
+  "forbidden_in_body": ["error is discarded"],
+  "expect_survivors": 0,
+  "expect_verdict": "UNKNOWN"
+}
