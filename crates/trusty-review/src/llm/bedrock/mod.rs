@@ -20,6 +20,9 @@
 //! JSON is extracted and returned as `LlmResponse.text` — clean, directly
 //! deserializable JSON with no fence-stripping required.
 //!
+//! `temperature` is omitted for a model that rejects it (#9304, see
+//! `accepts_temperature`).
+//!
 //! Region resolution: an explicit region > the region inside a Bedrock model
 //! ARN > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
 //! Credentials: standard AWS credential chain (env vars, `~/.aws/credentials`,
@@ -262,10 +265,7 @@ impl BedrockProvider {
             ));
         }
 
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(req.max_tokens as i32)
-            .temperature(req.temperature)
-            .build();
+        let inference = inference_config(req, model);
 
         let mut sdk_req = client
             .converse()
@@ -494,6 +494,41 @@ fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
         )));
     }
     blocks
+}
+
+/// Model families whose Bedrock Converse API rejects `temperature` with
+/// `ValidationException` (#9304).
+const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+
+/// Whether `model` accepts a `temperature` on Bedrock Converse.
+///
+/// Why: Opus 5.5 rejects `temperature` ("`temperature` is deprecated for this
+/// model"), and Sonnet 5.5 rejects any non-default value, so every review
+/// call to either failed (#9304).
+/// What: `false` only for a family in [`NO_TEMPERATURE_FAMILIES`], read with
+/// the #9292 parser [`tool_use::bedrock_model_family`]. An id that parser
+/// cannot read — an application-inference-profile ARN — keeps `temperature`:
+/// for a model that accepts it, dropping it silently swaps the configured
+/// value for the model default, while a wrong `true` fails loudly with the
+/// same `ValidationException` this fix removes.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`.
+fn accepts_temperature(model: &str) -> bool {
+    tool_use::bedrock_model_family(model).is_none_or(|f| !NO_TEMPERATURE_FAMILIES.contains(&f))
+}
+
+/// The Converse inference configuration for `req` sent to `model`.
+///
+/// What: `max_tokens` always; `temperature` only when
+/// [`accepts_temperature`] holds.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`,
+/// `inference_config_temperature_covers_every_compare_candidate`.
+fn inference_config(req: &LlmRequest, model: &str) -> InferenceConfiguration {
+    // #9304: the 5.5 families reject `temperature`; omit the field for them.
+    let temperature = accepts_temperature(model).then_some(req.temperature);
+    InferenceConfiguration::builder()
+        .max_tokens(req.max_tokens as i32)
+        .set_temperature(temperature)
+        .build()
 }
 
 // ─── Response helpers ─────────────────────────────────────────────────────────
