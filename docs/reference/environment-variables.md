@@ -132,7 +132,7 @@ cannot produce a number exits 2 instead of reporting 0. Fixtures:
 
 ## Per-repo gh identity
 
-An owner binds a per-repo `gh` identity in tm config. An agent never constructs, fetches or switches a token itself; a blocked agent reports the block to the PM ([BASE-AGENT](../../content/agents/BASE-AGENT.md) credential rule, #8557).
+An owner binds a per-repo `gh` identity in tm config. An agent never constructs, fetches or switches a token itself; a blocked agent reports the block to the PM ([BASE-AGENT](../../content/agents/BASE-AGENT.md) credential rule; rule history #8557, #8371, #8133). The identity comes from the ProjectRegistry pin or the `[accounts]` org map in `~/.trusty-mpm/config.toml`, never from the agent.
 
 | Route | Applies to | Source |
 |---|---|---|
