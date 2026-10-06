@@ -88,7 +88,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/local-ops.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/memory-manager.md"
@@ -172,7 +172,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/vercel-ops.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/version-control.md"
@@ -352,7 +352,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-secrets.md"
-version = "1.2.0"
+version = "1.2.1"
 
 [[member]]
 path = "skills/tm-session-management.md"

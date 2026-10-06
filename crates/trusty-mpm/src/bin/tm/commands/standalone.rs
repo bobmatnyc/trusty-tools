@@ -14,7 +14,10 @@
 //! `core::standalone::registry`'s `test_registry_*`. (#4912: the former pointer
 //! here named `cli_parses_register`/`cli_parses_ls`, neither of which exists.)
 
+use std::path::Path;
+
 use anyhow::Context;
+use trusty_mpm::core::standalone::registry::RegistryEntry;
 
 use super::managed_root::ManagedPaths;
 
@@ -148,16 +151,7 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             .collect();
         let fleet_rows: Vec<serde_json::Value> = fleet_entries
             .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "alias": e.alias,
-                    // #9124: an entry stored before the fix may carry a token.
-                    "url": trusty_mpm::core::remote_url_redact::redact_url(&e.url),
-                    "ref": e.git_ref,
-                    "loaded": registry.is_loaded(&e.alias, root),
-                    "repo_path": root.join("projects").join(&e.alias).join("repo"),
-                })
-            })
+            .map(|e| fleet_json_row(e, registry.is_loaded(&e.alias, root), root))
             .collect();
         println!(
             "{}",
@@ -214,17 +208,37 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             "─".repeat(30)
         );
         for e in &fleet_entries {
-            let loaded = if registry.is_loaded(&e.alias, root) {
-                "yes"
-            } else {
-                "no"
-            };
-            let url = trusty_mpm::core::remote_url_redact::redact_url(&e.url);
-            println!("  {:<alias_w$}  {:<10}  {url}", e.alias, loaded);
+            let loaded = registry.is_loaded(&e.alias, root);
+            println!("{}", fleet_table_row(e, loaded, alias_w));
         }
     }
 
     Ok(())
+}
+
+/// One `managed_fleet` object of `tm list --json`.
+///
+/// Why (#9124, #9227): an entry stored before #9124 may carry a token, and
+/// its password may hold a quote or space that free-text redaction misses.
+/// What: the entry's fields, with the URL through `redact_stored_url`.
+/// Test: `fleet_rows_never_print_a_quoted_password`.
+fn fleet_json_row(e: &RegistryEntry, loaded: bool, root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "alias": e.alias,
+        "url": trusty_mpm::core::remote_url_redact::redact_stored_url(&e.url),
+        "ref": e.git_ref,
+        "loaded": loaded,
+        "repo_path": root.join("projects").join(&e.alias).join("repo"),
+    })
+}
+
+/// One managed-fleet line of the `tm list` table, URL redacted as in
+/// [`fleet_json_row`].
+/// Test: `fleet_rows_never_print_a_quoted_password`.
+fn fleet_table_row(e: &RegistryEntry, loaded: bool, alias_w: usize) -> String {
+    let loaded = if loaded { "yes" } else { "no" };
+    let url = trusty_mpm::core::remote_url_redact::redact_stored_url(&e.url);
+    format!("  {:<alias_w$}  {:<10}  {url}", e.alias, loaded)
 }
 
 /// Handle `tm load <alias>`.
@@ -466,3 +480,7 @@ pub(crate) fn login_cmd(paths: &ManagedPaths) -> anyhow::Result<()> {
         anyhow::bail!("claude auth login failed: {status}")
     }
 }
+
+#[cfg(test)]
+#[path = "standalone_tests.rs"]
+mod standalone_tests;

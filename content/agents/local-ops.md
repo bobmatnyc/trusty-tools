@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # Local Ops — Local Development Environment Specialist
@@ -171,6 +171,10 @@ Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation rep
   (`security find-generic-password -s <service> -w | docker login -u <user>
   --password-stdin <registry>`) — never store it in a shell variable and never
   echo it. `tm hook --pm-guard` refuses the printing forms.
+- 🔴 List Vercel env var NAMES only, filtered at the source (#9158):
+  `vercel env ls <env> | awk 'NR>1{print $1}'`. Never `--json`, and
+  never the unfiltered table — both can print a value or value-adjacent data
+  into the transcript. A value that prints anyway is an exposure: report it.
 
 ## Brief Scope Overrides the Playbook (#8027)
 

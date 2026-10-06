@@ -74,10 +74,11 @@ pub struct ManagedRegistry {
 pub enum RegistryError {
     /// The alias is already registered with a different URL and `--force` was
     /// not passed.
-    // #9124: an entry stored before the fix may carry a token.
+    // #9124: an entry stored before the fix may carry a token; #9227: one
+    // whose password holds a quote or space too.
     #[error(
         "alias '{alias}' is already registered as '{}'; use --force to overwrite",
-        crate::core::remote_url_redact::redact_url(.existing_url)
+        crate::core::remote_url_redact::redact_stored_url(.existing_url)
     )]
     DuplicateAlias {
         /// The alias that collides.
@@ -544,6 +545,34 @@ mod tests {
         for text in [err.to_string(), format!("{err:?}")] {
             assert!(!text.contains("SECRETQATOKEN2"), "{text}");
             assert!(text.contains("h/org/a"), "{text}");
+        }
+    }
+
+    /// #9227: the collision message masks a stored password that holds a
+    /// quote, a space, a double quote or a backtick.
+    #[test]
+    fn duplicate_alias_message_masks_a_quoted_password_9227() {
+        for (i, sep) in ["'", " ", "\"", "`"].into_iter().enumerate() {
+            let (_dir, root) = tmp_root();
+            let mut reg = ManagedRegistry::load(&root).unwrap();
+            let stored = format!("https://u:pa{sep}ss9227@host/o/r");
+            reg.add("myproj", &stored, false).unwrap();
+            let msg = reg
+                .add("myproj", "https://host/o/b", false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !msg.contains("ss9227"),
+                "case {i}: a password fragment survived"
+            );
+            assert!(
+                !msg.contains("u:pa"),
+                "case {i}: the user:password pair survived"
+            );
+            assert!(
+                msg.contains("'https://***@host/o/r'"),
+                "case {i}: URL not masked"
+            );
         }
     }
 }
