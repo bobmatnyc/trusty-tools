@@ -777,12 +777,18 @@ Remove a file (and all its chunks) from the index.
   { "index_id": "my-project", "path": "src/auth.rs", "removed_chunks": 4 }
   ```
   - `path` (#9236) is index-relative, or absolute under the index root. An
-    absolute path is mapped to its index-relative key the way the watcher maps
-    its events, and a key stored verbatim by an absolute `index-file` write is
-    removed too. `path` in the reply echoes the request.
+    absolute path is mapped to its index-relative key by text against the raw
+    and the canonical root; only when both fail is its parent directory
+    canonicalized. The last component is never resolved, so an in-root
+    symlink removes its own key, not its target's. A key stored verbatim by
+    an absolute `index-file` write is removed too. `path` in the reply echoes
+    the request.
+  - A successful removal also drops the file's content hash, so the next
+    reindex indexes the file again. A failed removal keeps the hash.
 - **Response 400** `remove_file_path_outside_root` (#9236): an absolute path
-  outside the root, a `..` climb out of it, or the root itself. Nothing is
-  removed; `message` names both accepted forms.
+  outside the root, the root itself, or a path, relative or absolute, that is
+  empty, `.`, or holds a `..` segment. Nothing is removed (`removed_chunks: 0`);
+  `message` names both accepted forms.
 
 ###### Supported network-mount pattern (EFS/NFS/SMB) — issue #3408
 
