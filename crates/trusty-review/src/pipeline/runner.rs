@@ -218,7 +218,7 @@ pub async fn run_review_with(
     deps: ReviewDeps,
     options: ReviewOptions,
 ) -> ReviewOutcome {
-    let mut ledger = ContextLedger::new(options.request.requested_new());
+    let mut ledger = ContextLedger::new(options.request.ledger_enabled());
     let result = run_pipeline(config, input, deps, &options, &mut ledger).await;
     ReviewOutcome {
         result,

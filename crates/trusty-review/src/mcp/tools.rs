@@ -228,7 +228,7 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
 mod review_pr;
 // #9192: `review_pr`'s optional PR-context parameters.
 #[path = "context_args.rs"]
-mod context_args;
+pub(crate) mod context_args;
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
 

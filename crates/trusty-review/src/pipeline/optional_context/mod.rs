@@ -24,9 +24,12 @@ pub(crate) use seams::PrSource;
 /// Why: each input is off unless asked for, so a default request reviews
 /// exactly as `run_review` does.
 /// What: `include_pr_body` merges the fetched PR body, capped at
-/// `MAX_PR_BODY_CHARS` with its own marker, into the reviewer's PR
-/// description, ahead of any caller text. A local diff has no PR body; the
-/// ledger records it `unavailable` and the review runs.
+/// `MAX_PR_BODY_CHARS` with its own marker and fenced as data, into the
+/// reviewer's PR description, ahead of any caller text. A local diff has no
+/// PR body; the ledger records it `unavailable` and the review runs.
+/// `caller_text` marks caller text that arrived through a new parameter (the
+/// MCP `review_pr` text params). `report_context` asks for the source ledger
+/// with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
 /// `requested_new_is_off_by_default_and_on_with_pr_body`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -34,6 +37,10 @@ pub(crate) use seams::PrSource;
 pub struct OptionalContextRequest {
     /// Merge the fetched PR body into the reviewer's PR description.
     pub include_pr_body: bool,
+    /// Caller text arrived through a new parameter (MCP `review_pr`).
+    pub caller_text: bool,
+    /// Report the source ledger even with no other new input.
+    pub report_context: bool,
 }
 
 impl OptionalContextRequest {
@@ -44,15 +51,37 @@ impl OptionalContextRequest {
         self
     }
 
-    /// Whether any new input is on, which turns the source ledger on.
+    /// This request with `caller_text` set to `on`.
+    #[must_use]
+    pub fn with_caller_text(mut self, on: bool) -> Self {
+        self.caller_text = on;
+        self
+    }
+
+    /// This request with `report_context` set to `on`.
+    #[must_use]
+    pub fn with_report_context(mut self, on: bool) -> Self {
+        self.report_context = on;
+        self
+    }
+
+    /// Whether any new input is on.
     ///
-    /// Why: the ledger reports only on a review that asked for something new;
-    /// the legacy caller-context fields and a `# Context:` preamble never
-    /// turn it on (#9192).
+    /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
+    /// parameter counts. The legacy `run` text flags and a `# Context:`
+    /// preamble never set `caller_text`, so they never count.
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
     /// `stdin_context_and_pr_description_never_report`.
     pub fn requested_new(&self) -> bool {
-        self.include_pr_body
+        self.include_pr_body || self.caller_text
+    }
+
+    /// Whether the review keeps a source ledger: a new input, or a request
+    /// for the report itself.
+    ///
+    /// Test: `report_context_alone_turns_the_ledger_on`.
+    pub fn ledger_enabled(&self) -> bool {
+        self.requested_new() || self.report_context
     }
 }
 
@@ -89,7 +118,7 @@ impl ReviewOptions {
 /// travels beside it, and the MCP envelope reports it as `context_sources`.
 /// What: the `ReviewResult` `run_review` would have returned, and one record
 /// per optional source the request turned on. `context_sources` is empty
-/// unless [`OptionalContextRequest::requested_new`] holds, and empty on a
+/// unless [`OptionalContextRequest::ledger_enabled`] holds, and empty on a
 /// review that ended before its context was gathered.
 /// Test: `context_sources_absent_unless_requested`,
 /// `a_new_input_turns_the_ledger_on`.

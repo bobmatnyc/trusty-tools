@@ -21,10 +21,9 @@ fn review_pr_accepts_the_three_text_params() {
     assert_eq!(parsed.caller.pr_discussion.as_deref(), Some("talk"));
     assert_eq!(parsed.caller.referenced_code, None);
     assert!(parsed.warnings.is_empty());
-    assert!(
-        !parsed.request.requested_new(),
-        "text params never turn the ledger on"
-    );
+    // Ruling 2026-10-06 03:42Z (plan §3.1): the text params are new to
+    // `review_pr`, so they turn the ledger on.
+    assert!(parsed.request.requested_new() && parsed.request.caller_text);
 }
 
 /// #9192: a call with none of the params parses to the defaults.

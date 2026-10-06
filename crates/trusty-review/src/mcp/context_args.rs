@@ -7,7 +7,8 @@
 //! three text names (`pr_description`, `pr_discussion`, `referenced_code`)
 //! were ignored before, so a wrong type is still ignored, with a warning. The
 //! new boolean `include_pr_body` has no legacy callers, so a wrong type is
-//! `InvalidParams`.
+//! `InvalidParams`. Any non-blank text param, or `include_pr_body: true`,
+//! turns the source ledger on (plan §3.1).
 //! Test: `review_pr_accepts_the_three_text_params`,
 //! `review_pr_ignores_a_mistyped_text_param_with_a_warning`,
 //! `review_pr_rejects_a_mistyped_include_pr_body`.
@@ -69,7 +70,18 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
             )));
         }
     };
-    parsed.request = OptionalContextRequest::default().with_pr_body(include);
+    // #9192 (plan §3.1): the text params are new to `review_pr`, so sending
+    // one turns the source ledger on.
+    let caller_text = [
+        &parsed.caller.pr_description,
+        &parsed.caller.pr_discussion,
+        &parsed.caller.referenced_code,
+    ]
+    .iter()
+    .any(|t| t.is_some());
+    parsed.request = OptionalContextRequest::default()
+        .with_pr_body(include)
+        .with_caller_text(caller_text);
     Ok(parsed)
 }
 

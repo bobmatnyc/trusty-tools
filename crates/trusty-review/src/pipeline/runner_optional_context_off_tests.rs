@@ -230,20 +230,59 @@ pub(super) fn legacy_caller() -> CallerContext {
     }
 }
 
-/// A config with no external context source, so no fixture run dials out.
+/// A config built from literals, with no external context source.
+///
+/// Why: the goldens must not move with the host. `ReviewConfig::load` and
+/// `from_env_and_file` read `TRUSTY_REVIEW_*` variables and config files, so
+/// a developer's model, voice or template settings would change the prompts.
+/// What: every field pinned; roles resolve from an empty `RoleEnv` (the
+/// built-in defaults); voice principles on with no voice package and no
+/// template, as on a host with nothing set; every external source off.
 pub(super) fn hermetic_config() -> ReviewConfig {
-    let mut config = ReviewConfig::from_env_and_file(None, None);
-    let off = crate::integrations::context::SourceConfig {
+    use crate::config::{RoleEnv, RoleModels};
+    use crate::integrations::context::{
+        ConformanceSourceConfig, ContextSourcesConfig, SourceConfig,
+    };
+    let off = SourceConfig {
         enabled: Some(false),
         ..Default::default()
     };
-    let sources = &mut config.context_sources;
-    sources.jira = off.clone();
-    sources.confluence = off.clone();
-    sources.github_issues = off.clone();
-    sources.pr_history = off.clone();
-    sources.conformance.base = off;
-    config
+    ReviewConfig {
+        dry_run: true,
+        enabled_repos: String::new(),
+        excluded_repos: String::new(),
+        excluded_authors: String::new(),
+        log_dir: std::env::temp_dir().join("trusty-review-9192-goldens"),
+        openrouter_api_key: String::new(),
+        fireworks_api_key: String::new(),
+        search_url: "http://127.0.0.1:7878".to_string(),
+        analyzer_socket: PathBuf::from("/nonexistent/trusty-analyze.sock"),
+        search_index: "main".to_string(),
+        search_index_explicit: true,
+        github_app_id: None,
+        github_app_private_key: None,
+        github_token: String::new(),
+        github_installations: Vec::new(),
+        bot_username: "trusty-review".to_string(),
+        live_review_requesters: Vec::new(),
+        role_models: RoleModels::from_env(&RoleEnv::default()),
+        verification: crate::config::VerificationConfig::default(),
+        context: crate::config::context::ContextConfig::default(),
+        context_sources: ContextSourcesConfig {
+            jira: off.clone(),
+            confluence: off.clone(),
+            github_issues: off.clone(),
+            pr_history: off.clone(),
+            conformance: ConformanceSourceConfig {
+                base: off,
+                ..Default::default()
+            },
+        },
+        voice_package: None,
+        voice_principles: true,
+        review_template: None,
+        coverage: crate::coverage::CoveragePolicy::default(),
+    }
 }
 
 /// A GitHub-path input for `acme/billing#7` that can never post.
