@@ -213,6 +213,7 @@ struct DoctorRequest {
 
 /// One backend's row in the doctor table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BackendStatus {
     /// The backend id.
     pub id: BackendId,
@@ -223,7 +224,9 @@ pub struct BackendStatus {
 }
 
 /// `secrets.doctor` response: backend availability and paths only.
+// #9073: §7 `detect_backends` grows the doctor table, so callers read it only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DoctorResponse {
     /// The socket this server answers on.
     pub socket: PathBuf,

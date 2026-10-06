@@ -21,6 +21,16 @@
 //! No item in this crate prints, logs, or formats a secret value. Errors and
 //! `Debug` output carry names and locations only.
 //!
+//! # Compatibility
+//!
+//! Request structs, the response types that will grow, and the error enums
+//! are `#[non_exhaustive]`; build a request with its constructor. On the
+//! wire, every request denies unknown fields, so an older server rejects a
+//! field it does not know. A new request field therefore arrives only in a
+//! minor release and is optional, with a serde default that keeps the old
+//! behaviour. A client must not send a new field to a server older than the
+//! release that added it.
+//!
 //! Test: unit tests beside each module; the real-Keychain round trip is the
 //! ignored `keychain_real_roundtrip_store_list_remove` in
 //! `tests/keychain_roundtrip.rs`.

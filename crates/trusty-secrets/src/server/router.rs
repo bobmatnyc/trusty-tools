@@ -48,6 +48,8 @@ pub fn default_backends() -> BackendFactory {
 /// What: the settings, the names-only index rooted at
 /// [`ServerSettings::index_root`], and the backend factory. `Debug` shows
 /// settings and the index root only.
+// #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
+#[non_exhaustive]
 pub struct State {
     /// Paths and the idle window.
     pub settings: ServerSettings,
@@ -118,6 +120,7 @@ pub fn build_router(state: Arc<State>) -> RpcRouter {
 ///
 /// What: the path and trusty-common's reason. Carries nothing a client sent.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ServeError {
     /// The socket path has no parent directory.
     #[error("socket path {path} has no parent directory")]

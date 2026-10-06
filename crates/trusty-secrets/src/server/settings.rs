@@ -44,6 +44,7 @@ pub const SERVE_SUBCOMMAND: &str = "serve";
 
 /// A `serve` command line that could not be read.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SettingsError {
     /// The first argument is not `serve`.
     #[error(

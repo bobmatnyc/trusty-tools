@@ -49,6 +49,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// What: the server's error arrives as [`ClientError::Rpc`], whose message
 /// is the server's fixed text.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ClientError {
     /// `$HOME` is unknown, so the default socket path is too.
     #[error("home directory is unavailable")]

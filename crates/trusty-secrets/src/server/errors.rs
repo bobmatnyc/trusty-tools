@@ -22,9 +22,12 @@ use crate::api::SecretsError;
 /// sent can travel back in it.
 /// What: `Copy`; [`ErrorKind::as_str`] is the machine-readable kind,
 /// [`ErrorKind::text`] the human sentence, [`ErrorKind::code`] the JSON-RPC
-/// code.
+/// code. `#[non_exhaustive]` binds other crates only: the matches in this
+/// file stay exhaustive, so a new kind fails the build until it has a kind
+/// string, a sentence and a code.
 /// Test: `server_error_text_is_fixed_per_method_and_kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// The params are not an object of the method's shape.
     InvalidParams,
