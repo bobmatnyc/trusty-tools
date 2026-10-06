@@ -11,12 +11,12 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.1.1"
+version = "2.1.2"
 schema_major = 1
 
 [[member]]
 path = "agents/BASE-AGENT.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/BASE-ENGINEER.md"
