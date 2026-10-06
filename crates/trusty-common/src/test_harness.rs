@@ -35,6 +35,7 @@
 //! `resolve_repo_root_table` in `test_harness_repo_root_tests.rs`.
 //!
 //! [`FORCE_ENV`]: crate::test_harness::FORCE_ENV
+//! [`test_repo_root`]: crate::test_harness::test_repo_root
 
 use std::path::{Path, PathBuf};
 
