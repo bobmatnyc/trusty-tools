@@ -26,7 +26,7 @@ use tracing::{debug, warn};
 use crate::{
     llm::{LlmProvider, LlmRequest},
     pipeline::{
-        parser::parse_review_response,
+        parser::{parse_review_response_with_input, request_input_text},
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
         reply_shape::describe_reply,
     },
@@ -199,9 +199,11 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
         MapTask::Call { file, req } => (file, *req),
     };
 
+    // #9310: the chunk's reviewer input, so the parser never trusts an object quoted from it.
+    let reviewer_input = request_input_text(&req);
     match llm.complete(req).await {
         Ok(resp) => {
-            let parsed = parse_review_response(&resp.text);
+            let parsed = parse_review_response_with_input(&resp.text, &reviewer_input);
             if parsed.is_fail_safe {
                 // #9310: record the unparsed chunk reply's shape; the raw text is not kept.
                 warn!(

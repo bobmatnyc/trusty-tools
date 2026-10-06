@@ -49,7 +49,7 @@ use crate::{
             ledger::ContextLedger,
             seams::{load_diff_via, pr_meta_via},
         },
-        parser::parse_review_response,
+        parser::{parse_review_response_with_input, request_input_text},
         post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
@@ -590,6 +590,8 @@ async fn run_pipeline(
     // `complete`; truncation detection (#1241) compares the produced
     // `output_tokens` against this ceiling.
     let requested_max_tokens = llm_req.max_tokens;
+    // #9310: the reviewer input, so the parser never trusts an object quoted from it.
+    let reviewer_input = request_input_text(&llm_req);
 
     let llm_resp = match deps.llm.complete(llm_req).await {
         Ok(resp) => resp,
@@ -657,7 +659,7 @@ async fn run_pipeline(
     }
 
     // ── Step 7: parse verdict + findings ──────────────────────────────────
-    let mut parsed = parse_review_response(&llm_resp.text);
+    let mut parsed = parse_review_response_with_input(&llm_resp.text, &reviewer_input);
     if parsed.is_fail_safe {
         // #9310: record what the unparsed reply looked like; the raw text is not kept.
         let shape = crate::pipeline::reply_shape::describe_reply(&llm_resp);

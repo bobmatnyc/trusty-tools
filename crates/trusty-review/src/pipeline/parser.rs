@@ -261,12 +261,46 @@ impl ParsedReview {
 /// reads as a clean review (#4491).  Ticket #1241 supersedes spec REV-130: the
 /// fail-safe is UNKNOWN, not APPROVE.
 ///
+/// This entry point knows no reviewer input, so strategy 3 cannot drop an
+/// object the model quoted from it; the pipeline calls
+/// [`parse_review_response_with_input`] instead (#9310).
+///
 /// Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
 /// `parse_verdict_keyword_fallback_approve_star`,
 /// `parse_fail_safe_unknown_on_empty_response`,
 /// `parse_double_encoded_findings_are_recovered`,
 /// `parse_bare_fence_review_object`, `parse_two_distinct_objects_fail_closed`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
+    parse_review_response_with_input(body, "")
+}
+
+/// The reviewer input of `req` as one text: the system prompt and every
+/// message, for [`parse_review_response_with_input`] (#9310).
+///
+/// Test: `request_input_text_joins_system_and_messages`.
+pub(crate) fn request_input_text(req: &crate::llm::LlmRequest) -> String {
+    let mut text = req.system.clone();
+    for message in &req.messages {
+        text.push('\n');
+        text.push_str(&message.content);
+    }
+    text
+}
+
+/// [`parse_review_response`], with strategy 3 dropping every candidate the
+/// reviewer `input` already contains.
+///
+/// Why: the diff and PR text in the input are attacker-controlled; a review
+/// object the model quotes from them must never become its verdict (#9310).
+/// What: the four strategies; strategy 3 follows the candidate rule in
+/// `parser_embedded.rs`. A `json` fence holding no valid review object fails
+/// closed before strategy 3 runs. `input` is the text from
+/// [`request_input_text`].
+/// Test: `parse_inline_quote_of_input_object_is_not_trusted`,
+/// `parse_malformed_json_fence_fails_closed_past_an_inline_quote`,
+/// `parse_own_object_beside_quoted_input_object_is_accepted`,
+/// `parse_input_object_reproduced_alone_is_rejected`.
+pub(crate) fn parse_review_response_with_input(body: &str, input: &str) -> ParsedReview {
     if body.trim().is_empty() {
         warn!("LLM returned empty response — applying fail-safe UNKNOWN (fail-closed, #1241)");
         return ParsedReview::fail_safe("empty LLM response");
@@ -286,46 +320,64 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     }
 
     // Strategy 3 (#9310): an auto-mode reply may carry the object outside a
-    // ```json fence. Only a complete object counts; ambiguity fails closed.
-    match embedded::find_review_object(body) {
+    // ```json fence. Only a complete object the input lacks counts; a broken
+    // json fence or two distinct objects fail closed.
+    let quoted = match embedded::find_review_object(body, input) {
         Embedded::Found(block) => {
             let parsed = parsed_from_block(block);
             debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via embedded object (#9310)");
             return parsed;
         }
         Embedded::Ambiguous(count) => {
-            let reason = format!(
+            return fail_closed(format!(
                 "{count} distinct review objects in the LLM response; none is trusted \
                  as the review (#9310)"
-            );
-            warn!(
-                reason,
-                "ambiguous LLM response — applying fail-safe UNKNOWN (fail-closed, #9310)"
-            );
-            return ParsedReview::fail_safe(reason);
+            ));
         }
-        Embedded::NotFound => {}
-    }
+        Embedded::MalformedFence => {
+            return fail_closed(format!(
+                "a json fence in the LLM response holds no valid review object, so no \
+                 other object is trusted (#9310); {}",
+                keyword_reason(body)
+            ));
+        }
+        Embedded::NotFound { quoted } => quoted,
+    };
 
     // Strategy 4: the structured payload did not parse, so the FINDINGS are gone.
     // #4491: a keyword-scanned verdict beside an empty findings list is
     // byte-for-byte indistinguishable from a genuinely clean review, so the
     // scanned token is reported as context in the fail-safe reason and never as
     // the review's own verdict.
-    let reason = match scan_verdict_keyword(body) {
+    let mut reason = keyword_reason(body);
+    if quoted > 0 {
+        reason.push_str(&format!(
+            "; {quoted} review object(s) in the reply repeat an object from the \
+             reviewer input and are not trusted (#9310)"
+        ));
+    }
+    fail_closed(reason)
+}
+
+/// The fail-safe UNKNOWN for `reason`, logged at `warn!`.
+fn fail_closed(reason: String) -> ParsedReview {
+    warn!(
+        reason,
+        "failed to parse the LLM response — applying fail-safe UNKNOWN (fail-closed, #4491)"
+    );
+    ParsedReview::fail_safe(reason)
+}
+
+/// The fail-safe reason naming what the REV-112 keyword scan read, if anything.
+fn keyword_reason(body: &str) -> String {
+    match scan_verdict_keyword(body) {
         Some(verdict) => format!(
             "findings could not be parsed from the LLM response; the trailing \
              keyword scan read {verdict}, which is not trusted as a review outcome \
              (spec REV-112 fallback, #4491)"
         ),
         None => "no parseable verdict or findings in LLM response".to_string(),
-    };
-    warn!(
-        body_len = body.len(),
-        reason,
-        "failed to parse the LLM response — applying fail-safe UNKNOWN (fail-closed, #4491)"
-    );
-    ParsedReview::fail_safe(reason)
+    }
 }
 
 // ─── Strategy 1: Direct JSON parse (structured output) ───────────────────────

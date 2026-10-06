@@ -5,6 +5,10 @@ Fixed
   models on `toolChoice` auto answer this way. Two different review objects in
   one reply, an object in a non-JSON code fence, and a keyword-only reply stay
   fail-safe UNKNOWN (#9310).
+- An embedded review object equal to any JSON object in the reviewer input
+  (the diff, PR text and prompt) is never trusted, so a quoted fixture cannot
+  become the verdict. A `json` fence holding no valid review object fails
+  closed instead of trusting another object in the reply (#9310).
 - A review that fails to parse now records its reply shape (stop reason, output
   tokens, text length, and a short masked head and tail) in the warning log and
   in the `review not parsed` error. The Bedrock provider logs the content-block
