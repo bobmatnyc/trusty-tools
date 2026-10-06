@@ -8,8 +8,11 @@
 //! `<data_root>/drawer_counts.jsonl` ([`take_snapshot`], driven by
 //! [`spawn_snapshot_task`]). Counts come from the open handle when the palace is
 //! resident and from its `kg.redb` B-tree header otherwise, so no palace is
-//! opened to be counted (#1924). A palace that cannot be read is recorded as
-//! `unavailable` with a null count, never as zero. Lines older than
+//! opened to be counted (#1924). The snapshot holds the idle-evict
+//! [`EvictGate`] so no sweep takes a resident handle away mid-count, and
+//! re-tries an unreadable palace a few times before giving up. A palace that
+//! still cannot be read is recorded as `unavailable` with a null count and the
+//! reason, never as zero, and logged at `warn`. Lines older than
 //! [`RETENTION_DAYS`] are pruned on the next write. [`analysis`] compares
 //! adjacent counts against `maintenance_deletions.jsonl`; the doctor check and
 //! `doctor --drawer-report` read its verdicts.
@@ -32,9 +35,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
-use trusty_common::memory_core::{Palace, PalaceRegistry};
+use trusty_common::memory_core::{Palace, PalaceHandle, PalaceRegistry};
 
 use crate::console_metrics::disk_stats;
+use crate::idle_evict::EvictGate;
 use crate::transport::methods::HEALTH_PROBE_PALACE;
 
 /// File name of the history, directly under the palace data root.
@@ -49,8 +53,22 @@ pub const RETENTION_DAYS: i64 = 90;
 /// stops while a laptop sleeps, so a 24 h timer drifts past whole UTC days.
 /// The once-per-day guard in [`take_snapshot`] keeps it to one line a day.
 pub const SNAPSHOT_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
-/// Delay before the first snapshot, so it does not race daemon startup.
-pub const SNAPSHOT_FIRST_DELAY: Duration = Duration::from_secs(60);
+/// Delay before the first snapshot.
+///
+/// Why (#9283): under the 60 s first idle-evict tick, so a restart's
+/// hydrated palaces are counted from their resident handles. The
+/// [`EvictGate`], not this number, is what keeps the two apart.
+pub const SNAPSHOT_FIRST_DELAY: Duration = Duration::from_secs(30);
+/// Waits before each re-try of a palace whose count could not be read.
+///
+/// Why (#9283): a handle leaving the registry can keep its `kg.redb` locked a
+/// moment longer (a background task still holds its store); three short
+/// re-tries cover that without stalling a snapshot for long.
+pub const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(250),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
 /// How long a writer waits for the history's file lock.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -58,11 +76,11 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CountSource {
-    /// The resident handle's drawer list.
+    /// The `DRAWERS` row count, read through the resident handle's store.
     Cache,
     /// The `DRAWERS` table length in a closed palace's `kg.redb`.
     Disk,
-    /// The palace could not be read (another process holds it for writing).
+    /// The palace could not be read; the line's `reason` says why.
     Unavailable,
     /// Not a count: an operator acknowledgement of a drop (`doctor --ack-drop`).
     Ack,
@@ -95,6 +113,10 @@ pub struct CountLine {
     /// Present only on an ack line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack: Option<Ack>,
+    /// Why the count is unavailable; present only on an unavailable line
+    /// (#9283). Operator-facing, carries no drawer content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl CountLine {
@@ -179,6 +201,39 @@ pub struct SnapshotOutcome {
     pub pruned: usize,
 }
 
+/// One palace's count, or the reason it has none.
+struct Counted {
+    drawers: Option<usize>,
+    src: CountSource,
+    reason: Option<String>,
+}
+
+impl Counted {
+    /// Count a resident palace through its own open store.
+    ///
+    /// Why (#9283): the handle's in-memory list also holds L1-snapshot
+    /// drawers the store no longer has (a sandbox copy of the live root read
+    /// 564 there against 559 rows on disk), so a palace counted resident one
+    /// day and from disk the next showed a drop no journal explains.
+    /// What: the `DRAWERS` row count (decoded plus skipped rows) read through
+    /// the daemon's own handle — the figure [`disk_stats::read`] returns —
+    /// so no second open is made. A failed read is unavailable, never zero.
+    fn cached(handle: &PalaceHandle) -> Self {
+        match handle.kg.load_drawers_with_skipped() {
+            Ok((rows, skipped)) => Self {
+                drawers: Some(rows.len() + skipped),
+                src: CountSource::Cache,
+                reason: None,
+            },
+            Err(e) => Self {
+                drawers: None,
+                src: CountSource::Unavailable,
+                reason: Some(format!("resident store read failed: {e:#}")),
+            },
+        }
+    }
+}
+
 /// Count one palace without opening it.
 ///
 /// Why: see the module doc and `console_metrics::count_palace`, whose split
@@ -187,20 +242,55 @@ pub struct SnapshotOutcome {
 /// gets one more `peek`, because the daemon may have opened the palace between
 /// the two calls and its own lock is what refused the read.
 /// Test: `snapshot_records_unavailable_not_zero_for_a_write_held_palace`.
-fn count_drawers(registry: &PalaceRegistry, info: &Palace) -> (Option<usize>, CountSource) {
+fn count_drawers(registry: &PalaceRegistry, info: &Palace) -> Counted {
     if let Some(handle) = registry.peek(&info.id) {
-        return (Some(handle.drawers.read().len()), CountSource::Cache);
+        return Counted::cached(&handle);
     }
     match disk_stats::read(&info.data_dir) {
-        Ok(stats) => (Some(stats.drawer_count), CountSource::Disk),
+        Ok(stats) => Counted {
+            drawers: Some(stats.drawer_count),
+            src: CountSource::Disk,
+            reason: None,
+        },
         Err(reason) => match registry.peek(&info.id) {
-            Some(handle) => (Some(handle.drawers.read().len()), CountSource::Cache),
-            None => {
-                tracing::debug!(palace = %info.id, "#9283: drawer count unavailable: {reason}");
-                (None, CountSource::Unavailable)
-            }
+            Some(handle) => Counted::cached(&handle),
+            None => Counted {
+                drawers: None,
+                src: CountSource::Unavailable,
+                reason: Some(reason),
+            },
         },
     }
+}
+
+/// Count `todo`, re-trying each unreadable palace after each of `delays`.
+///
+/// Why (#9283): a handle on its way out of the registry can hold `kg.redb`
+/// after `peek` stops finding it; one read per palace recorded such palaces
+/// unavailable although the daemon itself held them.
+/// What: one pass, then per delay: sleep, and recount (re-peek included) only
+/// the palaces still without a count. Results follow `todo`'s order. Blocks,
+/// so it runs on the blocking pool.
+/// Test: `snapshot_counts_a_palace_whose_handle_is_still_closing`.
+fn count_with_retries(
+    registry: &PalaceRegistry,
+    todo: &[&Palace],
+    delays: &[Duration],
+) -> Vec<Counted> {
+    let mut out: Vec<Counted> = todo.iter().map(|p| count_drawers(registry, p)).collect();
+    for delay in delays {
+        let pending: Vec<usize> = (0..out.len())
+            .filter(|&i| out[i].drawers.is_none())
+            .collect();
+        if pending.is_empty() {
+            break;
+        }
+        std::thread::sleep(*delay);
+        for i in pending {
+            out[i] = count_drawers(registry, todo[i]);
+        }
+    }
+    out
 }
 
 /// Record today's drawer count for every palace not yet recorded today.
@@ -262,15 +352,27 @@ fn snapshot_locked(
         // cannot read (ADR-0067 D2).
         kept.push(raw.to_string());
     }
-    for info in palaces.iter().filter(|p| !done.contains(p.id.as_str())) {
-        let (drawers, src) = count_drawers(registry, info);
+    let todo: Vec<&Palace> = palaces
+        .iter()
+        .filter(|p| !done.contains(p.id.as_str()))
+        .collect();
+    let counted = count_with_retries(registry, &todo, &RETRY_DELAYS);
+    for (info, c) in todo.iter().zip(counted) {
+        if let Some(reason) = &c.reason {
+            // #9283: an uncountable palace can never go red, so say so loudly.
+            tracing::warn!(
+                palace = %info.id,
+                "#9283: drawer count unavailable, recorded as unavailable: {reason}"
+            );
+        }
         let line = CountLine {
             v: SCHEMA_VERSION,
             at: now,
             palace: info.id.as_str().to_string(),
-            drawers,
-            src,
+            drawers: c.drawers,
+            src: c.src,
             ack: None,
+            reason: c.reason,
         };
         kept.push(serde_json::to_string(&line).context("serialize count line")?);
         outcome.written += 1;
@@ -342,6 +444,7 @@ pub fn append_ack(
                 reason: reason.trim().to_string(),
                 day,
             }),
+            reason: None,
         };
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -362,17 +465,19 @@ pub fn append_ack(
 /// the file this task writes.
 /// What: a no-op returning `None` when the registry has no data root. Otherwise
 /// one task: waits [`SNAPSHOT_FIRST_DELAY`], runs [`take_snapshot`] on the
-/// blocking pool, then repeats every [`SNAPSHOT_CHECK_INTERVAL`]. A failed
-/// snapshot is logged at `warn` and retried on the next tick. Exits on the
-/// shutdown watch.
+/// blocking pool with `gate` held (#9283), then repeats every
+/// [`SNAPSHOT_CHECK_INTERVAL`]. A failed snapshot is logged at `warn` and
+/// retried on the next tick. Exits on the shutdown watch.
 /// Test: `snapshot_loop_writes_at_start_and_stops_on_shutdown`.
 pub fn spawn_snapshot_task(
     registry: Arc<PalaceRegistry>,
+    gate: EvictGate,
     shutdown: watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let root = registry.data_root()?.to_path_buf();
     Some(spawn_snapshot_loop(
         registry,
+        gate,
         root,
         SNAPSHOT_FIRST_DELAY,
         SNAPSHOT_CHECK_INTERVAL,
@@ -382,6 +487,7 @@ pub fn spawn_snapshot_task(
 
 fn spawn_snapshot_loop(
     registry: Arc<PalaceRegistry>,
+    gate: EvictGate,
     data_root: PathBuf,
     first_delay: Duration,
     interval: Duration,
@@ -397,9 +503,14 @@ fn spawn_snapshot_loop(
             if *shutdown.borrow() {
                 return;
             }
-            let (reg, root) = (registry.clone(), data_root.clone());
-            match tokio::task::spawn_blocking(move || take_snapshot(&reg, &root, Utc::now())).await
-            {
+            let (reg, root, gate) = (registry.clone(), data_root.clone(), gate.clone());
+            // #9283: hold the evict gate so no sweep pulls a resident handle
+            // out of the registry while it is being counted.
+            let run = move || {
+                let _held = gate.lock();
+                take_snapshot(&reg, &root, Utc::now())
+            };
+            match tokio::task::spawn_blocking(run).await {
                 Ok(Ok(o)) if o.written > 0 || o.pruned > 0 => tracing::info!(
                     written = o.written,
                     pruned = o.pruned,

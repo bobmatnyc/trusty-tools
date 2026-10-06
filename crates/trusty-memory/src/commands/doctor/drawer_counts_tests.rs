@@ -21,6 +21,7 @@ fn count(palace: &str, at: DateTime<Utc>, drawers: Option<usize>) -> CountLine {
             CountSource::Unavailable
         },
         ack: None,
+        reason: None,
     }
 }
 
@@ -328,7 +329,61 @@ fn removed_unavailable_and_pending_palaces_are_not_red() {
     let r = verdict(tmp.path(), now);
     assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
     assert!(detail(&r).contains("palace removed: gone"), "{r:?}");
-    assert!(detail(&r).contains("held: count unavailable"), "{r:?}");
+    assert!(
+        detail(&r).contains("1 palace(s) uncountable: held: reason not recorded"),
+        "{r:?}"
+    );
+}
+
+/// Why (#9283, Fail-Open Check): an uncountable palace can never go red, so
+/// a check that passes beside one reads as healthy while it cannot see loss.
+/// What: one palace compares clean, one is unavailable with a reason; the
+/// check warns and names the palace and the reason.
+#[test]
+fn an_uncountable_palace_is_named_and_never_green() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let now = Utc::now();
+    let t0 = now - Duration::days(1);
+    let mut held = count("held", now, None);
+    held.reason = Some("kg.redb is not readable: Database already open".into());
+    write_history(
+        tmp.path(),
+        &[
+            count("ok", t0, Some(5)),
+            count("ok", now, Some(5)),
+            count("held", t0, Some(4)),
+            held,
+        ],
+    );
+    let r = verdict(tmp.path(), now);
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+    assert!(
+        detail(&r).contains(
+            "1 palace(s) uncountable: held: kg.redb is not readable: Database already open"
+        ),
+        "{r:?}"
+    );
+}
+
+/// Why (#9283): one day of counts is the expected first-day state, not an
+/// undetermined probe — reporting it Unknown made every first-day doctor run
+/// exit 1 (#4001 counts Unknown as unhealthy). It is still not green.
+/// What: one snapshot day, every palace counted: Warn naming the pending
+/// baseline; an empty history stays Unknown.
+#[test]
+fn a_first_day_baseline_warns_instead_of_undetermined() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let now = Utc::now();
+    write_history(
+        tmp.path(),
+        &[count("a", now, Some(3)), count("b", now, Some(0))],
+    );
+    let r = verdict(tmp.path(), now);
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+    assert!(
+        detail(&r).contains("baseline pending: 2 palace(s) counted once"),
+        "{r:?}"
+    );
 }
 
 #[derive(clap::Parser)]
