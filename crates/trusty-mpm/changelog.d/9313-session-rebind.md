@@ -1,0 +1,3 @@
+Fixed
+- After a tmux server replacement, a live session no longer lists as `stopped` in `tm ls`. Boot reconcile and the managed-session list, get and attach-cmd routes re-bind a record to its live pane and server when its session on the replaced server holds exactly one pane and no other record claims it. Zero or several matching panes leave the record unchanged and log why. The rebind writes the record only; the running Claude is never restarted or signalled (#9313).
+- `tm sessions rebind <id-or-name> [--tmux <session>]` and `tm sessions rebind --all` re-bind records by hand, including a session renamed in tmux, and report each session as rebound, current, no match, ambiguous or error. An ambiguous match is refused and the record is not changed (#9313).

@@ -153,6 +153,9 @@ impl SessionManager {
         // #9238: before any name-keyed decision below, including the dedup
         // that decommissioned renamed sessions as stale duplicates.
         self.follow_tmux_renames().await;
+        // #9313: a session relaunched on a replaced tmux server gets its live
+        // pane and server back before the live/gone decision below.
+        self.rebind_stale_panes().await;
 
         // #5856: an unobservable tmux is not an empty tmux. `None` means tmux
         // was never successfully asked — it is NOT a set of zero live
