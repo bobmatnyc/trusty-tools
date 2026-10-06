@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.29.2] — 2026-10-06
+
+### Added
+
+- `doctor` checks drawer-count stability (#9283). The daemon records one drawer count per palace per UTC day in `<data_root>/drawer_counts.jsonl` (90 days kept; a palace it cannot read is recorded as unavailable, never zero). The check turns red when a palace's newest drop exceeds the deletions its `maintenance_deletions.jsonl` journals, and warns when a palace disappears.
+- `trusty-memory doctor --drawer-report [--days 7] [--json]` prints each palace's daily counts, net delta, journaled deletions by reason and unexplained drops, with a `N/7 clean` footer; it exits 1 on any unexplained drop (#9283).
+- `trusty-memory doctor --ack-drop <palace> --count N --reason TEXT [--ack-day YYYY-MM-DD]` records an operator acknowledgement that explains a drop the journal cannot (#9283).
+
+## [0.29.1] — 2026-10-06
+
+### Fixed
+
+- `memory_recall` and `memory_recall_deep` now keep a user-scope ruling that answers the query inside `top_k`, even when many project drawers outscore it. After the score sort, each folded ruling whose content holds at least half of the query's content terms (and at least two) is lifted to rank 3 or better, in a reserved slot inside the cut. The leg still adds at most `ceil(top_k / 3)` rulings, and a ruling the query is not about keeps its score rank (#9143).
+
 ## [0.29.0] — 2026-10-06
 
 ### Added

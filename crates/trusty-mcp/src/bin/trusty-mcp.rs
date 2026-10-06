@@ -290,15 +290,14 @@ async fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
-    /// Read a sibling crate's source out of this checkout.
+    /// Read a sibling crate's source out of the running checkout (#9298).
     ///
-    /// Returns `None` in a published tarball, where no sibling crate exists and
-    /// there is nothing for the table to drift from.
+    /// Returns `None` in a published tarball, where no workspace or sibling
+    /// crate exists and there is nothing for the table to drift from.
     fn sibling_source(rel: &str) -> Option<String> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel);
-        std::fs::read_to_string(path).ok()
+        let root = trusty_common::test_harness::test_repo_root().ok()?;
+        std::fs::read_to_string(root.join("crates").join(rel)).ok()
     }
 
     /// The string literals in a `pub const NAME: &[&str] = &[…];` declaration.

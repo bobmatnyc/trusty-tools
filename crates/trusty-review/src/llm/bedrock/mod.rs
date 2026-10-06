@@ -20,6 +20,9 @@
 //! JSON is extracted and returned as `LlmResponse.text` — clean, directly
 //! deserializable JSON with no fence-stripping required.
 //!
+//! `temperature` is omitted for a model that rejects it (#9304, see
+//! `accepts_temperature`).
+//!
 //! Region resolution: an explicit region > the region inside a Bedrock model
 //! ARN > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
 //! Credentials: standard AWS credential chain (env vars, `~/.aws/credentials`,
@@ -38,6 +41,8 @@
 //! no real AWS calls).
 
 pub(crate) mod arn;
+// #9310: opt-in raw capture of reviewer replies.
+mod capture;
 pub mod pricing;
 mod request_metadata;
 pub mod tool_use;
@@ -262,10 +267,7 @@ impl BedrockProvider {
             ));
         }
 
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(req.max_tokens as i32)
-            .temperature(req.temperature)
-            .build();
+        let inference = inference_config(req, model);
 
         let mut sdk_req = client
             .converse()
@@ -299,25 +301,15 @@ impl BedrockProvider {
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        let text = response_text(&resp, req.response_schema.is_some());
-
-        let (input_tokens, output_tokens) = extract_token_usage(&resp);
-        let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
-
-        // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
-        // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
-        // is the truncation case the runner keys off.
-        let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
-
-        Ok(LlmResponse {
-            text,
-            model: model.to_string(),
-            input_tokens,
-            output_tokens,
+        // #9310: read per call, so capture needs no restart; off when unset.
+        let capture = capture::capture_dir(&|key| std::env::var(key).ok());
+        Ok(llm_response(
+            req,
+            model,
+            &resp,
             latency_ms,
-            cost_usd,
-            finish_reason,
-        })
+            capture.as_deref(),
+        ))
     }
 }
 
@@ -496,7 +488,99 @@ fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
     blocks
 }
 
+/// Model families whose Bedrock Converse API rejects `temperature` with
+/// `ValidationException` (#9304).
+const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+
+/// Whether `model` accepts a `temperature` on Bedrock Converse.
+///
+/// Why: Opus 5.5 rejects `temperature` ("`temperature` is deprecated for this
+/// model"), and Sonnet 5.5 rejects any non-default value, so every review
+/// call to either failed (#9304).
+/// What: `false` only for a family in [`NO_TEMPERATURE_FAMILIES`], read with
+/// the #9292 parser [`tool_use::bedrock_model_family`]. An id that parser
+/// cannot read — an application-inference-profile ARN — keeps `temperature`:
+/// for a model that accepts it, dropping it silently swaps the configured
+/// value for the model default, while a wrong `true` fails loudly with the
+/// same `ValidationException` this fix removes.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`.
+fn accepts_temperature(model: &str) -> bool {
+    tool_use::bedrock_model_family(model).is_none_or(|f| !NO_TEMPERATURE_FAMILIES.contains(&f))
+}
+
+/// The Converse inference configuration for `req` sent to `model`.
+///
+/// What: `max_tokens` always; `temperature` only when
+/// [`accepts_temperature`] holds.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`,
+/// `inference_config_temperature_covers_every_compare_candidate`.
+fn inference_config(req: &LlmRequest, model: &str) -> InferenceConfiguration {
+    // #9304: the 5.5 families reject `temperature`; omit the field for them.
+    let temperature = accepts_temperature(model).then_some(req.temperature);
+    InferenceConfiguration::builder()
+        .max_tokens(req.max_tokens as i32)
+        .set_temperature(temperature)
+        .build()
+}
+
 // ─── Response helpers ─────────────────────────────────────────────────────────
+
+/// The `LlmResponse` for one Converse reply, capturing it when `capture` is set.
+///
+/// Why: one place builds the response, so the opt-in capture (#9310) can be
+/// shown not to change it.
+/// What: the parser text from [`response_text`], token usage, cost, and the
+/// lowercase stop reason (#1357); `warn!`s the block kinds of a structured
+/// reply with no `toolUse` block. With `capture` set, a reviewer reply is also
+/// written by `capture::capture_reply`, which never fails the call.
+/// Test: `capture_write_failure_leaves_the_response_identical`,
+/// `capture_on_writes_one_private_file_per_reviewer_call`.
+fn llm_response(
+    req: &LlmRequest,
+    model: &str,
+    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+    latency_ms: u64,
+    capture: Option<&std::path::Path>,
+) -> LlmResponse {
+    let text = response_text(resp, req.response_schema.is_some());
+
+    let (input_tokens, output_tokens) = extract_token_usage(resp);
+    let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
+
+    // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
+    // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
+    // is the truncation case the runner keys off.
+    let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
+
+    // #9310: a structured reply with no toolUse block reaches the parser as
+    // text; log its block kinds, which the runner's record cannot see.
+    if req.response_schema.is_some() {
+        let blocks = tool_use::reply_block_kinds(resp);
+        if !blocks.contains(&"tool_use") {
+            warn!(
+                model = %arn::mask_account_ids(model),
+                blocks = ?blocks,
+                stop = finish_reason.as_deref().unwrap_or("none"),
+                output_tokens,
+                text_chars = text.chars().count(),
+                "structured Bedrock reply carried no toolUse block; the caller parses its text (#9310)"
+            );
+        }
+    }
+
+    if let Some(dir) = capture {
+        capture::capture_reply(dir, req, model, resp, &text);
+    }
+    LlmResponse {
+        text,
+        model: model.to_string(),
+        input_tokens,
+        output_tokens,
+        latency_ms,
+        cost_usd,
+        finish_reason,
+    }
+}
 
 /// The reply text the pipeline parses: the `toolUse.input` JSON for a
 /// structured request, else the joined text blocks.

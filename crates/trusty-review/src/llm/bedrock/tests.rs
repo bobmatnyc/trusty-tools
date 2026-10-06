@@ -703,15 +703,126 @@ fn system_blocks_add_the_tool_line_only_for_auto_models() {
     );
 }
 
+// ── Per-model temperature (#9304) ─────────────────────────────────────────
+
+/// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
+const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "eu.anthropic.claude-opus-5-5",
+    "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "us-gov.anthropic.claude-opus-5-5",
+    "claude-opus-5-5",
+    "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5-5-20260901-v1:0",
+];
+
+/// Ids that keep `temperature`: older Claude, Nova, and an id that names no
+/// model (an application-inference-profile ARN).
+const TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "bedrock/us.anthropic.claude-sonnet-4-5",
+    "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon.nova-pro-v1:0",
+    "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+];
+
+/// The Converse request omits `temperature` for Sonnet 5.5 and Opus 5.5 in
+/// every id shape, and keeps it for every other model.
+///
+/// Why: Bedrock rejects `temperature` for Opus 5.5 with `ValidationException`
+/// ("`temperature` is deprecated for this model"), so every Opus 5.5 review
+/// failed (#9304); Sonnet 5.5 rejects non-default sampling values too.
+/// What: builds the inference configuration for each id and checks that
+/// `temperature` is absent or carries the request's value, and that
+/// `max_tokens` is unchanged either way.
+/// Test: this test.
+#[test]
+fn inference_config_omits_temperature_only_for_claude_5_5() {
+    let req = structured_request("reviewer");
+    let absent = AUTO_MODEL_IDS.iter().chain(NO_TEMPERATURE_MODEL_IDS);
+    for model in absent {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), None, "{model} must omit temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+    let present = FORCED_MODEL_IDS.iter().chain(TEMPERATURE_MODEL_IDS);
+    for model in present {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), Some(0.3), "{model} keeps temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+}
+
+/// Every compare-set candidate and the reviewer default has a stated
+/// temperature answer.
+///
+/// Why: these are the ids the Q86 model eval runs; two of them are 5.5 models
+/// that reject `temperature` (#9304).
+/// What: pins the answer per `COMPARE_CANDIDATE_MODELS` entry, in order, so an
+/// added candidate fails here until it gets one.
+/// Test: this test.
+#[test]
+fn inference_config_temperature_covers_every_compare_candidate() {
+    use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
+    let req = structured_request("reviewer");
+    let expected = [
+        (
+            "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(0.3),
+        ),
+        ("bedrock/us.anthropic.claude-sonnet-4-6", Some(0.3)),
+        ("bedrock/us.anthropic.claude-sonnet-5-5", None),
+        ("bedrock/us.anthropic.claude-opus-5-5", None),
+    ];
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids, COMPARE_CANDIDATE_MODELS,
+        "a compare candidate has no case"
+    );
+    for (model, temperature) in expected {
+        assert_eq!(
+            super::inference_config(&req, model).temperature(),
+            temperature,
+            "temperature for {model}"
+        );
+    }
+    assert_eq!(
+        super::inference_config(&req, DEFAULT_REVIEWER_MODEL).temperature(),
+        None,
+        "the default reviewer must omit temperature"
+    );
+}
+
 /// A Converse reply holding one text block and no `toolUse` block.
 fn text_only_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![aws_sdk_bedrockruntime::types::ContentBlock::Text(
+        text.to_string(),
+    )])
+}
+
+/// A `toolUse` content block named `review_output` carrying `input`.
+fn tool_use_block(input: serde_json::Value) -> aws_sdk_bedrockruntime::types::ContentBlock {
+    let block = aws_sdk_bedrockruntime::types::ToolUseBlock::builder()
+        .tool_use_id("tooluse-1")
+        .name("review_output")
+        .input(tool_use::json_to_document(&input).expect("input is an object"))
+        .build()
+        .expect("tool use block builds");
+    aws_sdk_bedrockruntime::types::ContentBlock::ToolUse(block)
+}
+
+/// A Converse reply holding `blocks`, in order, with an `end_turn` stop.
+fn reply_with_blocks(
+    blocks: Vec<aws_sdk_bedrockruntime::types::ContentBlock>,
+) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
     use aws_sdk_bedrockruntime::types::{
-        ContentBlock, ConversationRole, ConverseMetrics, ConverseOutput as Output, Message,
-        StopReason, TokenUsage,
+        ConversationRole, ConverseMetrics, ConverseOutput as Output, Message, StopReason,
+        TokenUsage,
     };
     let message = Message::builder()
         .role(ConversationRole::Assistant)
-        .content(ContentBlock::Text(text.to_string()))
+        .set_content(Some(blocks))
         .build()
         .expect("message builds");
     aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
@@ -760,6 +871,28 @@ fn auto_mode_free_text_reply_reaches_the_review_parser() {
     let parsed = parse_review_response(&text);
     assert!(parsed.is_fail_safe, "prose must fail closed");
     assert_eq!(parsed.verdict, Verdict::Unknown);
+}
+
+/// The block kinds of a reply are named in order (#9310).
+///
+/// Why: the parse-failure record needs to say whether the model called the
+/// tool, which only the Converse blocks show.
+/// What: a text-only reply and a text-plus-tool reply.
+/// Test: this test.
+#[test]
+fn reply_block_kinds_name_each_block() {
+    assert_eq!(
+        tool_use::reply_block_kinds(&text_only_reply("prose")),
+        vec!["text"]
+    );
+    let reply = reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("prose".to_string()),
+        tool_use_block(serde_json::json!({"verdict": "APPROVE"})),
+    ]);
+    assert_eq!(
+        tool_use::reply_block_kinds(&reply),
+        vec!["text", "tool_use"]
+    );
 }
 
 // ── SDK error rendering (#6912) ───────────────────────────────────────────
@@ -864,4 +997,162 @@ fn bedrock_timeout_error_keeps_sdk_rendering() {
         describe_sdk_error(&construction),
         "failed to construct request"
     );
+}
+
+// ── Opt-in raw reply capture (#9310) ──────────────────────────────────────
+
+/// The model id the capture tests send.
+const CAPTURE_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
+
+/// A reply holding a text block, then a `toolUse` block with an APPROVE input.
+fn text_and_tool_reply() -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("Preamble.".to_string()),
+        tool_use_block(serde_json::json!({
+            "verdict": "APPROVE", "summary": "Clean.", "findings": []
+        })),
+    ])
+}
+
+/// The capture files in `dir`, sorted by name; empty when `dir` is absent.
+fn capture_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Capture is off unless the env var names a directory (#9310).
+///
+/// Why: the files hold raw replies, so capture must be an explicit opt-in.
+/// What: unset and blank values are off; a set value is the directory.
+/// Test: this test.
+#[test]
+fn capture_dir_is_off_unless_the_env_var_names_a_dir() {
+    use super::capture::{CAPTURE_DIR_ENV, capture_dir};
+    assert_eq!(capture_dir(&|_| None), None, "unset is off");
+    assert_eq!(
+        capture_dir(&|_| Some("  ".to_string())),
+        None,
+        "blank is off"
+    );
+    let on = capture_dir(&|key| (key == CAPTURE_DIR_ENV).then(|| "/tmp/cap".to_string()));
+    assert_eq!(on, Some(std::path::PathBuf::from("/tmp/cap")));
+}
+
+/// With capture off, a reviewer reply writes nothing (#9310).
+///
+/// What: the default environment gives no capture dir, and the response
+/// builder then leaves an empty directory empty.
+/// Test: this test.
+#[test]
+fn capture_off_by_default_writes_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let capture = super::capture::capture_dir(&|_| None);
+    let req = structured_request("reviewer");
+    super::llm_response(
+        &req,
+        CAPTURE_MODEL,
+        &text_and_tool_reply(),
+        1,
+        capture.as_deref(),
+    );
+    assert!(capture_files(tmp.path()).is_empty());
+}
+
+/// With capture on, each reviewer call writes one new private file holding
+/// the raw reply and its metadata (#9310).
+///
+/// Why: part 2 of #9310 needs the raw replies, joinable to a harness row.
+/// What: two calls into a missing directory; the directory is 0700, each file
+/// is 0600, neither overwrites the other, and the record carries every field.
+/// Test: this test.
+#[test]
+fn capture_on_writes_one_private_file_per_reviewer_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let first = super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    let files = capture_files(&dir);
+    assert_eq!(files.len(), 2, "one file per call, none overwritten");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&dir), 0o700, "the capture dir is private");
+        for file in &files {
+            assert_eq!(mode(file), 0o600, "{}", file.display());
+        }
+    }
+    let raw = std::fs::read_to_string(&files[0]).expect("capture file reads");
+    let record: serde_json::Value = serde_json::from_str(&raw).expect("capture is JSON");
+    assert_eq!(record["reply"], first.text.as_str(), "the parser's text");
+    assert_eq!(record["model"], CAPTURE_MODEL);
+    assert_eq!(record["stop_reason"], "end_turn");
+    assert_eq!(record["output_tokens"], 5);
+    assert_eq!(record["tool_use"], true);
+    assert_eq!(record["tool_use_input"]["verdict"], "APPROVE");
+    assert_eq!(record["text"], "Preamble.");
+    assert!(
+        record["captured_utc"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+    let name = files[0].file_name().and_then(|n| n.to_str()).unwrap_or("");
+    assert_eq!(
+        format!("{}.json", record["id"].as_str().unwrap_or("")),
+        name,
+        "the id is the file stem"
+    );
+}
+
+/// Only reviewer calls are captured (#9310).
+///
+/// What: a verifier-schema call and an unstructured call write nothing and
+/// create no directory.
+/// Test: this test.
+#[test]
+fn capture_skips_non_reviewer_calls() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let mut verifier = structured_request("verifier");
+    if let Some(schema) = verifier.response_schema.as_mut() {
+        schema.name = "finding_verification".to_string();
+    }
+    let mut plain = structured_request("plain");
+    plain.response_schema = None;
+    for req in [verifier, plain] {
+        super::llm_response(&req, CAPTURE_MODEL, &text_and_tool_reply(), 1, Some(&dir));
+    }
+    assert!(!dir.exists(), "no capture for a non-reviewer call");
+}
+
+/// A capture that cannot be written leaves the response identical (#9310).
+///
+/// Why: capture is diagnostic and fail-open; it must never fail or change a
+/// review.
+/// What: the capture dir sits under a regular file, so creating it fails; the
+/// response equals the one built with capture off.
+/// Test: this test.
+#[test]
+fn capture_write_failure_leaves_the_response_identical() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, "x").expect("blocker file");
+    let dir = blocker.join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let off = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, None);
+    let failed = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, Some(&dir));
+    assert_eq!(
+        serde_json::to_value(&failed).expect("serialises"),
+        serde_json::to_value(&off).expect("serialises"),
+        "a failed capture must not change the response"
+    );
+    assert!(!dir.exists());
 }

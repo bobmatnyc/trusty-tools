@@ -257,6 +257,10 @@ enum Command {
         /// executed manually.
         #[arg(long, requires = "fix_palaces")]
         fix: bool,
+
+        /// #9283: `--drawer-report` and `--ack-drop` modes.
+        #[command(flatten)]
+        drawer: trusty_memory::commands::doctor::DrawerCountArgs,
     },
 
     /// Manage the macOS launchd LaunchAgent for the daemon.
@@ -767,12 +771,11 @@ async fn run() -> Result<()> {
         },
         Command::PromptContext => run_prompt_context_and_exit().await,
         Command::Service { action } => handle_service(&action),
-        Command::Doctor { fix_palaces, fix } => {
-            if fix_palaces {
-                trusty_memory::commands::doctor::handle_doctor_fix_palaces(fix).await?;
-            }
-            trusty_memory::commands::doctor::handle_doctor().await
-        }
+        Command::Doctor {
+            fix_palaces,
+            fix,
+            drawer,
+        } => trusty_memory::commands::doctor::run_doctor(fix_palaces, fix, &drawer).await,
         Command::Monitor { target } => run_monitor(target).await,
         Command::SendMessage {
             to,

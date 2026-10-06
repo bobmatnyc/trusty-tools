@@ -10,12 +10,9 @@ use std::path::PathBuf;
 
 use trusty_sld_lint::gap::run_gap_report;
 
-/// The workspace root, relative to this crate's manifest dir.
+/// The running checkout's workspace root (#9298), canonical.
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root resolves")
+    trusty_common::test_harness::test_repo_root().expect("the running checkout's workspace root")
 }
 
 #[test]

@@ -19,6 +19,8 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 // #9059: hold an index whose exclude globs do not parse.
 pub(crate) mod exclude_hold;
+// #9029: one indexed file's content and its diff against HEAD.
+pub(crate) mod file_view;
 pub mod fs_discovery;
 pub mod grep;
 // #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.
@@ -89,6 +91,9 @@ mod excludes_8922_tests;
 // #9059: every ingest path against an index held by an invalid exclude glob.
 #[cfg(test)]
 mod exclude_hold_9059_tests;
+// #9230: every delete path stamps the corpus only when its rows left redb.
+#[cfg(test)]
+mod delete_stamp_9230_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 

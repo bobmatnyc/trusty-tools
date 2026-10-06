@@ -466,3 +466,56 @@ fn purge_refuses_a_symlinked_trash_base() {
     assert!(purge_trash(&root, today).is_err());
     assert!(victim.join(MANIFEST_FILE).is_file());
 }
+
+/// Why (#9283 design §2): `reclaim --apply` removes fixture drawers through the
+/// daemon's `memory.drawer_delete`, which wrote no journal line, so the
+/// cleanup would read as an unexplained drawer-count drop.
+/// What: the `remove_drawer` seam calls the real `memory.drawer_delete`
+/// handler on an in-process daemon state over the scene's root; every removed
+/// fixture leaves a `user_forget` record with no content copy.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reclaim_apply_removal_is_journaled_via_daemon_forget() {
+    use trusty_common::memory_core::maintenance_log::read_journal;
+    trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock();
+    let s = scene(2);
+    let list = review(&s);
+    let state = crate::AppState::new(s.root.clone());
+    state.set_ready();
+    let rt = tokio::runtime::Handle::current();
+    let mut remover = |palace: &str, id: &str| -> Result<()> {
+        let params = serde_json::from_value(serde_json::json!({
+            "palace_id": palace, "drawer_id": id,
+        }))?;
+        tokio::task::block_in_place(|| {
+            rt.block_on(crate::transport::methods::palaces::delete_drawer(
+                &state, params,
+            ))
+        })
+        .map(|_| ())
+        .map_err(|e| anyhow!("{e:?}"))
+    };
+    let mut env = ApplyEnv {
+        home: Some(&s.home),
+        now_unix: s.now,
+        date: DATE.into(),
+        reviewed_path: PathBuf::from("reviewed.json"),
+        remove_drawer: &mut remover,
+    };
+    let report = apply(&s.root, &list, &mut env).expect("apply");
+    assert_eq!(report.not_applied(), 0, "{}", report.render_text());
+
+    let records = read_journal(&s.root.join("busy")).expect("journal").records;
+    for f in &s.fixtures {
+        let rec = records
+            .iter()
+            .find(|r| r.drawer_id == f.id)
+            .unwrap_or_else(|| panic!("no journal record for {}: {records:?}", f.id));
+        // Compared by its journal name so this test also compiles before the fix.
+        assert_eq!(
+            serde_json::to_value(rec.reason).expect("reason"),
+            "user_forget"
+        );
+        assert!(rec.drawer.is_none(), "a reclaim removal keeps no copy");
+    }
+}
