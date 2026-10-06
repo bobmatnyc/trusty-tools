@@ -222,6 +222,22 @@ fn credential_switching_is_forbidden_in_the_shipped_assets() {
     );
 }
 
+/// The credential rule names the sanctioned route, so a refusal says where the
+/// owner binds a per-repo identity instead of leaving the agent to improvise.
+/// See #8557 part (b).
+#[test]
+fn credential_rule_points_at_the_per_repo_identity_route() {
+    let flat = asset("BASE-AGENT.md").replace('\n', " ");
+    let rule_start = flat.find("One credential rule").expect("credential rule");
+    let rule = &flat[rule_start..];
+    let rule = &rule[..rule.find("**A PM `SendMessage`").unwrap_or(rule.len())];
+    assert!(
+        rule.contains("docs/reference/environment-variables.md#per-repo-gh-identity"),
+        "BASE-AGENT's credential rule must point at the per-repo gh identity \
+         route in environment-variables.md (#8557)"
+    );
+}
+
 /// The ops agents that handle credentials name the non-printing form.
 /// See #8596 (`local-ops` printed Keychain values while "checking" them)
 /// and #8248 (`gcp-ops` ran `print-access-token` bare to see it work).
