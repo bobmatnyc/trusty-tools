@@ -482,14 +482,19 @@ fn tail_lines(output: &str) -> String {
 /// repo URL followed by session rows or a `—` placeholder when empty.
 /// State glyphs are delegated to [`crate::client::fleet_state_glyph`] to stay
 /// consistent with the Telegram adapter (🟢 active  🟡 provisioning  🔴 other).
-/// Test: `format_fleet_by_project_slack_renders_projects` in `tests.rs`.
+/// Test: `format_fleet_by_project_slack_renders_projects`,
+/// `format_fleet_by_project_slack_masks_a_quoted_stored_password` in `tests.rs`.
 fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
     if fleet.is_empty() {
         return "No registered projects.".to_string();
     }
     let mut text = String::from("*fleet by project*");
     for pf in fleet {
-        text.push_str(&format!("\n\n*{}* — `{}`", pf.project_name, pf.repo_url,));
+        text.push_str(&format!(
+            "\n\n*{}* — `{}`",
+            pf.project_name,
+            crate::core::remote_url_redact::redact_stored_url(&pf.repo_url),
+        ));
         if pf.sessions.is_empty() {
             text.push_str("\n  —");
         } else {

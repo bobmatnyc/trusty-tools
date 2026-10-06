@@ -147,7 +147,7 @@ async fn provision(
         // so with `LaunchDir::CallerResolved` when it composes onto `launch()`.
         tracing::info!(
             // #9124: a remote URL may embed `user:token@`.
-            origin = %trusty_mpm::core::remote_url_redact::redact_url(origin_url),
+            origin = %trusty_mpm::core::remote_url_redact::redact_stored_url(origin_url),
             path = %main_checkout.display(),
             "session runs in the main checkout; no base clone, no worktree (#5274)"
         );
@@ -352,7 +352,7 @@ pub(crate) async fn provision_for_fallback(
             "tm: cannot determine GitHub project from remote URL '{}'.\n\
              Start the daemon first with `tm start`, then run `tm` again.",
             // #9124: a remote URL may embed `user:token@`.
-            trusty_mpm::core::remote_url_redact::redact_url(origin_url)
+            trusty_mpm::core::remote_url_redact::redact_stored_url(origin_url)
         );
         anyhow::bail!(
             "daemon unreachable: cannot parse GitHub remote URL as owner/repo — run `tm start` first"

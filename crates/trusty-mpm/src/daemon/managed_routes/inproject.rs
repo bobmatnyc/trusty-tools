@@ -955,7 +955,7 @@ pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, Strin
     let Some(gh) = trusty_common::github_path::parse_github_path(&origin_url) else {
         warn!(
             // #9124: a remote URL may embed `user:token@`.
-            url = %crate::core::remote_url_redact::redact_url(&origin_url),
+            url = %crate::core::remote_url_redact::redact_stored_url(&origin_url),
             "inproject: cannot parse GitHub owner/repo from remote URL; falling through"
         );
         return Ok(None);

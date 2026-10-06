@@ -429,7 +429,7 @@ fn missing(dir: &Path) -> String {
 /// `a_refusal_never_quotes_the_origin_credentials_9124`.
 fn refusal(dir: &Path, url: &str, why: &SlugRefusal) -> String {
     // #9124: the refusal is logged on every reclaim poll; never the token.
-    let url = crate::core::remote_url_redact::redact_url(url);
+    let url = crate::core::remote_url_redact::redact_stored_url(url);
     match why {
         SlugRefusal::NoRepository => format!(
             "the `origin` remote at {} is {url:?}, which names no GitHub `owner/repo` — \

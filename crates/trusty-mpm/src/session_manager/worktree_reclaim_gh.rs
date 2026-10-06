@@ -352,7 +352,7 @@ pub(crate) fn proof_origin(
         .map(|slug| slug_as_url(&slug))
         .map_err(|refusal| {
             // #9124: the refusal is logged; never the origin's token.
-            let origin = crate::core::remote_url_redact::redact_url(origin);
+            let origin = crate::core::remote_url_redact::redact_stored_url(origin);
             match refusal {
                 super::worktree_repo_slug::SlugRefusal::UnresolvedSshAlias(alias) => format!(
                     "cannot tell which gh host serves {origin}: no `~/.ssh/config` entry \

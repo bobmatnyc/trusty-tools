@@ -62,7 +62,7 @@ pub(super) fn repo_mismatch<T: Git>(git: &T, req: &CleanupRequest) -> Option<Str
                 "the registry names `{stated}`, and the `origin` URL at {} ({}) names no \
                  repository this can compare it against — refusing (#7275)",
                 req.repo_root.display(),
-                crate::core::remote_url_redact::redact_url(&url) // #9124
+                crate::core::remote_url_redact::redact_stored_url(&url) // #9124
             ));
         }
     };

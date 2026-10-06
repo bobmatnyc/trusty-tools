@@ -34,7 +34,7 @@ use std::path::Path;
      ABSOLUTE path to a directory that already exists on the daemon host. Clone the repository \
      yourself, then pass that path — e.g. `git clone <url> <dir>` followed by \
      `tm session new <dir>`.",
-    crate::core::remote_url_redact::redact_url(.repo_url) // #9124
+    crate::core::remote_url_redact::redact_stored_url(.repo_url) // #9124
 )]
 pub struct NonLocalRepoUrl {
     /// The `repo_url` as the caller supplied it.
@@ -47,7 +47,7 @@ impl std::fmt::Debug for NonLocalRepoUrl {
         f.debug_struct("NonLocalRepoUrl")
             .field(
                 "repo_url",
-                &crate::core::remote_url_redact::redact_url(&self.repo_url),
+                &crate::core::remote_url_redact::redact_stored_url(&self.repo_url),
             )
             .finish()
     }
@@ -141,5 +141,16 @@ mod tests {
             "{msg}"
         );
         assert_eq!(err.repo_url, url);
+        // #9259: a quote or space in the password does not end the userinfo.
+        for url in [
+            "https://octo:pa'ss9259@github.com/owner/repo.git",
+            "https://octo:pa ss9259@github.com/owner/repo.git",
+        ] {
+            let err = require_local_repo_url(url).expect_err("a remote URL is not local");
+            for text in [err.to_string(), format!("{err:?}")] {
+                assert!(!text.contains("ss9259"), "the password reached {text}");
+                assert!(text.contains("https://***@github.com/owner/repo.git"));
+            }
+        }
     }
 }

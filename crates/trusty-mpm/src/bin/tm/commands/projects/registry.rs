@@ -13,6 +13,7 @@
 
 use trusty_mpm::client::DaemonClient;
 use trusty_mpm::client::http_client::projects::{ProjectStatusWire, RegisterProjectArgs};
+use trusty_mpm::core::remote_url_redact::redact_stored_url;
 use trusty_mpm::project::Project;
 use trusty_mpm::project_config::{self, ConfigEdit};
 
@@ -515,7 +516,7 @@ async fn config_apply(
 /// nested sessions (that is `show`'s job, not `config`'s).
 fn render_config_view(p: &Project) -> String {
     let lines = [
-        format!("{} ({})", p.name, p.repo_url),
+        format!("{} ({})", p.name, redact_stored_url(&p.repo_url)),
         format!("  default_branch: {}", p.default_branch),
         format!(
             "  description: {}",
@@ -576,9 +577,15 @@ fn normalize_bool_flag(value: &str) -> anyhow::Result<String> {
 /// (#5994), which appends its own `[plugin-trusted]` marker to this line rather
 /// than growing a second renderer that could drift from it.
 /// What: name, repo URL, and default branch on one line.
-/// Test: `render_project_line_basic`.
+/// Test: `render_project_line_basic`,
+/// `project_renderers_mask_a_quoted_stored_password_9259`.
 pub(crate) fn render_project_line(p: &Project) -> String {
-    format!("{}\t{}\t({})", p.name, p.repo_url, p.default_branch)
+    format!(
+        "{}\t{}\t({})",
+        p.name,
+        redact_stored_url(&p.repo_url),
+        p.default_branch
+    )
 }
 
 /// Render the status rollup as human lines.
@@ -595,7 +602,7 @@ fn render_status(s: &ProjectStatusWire) -> Vec<String> {
         .map(|t| t.to_rfc3339())
         .unwrap_or_else(|| "never".to_string());
     vec![
-        format!("{} ({})", s.project_name, s.repo_url),
+        format!("{} ({})", s.project_name, redact_stored_url(&s.repo_url)),
         format!(
             "  sessions: {} total  ({} active, {} provisioning, {} stopped, {} errored, {} decommissioned)",
             c.total, c.active, c.provisioning, c.stopped, c.errored, c.decommissioned
@@ -648,6 +655,35 @@ mod tests {
         assert!(line.contains("widget"));
         assert!(line.contains("https://github.com/acme/widget"));
         assert!(line.contains("main"));
+    }
+
+    /// #9259: a stored `repo_url` keeps any `user:token@` it was registered
+    /// with, so every renderer masks it, a quoted or spaced password included.
+    #[test]
+    fn project_renderers_mask_a_quoted_stored_password_9259() {
+        for url in [
+            "https://u:pa'ss9259@host/o/r",
+            "https://u:pa ss9259@host/o/r",
+        ] {
+            let mut p = project();
+            p.repo_url = url.into();
+            let s = ProjectStatusWire {
+                project_name: "widget".into(),
+                repo_url: url.into(),
+                sessions: SessionStateCountsWire::default(),
+                last_activity_at: None,
+                config: ProjectConfigFlagsWire::default(),
+            };
+            for text in [
+                render_project_line(&p),
+                render_config_view(&p),
+                render_status(&s).join("\n"),
+            ] {
+                assert!(!text.contains("ss9259"), "a password fragment survived");
+                assert!(!text.contains("u:pa"), "the user:password pair survived");
+                assert!(text.contains("https://***@host/o/r"), "{text}");
+            }
+        }
     }
 
     #[test]

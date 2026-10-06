@@ -10,7 +10,8 @@
 //! token-bearing query key ([`TOKEN_KEYS`]); text with neither is returned
 //! borrowed and unchanged. An scp-style `git@host:o/r` carries no secret and
 //! is left alone. [`redact_stored_url`] is the variant for one stored URL,
-//! whose authority a quote or whitespace does not end (#9227).
+//! whose authority a quote or whitespace does not end (#9227); every site that
+//! prints one known URL uses it, and free text keeps [`redact_url`] (#9259).
 //! Test: `redact_url_strips_user_and_token` and its siblings in
 //! `remote_url_redact_tests.rs`;
 //! `a_credentialed_origin_never_reaches_the_log_or_the_error` for the clone
@@ -29,7 +30,8 @@ pub const TOKEN_KEYS: &[&str] = &["access_token", "private_token", "oauth_token"
 
 /// A `repo_url` that keeps its raw value but prints redacted under `Debug`
 /// (#9124): a derived `Debug` on an error variant would otherwise show it.
-/// Test: `daemon::error::tests::project_not_found_message_redacts_the_url_credentials`.
+/// Test: `daemon::error::tests::project_not_found_message_redacts_the_url_credentials`,
+/// `every_single_url_type_masks_a_quoted_or_spaced_password`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedUrl(pub String);
 
@@ -54,7 +56,8 @@ impl From<&str> for RedactedUrl {
 
 impl std::fmt::Debug for RedactedUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&redact_url(&self.0), f)
+        // #9259: one stored URL, whose password may hold a quote or space.
+        std::fmt::Debug::fmt(&redact_stored_url(&self.0), f)
     }
 }
 

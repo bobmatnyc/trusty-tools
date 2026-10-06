@@ -152,7 +152,7 @@ pub(crate) fn pin_notice(name: &str, previous: Option<&str>, login: &str) -> Str
 pub(crate) fn transport_notice(origin: &str, login: &str) -> String {
     let scp_style = !origin.contains("://") && origin.contains('@') && origin.contains(':');
     let ssh = origin.starts_with("ssh://") || scp_style;
-    let origin = trusty_mpm::core::remote_url_redact::redact_url(origin); // #9124
+    let origin = trusty_mpm::core::remote_url_redact::redact_stored_url(origin); // #9124
     if ssh {
         format!(
             "tm: gh runs as '{login}'. git uses SSH for {origin}, so fetch and push authenticate \
@@ -202,7 +202,7 @@ pub(crate) fn pin_targets(
         return Ok(matching);
     }
     let name = trusty_mpm::project::derive_name_from_url(origin).ok_or_else(|| {
-        let shown = trusty_mpm::core::remote_url_redact::redact_url(origin); // #9124
+        let shown = trusty_mpm::core::remote_url_redact::redact_stored_url(origin); // #9124
         anyhow::anyhow!("cannot name a project for origin '{shown}'")
     })?;
     Ok(vec![(name, origin.to_string())])

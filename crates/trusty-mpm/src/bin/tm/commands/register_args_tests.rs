@@ -789,6 +789,10 @@ fn register_errors_never_echo_an_embedded_token_9124() {
     for bad in [
         "https://qauser:SECRETQATOKEN2@example.invalid/",
         "https://qauser:SECRETQATOKEN2@github.com/o/r/issues",
+        // #9259: a quote or space in the password does not end the userinfo.
+        "https://qauser:pa'ssSECRETQATOKEN2@example.invalid/",
+        "https://qauser:\"pSECRETQATOKEN2\"@example.invalid/",
+        "https://qauser:pa ssSECRETQATOKEN2@github.com/o/r/issues",
     ] {
         let err = resolve_register_args(bad, None).unwrap_err();
         assert_no_token(bad, &format!("{err:#}"));
@@ -894,4 +898,19 @@ fn shown_masks_an_scp_style_password_9124() {
         super::shown("https://qauser:SECRETQATOKEN2@h/o/r"),
         "https://***@h/o/r"
     );
+    // #9259: a quoted or spaced password, in the URL and the scp form.
+    for (s, want) in [
+        (
+            "https://qauser:pa'ssSECRETQATOKEN2@h/o/r",
+            "https://***@h/o/r",
+        ),
+        (
+            "https://qauser:\"p@ssSECRETQATOKEN2\"@h/o/r",
+            "https://***@h/o/r",
+        ),
+        ("qauser:pa ssSECRETQATOKEN2@host:o/r", "***@host:o/r"),
+        ("qauser:pa'ssSECRETQATOKEN2@h:o/r://x", "***@h:o/r://x"),
+    ] {
+        assert_eq!(super::shown(s), want);
+    }
 }
