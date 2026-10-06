@@ -19,10 +19,9 @@
 //! real daemon. That yields a clean two-valued signal: exit 2 means clap SAW
 //! the file's value and rejected it, exit 1 means clap never saw it.
 //!
-//! Test: `cargo test -p trusty-search --test daemon_env_precedence`
+//! Test: `cargo test -p trusty-search --test integration daemon_env_precedence::`
 
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
+use crate::test_daemon;
 
 use std::path::Path;
 use std::process::Command;

@@ -39,7 +39,7 @@
 //! directly against the wire shape a UI client actually receives.
 //! Test: this module is itself the test surface.
 
-mod support;
+use crate::support;
 
 use serde_json::{Value, json};
 use support::{StdioSession, find_session_event, project_with_agents};

@@ -8,10 +8,9 @@
 //! receives. Against pre-fix code the tool call succeeds with `queued: true`.
 //! What: one quarantined index, raised by a DIRECTORY at the colocated redb
 //! path, and one `tools/call reindex` against it.
-//! Test: `cargo test -p trusty-search --test mcp_reindex_quarantine_8105`
+//! Test: `cargo test -p trusty-search --test integration mcp_reindex_quarantine_8105::`
 
-#[path = "support/socket_daemon.rs"]
-mod socket_daemon;
+use crate::socket_daemon;
 
 use std::sync::Arc;
 

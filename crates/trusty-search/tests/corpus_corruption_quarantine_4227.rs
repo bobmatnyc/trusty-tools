@@ -33,7 +33,7 @@
 //! index is NOT quarantined, so #1 fails its `corpus_open_failed` assertion and
 //! #2 watches `chunk_count` climb past 0 exactly as it did in production.
 //!
-//! Test: `cargo test -p trusty-search --test corpus_corruption_quarantine_4227`
+//! Test: `cargo test -p trusty-search --test integration corpus_corruption_quarantine_4227::`
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

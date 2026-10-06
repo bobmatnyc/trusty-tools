@@ -15,8 +15,7 @@
 //! AND `config get --help` (pre-existing verb — must still parse cleanly).
 //! Test: this file IS the test.
 
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
+use crate::test_daemon;
 
 // #8900: every test starts the binary through `test_daemon::command`, which
 // runs the real built CLI, not a stub.

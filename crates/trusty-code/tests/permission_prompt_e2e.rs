@@ -22,7 +22,7 @@
 //! Test: this file IS the test; `support` holds the process/protocol
 //! plumbing shared with `task_e2e.rs`.
 
-mod support;
+use crate::support;
 
 use serde_json::{Value, json};
 use support::{StdioSession, find_response, find_session_event};

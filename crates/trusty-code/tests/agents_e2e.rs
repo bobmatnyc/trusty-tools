@@ -23,7 +23,7 @@
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared with `session_e2e.rs`/`task_e2e.rs`/`readiness_e2e.rs`.
 
-mod support;
+use crate::support;
 
 use serde_json::json;
 use support::{StdioSession, project_with_agents, run_task_to_completion};

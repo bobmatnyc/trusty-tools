@@ -10,7 +10,7 @@
 //! success with the expected surface text.
 //! Test: this file IS the test.
 
-mod support;
+use crate::support;
 
 use support::tcode_command;
 

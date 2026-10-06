@@ -11,7 +11,7 @@
 //! What: pure-logic tests that mirror the arg-building decision in
 //! `commands::start::handle_start` — no subprocess is actually spawned.
 //!
-//! Test: `cargo test -p trusty-search --test data_dir_forward`
+//! Test: `cargo test -p trusty-search --test integration data_dir_forward::`
 
 /// Mirror of the arg-forwarding logic in `commands::start::handle_start`.
 ///

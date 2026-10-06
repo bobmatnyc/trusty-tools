@@ -22,7 +22,7 @@
 //! and was re-read on every insert, so the pinned cap of three reached every
 //! other index alive at that moment.
 //!
-//! Test: `cargo test -p trusty-search --test watcher_chunk_cap_orphans_100`
+//! Test: `cargo test -p trusty-search --test integration watcher_chunk_cap_orphans_100::`
 
 use std::path::PathBuf;
 use std::sync::Arc;

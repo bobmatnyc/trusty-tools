@@ -21,7 +21,7 @@
 //! canned result set by BOTH `path` AND `score` — not merely `hit_count`.
 //! Test: this module is itself the test surface.
 
-mod support;
+use crate::support;
 
 use serde_json::{Value, json};
 use support::{StdioSession, find_session_event, project_with_agents};

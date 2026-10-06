@@ -34,7 +34,7 @@
 //! that leaves the original corpus fully intact on disk, exactly as in the
 //! incident.
 //!
-//! Test: `cargo test -p trusty-search --test corpus_open_quarantine_4122`
+//! Test: `cargo test -p trusty-search --test integration corpus_open_quarantine_4122::`
 
 use std::path::Path;
 use std::sync::Arc;

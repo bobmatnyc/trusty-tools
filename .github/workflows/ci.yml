@@ -812,11 +812,11 @@ jobs:
       # line-tables-only keeps file:line info in panic backtraces while
       # dropping the bulk of debug records. See #3668.
       #
-      # The workspace Cargo.toml has no [profile.test] override, so `cargo
-      # test` normally inherits dev's implicit debug level — but the `test`
-      # profile is the one actually selected by `cargo test`, and cargo
-      # honors CARGO_PROFILE_TEST_DEBUG directly for it (verified locally:
-      # this var alone changes the emitted debug info, no
+      # Since #9302 the workspace Cargo.toml sets the same value in
+      # `[profile.test]`, so this var only restates it. It stays as a pin
+      # for this job: cargo honors CARGO_PROFILE_TEST_DEBUG directly for
+      # the `test` profile `cargo test` selects (verified locally: this var
+      # alone changes the emitted debug info, no
       # CARGO_PROFILE_DEV_DEBUG needed). Scoped to this job only: the
       # clippy job's `--all-targets` run was checked and confirmed to build
       # under the check-only `dev` profile with zero linked executables and

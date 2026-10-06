@@ -36,7 +36,7 @@
 //! carries none.
 //! Test: this module is itself the test surface.
 
-mod support;
+use crate::support;
 
 use serde_json::{Value, json};
 use support::{

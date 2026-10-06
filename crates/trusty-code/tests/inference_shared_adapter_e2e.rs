@@ -22,7 +22,7 @@
 //! catalog slug). Credentials come from an injected `MemoryKeyStore` and base
 //! URLs from `OpenAiCompatClient::with_config`, so the test mutates no process
 //! env and is fully parallel-safe.
-//! Test: this file (`cargo test -p trusty-code --test inference_shared_adapter_e2e`).
+//! Test: this file (`cargo test -p trusty-code --test integration inference_shared_adapter_e2e::`).
 
 use serde_json::json;
 

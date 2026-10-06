@@ -35,7 +35,7 @@
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared with `session_e2e.rs`.
 
-mod support;
+use crate::support;
 
 use serde_json::json;
 use support::{StdioSession, find_session_event, project_with_agents, run_task_to_completion};

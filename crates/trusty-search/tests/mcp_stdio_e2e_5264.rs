@@ -37,12 +37,10 @@
 //! `ensure_daemon_up_names_the_socket_when_it_never_answers`, and the
 //! unreachable-daemon report by `mcp/tools/tests_health.rs`.
 //!
-//! Test: `cargo test -p trusty-search --test mcp_stdio_e2e_5264`
+//! Test: `cargo test -p trusty-search --test integration mcp_stdio_e2e_5264::`
 
-#[path = "support/socket_daemon.rs"]
-mod socket_daemon;
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
+use crate::socket_daemon;
+use crate::test_daemon;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
