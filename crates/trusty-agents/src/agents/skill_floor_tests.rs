@@ -5,7 +5,9 @@
 //! closed") needs a test, or it is only a comment.
 //! What: mostly pure. Three tests read the repo: the bundled-persona scan and
 //! the two catalog enumerations behind
-//! `every_bundled_skill_is_classified`, all rooted at `CARGO_MANIFEST_DIR`.
+//! `every_bundled_skill_is_classified`. The persona scan reads this crate's
+//! own tree; the two catalogs live in trusty-mpm and resolve through the
+//! running checkout's workspace root (#9298).
 //! Test: this file.
 
 use super::*;
@@ -138,8 +140,9 @@ const OFF_CATALOG_FLOOR_NAMES: &[&str] = &[
 /// function exactly when the tree stops looking familiar. The crate is a
 /// workspace member, so every `cargo test -p trusty-agents` run has it.
 fn mpm_bundled_skills() -> Vec<String> {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
+    let manifest = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join("crates")
         .join("trusty-mpm")
         .join("src")
         .join("assets")
@@ -171,8 +174,9 @@ fn mpm_bundled_skills() -> Vec<String> {
 /// What: the `.md` file stems. Panics when the directory is unreadable or
 /// empty, so the check cannot pass vacuously.
 fn mpm_architect_skills() -> Vec<String> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../trusty-mpm/src/assets/architect/skills");
+    let dir = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join("crates/trusty-mpm/src/assets/architect/skills");
     let entries =
         std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
     let out: Vec<String> = entries

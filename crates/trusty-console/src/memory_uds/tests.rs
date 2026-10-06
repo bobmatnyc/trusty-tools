@@ -186,8 +186,9 @@ async fn open_stream_reports_a_dead_socket_as_unreachable() {
 #[test]
 fn the_frame_budget_is_at_least_the_listeners() {
     let listener = declared_u64_const(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../trusty-memory/src/transport/uds.rs"),
+        &trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root")
+            .join("crates/trusty-memory/src/transport/uds.rs"), // #9298
         "pub const MAX_FRAME_BYTES: u64 = ",
     );
     assert!(
@@ -209,8 +210,9 @@ fn the_frame_budget_is_at_least_the_listeners() {
 /// Test: this is the test.
 #[test]
 fn every_memory_method_this_bridge_dials_is_declared_by_the_daemon() {
-    let uds_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../trusty-memory/src/transport/uds.rs");
+    let uds_rs = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join("crates/trusty-memory/src/transport/uds.rs"); // #9298
     let source = std::fs::read_to_string(&uds_rs)
         .unwrap_or_else(|e| panic!("read {}: {e}", uds_rs.display()));
     // The two tables are the only places a `"memory.*"` string literal is

@@ -697,18 +697,15 @@ fn dev_checkout_is_found_from_a_nested_directory_of_a_linked_worktree() {
 /// The real trusty-tools tree is detected as a checkout and serves agents.
 #[test]
 fn dev_checkout_detects_this_repository() {
-    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = find_dev_checkout(crate_dir).expect("this repository is a checkout");
-    assert_eq!(
-        root.canonicalize().expect("root"),
-        crate_dir
-            .join("../..")
-            .canonicalize()
-            .expect("workspace root")
-    );
+    // #9298: the running checkout, not the one that built this binary.
+    let workspace =
+        crate::test_harness::test_repo_root().expect("the running checkout's workspace root");
+    let crate_dir = workspace.join("crates/trusty-common");
+    let root = find_dev_checkout(&crate_dir).expect("this repository is a checkout");
+    assert_eq!(root.canonicalize().expect("root"), workspace);
     let content = resolve(&options(
         &root.join("no-cache"),
-        DevOverride::DetectFrom(crate_dir.to_path_buf()),
+        DevOverride::DetectFrom(crate_dir),
     ))
     .expect("resolve");
     assert!(!content.list("agents").expect("agents").is_empty());
@@ -932,9 +929,9 @@ fn read_of_an_absent_path_is_not_found() {
 
 /// Reads a repository script, relative to the workspace root.
 fn repo_script(rel: &str) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(rel);
+    let path = crate::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join(rel); // #9298
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
