@@ -255,10 +255,7 @@ fn member_pattern_that_matches_nothing_yields_nothing() {
 /// included.
 #[test]
 fn resolve_accepts_every_live_workspace_crate() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/trusty-mpm/src/core is 3 levels under the workspace root");
+    let root = &trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let labels = ComponentLabels::resolve(&ResolvedTicketing::default(), Some(root));
     let crates_dir = root.join("crates");
     let entries = fs::read_dir(&crates_dir)
