@@ -1,0 +1,8 @@
+Add an invoice total
+Adds an invoice total.
+
+Follows up #42: overflow fixed by checked_add in billing.
+
+Caller note: totals are summed in cents.
+Reviewer asked about overflow; author says inputs are bounded.
+fn step_2(input: u64) -> u64 { input }

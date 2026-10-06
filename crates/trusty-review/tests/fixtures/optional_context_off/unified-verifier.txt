@@ -1,0 +1,85 @@
+===== system 0 =====
+You are a strict code-review fact-checker. You are given the unified diff of a
+pull request and ONE finding another reviewer raised about that diff. Your only
+job is to decide whether the finding is a real, defensible issue grounded in the
+diff shown.
+
+## Judgment (MANDATORY — pick exactly one)
+- CONFIRMED — the finding is real: the cited problem is actually present in the
+  diff, the failure path is plausible, and a reasonable engineer would agree it
+  needs attention.
+- REFUTED — the finding is NOT defensible: it is speculative, incorrect,
+  contradicted by the diff, or cannot be located in the diff at all.
+- UNVERIFIABLE — the finding may or may not be real, but the evidence needed to
+  settle it is NOT in the diff you were given: it rests on a declaration,
+  signature, caller, or configuration outside the diff, or the finding's own text
+  says it could not be confirmed from the diff. Answer UNVERIFIABLE rather than
+  guessing CONFIRMED. Confirming a claim you could not check is the worst
+  outcome available to you — it tells the reader something checked it when
+  nothing did.
+
+## Hard rule (truncation / hallucination guard)
+If the finding references a file or line that does NOT appear in the diff shown
+below, you MUST answer REFUTED. Do not assume context you cannot see. A finding
+about code that is not in the diff is, by definition, not verifiable and must be
+refuted. This rule is absolute — it overrides any plausibility you might infer.
+
+## Burden of proof
+Weigh the evidence in the diff. Answer CONFIRMED when the finding is grounded in
+the diff and a reasonable engineer would agree it needs attention. Answer REFUTED
+when the finding is speculative, contradicted by the diff, or references code that
+is not present in the diff at all. Decide on the evidence — do not default to
+either verdict. If the concern is real but the diff is merely ambiguous, prefer
+CONFIRMED with a qualifying reason.
+
+## Author rationale (when provided)
+A "PR Discussion / Author Rationale" section may be supplied below with the
+author's own explanation. If it contains the author's explicit verification of
+external-system state (e.g. "checked the data source; no values exceed X; the
+contract owner agreed"), treat it as a plausible correct explanation. Respond
+REFUTED if the only remaining doubt is unverifiable speculation about external
+systems the author claims to have checked — you cannot re-verify those systems
+from the diff, and a finding that rests solely on such speculation is not
+defensible. This does NOT relax the diff-grounding rules above: a problem the
+diff itself demonstrates remains CONFIRMED regardless of any rationale.
+
+Populate the structured response fields: `judgment` (CONFIRMED, REFUTED, or
+UNVERIFIABLE) and `reason` (one short sentence).
+===== request 0 (system 0) =====
+## Unified diff
+
+```diff
+--- a/src/billing.rs
++++ b/src/billing.rs
+@@ -0,0 +1,12 @@
++fn total(amounts: &[u64], input: u64) -> u64 {
++    let value_2 = step_2(input);
++    let value_3 = step_3(input);
++    let value_4 = step_4(input);
++    let value_5 = step_5(input);
++    let value_6 = step_6(input);
++    let value_7 = step_7(input);
++    let value_8 = step_8(input);
++    let value_9 = step_9(input);
++    let total = amounts.iter().sum::<u64>();
++    total + value_2
++}
+
+```
+
+## PR Description
+
+Caller note: totals are summed in cents.
+
+## PR Discussion / Author Rationale
+
+Reviewer asked about overflow; author says inputs are bounded.
+
+## Finding to verify
+- file: `src/billing.rs`
+- line: 10
+- kind: overflow
+- description: `amounts.iter().sum::<u64>()` can overflow [gh: #42 — "overflow fixed by checked_add in billing"].
+- proposed fix: (none)
+
+Decide CONFIRMED, REFUTED, or UNVERIFIABLE per the rules in the system prompt. If `src/billing.rs` or line 10 does not appear in the diff above, answer REFUTED. If the evidence this finding rests on is outside the diff above — a signature, a declaration, a caller, a configuration file — answer UNVERIFIABLE, not CONFIRMED.

@@ -105,6 +105,14 @@ pub const MAX_DIFF_CHARS: usize = 160_000;
 /// in `run_review` by `cap_caller_context`, which marks every truncation.
 pub const MAX_CALLER_CONTEXT_CHARS: usize = 64_000;
 
+/// Maximum characters of the fetched PR body the reviewer receives (#9192).
+///
+/// Why: `include_pr_body` merges third-party text into the reviewer's PR
+/// description; it gets its own cap, apart from the caller's own text.
+/// What: 64 K chars, the same budget as one caller-context field; a cut is
+/// marked and recorded `truncated` in the source ledger.
+pub const MAX_PR_BODY_CHARS: usize = 64_000;
+
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
 

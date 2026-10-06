@@ -1,0 +1,50 @@
+{
+  "cost_estimate_usd": 0.0005880000000000001,
+  "dry_run": true,
+  "findings": [
+    {
+      "category": "correctness",
+      "code_provable": false,
+      "confidence": 0.8999999761581421,
+      "consequence": "",
+      "description": "`amounts.iter().sum::<u64>()` can overflow [gh: #42 — \"overflow fixed by checked_add in billing\"].",
+      "effort": "medium",
+      "file": "src/billing.rs",
+      "issue_eligible": false,
+      "kind": "overflow",
+      "line": 10,
+      "suggestion": "",
+      "verified": "confirmed"
+    }
+  ],
+  "findings_count": 1,
+  "grade": "D+",
+  "head_sha": "0123456789abcdef0123456789abcdef01234567",
+  "inline_comments": [
+    {
+      "body": "**overflow** — `amounts.iter().sum::<u64>()` can overflow [gh: #42 — \"overflow fixed by checked_add in billing\"].\n",
+      "line": 10,
+      "path": "src/billing.rs"
+    }
+  ],
+  "inline_finding_indices": [
+    0
+  ],
+  "input_tokens": 1400,
+  "latency_ms": 0,
+  "model": "stub/golden-reviewer",
+  "output_tokens": 5600,
+  "owner": "acme",
+  "posted": false,
+  "pr_number": 7,
+  "pr_title": "Add an invoice total",
+  "pr_url": "https://github.com/acme/billing/pull/7",
+  "repo": "billing",
+  "review_body": "ok\n\nMap-reduce review: 13 file(s) reviewed across 13 unit(s), 0 skipped, 0 failed; 1 finding(s) surfaced.\n---\nGrade: D+ · 🤖 Reviewed by Trusty-Review (`stub/golden-reviewer`) · tokens ↑1,400 ↓5,600 · est. $0.001",
+  "review_version": "<review_version>",
+  "status": "completed",
+  "timestamp": "<timestamp>",
+  "unverified_count": 0,
+  "verdict": "REQUEST_CHANGES",
+  "withheld_unverified_count": 0
+}

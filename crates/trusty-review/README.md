@@ -181,6 +181,28 @@ A review that could not complete — a bad diff, a provider outage — still pri
 its JSON, with the reason in `error`, and exits non-zero. It never exits 0 on an
 empty result.
 
+### Optional PR context and the source ledger (#9192)
+
+- `--pr-description[-file]`, `--pr-discussion[-file]` and
+  `--referenced-code[-file]` pass caller text to the reviewer, each capped at
+  64,000 characters.
+- `--include-pr-body` merges the fetched PR body into the reviewer's PR
+  description, ahead of any `--pr-description` text. The body is capped at
+  64,000 characters with its own visible marker and sits in a fenced block
+  marked as data from the PR author. The verifier's author rationale and the
+  citation corpus see the same capped text. A local diff has no PR body; the
+  review runs and the ledger records the body `unavailable`.
+- `--report-context` asks for the source ledger with no other new input.
+
+With `--include-pr-body` or `--report-context`, `--json` prints
+`{"result": <review>, "context_sources": [...]}`, and the human output prints
+one line per source that was `unavailable` or `truncated`. Without either flag,
+`--json` prints the review object alone, exactly as before. The text flags and
+a `# Context:` stdin preamble never turn the ledger on by themselves.
+
+A repeat review of the same head with different context flags is skipped as a
+duplicate when a dedup store is wired. Push a new head, or clear the claim.
+
 | Retired | Now |
 |---|---|
 | `POST /review` → `review.run` | `trusty-review run … --json` |
@@ -235,6 +257,20 @@ Wire into Claude Code via `.mcp.json`:
   }
 }
 ```
+
+Optional PR context (#9192), all off by default:
+
+| Param | Type | Effect |
+|---|---|---|
+| `include_pr_body` | boolean | Merge the fetched PR body (capped at 64,000 characters, fenced as data) into the PR description, ahead of `pr_description`. A non-boolean is an invalid-params error. |
+| `pr_description` | string | PR description for the reviewer and the verifier. |
+| `pr_discussion` | string | Review and issue comments for the reviewer and the verifier. |
+| `referenced_code` | string | Related code the diff depends on, for the reviewer. |
+
+A mistyped text param is ignored with a warning. When any of the four is
+sent, the response envelope carries `context_sources`: one record per source
+(`pr_body`, `caller_context`) with state `used`, `truncated`, `absent` or
+`unavailable`. The `ReviewResult` text inside the envelope is unchanged.
 
 Returns a `ReviewResult` JSON object with:
 - `grade` (A+ | A | A- | B+ | B | B- | C+ | C | C- | D+ | D | D- | F) — letter grade

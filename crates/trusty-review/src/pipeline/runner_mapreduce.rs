@@ -29,6 +29,7 @@ use crate::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
         mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
+        optional_context::assemble::refs_for_gate,
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{CallerContext, ReviewDeps, ReviewInput},
@@ -38,7 +39,7 @@ use crate::{
         },
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
-        withheld_contract::{refs_corpus, regrade_from_survivors},
+        withheld_contract::regrade_from_survivors,
     },
 };
 
@@ -65,6 +66,8 @@ pub(super) struct MapReduceRun {
     pub coverage_contrib: Option<CoverageVerdictContrib>,
     /// Degraded reason from the #590 context gate (None = authoritative).
     pub degraded_reason: Option<String>,
+    /// #9192: false when `include_pr_body` put the capped body in the context.
+    pub body_in_refs: bool,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -410,14 +413,16 @@ async fn fold_reduced_into_result(
         input.caller_context.pr_discussion.as_deref(),
     );
     // #9188 D: context citations resolve in what the reviewer was shown.
-    let refs = refs_corpus(&[
-        Some(&run.pr_meta.title),
-        Some(&run.pr_meta.body),
-        Some(&run.external_context),
-        run.context.pr_description.as_deref(),
-        run.context.pr_discussion.as_deref(),
-        run.context.referenced_code.as_deref(),
-    ]);
+    let refs = refs_for_gate(
+        &run.pr_meta.title,
+        run.body_in_refs.then_some(run.pr_meta.body.as_str()), // #9192
+        &run.external_context,
+        [
+            run.context.pr_description.as_deref(),
+            run.context.pr_discussion.as_deref(),
+            run.context.referenced_code.as_deref(),
+        ],
+    );
     let inputs = GateInputs {
         filtered: &run.filtered,
         diff: &run.raw_diff,

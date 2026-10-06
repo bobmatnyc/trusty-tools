@@ -74,26 +74,33 @@ async fn run_captured(state: &AppState, owner: &str, repo: &str) -> (Option<Seen
     let seen: Arc<Mutex<Option<Seen>>> = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&seen);
     let args = json!({ "owner": owner, "repo": repo, "pr": 7 });
-    let envelope = review_pr_with(&args, state, move |config, _input, deps| async move {
-        let search_health = deps
-            .search
-            .health()
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string());
-        let analyze_ready = match deps.analyze.as_ref() {
-            Some(a) => Some(a.has_analysis(&config.search_index).await),
-            None => None,
-        };
-        if let Ok(mut slot) = sink.lock() {
-            *slot = Some(Seen {
-                index: config.search_index.clone(),
-                search_health,
-                analyze_ready,
-            });
-        }
-        ReviewResult::new("o", "r", 7, "PR #7", "")
-    })
+    let envelope = review_pr_with(
+        &args,
+        state,
+        move |config, _input, deps, _options| async move {
+            let search_health = deps
+                .search
+                .health()
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+            let analyze_ready = match deps.analyze.as_ref() {
+                Some(a) => Some(a.has_analysis(&config.search_index).await),
+                None => None,
+            };
+            if let Ok(mut slot) = sink.lock() {
+                *slot = Some(Seen {
+                    index: config.search_index.clone(),
+                    search_health,
+                    analyze_ready,
+                });
+            }
+            crate::pipeline::ReviewOutcome {
+                result: ReviewResult::new("o", "r", 7, "PR #7", ""),
+                context_sources: Vec::new(),
+            }
+        },
+    )
     .await
     .expect("review_pr_with must not fail at the protocol level");
     let captured = seen.lock().ok().and_then(|s| s.clone());
@@ -377,4 +384,67 @@ fn foreign_pin_is_named_in_the_miss() {
     .expect_err("another owner's index must not be auto-accepted");
     assert!(err.contains("\"tt-fork\""), "{err}");
     assert!(err.contains("alice/trusty-tools"), "{err}");
+}
+
+/// #9192: `review_pr` hands the review its parsed PR context and request, and
+/// the envelope carries the outcome's `context_sources`.
+#[tokio::test]
+#[serial_test::serial]
+async fn review_pr_passes_the_parsed_context_to_the_review() {
+    use crate::models::{ContextSourceRecord, SourceState};
+    use crate::pipeline::{CallerContext, OptionalContextRequest};
+
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "cli") };
+    let mut state = state_with(Some(two_repo_registry()), true);
+    state.config.github_token = "test-token-9192".into();
+    let seen: Arc<Mutex<Option<(CallerContext, OptionalContextRequest)>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let args = json!({
+        "owner": "bobmatnyc", "repo": "trusty-tools", "pr": 7,
+        "include_pr_body": true, "pr_description": "why", "pr_discussion": 3,
+    });
+    let envelope = review_pr_with(&args, &state, move |_config, input, _deps, options| {
+        if let Ok(mut slot) = sink.lock() {
+            *slot = Some((input.caller_context, options.request));
+        }
+        async move {
+            crate::pipeline::ReviewOutcome {
+                result: ReviewResult::new("o", "r", 7, "PR #7", ""),
+                context_sources: vec![ContextSourceRecord::new("pr_body", SourceState::Used)],
+            }
+        }
+    })
+    .await;
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    let envelope = envelope.expect("a mistyped legacy param never fails the call");
+    let (caller, request) = seen
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .expect("review ran");
+    assert_eq!(caller.pr_description.as_deref(), Some("why"));
+    assert_eq!(
+        caller.pr_discussion, None,
+        "a mistyped legacy param is ignored"
+    );
+    assert!(request.include_pr_body);
+    assert_eq!(envelope["context_sources"][0]["source"], "pr_body");
+}
+
+/// #9192: a mistyped `include_pr_body` is a protocol error, before any review.
+#[tokio::test]
+async fn review_pr_rejects_a_mistyped_include_pr_body_before_reviewing() {
+    let state = state_with(Some(two_repo_registry()), true);
+    let args =
+        json!({"owner": "bobmatnyc", "repo": "trusty-tools", "pr": 7, "include_pr_body": "yes"});
+    let out = review_pr_with(&args, &state, |_c, _i, _d, _o| async {
+        panic!("the review must not run")
+    })
+    .await;
+    assert!(
+        matches!(out, Err(crate::mcp::tools::ToolError::InvalidParams(m)) if m.contains("include_pr_body"))
+    );
 }

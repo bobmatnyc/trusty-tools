@@ -18,40 +18,46 @@ use tracing::{debug, error, info, warn};
 use super::runner_coverage::load_coverage_contrib;
 #[path = "runner_truncation.rs"]
 mod truncation;
+#[cfg(test)]
+use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC headroom
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    fetch_github_pr_meta, finalize_run, ground_parsed_findings, mark_no_head_sha_abort,
-    resolve_diff_token,
+    claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, resolve_diff_token,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
 use crate::{
     config::{
-        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath,
-        constants::MAX_CALLER_CONTEXT_CHARS, select_review_mode,
+        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode,
     },
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
-        caller_preamble::{cap_caller_context, consume_context_preamble},
+        caller_preamble::consume_context_preamble,
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{
-            DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers, load_diff,
+            DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers,
             truncate_diff,
         },
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
+        optional_context::{
+            ReviewOptions,
+            ReviewOutcome,
+            assemble::{PrBody, apply_caller_context, refs_for_gate}, // #9188 D, #9192
+            ledger::ContextLedger,
+            seams::{load_diff_via, pr_meta_via},
+        },
         parser::parse_review_response,
         post::{FinalizeAction, decide_action},
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
-        runner_helpers::{ClaimGate, classify_claim}, // #8904: moved for SLOC headroom
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
-        withheld_contract::{refs_corpus, regrade_from_survivors}, // #9188 D, J
+        withheld_contract::regrade_from_survivors, // #9188 J
     },
     store::DedupStore,
 };
@@ -188,8 +194,45 @@ pub struct ReviewDeps {
 /// `run_review_empty_head_sha_fails_closed_before_posting`.
 pub async fn run_review(
     config: &ReviewConfig,
+    input: ReviewInput,
+    deps: ReviewDeps,
+) -> ReviewResult {
+    run_review_with(config, input, deps, ReviewOptions::default())
+        .await
+        .result
+}
+
+/// Run the review with the optional inputs in `options` (#9192).
+///
+/// Why: the owner ruled the library source-compatible, so new inputs arrive
+/// through a new entry point rather than new fields on `CallerContext` or
+/// `ReviewDeps`; [`run_review`] is this with `ReviewOptions::default()`.
+/// What: runs the same pipeline as [`run_review`], plus each input
+/// `options.request` turns on, and returns the result with the ledger of
+/// sources those inputs used (empty unless one is on).
+/// Test: `off_is_byte_identical_unified`, `off_is_byte_identical_mapreduce`,
+/// `off_makes_no_extra_calls`.
+pub async fn run_review_with(
+    config: &ReviewConfig,
+    input: ReviewInput,
+    deps: ReviewDeps,
+    options: ReviewOptions,
+) -> ReviewOutcome {
+    let mut ledger = ContextLedger::new(options.request.ledger_enabled());
+    let result = run_pipeline(config, input, deps, &options, &mut ledger).await;
+    ReviewOutcome {
+        result,
+        context_sources: ledger.into_records(),
+    }
+}
+
+/// The review pipeline behind [`run_review_with`].
+async fn run_pipeline(
+    config: &ReviewConfig,
     mut input: ReviewInput,
     deps: ReviewDeps,
+    options: &ReviewOptions,
+    ledger: &mut ContextLedger,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
     // `LocalFile`, `GitRange`, and `Stdin` are all treated identically here:
@@ -264,7 +307,8 @@ pub async fn run_review(
     let (pr_meta, head_sha, meta_error): (ReviewPrMeta, String, Option<String>) = if is_local {
         (ReviewPrMeta::default(), String::new(), None)
     } else {
-        match fetch_github_pr_meta(config, &owner, &repo, pr_number, input.run_mode).await {
+        let source = options.pr_source.as_deref(); // #9192: test seam; None in production
+        match pr_meta_via(source, config, &owner, &repo, pr_number, input.run_mode).await {
             Ok((m, sha)) => (m, sha, None),
             Err(e) => {
                 warn!("failed to fetch PR metadata: {e} — using empty metadata");
@@ -310,72 +354,11 @@ pub async fn run_review(
     }
 
     // ── Step 2b: dedup claim (Phase 1, #582) ──────────────────────────────
-    // Claim the (owner,repo,pr,head_sha) slot before doing expensive work.  A
-    // completed claim for the same head SHA short-circuits the whole pipeline.
-    // #5064: a store error means the gate did not engage, so the review
-    // aborts without posting rather than proceeding unguarded.
-    if !is_local
-        && !head_sha.is_empty()
-        && let Some(store) = deps.dedup.as_ref()
-    {
-        match classify_claim(store.claim(&owner, &repo, pr_number, &head_sha).await) {
-            ClaimGate::DuplicateSkip => {
-                info!(
-                    owner = %owner,
-                    repo = %repo,
-                    pr = pr_number,
-                    head_sha = %head_sha,
-                    "dedup: a completed review already exists for this head SHA — skipping"
-                );
-                result.verdict = Verdict::Approve;
-                result.error = Some("skipped: duplicate of a completed review".to_string());
-                result.dry_run = true;
-                // #1877: `result.findings` is empty here (no LLM call happened
-                // yet) but keep the sync explicit rather than relying on the
-                // `ReviewResult::new()` default staying 0 forever.
-                result.findings_count = result.findings.len();
-                return result;
-            }
-            // #5126: the slot is held by someone else, so this review never
-            // ran. Report that, never a verdict.
-            ClaimGate::InProgressElsewhere => {
-                warn!(
-                    owner = %owner,
-                    repo = %repo,
-                    pr = pr_number,
-                    head_sha = %head_sha,
-                    "dedup: another holder owns the in-progress claim — not reviewed"
-                );
-                let stale_secs = crate::config::constants::DEDUP_STALE_SECS;
-                result.verdict = Verdict::Unknown;
-                result.error = Some(format!(
-                    "not reviewed: another review holds the in-progress dedup claim for \
-                     head SHA {head_sha}; it clears when that review finishes or after \
-                     {stale_secs}s"
-                ));
-                // NotHeld — this review never acquired the claim, so it must
-                // not delete the holder's record.
-                return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
-            }
-            ClaimGate::Proceed => {
-                debug!(head_sha = %head_sha, "dedup: claimed review slot");
-            }
-            // #5064: the claim gate did not engage — abort rather than post.
-            ClaimGate::Abort(reason) => {
-                error!(
-                    owner = %owner,
-                    repo = %repo,
-                    pr = pr_number,
-                    head_sha = %head_sha,
-                    "dedup claim failed — aborting without posting: {reason}"
-                );
-                result.error = Some(format!("dedup claim unavailable: {reason}"));
-                // #5064: NotHeld — this review never acquired the claim, so it
-                // must not delete whatever record is on disk.
-                return abort_dry(result, config, &input, &deps, DedupClaim::NotHeld).await;
-            }
-        }
-    }
+    // A completed claim for the same head SHA short-circuits the pipeline.
+    let mut result = match claim_slot(config, &input, &deps, result, is_local).await {
+        std::ops::ControlFlow::Break(done) => return done,
+        std::ops::ControlFlow::Continue(result) => result,
+    };
 
     // ── Step 2c: resolve the GitHub token for the diff fetch (#1880) ──────
     // `DiffSource::Github` may carry an empty placeholder token (service-path
@@ -393,7 +376,7 @@ pub async fn run_review(
 
     // ── Step 3: load, filter (DiffAnalyzer Stages A+B), and truncate diff ─
     // truncate_diff is the final safety net after noise filtering (REV-209).
-    let raw_diff = match load_diff(&diff_source).await {
+    let raw_diff = match load_diff_via(options.pr_source.as_deref(), &diff_source).await {
         Ok(d) => d,
         Err(e) => {
             warn!("failed to load diff: {e}");
@@ -560,7 +543,9 @@ pub async fn run_review(
     // GitHub fetch happened).  Cloned because the verifier also needs the
     // description + discussion as author rationale below.
     // #8654: one per-field cap, marked, before either prompt sees the text.
-    cap_caller_context(&mut input.caller_context, MAX_CALLER_CONTEXT_CHARS);
+    // #9192: the requested PR body merges in here, ahead of the caller's text.
+    let body = PrBody::of(is_local, meta_error.as_deref(), &pr_meta.body);
+    apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
@@ -580,6 +565,7 @@ pub async fn run_review(
             external_context,
             coverage_contrib,
             degraded_reason,
+            body_in_refs: !options.request.include_pr_body,
         };
         return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
     }
@@ -744,14 +730,16 @@ pub async fn run_review(
         input.caller_context.pr_discussion.as_deref(),
     );
     let caller = &input.caller_context;
-    let refs = refs_corpus(&[
-        Some(&pr_meta.title),
-        Some(&pr_meta.body),
-        Some(&external_context),
-        caller.pr_description.as_deref(),
-        caller.pr_discussion.as_deref(),
-        caller.referenced_code.as_deref(),
-    ]);
+    let refs = refs_for_gate(
+        &pr_meta.title,
+        (!options.request.include_pr_body).then_some(pr_meta.body.as_str()), // #9192
+        &external_context,
+        [
+            caller.pr_description.as_deref(),
+            caller.pr_discussion.as_deref(),
+            caller.referenced_code.as_deref(),
+        ],
+    );
     let inputs = GateInputs {
         filtered: &filtered,
         diff: &diff,

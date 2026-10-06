@@ -13,13 +13,14 @@
 use std::future::Future;
 
 use serde_json::Value;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     config::{InvocationSurface, ReviewConfig, repo_index::RepoIndexError},
     integrations::github::{AuthStrategy, GithubClient},
-    models::ReviewResult,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, run_review},
+    pipeline::{
+        DiffSource, ReviewDeps, ReviewInput, ReviewOptions, ReviewOutcome, run_review_with,
+    },
     service::AppState,
 };
 
@@ -27,8 +28,8 @@ use crate::{
 pub(crate) use crate::pipeline::pr_index::PrIndex;
 
 use super::{
-    MCP_REVIEW_ALLOW_POSTING, MCP_REVIEW_TRIGGER, ToolError, deps_from_state, mcp_run_mode,
-    require_str, wrap_result, wrap_tool_error,
+    MCP_REVIEW_ALLOW_POSTING, MCP_REVIEW_TRIGGER, ToolError, context_args::parse_review_pr_context,
+    deps_from_state, mcp_run_mode, require_str, wrap_outcome, wrap_tool_error,
 };
 
 /// Resolve the index `review_pr` uses for `owner/repo`, or the degrade.
@@ -68,9 +69,14 @@ pub(super) async fn call_review_pr(args: &Value, state: &AppState) -> Result<Val
     review_pr_with(args, state, run_resolved).await
 }
 
-/// The production runner: `run_review` under the per-call config it is given.
-async fn run_resolved(config: ReviewConfig, input: ReviewInput, deps: ReviewDeps) -> ReviewResult {
-    run_review(&config, input, deps).await
+/// The production runner: `run_review_with` under the per-call config it is given.
+async fn run_resolved(
+    config: ReviewConfig,
+    input: ReviewInput,
+    deps: ReviewDeps,
+    options: ReviewOptions,
+) -> ReviewOutcome {
+    run_review_with(&config, input, deps, options).await
 }
 
 /// `review_pr` with the review step injected.
@@ -78,20 +84,22 @@ async fn run_resolved(config: ReviewConfig, input: ReviewInput, deps: ReviewDeps
 /// Why: the original #8649 bug was the review running under the server's
 /// config; taking the runner as a parameter lets a test see exactly the
 /// config and deps the review receives.
-/// What: resolves the [`PrIndex`] first — an unresolvable one is an in-band
-/// error naming the repo and index id, returned before any GitHub call — then
-/// resolves the GitHub token, builds `ReviewDeps` and the `ReviewInput`,
-/// applies the index to both, and passes them to `run`.
+/// What: parses the optional PR-context parameters (#9192), resolves the
+/// [`PrIndex`] — an unresolvable one is an in-band error naming the repo and
+/// index id, returned before any GitHub call — then resolves the GitHub
+/// token, builds `ReviewDeps` and the `ReviewInput`, applies the index to
+/// both, and passes them with the parsed request to `run`.
 /// Test: `resolved_config_reaches_the_review_for_each_repo`,
-/// `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`.
+/// `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`,
+/// `review_pr_passes_the_parsed_context_to_the_review`.
 pub(crate) async fn review_pr_with<R, F>(
     args: &Value,
     state: &AppState,
     run: R,
 ) -> Result<Value, ToolError>
 where
-    R: FnOnce(ReviewConfig, ReviewInput, ReviewDeps) -> F,
-    F: Future<Output = ReviewResult>,
+    R: FnOnce(ReviewConfig, ReviewInput, ReviewDeps, ReviewOptions) -> F,
+    F: Future<Output = ReviewOutcome>,
 {
     let owner = require_str(args, "owner")?;
     let repo = require_str(args, "repo")?;
@@ -99,6 +107,11 @@ where
         .get("pr")
         .and_then(Value::as_u64)
         .ok_or_else(|| ToolError::InvalidParams("missing or non-integer 'pr'".into()))?;
+    // #9192: optional PR context; a mistyped legacy text param is only logged.
+    let context = parse_review_pr_context(args)?;
+    for warning in &context.warnings {
+        warn!("{warning}");
+    }
 
     // #8649: the PR repo's own index, never the server-startup one.
     let index = match resolve_pr_index(state, owner, repo).await {
@@ -137,7 +150,7 @@ where
         trigger: MCP_REVIEW_TRIGGER,
         run_mode: mcp_run_mode(&state.config),
         allow_posting: MCP_REVIEW_ALLOW_POSTING,
-        caller_context: crate::pipeline::runner::CallerContext::default(),
+        caller_context: context.caller,
         // Search-unreachable semantics fix: the MCP tool surface can never post
         // to a real PR (`allow_posting: false` above), so a search outage
         // safely defaults to a loud DEGRADED diff-only review instead of a
@@ -147,8 +160,8 @@ where
     };
 
     info!(owner, repo, pr, reviewer_model, index = %config.search_index, "mcp: review_pr");
-    let result = run(config, input, deps).await;
-    Ok(wrap_result(&result))
+    let outcome = run(config, input, deps, ReviewOptions::new(context.request)).await;
+    Ok(wrap_outcome(&outcome))
 }
 
 // #8649: per-call search-index resolution for `review_pr`.

@@ -779,3 +779,52 @@ async fn review_health_reports_the_dry_run_the_review_path_executes() {
         "the reason names the gate: {health}"
     );
 }
+
+/// #9192: the envelope carries `context_sources` only when the outcome has
+/// records, and never changes the `ReviewResult` text it wraps.
+#[test]
+fn wrap_outcome_adds_context_sources_only_when_present() {
+    use crate::models::{ContextSourceRecord, SourceState};
+    use crate::pipeline::ReviewOutcome;
+
+    let result = ReviewResult::new("acme", "backend", 8, "Add Y", "https://example/pr/8");
+    let mut outcome = ReviewOutcome {
+        result: result.clone(),
+        context_sources: Vec::new(),
+    };
+    let off = super::wrap_outcome(&outcome);
+    assert_eq!(
+        off,
+        wrap_result(&result),
+        "no records: the envelope is unchanged"
+    );
+    assert!(off.get("context_sources").is_none());
+
+    outcome.context_sources = vec![ContextSourceRecord::new("pr_body", SourceState::Absent)];
+    let on = super::wrap_outcome(&outcome);
+    assert_eq!(
+        on["context_sources"],
+        json!([{"source": "pr_body", "state": "absent"}])
+    );
+    assert_eq!(on["content"], wrap_result(&result)["content"]);
+}
+
+/// #9192: `review_pr` lists the four optional context params, with the new
+/// boolean typed as one.
+#[test]
+fn review_pr_schema_lists_the_optional_context_params() {
+    let tools = tool_descriptors();
+    let review_pr = tools
+        .as_array()
+        .and_then(|a| a.iter().find(|t| t["name"] == "review_pr"))
+        .expect("review_pr descriptor");
+    let props = &review_pr["inputSchema"]["properties"];
+    assert_eq!(props["include_pr_body"]["type"], "boolean");
+    for name in ["pr_description", "pr_discussion", "referenced_code"] {
+        assert_eq!(props[name]["type"], "string", "{name}");
+    }
+    assert_eq!(
+        review_pr["inputSchema"]["required"],
+        json!(["owner", "repo", "pr"])
+    );
+}
