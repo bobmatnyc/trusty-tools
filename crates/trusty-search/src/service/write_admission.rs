@@ -139,6 +139,8 @@ pub(crate) async fn gate(
 /// Why (#8922): a hash left behind makes a reindex hash-skip the file once the
 /// policy admits it again. The reindex keys hashes by root-relative path, so an
 /// absolute pushed path also forgets its root-relative form.
+/// Test: `pushed_write_to_an_excluded_path_is_refused_and_purged`; the #9230
+/// stamp by `excluded_pushed_write_purge_stamps_only_when_committed`.
 async fn purge_pushed(
     handle: &IndexHandle,
     indexer: &CodeIndexer,
@@ -147,7 +149,11 @@ async fn purge_pushed(
     use crate::service::reindex::hash::forget_file_hash;
     // #8959: `purge_file` stamps the durable stale mark; the graph-refresh
     // ticker rebuilds, so no whole-corpus pass per write.
-    let removed = indexer.purge_file(&handle.id, path).await?;
+    // #9230: fail-closed first; a committed purge stamps `reindexed_unix`.
+    let (removed, committed) = indexer.purge_file_committed(&handle.id, path).await?;
+    if committed {
+        indexer.record_incremental_commit(path).await;
+    }
     if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
         forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
     }

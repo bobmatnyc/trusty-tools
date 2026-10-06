@@ -3,9 +3,11 @@
 //!
 //! Why: `search.project.resolve` ranks two checkouts of one repo by that
 //! stamp, so a clone whose latest change was a deletion lost to a stale one.
-//! What: the three delete paths — boot reconcile's `apply_delta`, the rescan
-//! sweep and the watcher's `handle_removed` — each delete one file under an
-//! injected redb delete fault, then a second file with no fault.
+//! What: the five delete paths — boot reconcile's `apply_delta`, the rescan
+//! sweep, the watcher's `handle_removed`, `remove_file_report` (HTTP, socket
+//! and MCP `remove-file`) and an excluded pushed write's `purge_pushed` — each
+//! delete one file under an injected redb delete fault, then a second file
+//! with no fault. One test per path, so a red path never hides another.
 //! Test: `cargo test -p trusty-search -- delete_stamp_9230`.
 
 use std::path::PathBuf;
@@ -15,8 +17,9 @@ use tokio::sync::RwLock;
 
 use crate::core::corpus::CorpusStore;
 use crate::core::indexer::TEST_FAIL_CHUNK_DELETE;
-use crate::core::registry::{IndexHandle, IndexId};
+use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::CodeIndexer;
+use crate::service::server::{remove_file_report, RemoveFileRequest, SearchAppState};
 use crate::service::watch_loop::handle_removed;
 use crate::service::watch_rescan::reconcile_with_policy;
 use crate::service::IndexedFiles;
@@ -33,6 +36,8 @@ enum Site {
     Reconcile,
     Rescan,
     Watcher,
+    RemoveFile,
+    PurgePushed,
 }
 
 /// One delete path's fixture: a tree holding [`FILES`] and an indexer over a
@@ -105,11 +110,7 @@ impl Fixture {
         std::fs::remove_file(self.root.join(rel)).expect("remove from disk");
         match site {
             Site::Reconcile => {
-                let handle = Arc::new(IndexHandle::bare(
-                    self.id.clone(),
-                    self.indexer.clone(),
-                    self.root.clone(),
-                ));
+                let handle = Arc::new(self.handle());
                 let delta = vec![rel.to_string()];
                 let stamped =
                     crate::service::reconcile::apply_delta(&handle, &self.id.0, &delta, "sha")
@@ -130,9 +131,36 @@ impl Fixture {
                 )
                 .await;
             }
+            Site::RemoveFile => {
+                let registry = IndexRegistry::new();
+                registry.register(self.handle());
+                let state = Arc::new(SearchAppState::new(registry));
+                let req = RemoveFileRequest {
+                    path: rel.to_string(),
+                };
+                let body = remove_file_report(&state, &self.id.0, req)
+                    .await
+                    .expect("remove-file answers 200 either way");
+                assert!(body["removed_chunks"].as_u64() > Some(0), "{body}");
+            }
+            Site::PurgePushed => {
+                let mut handle = self.handle();
+                handle.exclude_globs = vec!["**/src/**".into()];
+                let idx = self.indexer.read().await;
+                let (status, body) =
+                    crate::service::write_admission::gate(&handle, &idx, rel, "pub fn x() {}\n")
+                        .await
+                        .expect_err("an excluded pushed write is refused");
+                assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{body}");
+                assert!(body["removed_chunks"].as_u64() > Some(0), "{body}");
+            }
         }
         let left = self.indexer.read().await.chunk_ids_for_file(rel).await;
         assert!(left.is_empty(), "{site:?}: {rel} left memory: {left:?}");
+    }
+
+    fn handle(&self) -> IndexHandle {
+        IndexHandle::bare(self.id.clone(), self.indexer.clone(), self.root.clone())
     }
 
     async fn stamp(&self) -> Option<u64> {
@@ -152,27 +180,56 @@ fn set_fault(id: &IndexId, on: bool) {
 /// Why: #9230 review — a delete that removed rows from redb is a committed
 /// write and stamps the corpus; one whose fail-closed redb delete failed is
 /// not, and still drops the file from memory as the caller always did.
-/// Fails against 8fe9e93737 at the second stamp assertion: no delete path
-/// stamped.
-/// Test: this test.
+/// What: plants an old stamp, deletes one file at `site` under the redb
+/// fault, then a second file without it.
+async fn assert_only_a_committed_delete_stamps(site: Site) {
+    let fx = Fixture::new(site).await;
+    let corpus = fx.indexer.read().await.corpus_store().expect("corpus");
+    corpus.write_reindexed_unix_sync(OLD_STAMP).expect("plant");
+
+    set_fault(&fx.id, true);
+    fx.delete(site, FILES[0].0).await;
+    set_fault(&fx.id, false);
+    assert_eq!(
+        fx.stamp().await,
+        Some(OLD_STAMP),
+        "{site:?}: a delete redb refused must not stamp"
+    );
+
+    fx.delete(site, FILES[1].0).await;
+    let got = fx.stamp().await.expect("stamp");
+    assert!(got > OLD_STAMP, "{site:?}: a committed delete must stamp");
+}
+
+/// Boot reconcile's `apply_delta`. Fails against 8fe9e93737: no delete stamped.
 #[tokio::test]
-async fn a_failed_delete_does_not_stamp_and_the_next_committed_delete_does() {
-    for site in [Site::Reconcile, Site::Rescan, Site::Watcher] {
-        let fx = Fixture::new(site).await;
-        let corpus = fx.indexer.read().await.corpus_store().expect("corpus");
-        corpus.write_reindexed_unix_sync(OLD_STAMP).expect("plant");
+async fn reconcile_delete_stamps_only_when_committed() {
+    assert_only_a_committed_delete_stamps(Site::Reconcile).await;
+}
 
-        set_fault(&fx.id, true);
-        fx.delete(site, FILES[0].0).await;
-        set_fault(&fx.id, false);
-        assert_eq!(
-            fx.stamp().await,
-            Some(OLD_STAMP),
-            "{site:?}: a delete redb refused must not stamp"
-        );
+/// The rescan sweep's `drop_file`. Fails against 8fe9e93737.
+#[tokio::test]
+async fn rescan_delete_stamps_only_when_committed() {
+    assert_only_a_committed_delete_stamps(Site::Rescan).await;
+}
 
-        fx.delete(site, FILES[1].0).await;
-        let got = fx.stamp().await.expect("stamp");
-        assert!(got > OLD_STAMP, "{site:?}: a committed delete must stamp");
-    }
+/// The watcher's `handle_removed`. Fails against 8fe9e93737.
+#[tokio::test]
+async fn watcher_delete_stamps_only_when_committed() {
+    assert_only_a_committed_delete_stamps(Site::Watcher).await;
+}
+
+/// `POST /indexes/{id}/remove-file`, the socket RPC and the MCP tool all
+/// serve `remove_file_report`. Fails against 7a7e7479d4: it deleted
+/// warn-only and never stamped.
+#[tokio::test]
+async fn remove_file_report_stamps_only_a_committed_delete() {
+    assert_only_a_committed_delete_stamps(Site::RemoveFile).await;
+}
+
+/// An excluded pushed `index-file` write purges through `purge_pushed`.
+/// Fails against 7a7e7479d4: it purged warn-only and never stamped.
+#[tokio::test]
+async fn excluded_pushed_write_purge_stamps_only_when_committed() {
+    assert_only_a_committed_delete_stamps(Site::PurgePushed).await;
 }

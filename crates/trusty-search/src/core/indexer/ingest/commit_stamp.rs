@@ -7,7 +7,8 @@
 //! What: [`CodeIndexer::stamp_incremental_commit`] writes "now" into the held
 //! corpus; [`CodeIndexer::record_incremental_commit`] logs a failure of it.
 //! The callers (`index_file_outcome`, `index_files_batch_inner`, and the
-//! delete paths through [`CodeIndexer::purge_file_committed`] and
+//! delete paths through [`CodeIndexer::purge_file_committed`],
+//! [`CodeIndexer::remove_file_committed`] and
 //! [`CodeIndexer::remove_chunk_ids_committed`]) stamp only after their rows
 //! reached or left redb, never on a refused, failed or no-op write.
 //! Test: `indexer::tests::incremental_stamp_9230`,
@@ -78,7 +79,9 @@ impl CodeIndexer {
     /// [`Self::purge_file`], whose count or error the caller handles as it
     /// always has. Returns `(removed, committed)`; `committed` is true only
     /// when the fail-closed purge removed rows.
-    /// Test: `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
+    /// Test: `reconcile_delete_stamps_only_when_committed`,
+    /// `rescan_delete_stamps_only_when_committed`,
+    /// `excluded_pushed_write_purge_stamps_only_when_committed`.
     pub(crate) async fn purge_file_committed(
         &self,
         index_id: &IndexId,
@@ -101,13 +104,40 @@ impl CodeIndexer {
         }
     }
 
+    /// [`Self::remove_file`] that reports whether its delete committed (#9230).
+    ///
+    /// Why: `POST /indexes/{id}/remove-file` must stamp a committed delete and
+    /// keep its warn-only tolerance of a failed redb delete.
+    /// What: removes fail-closed. On an error it logs, then runs the warn-only
+    /// [`Self::remove_file`], whose count or error the caller handles as it
+    /// always has. Returns `(removed, committed)`, as
+    /// [`Self::purge_file_committed`] does.
+    /// Test: `remove_file_report_stamps_only_a_committed_delete`.
+    pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
+        match self
+            .remove_file_with(file_path, RedbChunkDelete::FailClosed)
+            .await
+        {
+            Ok(removed) => Ok((removed, removed > 0)),
+            Err(e) => {
+                tracing::warn!(
+                    index_id = %self.index_id,
+                    file = %file_path,
+                    "fail-closed remove failed; removing warn-only, without a \
+                     reindex stamp (#9230): {e:#}"
+                );
+                Ok((self.remove_file(file_path).await?, false))
+            }
+        }
+    }
+
     /// Drop chunk `ids` from every store; `true` when they left redb (#9230).
     ///
     /// Why: the watcher's delete must stamp the corpus when it committed, and
     /// keep its old tolerance (drop from memory, log) when redb refused.
     /// What: removes fail-closed. On an error it logs and removes warn-only,
     /// as the watcher always did. Empty `ids` is `false`.
-    /// Test: `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
+    /// Test: `watcher_delete_stamps_only_when_committed`.
     pub(crate) async fn remove_chunk_ids_committed(&self, ids: &[String]) -> bool {
         if ids.is_empty() {
             return false;

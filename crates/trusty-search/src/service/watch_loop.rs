@@ -579,7 +579,7 @@ pub async fn handle_modified(
 /// `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` in
 /// `tests/watcher_chunk_cap_orphans_100.rs` covers the case where the entry it
 /// looks up was written by `handle_modified`'s error arm; the #9230 stamp by
-/// `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
+/// `watcher_delete_stamps_only_when_committed`.
 ///
 /// Public for that integration test on the same terms as `handle_modified`.
 #[doc(hidden)]

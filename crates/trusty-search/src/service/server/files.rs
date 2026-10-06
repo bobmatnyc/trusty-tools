@@ -149,7 +149,8 @@ pub(super) async fn remove_file_handler(
 /// removal which failed never reports a chunk count.
 /// Test: `remove_file_over_the_socket_matches_the_http_body`,
 /// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
-/// `crate::service::rpc::writes`.
+/// `crate::service::rpc::writes`;
+/// the #9230 stamp by `remove_file_report_stamps_only_a_committed_delete`.
 pub(crate) async fn remove_file_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -164,25 +165,33 @@ pub(crate) async fn remove_file_report(
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
-    let removed = indexer.remove_file(&req.path).await.map_err(|e| {
-        // #5061: see the sibling handler — a silent 500 leaves the caller
-        // believing a deletion landed when it did not.
-        tracing::warn!(
-            index_id = %index_id,
-            path = %req.path,
-            error = %e,
-            "remove-file failed"
-        );
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "error": "remove_file_failed",
-                "index_id": index_id.0,
-                "path": req.path,
-                "message": e.to_string(),
-            }),
-        )
-    })?;
+    // #9230: fail-closed first, so a committed delete can stamp below.
+    let (removed, committed) = indexer
+        .remove_file_committed(&req.path)
+        .await
+        .map_err(|e| {
+            // #5061: see the sibling handler — a silent 500 leaves the caller
+            // believing a deletion landed when it did not.
+            tracing::warn!(
+                index_id = %index_id,
+                path = %req.path,
+                error = %e,
+                "remove-file failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({
+                    "error": "remove_file_failed",
+                    "index_id": index_id.0,
+                    "path": req.path,
+                    "message": e.to_string(),
+                }),
+            )
+        })?;
+    // #9230: only a delete whose rows left redb moves `reindexed_unix`.
+    if committed {
+        indexer.record_incremental_commit(&req.path).await;
+    }
     Ok(serde_json::json!({
         "index_id": index_id.0,
         "path": req.path,
