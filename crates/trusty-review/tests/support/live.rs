@@ -7,8 +7,10 @@
 //! What: [`live_settings`] reads the environment and returns `None` unless
 //! `TRUSTY_EVAL_LIVE=1`; [`run_live`] checks every model is priced, then runs
 //! passes x models x diffs through [`review_diff`] with providers from the
-//! injected factory, stops when the shared [`Budget`] is spent, writes
-//! `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
+//! injected factory, and schedules nothing new once the shared [`Budget`] is
+//! spent. It compares models only on [`compared_passes`], the passes every
+//! model completed, with incomplete rows left out and counted per model and
+//! pass. It writes `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
 //! only place a network provider is built, and it is never called when the
 //! opt-in is absent.
 //! Test: `live_leg_is_inert_without_opt_in`, `live_settings_read_overrides`,
@@ -32,6 +34,8 @@ pub const DEFAULT_MAX_USD: f64 = 22.00;
 pub const DEFAULT_PASSES: u32 = 3;
 /// Default reviews in flight per model and pass.
 pub const DEFAULT_CONCURRENCY: usize = 4;
+/// Most reviews in flight; bounds how far past the cap a run can spend.
+pub const MAX_CONCURRENCY: usize = 8;
 
 /// Reads one environment variable; injected so tests never touch the process
 /// environment.
@@ -52,7 +56,8 @@ pub struct LiveSettings {
     pub passes: u32,
     /// Spend cap, USD (`TRUSTY_EVAL_MAX_USD`).
     pub max_usd: f64,
-    /// Reviews in flight (`TRUSTY_EVAL_CONCURRENCY`).
+    /// Reviews in flight (`TRUSTY_EVAL_CONCURRENCY`, clamped to
+    /// [`MAX_CONCURRENCY`]).
     pub concurrency: usize,
     /// Only these entry ids, when set (`TRUSTY_EVAL_ONLY`, comma-separated).
     pub only: Vec<String>,
@@ -101,7 +106,8 @@ pub fn live_settings(env: Env<'_>) -> Result<Option<LiveSettings>, String> {
     }
     let passes = parsed(env, "TRUSTY_EVAL_PASSES", DEFAULT_PASSES)?;
     let max_usd = parsed(env, "TRUSTY_EVAL_MAX_USD", DEFAULT_MAX_USD)?;
-    let concurrency = parsed(env, "TRUSTY_EVAL_CONCURRENCY", DEFAULT_CONCURRENCY)?;
+    let concurrency =
+        parsed(env, "TRUSTY_EVAL_CONCURRENCY", DEFAULT_CONCURRENCY)?.min(MAX_CONCURRENCY);
     if passes == 0 || concurrency == 0 || max_usd.is_nan() || max_usd <= 0.0 {
         return Err("TRUSTY_EVAL_PASSES, _CONCURRENCY and _MAX_USD must be positive".into());
     }
@@ -167,7 +173,9 @@ async fn model_pass(
     for entry in entries {
         jobs.push((entry, factory(model)?, factory(&settings.verifier)?));
     }
+    // Checked as each entry is scheduled: once the cap is spent, nothing new starts.
     let mut rows: Vec<Row> = stream::iter(jobs)
+        .take_while(|_| std::future::ready(!budget.exhausted()))
         .map(|(entry, llm, verifier)| {
             review_diff(&config, entry, model, pass, llm, verifier, budget)
         })
@@ -176,6 +184,43 @@ async fn model_pass(
         .await;
     rows.sort_by(|a, b| a.diff.cmp(&b.diff));
     Ok(rows)
+}
+
+/// Passes every model completed: a row for each of `entries` diffs, and no
+/// row cut short by the cost cap. Models are compared on these passes only.
+pub fn compared_passes(rows: &[Row], models: &[String], passes: u32, entries: usize) -> Vec<u32> {
+    (1..=passes)
+        .filter(|&p| {
+            models.iter().all(|m| {
+                let mine: Vec<&Row> = rows
+                    .iter()
+                    .filter(|r| r.pass == p && &r.model == m)
+                    .collect();
+                mine.len() == entries && !mine.iter().any(|r| r.cut_by_cap())
+            })
+        })
+        .collect()
+}
+
+/// Rows run and incomplete rows, per model and pass, for the report.
+pub fn incomplete_by_pass(rows: &[Row], models: &[String], passes: u32) -> serde_json::Value {
+    let mut out = Vec::new();
+    for m in models {
+        for p in 1..=passes {
+            let mine: Vec<&Row> = rows
+                .iter()
+                .filter(|r| r.pass == p && &r.model == m)
+                .collect();
+            out.push(serde_json::json!({
+                "model": m,
+                "pass": p,
+                "rows": mine.len(),
+                "incomplete": mine.iter().filter(|r| r.incomplete.is_some()).count(),
+                "cut_by_cap": mine.iter().filter(|r| r.cut_by_cap()).count(),
+            }));
+        }
+    }
+    serde_json::Value::Array(out)
 }
 
 /// Run the live comparison, or return [`LiveOutcome::Skipped`] without
@@ -204,6 +249,9 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
     let (mut rows, mut stopped) = (Vec::new(), None);
     'passes: for pass in 1..=settings.passes {
         for model in &settings.models {
+            if budget.exhausted() {
+                break 'passes;
+            }
             rows.extend(model_pass(&settings, &entries, model, pass, factory, &budget).await?);
             if budget.exhausted() {
                 stopped = Some(format!(
@@ -214,16 +262,24 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
             }
         }
     }
+    let compared = compared_passes(&rows, &settings.models, settings.passes, entries.len());
     let summary: Vec<(String, u32, Totals)> = settings
         .models
         .iter()
         .map(|m| {
-            let mine: Vec<&Row> = rows.iter().filter(|r| &r.model == m).collect();
-            let passes = mine.iter().map(|r| r.pass).max().unwrap_or(0);
-            (m.clone(), passes, Totals::of(mine))
+            let mine = rows
+                .iter()
+                .filter(|r| &r.model == m && compared.contains(&r.pass));
+            (m.clone(), compared.len() as u32, Totals::of(mine))
         })
         .collect();
+    let incomplete = incomplete_by_pass(&rows, &settings.models, settings.passes);
     let table = markdown_table(&summary);
+    println!(
+        "compared on {} of {} passes, the passes every model completed",
+        compared.len(),
+        settings.passes
+    );
     println!("{table}");
     if let Some(why) = &stopped {
         println!("STOPPED: {why}");
@@ -236,6 +292,9 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
         "finished_utc": chrono::Utc::now().to_rfc3339(),
         "spent_usd": budget.spent(),
         "stopped_reason": stopped,
+        "compared_passes": compared.len(),
+        "compared_pass_numbers": compared,
+        "incomplete_by_model_pass": incomplete,
         "summary": summary.iter().map(|(model, passes, totals)| serde_json::json!({
             "model": model, "passes": passes, "recall": totals.recall(), "totals": totals,
         })).collect::<Vec<_>>(),

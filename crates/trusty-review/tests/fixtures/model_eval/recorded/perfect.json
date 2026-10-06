@@ -429,7 +429,7 @@
         "findings": [
           {
             "title": "B2-off-by-one",
-            "body": "`for n in (1..keep).rev() {` shifts slots 1..keep-1 only, so slot keep is overwritten each rotation and just keep - 1 old files survive (off-by-one).",
+            "body": "`for n in (1..keep - 1).rev() {` never shifts slot keep - 1 into slot keep, so the rename overwrites it and only keep - 1 rotated files survive (off-by-one).",
             "severity": "medium",
             "confidence": 0.9,
             "file": "crates/trusty-common/src/error_capture/rotate.rs",

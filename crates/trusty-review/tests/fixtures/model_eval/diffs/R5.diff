@@ -275,7 +275,7 @@ index 0000000000..9318979dbb
 +        let body = r#"{
 +  "pid": 84890,
 +  "version": "2.1.225",
-+  "launchTarget": "/Users/masa/.local/share/claude/versions/2.1.225"
++  "launchTarget": "/Users/user/.local/share/claude/versions/2.1.225"
 +}"#;
 +        assert_eq!(parse_lock(body), None);
 +    }

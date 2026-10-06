@@ -250,7 +250,7 @@ index 668ceb05a0..82de8f1cc3 100644
 +        let dir = tempfile::tempdir().expect("tempdir");
 +        let above = dir.path().canonicalize().expect("canonicalize");
 +        std::fs::create_dir(above.join(".git")).expect("create .git");
-+        let home = above.join("masa");
++        let home = above.join("user");
 +        let cwd = home.join("projects");
 +        std::fs::create_dir_all(&cwd).expect("create home and cwd");
 +

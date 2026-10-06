@@ -73,6 +73,10 @@ pub struct Usage {
     pub calls: u32,
     /// Calls refused by the cost cap.
     pub refused: u32,
+    /// Calls the provider failed (throttle, transport, validation...).
+    pub errors: u32,
+    /// Of `errors`, those that were `LlmError::Validation`.
+    pub validation_errors: u32,
     /// Calls that returned tokens but priced at $0 (no pricing entry).
     pub unpriced: u32,
     /// Input tokens over all calls.
@@ -90,6 +94,8 @@ impl Usage {
     pub fn absorb(&mut self, other: &Usage) {
         self.calls += other.calls;
         self.refused += other.refused;
+        self.errors += other.errors;
+        self.validation_errors += other.validation_errors;
         self.unpriced += other.unpriced;
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
@@ -156,7 +162,17 @@ impl LlmProvider for Metered {
             )));
         }
         let req_model = req.model.clone();
-        let resp = self.inner.complete(req).await?;
+        let resp = match self.inner.complete(req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let validation = matches!(e, LlmError::Validation(_));
+                self.record(|u| {
+                    u.errors += 1;
+                    u.validation_errors += u32::from(validation);
+                });
+                return Err(e);
+            }
+        };
         let cost = call_cost_usd(&req_model, &resp);
         self.budget.add(cost);
         self.record(|u| {

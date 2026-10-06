@@ -14,8 +14,8 @@
       ],
       "anchors": [
         "verdict_floor",
-        "max",
-        "min"
+        "max_by_key",
+        "min_by_key"
       ],
       "removal": false,
       "kind": "logic"
@@ -37,7 +37,6 @@
       "anchors": [
         "unwrap_or_default",
         "corrupt",
-        "parse",
         "overwrit"
       ],
       "removal": false,
@@ -59,9 +58,7 @@
       ],
       "anchors": [
         "TryLockError::Error",
-        "try_lock",
-        "acquired",
-        "fail"
+        "try_lock"
       ],
       "removal": false,
       "kind": "fail-open lock"
@@ -81,9 +78,8 @@
         ]
       ],
       "anchors": [
-        "exists",
+        "exists()",
         "create_new",
-        "race",
         "TOCTOU"
       ],
       "removal": false,
@@ -104,10 +100,9 @@
         ]
       ],
       "anchors": [
-        "kill",
-        "wait",
-        "zombie",
-        "leak"
+        "kill()",
+        "wait()",
+        "zombie"
       ],
       "removal": false,
       "kind": "resource leak"
@@ -129,8 +124,7 @@
       "anchors": [
         "starts_with",
         "root-evil",
-        "component",
-        "prefix"
+        "component"
       ],
       "removal": false,
       "kind": "path validation"
@@ -151,8 +145,7 @@
       ],
       "anchors": [
         "MIN_TOKEN_LEN",
-        "empty",
-        "guard"
+        "empty expected token"
       ],
       "removal": true,
       "kind": "removed guard"
@@ -173,7 +166,6 @@
       ],
       "anchors": [
         "offset + limit",
-        "panic",
         "clamp",
         "out of range",
         "last page"
@@ -197,8 +189,7 @@
       ],
       "anchors": [
         "starts_with",
-        "target-worktree",
-        "prefix"
+        "target-worktree"
       ],
       "removal": false,
       "kind": "logic (over-broad dedup)"
@@ -219,10 +210,9 @@
       ],
       "anchors": [
         "max_by_key",
-        "arrival",
+        "min_by_key",
         "newest",
-        "oldest",
-        "min_by_key"
+        "oldest"
       ],
       "removal": false,
       "kind": "logic (wrong extreme)"
@@ -243,9 +233,7 @@
       ],
       "anchors": [
         "Ok(String::new())",
-        "last_err",
-        "empty",
-        "error"
+        "last_err"
       ],
       "removal": false,
       "kind": "swallowed error"
@@ -266,9 +254,7 @@
       ],
       "anchors": [
         "MutexGuard",
-        "await",
-        "lock",
-        "held"
+        "QUEUE.lock()"
       ],
       "removal": false,
       "kind": "lock held across await"
@@ -289,10 +275,8 @@
       ],
       "anchors": [
         "fetch_sub",
-        "load",
-        "store",
-        "race",
-        "lost"
+        "lost-update",
+        "lost update"
       ],
       "removal": false,
       "kind": "lost update"
@@ -313,9 +297,8 @@
       ],
       "anchors": [
         "write_all",
-        "tmp",
         "remove_file",
-        "leak"
+        "tmp file"
       ],
       "removal": false,
       "kind": "resource leak (temp file)"
@@ -335,11 +318,9 @@
         ]
       ],
       "anchors": [
-        "join",
-        "../",
         "traversal",
-        "sanitis",
-        "sanitiz"
+        "unsanitised",
+        "unsanitized"
       ],
       "removal": false,
       "kind": "path traversal"
@@ -360,10 +341,8 @@
       ],
       "anchors": [
         "&s[..max]",
-        "byte",
         "char boundary",
-        "multibyte",
-        "UTF-8"
+        "multibyte"
       ],
       "removal": false,
       "kind": "UTF-8 boundary panic"
@@ -384,9 +363,8 @@
       ],
       "anchors": [
         "next_new",
-        "'-'",
-        "removed",
-        "deleted"
+        "removed line",
+        "deletion"
       ],
       "removal": false,
       "kind": "logic (line counter)"
@@ -408,8 +386,7 @@
       "anchors": [
         "filter_map",
         "Result::ok",
-        "error",
-        "fail"
+        "fails open"
       ],
       "removal": false,
       "kind": "fail-open error handling"
@@ -430,9 +407,8 @@
       ],
       "anchors": [
         "read_exact",
-        "cancel",
-        "select!",
-        "partial"
+        "cancel-safe",
+        "select!"
       ],
       "removal": false,
       "kind": "cancel safety"
@@ -454,8 +430,7 @@
       "anchors": [
         "Arc::clone",
         "Weak",
-        "cycle",
-        "leak"
+        "reference cycle"
       ],
       "removal": false,
       "kind": "reference cycle"
@@ -475,11 +450,9 @@
         ]
       ],
       "anchors": [
-        "remove",
-        "Failed",
-        "grows",
-        "unbounded",
-        "leak"
+        "inflight",
+        "without bound",
+        "unbounded"
       ],
       "removal": false,
       "kind": "unbounded growth"
@@ -499,11 +472,8 @@
         ]
       ],
       "anchors": [
-        "sh",
-        "-c",
-        "format!",
-        "injection",
-        "shell"
+        "sh -c",
+        "injection"
       ],
       "removal": false,
       "kind": "command injection"
@@ -513,7 +483,7 @@
     "id": "B2",
     "tier": "seeded",
     "diff_file": "diffs/B2.diff",
-    "about": "(1..keep).rev() keeps only keep-1 rotated files",
+    "about": "the shift loop stops one slot short, (1..keep - 1).rev(), so only keep - 1 rotated files survive",
     "label": {
       "file": "crates/trusty-common/src/error_capture/rotate.rs",
       "spans": [
@@ -523,10 +493,9 @@
         ]
       ],
       "anchors": [
-        "1..keep",
-        "keep",
+        "1..keep - 1",
         "off-by-one",
-        "rev"
+        "keep - 1 rotated"
       ],
       "removal": false,
       "kind": "off-by-one"
@@ -547,9 +516,8 @@
       ],
       "anchors": [
         "as_millis",
-        "ceil",
-        "truncat",
-        "div_ceil"
+        "div_ceil",
+        "truncates"
       ],
       "removal": false,
       "kind": "truncating division"
@@ -628,10 +596,7 @@
       ],
       "anchors": [
         "LiveJob",
-        "drop",
-        "heap",
-        "wait_for_turn",
-        "seq"
+        "wait_for_turn"
       ],
       "removal": false,
       "kind": "resource leak / async cancel"
@@ -662,10 +627,7 @@
       ],
       "anchors": [
         "canonicalize",
-        "home",
-        "ok()",
-        "None",
-        "guard"
+        "home_dir"
       ],
       "removal": false,
       "kind": "fail-open"
@@ -725,8 +687,6 @@
       ],
       "anchors": [
         "settings.local.json",
-        "*",
-        "prefix",
         "wildcard"
       ],
       "removal": false,
@@ -753,11 +713,9 @@
         ]
       ],
       "anchors": [
-        "as libc::pid_t",
-        "kill",
+        "libc::pid_t",
         "process group",
-        "u32",
-        "0"
+        "i32::MAX"
       ],
       "removal": false,
       "kind": "boundary"
@@ -789,8 +747,7 @@
       "anchors": [
         "record_attempt",
         "fetch_add",
-        "MAX_REDELEGATIONS",
-        "attempt"
+        "MAX_REDELEGATIONS"
       ],
       "removal": false,
       "kind": "logic (counter scope)"
@@ -818,9 +775,7 @@
       "anchors": [
         "write_all",
         "newline",
-        "append",
-        "interleave",
-        "rotate"
+        "interleave"
       ],
       "removal": false,
       "kind": "concurrency (torn append)"
@@ -848,7 +803,6 @@
       "anchors": [
         "try_lock",
         "set_len",
-        "pid",
         "holder_pid"
       ],
       "removal": false,

@@ -30,7 +30,7 @@
         "findings": [
           {
             "title": "C1-pid-write",
-            "body": "`writeln!(file, \"{}\", std::process::id())?;` writes the pid without checking the file still exists.",
+            "body": "`writeln!(file, \"{}\", std::process::id())?;` writes the pid; the claim should use create_new.",
             "severity": "medium",
             "confidence": 0.9,
             "file": "crates/trusty-common/src/pid_claim.rs",

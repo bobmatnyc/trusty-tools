@@ -18,7 +18,7 @@ index 0000000..1111111
 +    if keep == 0 {
 +        return std::fs::remove_file(base);
 +    }
-+    for n in (1..keep).rev() {
++    for n in (1..keep - 1).rev() {
 +        let from = numbered(base, n);
 +        if from.exists() {
 +            std::fs::rename(&from, numbered(base, n + 1))?;

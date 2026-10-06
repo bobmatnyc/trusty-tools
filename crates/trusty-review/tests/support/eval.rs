@@ -217,14 +217,108 @@ pub struct Row {
     pub verifier: Usage,
     /// Wall time of the whole `run_review` call, ms.
     pub wall_ms: u64,
+    /// Why the review did not complete; `None` when it did. An incomplete row
+    /// is left out of every score (see [`incomplete_reason`]).
+    pub incomplete: Option<String>,
 }
 
-/// The config every eval review runs under: the operator's config with the
-/// verifier pinned to `verifier_model`.
+impl Row {
+    /// Whether the cost cap refused one of this row's calls.
+    pub fn cut_by_cap(&self) -> bool {
+        self.reviewer.refused > 0 || self.verifier.refused > 0
+    }
+}
+
+/// Why a review did not complete, or `None`.
+///
+/// Why: a review cut short is not the model's miss. The runner does not retry
+/// a failed reviewer call, and a refused or rejected verifier call withholds
+/// findings the model did report.
+/// What: incomplete when the reviewer was refused by the cap, never returned,
+/// or errored (a throttle included); or when a verifier call was refused by
+/// the cap or failed with `LlmError::Validation`.
+pub fn incomplete_reason(reviewer: &Usage, verifier: &Usage) -> Option<String> {
+    if reviewer.refused > 0 {
+        Some("cost cap refused the reviewer".into())
+    } else if reviewer.errors > 0 || reviewer.calls == 0 {
+        Some("reviewer call failed".into())
+    } else if verifier.refused > 0 {
+        Some("cost cap refused the verifier".into())
+    } else if verifier.validation_errors > 0 {
+        Some("verifier call failed validation".into())
+    } else {
+        None
+    }
+}
+
+/// The config every eval review runs under, built field by field.
+///
+/// Why: the offline leg must not depend on the operator's
+/// `~/.config/trusty-review/config.toml` or environment, and no review may
+/// reach Jira, Confluence, GitHub or a daemon.
+/// What: Bedrock roles at their built-in defaults with the verifier pinned to
+/// `verifier_model`; every external context source disabled; dry run; no
+/// GitHub credentials; verification and context gates at their defaults.
 pub fn eval_config(verifier_model: &str) -> ReviewConfig {
-    let mut config = ReviewConfig::load(None);
-    config.role_models.verifier.model = verifier_model.to_string();
-    config
+    use trusty_review::config::{
+        ContextConfig, Provider, RoleConfig, RoleModels, VerificationConfig,
+    };
+    use trusty_review::coverage::CoveragePolicy;
+    use trusty_review::integrations::context::{
+        ConformanceSourceConfig, ContextSourcesConfig, SourceConfig,
+    };
+    use trusty_review::llm::models::{DEFAULT_REVIEWER_MODEL, DEFAULT_SUMMARIZER_MODEL};
+    let role = |model: &str, temperature: f32, max_tokens: u32| RoleConfig {
+        provider: Provider::Bedrock,
+        model: model.to_string(),
+        temperature,
+        max_tokens,
+    };
+    let off = SourceConfig {
+        enabled: Some(false),
+        ..SourceConfig::default()
+    };
+    ReviewConfig {
+        dry_run: true,
+        enabled_repos: "*".to_string(),
+        excluded_repos: String::new(),
+        excluded_authors: String::new(),
+        log_dir: std::env::temp_dir().join("trusty-review-model-eval"),
+        openrouter_api_key: String::new(),
+        fireworks_api_key: String::new(),
+        // Never dialled: `review_diff` injects `FakeSearch` and `ReadyAnalyze`.
+        search_url: "http://127.0.0.1:9".to_string(),
+        analyzer_socket: PathBuf::from("/nonexistent/trusty-analyze.sock"),
+        search_index: "main".to_string(),
+        search_index_explicit: true,
+        role_models: RoleModels {
+            reviewer: role(DEFAULT_REVIEWER_MODEL, 0.3, 4096),
+            verifier: role(verifier_model, 1.0, 128),
+            summarizer: role(DEFAULT_SUMMARIZER_MODEL, 0.0, 4096),
+        },
+        github_app_id: None,
+        github_app_private_key: None,
+        github_token: String::new(),
+        github_installations: Vec::new(),
+        bot_username: "trusty-review[bot]".to_string(),
+        live_review_requesters: Vec::new(),
+        verification: VerificationConfig::default(),
+        context: ContextConfig::default(),
+        context_sources: ContextSourcesConfig {
+            jira: off.clone(),
+            confluence: off.clone(),
+            github_issues: off.clone(),
+            conformance: ConformanceSourceConfig {
+                base: off.clone(),
+                ..ConformanceSourceConfig::default()
+            },
+            pr_history: off,
+        },
+        voice_package: None,
+        voice_principles: true,
+        review_template: None,
+        coverage: CoveragePolicy::default(),
+    }
 }
 
 /// Review `entry` with `reviewer_model` through the real pipeline, metering
@@ -267,6 +361,7 @@ pub async fn review_diff(
     let started = Instant::now();
     let result = run_review(config, input, deps).await;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (reviewer, verifier) = (reviewer.usage(), checker.usage());
     Row {
         model: reviewer_model.to_string(),
         pass,
@@ -274,8 +369,9 @@ pub async fn review_diff(
         tier: entry.tier,
         kind: entry.label.as_ref().map(|l| l.kind.clone()),
         score: score(entry, &diff, &result),
-        reviewer: reviewer.usage(),
-        verifier: checker.usage(),
+        incomplete: incomplete_reason(&reviewer, &verifier),
+        reviewer,
+        verifier,
         wall_ms,
     }
 }
@@ -283,8 +379,10 @@ pub async fn review_diff(
 /// Totals over a set of rows.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Totals {
-    /// Rows counted.
+    /// Complete rows scored.
     pub diffs: usize,
+    /// Incomplete rows, left out of every score above and below.
+    pub incomplete: usize,
     /// Labelled rows.
     pub defects: usize,
     /// Labelled rows caught.
@@ -297,10 +395,6 @@ pub struct Totals {
     pub hallucinations: usize,
     /// Withheld findings.
     pub withheld: usize,
-    /// Rows whose reviewer call never returned: a provider error or the cost
-    /// cap. (`ReviewResult::error` also notes withheld findings, so it is not
-    /// used here.)
-    pub failed_reviews: usize,
     /// Reviewer usage.
     pub reviewer: Usage,
     /// Verifier usage.
@@ -310,10 +404,18 @@ pub struct Totals {
 }
 
 impl Totals {
-    /// Sum `rows`.
+    /// Sum `rows`. Usage and wall time count every row; scores count only
+    /// complete rows.
     pub fn of<'a>(rows: impl IntoIterator<Item = &'a Row>) -> Self {
         let mut t = Self::default();
         for r in rows {
+            t.reviewer.absorb(&r.reviewer);
+            t.verifier.absorb(&r.verifier);
+            t.wall_ms += r.wall_ms;
+            if r.incomplete.is_some() {
+                t.incomplete += 1;
+                continue;
+            }
             t.diffs += 1;
             if let Some(c) = r.score.caught {
                 t.defects += 1;
@@ -323,10 +425,6 @@ impl Totals {
             t.extras += r.score.extras;
             t.hallucinations += r.score.hallucinations;
             t.withheld += r.score.withheld_by_reason.values().sum::<usize>();
-            t.failed_reviews += usize::from(r.reviewer.calls == 0);
-            t.reviewer.absorb(&r.reviewer);
-            t.verifier.absorb(&r.verifier);
-            t.wall_ms += r.wall_ms;
         }
         t
     }
@@ -341,17 +439,18 @@ impl Totals {
     }
 }
 
-/// A markdown table with one row per `(model, totals)`.
+/// A markdown table with one row per `(model, passes compared, totals)`.
 pub fn markdown_table(per_model: &[(String, u32, Totals)]) -> String {
     let mut out = String::from(
-        "| model | passes | recall | caught/defects | false positives | extras | hallucinations | withheld | failed reviews | reviewer tok in/out | verifier tok in/out | cost USD | mean wall s |\n\
+        "| model | passes | recall | caught/defects | false positives | extras | hallucinations | withheld | incomplete | reviewer tok in/out | verifier tok in/out | cost USD | mean wall s |\n\
          |---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for (model, passes, t) in per_model {
-        let mean_wall = if t.diffs == 0 {
+        let rows = t.diffs + t.incomplete;
+        let mean_wall = if rows == 0 {
             0.0
         } else {
-            t.wall_ms as f64 / t.diffs as f64 / 1000.0
+            t.wall_ms as f64 / rows as f64 / 1000.0
         };
         out.push_str(&format!(
             "| {model} | {passes} | {:.3} | {}/{} | {} | {} | {} | {} | {} | {}/{} | {}/{} | {:.4} | {mean_wall:.1} |\n",
@@ -362,7 +461,7 @@ pub fn markdown_table(per_model: &[(String, u32, Totals)]) -> String {
             t.extras,
             t.hallucinations,
             t.withheld,
-            t.failed_reviews,
+            t.incomplete,
             t.reviewer.input_tokens,
             t.reviewer.output_tokens,
             t.verifier.input_tokens,

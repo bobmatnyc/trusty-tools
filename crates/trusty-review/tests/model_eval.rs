@@ -14,7 +14,9 @@
 //! - false positive: any survivor on a clean diff; extra: a survivor on a
 //!   labelled diff that does not catch it;
 //! - hallucination: a survivor the shared oracle (`support/oracle.rs`, also
-//!   used by the corpus test) cannot resolve at the head.
+//!   used by the corpus test) cannot resolve at the head;
+//! - incomplete: a review the cap or a failed call cut short; it is left out
+//!   of every score and counted apart.
 //!
 //! Two legs share that driver:
 //! - offline (CI): recorded reviewer outputs in `fixtures/model_eval/recorded/`
@@ -27,7 +29,8 @@
 //! Test: `perfect_recording_catches_every_defect`,
 //! `bad_recording_scores_hallucinations`, `a_missed_defect_scores_a_miss`,
 //! `invented_survivor_on_clean_diff_is_a_false_positive`,
-//! `every_label_span_exists_in_its_fixture_diff`, `live_leg_is_inert_without_opt_in`.
+//! `every_label_span_exists_in_its_fixture_diff`, `anchors_are_specific`,
+//! `incomplete_rows_are_left_out_of_recall`, `live_leg_is_inert_without_opt_in`.
 
 #[path = "support/eval.rs"]
 mod eval;
@@ -173,6 +176,34 @@ fn dataset_matches_the_ruling() {
     }
 }
 
+/// Generic words that would match almost any finding body.
+const GENERIC_ANCHORS: &[&str] = &[
+    "drop", "error", "fail", "keep", "lock", "race", "leak", "panic", "empty", "guard", "heap",
+    "home", "load", "store", "parse", "prefix", "attempt", "append", "rotate", "remove",
+];
+
+/// Every anchor is specific: longer than 3 characters and not a generic
+/// word, so a vague body cannot score a catch; every label keeps one.
+#[test]
+fn anchors_are_specific() {
+    for e in load_dataset() {
+        let Some(label) = &e.label else { continue };
+        assert!(!label.anchors.is_empty(), "{}: no anchor", e.id);
+        for a in &label.anchors {
+            assert!(
+                a.chars().count() > 3,
+                "{}: anchor `{a}` is 3 characters or fewer",
+                e.id
+            );
+            assert!(
+                !GENERIC_ANCHORS.contains(&a.to_lowercase().as_str()),
+                "{}: anchor `{a}` is a generic word",
+                e.id
+            );
+        }
+    }
+}
+
 /// Every label names a file in its diff, and every line of every span is a
 /// new-side line of that file (a removal's span may sit at its deletion).
 #[test]
@@ -259,7 +290,7 @@ async fn perfect_recording_catches_every_defect() {
             t.false_positives,
             t.extras,
             t.hallucinations,
-            t.failed_reviews
+            t.incomplete
         ),
         (40, 32, 32, 0, 0, 0, 0),
         "{}",
@@ -333,9 +364,51 @@ async fn invented_survivor_on_clean_diff_is_a_false_positive() {
     assert_eq!(Totals::of(&good).false_positives, 0);
 }
 
+/// A review the cap cut short is not a miss. L1's reviewer is refused (the
+/// cap is already spent); L3's reviewer answers with its grounded finding but
+/// the verifier call after it is refused. Neither row may count as a defect,
+/// a catch, a false positive or a hallucination.
+#[tokio::test]
+async fn incomplete_rows_are_left_out_of_recall() {
+    let rec = load_recording("perfect");
+    let config = eval_config(trusty_review::llm::models::DEFAULT_VERIFIER_MODEL);
+    let mut rows = Vec::new();
+    for (id, cap) in [("L1", 0.0), ("L3", 0.000_001)] {
+        let entry = &entries(&[id])[0];
+        let llm = Arc::new(FakeLlm {
+            response: reply_text(&rec.outputs[id].reviewer),
+        });
+        let verifier = Arc::new(FakeVerifier { refuted: vec![] });
+        let budget = Budget::new(cap);
+        rows.push(review_diff(&config, entry, &rec.model, 1, llm, verifier, &budget).await);
+    }
+    eprintln!("{}", dump(&rows));
+    assert_eq!(rows[0].reviewer.refused, 1, "L1 reviewer refused");
+    assert_eq!(rows[1].verifier.refused, 1, "L3 verifier refused");
+    assert!(
+        rows.iter().all(|r| r.incomplete.is_some()),
+        "{}",
+        dump(&rows)
+    );
+    let t = Totals::of(&rows);
+    assert_eq!(t.incomplete, 2);
+    assert_eq!(
+        (
+            t.defects,
+            t.caught,
+            t.false_positives,
+            t.hallucinations,
+            t.extras
+        ),
+        (0, 0, 0, 0, 0),
+        "{}",
+        dump(&rows)
+    );
+}
+
 // ── Metering and the cost cap ───────────────────────────────────────────
 
-/// A provider that reports fixed token counts for a fixed model.
+/// A provider that approves with fixed token counts for a fixed model.
 struct Priced {
     model: &'static str,
     input: u32,
@@ -349,7 +422,7 @@ impl LlmProvider for Priced {
     }
     async fn complete(&self, _: LlmRequest) -> Result<LlmResponse, LlmError> {
         Ok(LlmResponse {
-            text: String::new(),
+            text: reply_text(&serde_json::from_str(EMPTY_APPROVE).expect("valid JSON")),
             model: self.model.into(),
             input_tokens: self.input,
             output_tokens: self.output,
@@ -494,8 +567,10 @@ async fn live_leg_refuses_an_unpriced_model() {
     assert!(err.contains("no Bedrock price"), "{err}");
 }
 
-/// The live driver with fake providers: it writes a JSON report with the
-/// config, git SHA and per-row scores, and stops at the cap.
+/// The live driver with fake providers. Each review costs $0.0022 (1k input
+/// tokens at Sonnet 5.5's $2.20/M), so a $0.005 cap lets pass 1 (L1, K1)
+/// finish and pass 2's L1 spend the rest; K1 of pass 2 is never scheduled.
+/// The report compares on pass 1 only and carries config, git SHA and rows.
 #[tokio::test]
 async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     let out = tempfile::tempdir().expect("tempdir");
@@ -504,14 +579,16 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
         ("TRUSTY_EVAL_LIVE", "1"),
         ("TRUSTY_EVAL_MODELS", SONNET_55),
         ("TRUSTY_EVAL_PASSES", "3"),
-        ("TRUSTY_EVAL_MAX_USD", "0.0001"),
+        ("TRUSTY_EVAL_MAX_USD", "0.005"),
         ("TRUSTY_EVAL_CONCURRENCY", "1"),
         ("TRUSTY_EVAL_ONLY", "L1,K1"),
         ("TRUSTY_EVAL_OUT_DIR", &out_dir),
     ]);
     let factory = |_: &str| -> Result<Arc<dyn LlmProvider>, String> {
-        Ok(Arc::new(FakeLlm {
-            response: reply_text(&serde_json::from_str(EMPTY_APPROVE).expect("valid")),
+        Ok(Arc::new(Priced {
+            model: SONNET_55,
+            input: 1_000,
+            output: 0,
         }))
     };
     let LiveOutcome::Ran {
@@ -523,12 +600,18 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     else {
         panic!("enabled run skipped");
     };
-    assert_eq!(rows, 2, "one pass of 2 diffs, then the cap stops it");
+    assert_eq!(rows, 3, "pass 1 (2 diffs), then pass 2 stops after L1");
     assert!(stopped.is_some_and(|s| s.contains("cost cap")));
-    assert!(spent_usd >= 0.0001);
+    assert!((spent_usd - 0.0066).abs() < 1e-9, "{spent_usd}");
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("JSON");
     assert_eq!(json["config"]["passes"], 3);
+    assert_eq!(json["compared_passes"], 1, "only pass 1 finished");
+    assert_eq!(
+        json["summary"][0]["totals"]["diffs"], 2,
+        "pass 2 is not compared"
+    );
+    assert_eq!(json["incomplete_by_model_pass"][1]["rows"], 1);
     assert!(json.get("git_sha").is_some());
     let row = &json["rows"][0];
     for key in [
@@ -542,6 +625,7 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
         "reviewer",
         "verifier",
         "wall_ms",
+        "incomplete",
     ] {
         assert!(row.get(key).is_some(), "row lacks `{key}`: {row}");
     }
