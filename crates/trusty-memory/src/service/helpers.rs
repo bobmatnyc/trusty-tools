@@ -223,6 +223,18 @@ pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace
     .map_err(|e| anyhow!("list palaces: {e:#}"))
 }
 
+/// How many palaces a recall-all fan-out opens at once (#9141).
+///
+/// Why: the batch opened its palaces one after another, so a batch of cold
+/// palaces cost the SUM of their open times. Opens of different palaces
+/// already run in parallel under startup hydration, which uses the same bound
+/// (`DEFAULT_STARTUP_OPEN_LIMIT`, 4). Residency is unchanged: a batch holds its
+/// `RECALL_PALACE_BATCH` handles until its search ends either way; only the
+/// open-time scratch of up to four opens overlaps.
+/// What: the `bound` [`open_palaces_blocking`] passes to [`open_bounded`].
+/// Test: `open_bounded_overlaps_opens_up_to_its_bound`.
+pub(crate) const RECALL_OPEN_CONCURRENCY: usize = 4;
+
 /// Open a handle for every palace in `palaces`, off the async executor.
 ///
 /// Why (issue #4637): the cross-palace recall fan-out genuinely needs every
@@ -234,11 +246,11 @@ pub(crate) async fn list_palaces_blocking(state: &AppState) -> Result<Vec<Palace
 /// and moves the blocking work to the blocking pool where it belongs. Three
 /// byte-identical copies of this loop previously existed (`MemoryService::recall_all`,
 /// `chat::tools::execute_recall_all`, `tools::memory_ops::handle_memory_recall_all`).
-/// What: clones the registry `Arc` + `data_root`, opens each palace serially
-/// on `spawn_blocking` (serial on purpose — parallel cold opens would thrash
-/// the 64-slot LRU), and skips failures with a `tracing::warn!` so one bad
-/// palace cannot fail the whole fan-out. `label` names the caller in that
-/// warning.
+/// What: opens each palace on the blocking pool, up to
+/// [`RECALL_OPEN_CONCURRENCY`] at a time (#9141; its callers bound how many
+/// palaces they pass, see `recall_stream`), returns the handles in input
+/// order, and skips failures with a `tracing::warn!` so one bad palace cannot
+/// fail the whole fan-out. `label` names the caller in that warning.
 /// Test: `open_palaces_blocking_opens_every_palace` pins that the fan-out
 /// still sees palaces that were never cached.
 pub(crate) async fn open_palaces_blocking(
@@ -251,21 +263,53 @@ pub(crate) async fn open_palaces_blocking(
     let ids: Vec<PalaceId> = palaces.iter().map(|p| p.id.clone()).collect();
     // #4637: open_palace is correct here (recall must see every palace) but must
     // not run inline on the async executor — hop to the blocking pool.
-    tokio::task::spawn_blocking(move || {
-        let mut handles = Vec::with_capacity(ids.len());
-        for id in &ids {
-            match registry.open_palace(&root, id) {
-                Ok(h) => handles.push(h),
-                Err(e) => tracing::warn!(palace = %id, "{label}: open failed: {e:#}"),
-            }
-        }
-        handles
+    open_bounded(ids, RECALL_OPEN_CONCURRENCY, label, move |id| {
+        registry.open_palace(&root, id)
     })
     .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("{label}: join open_palaces failed: {e}");
-        Vec::new()
-    })
+}
+
+/// Run `open` for every id on the blocking pool, at most `bound` at a time.
+///
+/// Why (#9141): the bounded-concurrency core of [`open_palaces_blocking`],
+/// generic over the opener so a test can observe the overlap.
+/// What: one `spawn_blocking` per id, at most `bound` (minimum 1) in flight,
+/// results kept in input order. An `Err` or a join failure is logged at `warn`
+/// under `label` and dropped.
+/// Test: `open_bounded_overlaps_opens_up_to_its_bound`.
+pub(crate) async fn open_bounded<T, F>(
+    ids: Vec<PalaceId>,
+    bound: usize,
+    label: &'static str,
+    open: F,
+) -> Vec<T>
+where
+    T: Send + 'static,
+    F: Fn(&PalaceId) -> Result<T> + Send + Sync + 'static,
+{
+    use futures::StreamExt;
+    let open = Arc::new(open);
+    futures::stream::iter(ids)
+        .map(|id| {
+            let open = Arc::clone(&open);
+            async move {
+                match tokio::task::spawn_blocking(move || (open(&id), id)).await {
+                    Ok((Ok(handle), _)) => Some(handle),
+                    Ok((Err(e), id)) => {
+                        tracing::warn!(palace = %id, "{label}: open failed: {e:#}");
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!("{label}: join open_palaces failed: {e}");
+                        None
+                    }
+                }
+            }
+        })
+        .buffered(bound.max(1))
+        .filter_map(std::future::ready)
+        .collect()
+        .await
 }
 
 /// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
@@ -946,5 +990,46 @@ mod tests {
             handles.iter().any(|h| h.id == PalaceId::new("a")),
             "the evicted palace 'a' must still be opened and searched"
         );
+    }
+
+    /// Why (#9141): a recall-all batch opened its palaces serially, so a cold
+    /// batch cost the sum of its opens. Opens must overlap, never past the
+    /// bound, and the handles must come back in input order without a failure.
+    /// What: six ids, bound 3. Each open records how many are in flight and
+    /// waits up to 2 s for a second one to start, so a serial runner reports a
+    /// peak of 1. The fourth id fails and must be dropped.
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn open_bounded_overlaps_opens_up_to_its_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let ids: Vec<PalaceId> = (0..6).map(|i| PalaceId::new(format!("p{i}"))).collect();
+        let (flight, high) = (Arc::clone(&in_flight), Arc::clone(&peak));
+        let opened = open_bounded(ids, 3, "test", move |id| {
+            let now = flight.fetch_add(1, Ordering::SeqCst) + 1;
+            high.fetch_max(now, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while flight.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            flight.fetch_sub(1, Ordering::SeqCst);
+            match id.as_str() {
+                "p3" => Err(anyhow!("p3 is broken")),
+                name => Ok(name.to_string()),
+            }
+        })
+        .await;
+
+        assert_eq!(
+            opened,
+            ["p0", "p1", "p2", "p4", "p5"],
+            "order or failure handling"
+        );
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak >= 2, "opens never overlapped (peak {peak})");
+        assert!(peak <= 3, "opens exceeded the bound of 3 (peak {peak})");
     }
 }
