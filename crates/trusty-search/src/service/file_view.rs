@@ -102,8 +102,8 @@ fn refusal(status: StatusCode, index_id: &str, error: &str, reason: &str, msg: &
 /// Read one indexed file and, when asked, its diff against `HEAD`.
 ///
 /// Why: see the module docs.
-/// What: a held index (#9059) is 503 `reason: "index_held"` for every path,
-/// checked before the path is touched. `path` is root-relative or absolute.
+/// What: a held index (#9059) is 503 `reason: "index_held"`,
+/// `retryable: false`, for every path, checked before the path is touched. `path` is root-relative or absolute.
 /// An empty path, a NUL byte, or a `..` segment is 400 `invalid_path`. An absolute path outside the root is
 /// refused before the filesystem is touched. The path is then canonicalised;
 /// a miss, a symlink resolving outside the root, a non-file, and a walker
@@ -130,13 +130,16 @@ pub fn read_indexed_file(
     // #9029: a held index refuses every path alike, before the path is read,
     // so an existing excluded file and a missing one cannot be told apart.
     if let Some(hold) = crate::service::exclude_hold::hold(handle) {
-        return Err(refusal(
+        let (status, mut body) = refusal(
             StatusCode::SERVICE_UNAVAILABLE,
             index_id,
             "file_admission_undetermined",
             "index_held",
             &hold.reason(),
-        ));
+        );
+        // #9029: only a config PATCH lifts a hold, so the socket answers -32012.
+        body["retryable"] = false.into();
+        return Err((status, body));
     }
     let given = Path::new(path);
     if path.is_empty() || path.contains('\0') {

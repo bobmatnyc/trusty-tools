@@ -152,17 +152,22 @@ fn a_missing_file_and_an_outside_file_answer_one_body() {
     }
 }
 
-/// #9029: a held index (#9059) answers one retryable 503 for every path, so
-/// an existing excluded file and a missing one cannot be told apart.
+/// #9029: a held index (#9059) answers one non-retryable 503 for every path —
+/// an admitted file, an excluded one and a missing one alike — so the hold
+/// neither serves content nor reveals existence.
 #[test]
 fn a_held_index_answers_one_refusal_for_every_path() {
+    use crate::service::rpc::error::{code_for, refusal_is_permanent, CODE_UNAVAILABLE_PERMANENT};
+
     let mut fx = fixture();
     fx.handle.exclude_globs = vec!["**/secrets/[**".to_owned()];
     std::fs::write(fx.root.join(".env"), "API_TOKEN=secret\n").expect(".env");
 
+    let admitted = get(&fx, "src/lib.rs", DiffMode::Head).expect_err("held: admitted");
     let existing = get(&fx, ".env", DiffMode::None).expect_err("held: existing");
     let missing = get(&fx, "src/nope.rs", DiffMode::None).expect_err("held: missing");
     assert_eq!(existing, missing, "a held index must not reveal existence");
+    assert_eq!(admitted, missing, "a held index must not serve content");
     assert_eq!(
         existing.0,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -170,7 +175,12 @@ fn a_held_index_answers_one_refusal_for_every_path() {
         existing.1
     );
     assert_eq!(existing.1["reason"], "index_held");
-    assert_eq!(existing.1["retryable"], true);
+    assert_eq!(existing.1["retryable"], false);
+    assert_eq!(
+        code_for(existing.0.as_u16(), refusal_is_permanent(&existing.1)),
+        CODE_UNAVAILABLE_PERMANENT,
+        "only operator action clears a hold"
+    );
 }
 
 /// #9029: a `..` segment, an empty path and a NUL byte are refused as invalid
