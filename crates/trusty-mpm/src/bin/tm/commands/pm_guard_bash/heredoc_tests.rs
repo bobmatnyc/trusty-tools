@@ -372,3 +372,63 @@ fn heredoc_bodies_read_a_crlf_heredoc_as_the_shell_does() {
     assert!(bodies.contains(decoy.find("cat <<'X'").expect("inner")));
     assert!(!bodies.contains(decoy.find("$(").expect("$(")), "live");
 }
+
+/// #9180: an operator line runs on across a continuation, so the body starts
+/// after the last joined line and the joined line keeps its live syntax; a
+/// shell glued to the operator is not framed.
+#[test]
+fn heredoc_bodies_follow_a_continued_operator_line_9180() {
+    let command = "cat <<'X' \\\n; rm -rf /\nbody > here\nX";
+    let bodies = HeredocBodies::scan(command);
+    assert!(!bodies.is_unscannable());
+    assert!(
+        !bodies.contains(command.find("rm").expect("rm")),
+        "joined line is live"
+    );
+    assert!(
+        bodies.contains(command.find('>').expect(">")),
+        "body claimed"
+    );
+    let glued = "bash<<'O'\nbody\nO";
+    let newline = glued.find('\n').expect("operator line ends");
+    assert!(!HeredocBodies::scan(glued).suppresses_separator(newline));
+}
+
+/// #9180: a continuation the scan cannot place refuses the command: one that
+/// joins two `<`, one after a `#` on an operator line, and an unquoted body
+/// whose joined lines end it somewhere other than its physical lines do. A
+/// quoted body keeps its `\` literally, as the shell does.
+#[test]
+fn heredoc_bodies_refuse_a_continuation_they_cannot_place_9180() {
+    for command in [
+        "cat <\\\n<X\nbody\nX",
+        "cat <<'X' # c \\\nX\nbody\nX",
+        "cat <<X\na\\\nX\nb\nX",
+    ] {
+        assert!(HeredocBodies::scan(command).is_unscannable(), "{command:?}");
+    }
+    let quoted = "cat <<'X'\na\\\nX\necho done";
+    let bodies = HeredocBodies::scan(quoted);
+    assert!(!bodies.is_unscannable());
+    assert!(!bodies.contains(quoted.find("echo").expect("echo")), "live");
+}
+
+/// #9180: an abandoned scan claims nothing but keeps every body it found —
+/// the unterminated one to the end of input — and reports the lost
+/// confidence; a terminated scan reports none.
+#[test]
+fn heredoc_bodies_keep_every_body_when_abandoned_9180() {
+    let command = "bash <<'O'\ncat <<X\nx\nX";
+    let bodies = HeredocBodies::scan(command);
+    assert!(bodies.lost_confidence());
+    assert!(bodies.spans().is_empty());
+    let [body] = bodies.bodies() else {
+        panic!("one body expected");
+    };
+    assert_eq!(&command[body.span.0..body.span.1], "cat <<X\nx\nX");
+    let unbalanced = "bash <<'O'\nx\nO\necho \"open";
+    let bodies = HeredocBodies::scan(unbalanced);
+    assert!(bodies.lost_confidence() && bodies.spans().is_empty());
+    assert_eq!(bodies.bodies().len(), 1);
+    assert!(!HeredocBodies::scan("cat <<'X'\nx\nX").lost_confidence());
+}

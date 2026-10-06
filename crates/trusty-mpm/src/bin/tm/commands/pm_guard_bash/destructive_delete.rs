@@ -107,9 +107,11 @@ use std::path::{Component, Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::heredoc::{blank_spans, data_bodies};
+use super::continuation;
+use super::heredoc::{HeredocBodies, blank_spans, data_bodies};
 use super::substitutions::{
-    Substitution, blank_inert_heredocs, segment_substitutions, shell_run_heredoc_bodies,
+    HEREDOC_RUNNERS, Substitution, blank_inert_heredocs, segment_substitutions,
+    shell_run_heredoc_bodies,
 };
 use super::{
     MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, shell_lex, split_shell_segments,
@@ -316,10 +318,6 @@ pub(crate) fn lone_inert_heredoc(command: &str) -> Option<String> {
 /// directory its level saw, so nested bodies multiply the work.
 const MAX_DELETE_WORK: usize = 4096;
 
-/// Programs whose here-document body a shell runs (`sudo -s`, `su`,
-/// `parallel`), so its substitutions stay live for the floor.
-const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
-
 /// [`classify_destructive_delete_in`] for text nested `depth` substitutions
 /// deep (#8735).
 ///
@@ -339,7 +337,12 @@ const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
 /// Past [`MAX_WRAPPER_DEPTH`]
 /// levels the text is not read further, and a delete verb anywhere in it
 /// denies as unresolved; past [`MAX_DELETE_WORK`] calls, anything does.
+/// #9180: each level also judges its continuation-joined spelling
+/// ([`continuation::joined`]), and a level whose here-document scan lost
+/// confidence denies as unresolved once a delete verb is in sight.
 /// Test: `denies_a_delete_inside_a_substitution_body`,
+/// `continuation_tests::the_floor_denies_each_9180_class`,
+/// `continuation_tests::the_floor_fails_closed_on_an_unplaceable_heredoc_9180`,
 /// `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`,
 /// `denies_a_delete_nested_past_the_depth_cap`,
 /// `allows_a_scratch_delete_inside_a_substitution`,
@@ -360,7 +363,14 @@ fn classify_at_depth(
     if depth > MAX_WRAPPER_DEPTH {
         return segment_mentions_a_delete_verb(command).then_some(DeleteTarget::Unresolved);
     }
-    let mut worst: Option<DeleteTarget> = None;
+    // #9180: a here-document the scan gave up on leaves which lines run
+    // unknown, so a delete verb in sight fails closed.
+    if HeredocBodies::scan(command).lost_confidence() && segment_mentions_a_delete_verb(command) {
+        return Some(DeleteTarget::Unresolved);
+    }
+    // #9180: the continuation-joined spelling is judged too; it only adds.
+    let mut worst = continuation::joined(command)
+        .and_then(|joined| classify_at_depth(&joined, cwd, env, depth, work));
     let mut effective_cwd = cwd.to_path_buf();
     let mut cwds_seen: Vec<PathBuf> = vec![effective_cwd.clone()];
     let mut judged: HashSet<String> = HashSet::new();

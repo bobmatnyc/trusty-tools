@@ -23,6 +23,7 @@
 //! `evaluate_bash_command_allows_readonly_heredoc_script` in the parent's.
 
 use super::credential_print::{OperatorCtx, heredoc_operators};
+use super::heredoc_line::line_runs_a_shell;
 use super::shell_lex::QuoteScan;
 
 /// A here-document delimiter word plus its `<<-` tab-stripping mode.
@@ -36,12 +37,14 @@ struct Delimiter {
     ambiguous: bool,
 }
 
-/// One here-document body its operator line hands to something other than a
-/// shell (#8756).
+/// One here-document body and the line that opened it (#8756).
 ///
 /// What: `span` is the body's half-open byte range, `operator_line` the range
 /// of the line that opened it, and `expands` is `true` when the delimiter was
 /// unquoted, so the shell runs every `$( … )` and backtick in the body.
+/// [`HeredocBodies::data`] lists the bodies handed to something other than a
+/// shell; #9180: [`HeredocBodies::bodies`] lists every body.
+#[derive(Clone)]
 pub(crate) struct DataBody {
     pub(crate) span: (usize, usize),
     pub(crate) operator_line: (usize, usize),
@@ -67,31 +70,48 @@ pub(super) struct HeredocBodies {
     data: Vec<DataBody>,
     /// #9155: every body whose delimiter was unquoted, data or shell source.
     expanding: Vec<(usize, usize)>,
+    /// #9180: every body found, an unterminated one to the end of input, kept
+    /// even when the scan claims nothing, so what a shell runs is still read.
+    bodies: Vec<DataBody>,
     /// #9150: a delimiter word this scan cannot split as the shell does.
     unscannable: bool,
+    /// #9180: a code `<<` was read but the scan claimed nothing for it.
+    lost: bool,
+}
+
+/// What an abandoned [`HeredocBodies::collect`] still found (#9155, #9180).
+struct Partial {
+    expanding: Vec<(usize, usize)>,
+    bodies: Vec<DataBody>,
 }
 
 /// Why [`HeredocBodies::collect`] gave up on a command.
 enum Abandon {
-    /// No terminator line, or an operator line's own quotes do not close:
-    /// claim nothing and leave every byte live (an arithmetic `<<` lands here).
-    NoConfidence,
+    /// An operator line's own quotes do not close: claim nothing and leave
+    /// every byte live. #9180: the bodies found up to there are kept.
+    NoConfidence(Partial),
     /// #9150: a delimiter word the shell reads differently from this scan.
+    /// #9180: also a line continuation that moves where a body starts or
+    /// ends in a way this scan cannot place.
     Delimiter,
     /// #9155: a code `<<` with no terminator line. The shell runs that body
     /// to the end of input, so every byte stays live as under
     /// [`Abandon::NoConfidence`], but the unquoted-delimiter bodies found up
     /// to there — this one included, to the end of input — still expand.
-    Unterminated(Vec<(usize, usize)>),
+    /// #9180: every body found up to there, this one included, is kept too.
+    Unterminated(Partial),
 }
 
 /// Deny reason for a here-document delimiter the guard cannot read (#9150).
 pub(crate) const HEREDOC_DELIMITER_REASON: &str = "this command opens a here-document the \
      guard cannot delimit: its delimiter word is not letters, digits, `_`, `.` and `-` (bare, \
      in one pair of quotes, or `\\`-escaped), or its `<<` sits in arithmetic or in a `$(…)` or \
-     backtick that closes on the same line while a later line matches the word. The shell may \
-     end that body at a different line than the guard finds, so the guard cannot tell which \
-     lines run (#9150). Use a plain delimiter such as `<<'EOF'` in plain command position.";
+     backtick that closes on the same line while a later line matches the word, or a `\\`-newline \
+     line continuation joins two `<`, follows a `#` on a here-document operator line, or joins an \
+     unquoted body's line to the line that would end it (#9180). The shell may end that body at a different line than the \
+     guard finds, so the guard cannot tell which lines run (#9150). Use a plain delimiter such as \
+     `<<'EOF'` in plain command position, with no `\\` at the end of the operator line or of the \
+     body line before the terminator.";
 
 impl HeredocBodies {
     /// Locate every here-document body in `command`.
@@ -108,32 +128,78 @@ impl HeredocBodies {
     /// #6946: each body also contributes a `frames` entry, unless its operator
     /// line names a shell ([`line_runs_a_shell`]) — see
     /// [`HeredocBodies::suppresses_separator`].
+    ///
+    /// #9180: the classifier entry point for here-document structure.
+    /// Why: a body the guard misplaces is a command it misreads — a shell's
+    /// body read as data hides what it nests, and a continuation that moves a
+    /// body's first or last line turns data into commands or commands into
+    /// data. What: an operator line runs on across each `\`-newline
+    /// continuation, as the shell reads it, so its body starts after the last
+    /// joined line; a continuation the scan cannot place refuses the command
+    /// ([`HeredocBodies::is_unscannable`]). Every body found is kept in
+    /// [`HeredocBodies::bodies`] even when the scan claims nothing — an
+    /// unterminated body, or a command whose quotes do not balance — and
+    /// [`HeredocBodies::lost_confidence`] reports that the scan gave up on a
+    /// code `<<`, so a rule can fail closed.
     /// Test: `heredoc_bodies_cover_a_quoted_delimiter_body`,
     /// `heredoc_bodies_claim_nothing_when_unterminated`,
     /// `heredoc_bodies_span_two_heredocs_on_one_line`,
     /// `heredoc_frames_cover_the_terminator_line`,
-    /// `heredoc_frames_are_empty_for_a_shell_operator_line`.
+    /// `heredoc_frames_are_empty_for_a_shell_operator_line`,
+    /// `heredoc_bodies_follow_a_continued_operator_line_9180`,
+    /// `heredoc_bodies_refuse_a_continuation_they_cannot_place_9180`,
+    /// `heredoc_bodies_keep_every_body_when_abandoned_9180`.
     pub(super) fn scan(command: &str) -> Self {
-        let quotes = QuoteScan::new(command);
         // #9150: only a `<<` the shell reads as an operator opens a body.
         let ops = heredoc_operators(command);
+        let mut found = Self::scan_with(command, &ops);
+        // #9180: only a code `<<` can be lost; a stray quote alone is not.
+        found.lost &= ops.iter().any(|(_, ctx)| *ctx == OperatorCtx::Code);
+        found
+    }
+
+    /// [`HeredocBodies::scan`] against the command's operators `ops`.
+    fn scan_with(command: &str, ops: &[(usize, OperatorCtx)]) -> Self {
+        let quotes = QuoteScan::new(command);
         if quotes.balanced {
-            return Self::settle(Self::collect(command, Some(&quotes), &ops));
+            return Self::settle(Self::collect(command, Some(&quotes), ops));
         }
         // #8111: an apostrophe in a BODY (`it's`) unbalances the whole-command
         // map, and claiming nothing made that body prose live shell. Retry with
         // each operator line's own quotes; keep the answer only when blanking
         // the bodies it found leaves the rest of the command balanced.
-        match Self::collect(command, None, &ops) {
+        match Self::collect(command, None, ops) {
             Ok(found)
                 if !found.spans.is_empty()
                     && QuoteScan::new(&blank_spans(command, &found.spans)).balanced =>
             {
                 found
             }
-            Ok(_) | Err(Abandon::NoConfidence) => Self::empty(),
+            // #9180: claim nothing, but keep what a shell runs and expands.
+            Ok(found) => Self {
+                expanding: found.expanding,
+                bodies: found.bodies,
+                lost: !found.spans.is_empty(),
+                ..Self::empty()
+            },
             Err(why) => Self::settle(Err(why)),
         }
+    }
+
+    /// Whether the scan read a code `<<` but claimed no body for it (#9180):
+    /// an unterminated body, an operator line whose quotes do not close, or a
+    /// command whose quotes do not balance around its bodies. Every byte then
+    /// stays live, but the guard cannot say which lines are data.
+    ///
+    /// Test: `heredoc_bodies_keep_every_body_when_abandoned_9180`.
+    pub(super) fn lost_confidence(&self) -> bool {
+        self.lost
+    }
+
+    /// Every body found, with its operator line, in order — kept when the
+    /// scan claims nothing (#9180).
+    pub(super) fn bodies(&self) -> &[DataBody] {
+        &self.bodies
     }
 
     /// Whether `command` opens a here-document whose delimiter this scan
@@ -152,13 +218,16 @@ impl HeredocBodies {
     fn settle(collected: Result<Self, Abandon>) -> Self {
         match collected {
             Ok(found) => found,
-            // #9155: claim nothing, but keep what the shell still expands.
-            Err(Abandon::Unterminated(expanding)) => Self {
-                expanding,
+            // #9155: claim nothing, but keep what the shell still expands;
+            // #9180: and every body, so a shell-run one is still read whole.
+            Err(Abandon::Unterminated(partial) | Abandon::NoConfidence(partial)) => Self {
+                expanding: partial.expanding,
+                bodies: partial.bodies,
+                lost: true,
                 ..Self::empty()
             },
-            Err(why) => Self {
-                unscannable: matches!(why, Abandon::Delimiter),
+            Err(Abandon::Delimiter) => Self {
+                unscannable: true,
                 ..Self::empty()
             },
         }
@@ -170,7 +239,9 @@ impl HeredocBodies {
     /// (#9155), [`Abandon::NoConfidence`] when an operator line's own quotes
     /// do not close; [`Abandon::Delimiter`]
     /// when [`delimiters_on`] cannot read a delimiter word, or an ambiguous
-    /// `<<` would claim a body (#9150).
+    /// `<<` would claim a body (#9150), or a continuation joins two `<`,
+    /// follows a `#` on an operator line, or moves an unquoted body's end
+    /// ([`body_span`], #9180).
     fn collect(
         command: &str,
         quotes: Option<&QuoteScan>,
@@ -181,9 +252,21 @@ impl HeredocBodies {
         let mut frames = Vec::new();
         let mut data = Vec::new();
         let mut expanding = Vec::new();
+        let mut bodies = Vec::new();
         let mut line = 0;
         while line < lines.len() {
-            let (start, end) = lines[line];
+            let (start, mut end) = lines[line];
+            // #9180: the shell reads an operator line on across each
+            // continuation, so its body starts after the last joined line.
+            let mut joined = false;
+            while line + 1 < lines.len() && continues(command, lines[line], quotes) {
+                if fuses_a_redirect(command, lines[line].1) {
+                    return Err(Abandon::Delimiter);
+                }
+                line += 1;
+                end = lines[line].1;
+                joined = true;
+            }
             let operator_line = &command[start..end];
             let delimiters = match quotes {
                 Some(quotes) => delimiters_on(operator_line, (start, start), quotes, ops),
@@ -193,33 +276,51 @@ impl HeredocBodies {
                     // delimiter the shell reads past this line.
                     let read = delimiters_on(operator_line, (start, 0), &own, ops);
                     if !own.balanced && read.is_some() {
-                        return Err(Abandon::NoConfidence);
+                        return Err(Abandon::NoConfidence(Partial { expanding, bodies }));
                     }
                     read
                 }
             };
             let delimiters = delimiters.ok_or(Abandon::Delimiter)?;
+            // #9180: a `#` can end the line's code before the continuation the
+            // walk followed, and then the body starts a line earlier.
+            if joined && !delimiters.is_empty() && has_comment_mark(command, (start, end), quotes) {
+                return Err(Abandon::Delimiter);
+            }
             let framing = !delimiters.is_empty() && !line_runs_a_shell(operator_line);
             line += 1;
             for delimiter in delimiters {
                 if delimiter.ambiguous {
                     // #9150: a shell that reads this `<<` as an operator
                     // ends its body at a line the guard cannot place.
-                    if body_span(command, &lines, line, &delimiter).is_some() {
+                    if !matches!(body_span(command, &lines, line, &delimiter), Ok(None)) {
                         return Err(Abandon::Delimiter);
                     }
                     continue;
                 }
-                let Some(body) = body_span(command, &lines, line, &delimiter) else {
+                let Some(body) = body_span(command, &lines, line, &delimiter)? else {
                     // #9155: bash runs an unterminated body to end of input, so
                     // an unquoted one expands there; `X ` never ends `<<X`.
                     let rest = lines.get(line).map_or(command.len(), |l| l.0);
-                    if !delimiter.quoted && rest < command.len() {
-                        expanding.push((rest, command.len()));
+                    if rest < command.len() {
+                        if !delimiter.quoted {
+                            expanding.push((rest, command.len()));
+                        }
+                        // #9180: a shell's unterminated body is still read whole.
+                        bodies.push(DataBody {
+                            span: (rest, command.len()),
+                            operator_line: (start, end),
+                            expands: !delimiter.quoted,
+                        });
                     }
-                    return Err(Abandon::Unterminated(expanding));
+                    return Err(Abandon::Unterminated(Partial { expanding, bodies }));
                 };
                 if body.span.0 < body.span.1 {
+                    bodies.push(DataBody {
+                        span: body.span,
+                        operator_line: (start, end),
+                        expands: !delimiter.quoted,
+                    });
                     spans.push(body.span);
                     if !delimiter.quoted {
                         // #9155: the shell expands this body whoever runs it.
@@ -249,7 +350,9 @@ impl HeredocBodies {
             frames,
             data,
             expanding,
+            bodies,
             unscannable: false,
+            lost: false,
         })
     }
 
@@ -260,7 +363,9 @@ impl HeredocBodies {
             frames: Vec::new(),
             data: Vec::new(),
             expanding: Vec::new(),
+            bodies: Vec::new(),
             unscannable: false,
+            lost: false,
         }
     }
 
@@ -275,7 +380,9 @@ impl HeredocBodies {
             .map(|span| span.1)
     }
 
-    /// Every claimed body's half-open span, in order (#9155).
+    /// Every claimed body's half-open span, in order (#9155); #9180: the
+    /// shell-run reader moved to [`Self::bodies`], so only tests ask.
+    #[cfg(test)]
     pub(super) fn spans(&self) -> &[(usize, usize)] {
         &self.spans
     }
@@ -371,23 +478,51 @@ pub(crate) fn data_bodies(command: &str) -> Vec<DataBody> {
     HeredocBodies::scan(command).data
 }
 
-/// Whether a here-document operator line hands its body to a shell.
-///
-/// Why (#6946 fail-open check): `bash <<'EOF'` runs the body as shell source,
-/// so suppressing the body's separators there would hide `rm -rf …` from the
-/// destructive-delete rule that catches it today. `cat`, `python3`, `jq` and
-/// the rest consume the body as data instead.
-/// What: `true` when any whitespace-delimited token of the line, basename
-/// stripped, is one of [`QuoteScan`]'s sibling [`super::shell_lex::DASH_C_SHELLS`].
-/// Scanning every token rather than the leading one keeps `sudo bash`,
-/// `env - bash` and `foo && bash <<EOF` on the conservative side; a false
-/// positive only restores the pre-#6946 splitting.
-/// Test: `heredoc_frames_are_empty_for_a_shell_operator_line`.
-fn line_runs_a_shell(line: &str) -> bool {
-    line.split_whitespace().any(|token| {
-        let base = token.rsplit('/').next().unwrap_or(token);
-        super::shell_lex::DASH_C_SHELLS.contains(&base)
-    })
+/// Whether the line `(start, end)` ends in a `\`-newline continuation: an odd
+/// run of `\` before its newline, outside single quotes (#9180). With no
+/// whole-command quote map the line's own is used.
+fn continues(command: &str, (start, end): (usize, usize), quotes: Option<&QuoteScan>) -> bool {
+    let bytes = &command.as_bytes()[start..end];
+    let run = bytes.iter().rev().take_while(|b| **b == b'\\').count();
+    if run.is_multiple_of(2) || end >= command.len() {
+        return false;
+    }
+    match quotes {
+        Some(quotes) => !quotes.balanced || quotes.allows_substitution(end - 1),
+        None => {
+            let own = QuoteScan::new(&command[start..end]);
+            !own.balanced || own.allows_substitution(bytes.len() - 1)
+        }
+    }
+}
+
+/// Whether the continuation ending the line at `end` joins a `<` to a `<`,
+/// which makes a `<<` or `<<<` the line-by-line scan never sees (#9180).
+fn fuses_a_redirect(command: &str, end: usize) -> bool {
+    let bytes = command.as_bytes();
+    let before = bytes[..end].iter().rev().find(|b| **b != b'\\');
+    before == Some(&b'<') && bytes.get(end + 1) == Some(&b'<')
+}
+
+/// Whether the operator line `(start, end)` carries an unquoted `#`, which
+/// may open a comment the shell ends at the first newline (#9180).
+fn has_comment_mark(
+    command: &str,
+    (start, end): (usize, usize),
+    quotes: Option<&QuoteScan>,
+) -> bool {
+    let own;
+    let (quotes, offset) = match quotes {
+        Some(quotes) => (quotes, start),
+        None => {
+            own = QuoteScan::new(&command[start..end]);
+            (&own, 0)
+        }
+    };
+    command.as_bytes()[start..end]
+        .iter()
+        .enumerate()
+        .any(|(i, b)| *b == b'#' && quotes.is_unquoted(offset + i))
 }
 
 /// `command` with every byte inside `spans` replaced by a space, newlines kept,
@@ -593,32 +728,53 @@ struct Body {
 
 /// The body for one delimiter, starting at line `from`.
 ///
-/// What: `None` when no later line consists solely of the delimiter word (with
-/// leading tabs allowed under `<<-`) — the caller then claims nothing.
-/// Test: `heredoc_bodies_claim_nothing_when_unterminated`.
+/// What: `Ok(None)` when no later line consists solely of the delimiter word
+/// (with leading tabs allowed under `<<-`) — the caller then claims nothing.
+/// #9180: in an unquoted body the shell joins a `\`-newline continuation
+/// before it compares a line with the word, so `a\`, `EOF` does not end the
+/// body and `\`, `EOF` may. Where the joined and the line-by-line reading
+/// disagree on a line, `Err` — the scan cannot place the body's end.
+/// Test: `heredoc_bodies_claim_nothing_when_unterminated`,
+/// `heredoc_bodies_refuse_a_continuation_they_cannot_place_9180`.
 fn body_span(
     command: &str,
     lines: &[(usize, usize)],
     from: usize,
     delimiter: &Delimiter,
-) -> Option<Body> {
-    let body_start = lines.get(from)?.0;
+) -> Result<Option<Body>, Abandon> {
+    let Some(&(body_start, _)) = lines.get(from) else {
+        return Ok(None);
+    };
+    let ends = |text: &str, last| is_terminator(text, &delimiter.word, delimiter.strip_tabs, last);
+    // The logical line so far, `\`-newline removed, while one is continuing.
+    let mut logical: Option<String> = None;
     for (index, (start, end)) in lines.iter().enumerate().skip(from) {
         let last = index + 1 == lines.len();
-        if is_terminator(
-            &command[*start..*end],
-            &delimiter.word,
-            delimiter.strip_tabs,
-            last,
-        ) {
-            return Some(Body {
+        let text = &command[*start..*end];
+        let whole = logical.take().map(|head| format!("{head}{text}"));
+        if let Some(whole) = &whole
+            && ends(text, last) != ends(whole, last)
+        {
+            return Err(Abandon::Delimiter);
+        }
+        if ends(text, last) {
+            return Ok(Some(Body {
                 span: (body_start, *start),
                 frame_end: *end,
                 next_line: index + 1,
-            });
+            }));
+        }
+        if !delimiter.quoted && odd_trailing_backslashes(text) {
+            let whole = whole.unwrap_or_else(|| text.to_string());
+            logical = Some(whole[..whole.len() - 1].to_string());
         }
     }
-    None
+    Ok(None)
+}
+
+/// Whether `text` ends in an odd run of `\`, so its newline is a continuation.
+fn odd_trailing_backslashes(text: &str) -> bool {
+    text.bytes().rev().take_while(|b| *b == b'\\').count() % 2 == 1
 }
 
 /// Whether `line`, newline excluded, ends a body whose delimiter is `word`.
