@@ -234,6 +234,79 @@ fn value_in_the_command_line_is_refused_before_spawn() {
     }
 }
 
+#[tokio::test]
+async fn async_value_in_the_command_line_is_refused_before_spawn() {
+    // A real program that leaves a marker file when it runs: the marker's
+    // absence proves no child was spawned.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("spawned");
+    let base = || {
+        ExternalCliCommand::new("sh")
+            .args(["-c", r#"touch "$1""#, "probe"])
+            .arg(&marker)
+    };
+    let cases = [
+        ("argv", base().arg(format!("password={VALUE}"))),
+        ("env overlay", base().env("PASSWORD", VALUE)),
+    ];
+    for (name, cmd) in cases {
+        let err = cmd.output_with_stdin(&secret()).await.expect_err(name);
+        assert!(
+            matches!(err, ExternalCliError::ValueInCommandLine { .. }),
+            "{name}: {err:?}"
+        );
+        assert_no_value(&err, VALUE);
+        assert!(!marker.exists(), "{name}: a child was spawned");
+    }
+}
+
+#[tokio::test]
+async fn async_dropped_future_kills_the_child() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("pid");
+    let cmd = ExternalCliCommand::new("sh")
+        .args(["-c", r#"printf '%s' "$$" > "$1"; exec sleep 30"#, "probe"])
+        .arg(&pid_file);
+    let secret = secret();
+    // Boxed so `drop(run)` drops the future itself, not a pinned reference.
+    let mut run = Box::pin(cmd.output_with_stdin(&secret));
+    // A caller's timeout drops the future; drop it only once the child has
+    // written its pid, so the kill cannot race the child's start.
+    let started = Instant::now();
+    let pid = loop {
+        let timed_out = tokio::time::timeout(Duration::from_millis(500), &mut run).await;
+        assert!(timed_out.is_err(), "the child must still be running");
+        let pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        if !pid.is_empty() {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the child never wrote its pid"
+        );
+    };
+    drop(run);
+    // tokio reaps a killed orphan asynchronously, and a zombie still answers
+    // `kill -0`, so poll until the pid is gone.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let gone = loop {
+        let alive = tokio::process::Command::new("sh")
+            .args(["-c", r#"kill -0 "$1""#, "probe", pid.trim()])
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .expect("run kill -0");
+        if !alive.success() || Instant::now() >= deadline {
+            break !alive.success();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        gone,
+        "pid {pid} still exists 5 s after the future was dropped"
+    );
+}
+
 #[test]
 fn output_without_stdin_sees_eof_and_wraps_stdout() {
     // `cat` on a null stdin ends at once. The value rides argv here only to

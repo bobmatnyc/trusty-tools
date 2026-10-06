@@ -317,7 +317,9 @@ impl ExternalCliCommand {
     /// write kills the child, which is then reaped. The child is spawned with
     /// `kill_on_drop`, so a dropped future kills it too and tokio reaps it.
     /// Test: `async_stdin_value_reaches_the_child_on_stdin_only`,
-    /// `async_stdin_write_failure_kills_and_reaps_the_child`.
+    /// `async_stdin_write_failure_kills_and_reaps_the_child`,
+    /// `async_value_in_the_command_line_is_refused_before_spawn`,
+    /// `async_dropped_future_kills_the_child`.
     pub async fn output_with_stdin<T: AsRef<[u8]>>(
         &self,
         value: &Secret<T>,
