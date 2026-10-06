@@ -202,6 +202,45 @@ size. Recovering one is a manual step that the E14 guide documents.
   `palace.json` (DOC-80 OQ-3). The project UUID that ADR-0051 is amended to
   carry lands in the same bump.
 
+### D7. Decisions recorded at review
+
+Decided (Bob, 2026-10-06, "adopt all"), each as recommended in the Architect
+review:
+
+- **Retention.** Decided (Bob, 2026-10-06): keep the two newest migration
+  backups per palace, with no age-based expiry; only an operator deletes a
+  backup. A successful open does not prove the migrated data is correct.
+  Silent drawer loss is detected only later, by count history
+  ([#9283](https://github.com/bobmatnyc/trusty-tools/issues/9283)), and an age
+  rule would delete the only restore point first. `doctor` reports the total
+  size (D3 rule 3).
+- **N-2 path.** Decided (Bob, 2026-10-06): no `palace migrate --chain` command
+  in 1.x; the E14 table of release lines is the N-2 path. The owner's N-1 rule
+  keeps one migration per binary. A chain would keep every past migration in
+  the binary and multiply the D4 fixture matrix, which is why "auto-migrate
+  any older format" is rejected below.
+- **Read-only access to a refused palace.** Decided (Bob, 2026-10-06): a
+  failed-migration palace stays fully offline in the binary that failed. The
+  backup is a complete format N-1 palace, so an operator who needs its data
+  restores it (Consequences) and reads it with the release line that writes
+  N-1. A second read path into a backup directory would be a new surface with
+  its own tests, used only in a failure case.
+- **`recall.redb` class.** Decided (Bob, 2026-10-06): `recall.redb` is
+  auxiliary. It holds hit/miss telemetry
+  (`crates/trusty-common/src/memory_core/analytics.rs:1-15`), a failure to open
+  it already leaves the palace usable
+  (`crates/trusty-common/src/memory_core/retrieval/handle.rs:525-541`), and
+  recall ranking does not read it. E13 measures recall against a checked-in
+  known-answer corpus ([#9281](https://github.com/bobmatnyc/trusty-tools/issues/9281)),
+  not against this log.
+- **Memory id minting for sync.** Decided (Bob, 2026-10-06): `memory_id`s are
+  minted eagerly, inside the sync N → N+1 migration and under the verified
+  backup. Every drawer then has a `memory_id` once format N+1 is stamped,
+  which the D4 fixture test can assert. Lazy minting would make publish a
+  writer of primary data outside any migration. The DOC-80 draft (PR #9176)
+  already requires a daemon-side map from `memory_id` to the local drawer id,
+  so the eager write fills a table that must exist anyway.
+
 ## Consequences
 
 **Easier:**
@@ -239,50 +278,7 @@ size. Recovering one is a manual step that the E14 guide documents.
 
 ### Open questions for review
 
-1. **Retention.** Is "two newest per palace" right, or should backups expire
-   by age after a successful later open?
-   **Recommendation:** keep the two newest per palace, with no age-based
-   expiry; only an operator deletes a backup. A successful open does not
-   prove the migrated data is correct. Silent drawer loss is detected only
-   later, by count history
-   ([#9283](https://github.com/bobmatnyc/trusty-tools/issues/9283)), and an
-   age rule would delete the only restore point first. `doctor` already
-   reports the total size (D3 rule 3).
-2. **N-2 path.** Should 1.x ship an explicit `trusty-memory palace migrate
-   --chain` that runs older migrations in sequence, instead of requiring
-   intermediate installs?
-   **Recommendation:** no `--chain` in 1.x; the E14 table of release lines
-   stays the N-2 path. The owner's N-1 rule keeps one migration per binary.
-   A chain would keep every past migration in the binary and multiply the
-   D4 fixture matrix, which is why "auto-migrate any older format" is
-   rejected below.
-3. **Read-only access to a refused palace.** Should a failed-migration palace
-   be readable through the backup for export, or stay fully offline?
-   **Recommendation:** stay fully offline in the binary that failed. The
-   backup is a complete format N-1 palace, so an operator who needs its data
-   restores it (Consequences) and reads it with the release line that writes
-   N-1. A second read path into a backup directory would be a new surface
-   with its own tests, used only in a failure case.
-4. **`recall.redb` class.** It is classed as auxiliary. Does the recall eval
-   gate (E13) need it preserved as primary?
-   **Recommendation:** keep it auxiliary. It holds hit/miss telemetry
-   (`crates/trusty-common/src/memory_core/analytics.rs:1-15`), a failure to
-   open it already leaves the palace usable
-   (`crates/trusty-common/src/memory_core/retrieval/handle.rs:525-541`), and
-   recall ranking does not read it. E13 measures recall against a checked-in
-   known-answer corpus ([#9281](https://github.com/bobmatnyc/trusty-tools/issues/9281)),
-   not against this log.
-5. **Memory id minting for sync.** Should the sync migration mint a
-   `memory_id` for every existing drawer, or should the id be minted lazily
-   at first publish? This is DOC-80's call, and the format bump applies
-   either way.
-   **Recommendation:** mint eagerly, inside the sync N → N+1 migration. Every
-   drawer then has a `memory_id` once format N+1 is stamped, which the D4
-   fixture test can assert, and every id is written under the verified
-   backup. Lazy minting makes publish a writer of primary data outside any
-   migration. The DOC-80 draft (PR #9176) already requires a daemon-side
-   map from `memory_id` to the local drawer id, so the eager write fills a
-   table that must exist anyway.
+None remaining at review (2026-10-06).
 
 ## Alternatives considered
 
