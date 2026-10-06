@@ -505,10 +505,15 @@ async fn mapreduce_phantom_missing_file_finding_does_not_block() {
     let result = run_review(&config, input(source), deps(llm)).await;
 
     // #9188 A: the phantom was the only finding and it was withheld, so the
-    // review has no verified finding: `Unknown`, never BLOCK and never APPROVE.
+    // review has no verified finding: never BLOCK and never APPROVE. #9310: the
+    // reviewer rejected, so it is REQUEST_CHANGES (`suppressed_reject`).
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
     assert_eq!(
         result.verdict,
-        Verdict::Unknown,
+        Verdict::RequestChanges,
         "a claim the changeset itself refutes must not drive the verdict (#1873)"
     );
     assert!(
@@ -1062,11 +1067,12 @@ async fn mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff() {
         "a finding citing a file absent from the diff reached the merged review — the \
          citation check is not wired into the map-reduce path (#4042 / #4045): {leaked:?}"
     );
-    // #9188 A: every finding was withheld, so the review is `Unknown` — the
-    // fabricated BLOCK does not survive, and nothing verified approves it either.
+    // #9188 A: every finding was withheld — the fabricated BLOCK does not
+    // survive, and nothing verified approves it either. #9310: the reviewer
+    // rejected, so it is REQUEST_CHANGES (`suppressed_reject`), not BLOCK.
     assert_eq!(
         result.verdict,
-        Verdict::Unknown,
+        Verdict::RequestChanges,
         "the only non-APPROVE chunk rested on the fabricated finding, so the merged \
          verdict must not block a clean diff"
     );

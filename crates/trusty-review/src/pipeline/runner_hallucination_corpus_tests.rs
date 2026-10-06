@@ -146,10 +146,12 @@ fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
         .count();
     // AQ-7t (Bob 2026-10-05): with no survivor, a withheld finding may neither
     // block nor shape the grade.
+    let status = result.verdict_status.map(|s| s.to_string()); // #9310
     let withheld_shapes_verdict = oracle::withheld_shapes_verdict(
         result.findings.len(),
         result.withheld_findings.len(),
         &result.verdict.to_string(),
+        status.as_deref(),
         result.grade.as_deref(),
     );
     survivors + prose + usize::from(withheld_shapes_verdict)

@@ -92,6 +92,8 @@ pub mod voice_config;
 // #9188: the zero-hallucination result contract — what survives, what the
 // prose may say, and the typed withheld counts.
 pub mod withheld_contract;
+// #9310: the withheld-verdict mapping and the unparsed-reply status.
+pub(crate) mod verdict_status;
 // Why: coverage data loading extracted from runner.rs to keep that file under
 // the 500-line cap (#610) after adding coverage-gating pipeline (#1014).
 pub mod runner_coverage;
@@ -113,7 +115,7 @@ pub use letter_grade::{
 };
 pub use optional_context::{OptionalContextRequest, ReviewOptions, ReviewOutcome};
 pub use output::{log_json_path, print_review_result, write_review_log};
-pub use parser::{ParsedReview, parse_review_response};
+pub use parser::{ParsedReview, parse_review_reply, parse_review_response};
 pub use post::{
     DryRunReason, FinalizeAction, PostContext, decide_action, finalize_review, surface_dry_run,
 };

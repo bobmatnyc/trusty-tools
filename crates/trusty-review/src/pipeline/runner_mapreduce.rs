@@ -37,6 +37,7 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
+        verdict_status::judged_verdict, // #9310
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors,
@@ -152,6 +153,13 @@ pub(super) async fn run_mapreduce_branch(
     // the synthesis-floored verdict directly instead of re-applying the full
     // derive_verdict_with_grade (which would re-add the count-based Medium floor
     // that synthesis is calibrating away).
+    // #9310: a chunk whose reply did not parse reads UNKNOWN, and reduce reads
+    // UNKNOWN only when every reviewed chunk did.
+    if reduced.verdict == crate::models::Verdict::Unknown {
+        result.verdict_status = Some(crate::models::VerdictStatus::ParseFailed);
+    }
+    let model_verdict = reviewer_verdict(&reduced.verdict, wiped_model_verdict.as_ref());
+    let model_verdict = judged_verdict(model_verdict, run.coverage_contrib.as_ref());
     let synthesis_active = reduced.grade.is_some();
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),
@@ -205,6 +213,7 @@ pub(super) async fn run_mapreduce_branch(
         ReduceFacts {
             synthesis_active,
             wiped_model_verdict,
+            model_verdict,
         },
     )
     .await;
@@ -328,6 +337,27 @@ struct ReduceFacts {
     synthesis_active: bool,
     /// From `run_map_reduce_with_wiped`, for `settle_no_survivors` (#9188).
     wiped_model_verdict: Option<crate::models::Verdict>,
+    /// #9310: the reviewers' verdict the withheld mapping reads.
+    model_verdict: crate::models::Verdict,
+}
+
+/// The reviewers' own verdict on the map-reduce path (#9310).
+///
+/// What: the reduced verdict, or the strictest chunk verdict the hygiene pass
+/// relaxed when that is stricter; UNKNOWN stays UNKNOWN.
+/// Test: `mapreduce_phantom_missing_file_finding_does_not_block`.
+fn reviewer_verdict(
+    reduced: &crate::models::Verdict,
+    wiped: Option<&crate::models::Verdict>,
+) -> crate::models::Verdict {
+    match wiped {
+        Some(w)
+            if *reduced != crate::models::Verdict::Unknown && w.ordinal() > reduced.ordinal() =>
+        {
+            w.clone()
+        }
+        _ => reduced.clone(),
+    }
 }
 
 /// Apply the post-LLM grade/verify/inline chain to a reduced parse.
@@ -431,6 +461,7 @@ async fn fold_reduced_into_result(
         refs: &refs,
         narrative: &parsed.summary, // #9188 C: the synthesis summary
         wiped_model_verdict: facts.wiped_model_verdict,
+        model_verdict: facts.model_verdict,
     };
     gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 
