@@ -14,11 +14,14 @@
 //! line naming the palace, drawer id and reason, so the daemon log alone shows
 //! which drawers went and why. `trusty-memory palace deletions` reads the file
 //! back.
-//! User-initiated deletions (`memory_forget`, the HTTP drawer delete) call
-//! [`PalaceHandle::forget`] and are not recorded, with one exception (#9172):
-//! forgetting a drawer this journal names as a dedup survivor is recorded as
-//! [`DeletionReason::ForgetOfMergedSurvivor`], because merged-in text leaves
-//! with it.
+//! User-initiated deletions (`memory_forget`, the HTTP/UDS drawer delete, and so
+//! `palace reclaim --apply`) call [`PalaceHandle::forget`]. #9283: each is
+//! recorded as [`DeletionReason::UserForget`] carrying the drawer's content
+//! hash and NO content copy, so the doctor drawer-count check can explain the
+//! drop while the forgotten text stays gone. One exception (#9172): forgetting
+//! a drawer this journal names as a dedup survivor is recorded as
+//! [`DeletionReason::ForgetOfMergedSurvivor`] with its copy, because merged-in
+//! text leaves with it.
 //!
 //! A failed append does not undo or block the deletion. The full record is
 //! logged at `error` instead, which the default filter keeps. A palace with no
@@ -27,6 +30,7 @@
 //! `maintenance_log_tests::every_maintenance_removal_logs_its_id_and_reason`,
 //! `maintenance_log_tests::a_failed_record_write_logs_the_record_and_still_deletes`.
 
+use crate::memory_core::content_hash::{ContentHash, memory_content_hash};
 use crate::memory_core::palace::{Drawer, PalaceId};
 use crate::memory_core::retrieval::{ForgetOutcome, PalaceHandle};
 use anyhow::{Context, Result};
@@ -62,6 +66,8 @@ pub enum DeletionReason {
     ExpiredPurgeAtOpen,
     /// #9172: a user forget removed a drawer a dedup merge had kept.
     ForgetOfMergedSurvivor,
+    /// #9283: a user forget (MCP, HTTP/UDS delete, reclaim). Hash only, no copy.
+    UserForget,
 }
 
 impl DeletionReason {
@@ -75,6 +81,7 @@ impl DeletionReason {
             Self::ExpiredPurge => "expired_purge",
             Self::ExpiredPurgeAtOpen => "expired_purge_at_open",
             Self::ForgetOfMergedSurvivor => "forget_of_merged_survivor",
+            Self::UserForget => "user_forget",
         }
     }
 }
@@ -107,6 +114,10 @@ pub struct MaintenanceDeletion {
     /// #8729: a copy of the removed drawer, so it can be re-remembered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drawer: Option<RemovedDrawer>,
+    /// #9283: the removed drawer's content hash. A user-forget record carries
+    /// this in place of a content copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<ContentHash>,
 }
 
 /// What a journal record keeps of a removed drawer (#8729).
@@ -156,7 +167,20 @@ impl MaintenanceDeletion {
             score: None,
             pid: std::process::id(),
             drawer: None,
+            content_hash: None,
         }
+    }
+
+    /// #9283: attach the drawer's content hash, never its content.
+    pub fn with_content_hash_of(mut self, drawer: &Drawer) -> Self {
+        let stored = drawer.content_hash();
+        // A legacy drawer read back with no digest gets one computed here.
+        self.content_hash = Some(if stored.is_unset() {
+            memory_content_hash(drawer.content())
+        } else {
+            stored
+        });
+        self
     }
 
     /// #8729: attach a recoverable copy of the removed drawer.
@@ -273,12 +297,15 @@ pub fn record(data_dir: Option<&Path>, rec: &MaintenanceDeletion) -> RecordOutco
     match append(dir, rec, ROTATE_AT_BYTES) {
         Ok(()) => {
             // #8729: each removal is logged with its id and reason, not only
-            // counted in the pass summary.
-            tracing::warn!(
-                palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
-                survivor_id = ?rec.survivor_id, score = ?rec.score,
-                "#8729: maintenance removed drawer {} ({})", rec.drawer_id, rec.reason
-            );
+            // counted in the pass summary. #9283: a user forget is already
+            // logged once by its caller (`log_user_forget`); no second line.
+            if rec.reason != DeletionReason::UserForget {
+                tracing::warn!(
+                    palace = %rec.palace, drawer_id = %rec.drawer_id, reason = %rec.reason,
+                    survivor_id = ?rec.survivor_id, score = ?rec.score,
+                    "#8729: maintenance removed drawer {} ({})", rec.drawer_id, rec.reason
+                );
+            }
             RecordOutcome::Journaled
         }
         Err(e) => {
@@ -351,7 +378,7 @@ impl PalaceHandle {
     /// surviving drawer id and, for dedup, the score. #8729: a failed L1
     /// snapshot save after the delete is returned only after the record.
     /// Test: `maintenance_log_tests::dream_dedup_records_the_removed_and_surviving_drawer`,
-    /// `maintenance_log_tests::user_forget_writes_no_maintenance_record`,
+    /// `maintenance_log_tests::a_user_forget_writes_a_user_forget_journal_record`,
     /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
     pub async fn forget_for_maintenance(
         &self,
@@ -378,27 +405,36 @@ impl PalaceHandle {
     }
 }
 
-/// Record a user forget of `drawer` when the journal names it as a survivor.
+/// Record one user forget of `drawer`.
 ///
-/// Why (#9172): two dedup survivors were later removed with no record, so the
-/// text merged into them could not be traced.
-/// What: a no-op without a data dir or when [`names_survivor`] says no;
-/// otherwise records [`DeletionReason::ForgetOfMergedSurvivor`].
-/// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
-/// `dedup_survivor_tests::forgetting_an_unmerged_drawer_writes_no_record`.
-pub(crate) fn record_survivor_forget(handle: &PalaceHandle, drawer: &Drawer) {
+/// Why: #9283 — the doctor drawer-count check explains a count drop from this
+/// journal, and a user forget left no line, so every one read as silent loss.
+/// The record must not defeat the forget, so it carries no content (owner
+/// ruling 2026-10-06). #9172: a forgotten dedup survivor keeps its copy,
+/// because text merged into it from other drawers leaves with it.
+/// What: a no-op without a data dir. When [`names_survivor`] says yes, records
+/// [`DeletionReason::ForgetOfMergedSurvivor`] with the drawer copy; otherwise
+/// records [`DeletionReason::UserForget`] with the content hash only.
+/// Test: `maintenance_log_tests::a_user_forget_writes_a_user_forget_journal_record`,
+/// `maintenance_log_tests::forgotten_content_cannot_be_recovered_from_the_journal`,
+/// `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`.
+pub(crate) fn record_user_forget(handle: &PalaceHandle, drawer: &Drawer) {
     let Some(dir) = handle.data_dir.as_deref() else {
         return;
     };
-    if names_survivor(dir, drawer) {
-        let rec = MaintenanceDeletion::new(
+    let rec = if names_survivor(dir, drawer) {
+        MaintenanceDeletion::new(
             &handle.id,
             drawer.id,
             DeletionReason::ForgetOfMergedSurvivor,
         )
-        .with_drawer(drawer);
-        record(Some(dir), &rec);
-    }
+        .with_drawer(drawer)
+    } else {
+        // #9283: id, reason, time and hash — never the content.
+        MaintenanceDeletion::new(&handle.id, drawer.id, DeletionReason::UserForget)
+            .with_content_hash_of(drawer)
+    };
+    record(Some(dir), &rec);
 }
 
 /// Whether a journal record in `dir` names `drawer` as its survivor.

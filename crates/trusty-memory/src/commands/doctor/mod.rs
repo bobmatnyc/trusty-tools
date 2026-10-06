@@ -15,6 +15,8 @@
 //!   5. No Tier S standing rule is overdue for re-affirmation (#4890, `tier_s`)
 //!   6. Every MCP-client registration launches `trusty-memory serve` (#5265,
 //!      `mcp_registration`)
+//!   7. No palace's drawer count dropped further than its deletion journal
+//!      explains (#9283, `drawer_counts`)
 //!
 //! Each check prints a ✅ or ❌ line. The command exits 0 if all critical
 //! checks pass, 1 otherwise.
@@ -26,6 +28,8 @@
 
 mod audit;
 mod checks;
+// #9283: drawer-count stability check, report and ack.
+mod drawer_counts;
 // #8751: doctor-side threshold for a palace lock held too long.
 mod lock_stall;
 mod mcp_registration;
@@ -38,6 +42,8 @@ pub use audit::{PalaceAuditEntry, PalaceAuditStatus};
 #[cfg(target_os = "macos")]
 use checks::check_launchd_plist;
 use checks::{check_daemon_health, check_fastembed_cache, check_kg_redb_size};
+use drawer_counts::check_drawer_counts;
+pub use drawer_counts::{handle_ack_drop, handle_drawer_report, DrawerCountArgs};
 use mcp_registration::check_mcp_registrations;
 use palace_locks::check_stale_palace_locks;
 use tier_s::check_tier_s_reaffirmation;
@@ -252,6 +258,26 @@ pub async fn handle_doctor_fix_palaces(suggest_fix: bool) -> Result<()> {
     Ok(())
 }
 
+/// Dispatch `trusty-memory doctor` to its mode.
+///
+/// Why: keeps the mode selection out of `main.rs`, which sits at the SLOC cap.
+/// What: #9283 `--drawer-report` or `--ack-drop` replaces the ordinary run;
+/// otherwise `--fix-palaces` prints its audit first, then the checks run.
+/// Test: `doctor_drawer_flags_parse` covers the flag surface; the dispatch is
+/// process-level.
+pub async fn run_doctor(fix_palaces: bool, fix: bool, drawer: &DrawerCountArgs) -> Result<()> {
+    if drawer.drawer_report {
+        return handle_drawer_report(drawer.days, drawer.json);
+    }
+    if drawer.is_mode() {
+        return handle_ack_drop(drawer);
+    }
+    if fix_palaces {
+        handle_doctor_fix_palaces(fix).await?;
+    }
+    handle_doctor().await
+}
+
 /// Entry point for `trusty-memory doctor`.
 ///
 /// Why: a single command for operators to triage daemon health without
@@ -291,6 +317,9 @@ pub async fn handle_doctor() -> Result<()> {
     // #6652: kg.redb only ever grows; surface the biggest one before it is a
     // slow-write symptom the operator has to trace by hand.
     results.push(check_kg_redb_size());
+
+    // #9283: a drawer-count drop the deletion journal does not explain.
+    results.push(check_drawer_counts());
 
     // Check 5 (#4890): Tier S facts overdue for re-affirmation. Report only.
     results.push(check_tier_s_reaffirmation().await);
