@@ -155,15 +155,13 @@ pub(crate) fn unit_socket_path(unit_override: Option<&Path>) -> Result<PathBuf> 
 /// What: `reap_orphans::plan` over `candidates`; only its confirmed orphans —
 /// daemons positively identified on this data dir — are returned. A daemon on
 /// another data dir, or one whose argv or environment is unreadable, is
-/// spared.
-/// Test: `a_daemon_on_another_data_dir_is_not_targeted`.
+/// spared. A daemon declaring no data dir is resolved against its own `HOME`
+/// (#9232), so a restart run under another HOME never targets it.
+/// Test: `a_daemon_on_another_data_dir_is_not_targeted`,
+/// `a_default_daemon_under_another_home_is_not_targeted`.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn scoped_daemon_pids(
-    candidates: &[Candidate],
-    unit_data_dir: &Path,
-    platform_default: &Path,
-) -> Vec<u32> {
-    plan(candidates, unit_data_dir, platform_default)
+pub(crate) fn scoped_daemon_pids(candidates: &[Candidate], unit_data_dir: &Path) -> Vec<u32> {
+    plan(candidates, unit_data_dir)
         .orphans
         .iter()
         .map(ConfirmedOrphan::pid)
@@ -261,7 +259,8 @@ pub(crate) fn restart_unit(
         .clone()
         .unwrap_or_else(|| platform_default.to_path_buf());
     let socket = fx.socket_for(unit_override.as_deref())?;
-    let scoped_now = || scoped_daemon_pids(&fx.candidates(), &unit_dir, platform_default);
+    // #9232: candidates resolve their own default; `platform_default` names only the unit's.
+    let scoped_now = || scoped_daemon_pids(&fx.candidates(), &unit_dir);
     restart_with(
         scoped_now(),
         expected_version,
