@@ -2191,12 +2191,9 @@ fn pr_index_from_gh_reads_this_repository() {
         eprintln!("skipping: `gh` not on PATH");
         return;
     }
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root");
+    let repo_root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let mut probe = std::process::Command::new("gh");
-    probe.current_dir(repo_root).args([
+    probe.current_dir(&repo_root).args([
         "repo",
         "view",
         "--json",
@@ -2215,7 +2212,7 @@ fn pr_index_from_gh_reads_this_repository() {
         eprintln!("skipping: resolved {resolved:?}, not the upstream {UPSTREAM:?}");
         return;
     }
-    let index = PrIndex::from_gh(repo_root);
+    let index = PrIndex::from_gh(&repo_root);
     // #7038: a branch this repository cannot have resolves to `LookupFailed`
     // only when the `gh pr list` inside `from_gh` itself failed — a call that
     // answered reports `NoPr` or `Unknown` instead.

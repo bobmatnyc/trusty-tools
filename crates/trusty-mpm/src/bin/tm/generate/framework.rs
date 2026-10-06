@@ -103,9 +103,12 @@ const LIVE_STATE_COMMANDS: &[(&[&str], &str)] = &[
 /// Why: see the module doc — every path and tier below is computed, never
 /// restated.
 /// What: seven sections (layout, managed config dir, agent tiers, skill tiers,
-/// per-session state, documentation index, live-state commands).
-/// Test: `framework_render_lists_the_real_agent_tier_order`.
-pub(crate) fn render() -> String {
+/// per-session state, documentation index, live-state commands). The
+/// documentation index is probed against the checkout holding `start`
+/// ([`repo_root`], #9298).
+/// Test: `framework_render_lists_the_real_agent_tier_order`,
+/// `framework_render_probes_the_checkout_holding_start_9298`.
+pub(crate) fn render(start: &Path) -> String {
     let home = Path::new(HOME);
     let paths = FrameworkPaths::under(home);
     let managed = managed_claude_config_dir_at(home);
@@ -127,7 +130,7 @@ pub(crate) fn render() -> String {
     render_agent_tiers(&mut out, &paths, &managed);
     render_skill_tiers(&mut out, &paths);
     render_session_state(&mut out);
-    render_docs(&mut out);
+    render_docs(&mut out, &repo_root(start));
     render_live_state(&mut out);
     out
 }
@@ -268,7 +271,7 @@ fn render_session_state(out: &mut String) {
 }
 
 /// Documentation index, split by what actually ships.
-fn render_docs(out: &mut String) {
+fn render_docs(out: &mut String, root: &Path) {
     out.push_str("## Authoritative Documentation\n\n");
     out.push_str(
         "This catalog answers layout and tier questions. Design rationale, \
@@ -282,7 +285,7 @@ fn render_docs(out: &mut String) {
         "`tm install` writes these into `~/.trusty-mpm/framework/docs/` from the \
          content `tm content install` pinned (or from a checkout's `content/`).\n\n",
     );
-    let content_docs = crate_doc_files();
+    let content_docs = crate_doc_files(root);
     if content_docs.is_empty() {
         out.push_str("- (none found under `content/instructions/docs/`)\n");
     } else {
@@ -301,7 +304,6 @@ fn render_docs(out: &mut String) {
          installed binary alone cannot open these.\n\n",
     );
     out.push_str("| Path | Holds | Present in this checkout |\n|---|---|---|\n");
-    let root = repo_root();
     for (rel, what) in REPO_DOCS {
         let present = if root.join(rel).exists() { "yes" } else { "NO" };
         let _ = writeln!(out, "| `{rel}` | {what} | {present} |");
@@ -358,13 +360,21 @@ fn command_about(path: &[&str]) -> String {
         .unwrap_or_else(|| "(no description)".to_string())
 }
 
-/// The repository root (`crates/trusty-mpm/../..`).
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+/// The checkout holding `start`: its nearest ancestor with a `.git` entry.
+///
+/// Why (#9298): the compile-time `CARGO_MANIFEST_DIR` named the BUILD
+/// checkout, so an installed `tm` probed a reclaimed worktree and rendered
+/// every doc row `NO`. Same resolution as `resolve_skills_asset_dir` (#7776).
+/// What: the nearest ancestor of `start` holding `.git` (a directory, or a
+/// worktree's file); `start` itself when there is none, so the probes report
+/// the docs absent rather than reading another tree.
+/// Test: `framework_render_probes_the_checkout_holding_start_9298`.
+fn repo_root(start: &Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|d| d.join(".git").exists())
+        .unwrap_or(start)
+        .to_path_buf()
 }
 
 /// Every `.md` file under `content/instructions/docs/` (#9012), sorted.
@@ -374,8 +384,8 @@ fn repo_root() -> PathBuf {
 /// the generated skill and is caught by the drift gate.
 /// What: sorted file names; an unreadable directory yields an empty list.
 /// Test: `framework_render_lists_crate_docs`.
-fn crate_doc_files() -> Vec<String> {
-    let dir = repo_root().join("content/instructions/docs");
+fn crate_doc_files(root: &Path) -> Vec<String> {
+    let dir = root.join("content/instructions/docs");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -393,6 +403,16 @@ fn crate_doc_files() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The checkout this test runs for (#9298: runtime, not compile-time).
+    fn checkout() -> PathBuf {
+        trusty_common::test_harness::test_repo_root().expect("resolve the checkout")
+    }
+
+    /// Renders against [`checkout`].
+    fn render() -> String {
+        super::render(&checkout())
+    }
 
     #[test]
     fn framework_render_lists_the_real_agent_tier_order() {
@@ -434,7 +454,7 @@ mod tests {
 
     #[test]
     fn framework_render_lists_crate_docs() {
-        let docs = crate_doc_files();
+        let docs = crate_doc_files(&checkout());
         assert!(
             !docs.is_empty(),
             "content/instructions/docs/ should hold the bundled docs"
@@ -467,5 +487,29 @@ mod tests {
     #[test]
     fn framework_render_is_deterministic() {
         assert_eq!(render(), render());
+    }
+
+    /// #9298: the docs index probes the checkout holding `start`, found by
+    /// walking up, never the checkout that built this binary.
+    #[test]
+    fn framework_render_probes_the_checkout_holding_start_9298() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fake = tmp.path().join("fake");
+        let docs = fake.join("content/instructions/docs");
+        std::fs::create_dir_all(&docs).expect("mkdir docs");
+        std::fs::create_dir_all(fake.join(".git")).expect("mkdir .git");
+        std::fs::write(docs.join("only-in-the-fake-9298.md"), "x").expect("write doc");
+        let start = fake.join("crates/trusty-mpm/src");
+        std::fs::create_dir_all(&start).expect("mkdir start");
+
+        assert_eq!(repo_root(&start), fake);
+        let rendered = super::render(&start);
+        assert!(
+            rendered.contains("content/instructions/docs/only-in-the-fake-9298.md"),
+            "{rendered}"
+        );
+        // The fake holds none of the repo-only docs, so every row reads NO.
+        assert!(rendered.contains("| `docs/adr/INDEX.md` |"), "{rendered}");
+        assert!(!rendered.contains("| yes |"), "{rendered}");
     }
 }

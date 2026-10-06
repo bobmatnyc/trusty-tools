@@ -118,9 +118,14 @@ pub(crate) mod test_support {
 
     use super::{AgentRoster, HarnessDoc};
 
-    /// The trusty-tools checkout this crate is built from.
+    /// The trusty-tools checkout this test runs for, resolved at runtime.
+    ///
+    /// #9298: never the compile-time `CARGO_MANIFEST_DIR`, which names the
+    /// checkout that BUILT the binary — another worktree under a shared target.
+    /// Test: `repo_root_follows_the_runtime_checkout_9298`.
     pub(crate) fn repo_root() -> PathBuf {
-        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+        trusty_common::test_harness::test_repo_root()
+            .expect("resolve the trusty-tools checkout (set TRUSTY_TEST_REPO_ROOT)")
     }
 
     /// The checkout's `content/agents` directory.
@@ -208,3 +213,7 @@ mod tests {
         assert_eq!(roster.len(), test_support::repo_roster().len());
     }
 }
+
+#[cfg(test)]
+#[path = "content_source_root_tests.rs"]
+mod content_source_root_tests;

@@ -132,8 +132,9 @@ impl RealProjectSettingsGuard {
 
     /// The `.claude/settings.json` of this checkout and of its main checkout.
     ///
-    /// `CARGO_MANIFEST_DIR` is `<checkout>/crates/trusty-mpm`, so two `pop`s
-    /// reach the checkout root without depending on the cwd this test redirects.
+    /// The checkout root comes from the runtime `CARGO_MANIFEST_DIR` (#9298:
+    /// never the compile-time path), so it does not depend on the cwd this
+    /// test redirects.
     /// A linked worktree's `.git` is a FILE reading
     /// `gitdir: <main>/.git/worktrees/<name>`; trimming the last two components
     /// yields `<main>/.git`, whose parent is the main checkout — resolved by
@@ -141,9 +142,7 @@ impl RealProjectSettingsGuard {
     /// git binary and cannot be confused by the redirected cwd.
     fn watched_paths() -> Vec<std::path::PathBuf> {
         let mut roots = Vec::new();
-        let mut checkout = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        checkout.pop();
-        checkout.pop();
+        let checkout = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
 
         if let Ok(text) = std::fs::read_to_string(checkout.join(".git"))
             && let Some(rest) = text.trim().strip_prefix("gitdir:")

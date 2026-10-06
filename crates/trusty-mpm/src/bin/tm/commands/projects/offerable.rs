@@ -184,7 +184,10 @@ mod tests {
     fn offerable_keeps_a_real_checkout() {
         // This crate's own source directory is a subdirectory of a checkout
         // whose `.git` may be a file (a worktree) or a directory.
-        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // #9298: the running checkout, not the compile-time build path.
+        let here = &trusty_common::test_harness::test_repo_root()
+            .expect("resolve the checkout")
+            .join("crates/trusty-mpm");
         assert!(in_git_checkout(here), "{here:?} is not in a checkout");
         assert!(is_offerable_checkout(here), "{here:?} was rejected");
     }

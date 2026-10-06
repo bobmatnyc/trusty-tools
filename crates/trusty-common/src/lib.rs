@@ -1238,7 +1238,8 @@ pub mod private_dir;
 /// path that no feature flag governs.
 /// What: exposes [`test_harness::running_under_test_harness`] plus the
 /// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
-/// override names.
+/// override names, and [`test_harness::test_repo_root`], the runtime
+/// checkout a test reads repo content from (#9298).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// test_harness::tests`.
 pub mod test_harness;

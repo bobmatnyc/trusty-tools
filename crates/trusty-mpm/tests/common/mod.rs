@@ -355,7 +355,8 @@ pub fn stage_repo_content(home: &Path) {
     if cache.join(LOCK_FILE_NAME).exists() {
         return;
     }
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // #9298: the runtime checkout, never the compile-time build path.
+    let repo = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let mut entries: Vec<(String, Vec<u8>)> = vec![(
         "bundle-manifest.toml".to_string(),
         format!("tag = \"{TAG}\"\nschema_major = 1\n").into_bytes(),

@@ -28,11 +28,16 @@
 //! outside `deps/`) produces a child that is not detected. Such a test must
 //! set [`FORCE_ENV`] or `TRUSTY_DATA_DIR` on the child explicitly.
 //!
-//! Test: `detect_*` and `is_cargo_test_binary_*` in this module's `tests`.
+//! It also owns [`test_repo_root`], the runtime answer to "which checkout is
+//! this test reading?" (#9298).
+//!
+//! Test: `detect_*` and `is_cargo_test_binary_*` in this module's `tests`;
+//! `resolve_repo_root_table` in `test_harness_repo_root_tests.rs`.
 //!
 //! [`FORCE_ENV`]: crate::test_harness::FORCE_ENV
+//! [`test_repo_root`]: crate::test_harness::test_repo_root
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Forces [`running_under_test_harness`] to report `true`.
 ///
@@ -120,6 +125,97 @@ fn is_cargo_test_binary(exe: &Path) -> bool {
         !name.is_empty() && hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit())
     })
 }
+
+/// Names the repository root a test reads repo content from, outranking every
+/// other source in [`test_repo_root`] (#9298).
+pub const REPO_ROOT_ENV: &str = "TRUSTY_TEST_REPO_ROOT";
+
+/// The Cargo workspace root this test process reads repository content from.
+///
+/// Why (#9298): `env!("CARGO_MANIFEST_DIR")` bakes the BUILD checkout's path
+/// into the binary. With one `CARGO_TARGET_DIR` shared across worktrees, a test
+/// binary built in one worktree and run for another read the first worktree's
+/// files — or a reclaimed, deleted tree. The runtime value names the checkout
+/// cargo is running the test for.
+/// What: [`resolve_repo_root`] over [`REPO_ROOT_ENV`], the runtime
+/// `CARGO_MANIFEST_DIR`, and the current directory. There is no compile-time
+/// fallback.
+/// Test: `resolve_repo_root_table`; end to end in trusty-mpm's
+/// `repo_root_follows_the_runtime_checkout_9298`.
+pub fn test_repo_root() -> std::io::Result<PathBuf> {
+    let explicit = std::env::var_os(REPO_ROOT_ENV).map(PathBuf::from);
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let cwd = std::env::current_dir().ok();
+    resolve_repo_root(explicit.as_deref(), manifest_dir.as_deref(), cwd.as_deref())
+}
+
+/// Pure resolution behind [`test_repo_root`]; reads the filesystem, never
+/// process state.
+///
+/// What: the first source that answers wins, and the result is canonical.
+/// 1. `explicit` must itself hold a `Cargo.toml` with a `[workspace]` line. It
+///    is not walked up; an invalid value is `InvalidInput`.
+/// 2. `manifest_dir`, walked up to the first workspace root.
+/// 3. `cwd`, walked up the same way.
+///
+/// With no answer the error is `NotFound` and names [`REPO_ROOT_ENV`].
+///
+/// Test: `resolve_repo_root_table`.
+pub fn resolve_repo_root(
+    explicit: Option<&Path>,
+    manifest_dir: Option<&Path>,
+    cwd: Option<&Path>,
+) -> std::io::Result<PathBuf> {
+    use std::io::{Error, ErrorKind};
+    if let Some(dir) = explicit {
+        let root = (!dir.as_os_str().is_empty())
+            .then(|| dir.canonicalize().ok())
+            .flatten()
+            .filter(|d| is_workspace_root(d));
+        return root.ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "{REPO_ROOT_ENV}={} does not hold a Cargo.toml with a [workspace] table",
+                    dir.display()
+                ),
+            )
+        });
+    }
+    for start in [manifest_dir, cwd].into_iter().flatten() {
+        // A start that does not exist cannot name a checkout; try the next.
+        let Ok(start) = start.canonicalize() else {
+            continue;
+        };
+        if let Some(root) = start.ancestors().find(|d| is_workspace_root(d)) {
+            return Ok(root.to_path_buf());
+        }
+    }
+    Err(Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "no Cargo workspace root at or above CARGO_MANIFEST_DIR ({}) or the current \
+             directory ({}); set {REPO_ROOT_ENV} to the checkout root",
+            display_or_unset(manifest_dir),
+            display_or_unset(cwd)
+        ),
+    ))
+}
+
+/// Does `dir/Cargo.toml` carry a `[workspace]` table header?
+fn is_workspace_root(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml"))
+        .is_ok_and(|toml| toml.lines().any(|line| line.trim() == "[workspace]"))
+}
+
+/// A path for an error message, or `unset`.
+fn display_or_unset(path: Option<&Path>) -> String {
+    path.map_or_else(|| "unset".to_string(), |p| p.display().to_string())
+}
+
+#[cfg(test)]
+#[path = "test_harness_repo_root_tests.rs"]
+mod repo_root_tests;
 
 #[cfg(test)]
 mod tests {

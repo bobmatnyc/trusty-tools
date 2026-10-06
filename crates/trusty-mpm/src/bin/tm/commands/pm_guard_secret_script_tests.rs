@@ -416,7 +416,7 @@ fn self_location_idioms_resolve_9037() {
 /// No over-deny on this repository's own gate scripts, run by path.
 #[test]
 fn the_repo_gate_scripts_allow_8879() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     // #8879: bare names, joined below, so no `scripts/<name>.sh` literal sits in
     // crate source for scripts/select-test-crates.sh to read as a reference.
     for gate in [

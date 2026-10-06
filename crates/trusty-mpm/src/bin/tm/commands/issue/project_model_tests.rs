@@ -28,8 +28,8 @@ use trusty_mpm::core::trusty_tools_config::ResolvedTicketing;
 /// A deleted, renamed, unparseable, or invalid model fails every test in this
 /// file rather than skipping them.
 fn project_model() -> StateModel {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
+    let path = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
         .join("issue-state.yaml");
     let yaml =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));

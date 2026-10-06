@@ -344,7 +344,9 @@ const UNLOADABLE_SKILL_ALLOWLIST: &[(&str, &str, Option<&str>, &str)] = &[
 /// What: reads `content/skills/*.md` (#9012: moved out of trusty-mpm); panics
 /// when the directory is missing or empty so the check can never pass vacuously.
 fn bundled_skill_names() -> BTreeSet<String> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/skills");
+    let dir = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("content/skills");
     let names: BTreeSet<String> = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("bundled skills dir {} must exist: {e}", dir.display()))
         .filter_map(|entry| {

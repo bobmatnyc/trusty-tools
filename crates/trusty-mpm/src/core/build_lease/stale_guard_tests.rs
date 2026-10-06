@@ -163,7 +163,10 @@ fn a_held_cargo_lock_marks_the_directory_busy() {
 #[test]
 #[serial_test::serial(build_slot_fds)] // #8736: spawns `cargo`; see `slots::tests`.
 fn workspace_packages_lists_this_workspace() {
-    let names = workspace_packages(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("metadata");
+    let names = workspace_packages(
+        &trusty_common::test_harness::test_repo_root().expect("resolve the checkout"),
+    )
+    .expect("metadata");
     assert!(names.iter().any(|n| n == "trusty-mpm"), "{names:?}");
     assert!(
         !names.iter().any(|n| n == "serde"),

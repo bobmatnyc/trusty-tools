@@ -36,7 +36,8 @@ use trusty_mpm::core::{
 
 /// The checkout's skills and instructions (#9012: runtime content).
 fn repo_content() -> trusty_mpm::core::framework_content::FrameworkContent {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // #9298: the runtime checkout, never the compile-time build path.
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     trusty_mpm::core::framework_content::FrameworkContent::load(
         &trusty_agents_common::agent_content::checkout_content(&root).expect("repo content"),
     )

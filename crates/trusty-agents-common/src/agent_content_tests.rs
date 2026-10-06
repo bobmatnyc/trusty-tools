@@ -10,9 +10,10 @@ use trusty_common::integrity::Sha256Digest;
 
 use super::*;
 
-/// The trusty-tools checkout this crate is built from.
+/// The trusty-tools checkout this test runs for (#9298: runtime, not the
+/// compile-time build path).
 pub(crate) fn repo_root() -> PathBuf {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).to_path_buf()
+    trusty_common::test_harness::test_repo_root().expect("resolve the checkout")
 }
 
 /// The repository's own content, through the dev override.

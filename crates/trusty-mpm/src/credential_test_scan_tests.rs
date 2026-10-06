@@ -1188,10 +1188,9 @@ fn rust_sources(crates: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
 /// Test: this test.
 #[test]
 fn every_credential_test_is_serial_and_sandboxed() {
-    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/ is this crate's parent")
-        .to_path_buf();
+    let crates = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
+        .join("crates");
     let mut sources = Vec::new();
     let roots = std::fs::read_dir(&crates).expect("read crates/");
     for krate in roots.map(|e| e.expect("crate entry").path()) {
