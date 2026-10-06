@@ -8,7 +8,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::config::{
-    MachineSecretsConfig, ProjectSecretsConfig, load_machine_at, load_project_at, resolve,
+    MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig, load_machine_at, load_project_at,
+    resolve,
 };
 use super::*;
 use crate::api::methods::ScopeKind;
@@ -25,6 +26,7 @@ fn backend(id: &str) -> BackendId {
 fn config_backend_precedence_table() {
     let machine = MachineSecretsConfig {
         default_backend: Some(backend("onepassword")),
+        ..MachineSecretsConfig::default()
     };
     let project = ProjectSecretsConfig {
         backend: Some(backend("keeper")),
@@ -33,6 +35,9 @@ fn config_backend_precedence_table() {
     let bare_project = ProjectSecretsConfig::default();
 
     assert_eq!(resolve(None, None).backend.as_str(), "keychain");
+    let default = ResolvedConfig::default();
+    assert_eq!(default.backend.as_str(), "keychain");
+    assert!(default.vault_override.is_none());
     assert_eq!(
         resolve(None, Some(&machine)).backend.as_str(),
         "onepassword"
@@ -145,6 +150,9 @@ fn scope_remote_url_table() {
         "https://github.com/bobmatnyc/trusty-tools",
         "https://x-access-token:ghs_secret@github.com/bobmatnyc/trusty-tools.git",
         "ssh://git@github.com:22/bobmatnyc/trusty-tools/",
+        // #9328: git reads both spellings as `ssh`.
+        "git+ssh://git@github.com/bobmatnyc/trusty-tools.git",
+        "ssh+git://git@github.com/bobmatnyc/trusty-tools.git",
     ] {
         let (owner, repo) = parse_remote_identity(url).expect(url);
         assert_eq!(
@@ -159,7 +167,7 @@ fn scope_remote_url_table() {
         "https://gitlab.com/group/sub/repo.git",
         "https://ghs_secret@github.com/own er/repo",
     ] {
-        let reason = parse_remote_identity(url).expect_err(url);
+        let reason = parse_remote_identity(url).expect_err(url).reason();
         assert!(!reason.contains("ghs_secret"), "{reason}");
     }
 }
@@ -184,27 +192,34 @@ fn scope_derive_reads_the_origin_remote() {
         tmp.path(),
         &["remote", "add", "origin", "git@github.com:Acme/Web.git"],
     );
-    let scopes = ScopeSet::derive(tmp.path(), None).unwrap();
+    let scopes = ScopeSet::derive(tmp.path(), None, None).unwrap();
     assert_eq!(scopes.project().as_str(), "trusty/acme/web");
     assert_eq!(scopes.owner().unwrap().as_str(), "trusty/acme");
 }
 
-/// Why: a directory with no remote and no override must fail with the reason,
-/// never pick a vault; with an override it uses the override and no owner.
+/// Why: a directory with no remote must fail with the reason, never pick a
+/// vault. #9328: with no remote there is no owner to check an override
+/// against, so a tracked or machine override does not rescue it.
 /// Test: itself.
 #[test]
 fn scope_derive_without_a_remote_fails_closed() {
     let tmp = TempDir::new().unwrap();
-    let err = ScopeSet::derive(tmp.path(), None).unwrap_err();
-    assert!(
-        matches!(err, SecretsError::ScopeUndetermined { .. }),
-        "{err:?}"
-    );
-
     let shared = VaultName::new("trusty/acme/shared").unwrap();
-    let scopes = ScopeSet::derive(tmp.path(), Some(shared.clone())).unwrap();
-    assert_eq!(scopes.project(), &shared);
-    assert!(scopes.owner().is_none());
+    let machine = MachineSecretsConfig {
+        project_vaults: [("acme/web".to_string(), shared.clone())].into(),
+        ..MachineSecretsConfig::default()
+    };
+    for (tracked, machine) in [
+        (None, None),
+        (Some(shared.clone()), None),
+        (None, Some(&machine)),
+    ] {
+        let err = ScopeSet::derive(tmp.path(), tracked, machine).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::ScopeUndetermined { .. }),
+            "{err:?}"
+        );
+    }
 }
 
 /// Why: DOC-74 §13 Q5 — `secrets.vault` replaces the project vault only; the
@@ -215,11 +230,14 @@ fn scope_override_replaces_only_the_project_vault() {
     let owner = OwnerName::new("acme").unwrap();
     let repo = RepoName::new("web").unwrap();
     let shared = VaultName::new("trusty/acme/shared").unwrap();
-    let scopes = ScopeSet::from_identity(&owner, &repo, Some(shared));
+    let scopes =
+        ScopeSet::from_identity(&owner, &repo, Some(VaultOverride::Tracked(shared))).unwrap();
     let order: Vec<&str> = scopes.lookup_order().map(VaultName::as_str).collect();
     assert_eq!(order, ["trusty/acme/shared", "trusty/acme"]);
 
-    let response = ScopeSet::from_identity(&owner, &repo, None).to_response();
+    let response = ScopeSet::from_identity(&owner, &repo, None)
+        .unwrap()
+        .to_response();
     let kinds: Vec<(ScopeKind, &str)> = response
         .scopes
         .iter()
@@ -231,5 +249,129 @@ fn scope_override_replaces_only_the_project_vault() {
             (ScopeKind::Project, "trusty/acme/web"),
             (ScopeKind::Owner, "trusty/acme")
         ]
+    );
+}
+
+/// A temp checkout whose `origin` is `url`.
+fn checkout_with_origin(url: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    git(tmp.path(), &["init", "-q"]);
+    git(tmp.path(), &["remote", "add", "origin", url]);
+    tmp
+}
+
+/// Why: #9328 vector (c), owner ruling 06 R3 — the remote host was dropped,
+/// so `evil.example/acme/app` mapped to `github.com/acme/app`'s vaults. Any
+/// host but github.com is now refused with fixed text that names neither the
+/// host nor the URL; github.com in https and ssh forms still derives. Only
+/// the https, ssh and scp forms are accepted, so github.com over `file`,
+/// `git`, `http` or a `<helper>::` prefix is the same refusal.
+/// Red on the unfixed code: `parse_remote_identity` returns `Ok` for every
+/// URL in the first table.
+/// Test: itself.
+#[test]
+fn scope_non_github_remote_is_refused_with_fixed_text() {
+    for url in [
+        "https://evil.example/acme/app.git",
+        "git@evil.example:acme/app.git",
+        "ssh://git@evil.example:22/acme/app",
+        "https://github.com.evil.example/acme/app",
+        "https://evil.example#@github.com/acme/app",
+        "https://gitlab.com/acme/app.git",
+        // #9328: github.com over a scheme DOC-74 §15.3 does not accept.
+        "file://github.com/acme/app",
+        "git://github.com/acme/app",
+        "http://github.com/acme/app",
+        "x::https://github.com/acme/app",
+    ] {
+        let refusal = parse_remote_identity(url).expect_err(url);
+        assert_eq!(refusal, RemoteRefusal::UnsupportedHost, "{url}");
+        assert_eq!(refusal.reason(), "the origin remote is not on github.com");
+    }
+
+    let evil = checkout_with_origin("https://evil.example/acme/app.git");
+    let err = ScopeSet::derive(evil.path(), None, None).unwrap_err();
+    assert!(
+        matches!(err, SecretsError::UnsupportedRemoteHost { .. }),
+        "{err:?}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("only github.com remotes are supported"),
+        "{text}"
+    );
+    assert!(!text.contains("evil.example"), "{text}");
+
+    for url in [
+        "https://github.com/acme/app.git",
+        "https://GitHub.com/Acme/App",
+        "git@github.com:acme/app.git",
+        "ssh://git@github.com/acme/app.git",
+    ] {
+        let checkout = checkout_with_origin(url);
+        let scopes = ScopeSet::derive(checkout.path(), None, None).expect(url);
+        assert_eq!(scopes.project().as_str(), "trusty/acme/app", "{url}");
+        assert_eq!(scopes.owner().unwrap().as_str(), "trusty/acme", "{url}");
+    }
+}
+
+/// Why: #9328 vector (b), owner ruling 06 R2 — the tracked repo file's
+/// `secrets.vault` could name any vault, so a PR could point a checkout at
+/// another project's secrets. A tracked override outside
+/// `trusty/<remote-owner>/*` is refused (never replaced by the derived
+/// vault); the same vault from the untracked machine config is honoured.
+/// Red on the unfixed code: `derive` returns the victim vault as the
+/// project vault.
+/// Test: itself.
+#[test]
+fn scope_tracked_override_outside_the_owner_is_refused() {
+    let checkout = checkout_with_origin("git@github.com:Acme/App.git");
+    let vault = |name: &str| VaultName::new(name).unwrap();
+
+    for wide in [
+        "trusty/victim/prod-repo",
+        "trusty/victim",
+        "trusty/acme",
+        "trusty/acmex/app",
+    ] {
+        let err = ScopeSet::derive(checkout.path(), Some(vault(wide)), None).unwrap_err();
+        match &err {
+            SecretsError::VaultOutOfScope { vault, .. } => assert_eq!(vault, wide),
+            other => panic!("{wide}: expected VaultOutOfScope, got {other:?}"),
+        }
+    }
+    let same_owner =
+        ScopeSet::derive(checkout.path(), Some(vault("trusty/acme/shared")), None).unwrap();
+    assert_eq!(same_owner.project().as_str(), "trusty/acme/shared");
+
+    let tmp = TempDir::new().unwrap();
+    let path = write(
+        tmp.path(),
+        "machine.yaml",
+        "secrets:\n  project_vaults:\n    Acme/App: trusty/victim/prod-repo\n    other/repo: trusty/x/y\n",
+    );
+    let machine = load_machine_at(&path).unwrap().unwrap();
+    let scopes = ScopeSet::derive(
+        checkout.path(),
+        Some(vault("trusty/acme/ignored")),
+        Some(&machine),
+    )
+    .unwrap();
+    let order: Vec<&str> = scopes.lookup_order().map(VaultName::as_str).collect();
+    assert_eq!(order, ["trusty/victim/prod-repo", "trusty/acme"]);
+
+    let unrelated = MachineSecretsConfig {
+        project_vaults: [("other/repo".to_string(), vault("trusty/x/y"))].into(),
+        ..MachineSecretsConfig::default()
+    };
+    let err = ScopeSet::derive(
+        checkout.path(),
+        Some(vault("trusty/victim/prod-repo")),
+        Some(&unrelated),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, SecretsError::VaultOutOfScope { .. }),
+        "{err:?}"
     );
 }
