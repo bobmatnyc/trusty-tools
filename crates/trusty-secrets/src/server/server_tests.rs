@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use trusty_common::uds::server::{RpcResponse, ServeExit};
+use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{UdsSecurityError, send_framed_request, socket_is_serving};
 
 use super::*;
@@ -172,29 +172,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 21] = [
-    ErrorKind::InvalidParams,
-    ErrorKind::ProjectInvalid,
-    ErrorKind::ProjectUnresolved,
-    ErrorKind::VaultOutOfScope,
-    ErrorKind::InvalidValue,
-    ErrorKind::NotFound,
-    ErrorKind::Unsupported,
-    ErrorKind::UnknownBackend,
-    ErrorKind::BackendFailed,
-    ErrorKind::OrphanedBackendEntry,
-    ErrorKind::IndexCorrupt,
-    ErrorKind::IndexBusy,
-    ErrorKind::StorageUnavailable,
-    ErrorKind::ConfigInvalid,
-    ErrorKind::HomeUnavailable,
-    ErrorKind::SameBackend,
-    ErrorKind::AgentUseRefused,
-    ErrorKind::InvalidEnvEntry,
-    ErrorKind::EnvResolutionFailed,
-    ErrorKind::DotenvSyntax,
-    ErrorKind::Internal,
-];
+const ALL_KINDS: [ErrorKind; 21] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -757,6 +735,38 @@ async fn server_error_text_is_fixed_per_method_and_kind() {
     server.stop().await;
 }
 
+/// Why: #9073 — the client's error is this crate's `RpcFailure`, not
+/// trusty-common's `RpcError`, so every kind must survive the conversion, an
+/// unknown or absent kind must read as `None`, and the `Display` text must
+/// not change.
+/// Test: itself.
+#[test]
+fn client_rpc_failure_reads_every_kind_from_the_wire() {
+    for kind in ALL_KINDS {
+        let failure = RpcFailure::from_wire(kind.to_rpc(method::LIST));
+        assert_eq!(failure.kind, Some(kind));
+        assert_eq!(failure.code, kind.code());
+        assert_eq!(
+            failure.message,
+            format!("{}: {}", method::LIST, kind.text())
+        );
+        assert_eq!(
+            ClientError::Rpc(failure).to_string(),
+            format!("[{}] {}: {}", kind.code(), method::LIST, kind.text())
+        );
+    }
+    let newer = trusty_common::uds::server::RpcError::new(-32099, "secrets.list: newer")
+        .with_data(json!({ "kind": "a_kind_from_a_newer_server" }));
+    assert_eq!(RpcFailure::from_wire(newer).kind, None);
+    let bare = trusty_common::uds::server::RpcError::new(-32601, "method not found");
+    assert_eq!(
+        RpcFailure::from_wire(bare),
+        RpcFailure::new(-32601, "method not found", None)
+    );
+    let transport = ClientError::Transport(Box::new(std::io::Error::other("io detail")));
+    assert_eq!(transport.to_string(), "io detail");
+}
+
 /// Why: a key left in the backend with no index row needs reconciling, so it
 /// must not read as success, `NotFound`, or a plain backend failure, and its
 /// key, vault and causes must stay off the wire (#9065).
@@ -968,10 +978,11 @@ async fn server_second_instance_is_refused_and_the_first_keeps_serving() {
     assert!(
         matches!(
             second,
-            Err(ServeError::Bind {
-                source: UdsSecurityError::AlreadyServing { .. },
-                ..
-            })
+            Err(ServeError::Bind { ref source, .. })
+                if matches!(
+                    source.downcast_ref::<UdsSecurityError>(),
+                    Some(UdsSecurityError::AlreadyServing { .. })
+                )
         ),
         "{second:?}"
     );

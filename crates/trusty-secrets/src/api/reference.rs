@@ -26,6 +26,7 @@ pub const SCHEME: &str = "secret://";
 /// key. Holds names only.
 /// Test: `api_reference_grammar_table`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SecretRef {
     /// `secret://KEY`: resolved project-first, then owner.
     Unscoped {

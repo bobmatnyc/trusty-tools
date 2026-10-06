@@ -31,7 +31,9 @@ pub const MACHINE_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-common/config.yam
 ///
 /// What: unknown keys are ignored so backend-specific settings (§6.2) can
 /// sit beside it; a known key with a bad value fails the load.
+// #9073: §6.2 adds backend settings; build it from `Default` and assign fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MachineSecretsConfig {
     /// The backend projects use when they name none.
     #[serde(default)]
@@ -40,6 +42,7 @@ pub struct MachineSecretsConfig {
 
 /// The project-level `secrets:` section.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ProjectSecretsConfig {
     /// This project's backend, overriding the machine default.
     #[serde(default)]
@@ -51,6 +54,7 @@ pub struct ProjectSecretsConfig {
 
 /// The resolved backend and project-vault override for one invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedConfig {
     /// The backend to open.
     pub backend: BackendId,
