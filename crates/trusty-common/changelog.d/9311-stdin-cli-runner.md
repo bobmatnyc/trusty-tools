@@ -1,0 +1,2 @@
+Added
+- `credentials::ExternalCliCommand`: the shared runner that hands a `Secret` to a vendor CLI (`op`, `keeper`, `vercel`, `gh`) on stdin only, never argv or env. Errors and `Debug` output never carry the value or the child's output, a missing binary fails closed as `ExternalCliError::NotInstalled`, and the child is killed and reaped when the stdin write fails ([#9311](https://github.com/bobmatnyc/trusty-tools/issues/9311))
