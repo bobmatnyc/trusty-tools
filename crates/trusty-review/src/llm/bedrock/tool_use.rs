@@ -40,11 +40,9 @@ const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-o
 /// Why: Sonnet 5.5 and Opus 5.5 on Bedrock reject `toolChoice = tool` with
 /// `ValidationException`, so a forced structured-output call to either fails
 /// every time (#9292). Every other model keeps the forced request it had.
-/// What: strips a `bedrock/` routing prefix, reads the embedded model id out
-/// of an inference-profile or foundation-model ARN, and takes the model name
-/// after the `anthropic.` vendor segment, whatever single region segment
-/// precedes it (`us.`, `apac.`, `au.`, ...). It strips any date or version
-/// suffix, then returns `false` for the 5.5 families and `true` for
+/// What: reads the family with [`bedrock_model_family`], whatever single
+/// region segment precedes the `anthropic.` vendor (`us.`, `apac.`, `au.`,
+/// ...), then returns `false` for the 5.5 families and `true` for
 /// everything else. An application-inference-profile ARN names no model, so
 /// forcing is unknown there; it returns `false`, because `auto` is the one
 /// choice every model accepts and a non-tool reply already fails closed in
@@ -52,17 +50,28 @@ const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-o
 /// Test: `forced_tool_choice_capability_per_model_id_shape`,
 /// `forced_tool_choice_capability_covers_every_compare_candidate`.
 pub(crate) fn supports_forced_tool_choice(model: &str) -> bool {
+    // #9292: an application inference profile hides its model (`None`).
+    bedrock_model_family(model).is_some_and(|f| !NO_FORCED_TOOL_CHOICE_FAMILIES.contains(&f))
+}
+
+/// The model family a Bedrock model id names, or `None` when the id hides it.
+///
+/// Why: each per-model capability check (#9292 tool choice, #9304
+/// temperature) must read every id shape the same way; one parser keeps them
+/// from disagreeing about the same string.
+/// What: strips a `bedrock/` routing prefix, reads the embedded model id out
+/// of an inference-profile or foundation-model ARN, takes the name after the
+/// `anthropic.` vendor segment, and strips any date or version suffix.
+/// `None` for an application-inference-profile ARN, which names no model.
+/// Test: `forced_tool_choice_capability_per_model_id_shape`,
+/// `inference_config_omits_temperature_only_for_claude_5_5`.
+pub(crate) fn bedrock_model_family(model: &str) -> Option<&str> {
     let model = model.strip_prefix(BEDROCK_MODEL_PREFIX).unwrap_or(model);
     let model = match arn::parse(model) {
         None => model,
-        Some(parsed) => match parsed.priced_model() {
-            Some(embedded) => embedded,
-            // #9292: an application inference profile hides its model.
-            None => return false,
-        },
+        Some(parsed) => parsed.priced_model()?,
     };
-    let family = normalize_model_family(anthropic_model_name(model));
-    !NO_FORCED_TOOL_CHOICE_FAMILIES.contains(&family)
+    Some(normalize_model_family(anthropic_model_name(model)))
 }
 
 /// The model name after the `anthropic.` vendor in `<region>.anthropic.<name>`
