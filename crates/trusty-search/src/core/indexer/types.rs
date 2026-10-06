@@ -303,4 +303,7 @@ pub struct CommitTimings {
     pub kg_ms: u64,
     /// Issue #100: chunks dropped by the per-index `TRUSTY_MAX_CHUNKS` cap.
     pub chunks_dropped_by_cap: usize,
+    /// #9230: the redb write failed (logged, not returned), so the durable
+    /// corpus lacks this batch and an incremental write must not stamp it.
+    pub corpus_write_failed: bool,
 }

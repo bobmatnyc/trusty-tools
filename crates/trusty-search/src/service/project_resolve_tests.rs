@@ -505,6 +505,138 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     assert_eq!(mtime(b_corpus), b_before, "reading B's stamp rewrote B");
 }
 
+/// Unix seconds `age` seconds ago.
+fn unix_ago(age: u64) -> u64 {
+    (SystemTime::now() - Duration::from_secs(age))
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after epoch")
+        .as_secs()
+}
+
+/// #9230: two colocated clones of `REPO`. A's full-reindex stamp is two days
+/// old and B's one hour old. Returns the rows and a resident handle on A.
+fn clone_a_older_than_b(
+    tmp: &Path,
+) -> (
+    Vec<PersistedIndex>,
+    std::sync::Arc<crate::core::registry::IndexHandle>,
+) {
+    use crate::core::corpus::CorpusStore;
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId};
+    use std::sync::Arc;
+
+    let mut rows = Vec::new();
+    for (id, dir, age) in [
+        ("clone-a", "a/repo", 2 * 86_400),
+        ("clone-b", "b/repo", 3_600),
+    ] {
+        let root = tmp.join(dir);
+        std::fs::create_dir_all(root.join(".git")).expect(".git");
+        std::fs::create_dir_all(root.join(".trusty-search")).expect("store");
+        CorpusStore::open(&root.join(".trusty-search/index.redb"))
+            .expect("open")
+            .write_reindexed_unix_sync(unix_ago(age))
+            .expect("full-reindex stamp");
+        rows.push(PersistedIndex {
+            colocated: true,
+            repo_identity: Some(REPO.to_string()),
+            ..PersistedIndex::new(id, root)
+        });
+    }
+    let a_root = tmp.join("a/repo");
+    let mut indexer = CodeIndexer::new("clone-a", a_root.clone());
+    indexer.set_corpus_store(Arc::new(
+        CorpusStore::open(&a_root.join(".trusty-search/index.redb")).expect("load A"),
+    ));
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("clone-a"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        a_root,
+    ));
+    (rows, handle)
+}
+
+/// Resolve `REPO` with `a` resident, on a blocking worker as the RPC does.
+async fn resolve_with_resident(
+    rows: Vec<PersistedIndex>,
+    a: std::sync::Arc<crate::core::registry::IndexHandle>,
+) -> Resolution {
+    let candidates = gather_candidates(&rows, &[("clone-a".to_string(), a.root_path.clone())]);
+    let disk = LiveDisk {
+        names: WorktreeDirNames::default(),
+        resident: [("clone-a".to_string(), a)].into_iter().collect(),
+        runtime: Some(tokio::runtime::Handle::current()),
+    };
+    tokio::task::spawn_blocking(move || {
+        resolve(&ProjectQuery::Identity(REPO.into()), &candidates, &disk).expect("resolves")
+    })
+    .await
+    .expect("resolve task")
+}
+
+/// Why: #9230 — clone A, kept current by incremental writes, lost to clone B,
+/// whose only advantage was a more recent full reindex.
+/// What: a resident A takes one `index_file` write after B's full reindex,
+/// and the resolver must pick A. Fails on origin/main: it picks B.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_incremental_write_after_the_others_full_reindex_resolves_to_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (rows, a) = clone_a_older_than_b(tmp.path());
+    a.indexer
+        .read()
+        .await
+        .index_file("src/lib.rs", "pub fn kept_current_9230() {}\n")
+        .await
+        .expect("incremental write");
+
+    let got = resolve_with_resident(rows, a).await;
+    assert_eq!(got.index.index_id, "clone-a", "{got:?}");
+    assert_eq!(ids(&got.duplicates), ["clone-b"]);
+}
+
+/// Why: #9230 review — a boot-reconcile delta made only of deletions is a
+/// committed write too, so it must refresh A's recency.
+/// What: A holds a file that is gone from disk, with its stamp set back to
+/// two days old; B's full reindex is one hour old. A delete-only
+/// `apply_delta` on A, then the resolver must pick A. Fails against
+/// 8fe9e93737: the purge arm never stamped, so it picks B.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_only_reconcile_after_the_others_full_reindex_resolves_to_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (rows, a) = clone_a_older_than_b(tmp.path());
+    {
+        let idx = a.indexer.read().await;
+        idx.index_file("src/gone.rs", "pub fn gone_9230() {}\n")
+            .await
+            .expect("setup write");
+        idx.corpus_store()
+            .expect("A's corpus")
+            .write_reindexed_unix_sync(unix_ago(2 * 86_400))
+            .expect("set A back to its old full reindex");
+    }
+    assert!(
+        !a.root_path.join("src/gone.rs").exists(),
+        "a deletion on disk"
+    );
+
+    let delta = vec!["src/gone.rs".to_string()];
+    assert!(crate::service::reconcile::apply_delta(&a, "clone-a", &delta, "sha-9230").await);
+    assert!(a
+        .indexer
+        .read()
+        .await
+        .chunk_ids_for_file("src/gone.rs")
+        .await
+        .is_empty());
+
+    let got = resolve_with_resident(rows, a).await;
+    assert_eq!(got.index.index_id, "clone-a", "{got:?}");
+    assert_eq!(ids(&got.duplicates), ["clone-b"]);
+}
+
 /// Why: #9169 — a repo whose identity group holds only a worktree still has a
 /// live index when a subdirectory of it (no `.git` of its own) is indexed.
 /// Test: this test.

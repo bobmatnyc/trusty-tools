@@ -111,12 +111,15 @@ pub struct RescanStats {
     /// a walked file's content is sops-encrypted (#8922). A file with no
     /// chunks to drop is not counted.
     pub files_excluded: usize,
+    /// #9230: tracked files whose removal redb refused. Their chunks and
+    /// `IndexedFiles` entry stay, so the retry this forces removes them.
+    pub files_failed: usize,
 }
 
 impl RescanStats {
-    /// Whether this pass left any file's state unknown.
+    /// Whether this pass left any file's state unknown or unremoved.
     pub fn is_complete(&self) -> bool {
-        self.files_unreadable == 0
+        self.files_unreadable == 0 && self.files_failed == 0
     }
 }
 
@@ -163,7 +166,9 @@ pub enum RescanError {
         /// The hold reason, naming every invalid glob and the fix.
         message: String,
     },
-    /// Chunks for a file that no longer exists could not be dropped.
+    /// Chunks for a file that no longer exists could not be dropped. Since
+    /// #9230 it is logged per file and counted in
+    /// [`RescanStats::files_failed`], not returned.
     #[error("index '{index_id}': could not drop chunks for deleted file '{path}' after a dropped-event rescan: {source}")]
     Remove {
         /// Index whose reconcile failed.
@@ -187,8 +192,9 @@ pub enum RescanError {
 /// and records the ids in `indexed_files` so a later `Removed` event can still
 /// find them. Then removes every tracked file that is absent from disk, and
 /// rebuilds the symbol graph once. Unreadable individual files are skipped at
-/// `debug`, matching `watch_loop::handle_modified`; indexer failures abort the
-/// pass with [`RescanError`].
+/// `debug`, matching `watch_loop::handle_modified`; a batch commit failure
+/// aborts the pass with [`RescanError`], and a refused per-file removal is
+/// counted in [`RescanStats::files_failed`] (#9230).
 ///
 /// The batch path is deliberately not gated on `refuse_incremental_write`: a
 /// write-quarantined index holds no `CorpusStore`, so a bulk commit writes
@@ -288,6 +294,8 @@ pub(crate) async fn reconcile_with_policy(
         .files;
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
+    // #9230: a delete whose rows left redb stamps the corpus once, below.
+    let mut delete_committed = false;
 
     // #6570: the same per-index content-hash cache the reindex pipeline skips
     // unchanged files with. Warmed from the durable corpus when this process
@@ -324,11 +332,17 @@ pub(crate) async fn reconcile_with_policy(
             // the content check existed may sit over plaintext chunks. The
             // file stays `live`, so the sweep below never counts it as gone.
             if crate::core::sops::is_sops_encrypted(&content) {
-                if drop_file(index_id, indexer, &rel).await? > 0 {
+                live.insert(key.clone());
+                // #9230: a refused purge keeps the file's chunks and entry.
+                let Some((removed, committed)) = drop_file(index_id, indexer, &rel).await else {
+                    stats.files_failed += 1;
+                    continue;
+                };
+                delete_committed |= committed;
+                if removed > 0 {
                     stats.files_excluded += 1;
                 }
                 indexed_files.take(&key).await;
-                live.insert(key);
                 continue;
             }
             // #6570: the file was still read and hashed, so this is a decision
@@ -384,15 +398,20 @@ pub(crate) async fn reconcile_with_policy(
         &live,
         policy,
     )
-    .await?;
+    .await;
     stats.files_removed = swept.deleted;
     stats.files_excluded += swept.excluded;
+    stats.files_failed += swept.failed;
 
     if stats.files_reindexed > 0 || stats.files_removed > 0 || stats.files_excluded > 0 {
         // One rebuild for the whole pass — `index_files_batch_no_rebuild` and
         // `remove_file_no_kg_rebuild`'s public sibling both defer it, and the
         // graph is O(N + E) over the entire corpus.
         indexer.read().await.rebuild_symbol_graph_now().await;
+    }
+    if delete_committed || swept.committed {
+        let idx = indexer.read().await;
+        idx.record_incremental_commit("rescan delete").await;
     }
 
     Ok(stats)
@@ -439,26 +458,34 @@ async fn warm_hashes_from_corpus(
     }
 }
 
-/// Drop one file's chunks and content hash, mapping a failure to
-/// [`RescanError::Remove`].
+/// Drop one file's chunks and content hash. Returns `(removed, committed)`,
+/// or `None` when the fail-closed purge failed: logged at `warn` as
+/// [`RescanError::Remove`], with the file's chunks and hash left in place.
 ///
 /// Why (#8922): the hash goes with the chunks, or a re-admitted unchanged file
 /// is hash-skipped forever. No per-file graph rebuild: the pass rebuilds once.
+/// #9230: `committed` (rows left redb) makes the pass stamp the corpus; a
+/// failure is counted per file, never aborting the pass.
 /// Caller obligation (#3049): the same as [`sweep_deleted`]'s — the caller
 /// holds the teardown guard; declared in `scripts/teardown-guard-manifest.tsv`.
 async fn drop_file(
     index_id: &IndexId,
     indexer: &Arc<RwLock<CodeIndexer>>,
     path: &str,
-) -> Result<usize, RescanError> {
+) -> Option<(usize, bool)> {
     let idx = indexer.read().await;
-    idx.purge_file(index_id, path)
-        .await
-        .map_err(|source| RescanError::Remove {
-            index_id: index_id.to_string(),
-            path: path.to_string(),
-            source,
-        })
+    match idx.purge_file_committed(index_id, path).await {
+        Ok(purged) => Some(purged),
+        Err(source) => {
+            let err = RescanError::Remove {
+                index_id: index_id.to_string(),
+                path: path.to_string(),
+                source,
+            };
+            tracing::warn!("rescan reconcile: {err:#}; kept for retry (#9230)");
+            None
+        }
+    }
 }
 
 /// What [`sweep_deleted`] removed.
@@ -468,6 +495,10 @@ struct Swept {
     deleted: usize,
     /// Tracked files still on disk that the policy now excludes (#8922).
     excluded: usize,
+    /// #9230: some removal's rows left redb, so the pass stamps the corpus.
+    committed: bool,
+    /// #9230: removals redb refused; each file stays tracked for a retry.
+    failed: usize,
 }
 
 /// Drop chunks for tracked files that the walk did not find: files gone from
@@ -498,7 +529,7 @@ async fn sweep_deleted(
     indexed_files: &IndexedFiles,
     live: &HashSet<PathBuf>,
     policy: Option<&crate::core::registry::IndexHandle>,
-) -> Result<Swept, RescanError> {
+) -> Swept {
     use crate::service::index_admission::{admits, Admission};
     let mut swept = Swept::default();
     for tracked in indexed_files.paths().await {
@@ -512,7 +543,13 @@ async fn sweep_deleted(
         if on_disk && !excluded {
             continue;
         }
-        let removed = drop_file(index_id, indexer, &tracked.display().to_string()).await?;
+        let Some((removed, committed)) =
+            drop_file(index_id, indexer, &tracked.display().to_string()).await
+        else {
+            swept.failed += 1;
+            continue;
+        };
+        swept.committed |= committed;
         indexed_files.take(&tracked).await;
         if excluded {
             // #8922: counted only when chunks actually left.
@@ -523,7 +560,7 @@ async fn sweep_deleted(
             swept.deleted += 1;
         }
     }
-    Ok(swept)
+    swept
 }
 
 /// What the watch loop owes after a reconcile pass finishes.

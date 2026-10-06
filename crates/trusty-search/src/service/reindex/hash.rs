@@ -134,17 +134,13 @@ impl crate::core::CodeIndexer {
     /// the graph once, and only when something was removed. Stamps the
     /// durable graph-dirty mark first (#8959).
     ///
+    /// The redb chunk-delete failure mode is the caller's; `index_file`'s
+    /// sops arm and `purge_file_committed` use `FailClosed` (#8959, #9230), so
+    /// a failed delete keeps the ids and the hash for a retry.
+    ///
     /// A method, not a free function, so `scripts/check_teardown_guard.sh`
-    /// sees every `.purge_file(` call site: both writes are durable and each
-    /// caller must hold the teardown guard (#3049).
-    pub(crate) async fn purge_file(&self, index_id: &IndexId, rel: &str) -> anyhow::Result<usize> {
-        self.purge_file_with(index_id, rel, RedbChunkDelete::WarnOnly)
-            .await
-    }
-
-    /// [`Self::purge_file`] with the redb chunk-delete failure mode chosen by
-    /// the caller; `index_file`'s sops arm uses `FailClosed` (#8959), so a
-    /// failed delete keeps the plaintext ids and the hash for a retry.
+    /// sees every `.purge_file_with(` call site: both writes are durable and
+    /// each caller must hold the teardown guard (#3049).
     pub(crate) async fn purge_file_with(
         &self,
         index_id: &IndexId,

@@ -14,6 +14,8 @@
 //! test in `indexer::tests`.
 
 pub(crate) mod commit;
+// #9230: an incremental commit stamps the corpus's reindex stamp.
+pub(crate) mod commit_stamp;
 pub(crate) mod deferred;
 pub(crate) mod embed;
 // #8976: what one `index_file` write did, so zero chunks never read as success.
@@ -365,7 +367,9 @@ impl CodeIndexer {
     /// `index_file_on_json_above_the_window_ceiling_reports_too_large` in
     /// `indexer::tests::zero_chunk_8976`; the #8959 error arms by
     /// `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`
-    /// and `a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen`.
+    /// and `a_failed_sops_purge_fails_the_write_and_leaves_no_plaintext_after_reopen`;
+    /// the #9230 stamp by `index_file_stamps_the_corpus_it_commits` and
+    /// `a_redb_write_logged_as_a_warning_does_not_stamp`.
     pub async fn index_file_outcome(
         &self,
         file_path: &str,
@@ -388,8 +392,13 @@ impl CodeIndexer {
         if trusty_common::knowledge_document::is_tombstone(content) {
             // #8959: a failed redb delete fails the write with the ids still in
             // memory, so a retry removes them instead of a reopen loading them.
-            self.remove_file_with(file_path, super::RedbChunkDelete::FailClosed)
+            let removed = self
+                .remove_file_with(file_path, super::RedbChunkDelete::FailClosed)
                 .await?;
+            // #9230: a fail-closed delete that removed rows is a durable commit.
+            if removed > 0 {
+                self.record_incremental_commit(file_path).await;
+            }
             return Ok(IndexFileOutcome::Removed);
         }
         // #8922: a sops-encrypted file is never indexed, and a file that became
@@ -411,6 +420,10 @@ impl CodeIndexer {
                 removed,
                 "index_file: refused a sops-encrypted file (#8922)"
             );
+            // #9230: as the tombstone arm — the purge failed closed.
+            if removed > 0 {
+                self.record_incremental_commit(file_path).await;
+            }
             return Ok(IndexFileOutcome::SopsEncrypted);
         }
         let (mut chunks, entities) = chunk_ast(file_path, content);
@@ -463,6 +476,8 @@ impl CodeIndexer {
         // call must report that rather than answer `Ok` — see the refusal at
         // the end of the function for why it is deferred to there.
         let mut dropped_by_cap = 0usize;
+        // #9230: did rows reach redb? Superseded ids were deleted fail-closed.
+        let mut durable = !superseded.is_empty();
         if let Some(embeddings) = embeddings {
             let parsed = ParsedBatch {
                 chunks,
@@ -472,10 +487,10 @@ impl CodeIndexer {
                 embed_ms: 0,
                 vector_count: 0,
             };
-            dropped_by_cap = self
-                .commit_parsed_batch(parsed, true)
-                .await?
-                .chunks_dropped_by_cap;
+            let timings = self.commit_parsed_batch(parsed, true).await?;
+            dropped_by_cap = timings.chunks_dropped_by_cap;
+            // #9230: a redb write logged at warn is not a commit; never stamp it.
+            durable = !timings.corpus_write_failed && (durable || timings.chunks > 0);
         }
 
         let all_entities = self
@@ -515,6 +530,10 @@ impl CodeIndexer {
                 self.chunk_cap(), // #6369: report the cap this index enforced
                 dropped_by_cap
             );
+        }
+        // #9230: stamp only a write that is reported as a success and landed.
+        if durable {
+            self.record_incremental_commit(file_path).await;
         }
         Ok(outcome)
     }
@@ -613,6 +632,10 @@ impl CodeIndexer {
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)
             .await?;
+        // #9230: the watcher rescan commits here; stamp what reached redb.
+        if timings.chunks > 0 && !timings.corpus_write_failed {
+            self.record_incremental_commit("index_files_batch").await;
+        }
         Ok(timings.chunks)
     }
 

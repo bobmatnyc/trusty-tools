@@ -350,7 +350,7 @@ async fn a_deferred_rebuild_survives_a_reopen() {
     assert!(!idx.symbol_graph_is_stale(), "a rebuilt graph boots fresh");
 }
 
-/// #8959: `purge_file`, the no-rebuild removal the watcher rescan and the git
+/// #8959: `purge_file_committed`, the no-rebuild removal the watcher rescan and the git
 /// reconcile pass call per file, stamps the durable mark before it removes
 /// anything. Fails with the stamp removed from `purge_file_with`: the reopened
 /// index booted the old persisted graph as current and served the purged
@@ -372,7 +372,7 @@ async fn a_purge_without_its_rebuild_is_rebuilt_after_a_reopen() {
         .await
         .expect("seed batch persists the graph");
         let id = crate::core::registry::IndexId::new(ID);
-        let removed = idx.purge_file(&id, PATH).await.expect("purge");
+        let (removed, _) = idx.purge_file_committed(&id, PATH).await.expect("purge");
         assert!(removed > 0, "the fixture must purge chunks");
         // Dropped before the caller's per-pass rebuild: a crash in the pass.
     }

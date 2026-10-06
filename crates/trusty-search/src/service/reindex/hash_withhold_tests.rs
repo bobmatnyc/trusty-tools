@@ -4,7 +4,8 @@
 //! over chunks that never landed, or an old hash left in place when the new
 //! one was withheld, kept a file out of search until a forced reindex.
 //! What: end-to-end reindex runs under a chunk cap, a commit that fails at the
-//! vector upsert, and the withhold pass's logging and keep rules.
+//! vector upsert or at the redb write (#9230), and the withhold pass's
+//! logging and keep rules.
 //! Test: `cargo test -p trusty-search -- hash_withhold_tests`.
 
 use std::fs;
@@ -385,6 +386,57 @@ async fn commit_error_clears_the_old_hash() {
         ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
         Some(WITHHELD_HASH),
         "ALPHA's hash must not survive the failed commit"
+    );
+}
+
+/// #9230: the redb-write-failure arm. `commit_parsed_batch` logs a failed
+/// redb write and answers `Ok`; the batch must still fail, as the error arm
+/// does, so it neither counts as indexed nor keeps a hash for chunks redb
+/// lacks. Fails against 8fe9e93737: no error, BRAVO's hash recorded.
+#[tokio::test]
+async fn a_failed_redb_write_fails_the_batch_and_withholds_its_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut indexer = CodeIndexer::new("redb-write-fail-9230", dir.path());
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
+    ));
+    crate::core::indexer::break_chunk_writes(&indexer);
+    let handle = handle_over("redb-write-fail-9230", dir.path(), indexer);
+    let ctx = ctx_for(&handle);
+    let key = PathBuf::from("a.rs");
+    ctx.hashes.insert(key.clone(), hash_content(ALPHA));
+
+    let (new, _) = chunk_ast("a.rs", BRAVO);
+    let ready = ParsedReadyBatch {
+        parsed: ParsedBatch {
+            embeddings: vec![None; new.len()],
+            chunks: new,
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        },
+        new_hashes: vec![(key.clone(), hash_content(BRAVO))],
+        batch_files: 1,
+        changed_corpus_paths: vec!["a.rs".to_string()],
+        final_chunkless_paths: Vec::new(),
+    };
+    commit_parsed_and_finalize(&ctx, ready).await;
+
+    assert_eq!(
+        ctx.progress.errors.load(Ordering::Acquire),
+        1,
+        "a batch whose redb write failed must be reported as failed"
+    );
+    assert_eq!(
+        ctx.progress.indexed_count(),
+        0,
+        "a failed batch indexed nothing"
+    );
+    assert_eq!(
+        ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "no hash may claim content the durable corpus lacks"
     );
 }
 
