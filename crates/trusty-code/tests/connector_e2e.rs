@@ -22,7 +22,7 @@
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared with every other `*_e2e.rs` file in this crate.
 
-mod support;
+use crate::support;
 
 use trusty_agents_common::connectors::{
     AgentSpec, AttachHandle, BackendParams, ConnectorError, ConnectorTestKit, CreateSessionReq,

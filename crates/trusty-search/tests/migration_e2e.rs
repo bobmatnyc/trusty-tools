@@ -11,7 +11,7 @@
 //!   2. A writable temporary directory for a real redb corpus.
 //!   3. Non-trivial wall-clock time (~30 s on a cold model cache).
 //!
-//! Run with: `cargo test -p trusty-search --test migration_e2e -- --include-ignored`
+//! Run with: `cargo test -p trusty-search --test integration migration_e2e:: -- --include-ignored`
 
 use std::sync::Arc;
 
@@ -27,7 +27,7 @@ use trusty_search::core::registry::{IndexHandle, IndexId};
 /// applies itself to an already-migrated index.
 /// What: create a temporary corpus, write `CURRENT_SCHEMA_VERSION` into it,
 /// run the production registry, and assert the version is unchanged.
-/// Test: `cargo test -p trusty-search --test migration_e2e -- --include-ignored`
+/// Test: `cargo test -p trusty-search --test integration migration_e2e:: -- --include-ignored`
 #[tokio::test]
 #[ignore = "requires real redb corpus — run with --include-ignored"]
 async fn migration_e2e_already_current_is_noop() {
@@ -79,7 +79,7 @@ async fn migration_e2e_already_current_is_noop() {
 /// indexed yet) at version 0 should reach version 1 with zero re-indexing work.
 /// What: open a real redb corpus, leave schema_version at 0 (default), run
 /// the production registry, and assert the version advances to 1.
-/// Test: `cargo test -p trusty-search --test migration_e2e -- --include-ignored`
+/// Test: `cargo test -p trusty-search --test integration migration_e2e:: -- --include-ignored`
 #[tokio::test]
 #[ignore = "requires real redb corpus — run with --include-ignored"]
 async fn migration_e2e_empty_corpus_advances_to_current() {

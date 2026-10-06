@@ -546,6 +546,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# #9302: `test` already inherits the two settings above; this pins its own so a
+# later full-debuginfo `dev` cannot grow test binaries. macOS scans every new
+# executable on its first exec, and the scan time grows with the file size.
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

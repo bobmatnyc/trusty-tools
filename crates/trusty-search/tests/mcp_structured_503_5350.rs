@@ -11,10 +11,9 @@
 //!
 //! What: registers a cold-parked index in a real `SearchAppState`, serves the
 //! real socket router, and drives `index_status` in both MCP call forms.
-//! Test: `cargo test -p trusty-search --test mcp_structured_503_5350`
+//! Test: `cargo test -p trusty-search --test integration mcp_structured_503_5350::`
 
-#[path = "support/socket_daemon.rs"]
-mod socket_daemon;
+use crate::socket_daemon;
 
 use std::path::PathBuf;
 

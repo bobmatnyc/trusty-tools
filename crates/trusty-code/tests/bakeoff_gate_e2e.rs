@@ -12,7 +12,7 @@
 //! blocks a verifier pass-rate drop.
 //! Test: this file IS the test.
 
-mod support;
+use crate::support;
 
 use std::path::Path;
 
