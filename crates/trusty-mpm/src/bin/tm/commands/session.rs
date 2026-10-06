@@ -534,6 +534,10 @@ pub(crate) async fn session(
         SessionAction::Rename { arg1, arg2 } => {
             crate::commands::rename::session_rename(daemon, arg1, arg2).await?
         }
+        // #9313: a record update only; direct HTTP like `rename`.
+        SessionAction::Rebind { id, tmux, .. } => {
+            crate::commands::rebind::session_rebind(daemon, id, tmux).await?
+        }
         // #7660: decommission prints the daemon's verdict itself so a kept
         // workspace exits non-zero with the reason.
         SessionAction::Decommission { id, force } => {
