@@ -1,0 +1,2 @@
+Fixed
+- Stopping or dropping a file watcher no longer waits on fseventsd indefinitely. The OS watcher is now dropped on its own thread, and the stop waits at most 5 s for it. A teardown that outlasts the limit logs one warning naming the index and the limit, and its thread is left to finish on its own, so each stuck teardown leaks at most one thread. Index removal, the residency and idle sweeps, and daemon shutdown all stop watchers this way. Before, a silent `FSEventStreamStop` held the stop forever; one test hung for 28 minutes this way (#9315).
