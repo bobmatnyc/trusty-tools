@@ -78,7 +78,11 @@ const RETRY_BASE: Duration = Duration::from_secs(5);
 const RETRY_MAX: Duration = Duration::from_secs(300);
 
 /// What a reconcile pass changed. Reported by the watch loop.
+///
+/// #9212: `#[non_exhaustive]`, so a later counter is not a breaking change
+/// for an out-of-crate reader; outside the crate, start from `Default`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RescanStats {
     /// Files re-read from disk and committed to the index.
     pub files_reindexed: usize,

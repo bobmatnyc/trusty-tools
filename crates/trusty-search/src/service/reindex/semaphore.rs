@@ -284,7 +284,7 @@ pub(crate) fn remove_index_semaphore(id: &IndexId) {
 /// derived by hand-grepping mutating method names across `src/service`, which is
 /// how round 2 missed the config catch-up, round 3 missed the startup migration
 /// (in `src/commands`, outside the grepped subtree), and all three rounds missed
-/// `handle_modified`'s stale-chunk removal (`remove_chunk`, a method name absent
+/// `handle_modified`'s stale-chunk removal (then `remove_chunk`, a method name absent
 /// from the hand-written grep list). `scripts/check_teardown_guard.sh` now
 /// enumerates the call sites mechanically and fails when one is neither guarded
 /// in its own scope nor declared in

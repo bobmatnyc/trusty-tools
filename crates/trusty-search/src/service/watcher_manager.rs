@@ -21,7 +21,7 @@
 //! What: a `Mutex<HashMap<IndexId, WatcherTask>>` plus `spawn_for_index`,
 //! `stop_for_index`, and `stop_all`. Each watcher shares the same
 //! `Arc<RwLock<CodeIndexer>>` as the handle so incremental `index_file` /
-//! `remove_chunk` calls land in the live index. A fresh `IndexedFiles` tracker
+//! `remove_chunk_ids_committed` calls land in the live index. A fresh `IndexedFiles` tracker
 //! is created per index so deletions can locate the chunk IDs to evict.
 //!
 //! Test: unit tests at the bottom of this module cover idempotent spawn, the

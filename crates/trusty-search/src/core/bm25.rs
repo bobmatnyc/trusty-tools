@@ -27,7 +27,7 @@
 //! `wrapper_remove_document_drops_it_from_scoring`,
 //! `wrapper_len_and_is_empty_track_the_corpus`, and
 //! `wrapper_upsert_reporting_accepts_a_normal_document` in this file; the
-//! indexer paths are covered by `test_remove_chunk_removes_from_results`,
+//! indexer paths are covered by `test_remove_chunk_ids_removes_from_results`,
 //! `test_persist_and_load_chunks`, and the BM25 lane tests in
 //! `core::indexer::search::lanes_tests`.
 
@@ -94,7 +94,7 @@ impl CodeBm25Index {
 
     /// Drop `chunk_id` from the corpus.
     ///
-    /// Why: `remove_file` and `remove_chunk` must evict lexical postings along
+    /// Why: `remove_file` and `remove_chunk_ids_committed` must evict lexical postings along
     /// with the chunk itself, or a deleted chunk keeps ranking.
     /// What: forwards to `BM25Index::remove_document`; unknown ids are a no-op.
     /// Test: `wrapper_remove_document_drops_it_from_scoring`.

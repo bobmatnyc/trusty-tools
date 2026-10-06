@@ -436,7 +436,7 @@ impl CorpusStore {
 
     /// Delete a set of chunk ids in one write transaction.
     ///
-    /// Why: `remove_file` / `remove_chunk` must evict from the durable store
+    /// Why: `remove_file` / `remove_chunk_ids_committed` must evict from the durable store
     /// too, or a restart would resurrect deleted chunks.
     /// What: removes each id from `CHUNKS_TABLE`; unknown ids are a silent
     /// no-op (idempotent delete), matching the in-memory `HashMap::remove`.

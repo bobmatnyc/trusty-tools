@@ -1,7 +1,7 @@
 //! Glue between [`crate::service::watcher::FileWatcher`] and `CodeIndexer`.
 //!
 //! Why: The watcher emits raw filesystem events; the indexer wants
-//! `index_file` / `remove_chunk` calls. This module bridges them and
+//! `index_file` / `remove_chunk_ids_committed` calls. This module bridges them and
 //! maintains an [`IndexedFiles`] side-map so that file deletions can locate
 //! the chunk IDs that need to come out of the HNSW + corpus.
 //!
@@ -130,7 +130,7 @@ impl Drop for WatcherTask {
 /// belong to which path (e.g. an explicit `remove_file` HTTP handler).
 pub fn spawn_watch_loop(
     root_path: &Path,
-    // #3049: the watcher is a WRITER (`index_file` / `remove_chunk`), so it
+    // #3049: the watcher is a WRITER (`index_file` / chunk-id removal), so it
     // needs the id to take this index's teardown-lock read side. Passing the id
     // rather than the whole handle keeps the existing `Arc<RwLock<CodeIndexer>>`
     // seam that the watcher tests construct directly.
@@ -529,8 +529,8 @@ pub async fn handle_modified(
     let path_str = watcher_relative_path(canonical_root, raw_root, path);
 
     // #3049 round 4: acquired BEFORE the stale-chunk removal below, not just
-    // before `index_file`. `remove_chunk` deletes from redb via
-    // `delete_chunks_from_redb`, so the removal loop is a durable write of its
+    // before `index_file`. `remove_chunk_ids_committed` deletes from redb
+    // (fail-closed, #9212), so the removal is a durable write of its
     // own; taking the guard after it left that loop racing a delete's
     // `remove_dir_all`. Held to the end of the function, which covers the
     // `index_file` write too.

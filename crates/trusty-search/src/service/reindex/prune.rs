@@ -49,6 +49,15 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
+/// What one prune pass did (#9212): files pruned, and files it could not prune.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PruneOutcome {
+    /// Deleted files whose chunks left every store.
+    pub(super) pruned: usize,
+    /// Deleted files kept for the next walk, plus a failed batched hash delete.
+    pub(super) failed: usize,
+}
+
 /// Prune stale data from the staging corpus for files deleted from disk (issue #848).
 ///
 /// Why: after the #839 carryover fix, `copy_all_from` seeds the staging corpus
@@ -73,6 +82,9 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
 ///
 /// Errors from individual store operations are counted and a single aggregated
 /// `warn!` is emitted at the end if any files partially failed (fix 3).
+/// #9212: the chunk delete fails closed. A refused delete leaves the file's
+/// chunks, entity list and hash in every store and skips the file, so the
+/// next walk finds it again; the caller withholds its stamps on `failed > 0`.
 ///
 /// The function is a no-op when `deleted_files` is empty (no files were removed
 /// since the last reindex).  Corpus errors from `list_indexed_files` bubble up
@@ -83,14 +95,15 @@ pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
 ///
 /// Test: `prune_pass_removes_deleted_file_from_staged_corpus`,
 /// `disk_existence_guard_skips_live_file` and
-/// `reindex_prunes_a_file_that_became_excluded_and_sops_content` in `prune_tests.rs`.
+/// `reindex_prunes_a_file_that_became_excluded_and_sops_content` in `prune_tests.rs`;
+/// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`.
 pub(super) async fn prune_deleted_files_from_staging(
     handle: &IndexHandle,
     walked_files: &[PathBuf],
     canonical_root: &Path,
     hashes: &Arc<DashMap<PathBuf, String>>,
     index_id: &IndexId,
-) {
+) -> PruneOutcome {
     // Build the walked set using the shared canonical normalisation so strings
     // are guaranteed identical to those stored by the batch loop.
     let walked_set: std::collections::HashSet<String> = walked_files
@@ -108,7 +121,7 @@ pub(super) async fn prune_deleted_files_from_staging(
         indexer.corpus_store()
     };
     let Some(corpus) = corpus else {
-        return; // No durable corpus — nothing to prune.
+        return PruneOutcome::default(); // No durable corpus — nothing to prune.
     };
     let indexed_files = match tokio::task::spawn_blocking(move || corpus.list_indexed_files()).await
     {
@@ -119,7 +132,7 @@ pub(super) async fn prune_deleted_files_from_staging(
                      skipping prune",
                 index_id.0
             );
-            return;
+            return PruneOutcome::default();
         }
         Err(e) => {
             tracing::warn!(
@@ -127,7 +140,7 @@ pub(super) async fn prune_deleted_files_from_staging(
                      skipping prune",
                 index_id.0
             );
-            return;
+            return PruneOutcome::default();
         }
     };
 
@@ -142,7 +155,7 @@ pub(super) async fn prune_deleted_files_from_staging(
             "reindex[{}]: prune pass: no deleted files detected",
             index_id.0
         );
-        return;
+        return PruneOutcome::default();
     }
 
     tracing::info!(
@@ -200,7 +213,9 @@ pub(super) async fn prune_deleted_files_from_staging(
                         file_path,
                     );
                     failed_count += 1;
-                    0
+                    // #9212: the delete failed closed, so the file's rows are
+                    // still in every store; keep its hash for the next walk.
+                    continue;
                 }
             }
         };
@@ -251,7 +266,7 @@ pub(super) async fn prune_deleted_files_from_staging(
     if failed_count > 0 {
         tracing::warn!(
             "reindex[{}]: prune pass: {} file(s) failed to fully prune — \
-             ghost chunks may persist until next reindex",
+             the next reindex retries them",
             index_id.0,
             failed_count,
         );
@@ -263,6 +278,10 @@ pub(super) async fn prune_deleted_files_from_staging(
         total_pruned_chunks,
         pruned_paths_for_hash.len(),
     );
+    PruneOutcome {
+        pruned: pruned_paths_for_hash.len(),
+        failed: failed_count,
+    }
 }
 
 /// Reconcile the warm in-memory state to the corpus a force reindex just

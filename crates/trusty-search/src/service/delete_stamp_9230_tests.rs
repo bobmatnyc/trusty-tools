@@ -9,7 +9,8 @@
 //! sops-encrypted content), `remove_file_report` (HTTP, socket and MCP `remove-file`)
 //! and an excluded pushed write's `purge_pushed` — each delete one file with
 //! no fault, then a second under an injected redb delete fault, then retry the
-//! second. One test per path, so a red path never hides another.
+//! second. One test per path, so a red path never hides another. #9212 adds
+//! a reconcile delta that partly fails and must not stamp the HEAD SHA.
 //! Test: `cargo test -p trusty-search -- delete_stamp_9230`.
 
 use std::path::{Path, PathBuf};
@@ -39,6 +40,9 @@ const FILES: [(&str, &str); 2] = [
 #[derive(Clone, Copy, Debug)]
 enum Site {
     Reconcile,
+    /// #9212: [`Site::Reconcile`]'s fixture under its own index id, so its
+    /// fault never reaches the #9230 reconcile test.
+    ReconcilePartial,
     Rescan,
     Watcher,
     WatcherModified,
@@ -124,7 +128,7 @@ impl Fixture {
         }
         let before = self.ids(rel).await;
         match site {
-            Site::Reconcile => {
+            Site::Reconcile | Site::ReconcilePartial => {
                 let handle = Arc::new(self.handle());
                 let delta = vec![rel.to_string()];
                 let stamped =
@@ -308,4 +312,58 @@ async fn remove_file_report_stamps_only_a_committed_delete() {
 #[tokio::test]
 async fn excluded_pushed_write_purge_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::PurgePushed).await;
+}
+
+/// `rel`'s chunk rows in the durable corpus, sorted.
+async fn durable_rows(fx: &Fixture, rel: &str) -> Vec<(String, String)> {
+    let corpus = fx.indexer.read().await.corpus_store().expect("corpus");
+    let mut rows: Vec<(String, String)> = corpus
+        .load_all_chunks()
+        .expect("rows")
+        .into_iter()
+        .filter(|c| c.file == rel)
+        .map(|c| (c.id, c.content))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// #9212: a reconcile delta with one landed write and one refused delete
+/// must not stamp the HEAD SHA. Why: a partial failure stamped anyway, so the
+/// next boot saw the index as current and never retried the delete, and the
+/// refused rows came back. What: adds `src/three.rs` and deletes `src/two.rs`
+/// in one delta under the redb delete fault; the write lands, the delete is
+/// refused with memory and redb unchanged, and the SHA keeps its old value
+/// until a clean retry. Fails against d6529ca1f5: `apply_delta` answered
+/// `true` and stamped.
+#[tokio::test]
+async fn a_partially_failed_reconcile_delta_does_not_stamp_the_sha() {
+    let fx = Fixture::new(Site::ReconcilePartial).await;
+    let handle = Arc::new(fx.handle());
+    *handle.indexed_head_sha.write().await = Some("old-sha".into());
+    let (gone, _) = FILES[1];
+    let ids = fx.ids(gone).await;
+    let rows = durable_rows(&fx, gone).await;
+    std::fs::write(fx.root.join("src/three.rs"), "pub fn three_9212() {}\n").expect("add");
+    std::fs::remove_file(fx.root.join(gone)).expect("delete");
+    let delta = vec!["src/three.rs".to_string(), gone.to_string()];
+
+    set_fault(&fx.id, true);
+    let stamped = crate::service::reconcile::apply_delta(&handle, &fx.id.0, &delta, "new").await;
+    set_fault(&fx.id, false);
+
+    assert!(!stamped, "a delta with a refused delete must answer false");
+    assert_eq!(
+        handle.indexed_head_sha.read().await.as_deref(),
+        Some("old-sha"),
+        "a partial failure must not stamp the SHA"
+    );
+    assert!(!fx.ids("src/three.rs").await.is_empty(), "the write landed");
+    assert_eq!(fx.ids(gone).await, ids, "a refused delete changed memory");
+    assert_eq!(durable_rows(&fx, gone).await, rows, "redb rows changed");
+
+    let retried = crate::service::reconcile::apply_delta(&handle, &fx.id.0, &delta, "new").await;
+    assert!(retried, "the clean retry stamps");
+    assert_eq!(handle.indexed_head_sha.read().await.as_deref(), Some("new"));
+    assert!(fx.ids(gone).await.is_empty(), "the retry removed the file");
 }

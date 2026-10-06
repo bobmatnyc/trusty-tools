@@ -6,7 +6,7 @@
 //! The commit upserted every snapshot vector, re-inserting orphans for deleted
 //! files that no removal path reclaims.
 //! What: drives the three phases by hand and interleaves `remove_file`,
-//! `remove_chunk` or an edit at each gap — the embed phase, the upsert, and
+//! `remove_chunk_ids_committed` or an edit at each gap — the embed phase, the upsert, and
 //! each removal's own gap between its map drop and its vector drop — plus the
 //! error arms and the background rehydrate wait.
 //! Test: the functions below.
@@ -222,7 +222,8 @@ async fn a_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     assert!(has_vector(&idx, "c").await);
 }
 
-/// The file watcher's `remove_chunk` has the same gap as `remove_file`.
+/// The file watcher's id removal (`remove_chunk_ids_committed`, which
+/// replaced `remove_chunk` in #9212) has the same gap as `remove_file`.
 #[tokio::test]
 async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let (idx, gated) = gated_indexer(None);
@@ -231,7 +232,8 @@ async fn a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector() {
     let run = plan.embed(None, None).await.expect("embed");
 
     let (reached, release) = gated.after_remove.arm();
-    let (removed, committed) = tokio::join!(idx.remove_chunk("a"), async {
+    let ids = ["a".to_string()];
+    let (removed, committed) = tokio::join!(idx.remove_chunk_ids_committed(&ids), async {
         reached.await.expect("remove reached");
         let committed = idx.commit_deferred_embed(plan, run).await;
         release.send(()).expect("release remove");

@@ -160,6 +160,9 @@ fn a_held_index_answers_one_refusal_for_every_path() {
     use crate::service::rpc::error::{code_for, refusal_is_permanent, CODE_UNAVAILABLE_PERMANENT};
 
     let mut fx = fixture();
+    // Deliberately unparsable (an unclosed `[` class): an exclude glob that
+    // does not parse is what holds the index (#9059). A valid glob here would
+    // not hold it, and the test would assert nothing about a hold.
     fx.handle.exclude_globs = vec!["**/secrets/[**".to_owned()];
     std::fs::write(fx.root.join(".env"), "API_TOKEN=secret\n").expect(".env");
 
