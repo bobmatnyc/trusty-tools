@@ -12,6 +12,8 @@
 //!   - `build_tool_config`: builds a Bedrock `ToolConfiguration` with one
 //!     tool whose `inputSchema` is the caller-supplied JSON Schema.  Sets
 //!     `toolChoice` to force that specific tool.
+//!   - `build_tool_config_for_model`: the same, except `toolChoice = auto`
+//!     for a model that rejects forcing (#9292).
 //!   - `extract_tool_use_json`: walks the Converse output to find the
 //!     `ToolUse` block, serialises its `input` document to a JSON string,
 //!     and returns it as `LlmResponse.text`.
@@ -20,12 +22,97 @@
 //! `extract_tool_use_json_from_mock_output` in `bedrock/mod.rs` test module.
 
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, SpecificToolChoice, Tool, ToolChoice, ToolConfiguration, ToolInputSchema,
-    ToolSpecification,
+    AutoToolChoice, ContentBlock, SpecificToolChoice, Tool, ToolChoice, ToolConfiguration,
+    ToolInputSchema, ToolSpecification,
 };
 use aws_smithy_types::Document;
 
+use super::{arn, normalize_model_family};
+use crate::llm::BEDROCK_MODEL_PREFIX;
 use crate::llm::error::LlmError;
+
+/// Model families whose Bedrock Converse API rejects a forced `toolChoice`
+/// (`tool` or `any`) with `ValidationException` (#9292).
+const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+
+/// Whether Bedrock accepts a forced `toolChoice` (`tool` / `any`) for `model`.
+///
+/// Why: Sonnet 5.5 and Opus 5.5 on Bedrock reject `toolChoice = tool` with
+/// `ValidationException`, so a forced structured-output call to either fails
+/// every time (#9292). Every other model keeps the forced request it had.
+/// What: strips a `bedrock/` routing prefix, reads the embedded model id out
+/// of an inference-profile or foundation-model ARN, and takes the model name
+/// after the `anthropic.` vendor segment, whatever single region segment
+/// precedes it (`us.`, `apac.`, `au.`, ...). It strips any date or version
+/// suffix, then returns `false` for the 5.5 families and `true` for
+/// everything else. An application-inference-profile ARN names no model, so
+/// forcing is unknown there; it returns `false`, because `auto` is the one
+/// choice every model accepts and a non-tool reply already fails closed in
+/// the parsers.
+/// Test: `forced_tool_choice_capability_per_model_id_shape`,
+/// `forced_tool_choice_capability_covers_every_compare_candidate`.
+pub(crate) fn supports_forced_tool_choice(model: &str) -> bool {
+    let model = model.strip_prefix(BEDROCK_MODEL_PREFIX).unwrap_or(model);
+    let model = match arn::parse(model) {
+        None => model,
+        Some(parsed) => match parsed.priced_model() {
+            Some(embedded) => embedded,
+            // #9292: an application inference profile hides its model.
+            None => return false,
+        },
+    };
+    let family = normalize_model_family(anthropic_model_name(model));
+    !NO_FORCED_TOOL_CHOICE_FAMILIES.contains(&family)
+}
+
+/// The model name after the `anthropic.` vendor in `<region>.anthropic.<name>`
+/// or `anthropic.<name>`; any other id comes back unchanged.
+// #9292: anchored on the vendor, not a region list, so a region prefix the
+// shared list lacks (`apac.`, `au.`) still classifies.
+fn anthropic_model_name(model: &str) -> &str {
+    const VENDOR: &str = "anthropic.";
+    model
+        .split_once('.')
+        .and_then(|(_, tail)| tail.strip_prefix(VENDOR))
+        .or_else(|| model.strip_prefix(VENDOR))
+        .unwrap_or(model)
+}
+
+/// The one system-prompt line an `auto`-mode request adds (#9292).
+///
+/// Why: with `toolChoice = auto` the model may answer in prose; this line
+/// asks it to call the tool, which forcing used to guarantee.
+/// What: names `schema_name` and requires the answer as that tool's input.
+/// Test: `system_blocks_add_the_tool_line_only_for_auto_models`.
+pub(crate) fn auto_tool_instruction(schema_name: &str) -> String {
+    format!(
+        "Respond only by calling the `{schema_name}` tool with your complete answer \
+         as its input; do not answer in plain text."
+    )
+}
+
+/// Build the `ToolConfiguration` for `model`: forced when Bedrock accepts
+/// forcing for it, `auto` otherwise.
+///
+/// Why: one call site needs the per-model choice; a model that supports
+/// forcing must get the same configuration [`build_tool_config`] builds.
+/// What: [`build_tool_config`] when [`supports_forced_tool_choice`] holds;
+/// otherwise the same single tool with `toolChoice = auto` (#9292).
+/// Test: `build_tool_config_for_model_picks_choice_per_model`.
+pub(crate) fn build_tool_config_for_model(
+    model: &str,
+    schema_name: &str,
+    json_schema: &serde_json::Value,
+) -> Result<ToolConfiguration, LlmError> {
+    if supports_forced_tool_choice(model) {
+        return build_tool_config(schema_name, json_schema);
+    }
+    tool_config_with_choice(
+        schema_name,
+        json_schema,
+        ToolChoice::Auto(AutoToolChoice::builder().build()),
+    )
+}
 
 /// Build a Bedrock `ToolConfiguration` that forces the model to call the
 /// named tool described by `json_schema`.
@@ -36,11 +123,26 @@ use crate::llm::error::LlmError;
 /// `inputSchema` = the caller's JSON Schema converted to `Document`.
 /// Sets `toolChoice = TOOL { name }` so the model MUST call this tool.
 /// Returns `LlmError::Validation` if the JSON Schema cannot be converted
-/// to a `Document` (e.g. not a JSON object).
-/// Test: `tool_config_contains_schema_name` in `bedrock/mod.rs`.
+/// to a `Document` (e.g. not a JSON object). Sonnet 5.5 and Opus 5.5 reject
+/// this choice; the provider uses `build_tool_config_for_model` (#9292).
+/// Test: `build_tool_config_succeeds_for_valid_schema`.
 pub fn build_tool_config(
     schema_name: &str,
     json_schema: &serde_json::Value,
+) -> Result<ToolConfiguration, LlmError> {
+    // Force the specific tool — the model MUST call `schema_name`.
+    let specific = SpecificToolChoice::builder()
+        .name(schema_name)
+        .build()
+        .map_err(|e| LlmError::Validation(format!("build SpecificToolChoice: {e}")))?;
+    tool_config_with_choice(schema_name, json_schema, ToolChoice::Tool(specific))
+}
+
+/// One structured-output tool named `schema_name` with the given `toolChoice`.
+fn tool_config_with_choice(
+    schema_name: &str,
+    json_schema: &serde_json::Value,
+    tool_choice: ToolChoice,
 ) -> Result<ToolConfiguration, LlmError> {
     let doc = json_to_document(json_schema).ok_or_else(|| {
         LlmError::Validation(format!(
@@ -61,13 +163,6 @@ pub fn build_tool_config(
         .map_err(|e| LlmError::Validation(format!("build ToolSpecification: {e}")))?;
 
     let tool = Tool::ToolSpec(tool_spec);
-
-    // Force the specific tool — the model MUST call `schema_name`.
-    let specific = SpecificToolChoice::builder()
-        .name(schema_name)
-        .build()
-        .map_err(|e| LlmError::Validation(format!("build SpecificToolChoice: {e}")))?;
-    let tool_choice = ToolChoice::Tool(specific);
 
     let config = ToolConfiguration::builder()
         .tools(tool)

@@ -20,7 +20,7 @@ use super::{
     BedrockProvider, LlmRequest, describe_sdk_error, estimate_bedrock_cost_usd,
     normalize_model_family, resolve_bedrock_region, validate_model_id,
 };
-use crate::llm::bedrock::tool_use::build_tool_config;
+use crate::llm::bedrock::tool_use::{self, build_tool_config};
 use crate::llm::{ChatMessage, LlmError, LlmProvider, ResponseSchema};
 
 // ── Region resolution ─────────────────────────────────────────────────────
@@ -470,6 +470,296 @@ async fn bedrock_structured_no_credentials_returns_error() {
         result.is_err(),
         "must fail without real credentials even with tool-use schema"
     );
+}
+
+// ── Per-model tool choice (#9292) ─────────────────────────────────────────
+
+/// The structured-output schema the #9292 tests send.
+fn review_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"]
+    })
+}
+
+/// A structured review request with `system` as its system prompt.
+fn structured_request(system: &str) -> LlmRequest {
+    LlmRequest {
+        model: String::new(),
+        system: system.to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "review diff".to_string(),
+        }],
+        temperature: 0.3,
+        max_tokens: 512,
+        response_schema: Some(ResponseSchema {
+            name: "review_output".to_string(),
+            schema: review_schema(),
+        }),
+    }
+}
+
+/// Model ids Bedrock rejects a forced `toolChoice` for, in each id shape.
+const AUTO_MODEL_IDS: &[&str] = &[
+    "anthropic.claude-sonnet-5-5",
+    "us.anthropic.claude-sonnet-5-5",
+    "global.anthropic.claude-sonnet-5-5",
+    "bedrock/us.anthropic.claude-sonnet-5-5",
+    "anthropic.claude-opus-5-5",
+    "us.anthropic.claude-opus-5-5",
+    "bedrock/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
+];
+
+/// Model ids that keep the forced `toolChoice`.
+const FORCED_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-4-6",
+    "bedrock/us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5",
+    "us.amazon.nova-pro-v1:0",
+];
+
+/// Sonnet 5.5 and Opus 5.5 get `auto`; Sonnet 4.6 and Haiku 4.5 get the
+/// exact forced configuration they had before #9292.
+///
+/// Why: Bedrock rejects `toolChoice = tool` for the 5.5 models, which broke the
+/// default reviewer (#9292); every other model must keep its request.
+/// What: builds the per-model config for each id shape and checks the choice;
+/// a forced model's config must equal `build_tool_config`'s output.
+/// Test: this test.
+#[test]
+fn build_tool_config_for_model_picks_choice_per_model() {
+    use aws_sdk_bedrockruntime::types::ToolChoice;
+    for model in AUTO_MODEL_IDS {
+        let config =
+            tool_use::build_tool_config_for_model(model, "review_output", &review_schema())
+                .expect("config builds");
+        assert!(
+            matches!(config.tool_choice(), Some(ToolChoice::Auto(_))),
+            "{model} must get toolChoice auto, got {:?}",
+            config.tool_choice()
+        );
+        assert_eq!(config.tools().len(), 1, "{model} keeps the tool definition");
+    }
+    let forced = build_tool_config("review_output", &review_schema()).expect("config builds");
+    for model in FORCED_MODEL_IDS {
+        let config =
+            tool_use::build_tool_config_for_model(model, "review_output", &review_schema())
+                .expect("config builds");
+        assert!(
+            matches!(config.tool_choice(), Some(ToolChoice::Tool(_))),
+            "{model} must keep the forced tool choice"
+        );
+        assert_eq!(config, forced, "{model} config must be unchanged");
+    }
+}
+
+/// The capability check reads every model-id shape the provider accepts.
+///
+/// Why: a model reaches the provider bare, prefixed, date-stamped or as an
+/// ARN; a shape the check misreads sends a forced request that fails (#9292).
+/// What: covers suffixes, regional prefixes and each ARN kind. An
+/// application-inference-profile ARN names no model, so it gets `auto`.
+/// Test: this test.
+#[test]
+fn forced_tool_choice_capability_per_model_id_shape() {
+    let cases = [
+        ("us.anthropic.claude-sonnet-5-5-20260901-v1:0", false),
+        ("eu.anthropic.claude-opus-5-5", false),
+        (
+            "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-sonnet-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6",
+            true,
+        ),
+        (
+            "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+            true,
+        ),
+        ("us.anthropic.claude-opus-4-8", true),
+        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
+        // #9292: region prefixes absent from the shared prefix list.
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
+            false,
+        ),
+        ("jp.anthropic.claude-sonnet-5-5-20260901-v1:0", false),
+        ("us-gov.anthropic.claude-opus-5-5", false),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            true,
+        ),
+        ("au.anthropic.claude-sonnet-4-5", true),
+        ("us.amazon.nova-pro-v1:0", true),
+        ("claude-sonnet-5-5", false),
+    ];
+    for (model, expected) in cases {
+        assert_eq!(
+            tool_use::supports_forced_tool_choice(model),
+            expected,
+            "supports_forced_tool_choice({model})"
+        );
+    }
+    for model in AUTO_MODEL_IDS {
+        assert!(!tool_use::supports_forced_tool_choice(model), "{model}");
+    }
+    for model in FORCED_MODEL_IDS {
+        assert!(tool_use::supports_forced_tool_choice(model), "{model}");
+    }
+}
+
+/// Every compare-set candidate and the reviewer default has a stated answer.
+///
+/// Why: the compare set and the default reviewer are the ids operators run;
+/// the reviewer default is Sonnet 5.5, which forcing broke (#9292).
+/// What: pins the expected answer for each `COMPARE_CANDIDATE_MODELS` entry,
+/// in order, so an added candidate fails here until it gets one.
+/// Test: this test.
+#[test]
+fn forced_tool_choice_capability_covers_every_compare_candidate() {
+    use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
+    let expected = [
+        ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", true),
+        ("bedrock/us.anthropic.claude-sonnet-4-6", true),
+        ("bedrock/us.anthropic.claude-sonnet-5-5", false),
+        ("bedrock/us.anthropic.claude-opus-5-5", false),
+    ];
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids, COMPARE_CANDIDATE_MODELS,
+        "a compare candidate has no case"
+    );
+    for (model, forced) in expected {
+        assert_eq!(
+            tool_use::supports_forced_tool_choice(model),
+            forced,
+            "supports_forced_tool_choice({model})"
+        );
+    }
+    assert!(!tool_use::supports_forced_tool_choice(
+        DEFAULT_REVIEWER_MODEL
+    ));
+}
+
+/// Only an `auto` model's structured request gets the extra system line.
+///
+/// Why: `auto` alone does not require a tool call, so the request asks for
+/// one; a forced model's request must stay byte-identical (#9292).
+/// What: Sonnet 5.5 and Opus 5.5 get the request's system block plus the tool
+/// line; Sonnet 4.6, Haiku 4.5 and an unstructured request get only the
+/// system block.
+/// Test: this test.
+#[test]
+fn system_blocks_add_the_tool_line_only_for_auto_models() {
+    use aws_sdk_bedrockruntime::types::SystemContentBlock;
+    let req = structured_request("reviewer");
+    let base = SystemContentBlock::Text("reviewer".to_string());
+    let line = SystemContentBlock::Text(tool_use::auto_tool_instruction("review_output"));
+    for model in AUTO_MODEL_IDS {
+        assert_eq!(
+            super::system_blocks(&req, model),
+            vec![base.clone(), line.clone()],
+            "{model} must carry the tool line"
+        );
+    }
+    for model in FORCED_MODEL_IDS {
+        assert_eq!(
+            super::system_blocks(&req, model),
+            vec![base.clone()],
+            "{model} system blocks must be unchanged"
+        );
+    }
+    let unstructured = LlmRequest {
+        response_schema: None,
+        ..structured_request("reviewer")
+    };
+    assert_eq!(
+        super::system_blocks(&unstructured, "us.anthropic.claude-sonnet-5-5"),
+        vec![base],
+        "an unstructured request never gets the tool line"
+    );
+    assert!(
+        tool_use::auto_tool_instruction("review_output").contains("`review_output` tool"),
+        "the line names the tool"
+    );
+}
+
+/// A Converse reply holding one text block and no `toolUse` block.
+fn text_only_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    use aws_sdk_bedrockruntime::types::{
+        ContentBlock, ConversationRole, ConverseMetrics, ConverseOutput as Output, Message,
+        StopReason, TokenUsage,
+    };
+    let message = Message::builder()
+        .role(ConversationRole::Assistant)
+        .content(ContentBlock::Text(text.to_string()))
+        .build()
+        .expect("message builds");
+    aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+        .output(Output::Message(message))
+        .stop_reason(StopReason::EndTurn)
+        .usage(
+            TokenUsage::builder()
+                .input_tokens(10)
+                .output_tokens(5)
+                .total_tokens(15)
+                .build()
+                .expect("usage builds"),
+        )
+        .metrics(
+            ConverseMetrics::builder()
+                .latency_ms(1)
+                .build()
+                .expect("metrics builds"),
+        )
+        .build()
+        .expect("output builds")
+}
+
+/// An `auto` reply in text, not `toolUse`, reaches the review parser, which
+/// parses JSON text or fails closed.
+///
+/// Why: an `auto` model may answer in prose (#9292); that reply must never
+/// read as a successful review unless it carries the review JSON.
+/// What: JSON text parses to its verdict; prose with a verdict keyword is
+/// the fail-safe UNKNOWN, as a Haiku free-text reply is today.
+/// Test: this test.
+#[test]
+fn auto_mode_free_text_reply_reaches_the_review_parser() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let json = r#"{"verdict":"APPROVE","summary":"Clean change.","findings":[]}"#;
+    let text = super::response_text(&text_only_reply(json), true);
+    assert_eq!(text, json, "the text block is the reply");
+    let parsed = parse_review_response(&text);
+    assert!(!parsed.is_fail_safe, "JSON text must parse");
+    assert_eq!(parsed.verdict, Verdict::Approve);
+
+    let prose = "The change looks fine to me. APPROVE";
+    let text = super::response_text(&text_only_reply(prose), true);
+    assert_eq!(text, prose);
+    let parsed = parse_review_response(&text);
+    assert!(parsed.is_fail_safe, "prose must fail closed");
+    assert_eq!(parsed.verdict, Verdict::Unknown);
 }
 
 // ── SDK error rendering (#6912) ───────────────────────────────────────────
