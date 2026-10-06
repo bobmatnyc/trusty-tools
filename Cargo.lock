@@ -11238,7 +11238,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.53.5"
+version = "0.53.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11518,7 +11518,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.28.4"
+version = "0.28.5"
 dependencies = [
  "anyhow",
  "async-trait",

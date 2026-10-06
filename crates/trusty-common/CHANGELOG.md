@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.53.6] — 2026-10-05
+
+### Added
+
+- Each maintenance journal record written by a dream pass, a TTL purge through the handle, or a forget of a dedup survivor carries a `drawer` copy of the removed drawer: content, room, tags, importance, creation time and `fact_key`, so a wrongly removed drawer can be recreated. The copy is kept when the L1 snapshot save after the delete fails (the record is written before the error returns) and when the journal append fails (the `error` line that stands in for the record carries it as journal JSON) (#8729).
+- `PalaceRegistry::with_data_root` and `PalaceRegistry::data_root` name the root a registry's palaces live under; `PalaceRegistry::open` sets it. The trusty-memory dream scheduler uses it to reach palaces that are not open (#9173).
+
+### Fixed
+
+- Dream dedup writes the merged survivor to the palace store before it deletes the loser, so merged text survives a reopen; if that write fails, both drawers stay. The merge no longer cuts text at 500 bytes, and appends nothing when the survivor already holds the loser's text. A merge whose text would pass 4 KiB is skipped and both drawers are kept, so a recurring near-duplicate cannot grow one drawer without bound (#9172).
+- Dream dedup picks the current drawer as survivor: a `fact_key` slot holder, then a `ruling`-tagged drawer, then the newer `created_at`, then the higher importance. Two slot holders are never merged (#9172).
+- Forgetting a drawer that the maintenance journal names as a dedup survivor writes a `forget_of_merged_survivor` record (#9172).
+- One palace handle runs one dream cycle at a time. A cycle that starts while another runs on the same palace (the idle loop, the dream rotation, `dream_run`) returns empty stats without running a pass, so it can no longer delete a drawer the running cycle has just merged text into (#9172).
+
 ## [0.53.5] — 2026-10-05
 
 ### Added
