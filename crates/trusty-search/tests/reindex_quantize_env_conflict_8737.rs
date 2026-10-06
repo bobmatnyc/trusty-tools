@@ -17,11 +17,10 @@
 //! inherited `TRUSTY_INDEX` removed, and a scratch working directory.
 //! Assertions read the request log, not just the exit code.
 //!
-//! Test: `cargo test -p trusty-search --test reindex_quantize_env_conflict_8737`
+//! Test: `cargo test -p trusty-search --test integration reindex_quantize_env_conflict_8737::`
 
+use crate::test_daemon;
 use std::path::Path;
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -36,8 +35,7 @@ use trusty_search::core::indexer::CodeIndexer;
 use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use trusty_search::service::server::{build_router, SearchAppState};
 
-#[path = "support/real_allowlist_guard.rs"]
-mod real_allowlist_guard;
+use crate::real_allowlist_guard;
 use real_allowlist_guard::RealAllowlistGuard;
 
 const INDEX_A: &str = "idx-a-8737";

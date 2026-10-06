@@ -10,6 +10,7 @@ description = "Project- and owner-scoped secret storage for the trusty-* tools: 
 keywords = ["secrets", "keychain", "credentials"]
 categories = ["authentication", "development-tools"]
 homepage = "https://trustytools.dev"
+readme = "README.md"
 
 # DOC-74 §15.2. `api` is the wire vocabulary only (no store code), so a caller
 # that only names keys — trusty-console's bridge — never links a keychain.

@@ -46,6 +46,7 @@ versions, publishability, and targets.
 | `trusty-publish-guard` | [`crates/trusty-publish-guard/`](../../crates/trusty-publish-guard/) | library, `publish-guard` | [crate README](../../crates/trusty-publish-guard/README.md) |
 | `trusty-review` | [`crates/trusty-review/`](../../crates/trusty-review/) | library, `trusty-review` | [crate README](../../crates/trusty-review/README.md) |
 | `trusty-search` | [`crates/trusty-search/`](../../crates/trusty-search/) | library, `trusty-search`, bundled `trusty-embedderd` | [crate README](../../crates/trusty-search/README.md), [extended docs](../trusty-search/README.md) |
+| `trusty-secrets` | [`crates/trusty-secrets/`](../../crates/trusty-secrets/) | library, `trusty-secrets` (on-demand socket server) | [crate README](../../crates/trusty-secrets/README.md), [extended docs](../trusty-secrets/README.md) |
 | `trusty-sld-lint` | [`crates/trusty-sld-lint/`](../../crates/trusty-sld-lint/) | library, `sld-lint` | [crate README](../../crates/trusty-sld-lint/README.md) |
 
 ## Nested workspace packages

@@ -310,7 +310,7 @@ fn classify_source_covers_all_known_match_reasons() {
 /// What: indexes a fixture, calls typeahead with `mode=blended`, and asserts
 /// the response has results; also asserts `source` values are one of the three
 /// valid tags.
-/// Test: `cargo test -p trusty-search --test typeahead -- --include-ignored`.
+/// Test: `cargo test -p trusty-search --test integration typeahead:: -- --include-ignored`.
 #[tokio::test]
 #[ignore = "loads the ONNX embedder; run by the pre-publish ignored-tests gate"]
 async fn typeahead_blended_mode_returns_results_tagged_by_source() {

@@ -99,6 +99,7 @@ version.
 | `kg.redb`: `drawers_by_fact_key`, `triples_by_object`, `active_subject_counts` | Derived index in a primary file | Rebuild inside the migration transaction |
 | `chat_sessions.redb` | Primary | Migrate |
 | `maintenance_deletions.jsonl` (and `.1`) | Primary audit journal; append-only | The line schema is frozen. Never rewritten. A new field is additive. |
+| `<data_root>/drawer_counts.jsonl` (amended for [#9283](https://github.com/bobmatnyc/trusty-tools/issues/9283)) | Primary audit journal; one line per palace per UTC day, written by the daemon | The line schema is frozen at `v: 1`; a new field is additive. A reader refuses a line with a newer `v`. The only rewrite is the daemon's 90-day prune, under the file lock, via a temp file and a rename, and it keeps every line it cannot read verbatim. Never blocks a palace open. |
 | `index.usearch.redb` (`vectors`, `vector_keys`, `deleted_vectors`, `vector_id_seq`) and the in-memory HNSW graph | Derived: content plus embedder model | Re-index, or migrate when a rebuild is too costly (D6) |
 | `<palace>/bm25/`, `l1_cache.json`, `dream_stats.json`, `last_used` | Derived | Discard and rebuild |
 | `recall.redb` | Auxiliary telemetry | Migrate if readable. Never blocks an open. |

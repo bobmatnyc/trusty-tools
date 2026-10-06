@@ -159,7 +159,9 @@ pub(super) async fn resolve_corpus_swap(
 ///
 /// Why: `search.project.resolve` picks a repo's most recently indexed index,
 /// and the `index.redb` mtime moves whenever redb opens the file, so a load
-/// looked like a reindex. This stamp moves only here. It is not
+/// looked like a reindex. This stamp moves only on a committed write: here
+/// for a full reindex, and through `CodeIndexer::record_incremental_commit`
+/// for any committed incremental write or delete (#9230). It is not
 /// `PersistedIndex::last_indexed_unix`, which reconcile reads (#4391).
 /// What: writes the current unix time into the handle's corpus `_meta` on a
 /// blocking worker. A handle with no durable corpus is a no-op; a write
@@ -171,13 +173,10 @@ pub(super) async fn stamp_reindex_commit(handle: &IndexHandle, index_id: &IndexI
     let Some(corpus) = handle.indexer.read().await.corpus_store() else {
         return;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let written = tokio::task::spawn_blocking(move || corpus.write_reindexed_unix_sync(now)).await;
+    // #9230: shared with the incremental stamp; a pre-epoch clock no longer stamps 0.
+    let written = tokio::task::spawn_blocking(move || corpus.write_reindexed_now_sync()).await;
     match written {
-        Ok(Ok(())) => {}
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!("reindex[{}]: reindex stamp not written: {e:#}", index_id.0),
         Err(e) => tracing::warn!("reindex[{}]: reindex stamp task failed: {e}", index_id.0),
     }

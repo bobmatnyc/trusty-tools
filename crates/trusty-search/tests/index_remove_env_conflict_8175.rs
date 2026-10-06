@@ -35,11 +35,10 @@
 //! `DELETE` request ever sent, proven against a request log the fake router
 //! records, not just against the exit code.
 //!
-//! Test: `cargo test -p trusty-search --test index_remove_env_conflict_8175`
+//! Test: `cargo test -p trusty-search --test integration index_remove_env_conflict_8175::`
 
+use crate::test_daemon;
 use std::path::Path;
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -59,8 +58,7 @@ const INDEX_B: &str = "idx-b-8175";
 
 // ─── Real-allowlist guard (fix-up: code-critic WARN) ───────────────────────
 // #8737: shared with `reindex_quantize_env_conflict_8737.rs`.
-#[path = "support/real_allowlist_guard.rs"]
-mod real_allowlist_guard;
+use crate::real_allowlist_guard;
 use real_allowlist_guard::RealAllowlistGuard;
 
 // ─── Request log + chaos middleware (fix-up: error-arm tests) ──────────────

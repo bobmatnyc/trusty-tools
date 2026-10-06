@@ -424,7 +424,9 @@ pub(super) async fn prepare_and_parse_batch(
 /// commits the new `ParsedBatch`, updates counters and hash cache, checks
 /// memory, and returns a `BatchOutcome`.
 /// Test: `reindex_walks_directory_and_emits_events` verifies correct chunk
-/// counts and no duplicates after a re-run.
+/// counts and no duplicates after a re-run; the error arms by
+/// `commit_error_clears_the_old_hash` and
+/// `a_failed_redb_write_fails_the_batch_and_withholds_its_hash` (#9230).
 pub(super) async fn commit_parsed_and_finalize(
     ctx: &BatchCtx,
     ready: ParsedReadyBatch,
@@ -483,7 +485,18 @@ pub(super) async fn commit_parsed_and_finalize(
             .filter(|p| !remove_failed_files.contains(p.as_str()))
             .collect();
 
-        let commit = match indexer.commit_parsed_batch(parsed, true).await {
+        // #9230: a redb write that failed was only logged, so the durable
+        // corpus lacks this batch; it fails like a returned error.
+        let committed = indexer
+            .commit_parsed_batch(parsed, true)
+            .await
+            .and_then(|c| {
+                if c.corpus_write_failed {
+                    anyhow::bail!("redb corpus write failed; the batch is not durable (#9230)");
+                }
+                Ok(c)
+            });
+        let commit = match committed {
             Ok(c) => c,
             Err(e) => {
                 drop(indexer);

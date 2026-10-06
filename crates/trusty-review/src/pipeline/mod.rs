@@ -67,6 +67,8 @@ pub mod post;
 // against, and each surface's degrade contract for an unreadable registry.
 pub mod pr_index;
 pub mod prompt;
+// #9310: the bounded reply shape a parse failure records.
+pub(crate) mod reply_shape;
 pub mod runner;
 // Why: the map-reduce branch of `run_review` (split → map → reduce → fold) is
 // extracted here to keep runner.rs under the 500-line cap (#610 / #1643).
