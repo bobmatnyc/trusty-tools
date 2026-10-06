@@ -381,9 +381,10 @@ async fn forgetting_a_dedup_survivor_writes_a_journal_record() {
 }
 
 /// Why (#9172): a drawer no dedup pass ever named as survivor is an ordinary
-/// user forget and stays out of the maintenance journal.
+/// user forget, not a survivor forget. #9283: it is journaled as
+/// `user_forget`, with no content copy.
 #[tokio::test]
-async fn forgetting_an_unmerged_drawer_writes_no_record() {
+async fn forgetting_an_unmerged_drawer_writes_only_a_user_forget_record() {
     let dir = tempdir().unwrap();
     let palace = palace_in(&dir, "plain-forget");
     let handle = open(&palace);
@@ -397,7 +398,10 @@ async fn forgetting_an_unmerged_drawer_writes_no_record() {
         .await
         .unwrap();
     assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
-    assert!(read_journal(&palace.data_dir).unwrap().records.is_empty());
+    let records = read_journal(&palace.data_dir).unwrap().records;
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0].reason, DeletionReason::UserForget);
+    assert!(records[0].drawer.is_none(), "a user forget keeps no copy");
 }
 
 /// Why (#9172): an over-bound merge must not drop the loser's text either.
