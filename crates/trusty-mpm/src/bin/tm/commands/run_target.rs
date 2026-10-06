@@ -455,7 +455,7 @@ async fn run_managed(
         // #9124: a remote URL may embed `user:token@`.
         eprintln!(
             "tm: cloned {} → {}",
-            trusty_mpm::core::remote_url_redact::redact_url(clone_url),
+            trusty_mpm::core::remote_url_redact::redact_stored_url(clone_url),
             checkout.base_path.display()
         );
     }
@@ -517,7 +517,7 @@ pub(crate) fn preflight_verdict(
         anyhow::anyhow!(
             "cannot choose the gh account for {}: {e}\n\
              No session was started. `tm doctor` reports the [accounts] table.",
-            trusty_mpm::core::remote_url_redact::redact_url(origin) // #9124
+            trusty_mpm::core::remote_url_redact::redact_stored_url(origin) // #9124
         )
     })
 }

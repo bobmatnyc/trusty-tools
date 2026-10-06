@@ -215,4 +215,17 @@ fn account_notices_never_quote_the_origin_token() {
         .to_string();
     assert!(!err.contains(TOKEN), "the token reached the refusal");
     assert!(err.contains("https://***@host/"), "{err}");
+
+    // #9259: a quote or space in the password does not end the userinfo.
+    let notice = transport_notice(
+        &format!("ssh://octo:pa'ss{TOKEN}@github.com/a/w.git"),
+        "octo",
+    );
+    assert!(!notice.contains(TOKEN), "the token reached the notice");
+    assert!(notice.contains("ssh://***@github.com/a/w.git"), "{notice}");
+    let err = pin_targets(&[], &format!("https://u:pa ss{TOKEN}@host/"))
+        .expect_err("an origin naming no repository names no project")
+        .to_string();
+    assert!(!err.contains(TOKEN), "the token reached the refusal");
+    assert!(err.contains("https://***@host/"), "{err}");
 }
