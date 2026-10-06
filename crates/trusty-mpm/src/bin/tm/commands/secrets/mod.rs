@@ -9,11 +9,10 @@
 //! (`OnDemandSecrets`, which starts the server on first call), the working
 //! directory as the project, the system clipboard and stdin — and
 //! [`dispatch`]es one verb from `verbs`. Output goes to one writer; errors
-//! carry fixed text, key names and paths only. Nothing here logs. This
-//! slice ships `set`, `list` and `doctor`; `remove`, `import` and `copy`
-//! follow in the next #7521 slice.
+//! carry fixed text, key names and paths only. Nothing here logs. Every
+//! write — `set`, `remove`, `import`, `copy` — stays in the project scope.
 //! Test: `tests.rs` beside this file, against an in-process server over a
-//! `MemoryBackend` in a temp dir.
+//! `MemoryBackend` in a temp dir, plus a second one as the `copy` target.
 //!
 //! Governing document: DOC-74 §9, §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
@@ -87,6 +86,17 @@ pub(crate) async fn dispatch(
             verbs::set(ctx, args, out).await
         }
         SecretsAction::List => verbs::list(ctx, out).await,
+        // #7521: slice 2 — remove, import, copy.
+        SecretsAction::Remove { key, group } => {
+            verbs::remove(ctx, key.text(), group.as_ref().map(|g| g.text()), out).await
+        }
+        SecretsAction::Import { path, group } => {
+            verbs::import(ctx, &path, group.as_ref().map(|g| g.text()), out).await
+        }
+        SecretsAction::Copy { from, to, keys } => {
+            let keys: Vec<&str> = keys.iter().map(|k| k.text()).collect();
+            verbs::copy(ctx, &from, &to, &keys, out).await
+        }
         SecretsAction::Doctor => verbs::doctor(ctx, out).await,
     }
 }

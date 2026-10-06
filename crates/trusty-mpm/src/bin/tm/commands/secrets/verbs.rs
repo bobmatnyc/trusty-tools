@@ -1,25 +1,31 @@
 //! The `tm secrets` verbs, each one or a few `secrets.*` calls (#7521).
 //!
 //! Why: DOC-74 §9's grammar over the §15.2 methods. tm holds a value only
-//! between reading it (clipboard or stdin) and sending it in `secrets.set`;
-//! nothing reads one back.
+//! between reading it (clipboard, stdin or a dotenv file) and sending it in
+//! `secrets.set`; nothing reads one back.
 //! What: `set` calls `secrets.scopes` then `secrets.set`; `list` calls
-//! `secrets.scopes` then `secrets.list` per scope; `doctor` calls
-//! `secrets.doctor`. Every line written names keys, scopes, backends or
-//! paths. `set` alone prints part of a value: the server's `mask_secret`
-//! confirmation.
+//! `secrets.scopes` then `secrets.list` per scope; `remove` calls
+//! `secrets.scopes` then `secrets.delete`; `import` parses the file with
+//! `parse_dotenv`, then one `secrets.set` per entry; `copy` calls
+//! `secrets.copy`; `doctor` calls `secrets.doctor`. Every line written names
+//! keys, scopes, backends or paths. `set` alone prints part of a value: the
+//! server's `mask_secret` confirmation.
 //! Test: `tests.rs` beside this file.
 
 use std::io::Write;
+use std::path::Path;
 
-use anyhow::{anyhow, bail};
+use anyhow::{Context as _, anyhow, bail};
 use serde_json::{Value, json};
-use trusty_secrets::SecretValue;
-use trusty_secrets::api::methods::{ListResponse, ScopesResponse, SetOutcome, SetResponse, method};
+use trusty_secrets::api::methods::{
+    CopyResponse, DeleteResponse, ListResponse, ScopesResponse, SetOutcome, SetResponse, method,
+};
 use trusty_secrets::server::{ClientError, DOCTOR, DoctorResponse};
+use trusty_secrets::store::parse_dotenv;
+use trusty_secrets::{BackendId, SecretKey, SecretValue};
 
 use super::Ctx;
-use super::session::{describe, entry_key, rpc_kind};
+use super::session::{check_group, describe, entry_key, rpc_kind};
 
 /// Refusal for a third positional argument to `set`.
 const ARGV_REFUSED: &str =
@@ -102,6 +108,158 @@ pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(
         for meta in listed.keys {
             writeln!(out, "  {}", meta.name)?;
         }
+    }
+    Ok(())
+}
+
+/// Key names joined for an error line.
+fn names(keys: &[SecretKey]) -> String {
+    keys.iter()
+        .map(SecretKey::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `remove KEY [group]`: delete one key of the project scope.
+///
+/// Why: DOC-74 §15.3 — the CLI writes the project scope only, and a removal
+/// is a write; a removal that matched nothing must not look like success.
+/// What: `secrets.scopes` then `secrets.delete`; prints
+/// `removed KEY from VAULT`. A key the project scope does not hold is an
+/// error naming the key and the vault (exit 1), with nothing printed.
+/// Test: `remove_deletes_a_project_key_and_fails_by_name_on_a_missing_one`.
+pub(super) async fn remove(
+    ctx: &Ctx<'_>,
+    key: &str,
+    group: Option<&str>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let key = entry_key(key, group)?;
+    // #7521: project scope only; the owner scope is the console's (§15.3).
+    let vault = ctx.project_vault().await?;
+    let response: DeleteResponse = ctx
+        .call(method::DELETE, json!({ "vault": vault, "key": key }))
+        .await?;
+    if !response.removed {
+        bail!("tm secrets remove: {key} is not in {vault}");
+    }
+    writeln!(out, "removed {key} from {vault}")?;
+    Ok(())
+}
+
+/// `import <path> [group]`: one project-scope `secrets.set` per dotenv entry.
+///
+/// Why: DOC-74 §9 — bulk-load a `.env` file without printing a value; the
+/// file is left in place.
+/// What: checks the group, then reads and parses the whole file with
+/// `parse_dotenv` before any socket call, so a syntax error stores nothing;
+/// its error names the line number and a fixed reason, never the line. Each
+/// `secret://` entry is skipped and named. Each other entry is sent with
+/// `secrets.set`; a key that fails is named with the server's fixed text and
+/// the rest continue. Ends with a count line; any failed key makes the exit
+/// status 1 and the error names it. Prints no value and no mask.
+/// Test: `import_loads_a_dotenv_file_and_prints_names_only`,
+/// `import_fails_by_name_on_a_refused_key_and_imports_the_rest`,
+/// `import_syntax_error_names_the_line_not_its_text`,
+/// `import_with_an_invalid_group_stores_nothing`.
+pub(super) async fn import(
+    ctx: &Ctx<'_>,
+    path: &Path,
+    group: Option<&str>,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    check_group(group)?;
+    let shown = path.display();
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("tm secrets import: cannot read {shown}"))?;
+    // #7521: `DotenvSyntax` carries the line number and a fixed reason only.
+    let entries = parse_dotenv(&text).map_err(|e| anyhow!("tm secrets import: {shown}: {e}"))?;
+    drop(text);
+    // #7521: project scope only (§15.3).
+    let vault = ctx.project_vault().await?;
+    let (mut imported, mut skipped, mut failed) = (0usize, 0usize, Vec::new());
+    for entry in &entries {
+        let key = match entry_key(entry.name(), group) {
+            Ok(key) => key,
+            Err(e) => {
+                writeln!(out, "failed {}: {e}", entry.name())?;
+                failed.push(entry.name().to_owned());
+                continue;
+            }
+        };
+        if entry.is_reference() {
+            writeln!(out, "skipped {key} (a secret:// reference)")?;
+            skipped += 1;
+            continue;
+        }
+        let value = SecretValue::new(entry.raw());
+        let params = json!({ "vault": vault, "key": key, "value": value });
+        match ctx.call::<SetResponse>(method::SET, params).await {
+            Ok(response) => {
+                writeln!(out, "imported {key} ({})", outcome_word(response.outcome))?;
+                imported += 1;
+            }
+            Err(e) => {
+                writeln!(out, "failed {key}: {e}")?;
+                failed.push(key.to_string());
+            }
+        }
+    }
+    let count = failed.len();
+    writeln!(
+        out,
+        "{vault}: {imported} imported, {skipped} skipped, {count} failed"
+    )?;
+    if count > 0 {
+        bail!(
+            "tm secrets import: {count} key(s) failed: {}",
+            failed.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// `copy --from A --to B [KEY...]`: copy this project's keys between backends.
+///
+/// Why: DOC-74 §9, §13 Q6 — the owner's "copy vars between stores", inside
+/// one project only.
+/// What: validates the backend ids and key names locally, then one
+/// `secrets.copy`. The request names no vault, so the server copies inside
+/// the caller's own project scope; no keys means every key of that scope.
+/// Prints `copied KEY` and `not copied KEY` lines and a count line. A key
+/// not copied — absent from the source, or refused by the destination —
+/// makes the exit status 1 and the error names it. Values never reach tm.
+/// Test: `copy_moves_project_keys_between_backends_without_printing_them`,
+/// `copy_fails_by_name_on_a_missing_key`.
+pub(super) async fn copy(
+    ctx: &Ctx<'_>,
+    from: &str,
+    to: &str,
+    keys: &[&str],
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
+    let backend = |id: &str| BackendId::new(id).map_err(|e| anyhow!("tm secrets copy: {e}"));
+    let (from, to) = (backend(from)?, backend(to)?);
+    let keys = keys
+        .iter()
+        .map(|key| SecretKey::new(key).map_err(|e| anyhow!("tm secrets copy: {e}")))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    // #7521: no vault in the request — the server keeps the copy in-project.
+    let params = json!({ "from_backend": from, "to_backend": to, "keys": keys });
+    let response: CopyResponse = ctx.call(method::COPY, params).await?;
+    for key in &response.copied {
+        writeln!(out, "copied {key}")?;
+    }
+    for key in &response.failed {
+        writeln!(out, "not copied {key}")?;
+    }
+    let (copied, failed) = (response.copied.len(), response.failed.len());
+    writeln!(out, "{from} -> {to}: {copied} copied, {failed} not copied")?;
+    if failed > 0 {
+        bail!(
+            "tm secrets copy: {failed} key(s) not copied (absent from {from}, or refused by {to}): {}",
+            names(&response.failed)
+        );
     }
     Ok(())
 }

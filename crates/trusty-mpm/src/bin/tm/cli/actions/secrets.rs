@@ -9,6 +9,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::Subcommand;
@@ -72,6 +73,43 @@ pub(crate) enum SecretsAction {
     },
     /// Print the key names of the project and owner scopes, never a value.
     List,
+    // #7521: slice 2 — remove, import and copy, project scope only.
+    /// Remove one key of the project scope.
+    ///
+    /// A key the project scope does not hold is an error (exit 1).
+    Remove {
+        /// The key name.
+        key: ArgText,
+        /// The label the key was set with.
+        group: Option<ArgText>,
+    },
+    /// Load every `KEY=value` of a dotenv file into the project scope.
+    ///
+    /// Prints key names only. `secret://` references are skipped and named.
+    /// A syntax error names the line number, never its text, and stores
+    /// nothing. Any key that fails makes the exit status 1. The file is left
+    /// in place.
+    Import {
+        /// The dotenv file.
+        path: PathBuf,
+        /// Optional label applied to every key (`<group>.<KEY>`).
+        group: Option<ArgText>,
+    },
+    /// Copy this project's keys from one backend to another.
+    ///
+    /// Copies the named keys, or every key of the project scope when none is
+    /// named. Stays inside the project and prints names only. Any key not
+    /// copied makes the exit status 1.
+    Copy {
+        /// Source backend id, e.g. `keychain`.
+        #[arg(long)]
+        from: String,
+        /// Destination backend id.
+        #[arg(long)]
+        to: String,
+        /// Stored key names (`<group>.<KEY>` for a grouped key); none means all.
+        keys: Vec<ArgText>,
+    },
     /// Report socket and backend reachability, never a value.
     Doctor,
 }

@@ -7,7 +7,8 @@
 //! the project folded into the params); [`Ctx::project_vault`] (the project
 //! scope from `secrets.scopes`); [`describe`] (a `ClientError` as fixed text:
 //! the server's own fixed message, a spawn failure, or a transport failure
-//! with its detail dropped); [`entry_key`] (`KEY` or `<group>.<KEY>`).
+//! with its detail dropped); [`entry_key`] (`KEY` or `<group>.<KEY>`) and
+//! [`check_group`].
 //! Test: `tests.rs` — `every_verb_fails_without_a_value_when_the_socket_is_unreachable`,
 //! `set_with_a_group_namespaces_the_key`.
 
@@ -127,19 +128,30 @@ pub(crate) fn rpc_kind(error: &ClientError) -> Option<&str> {
 /// Test: `set_with_a_group_namespaces_the_key`,
 /// `set_refuses_a_value_on_the_command_line_without_echoing_it`.
 pub(crate) fn entry_key(key: &str, group: Option<&str>) -> anyhow::Result<SecretKey> {
+    check_group(group)?;
     let name = match group {
         None => key.to_owned(),
-        Some(group) => {
-            let valid = !group.is_empty()
-                && group.len() <= MAX_GROUP_LEN
-                && group
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
-            if !valid {
-                bail!("tm secrets: a group is 1 to 16 of [A-Za-z0-9_-]");
-            }
-            format!("{group}.{key}")
-        }
+        Some(group) => format!("{group}.{key}"),
     };
     SecretKey::new(&name).map_err(|e| anyhow!("tm secrets: {e}"))
+}
+
+/// Refuse a group label outside 1–16 of `[A-Za-z0-9_-]`, without quoting it.
+///
+/// Why: #7521 — `import` checks the label once, before any key is sent.
+/// Test: `set_with_a_group_namespaces_the_key`,
+/// `import_with_an_invalid_group_stores_nothing`.
+pub(crate) fn check_group(group: Option<&str>) -> anyhow::Result<()> {
+    let Some(group) = group else {
+        return Ok(());
+    };
+    let valid = !group.is_empty()
+        && group.len() <= MAX_GROUP_LEN
+        && group
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if !valid {
+        bail!("tm secrets: a group is 1 to 16 of [A-Za-z0-9_-]");
+    }
+    Ok(())
 }
