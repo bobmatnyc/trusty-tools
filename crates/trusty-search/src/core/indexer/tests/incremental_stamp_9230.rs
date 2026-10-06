@@ -191,7 +191,10 @@ async fn a_failed_stamp_write_leaves_the_previous_stamp() {
 /// Why: #9230 closure — only a commit stamps; reclaiming the warm caches and
 /// rehydrating them from redb must not.
 /// Test: this test.
+// #9230: reclaims and rehydrates; serial with the tests that set
+// `TRUSTY_REHYDRATE_WAIT_MS` and `TEST_REHYDRATE_DELAY_MS`.
 #[tokio::test]
+#[serial_test::serial]
 async fn a_reclaim_and_rehydrate_does_not_stamp() {
     let (_dir, idx) = indexer("stamp-9230-rehydrate");
     idx.index_file("src/a.rs", FILE_A).await.expect("write");

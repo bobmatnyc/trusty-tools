@@ -10,7 +10,9 @@
 //! delete paths through [`CodeIndexer::purge_file_committed`],
 //! [`CodeIndexer::remove_file_committed`] and
 //! [`CodeIndexer::remove_chunk_ids_committed`]) stamp only after their rows
-//! reached or left redb, never on a refused, failed or no-op write.
+//! reached or left redb, never on a refused, failed or no-op write. A failed
+//! delete is returned to the caller with memory unchanged, never retried
+//! warn-only.
 //! Test: `indexer::tests::incremental_stamp_9230`,
 //! `service::delete_stamp_9230_tests`.
 
@@ -70,15 +72,14 @@ impl CodeIndexer {
         }
     }
 
-    /// [`Self::purge_file`] that reports whether its delete committed (#9230).
+    /// [`Self::purge_file_with`], fail-closed, reporting whether it committed (#9230).
     ///
     /// Why: a committed delete stamps the corpus, and only a fail-closed
-    /// delete proves the rows left redb. Boot reconcile and the rescan sweep
-    /// keep their warn-only tolerance of a failed redb delete.
-    /// What: purges fail-closed. On an error it logs, then runs the warn-only
-    /// [`Self::purge_file`], whose count or error the caller handles as it
-    /// always has. Returns `(removed, committed)`; `committed` is true only
-    /// when the fail-closed purge removed rows.
+    /// delete proves the rows left redb. A failed one must stay retryable.
+    /// What: purges fail-closed. A failed redb delete is an `Err` with the
+    /// chunk ids, entity list and content hash still in memory; the caller
+    /// must not stamp. Returns `(removed, committed)`; `committed` is
+    /// `removed > 0`.
     /// Test: `reconcile_delete_stamps_only_when_committed`,
     /// `rescan_delete_stamps_only_when_committed`,
     /// `excluded_pushed_write_purge_stamps_only_when_committed`.
@@ -87,78 +88,41 @@ impl CodeIndexer {
         index_id: &IndexId,
         rel: &str,
     ) -> Result<(usize, bool)> {
-        match self
+        let removed = self
             .purge_file_with(index_id, rel, RedbChunkDelete::FailClosed)
-            .await
-        {
-            Ok(removed) => Ok((removed, removed > 0)),
-            Err(e) => {
-                tracing::warn!(
-                    index_id = %self.index_id,
-                    file = %rel,
-                    "fail-closed purge failed; purging warn-only, without a \
-                     reindex stamp (#9230): {e:#}"
-                );
-                Ok((self.purge_file(index_id, rel).await?, false))
-            }
-        }
+            .await?;
+        Ok((removed, removed > 0))
     }
 
-    /// [`Self::remove_file`] that reports whether its delete committed (#9230).
+    /// [`Self::remove_file`], fail-closed, reporting whether it committed (#9230).
     ///
-    /// Why: `POST /indexes/{id}/remove-file` must stamp a committed delete and
-    /// keep its warn-only tolerance of a failed redb delete.
-    /// What: removes fail-closed. On an error it logs, then runs the warn-only
-    /// [`Self::remove_file`], whose count or error the caller handles as it
-    /// always has. Returns `(removed, committed)`, as
+    /// Why: `POST /indexes/{id}/remove-file` must stamp a committed delete,
+    /// and must not answer success for a delete redb refused.
+    /// What: removes fail-closed. A failed redb delete is an `Err` with the
+    /// chunk ids still in memory. Returns `(removed, committed)`, as
     /// [`Self::purge_file_committed`] does.
     /// Test: `remove_file_report_stamps_only_a_committed_delete`.
     pub(crate) async fn remove_file_committed(&self, file_path: &str) -> Result<(usize, bool)> {
-        match self
+        let removed = self
             .remove_file_with(file_path, RedbChunkDelete::FailClosed)
-            .await
-        {
-            Ok(removed) => Ok((removed, removed > 0)),
-            Err(e) => {
-                tracing::warn!(
-                    index_id = %self.index_id,
-                    file = %file_path,
-                    "fail-closed remove failed; removing warn-only, without a \
-                     reindex stamp (#9230): {e:#}"
-                );
-                Ok((self.remove_file(file_path).await?, false))
-            }
-        }
+            .await?;
+        Ok((removed, removed > 0))
     }
 
-    /// Drop chunk `ids` from every store; `true` when they left redb (#9230).
+    /// Drop chunk `ids` from every store; `Ok(true)` when they left redb (#9230).
     ///
     /// Why: the watcher's delete must stamp the corpus when it committed, and
-    /// keep its old tolerance (drop from memory, log) when redb refused.
-    /// What: removes fail-closed. On an error it logs and removes warn-only,
-    /// as the watcher always did. Empty `ids` is `false`.
-    /// Test: `watcher_delete_stamps_only_when_committed`.
-    pub(crate) async fn remove_chunk_ids_committed(&self, ids: &[String]) -> bool {
+    /// keep the ids for a retry when redb refused.
+    /// What: removes fail-closed. A failed redb delete is an `Err` with the
+    /// ids still in memory. Empty `ids` is `Ok(false)`.
+    /// Test: `watcher_delete_stamps_only_when_committed`,
+    /// `watcher_edit_delete_stamps_only_when_committed`.
+    pub(crate) async fn remove_chunk_ids_committed(&self, ids: &[String]) -> Result<bool> {
         if ids.is_empty() {
-            return false;
+            return Ok(false);
         }
-        let Err(e) = self
-            .remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
-            .await
-        else {
-            return true;
-        };
-        tracing::warn!(
-            index_id = %self.index_id,
-            "fail-closed chunk delete failed; removing warn-only, without a \
-             reindex stamp (#9230): {e:#}"
-        );
-        if let Err(e) = self
-            .remove_chunks_from_stores(ids, RedbChunkDelete::WarnOnly)
-            .await
-        {
-            tracing::warn!(index_id = %self.index_id, "warn-only chunk delete failed: {e:#}");
-        }
-        false
+        self.remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
+            .await?;
+        Ok(true)
     }
 }

@@ -693,7 +693,8 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// `index_admission::admits` (#8922): an admitted file → `indexer.index_file`
 /// (which refuses sops content); an excluded or deleted file →
 /// `purge_file_committed` (its chunks and content hash; a delete that left
-/// redb stamps `reindexed_unix` once, #9230); an undetermined answer
+/// redb stamps `reindexed_unix` once, #9230; a delete redb refused counts as
+/// failed and leaves the file's chunks in place); an undetermined answer
 /// touches nothing and counts as failed.
 /// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
 /// reindex requests (which need a write lock) are not blocked for the entire

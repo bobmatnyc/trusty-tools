@@ -211,8 +211,8 @@ pub(crate) fn spawn_watch_loop_with_registry(
                                 "reconciled watched tree after a dropped-event rescan",
                             );
                         }
-                        // The pass ran, but some files could not be read, so
-                        // their contents are still unknown to the index.
+                        // The pass ran, but some files could not be read or
+                        // removed (#9230), so the index does not match the tree.
                         Ok(stats) => {
                             tracing::warn!(
                                 index_id = %index_id,
@@ -222,8 +222,9 @@ pub(crate) fn spawn_watch_loop_with_registry(
                                 chunks_indexed = stats.chunks_indexed,
                                 files_removed = stats.files_removed,
                                 files_unreadable = stats.files_unreadable,
+                                files_failed = stats.files_failed,
                                 "watched tree is NOT fully reconciled after a dropped-event \
-                                 rescan — some files could not be read; will retry",
+                                 rescan — some files could not be read or removed; will retry",
                             );
                         }
                         Err(err) => {
@@ -405,7 +406,8 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 ///
 /// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
 /// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
-/// `tests/watcher_chunk_cap_orphans_100.rs`.
+/// `tests/watcher_chunk_cap_orphans_100.rs`; the #9230 stale-chunk delete by
+/// `watcher_edit_delete_stamps_only_when_committed`.
 ///
 /// Public so that integration test can call it directly instead of racing real
 /// OS watcher events for a state the debouncer makes hard to hit on purpose;
@@ -501,9 +503,22 @@ pub async fn handle_modified(
         .await
     {
         let idx = indexer.read().await;
-        for id in stale_ids {
-            if let Err(err) = idx.remove_chunk(&id).await {
-                tracing::warn!(?err, %id, "remove_chunk failed");
+        // #9230: fail-closed and stamped, so an edit whose new content commits
+        // no chunks still moves `reindexed_unix`. A refused delete keeps the
+        // ids and their entry, and this edit is retried on the next event.
+        match idx.remove_chunk_ids_committed(&stale_ids).await {
+            Ok(true) => {
+                idx.rebuild_symbol_graph_now().await;
+                idx.record_incremental_commit(&path_str).await;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(?err, file = %path_str, "watcher stale-chunk delete failed; kept for retry (#9230)");
+                drop(idx);
+                indexed_files
+                    .record(std::path::PathBuf::from(&path_str), stale_ids)
+                    .await;
+                return;
             }
         }
     }
@@ -569,7 +584,8 @@ pub async fn handle_modified(
 /// What: normalizes the event path to the same repo-root-relative key used by
 /// `handle_modified` when it recorded the chunks, removes those chunk IDs,
 /// rebuilds the symbol graph once, and stamps the corpus when the delete
-/// left redb (#9230). Uses `watcher_relative_path` with both
+/// left redb (#9230). A failed redb delete keeps the ids and re-records the
+/// entry, so a later event or rescan retries it. Uses `watcher_relative_path` with both
 /// the canonical and raw roots so that even when `notify` delivers the path
 /// in a different symlink form (e.g. `/var/…` vs `/private/var/…` on macOS)
 /// the lookup still hits the entry stored by `handle_modified`.
@@ -608,11 +624,21 @@ pub async fn handle_removed(
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
     let idx = indexer.read().await;
     // #9230: fail-closed, so a delete whose rows left redb stamps the corpus;
-    // a refused redb delete still drops the ids from memory and only logs.
-    let committed = idx.remove_chunk_ids_committed(&ids).await;
-    idx.rebuild_symbol_graph_now().await;
-    if committed {
-        idx.record_incremental_commit(&rel_key).await;
+    // a refused one keeps the ids in memory and re-tracks them for a retry.
+    match idx.remove_chunk_ids_committed(&ids).await {
+        Ok(committed) => {
+            idx.rebuild_symbol_graph_now().await;
+            if committed {
+                idx.record_incremental_commit(&rel_key).await;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?err, file = %rel_key, "watcher delete failed; kept for retry (#9230)");
+            drop(idx);
+            indexed_files
+                .record(std::path::PathBuf::from(&rel_key), ids)
+                .await;
+        }
     }
 }
 

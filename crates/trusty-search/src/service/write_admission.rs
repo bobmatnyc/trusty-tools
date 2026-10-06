@@ -147,9 +147,10 @@ async fn purge_pushed(
     path: &str,
 ) -> anyhow::Result<usize> {
     use crate::service::reindex::hash::forget_file_hash;
-    // #8959: `purge_file` stamps the durable stale mark; the graph-refresh
+    // #8959: `purge_file_with` stamps the durable stale mark; the graph-refresh
     // ticker rebuilds, so no whole-corpus pass per write.
-    // #9230: fail-closed first; a committed purge stamps `reindexed_unix`.
+    // #9230: fail-closed; a committed purge stamps `reindexed_unix`, and a
+    // refused one is a 500 `index_file_failed` with nothing dropped.
     let (removed, committed) = indexer.purge_file_committed(&handle.id, path).await?;
     if committed {
         indexer.record_incremental_commit(path).await;

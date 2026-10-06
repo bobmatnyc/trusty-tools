@@ -165,7 +165,8 @@ pub(crate) async fn remove_file_report(
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
-    // #9230: fail-closed first, so a committed delete can stamp below.
+    // #9230: fail-closed. A delete redb refused answers 500
+    // `remove_file_failed` with the file's chunks still indexed.
     let (removed, committed) = indexer
         .remove_file_committed(&req.path)
         .await
