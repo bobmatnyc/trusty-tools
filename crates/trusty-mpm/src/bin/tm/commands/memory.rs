@@ -15,7 +15,7 @@
 use anyhow::Context as _;
 use trusty_mpm::core::memory_import::{ImportOptions, ImportReport, ImportStatus};
 // #8352: the no-MCP palace verbs share this dispatcher.
-use trusty_mpm::core::memory_verbs::MemoryVerb;
+use trusty_mpm::core::memory_verbs::{FactSlot, MemoryVerb};
 
 use crate::cli::MemoryAction;
 
@@ -94,10 +94,20 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             palace,
             room,
             tags,
+            fact_key,
+            expires_at,
             json,
             memory_socket,
         } => {
-            let verb = MemoryVerb::Remember { text, room, tags };
+            let verb = MemoryVerb::Remember {
+                text,
+                room,
+                tags,
+                slot: FactSlot {
+                    fact_key,
+                    expires_at,
+                },
+            };
             super::memory_verbs::run(verb, palace, memory_socket, json).await
         }
         MemoryAction::Note {
@@ -105,6 +115,8 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
             palace,
             room,
             tags,
+            fact_key,
+            expires_at,
             json,
             memory_socket,
         } => {
@@ -112,6 +124,10 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                 content,
                 room,
                 tags,
+                slot: FactSlot {
+                    fact_key,
+                    expires_at,
+                },
             };
             super::memory_verbs::run(verb, palace, memory_socket, json).await
         }

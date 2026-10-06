@@ -59,7 +59,8 @@ pub(crate) enum MemoryAction {
     ///
     /// The daemon's content gates still apply: very short text with no context,
     /// auto-capture noise, and secret-shaped content are refused there, and the
-    /// report says so.
+    /// report says so. Exits 3 when the drawer was stored but its `--fact-key`
+    /// slot was refused.
     Remember {
         /// The memory text.
         text: String,
@@ -72,6 +73,15 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        // #9142: Tier C slot flags, passed through to trusty-memory.
+        /// ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        /// `pr:<n>/state`). The next write to the same key supersedes this one.
+        #[arg(long)]
+        fact_key: Option<String>,
+        /// RFC 3339 time the fact stops being current. With `--fact-key`
+        /// and omitted, trusty-memory applies a 24-hour default.
+        #[arg(long)]
+        expires_at: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,
@@ -84,6 +94,7 @@ pub(crate) enum MemoryAction {
     ///
     /// The shortcut for high-signal one-liners ("deploy target is prod-east"):
     /// stored at importance 1.0 so it surfaces in the palace's essentials.
+    /// Exits 3 when the drawer was stored but its `--fact-key` slot was refused.
     Note {
         /// The fact.
         content: String,
@@ -96,6 +107,15 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
+        // #9142: Tier C slot flags, passed through to trusty-memory.
+        /// ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        /// `pr:<n>/state`). The next write to the same key supersedes this one.
+        #[arg(long)]
+        fact_key: Option<String>,
+        /// RFC 3339 time the fact stops being current. With `--fact-key`
+        /// and omitted, trusty-memory applies a 24-hour default.
+        #[arg(long)]
+        expires_at: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,

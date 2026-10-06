@@ -3,7 +3,7 @@ name: tm-session-pause
 description: Pause the current PM session — snapshot todos, git state, and context to a project-local session file, prune stale worktrees, and print the resume path
 user-invocable: true
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: pm-workflow
 tags: [session, pause, worktree, context, pm-recommended]
 effort: medium
@@ -363,6 +363,18 @@ The snapshot captures the PM's own `TodoWrite` state as prose. For work items
 that must survive as durable, queryable tasks visible to *any* future session
 (not just a resumed one), promote them via `mcp__trusty-memory__task_add` /
 `task_list` / `task_complete` before pausing.
+
+## Resume State Goes in a Slot (#9142)
+
+After the snapshot, write the resume state to its slot, so this pause
+supersedes the previous one in recall:
+
+```bash
+tm memory remember "<session>: <summary>; next: <step>" --fact-key "ws:<session>/resume"
+```
+
+Record each open PR the same way under `pr:<n>/state`. Slot rules:
+`/tm-session-management`.
 
 ## Token Budget
 

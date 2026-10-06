@@ -3,7 +3,7 @@ name: tm-session-management
 description: PM context-limit pause/resume, project-local session snapshots, worktree pruning, and task-list integration
 user-invocable: true
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 category: pm-workflow
 tags: [session, context, pause, resume, worktree, pm-recommended]
 effort: medium
@@ -243,6 +243,30 @@ future session, not just a resumed one. Prefer `TodoWrite` for
 in-session-only progress tracking; promote a todo to
 `mcp__trusty-memory__task_add` when it needs to survive past this session's
 resume boundary.
+
+## Session and PR State Go in Memory Slots (#9142)
+
+A resume target or a PR's state is false after the next event. Write it to a
+slot (`fact_key`) so the next write to that key supersedes it. An unkeyed
+drawer keeps outranking the current fact in recall.
+
+| Fact | `fact_key` |
+|---|---|
+| A session's resume state | `ws:<session>/resume` |
+| A PR's state | `pr:<n>/state` |
+
+A key has one `:` and one `/`; each segment uses letters, digits, `.`, `_`
+and `-`; the whole key is at most 128 bytes. A refused key still stores the
+drawer, unslotted, and `tm memory` exits 3.
+
+```bash
+tm memory remember "<session>: <summary>; next: <step>" --fact-key "ws:<session>/resume"
+tm memory note "PR #<n>: <state>" --fact-key "pr:<n>/state"
+```
+
+The MCP `memory_remember` / `memory_note` tools take the same `fact_key` and
+`expires_at`. A slot expires after 24 hours unless `--expires-at <RFC 3339>`
+sets another time. Standing rules and history stay unkeyed.
 
 ## A Cross-Session Message Is a Pointer
 
