@@ -132,22 +132,124 @@ fn merge_base_sha(root_path: &Path, base_ref: &str, git_bin: &str) -> Option<Str
 ///
 /// Why: the three calls above share identical failure handling, and a silent
 /// divergence between them is how a partial delta gets returned.
+/// What: [`run_git_bounded`] with no deadline and no output cap.
 fn run_git(root_path: &Path, git_bin: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(git_bin)
+    let out = run_git_bounded(root_path, git_bin, args, None, usize::MAX)
+        .inspect_err(|e| tracing::warn!("git {:?} in {}: {e}", args, root_path.display()))
+        .ok()?;
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Why one git run failed (#9029).
+#[derive(Debug, thiserror::Error)]
+pub enum GitRunError {
+    /// The binary could not be started (missing, not executable).
+    #[error("git could not be started: {0}")]
+    Spawn(std::io::Error),
+    /// git ran and exited non-zero; `stderr` is its first KiB.
+    #[error("git exited {code:?}: {stderr}")]
+    Exit {
+        /// The exit code, `None` when a signal ended it.
+        code: Option<i32>,
+        /// git's own explanation, trimmed.
+        stderr: String,
+    },
+    /// git outran the deadline and was killed.
+    #[error("git did not finish within {0:?} and was killed")]
+    TimedOut(std::time::Duration),
+    /// Waiting on the child failed.
+    #[error("git could not be waited on: {0}")]
+    Wait(std::io::Error),
+}
+
+/// One bounded git run's stdout.
+#[derive(Debug)]
+pub struct GitOutput {
+    /// At most `stdout_cap` bytes of stdout.
+    pub stdout: Vec<u8>,
+    /// Whether stdout held more than `stdout_cap` bytes.
+    pub truncated: bool,
+}
+
+/// Run one git subcommand with an optional deadline and an stdout byte cap.
+///
+/// Why: #9029's `search.file.get` runs git on a request path, so a hung git
+/// (an index lock, a slow network mount) must not hold the request open.
+/// What: `args` go to `Command` as argv, never through a shell. stdin is null.
+/// Two threads drain stdout and stderr so a full pipe cannot stall git; stdout
+/// keeps at most `stdout_cap` bytes and records whether more arrived. Past
+/// `timeout` the child is killed and the run is [`GitRunError::TimedOut`].
+/// Test: `bounded_git_kills_a_run_past_its_deadline`,
+/// `bounded_git_reports_a_non_zero_exit_with_stderr`,
+/// `bounded_git_caps_stdout_and_says_so`.
+pub fn run_git_bounded(
+    root_path: &Path,
+    git_bin: &str,
+    args: &[&str],
+    timeout: Option<std::time::Duration>,
+    stdout_cap: usize,
+) -> Result<GitOutput, GitRunError> {
+    use std::process::Stdio;
+    let mut child = Command::new(git_bin)
         .args(args)
         .current_dir(root_path)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        tracing::warn!(
-            "git {:?} exited {:?} in {}",
-            args,
-            out.status.code(),
-            root_path.display()
-        );
-        return None;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(GitRunError::Spawn)?;
+    let out = child.stdout.take();
+    let err = child.stderr.take();
+    let out_reader = std::thread::spawn(move || drain_capped(out, stdout_cap));
+    let err_reader = std::thread::spawn(move || drain_capped(err, 1024));
+    let status = match timeout {
+        None => child.wait().map_err(GitRunError::Wait)?,
+        Some(limit) => {
+            let deadline = std::time::Instant::now() + limit;
+            loop {
+                if let Some(status) = child.try_wait().map_err(GitRunError::Wait)? {
+                    break status;
+                }
+                if std::time::Instant::now() >= deadline {
+                    // #9029: a killed child closes its pipes, so the readers
+                    // end; they are detached rather than joined regardless.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GitRunError::TimedOut(limit));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    };
+    // #9029: a lost stdout must not read as empty output.
+    let (stdout, truncated) = out_reader
+        .join()
+        .map_err(|_| GitRunError::Wait(std::io::Error::other("stdout reader panicked")))?;
+    if !status.success() {
+        let (stderr, _) = err_reader.join().unwrap_or_default();
+        return Err(GitRunError::Exit {
+            code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+        });
     }
-    String::from_utf8(out.stdout).ok()
+    Ok(GitOutput { stdout, truncated })
+}
+
+/// Read a pipe to its end, keeping at most `cap` bytes.
+fn drain_capped(pipe: Option<impl std::io::Read>, cap: usize) -> (Vec<u8>, bool) {
+    let Some(mut pipe) = pipe else {
+        return (Vec::new(), false);
+    };
+    let (mut kept, mut truncated, mut buf) = (Vec::new(), false, [0u8; 8192]);
+    while let Ok(n) = pipe.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        let room = cap.saturating_sub(kept.len());
+        kept.extend_from_slice(&buf[..n.min(room)]);
+        truncated |= n > room;
+    }
+    (kept, truncated)
 }
 
 /// Split a NUL-delimited git output stream into its non-empty fields.
@@ -701,3 +803,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "git_bounded_tests.rs"]
+mod bounded_tests;
