@@ -30,10 +30,12 @@ use trusty_review::{
         subprocess_analyze_client::SubprocessAnalyzeClient,
     },
     llm::build_provider,
+    models::{ContextSourceRecord, ReviewResult, SourceState},
     pipeline::{
-        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
+        CallerContext, DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
+        TriggerDecision, log_json_path,
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
-        run_review,
+        run_review_with,
     },
     run_output::{run_failure_reason, run_is_failure, run_json_payload},
     store::{DedupNeed, open_dedup_for},
@@ -176,6 +178,22 @@ pub struct RunArgs {
     /// Read the referenced code from a regular file (at most 256 KiB).
     #[arg(long, value_name = "PATH")]
     pub referenced_code_file: Option<std::path::PathBuf>,
+
+    /// Merge the fetched PR body into the reviewer's PR description, capped at
+    /// 64,000 characters with a visible marker, ahead of any --pr-description
+    /// text (#9192). A local diff has no PR body; the review runs without it.
+    /// With a dedup store wired (`--live`), a repeat review of the same head
+    /// is skipped as a duplicate whatever its flags: push a new head to rerun.
+    #[arg(long)]
+    pub include_pr_body: bool,
+
+    /// Report which optional context sources the review used (#9192). With
+    /// `--json` the output becomes `{"result": <review>, "context_sources":
+    /// [...]}`; otherwise one line is printed per source that was unavailable
+    /// or truncated. `--include-pr-body` does the same. Without either flag
+    /// `--json` prints the review object alone, as before.
+    #[arg(long)]
+    pub report_context: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -299,31 +317,110 @@ pub async fn cmd_run(
     };
 
     let input = run_input(&args, diff_source, reviewer_model.clone(), caller_context);
-    let result = run_review(&config_with_overrides, input, deps).await;
+    let request = run_request(&args);
+    let wants_ledger = request.ledger_enabled();
+    let outcome = run_review_with(
+        &config_with_overrides,
+        input,
+        deps,
+        ReviewOptions::new(request),
+    );
+    let outcome = outcome.await;
+    let result = &outcome.result;
+    // #9192: the ledger is reported only when a flag asked for it.
+    let ledger = wants_ledger.then_some(outcome.context_sources.as_slice());
 
     if args.json {
         // Serialised before the failure check so a failed review still hands the
         // caller its reason as data (#6290 fail-open check).
         println!(
             "{}",
-            serde_json::to_string_pretty(&run_json_payload(&result))
+            serde_json::to_string_pretty(&run_json_value(result, ledger))
                 .unwrap_or_else(|e| format!(r#"{{"error":"serialising the result failed: {e}"}}"#))
         );
+    } else {
+        for note in ledger_notes(ledger.unwrap_or_default()) {
+            println!("{note}");
+        }
     }
 
     if args.write_log {
-        let log_path = log_json_path(&result, &config_with_overrides.log_dir);
+        let log_path = log_json_path(result, &config_with_overrides.log_dir);
         eprintln!("\nLog written to: {}", log_path.display());
     }
 
     // #6290: was `status.is_skipped()` alone, which exited 0 on a provider
     // outage — `abort_dry` records that as `error: Some(..)` with the status
     // left at `Completed`. See `run_output::run_is_failure`.
-    if run_is_failure(&result) {
-        anyhow::bail!("{}", run_failure_reason(&result));
+    if run_is_failure(result) {
+        anyhow::bail!("{}", run_failure_reason(result));
     }
 
     Ok(())
+}
+
+/// The optional inputs `run`'s flags ask for (#9192).
+///
+/// Why: `--include-pr-body` is the one new input `run` takes and
+/// `--report-context` asks for the ledger alone; the PR-context text flags are
+/// legacy and turn the ledger on only beside one of those two (ruling
+/// 2026-10-06 03:42Z).
+/// What: the request with `include_pr_body` and `report_context` from the flags.
+/// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`.
+pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
+    OptionalContextRequest::default()
+        .with_pr_body(args.include_pr_body)
+        .with_report_context(args.report_context)
+}
+
+/// `run --json`'s output value (#9192).
+///
+/// Why: Architect ruling 1 (2026-10-06): with no ledger flag the output is
+/// the review object exactly as before; with one, the ledger travels beside
+/// the review, never inside it.
+/// What: `ledger: None` is [`run_json_payload`]; `Some(sources)` is
+/// `{"result": <payload>, "context_sources": sources}`.
+/// Test: `run_json_without_ledger_flags_is_the_plain_result`,
+/// `run_json_wraps_the_result_when_the_ledger_is_on`.
+pub(crate) fn run_json_value(
+    result: &ReviewResult,
+    ledger: Option<&[ContextSourceRecord]>,
+) -> serde_json::Value {
+    let payload = run_json_payload(result);
+    let Some(sources) = ledger else {
+        return payload;
+    };
+    let sources = serde_json::to_value(sources).unwrap_or_else(
+        |e| serde_json::json!({ "error": format!("failed to serialise context_sources: {e}") }),
+    );
+    let mut wrapped = serde_json::Map::new();
+    wrapped.insert("result".to_string(), payload);
+    wrapped.insert("context_sources".to_string(), sources);
+    serde_json::Value::Object(wrapped)
+}
+
+/// One line per ledger row a reader must act on: `unavailable` or `truncated`.
+///
+/// Why: a human `run --include-pr-body` that could not read the body said
+/// nothing (critic MEDIUM, #9192).
+/// What: names the source and the reason, or the characters cut.
+/// Test: `ledger_notes_name_unavailable_and_truncated_rows`.
+pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
+    sources
+        .iter()
+        .filter_map(|row| match row.state {
+            SourceState::Unavailable => Some(format!(
+                "context source {}: unavailable — {}",
+                row.source,
+                row.detail.as_deref().unwrap_or("no detail")
+            )),
+            SourceState::Truncated => Some(format!(
+                "context source {}: truncated — {} characters omitted",
+                row.source, row.chars_omitted
+            )),
+            _ => None,
+        })
+        .collect()
 }
 
 /// #5113: `run` may post a GitHub-PR review, so it must carry the claim gate
@@ -817,6 +914,87 @@ mod tests {
 
         let args = RunArgs::try_parse_from(["run"]).expect("parse");
         assert!(!args.live, "--live must default to false");
+    }
+
+    /// #9192: `--include-pr-body` parses, defaults off, and turns the ledger
+    /// on; a legacy text flag alone never does.
+    #[test]
+    fn run_include_pr_body_flag_parses() {
+        let args = RunArgs::try_parse_from(["run", "--include-pr-body"]).expect("parse");
+        assert!(args.include_pr_body);
+        assert!(run_request(&args).requested_new());
+
+        let args = RunArgs::try_parse_from(["run", "--pr-description", "x"]).expect("parse");
+        assert!(
+            !args.include_pr_body,
+            "--include-pr-body must default to false"
+        );
+        assert!(!run_request(&args).ledger_enabled());
+    }
+
+    /// #9192: `--report-context` turns the ledger on with no other new input,
+    /// and the text flags turn it on only beside it.
+    #[test]
+    fn run_report_context_flag_turns_the_ledger_on() {
+        let args = RunArgs::try_parse_from(["run", "--report-context"]).expect("parse");
+        let request = run_request(&args);
+        assert!(request.ledger_enabled() && !request.requested_new());
+        let args = RunArgs::try_parse_from(["run", "--pr-discussion", "x", "--report-context"])
+            .expect("parse");
+        assert!(run_request(&args).ledger_enabled());
+    }
+
+    /// #9192: with no ledger flag, `--json` prints exactly the review object,
+    /// the value origin/main printed.
+    #[test]
+    fn run_json_without_ledger_flags_is_the_plain_result() {
+        let result = ReviewResult::new("acme", "billing", 7, "Add Y", "https://x/pull/7");
+        for argv in [vec!["run"], vec!["run", "--pr-description", "x", "--json"]] {
+            let args = RunArgs::try_parse_from(argv).expect("parse");
+            assert!(!run_request(&args).ledger_enabled());
+        }
+        let plain = run_json_value(&result, None);
+        assert_eq!(plain, run_json_payload(&result));
+        assert_eq!(
+            serde_json::to_string_pretty(&plain).expect("serialises"),
+            serde_json::to_string_pretty(&run_json_payload(&result)).expect("serialises"),
+        );
+    }
+
+    /// #9192: with the ledger on, `--json` wraps the review beside its ledger,
+    /// even when the ledger is empty.
+    #[test]
+    fn run_json_wraps_the_result_when_the_ledger_is_on() {
+        let result = ReviewResult::new("acme", "billing", 7, "Add Y", "https://x/pull/7");
+        let rows = [ContextSourceRecord::new("pr_body", SourceState::Absent)];
+        let wrapped = run_json_value(&result, Some(&rows));
+        assert_eq!(wrapped["result"], run_json_payload(&result));
+        assert_eq!(
+            wrapped["context_sources"],
+            serde_json::json!([{"source": "pr_body", "state": "absent"}])
+        );
+        assert_eq!(
+            run_json_value(&result, Some(&[]))["context_sources"],
+            serde_json::json!([])
+        );
+    }
+
+    /// #9192: the human output names an unavailable or truncated source, and
+    /// says nothing about a used or absent one.
+    #[test]
+    fn ledger_notes_name_unavailable_and_truncated_rows() {
+        let mut down = ContextSourceRecord::new("pr_body", SourceState::Unavailable);
+        down.detail = Some("local diff has no PR".to_string());
+        let mut cut = ContextSourceRecord::new("caller_context", SourceState::Truncated);
+        cut.chars_omitted = 6_000;
+        let used = ContextSourceRecord::new("pr_body", SourceState::Used);
+        assert_eq!(
+            ledger_notes(&[down, used, cut]),
+            [
+                "context source pr_body: unavailable — local diff has no PR",
+                "context source caller_context: truncated — 6000 characters omitted",
+            ]
+        );
     }
 
     #[test]
