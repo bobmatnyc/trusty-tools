@@ -32,7 +32,7 @@ async fn tied_palace(dir: &std::path::Path) -> (PalaceHandle, Vec<Uuid>) {
             d
         })
         .collect();
-    drawers.sort_by(|a, b| b.id.cmp(&a.id));
+    drawers.sort_by_key(|a| std::cmp::Reverse(a.id));
     for d in &drawers {
         handle
             .vector_store
