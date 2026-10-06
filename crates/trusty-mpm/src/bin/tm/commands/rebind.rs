@@ -43,7 +43,10 @@ pub(crate) fn render_row(row: &RebindRow) -> String {
             row.pane_id.as_deref().unwrap_or("?"),
             row.tmux_server.as_deref().unwrap_or("?")
         ),
-        "current" => format!("{head}: already bound to its live pane"),
+        "current" if row.detail.is_empty() => format!("{head}: already bound to its live pane"),
+        // #9313: a stopped record on its live pane names the resume it needs.
+        "current" => format!("{head}: already bound to its live pane; {}", row.detail),
+        "skipped" => format!("{head}: skipped — {}; record unchanged", row.detail),
         "no_match" => format!("{head}: no match — {}; record unchanged", row.detail),
         "ambiguous" => format!("{head}: ambiguous — {}; record unchanged", row.detail),
         other => format!("{head}: {other} — {}", row.detail),
@@ -139,6 +142,14 @@ mod tests {
             "tm-dogfood (id-1): rebound to pane %1 on tmux server 66166:1791300000"
         );
         assert!(render_row(&row("current", "")).ends_with("already bound to its live pane"));
+        assert!(
+            render_row(&row("current", "its runtime is stopped"))
+                .ends_with("already bound to its live pane; its runtime is stopped")
+        );
+        assert!(
+            render_row(&row("skipped", "on the live server"))
+                .contains("skipped — on the live server; record unchanged")
+        );
         assert!(render_row(&row("no_match", "gone")).contains("no match — gone; record unchanged"));
         assert!(
             render_row(&row("ambiguous", "2 panes"))

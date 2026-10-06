@@ -9,11 +9,13 @@
 //! reconcile and the managed-routes cores run, and
 //! [`SessionManager::rebind_session`], the `tm sessions rebind` verb. Both bind
 //! a record only to the ONE pane its tmux session holds, and only when no
-//! other record claims that pane or name. A rebind writes the record and
+//! other record claims that pane or name; the automatic pass also needs that
+//! pane to sit in the record's project. A rebind writes the record and
 //! nothing else: no tmux session is created, killed, renamed or signalled.
 //! Test: `pane_rebind_tests.rs`.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use chrono::Utc;
 use tracing::{info, warn};
@@ -28,9 +30,11 @@ use super::rename::validate_session_name;
 /// Why: the verb reports each session as rebound, no match or ambiguous, and
 /// the automatic pass logs the same finding.
 /// What: `Rebound` carries the binding written; `Current` means the record
-/// already names the live pane; `NoMatch` and `Ambiguous` carry the reason
-/// the record was left as it is.
-/// Test: `exactly_one_pane_under_the_name_rebinds_a_stale_server_record`.
+/// already names the live pane, and says whether its runtime is stopped;
+/// `NoMatch`, `Ambiguous` and `Skipped` carry the reason the record was left
+/// as it is.
+/// Test: `exactly_one_pane_under_the_name_rebinds_a_stale_server_record`,
+/// `a_stopped_record_already_on_its_live_pane_is_not_reactivated`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RebindOutcome {
     /// The record now names this session, pane and server, and is `Active`.
@@ -42,22 +46,32 @@ pub enum RebindOutcome {
         /// The `<pid>:<start_time>` server the pane was read on.
         tmux_server: String,
     },
-    /// The record already names the live pane on the live server.
-    Current,
+    /// The record already names the live pane on the live server and was
+    /// not written (#9313).
+    Current {
+        /// The record is `Stopped`: its pane lives on but its runtime does
+        /// not, so it needs `tm sessions resume`, not a rebind.
+        stopped: bool,
+    },
     /// No live pane matches; the record is unchanged.
     NoMatch(String),
     /// More than one pane or record matches; the record is unchanged.
     Ambiguous(String),
+    /// `--all` left the record alone: its tmux server was not replaced
+    /// (#9313).
+    Skipped(String),
 }
 
 impl RebindOutcome {
-    /// The wire label: `rebound`, `current`, `no_match` or `ambiguous`.
+    /// The wire label: `rebound`, `current`, `no_match`, `ambiguous` or
+    /// `skipped`.
     pub fn label(&self) -> &'static str {
         match self {
             Self::Rebound { .. } => "rebound",
-            Self::Current => "current",
+            Self::Current { .. } => "current",
             Self::NoMatch(_) => "no_match",
             Self::Ambiguous(_) => "ambiguous",
+            Self::Skipped(_) => "skipped",
         }
     }
 }
@@ -151,6 +165,50 @@ fn single_pane(tmux: &dyn ManagedTmuxDriver, target: &str) -> Result<PaneMatch, 
     }
 }
 
+/// Why `pane` is not the record's own project, or `None` when the session's
+/// current path lies under the record's `cwd` or `workspace_path` (#9313).
+///
+/// Why: a same-named session on a replaced server can belong to another
+/// project; binding to it lets idle-stop, `tm sessions stop` and daemon
+/// shutdown signal that foreign session.
+/// What: reads `pane_current_path` for the record's tmux session; an unread
+/// path is a reason too, so doubt never binds.
+/// Test: `a_pane_in_another_project_is_not_rebound_automatically`.
+fn outside_project(
+    tmux: &dyn ManagedTmuxDriver,
+    record: &SessionRecord,
+    pane: &str,
+) -> Option<String> {
+    let Some(path) = tmux.get_pane_cwd(&record.tmux_name) else {
+        return Some(format!(
+            "tmux did not report the current path of pane {pane}"
+        ));
+    };
+    let roots: Vec<&Path> = std::iter::once(record.cwd.as_path())
+        .chain(record.workspace_path.as_deref())
+        .collect();
+    if roots.iter().any(|root| path_under(&path, root)) {
+        return None;
+    }
+    let roots: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+    Some(format!(
+        "pane {pane} is in {}, outside the record's {}",
+        path.display(),
+        roots.join(" and ")
+    ))
+}
+
+/// Whether `path` lies under `root`, compared by component both as given
+/// and canonicalised (macOS reports `/tmp` as `/private/tmp`). An empty
+/// `root` contains nothing.
+fn path_under(path: &Path, root: &Path) -> bool {
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    path.starts_with(root) || canonical(path).starts_with(canonical(root))
+}
+
 impl SessionManager {
     /// Re-bind one record to the single live pane of its tmux session, or of
     /// `tmux` when given (#9313). Backs `tm sessions rebind`.
@@ -162,9 +220,10 @@ impl SessionManager {
     /// for a `tmux` name tm cannot target. `NoMatch` when the session is gone
     /// or lists no pane, `Ambiguous` when it holds two or more panes or
     /// another non-terminal record claims the pane or the name, `Current`
-    /// when the active record already names the pane. Otherwise writes
-    /// `tmux_name`, `pane_id`, `tmux_server` and `Active`. Never launches,
-    /// kills or signals anything.
+    /// when the record already names the pane on the live server, whatever
+    /// its state; that record is not written, so a stopped one stays stopped
+    /// with its stop cause. Otherwise writes `tmux_name`, `pane_id`,
+    /// `tmux_server` and `Active`. Never launches, kills or signals anything.
     ///
     /// # Errors
     ///
@@ -172,11 +231,43 @@ impl SessionManager {
     /// tmux or store failure, which leaves the record unchanged.
     /// Test: `the_manual_verb_rebinds_a_renamed_session_to_the_named_tmux_session`,
     /// `two_panes_in_the_session_refuse_the_rebind`,
-    /// `a_tmux_error_in_the_manual_verb_changes_nothing`.
+    /// `a_tmux_error_in_the_manual_verb_changes_nothing`,
+    /// `a_stopped_record_already_on_its_live_pane_is_not_reactivated`,
+    /// `a_store_write_failure_leaves_the_record_unchanged`.
     pub async fn rebind_session(
         &self,
         id: &ManagedSessionId,
         tmux: Option<&str>,
+    ) -> Result<RebindOutcome, ManagedError> {
+        self.rebind_one(id, tmux, false).await
+    }
+
+    /// `tm sessions rebind --all`'s per-record rebind (#9313).
+    ///
+    /// Why: a fleet-wide verb must not move a record the automatic pass would
+    /// leave alone; a same-server pane change is a decision per session.
+    /// What: [`Self::rebind_session`] with no `--tmux`, answering `Skipped`
+    /// for a record with no recorded tmux server or one on the live server.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::rebind_session`].
+    /// Test: `rebind_all_leaves_a_same_server_fleet_unchanged`.
+    pub async fn rebind_if_server_replaced(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<RebindOutcome, ManagedError> {
+        self.rebind_one(id, None, true).await
+    }
+
+    /// The shared body of [`Self::rebind_session`] and
+    /// [`Self::rebind_if_server_replaced`]; `replaced_only` adds the
+    /// automatic pass's server gate.
+    async fn rebind_one(
+        &self,
+        id: &ManagedSessionId,
+        tmux: Option<&str>,
+        replaced_only: bool,
     ) -> Result<RebindOutcome, ManagedError> {
         let record = self.get(id).await?;
         if !rebindable(&record.state) {
@@ -188,6 +279,13 @@ impl SessionManager {
                 ),
             ));
         }
+        // #9313: the automatic pass never rebinds a record with no server.
+        if replaced_only && record.tmux_server.is_none() {
+            return Ok(RebindOutcome::Skipped(format!(
+                "the record captured no tmux server, so no replacement can be seen; \
+                 `tm sessions rebind {id}` rebinds it by hand"
+            )));
+        }
         let target = match tmux {
             Some(name) => validate_session_name(name)
                 .map_err(|why| ManagedError::InvalidState(id.to_string(), why))?,
@@ -198,12 +296,21 @@ impl SessionManager {
             PaneMatch::None(why) => return Ok(RebindOutcome::NoMatch(why)),
             PaneMatch::Many(why) => return Ok(RebindOutcome::Ambiguous(why)),
         };
-        let current = record.state == ManagedSessionState::Active
-            && record.tmux_name == target
-            && record.pane_id.as_deref() == Some(identity.pane_id.as_str())
-            && record.tmux_server.as_deref() == Some(identity.server.as_str());
-        if current {
-            return Ok(RebindOutcome::Current);
+        // #9313: a record already on the live pane is never written, so a
+        // stopped one keeps its state and stop cause.
+        let same_server = record.tmux_server.as_deref() == Some(identity.server.as_str());
+        if same_server && record.pane_id.as_deref() == Some(identity.pane_id.as_str()) {
+            return Ok(RebindOutcome::Current {
+                stopped: record.state == ManagedSessionState::Stopped,
+            });
+        }
+        // #9313: `--all` takes the automatic pass's server gate.
+        if replaced_only && same_server {
+            return Ok(RebindOutcome::Skipped(format!(
+                "the record is on the live tmux server; `tm sessions rebind {id}` \
+                 binds it to pane {} by hand",
+                identity.pane_id
+            )));
         }
         self.write_rebind(&record, &target, &identity).await
     }
@@ -216,7 +323,9 @@ impl SessionManager {
     /// What: one `list-sessions`. Then, for each `Active` or `Stopped` record
     /// whose `tmux_name` is live and that captured a `tmux_server`: when the
     /// live server differs from the recorded one, rebind it to the session's
-    /// single pane as [`Self::rebind_session`] does. A record on the live
+    /// single pane as [`Self::rebind_session`] does, but only when that
+    /// pane's current path lies under the record's `cwd` or
+    /// `workspace_path` (#9313); otherwise `NoMatch`. A record on the live
     /// server is left alone, so a same-server pane change is the manual
     /// verb's decision. The live server is read once per pass. Every tmux or
     /// store failure is logged and leaves that record unchanged. Returns
@@ -225,6 +334,8 @@ impl SessionManager {
     /// `no_pane_under_the_name_leaves_the_record_unchanged`,
     /// `two_panes_in_the_session_refuse_the_rebind`,
     /// `a_pane_list_error_leaves_that_record_unchanged_and_rebinds_the_rest`,
+    /// `a_pane_identity_error_in_the_automatic_pass_changes_nothing`,
+    /// `a_pane_in_another_project_is_not_rebound_automatically`,
     /// `boot_reconcile_rebinds_and_lists_the_session_active_without_a_launch_or_kill`.
     pub async fn rebind_stale_panes(&self) -> Vec<(ManagedSessionId, RebindOutcome)> {
         let live: HashSet<String> = match self.tmux.list_sessions() {
@@ -255,10 +366,12 @@ impl SessionManager {
                 }
             };
             match &outcome {
-                RebindOutcome::NoMatch(why) | RebindOutcome::Ambiguous(why) => {
+                RebindOutcome::NoMatch(why)
+                | RebindOutcome::Ambiguous(why)
+                | RebindOutcome::Skipped(why) => {
                     warn!(id = %record.id, name = %record.tmux_name, "pane rebind: {why}; record left as is (#9313)");
                 }
-                RebindOutcome::Rebound { .. } | RebindOutcome::Current => {}
+                RebindOutcome::Rebound { .. } | RebindOutcome::Current { .. } => {}
             }
             results.push((record.id, outcome));
         }
@@ -291,12 +404,20 @@ impl SessionManager {
                 panes.join(", ")
             ))));
         }
+        // #9313: a same-named session on the new server may be another project's.
+        if let Some(why) = outside_project(self.tmux.as_ref(), record, first) {
+            return Ok(Some(RebindOutcome::NoMatch(why)));
+        }
         self.write_rebind(record, name, &identity).await.map(Some)
     }
 
     /// Write the binding under one store write guard, only when no other
     /// record claims the pane or name and `before` is still the stored
-    /// record. Changes the record and nothing else.
+    /// record. Changes the record and nothing else; a failed write puts the
+    /// prior record back in the store's cache (#9313).
+    /// Test: `a_record_changed_mid_rebind_is_left_as_the_other_writer_left_it`,
+    /// `a_pane_another_record_holds_refuses_a_tmux_rebind`,
+    /// `a_store_write_failure_leaves_the_record_unchanged`.
     async fn write_rebind(
         &self,
         before: &SessionRecord,
@@ -320,7 +441,7 @@ impl SessionManager {
                 "the record changed while it was being rebound".to_string(),
             ));
         }
-        let mut updated = stored;
+        let mut updated = stored.clone();
         updated.tmux_name = target.to_owned();
         updated.pane_id = Some(identity.pane_id.clone());
         updated.tmux_server = Some(identity.server.clone());
@@ -329,7 +450,14 @@ impl SessionManager {
             updated.set_lifecycle_state(ManagedSessionState::Active, Utc::now());
         }
         updated.stop_cause = None;
-        store.upsert(updated).await?;
+        if let Err(e) = store.upsert(updated).await {
+            // #9313: `upsert` caches the record before its save fails; put the
+            // prior one back so a later save cannot persist this rebind.
+            if let Err(revert) = store.upsert(stored).await {
+                warn!(id = %before.id, "pane rebind: the prior record could not be re-saved ({revert}) (#9313)");
+            }
+            return Err(e.into());
+        }
         drop(store);
         if reactivated {
             self.bump_residency_generation();

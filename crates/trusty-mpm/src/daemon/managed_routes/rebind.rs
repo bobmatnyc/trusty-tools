@@ -6,8 +6,9 @@
 //! lets an operator rebind a renamed or same-server-relaunched session.
 //! What: [`router`] registers `POST …/managed/{id}/rebind` (optional
 //! `?tmux=<session>`) and the fleet-wide `POST …/managed/rebind`. Both report
-//! per record `rebound`, `current`, `no_match`, `ambiguous` or `error`. A
-//! rebind writes the record only; no tmux session is created, killed or
+//! per record `rebound`, `current`, `no_match`, `ambiguous` or `error`; the
+//! fleet-wide one also `skipped` for a record whose server was not replaced.
+//! A rebind writes the record only; no tmux session is created, killed or
 //! signalled.
 //! Test: `pane_rebind_tests.rs` (`the_rebind_routes_report_each_outcome`).
 
@@ -50,9 +51,10 @@ pub struct RebindResponse {
     pub id: String,
     /// The record's tmux name after the call.
     pub name: String,
-    /// `rebound`, `current`, `no_match`, `ambiguous` or `error`.
+    /// `rebound`, `current`, `no_match`, `ambiguous`, `skipped` or `error`.
     pub outcome: String,
-    /// Why the record was left as it is; empty for `rebound` and `current`.
+    /// Why the record was left as it is; empty for `rebound` and for a
+    /// `current` record that is active.
     pub detail: String,
     /// The pane the record now names, for `rebound`.
     pub pane_id: Option<String>,
@@ -80,10 +82,17 @@ fn response(id: String, name: &str, outcome: &RebindOutcome) -> RebindResponse {
             Some(tmux_server.clone()),
             tmux_name.clone(),
         ),
-        RebindOutcome::Current => (String::new(), None, None, name.to_owned()),
-        RebindOutcome::NoMatch(why) | RebindOutcome::Ambiguous(why) => {
-            (why.clone(), None, None, name.to_owned())
-        }
+        RebindOutcome::Current { stopped: false } => (String::new(), None, None, name.to_owned()),
+        // #9313: a stopped record on its live pane needs a resume, not a rebind.
+        RebindOutcome::Current { stopped: true } => (
+            format!("its runtime is stopped; `tm sessions resume {id}` starts it"),
+            None,
+            None,
+            name.to_owned(),
+        ),
+        RebindOutcome::NoMatch(why)
+        | RebindOutcome::Ambiguous(why)
+        | RebindOutcome::Skipped(why) => (why.clone(), None, None, name.to_owned()),
     };
     RebindResponse {
         id,
@@ -149,7 +158,8 @@ pub async fn rebind_all_route(State(state): State<Arc<DaemonState>>) -> impl Int
 ///
 /// Why: `tm sessions rebind --all` after a tmux server replacement.
 /// What: [`rebind_each`] over the manager; always 200.
-/// Test: `the_rebind_routes_report_each_outcome`.
+/// Test: `the_rebind_routes_report_each_outcome`,
+/// `rebind_all_leaves_a_same_server_fleet_unchanged`.
 pub(crate) async fn rebind_all_core(state: &Arc<DaemonState>) -> RouteOutcome {
     let mgr = state.session_manager().await;
     RouteOutcome::ok(&RebindAllResponse {
@@ -157,8 +167,9 @@ pub(crate) async fn rebind_all_core(state: &Arc<DaemonState>) -> RouteOutcome {
     })
 }
 
-/// [`SessionManager::rebind_session`] for each active or stopped record, one
-/// at a time. A failure is that record's `error` row and never stops the
+/// [`SessionManager::rebind_if_server_replaced`] for each active or stopped
+/// record, one at a time, so `--all` moves only records on a replaced tmux
+/// server (#9313). A failure is that record's `error` row and never stops the
 /// rest.
 async fn rebind_each(mgr: &SessionManager) -> Vec<RebindResponse> {
     let mut results = Vec::new();
@@ -170,7 +181,7 @@ async fn rebind_each(mgr: &SessionManager) -> Vec<RebindResponse> {
             continue;
         }
         let id = record.id.to_string();
-        let row = match mgr.rebind_session(&record.id, None).await {
+        let row = match mgr.rebind_if_server_replaced(&record.id).await {
             Ok(outcome) => response(id, &record.tmux_name, &outcome),
             Err(e) => RebindResponse {
                 id,

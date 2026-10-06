@@ -7,6 +7,7 @@
 //! assert that list stays empty.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::daemon::managed_routes::cores::list_core;
@@ -15,6 +16,8 @@ use crate::daemon::rpc::managed::outcome::RouteBody;
 use crate::daemon::state::DaemonState;
 use crate::session_manager::pane_identity::PaneIdentity;
 use crate::session_manager::pane_rebind::RebindOutcome;
+use crate::session_manager::record::StopCause;
+use crate::session_manager::store::SessionStore;
 use crate::session_manager::tests::make_active_test_record;
 use crate::session_manager::{
     ManagedError, ManagedSessionId, ManagedSessionState, ManagedTmuxDriver, SessionManager,
@@ -36,6 +39,9 @@ struct RebindTmux {
     pane_list_fails: HashSet<String>,
     /// Every pane-identity read fails.
     identity_fails: bool,
+    /// Session → `pane_current_path`; a session not listed sits in `/tmp`,
+    /// the seeded records' own `cwd`.
+    pane_cwds: HashMap<String, PathBuf>,
     /// Every call that could launch, kill, rename, type into or signal.
     mutations: Mutex<Vec<String>>,
 }
@@ -104,6 +110,14 @@ impl ManagedTmuxDriver for RebindTmux {
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.sessions.clone())
+    }
+    fn get_pane_cwd(&self, name: &str) -> Option<PathBuf> {
+        Some(
+            self.pane_cwds
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from("/tmp")),
+        )
     }
     fn pane_exists_checked(&self, name: &str, pane_id: &str) -> Option<bool> {
         Some(self.panes.get(pane_id).is_some_and(|(_, s)| s == name))
@@ -388,10 +402,8 @@ async fn the_manual_verb_rebinds_a_renamed_session_to_the_named_tmux_session() {
     let (name, pane, server, st) = binding(&mgr, &id).await;
     assert_eq!((name, pane, server), bound("tm-architect", "%0", NEW));
     assert_eq!(st, ManagedSessionState::Active);
-    assert_eq!(
-        mgr.rebind_session(&id, None).await.expect("again"),
-        RebindOutcome::Current
-    );
+    let again = mgr.rebind_session(&id, None).await.expect("again");
+    assert!(matches!(again, RebindOutcome::Current { .. }), "{again:?}");
     assert!(tmux.mutations().is_empty());
 }
 
@@ -523,4 +535,260 @@ fn the_real_driver_lists_every_pane_of_a_live_session() {
     assert!(two.iter().all(|p| p.starts_with('%')), "{two:?}");
 
     assert!(driver.session_pane_ids("tm-9313-no-such-session").is_err());
+}
+
+/// #9313 critic finding: a `Stopped` record whose pane and server match the
+/// live ones (its runtime exited, the pane lives on as a shell) is not
+/// written. Pre-fix the verb flipped it to `Active` and cleared its stop
+/// cause, so idle-stop and shutdown treated a bare shell as a running Claude.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_stopped_record_already_on_its_live_pane_is_not_reactivated() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-a"], &[("%1", NEW, "tm-a")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%1", NEW).await;
+    let mut record = mgr.get(&id).await.expect("record");
+    record.stop_cause = Some(StopCause::Unexpected);
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("stop cause");
+    let state = Arc::new(DaemonState::with_session_manager(Arc::clone(&mgr)));
+
+    let outcome = mgr.rebind_session(&id, None).await.expect("verb");
+
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%1", NEW));
+    assert_eq!(st, ManagedSessionState::Stopped, "{outcome:?}");
+    let cause = mgr.get(&id).await.expect("record").stop_cause;
+    assert_eq!(cause, Some(StopCause::Unexpected), "{outcome:?}");
+    assert_eq!(outcome.label(), "current", "{outcome:?}");
+    let route = rebind_core(&state, &id.to_string(), None).await;
+    let RouteBody::Json(body) = route.body else {
+        panic!("rebind answered {}: {:?}", route.status, route.body);
+    };
+    assert_eq!(body["outcome"], "current");
+    assert!(
+        body["detail"].as_str().expect("detail").contains("resume"),
+        "{body}"
+    );
+    assert_eq!(binding(&mgr, &id).await.3, ManagedSessionState::Stopped);
+    assert!(tmux.mutations().is_empty());
+}
+
+/// #9313 critic finding: `--all` takes the automatic pass's server gate. On
+/// a fleet whose records already name the live server, a different pane
+/// under the name is skipped, not rebound; only a single named id moves it.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rebind_all_leaves_a_same_server_fleet_unchanged() {
+    let tmux = Arc::new(RebindTmux::new(
+        &["tm-a", "tm-b", "tm-c"],
+        &[
+            ("%3", NEW, "tm-a"),
+            ("%5", NEW, "tm-b"),
+            ("%6", NEW, "tm-c"),
+        ],
+    ));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let a = seed(&mgr, "tm-a", ManagedSessionState::Active, "%2", NEW).await;
+    let b = seed(&mgr, "tm-b", ManagedSessionState::Stopped, "%4", NEW).await;
+    let c = seed(&mgr, "tm-c", ManagedSessionState::Active, "%6", NEW).await;
+    let state = Arc::new(DaemonState::with_session_manager(Arc::clone(&mgr)));
+
+    let all = rebind_all_core(&state).await;
+
+    let RouteBody::Json(body) = all.body else {
+        panic!("rebind --all answered {}: {:?}", all.status, all.body);
+    };
+    let outcome = |id: &ManagedSessionId| {
+        body["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .find(|r| r["id"] == id.to_string())
+            .map(|r| r["outcome"].as_str().unwrap_or_default().to_owned())
+    };
+    assert_eq!(outcome(&a).as_deref(), Some("skipped"), "{body}");
+    assert_eq!(outcome(&b).as_deref(), Some("skipped"), "{body}");
+    assert_eq!(outcome(&c).as_deref(), Some("current"), "{body}");
+    let (name, pane, server, st) = binding(&mgr, &a).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%2", NEW));
+    assert_eq!(st, ManagedSessionState::Active);
+    let (name, pane, server, st) = binding(&mgr, &b).await;
+    assert_eq!((name, pane, server), bound("tm-b", "%4", NEW));
+    assert_eq!(st, ManagedSessionState::Stopped);
+    let (name, pane, server, _) = binding(&mgr, &c).await;
+    assert_eq!((name, pane, server), bound("tm-c", "%6", NEW));
+    assert!(tmux.mutations().is_empty());
+}
+
+/// #9313 critic finding: the replacement server runs a session under the
+/// record's name whose one pane sits in another project. The automatic pass
+/// answers `NoMatch` and leaves the record; a pane under the record's
+/// `workspace_path` on the same pass still rebinds.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_pane_in_another_project_is_not_rebound_automatically() {
+    let mut fake = RebindTmux::new(
+        &["tm-a", "tm-b"],
+        &[("%1", NEW, "tm-a"), ("%2", NEW, "tm-b")],
+    );
+    let foreign = PathBuf::from("/nonexistent-9313/other-project");
+    fake.pane_cwds.insert("tm-a".into(), foreign);
+    fake.pane_cwds
+        .insert("tm-b".into(), PathBuf::from("/work/9313-proj/crates/x"));
+    let tmux = Arc::new(fake);
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let a = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%12", OLD).await;
+    let mut ours = make_active_test_record("tm-b", "t", "/work/9313-proj");
+    ours.pane_id = Some("%8".into());
+    ours.tmux_server = Some(OLD.into());
+    let b = ours.id;
+    mgr.store.write().await.upsert(ours).await.expect("seed b");
+
+    let results = mgr.rebind_stale_panes().await;
+
+    let found = |id: ManagedSessionId| results.iter().find(|(r, _)| *r == id).map(|(_, o)| o);
+    assert!(
+        matches!(found(a), Some(RebindOutcome::NoMatch(why)) if why.contains("other-project")),
+        "{results:?}"
+    );
+    assert!(
+        matches!(found(b), Some(RebindOutcome::Rebound { .. })),
+        "{results:?}"
+    );
+    let (name, pane, server, st) = binding(&mgr, &a).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%12", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+    assert_eq!(binding(&mgr, &b).await.1.as_deref(), Some("%2"));
+    assert!(tmux.mutations().is_empty());
+}
+
+/// #9313: another writer changes the record between the tmux read and the
+/// write (a resume relaunched it in `%10`). The rebind answers `NoMatch` and
+/// the record keeps what the other writer wrote.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_record_changed_mid_rebind_is_left_as_the_other_writer_left_it() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-a"], &[("%1", NEW, "tm-a")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%9", OLD).await;
+    let before = mgr.get(&id).await.expect("record");
+    let identity = tmux.pane_identity("%1").expect("identity");
+    let mut moved = before.clone();
+    moved.pane_id = Some("%10".into());
+    moved.state = ManagedSessionState::Active;
+    mgr.store
+        .write()
+        .await
+        .upsert(moved)
+        .await
+        .expect("other writer");
+
+    let outcome = mgr
+        .write_rebind(&before, "tm-a", &identity)
+        .await
+        .expect("write");
+
+    assert!(
+        matches!(&outcome, RebindOutcome::NoMatch(why) if why.contains("changed while")),
+        "{outcome:?}"
+    );
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%10", OLD));
+    assert_eq!(st, ManagedSessionState::Active);
+}
+
+/// #9313: `--tmux` names a session whose one pane another record already
+/// holds on the live server (that record's session was renamed in tmux).
+/// The rebind is ambiguous and neither record changes.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_pane_another_record_holds_refuses_a_tmux_rebind() {
+    let tmux = Arc::new(RebindTmux::new(&["tm-x"], &[("%1", NEW, "tm-x")]));
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let holder = seed(&mgr, "tm-old", ManagedSessionState::Active, "%1", NEW).await;
+    let id = seed(&mgr, "tm-y", ManagedSessionState::Stopped, "%9", OLD).await;
+
+    let outcome = mgr.rebind_session(&id, Some("tm-x")).await.expect("verb");
+
+    assert!(
+        matches!(&outcome, RebindOutcome::Ambiguous(why) if why.contains("already holds pane %1")),
+        "{outcome:?}"
+    );
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-y", "%9", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+    let (name, pane, server, st) = binding(&mgr, &holder).await;
+    assert_eq!((name, pane, server), bound("tm-old", "%1", NEW));
+    assert_eq!(st, ManagedSessionState::Active);
+}
+
+/// #9313 Fail-Open Check: the pane identity cannot be read on the AUTOMATIC
+/// path, so the pass reports nothing for the record and leaves it unchanged.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_pane_identity_error_in_the_automatic_pass_changes_nothing() {
+    let mut fake = RebindTmux::new(&["tm-a"], &[("%1", NEW, "tm-a")]);
+    fake.identity_fails = true;
+    let (_dir, mgr) = manager(Arc::new(fake)).await;
+    let id = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%9", OLD).await;
+
+    let results = mgr.rebind_stale_panes().await;
+
+    assert!(results.is_empty(), "{results:?}");
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%9", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+}
+
+/// #9313 Fail-Open Check: the store write fails (read-only store directory).
+/// The verb answers the store error, and neither the cached record nor the
+/// one on disk carries the rebind, so a later save cannot persist it.
+///
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_store_write_failure_leaves_the_record_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmux = Arc::new(RebindTmux::new(&["tm-a"], &[("%1", NEW, "tm-a")]));
+    let (dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let id = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%9", OLD).await;
+    let perms = std::fs::metadata(dir.path()).expect("meta").permissions();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+        .expect("make store dir read-only");
+
+    let result = mgr.rebind_session(&id, None).await;
+
+    // Restore first so TempDir cleanup works even when an assert fails.
+    std::fs::set_permissions(dir.path(), perms).expect("restore perms");
+    assert!(matches!(result, Err(ManagedError::Store(_))), "{result:?}");
+    let (name, pane, server, st) = binding(&mgr, &id).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%9", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+    let disk = SessionStore::load(dir.path())
+        .await
+        .expect("load")
+        .get(&id)
+        .await
+        .expect("on disk");
+    assert_eq!(
+        (disk.tmux_name, disk.pane_id, disk.tmux_server, disk.state),
+        (
+            "tm-a".into(),
+            Some("%9".into()),
+            Some(OLD.into()),
+            ManagedSessionState::Stopped
+        )
+    );
 }
