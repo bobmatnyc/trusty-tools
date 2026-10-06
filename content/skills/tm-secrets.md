@@ -124,7 +124,10 @@ server derives the vaults from that checkout's remote.
 | `secrets.copy` | Names copied and failed. Keychain is the only backend, so no copy has a destination. |
 | `secrets.doctor` | Backend availability and paths |
 
-No method returns a value.
+Only `secrets.set` echoes any part of a value: its one-time confirmation
+shows the first 8 characters and the length, or only the length for a value
+of 8 characters or fewer (owner ruling 2026-10-01). That is one reason agents
+never call it. No other method returns any part of a value.
 
 ## Refusals
 
