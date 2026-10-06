@@ -784,3 +784,207 @@ fn parse_finding_without_source_citation_defaults_none() {
         "absent source_citation must default to None (pre-#1419 back-compat)"
     );
 }
+
+// ── Review object embedded in text (#9310) ────────────────────────────────
+// A Bedrock 5.5 model on `toolChoice = auto` (#9292) may answer in text. The
+// review must parse whenever that text carries one complete review object, and
+// must stay fail-safe UNKNOWN whenever it does not.
+
+/// A complete review object, REQUEST_CHANGES with one finding.
+const EMBEDDED_REVIEW: &str = r#"{"verdict":"REQUEST_CHANGES","summary":"One bug.","findings":[{"title":"Off by one","body":"The loop skips the last item.","severity":"medium","confidence":0.9,"file":"src/lib.rs","line":7}]}"#;
+
+/// A second, different complete review object.
+const EMBEDDED_APPROVE: &str = r#"{"verdict":"APPROVE","summary":"Clean.","findings":[]}"#;
+
+/// Assert `body` parsed to [`EMBEDDED_REVIEW`].
+fn assert_embedded_review(body: &str) {
+    let result = parse_review_response(body);
+    assert!(
+        !result.is_fail_safe,
+        "a complete review object must parse: {:?}\nbody: {body}",
+        result.fail_safe_reason
+    );
+    assert_eq!(result.verdict, Verdict::RequestChanges, "body: {body}");
+    assert_eq!(result.summary, "One bug.");
+    assert_eq!(result.findings.len(), 1, "the finding must survive");
+    assert_eq!(result.findings[0].file, "src/lib.rs");
+    assert_eq!(result.findings[0].line, Some(7));
+}
+
+/// Assert `body` is the fail-safe UNKNOWN, never a verdict.
+fn assert_fail_safe_unknown(body: &str) -> String {
+    let result = parse_review_response(body);
+    assert!(result.is_fail_safe, "must fail closed, body: {body}");
+    assert_eq!(result.verdict, Verdict::Unknown, "body: {body}");
+    assert!(result.findings.is_empty());
+    result.fail_safe_reason.expect("fail-safe carries a reason")
+}
+
+/// A review object in a bare ``` fence parses (#9310).
+///
+/// Why: the bare fence is the favoured shape for the 37 unparsed Sonnet 5.5
+/// replies; strategy 2 reads only a ```json fence.
+/// What: prose, then the object in an untagged fence.
+/// Test: this test.
+#[test]
+fn parse_bare_fence_review_object() {
+    assert_embedded_review(&format!(
+        "I reviewed the diff.\n\n```\n{EMBEDDED_REVIEW}\n```\n"
+    ));
+}
+
+/// A review object in a ```JSON or ```jsonc fence parses (#9310).
+///
+/// Why: strategy 2 matches the lowercase `json` tag only.
+/// What: the same object under each tag variant.
+/// Test: this test.
+#[test]
+fn parse_json_tag_variant_fences() {
+    for tag in ["JSON", "jsonc", "Json"] {
+        assert_embedded_review(&format!(
+            "Review below.\n```{tag}\n{EMBEDDED_REVIEW}\n```\nDone."
+        ));
+    }
+}
+
+/// An unfenced review object after prose parses (#9310).
+///
+/// Why: strategy 1 needs the body to start with `{`.
+/// What: two lines of prose, then the bare object.
+/// Test: this test.
+#[test]
+fn parse_unfenced_object_after_prose() {
+    assert_embedded_review(&format!(
+        "I reviewed the diff. The loop bound is wrong.\nHere is the review:\n{EMBEDDED_REVIEW}"
+    ));
+}
+
+/// An unfenced review object before prose parses, and the trailing keyword is
+/// ignored (#9310).
+///
+/// Why: a model may add a closing remark after the object; that remark, and an
+/// `APPROVE` keyword in it, must not override the object.
+/// What: the object, then prose that names APPROVE.
+/// Test: this test.
+#[test]
+fn parse_unfenced_object_before_prose() {
+    assert_embedded_review(&format!(
+        "{EMBEDDED_REVIEW}\n\nThe loop bound is wrong, so APPROVE is not warranted yet."
+    ));
+}
+
+/// The same review object repeated is one candidate, so it parses (#9310).
+///
+/// Why: a model may restate its object, once fenced and once bare.
+/// What: the object in a bare fence and again unfenced.
+/// Test: this test.
+#[test]
+fn parse_repeated_identical_object_is_one_candidate() {
+    assert_embedded_review(&format!(
+        "```\n{EMBEDDED_REVIEW}\n```\nTo repeat:\n{EMBEDDED_REVIEW}\n"
+    ));
+}
+
+/// Two different review objects are ambiguous and fail closed (#9310).
+///
+/// Why: picking one of two disagreeing reviews could turn a BLOCK into an
+/// APPROVE; an ambiguous reply is never a verdict.
+/// What: an APPROVE object and a REQUEST_CHANGES object, in either order.
+/// Test: this test.
+#[test]
+fn parse_two_distinct_objects_fail_closed() {
+    for body in [
+        format!("Draft:\n{EMBEDDED_REVIEW}\nFinal:\n{EMBEDDED_APPROVE}\nAPPROVE"),
+        format!("```\n{EMBEDDED_APPROVE}\n```\nActually:\n{EMBEDDED_REVIEW}"),
+    ] {
+        let reason = assert_fail_safe_unknown(&body);
+        assert!(
+            reason.contains("2 distinct review objects"),
+            "the reason must name the ambiguity: {reason}"
+        );
+    }
+}
+
+/// A tool input wrapped once in `review_output` or `input` parses (#9310).
+///
+/// Why: candidate (b) — a tool call whose input nests the review under the
+/// tool name or the Converse field name fails strategy 1 on a missing `verdict`.
+/// What: each exact single-key wrapper around the object.
+/// Test: this test.
+#[test]
+fn parse_wrapped_tool_input_unwraps_one_exact_layer() {
+    for key in ["review_output", "input"] {
+        assert_embedded_review(&format!(r#"{{"{key}":{EMBEDDED_REVIEW}}}"#));
+    }
+}
+
+/// A wrapper never loosens the review object's required fields (#9310).
+///
+/// Why: unwrapping is for one evidenced shape only; a wrapped object that
+/// lacks `verdict`, a second wrapper layer, an unknown key, or an extra key is
+/// still a parse failure.
+/// What: four near-miss wrappers, each fail-safe UNKNOWN.
+/// Test: this test.
+#[test]
+fn parse_wrapper_near_misses_stay_unknown() {
+    let no_verdict = r#"{"review_output":{"summary":"Clean.","findings":[]}}"#;
+    let two_layers = format!(r#"{{"input":{{"review_output":{EMBEDDED_APPROVE}}}}}"#);
+    let other_key = format!(r#"{{"result":{EMBEDDED_APPROVE}}}"#);
+    let extra_key = format!(r#"{{"review_output":{EMBEDDED_APPROVE},"note":"x"}}"#);
+    for body in [no_verdict.to_string(), two_layers, other_key, extra_key] {
+        assert_fail_safe_unknown(&body);
+    }
+}
+
+/// A keyword-only reply stays fail-safe UNKNOWN (REV-112, #4491, #9310).
+///
+/// Why: a keyword alone is never a verdict; the lenient scan must not change
+/// that.
+/// What: prose ending in APPROVE, with and without braces in the prose.
+/// Test: this test.
+#[test]
+fn parse_keyword_only_reply_stays_unknown() {
+    for body in [
+        "The change looks fine to me. APPROVE",
+        "The `{}` placeholder and the `fn x() {` line are fine. APPROVE",
+    ] {
+        let reason = assert_fail_safe_unknown(body);
+        assert!(
+            reason.contains("APPROVE"),
+            "reason names the token: {reason}"
+        );
+    }
+}
+
+/// An invalid object beside a keyword stays fail-safe UNKNOWN (#9310).
+///
+/// Why: an object that does not deserialise, or a truncated one, carries no
+/// review; the keyword beside it must not become the verdict.
+/// What: an object missing `verdict`, a truncated object, and an object with
+/// an undecodable `findings` string, each next to APPROVE.
+/// Test: this test.
+#[test]
+fn parse_invalid_object_beside_keyword_stays_unknown() {
+    for body in [
+        r#"Looks good. APPROVE {"summary":"fine","findings":[]}"#,
+        r#"APPROVE. {"verdict":"APPROVE","findings":[{"title":"x","body":"#,
+        r#"Done: {"verdict":"APPROVE","findings":"[{\"title\": \"cut"} APPROVE"#,
+    ] {
+        assert_fail_safe_unknown(body);
+    }
+}
+
+/// A review-shaped object inside a non-JSON code fence is quoted code, not the
+/// review (#9310).
+///
+/// Why: a diff under review can hold a review-shaped fixture; a model that
+/// quotes it in a `rust` or `diff` fence must not have it read as its verdict.
+/// What: the APPROVE object inside a `rust` raw string, then a keyword.
+/// Test: this test.
+#[test]
+fn parse_object_in_code_fence_is_not_a_candidate() {
+    let body = format!(
+        "The test adds a fixture:\n```rust\nlet body = r#\"{EMBEDDED_APPROVE}\"#;\n```\nAPPROVE"
+    );
+    assert_fail_safe_unknown(&body);
+}

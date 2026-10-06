@@ -206,6 +206,31 @@ pub fn extract_tool_use_json(
     None
 }
 
+/// The content-block kinds of a Converse reply, in order (#9310).
+///
+/// Why: an `auto` reply that skips the tool reaches the review parser as text,
+/// and only the blocks show whether the model called the tool at all.
+/// What: one short name per block of the output message; a kind not named
+/// here reads `other`. Empty when the reply holds no message.
+/// Test: `reply_block_kinds_name_each_block`.
+pub(crate) fn reply_block_kinds(
+    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+) -> Vec<&'static str> {
+    let Some(msg) = resp.output().and_then(|o| o.as_message().ok()) else {
+        return Vec::new();
+    };
+    msg.content()
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text(_) => "text",
+            ContentBlock::ToolUse(_) => "tool_use",
+            ContentBlock::ReasoningContent(_) => "reasoning",
+            ContentBlock::CitationsContent(_) => "citations",
+            _ => "other",
+        })
+        .collect()
+}
+
 // ─── Document ↔ JSON conversion helpers ──────────────────────────────────────
 
 /// Convert a `serde_json::Value` to an AWS `Document`.

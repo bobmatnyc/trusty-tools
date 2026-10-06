@@ -828,7 +828,8 @@ async fn run_review_truncated_output_is_unknown() {
 /// telling the reader the review did not parse.
 /// What: drives a response whose findings payload cannot be decoded, asserts the
 /// verdict is UNKNOWN and `result.error` names the parse failure (which
-/// `print_review_result` renders as a `Pipeline error:` line).
+/// `print_review_result` renders as a `Pipeline error:` line) and, since
+/// #9310, the reply shape: stop reason, output tokens and a short head.
 #[tokio::test]
 async fn run_review_findings_parse_failure_sets_error() {
     let (source, _tmp) = local_diff_source("+fn x() {}\n");
@@ -859,6 +860,15 @@ async fn run_review_findings_parse_failure_sets_error() {
     assert!(
         err.contains("findings"),
         "the error must say the findings were not parsed: {err}"
+    );
+    // #9310: the harness row carries the reply shape, the raw reply is not kept.
+    assert!(
+        err.contains("reply shape: stop=none output_tokens=50"),
+        "the error must carry the reply shape: {err}"
+    );
+    assert!(
+        err.contains(r#"head="{\"summary\":\"looks fine\""#),
+        "the error must carry the reply head: {err}"
     );
 }
 

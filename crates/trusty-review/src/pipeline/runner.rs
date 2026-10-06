@@ -659,8 +659,11 @@ async fn run_pipeline(
     // ── Step 7: parse verdict + findings ──────────────────────────────────
     let mut parsed = parse_review_response(&llm_resp.text);
     if parsed.is_fail_safe {
+        // #9310: record what the unparsed reply looked like; the raw text is not kept.
+        let shape = crate::pipeline::reply_shape::describe_reply(&llm_resp);
         warn!(
             reason = ?parsed.fail_safe_reason,
+            %shape,
             "verdict parsing fell back to fail-safe UNKNOWN (fail-closed, #1241)"
         );
         // #4491: carry the reason into the rendered result and the JSON log, so a
@@ -669,7 +672,7 @@ async fn run_pipeline(
             .fail_safe_reason
             .clone()
             .unwrap_or_else(|| "unparseable LLM response".to_string());
-        result.error = Some(format!("review not parsed — {reason}"));
+        result.error = Some(format!("review not parsed — {reason}; {shape}"));
     }
 
     // ── Step 7-hyg/cite/absent/relax: output hygiene + grounding ──────────

@@ -796,13 +796,33 @@ fn inference_config_temperature_covers_every_compare_candidate() {
 
 /// A Converse reply holding one text block and no `toolUse` block.
 fn text_only_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![aws_sdk_bedrockruntime::types::ContentBlock::Text(
+        text.to_string(),
+    )])
+}
+
+/// A `toolUse` content block named `review_output` carrying `input`.
+fn tool_use_block(input: serde_json::Value) -> aws_sdk_bedrockruntime::types::ContentBlock {
+    let block = aws_sdk_bedrockruntime::types::ToolUseBlock::builder()
+        .tool_use_id("tooluse-1")
+        .name("review_output")
+        .input(tool_use::json_to_document(&input).expect("input is an object"))
+        .build()
+        .expect("tool use block builds");
+    aws_sdk_bedrockruntime::types::ContentBlock::ToolUse(block)
+}
+
+/// A Converse reply holding `blocks`, in order, with an `end_turn` stop.
+fn reply_with_blocks(
+    blocks: Vec<aws_sdk_bedrockruntime::types::ContentBlock>,
+) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
     use aws_sdk_bedrockruntime::types::{
-        ContentBlock, ConversationRole, ConverseMetrics, ConverseOutput as Output, Message,
-        StopReason, TokenUsage,
+        ConversationRole, ConverseMetrics, ConverseOutput as Output, Message, StopReason,
+        TokenUsage,
     };
     let message = Message::builder()
         .role(ConversationRole::Assistant)
-        .content(ContentBlock::Text(text.to_string()))
+        .set_content(Some(blocks))
         .build()
         .expect("message builds");
     aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
@@ -851,6 +871,74 @@ fn auto_mode_free_text_reply_reaches_the_review_parser() {
     let parsed = parse_review_response(&text);
     assert!(parsed.is_fail_safe, "prose must fail closed");
     assert_eq!(parsed.verdict, Verdict::Unknown);
+}
+
+/// An `auto` text reply carrying the review object in a bare fence parses.
+///
+/// Why: the favoured shape of the 37 unparsed Sonnet 5.5 reviews (#9310).
+/// What: prose plus a bare-fenced object, through `response_text` and the
+/// review parser.
+/// Test: this test.
+#[test]
+fn auto_mode_prose_reply_with_review_object_parses() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let prose = "I reviewed the diff.\n\n```\n{\"verdict\":\"REQUEST_CHANGES\",\
+                 \"summary\":\"One bug.\",\"findings\":[]}\n```";
+    let text = super::response_text(&text_only_reply(prose), true);
+    let parsed = parse_review_response(&text);
+    assert!(!parsed.is_fail_safe, "{:?}", parsed.fail_safe_reason);
+    assert_eq!(parsed.verdict, Verdict::RequestChanges);
+}
+
+/// A tool call wins over text, and a once-wrapped tool input parses.
+///
+/// Why: candidate (b) of #9310 — a tool input nested under the tool name.
+/// The tool call must still win when the reply also carries text.
+/// What: a text block with an APPROVE object, then a `toolUse` block whose
+/// input wraps a REQUEST_CHANGES object in `review_output`.
+/// Test: this test.
+#[test]
+fn auto_mode_wrapped_tool_input_wins_over_text() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let text_block = aws_sdk_bedrockruntime::types::ContentBlock::Text(
+        r#"{"verdict":"APPROVE","summary":"Clean.","findings":[]}"#.to_string(),
+    );
+    let tool = tool_use_block(serde_json::json!({
+        "review_output": {"verdict": "REQUEST_CHANGES", "summary": "One bug.", "findings": []}
+    }));
+    let reply = reply_with_blocks(vec![text_block, tool]);
+    let text = super::response_text(&reply, true);
+    let parsed = parse_review_response(&text);
+    assert!(!parsed.is_fail_safe, "{:?}", parsed.fail_safe_reason);
+    assert_eq!(
+        parsed.verdict,
+        Verdict::RequestChanges,
+        "the tool call wins"
+    );
+}
+
+/// The block kinds of a reply are named in order (#9310).
+///
+/// Why: the parse-failure record needs to say whether the model called the
+/// tool, which only the Converse blocks show.
+/// What: a text-only reply and a text-plus-tool reply.
+/// Test: this test.
+#[test]
+fn reply_block_kinds_name_each_block() {
+    assert_eq!(
+        tool_use::reply_block_kinds(&text_only_reply("prose")),
+        vec!["text"]
+    );
+    let reply = reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("prose".to_string()),
+        tool_use_block(serde_json::json!({"verdict": "APPROVE"})),
+    ]);
+    assert_eq!(
+        tool_use::reply_block_kinds(&reply),
+        vec!["text", "tool_use"]
+    );
 }
 
 // ── SDK error rendering (#6912) ───────────────────────────────────────────

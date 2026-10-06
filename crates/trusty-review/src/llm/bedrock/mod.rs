@@ -309,6 +309,22 @@ impl BedrockProvider {
         // is the truncation case the runner keys off.
         let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
 
+        // #9310: a structured reply with no toolUse block reaches the parser as
+        // text; log its block kinds, which the runner's record cannot see.
+        if req.response_schema.is_some() {
+            let blocks = tool_use::reply_block_kinds(&resp);
+            if !blocks.contains(&"tool_use") {
+                warn!(
+                    model = %arn::mask_account_ids(model),
+                    blocks = ?blocks,
+                    stop = finish_reason.as_deref().unwrap_or("none"),
+                    output_tokens,
+                    text_chars = text.chars().count(),
+                    "structured Bedrock reply carried no toolUse block; the caller parses its text (#9310)"
+                );
+            }
+        }
+
         Ok(LlmResponse {
             text,
             model: model.to_string(),
