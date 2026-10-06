@@ -2765,3 +2765,7 @@ mod verify_coverage;
 // #9188: the offline zero-hallucination corpus runner.
 #[path = "runner_hallucination_corpus_tests.rs"]
 mod hallucination_corpus;
+
+// #9192: with every optional input off, the review is byte-identical.
+#[path = "runner_optional_context_off_tests.rs"]
+mod optional_context_off;

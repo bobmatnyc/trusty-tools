@@ -8,9 +8,10 @@
 //!
 //! Test: covered transitively by runner integration tests.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use tracing::{error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::integrations::github::{
     AuthStrategy, CommentableLines, GithubClient, GithubError, RunMode, build_inline_plan,
@@ -499,6 +500,94 @@ pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> Claim
         Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
         Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
         Err(e) => ClaimGate::Abort(e.to_string()),
+    }
+}
+
+/// Take the dedup claim for this review's head SHA, or end the review (#582).
+///
+/// Why: moved out of `run_review` for `runner.rs`'s SLOC cap (#9192); the
+/// logic is unchanged. A completed claim for the same head SHA short-circuits
+/// the whole pipeline, and a store error aborts without posting (#5064).
+/// What: on a GitHub source with a head SHA and a wired store, claims
+/// `(owner, repo, pr, head_sha)` and maps the outcome through
+/// [`classify_claim`]: `Continue(result)` proceeds, `Break(result)` is the
+/// finished result the runner returns. Every other case is `Continue`.
+/// Test: `run_review_dedup_skips_completed`,
+/// `stranded_in_progress_claim_is_not_a_duplicate_skip`,
+/// `failed_claim_abort_does_not_delete_another_processes_record`.
+pub(super) async fn claim_slot(
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    deps: &ReviewDeps,
+    mut result: ReviewResult,
+    is_local: bool,
+) -> ControlFlow<ReviewResult, ReviewResult> {
+    let (owner, repo, pr_number) = (result.owner.clone(), result.repo.clone(), result.pr_number);
+    let head_sha = result.head_sha.clone();
+    let Some(store) = deps
+        .dedup
+        .as_ref()
+        .filter(|_| !is_local && !head_sha.is_empty())
+    else {
+        return ControlFlow::Continue(result);
+    };
+    match classify_claim(store.claim(&owner, &repo, pr_number, &head_sha).await) {
+        ClaimGate::DuplicateSkip => {
+            info!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup: a completed review already exists for this head SHA — skipping"
+            );
+            result.verdict = Verdict::Approve;
+            result.error = Some("skipped: duplicate of a completed review".to_string());
+            result.dry_run = true;
+            // #1877: `result.findings` is empty here (no LLM call happened
+            // yet) but keep the sync explicit rather than relying on the
+            // `ReviewResult::new()` default staying 0 forever.
+            result.findings_count = result.findings.len();
+            ControlFlow::Break(result)
+        }
+        // #5126: the slot is held by someone else, so this review never
+        // ran. Report that, never a verdict.
+        ClaimGate::InProgressElsewhere => {
+            warn!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup: another holder owns the in-progress claim — not reviewed"
+            );
+            let stale_secs = crate::config::constants::DEDUP_STALE_SECS;
+            result.verdict = Verdict::Unknown;
+            result.error = Some(format!(
+                "not reviewed: another review holds the in-progress dedup claim for \
+                 head SHA {head_sha}; it clears when that review finishes or after \
+                 {stale_secs}s"
+            ));
+            // NotHeld — this review never acquired the claim, so it must
+            // not delete the holder's record.
+            ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
+        }
+        ClaimGate::Proceed => {
+            debug!(head_sha = %head_sha, "dedup: claimed review slot");
+            ControlFlow::Continue(result)
+        }
+        // #5064: the claim gate did not engage — abort rather than post.
+        ClaimGate::Abort(reason) => {
+            error!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup claim failed — aborting without posting: {reason}"
+            );
+            result.error = Some(format!("dedup claim unavailable: {reason}"));
+            // #5064: NotHeld — this review never acquired the claim, so it
+            // must not delete whatever record is on disk.
+            ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
+        }
     }
 }
 
