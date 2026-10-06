@@ -1,7 +1,8 @@
 # 0069. trusty-memory 1.x freezes four surfaces: MCP tools, CLI, palace format, engine API
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-06
+- **Accepted:** 2026-10-06 (Bob, ruling d7)
 - **Scope:** crate `trusty-memory` (MCP tools, CLI, `engine` module, daemon
   socket); crate `trusty-common` (engine source until
   [#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271), then the

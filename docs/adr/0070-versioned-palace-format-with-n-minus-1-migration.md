@@ -1,7 +1,8 @@
 # 0070. Version the palace format; refuse newer, migrate N-1 behind a verified backup
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-06
+- **Accepted:** 2026-10-06 (Bob, ruling d7)
 - **Scope:** crate `trusty-memory` (engine store layer after
   [#9271](https://github.com/bobmatnyc/trusty-tools/issues/9271); today
   `trusty-common` `memory_core::store`), the palace directory layout under
