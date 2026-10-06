@@ -90,6 +90,8 @@ pub mod bm25_lane;
 pub mod bm25_repair;
 pub mod bootstrap;
 pub mod dream_scheduler;
+// #9283: daily per-palace drawer-count history for the doctor stability check.
+pub mod drawer_counts;
 pub mod exit_runtime;
 pub mod fd_metrics;
 pub mod idle_evict;

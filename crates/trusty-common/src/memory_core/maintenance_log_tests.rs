@@ -204,14 +204,46 @@ async fn purge_expired_records_each_drawer() {
     assert_eq!(records[0].reason, DeletionReason::ExpiredPurge);
 }
 
-/// Why: a user's `memory_forget` is not maintenance and must not be recorded
-/// as one.
+/// Why (#9283): a user forget left no journal line, so the doctor drawer-count
+/// check read every one as an unexplained drop.
+/// What: one `user_forget` record naming the palace and drawer, carrying the
+/// content hash and no drawer copy (owner ruling 2026-10-06).
 #[tokio::test]
-async fn user_forget_writes_no_maintenance_record() {
+async fn a_user_forget_writes_a_user_forget_journal_record() {
     let (_dir, data_dir, handle) = open_palace("user-forget");
+    let text = "a fact the user chose to forget";
+    let id = handle
+        .remember(text.into(), RoomType::General, vec![], 0.5)
+        .await
+        .unwrap();
+    assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
+
+    let records = read_journal(&data_dir).unwrap().records;
+    assert_eq!(records.len(), 1, "{records:?}");
+    let rec = &records[0];
+    assert_eq!(rec.palace, "user-forget");
+    assert_eq!(rec.drawer_id, id);
+    assert_eq!(rec.reason, DeletionReason::UserForget);
+    assert!(rec.drawer.is_none(), "a user forget must keep no copy");
+    assert_eq!(
+        rec.content_hash,
+        Some(super::content_hash::memory_content_hash(text))
+    );
+}
+
+/// Why (#9283, owner ruling 2026-10-06): the journal stores recoverable copies
+/// for maintenance deletions; a user forget must not, or forgetting a secret
+/// would leave it on disk.
+/// What: forgets a drawer holding a distinctive token, then searches every
+/// journal byte for it.
+#[tokio::test]
+async fn forgotten_content_cannot_be_recovered_from_the_journal() {
+    let (_dir, data_dir, handle) = open_palace("forget-secret");
+    // Not credential-shaped: the remember path's secret filter would refuse it.
+    let secret = "marigold-quokka-anniversary-9283";
     let id = handle
         .remember(
-            "a fact the user chose to forget".into(),
+            format!("the surprise party codeword is {secret}"),
             RoomType::General,
             vec![],
             0.5,
@@ -219,8 +251,16 @@ async fn user_forget_writes_no_maintenance_record() {
         .await
         .unwrap();
     assert_eq!(handle.forget(id).await.unwrap(), ForgetOutcome::Deleted);
-    assert!(!journal_path(&data_dir).exists());
-    assert!(read_journal(&data_dir).unwrap().records.is_empty());
+
+    let journal = std::fs::read_to_string(journal_path(&data_dir)).unwrap();
+    assert!(
+        journal.contains(&id.to_string()),
+        "the record names the drawer"
+    );
+    assert!(
+        !journal.contains(secret) && !journal.contains("surprise party"),
+        "forgotten content leaked into the journal: {journal}"
+    );
 }
 
 /// Why (Fail-Open Check): a journal that cannot be written must not undo the
