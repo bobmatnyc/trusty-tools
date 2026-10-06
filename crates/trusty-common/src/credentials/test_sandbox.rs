@@ -12,7 +12,10 @@
 //! holds or locates a credential: a registered credential variable, a name
 //! carrying a credential marker (`TOKEN`, `SECRET`, `_KEY`, `AUTH`, …), a
 //! config-dir redirect, and any value that is a URL with embedded userinfo.
-//! It points `HOME`, the XDG dirs, `GH_CONFIG_DIR` and
+//! It also removes git config injected through the environment
+//! (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`,
+//! `GIT_CONFIG_PARAMETERS`) as one set, so git in the sandbox starts clean
+//! (#9222). It points `HOME`, the XDG dirs, `GH_CONFIG_DIR` and
 //! `TRUSTY_DATA_DIR_OVERRIDE` at a fresh temp directory, sets
 //! `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, latches the
 //! `.env.local` loader so it never reads a file, and verifies the result — a
@@ -34,6 +37,7 @@
 //!
 //! Test: `the_sandbox_clears_credentials_and_restores_them`,
 //! `the_sandbox_reads_no_env_local`, `the_sandbox_hides_env_local_and_the_keychain`,
+//! `the_sandbox_clears_git_config_injection_and_restores_it`,
 //! `a_failed_secret_assert_never_prints_the_value`.
 
 use std::ffi::{OsStr, OsString};
@@ -72,6 +76,24 @@ fn looks_secret(name: &str, value: &OsStr) -> bool {
         || CONFIG_REDIRECTS.contains(&upper.as_str())
         || crate::credential_registry::is_registered_credential_env_var(name)
         || value.to_str().is_some_and(has_url_userinfo)
+}
+
+/// Whether a variable injects git config: `GIT_CONFIG_COUNT`, its numbered
+/// `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pairs, or
+/// `GIT_CONFIG_PARAMETERS`.
+// #9222: the `_KEY` marker stripped only the keys, so a tm session's
+// `GIT_CONFIG_COUNT=2` failed every sandboxed git with "missing config key".
+fn injects_git_config(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper == "GIT_CONFIG_COUNT"
+        || upper == "GIT_CONFIG_PARAMETERS"
+        || upper.starts_with("GIT_CONFIG_KEY_")
+        || upper.starts_with("GIT_CONFIG_VALUE_")
+}
+
+/// Whether the sandbox clears a variable: a credential, or injected git config.
+fn clears(name: &str, value: &OsStr) -> bool {
+    looks_secret(name, value) || injects_git_config(name)
 }
 
 /// Whether `value` carries a `scheme://user[:secret]@host` authority.
@@ -140,7 +162,7 @@ impl CredentialSandbox {
             saved: Vec::new(),
         };
         let ambient: Vec<OsString> = std::env::vars_os()
-            .filter(|(k, v)| k.to_str().is_none_or(|k| looks_secret(k, v)))
+            .filter(|(k, v)| k.to_str().is_none_or(|k| clears(k, v)))
             .map(|(k, _)| k)
             .collect();
         for name in ambient {
@@ -174,12 +196,12 @@ impl CredentialSandbox {
             home.display()
         );
         let leaked: Vec<String> = std::env::vars_os()
-            .filter(|(k, v)| k.to_str().is_none_or(|k| looks_secret(k, v)))
+            .filter(|(k, v)| k.to_str().is_none_or(|k| clears(k, v)))
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
         assert!(
             leaked.is_empty(),
-            "credential sandbox: credential variables survived (names only): {leaked:?}"
+            "credential sandbox: cleared variables survived (names only): {leaked:?}"
         );
     }
 
@@ -304,6 +326,77 @@ mod tests {
         unsafe {
             std::env::remove_var(VAR);
             std::env::remove_var(URL_VAR);
+        }
+    }
+
+    /// Why: a tm session exports `GIT_CONFIG_COUNT` with numbered key/value
+    /// pairs; a sandbox that strips only the keys leaves git unable to start
+    /// ("missing config key GIT_CONFIG_KEY_0", #9222).
+    /// What: injects a count, two pairs and `GIT_CONFIG_PARAMETERS`, then runs
+    /// git inside the sandbox: git succeeds, sees no injected key, every
+    /// variable is gone, and drop restores each value exactly.
+    /// Test: this test.
+    #[test]
+    #[serial]
+    fn the_sandbox_clears_git_config_injection_and_restores_it() {
+        clears_git_config_injection();
+    }
+
+    #[serial(dotenv_credential_env, inference_env)]
+    fn clears_git_config_injection() {
+        let _env = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        const INJECTED: &[(&str, &str)] = &[
+            ("GIT_CONFIG_COUNT", "2"),
+            ("GIT_CONFIG_KEY_0", "trusty.probe9222a"),
+            ("GIT_CONFIG_VALUE_0", "zero"),
+            ("GIT_CONFIG_KEY_1", "trusty.probe9222b"),
+            ("GIT_CONFIG_VALUE_1", "one"),
+            ("GIT_CONFIG_PARAMETERS", "'trusty.probe9222c'='two'"),
+        ];
+        let caller: Vec<_> = INJECTED
+            .iter()
+            .map(|(k, _)| (*k, std::env::var_os(k)))
+            .collect();
+        for (k, v) in INJECTED {
+            // SAFETY: `#[serial]`; the caller's values are put back below.
+            unsafe { std::env::set_var(k, v) };
+        }
+        {
+            let sandbox = CredentialSandbox::enter();
+            let repo = sandbox.root().join("repo");
+            std::fs::create_dir(&repo).expect("create the repo dir");
+            let git = |args: &[&str]| {
+                let out = crate::git::command_in(&repo)
+                    .args(args)
+                    .output()
+                    .expect("spawn git");
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(out.status.success(), "git {args:?} failed: {stderr}");
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            };
+            git(&["init", "-q"]);
+            let listed = git(&["config", "--list"]);
+            assert!(
+                !listed.contains("probe9222"),
+                "git read injected config inside the sandbox: {listed}"
+            );
+            for (k, _) in INJECTED {
+                assert!(std::env::var_os(k).is_none(), "{k} is visible inside");
+            }
+        }
+        for (k, v) in INJECTED {
+            assert_eq!(std::env::var(k).as_deref(), Ok(*v), "{k} not restored");
+        }
+        for (k, prior) in caller {
+            // SAFETY: as above.
+            unsafe {
+                match prior {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
         }
     }
 
