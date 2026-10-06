@@ -21,7 +21,7 @@ use trusty_common::uds::{UdsSecurityError, send_framed_request, socket_is_servin
 use super::*;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
-use crate::store::{MemoryBackend, NamesIndex, SecretBackend, mask_secret};
+use crate::store::{MemoryBackend, NamesIndex, SecretBackend, SecretStore, mask_secret};
 
 const VALUE: &str = "sk-fake-server-0123456789abcdef";
 const SENTINEL: &str = "SENTINEL-c0ffee-9065";
@@ -172,7 +172,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 21] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 22] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -637,8 +637,14 @@ async fn server_project_config_overrides_the_project_vault() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_vault_outside_the_project_is_refused() {
     let fx = fixture();
+    seed_victim(&fx);
     let server = fx.start().await;
     for (name, params) in [
+        // #9328: R1 — the same check a pinned `secret://` reference passes.
+        (
+            method::LIST,
+            json!({"project": fx.project(), "vault": "trusty/victim/prod-repo"}),
+        ),
         (
             method::SET,
             json!({"project": fx.project(), "vault": "trusty/acme/other", "key": "K", "value": VALUE}),
@@ -654,8 +660,130 @@ async fn server_vault_outside_the_project_is_refused() {
     ] {
         let response = call(&fx.settings.socket, name, params).await;
         assert_eq!(fixed_error(&response, name), ErrorKind::VaultOutOfScope);
+        assert!(!wire(&response).contains("DB_URL"));
     }
-    assert!(fx.keychain.is_empty());
+    assert_eq!(fx.keychain.len(), 1, "only the seeded victim entry");
+    server.stop().await;
+}
+
+/// Index and store one key in another project's vault, `trusty/victim/prod-repo`.
+fn seed_victim(fx: &Fixture) {
+    let store = SecretStore::new(
+        Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
+        NamesIndex::at(&fx.settings.index_root),
+    );
+    store
+        .set(
+            &vault("trusty/victim/prod-repo"),
+            &key("DB_URL"),
+            &SecretValue::new(SENTINEL),
+        )
+        .unwrap();
+}
+
+/// Why: #9328 vector (b), owner ruling 06 R2 — a tracked
+/// `secrets.vault: trusty/victim/prod-repo` made the victim vault this
+/// project's own, so list, set and delete reached it. Every method now
+/// answers `vault_out_of_scope` in fixed text and the victim entry is left
+/// alone; the same vault named in the untracked machine config is honoured.
+/// Red on the unfixed code: `secrets.scopes` answers the victim vault.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_vault_override_outside_the_owner_is_refused() {
+    let fx = fixture();
+    seed_victim(&fx);
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "secrets:\n  vault: trusty/victim/prod-repo\n").unwrap();
+    let server = fx.start().await;
+    let victim = "trusty/victim/prod-repo";
+    for (name, params) in [
+        (method::SCOPES, json!({"project": fx.project()})),
+        (
+            method::LIST,
+            json!({"project": fx.project(), "vault": victim}),
+        ),
+        (
+            method::SET,
+            json!({"project": fx.project(), "vault": victim, "key": "DB_URL", "value": VALUE}),
+        ),
+        (
+            method::DELETE,
+            json!({"project": fx.project(), "vault": victim, "key": "DB_URL"}),
+        ),
+    ] {
+        let response = call(&fx.settings.socket, name, params).await;
+        assert_eq!(fixed_error(&response, name), ErrorKind::VaultOutOfScope);
+        let text = wire(&response);
+        assert!(
+            !text.contains(SENTINEL) && !text.contains("victim"),
+            "{text}"
+        );
+    }
+    let victim_vault = vault(victim);
+    assert_eq!(
+        fx.keychain
+            .get(&victim_vault, &key("DB_URL"))
+            .unwrap()
+            .map(|v| v.expose().to_string()),
+        Some(SENTINEL.to_string()),
+        "the victim entry is untouched"
+    );
+
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  project_vaults:\n    acme/web: trusty/victim/prod-repo\n",
+    )
+    .unwrap();
+    let scopes = ok(call(
+        &fx.settings.socket,
+        method::SCOPES,
+        json!({"project": fx.project()}),
+    )
+    .await);
+    assert_eq!(scopes["scopes"][0]["vault"], victim);
+    assert_eq!(scopes["scopes"][1]["vault"], "trusty/acme");
+    server.stop().await;
+}
+
+/// Why: #9328 vector (c), owner ruling 06 R3 — a non-github.com remote is a
+/// fixed `remote_host_unsupported` error that names neither the host nor the
+/// path; github.com in https and ssh forms still resolves.
+/// Red on the unfixed code: `secrets.scopes` answers `trusty/acme/web` for
+/// the `evil.example` remote.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_non_github_remote_is_a_fixed_error() {
+    let fx = fixture();
+    let server = fx.start().await;
+    let checkout = |name: &str, url: &str| {
+        let dir = fx.tmp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["remote", "add", "origin", url]);
+        dir.display().to_string()
+    };
+    let evil = checkout("evil", "https://evil.example/Acme/Web.git");
+    let response = call(
+        &fx.settings.socket,
+        method::SCOPES,
+        json!({"project": evil}),
+    )
+    .await;
+    assert_eq!(
+        fixed_error(&response, method::SCOPES),
+        ErrorKind::RemoteHostUnsupported
+    );
+    assert!(!wire(&response).contains("evil"), "{}", wire(&response));
+
+    for (name, url) in [
+        ("https", "https://github.com/Acme/Web.git"),
+        ("ssh", "ssh://git@github.com/acme/web.git"),
+    ] {
+        let dir = checkout(name, url);
+        let scopes = ok(call(&fx.settings.socket, method::SCOPES, json!({"project": dir})).await);
+        assert_eq!(scopes["scopes"][0]["vault"], "trusty/acme/web", "{url}");
+    }
     server.stop().await;
 }
 
@@ -825,6 +953,10 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
         key: SENTINEL.into(),
         searched: SENTINEL.into(),
     };
+    let out_of_scope = || SecretsError::VaultOutOfScope {
+        vault: SENTINEL.into(),
+        reason: SENTINEL,
+    };
     let cases = [
         (refused(), ErrorKind::AgentUseRefused),
         (wrapped(refused()), ErrorKind::AgentUseRefused),
@@ -842,6 +974,15 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
                 reason: SENTINEL,
             },
             ErrorKind::DotenvSyntax,
+        ),
+        // #9328: out-of-scope stays a refusal even when `resolve_env` wraps it.
+        (out_of_scope(), ErrorKind::VaultOutOfScope),
+        (wrapped(out_of_scope()), ErrorKind::VaultOutOfScope),
+        (
+            SecretsError::UnsupportedRemoteHost {
+                dir: SENTINEL.into(),
+            },
+            ErrorKind::RemoteHostUnsupported,
         ),
     ];
     for (error, expected) in cases {

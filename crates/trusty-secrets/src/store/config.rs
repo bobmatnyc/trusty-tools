@@ -8,21 +8,26 @@
 //! top-level `secrets:` key from a YAML file, and [`resolve`].
 //! - backend: project `secrets.backend`, else machine
 //!   `secrets.default_backend`, else `keychain`.
-//! - vault: project `secrets.vault` when set; otherwise the remote-derived
-//!   project vault ([`super::ScopeSet::derive`]).
+//! - vault: the machine `secrets.project_vaults` entry for the checkout's
+//!   `<owner>/<repo>`; else project `secrets.vault`, which must sit under the
+//!   remote's owner; otherwise the remote-derived project vault
+//!   ([`super::ScopeSet::derive`]). #9328 (owner ruling 06 R2): the project
+//!   file is tracked, so only the untracked machine file may pick a vault
+//!   outside the owner.
 //!
 //! `copy` stays in-project (§13 Q6); its request type is
 //! [`crate::api::methods::CopyRequest`] and the copy itself ships with S2.
 //! Test: `config_backend_precedence_table`,
 //! `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::platform;
-use crate::api::{BackendId, SecretsError, VaultName};
+use crate::api::{BackendId, OwnerName, RepoName, SecretsError, VaultName};
 
 /// Machine config file, relative to `$HOME` (DOC-74 §6.1).
 pub const MACHINE_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-common/config.yaml";
@@ -38,6 +43,26 @@ pub struct MachineSecretsConfig {
     /// The backend projects use when they name none.
     #[serde(default)]
     pub default_backend: Option<BackendId>,
+    /// Per-project vault overrides, keyed by the remote's `<owner>/<repo>`.
+    // #9328: owner ruling 06 R2 — the only place a vault outside the
+    // remote's owner may be chosen, because this file is not tracked.
+    #[serde(default)]
+    pub project_vaults: BTreeMap<String, VaultName>,
+}
+
+impl MachineSecretsConfig {
+    /// The `project_vaults` entry for `<owner>/<repo>`, if any.
+    ///
+    /// What: keys compare ASCII case-insensitively, as owner and repository
+    /// names do; the first match in key order wins.
+    /// Test: `scope_tracked_override_outside_the_owner_is_refused`.
+    pub fn project_vault(&self, owner: &OwnerName, repo: &RepoName) -> Option<&VaultName> {
+        let identity = format!("{owner}/{repo}");
+        self.project_vaults
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&identity))
+            .map(|(_, vault)| vault)
+    }
 }
 
 /// The project-level `secrets:` section.
@@ -47,7 +72,8 @@ pub struct ProjectSecretsConfig {
     /// This project's backend, overriding the machine default.
     #[serde(default)]
     pub backend: Option<BackendId>,
-    /// An explicit project vault, overriding `trusty/<owner>/<repo>`.
+    /// An explicit project vault, overriding `trusty/<owner>/<repo>`. Must
+    /// be `trusty/<owner>/<name>` under the remote's owner (#9328).
     #[serde(default)]
     pub vault: Option<VaultName>,
 }
@@ -58,7 +84,8 @@ pub struct ProjectSecretsConfig {
 pub struct ResolvedConfig {
     /// The backend to open.
     pub backend: BackendId,
-    /// The project-vault override, passed to [`super::ScopeSet::derive`].
+    /// The tracked project-vault override, which [`super::ScopeSet::derive`]
+    /// checks against the remote's owner.
     pub vault_override: Option<VaultName>,
 }
 

@@ -72,13 +72,16 @@ pub enum ErrorKind {
     EnvResolutionFailed,
     /// A `.env` line is outside the supported subset.
     DotenvSyntax,
+    /// The project's `origin` remote is not on github.com.
+    // #9328: owner ruling 06 R3, its own kind so it never reads as a guess.
+    RemoteHostUnsupported,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -99,6 +102,7 @@ impl ErrorKind {
         Self::InvalidEnvEntry,
         Self::EnvResolutionFailed,
         Self::DotenvSyntax,
+        Self::RemoteHostUnsupported,
         Self::Internal,
     ];
 
@@ -132,6 +136,7 @@ impl ErrorKind {
             Self::InvalidEnvEntry => "invalid_env_entry",
             Self::EnvResolutionFailed => "env_resolution_failed",
             Self::DotenvSyntax => "dotenv_syntax",
+            Self::RemoteHostUnsupported => "remote_host_unsupported",
             Self::Internal => "internal",
         }
     }
@@ -165,6 +170,9 @@ impl ErrorKind {
             Self::InvalidEnvEntry => "an env-map entry is invalid",
             Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",
             Self::DotenvSyntax => "a `.env` line is outside the supported syntax",
+            Self::RemoteHostUnsupported => {
+                "the project's `origin` remote is not on github.com; only github.com remotes are supported"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -195,6 +203,7 @@ impl ErrorKind {
             Self::InvalidEnvEntry => -32066,
             Self::EnvResolutionFailed => -32067,
             Self::DotenvSyntax => -32068,
+            Self::RemoteHostUnsupported => -32069,
         }
     }
 
@@ -229,6 +238,9 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::LockTimeout { .. } => Self::IndexBusy,
             SecretsError::Config { .. } => Self::ConfigInvalid,
             SecretsError::ScopeUndetermined { .. } => Self::ProjectUnresolved,
+            // #9328: ruling 06 — out-of-scope vaults and non-github.com remotes.
+            SecretsError::VaultOutOfScope { .. } => Self::VaultOutOfScope,
+            SecretsError::UnsupportedRemoteHost { .. } => Self::RemoteHostUnsupported,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.
@@ -236,6 +248,12 @@ impl From<SecretsError> for ErrorKind {
                 if matches!(*source, SecretsError::AgentUseRefused { .. }) =>
             {
                 Self::AgentUseRefused
+            }
+            // #9328: likewise an out-of-scope pinned reference.
+            SecretsError::EnvResolution { source, .. }
+                if matches!(*source, SecretsError::VaultOutOfScope { .. }) =>
+            {
+                Self::VaultOutOfScope
             }
             SecretsError::EnvResolution { .. } => Self::EnvResolutionFailed,
             SecretsError::InvalidEnvEntry { .. } => Self::InvalidEnvEntry,

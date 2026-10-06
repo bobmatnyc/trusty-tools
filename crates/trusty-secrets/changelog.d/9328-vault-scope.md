@@ -1,0 +1,3 @@
+Security
+
+- Files inside a repository can no longer select another project's vault ([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328), owner ruling 06). A pinned `secret://<owner>[/<repo>]/KEY` must name the caller's own project or owner vault, else `VaultOutOfScope`; a tracked `.trusty-tools/trusty-secrets.yaml` `secrets.vault` must be `trusty/<owner>/<name>` under the remote's owner, and a wider override is honoured only from the machine config's new `secrets.project_vaults` map; a non-github.com `origin` remote is refused with the new `UnsupportedRemoteHost` error (`remote_host_unsupported` on the wire). `ScopeSet::derive` and `ScopeSet::from_identity` now take the override's source, and `parse_remote_identity` returns a `RemoteRefusal`.
