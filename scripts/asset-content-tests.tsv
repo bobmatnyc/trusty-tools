@@ -35,7 +35,7 @@ trusty-code	lib	assets::tests	reads test_catalog (checkout_content), resolve_age
 trusty-code	lib	events::tests::sm_harness_doc_documents_the_prefix_tcode_emits	reads HarnessDoc::load over the checkout content
 trusty-code	lib	run_task::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
 trusty-code	lib	task::executor::tests::engineer_registry_reads_embedded_agent_skill_pointers	runtime: resolves rust-engineer from trusty-agents-common .md, asserts its skill pointers
-trusty-code	test:paths_import_mpm_catalog_e2e	*	reads checkout_content, AgentRoster::load
+trusty-code	test:integration	paths_import_mpm_catalog_e2e	reads checkout_content, AgentRoster::load (a module of the integration target since #9302)
 trusty-common	lib	content::tests	14 reads: find_dev_checkout, DEV_CLASS_SOURCES, literal 'content/skills' (#8378)	content-resolver
 trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template through commands::fleet::seed::FILES (#8436)
 trusty-mpm	bin:tm	commands::install::tests::install_without_the_bundled_docs_fails_naming_the_doc	reads install::test_content_ref into a docs-less checkout (#9012)
