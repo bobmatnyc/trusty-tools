@@ -798,9 +798,10 @@ fn sm_harness_doc_documents_the_prefix_tcode_emits() {
     // session-manager prompt, read straight from the crate that owns it.
     let marker = emitted_prefix.trim_end();
     // #9011: the doc is instructional content, read from this checkout.
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root"); // #9298
     let content =
-        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
     let doc = trusty_agents_common::harness_doc::HarnessDoc::load(&content).expect("harness docs");
     for (section, text) in [
         ("agnostic", doc.agnostic()),

@@ -16,12 +16,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The workspace root, relative to this crate's manifest dir.
+/// The running checkout's workspace root (#9298), canonical.
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root resolves")
+    trusty_common::test_harness::test_repo_root().expect("the running checkout's workspace root")
 }
 
 /// A root the linter can scan successfully but which contains nothing to scan.

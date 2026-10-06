@@ -193,7 +193,10 @@ mod tests {
     #[test]
     fn referenced_copies_match_trusty_mpm_skills() {
         // #9012: trusty-mpm's skills moved to the workspace content tree.
-        let mpm_skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/skills");
+        // #9298: the running checkout, not the one that built this binary.
+        let mpm_skills = trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root")
+            .join("content/skills");
         for (relative, content) in REFERENCED_SKILL_FILES {
             let skill = relative.trim_end_matches("/SKILL.md");
             let source = std::fs::read_to_string(mpm_skills.join(format!("{skill}.md")))
@@ -209,9 +212,10 @@ mod tests {
     fn every_roster_pointer_names_an_embedded_file() {
         let marker = format!("{SKILLS_ROOT_PLACEHOLDER}/");
         // #9011: the shared texts are read from the checkout's content.
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let root = trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root"); // #9298
         let content =
-            trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+            trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
         let roster =
             trusty_agents_common::agent_content::AgentRoster::load(&content).expect("roster");
         for (file_name, md) in crate::assets::tm_agent_sources(&roster).expect("catalog") {

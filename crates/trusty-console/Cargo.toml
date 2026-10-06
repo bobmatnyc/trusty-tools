@@ -32,7 +32,7 @@ name        = "trusty-console"
 # external struct-literal construction stops compiling.
 # 0.12.1 (#8271, PR #8621): patch — test-only fix (shared-open-budget test
 # runs on a paused clock); no public API change.
-version     = "0.12.1"
+version     = "0.12.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

@@ -616,9 +616,10 @@ fn embedded_tm_agent_sources_has_31_entries_and_unique_keys() {
 /// The tm agent catalog over the checkout's `content/agents` (#9011), so no
 /// test depends on the cwd, HOME or an installed bundle.
 fn test_catalog() -> Vec<(String, String)> {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root"); // #9298
     let content =
-        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
     let roster =
         trusty_agents_common::agent_content::AgentRoster::load(&content).expect("repo roster");
     tm_agent_sources(&roster).expect("the checkout carries every shared file")

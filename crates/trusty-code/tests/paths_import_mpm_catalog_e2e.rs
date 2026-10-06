@@ -33,9 +33,10 @@ use trusty_code::paths::import::{ImportAction, apply_import, plan_import};
 /// `ticketing` extends `base-agent`; `version-control` extends `base-ops`,
 /// which itself extends `base-agent`.
 fn catalog() -> Vec<(&'static str, String)> {
-    let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    let root = trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root"); // #9298
     let roster =
-        AgentRoster::load(&checkout_content(root).expect("repo content")).expect("repo roster");
+        AgentRoster::load(&checkout_content(&root).expect("repo content")).expect("repo roster");
     [
         "BASE-AGENT.md",
         "BASE-OPS.md",

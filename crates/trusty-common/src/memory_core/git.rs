@@ -552,13 +552,10 @@ mod tests {
 
     #[test]
     fn extract_on_real_repo() {
-        // Use the trusty-memory repo itself (3+ commits exist).
-        let repo_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        // Use this repository itself (3+ commits exist); #9298: the running
+        // checkout, not the one that built this binary.
+        let repo_path =
+            crate::test_harness::test_repo_root().expect("the running checkout's workspace root");
         let extractor = GitExtractor::new(repo_path).unwrap();
         let facts = extractor.extract(None, 5).unwrap();
         assert!(!facts.is_empty(), "should extract at least 1 fact");
