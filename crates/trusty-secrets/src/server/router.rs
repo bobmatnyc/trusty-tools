@@ -20,9 +20,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use trusty_common::uds::server::{
-    IdleTracker, RpcRouter, RpcServeOptions, ServeExit, serve_until_idle,
+    IdleTracker, RpcRouter, RpcServeOptions, ServeExit as UdsServeExit, serve_until_idle,
 };
-use trusty_common::uds::{UdsSecurityError, bind_singleton_hardened, prepare_socket_dir};
+use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
@@ -81,7 +81,7 @@ impl fmt::Debug for State {
 }
 
 /// Every method this socket serves, with its body.
-pub const METHODS: [(&str, MethodFn); 6] = [
+pub(crate) const METHODS: [(&str, MethodFn); 6] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -99,7 +99,7 @@ pub const METHODS: [(&str, MethodFn); 6] = [
 /// [`ErrorKind::to_rpc`] for that method, and a body that panics becomes
 /// [`ErrorKind::Internal`].
 /// Test: `server_error_text_is_fixed_per_method_and_kind`.
-pub fn build_router(state: Arc<State>) -> RpcRouter {
+pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
     METHODS
         .into_iter()
         .fold(RpcRouter::new(), |router, (name, body)| {
@@ -116,9 +116,34 @@ pub fn build_router(state: Arc<State>) -> RpcRouter {
         })
 }
 
+/// Why [`serve`] returned.
+///
+/// What: an idle exit is the normal end of an on-demand server's life; a
+/// shutdown is the caller's future resolving (a signal, or a test).
+// #9073: this crate's own enum, so a trusty-common bump never changes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServeExit {
+    /// The shutdown future resolved and in-flight connections drained.
+    Shutdown,
+    /// No connection arrived for the whole idle window.
+    Idle,
+}
+
+impl ServeExit {
+    fn from_uds(exit: UdsServeExit) -> Self {
+        match exit {
+            UdsServeExit::Shutdown => Self::Shutdown,
+            UdsServeExit::Idle => Self::Idle,
+        }
+    }
+}
+
 /// The socket could not be prepared or bound.
 ///
-/// What: the path and trusty-common's reason. Carries nothing a client sent.
+/// What: the path and the bind layer's reason. Carries nothing a client sent.
+/// The reason is opaque (#9073): its type is trusty-common's and not part of
+/// this crate's API; read it through `Display` or `downcast_ref`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ServeError {
@@ -133,18 +158,18 @@ pub enum ServeError {
     SocketDir {
         /// The directory.
         path: PathBuf,
-        /// trusty-common's reason.
+        /// The bind layer's reason.
         #[source]
-        source: UdsSecurityError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
     /// The bind was refused — including a live instance already serving.
     #[error("cannot bind {path}: {source}")]
     Bind {
         /// The socket path.
         path: PathBuf,
-        /// trusty-common's reason; `AlreadyServing` for a live owner.
+        /// The bind layer's reason, including a live owner already serving.
         #[source]
-        source: UdsSecurityError,
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 }
 
@@ -177,13 +202,13 @@ pub async fn serve(
     })?;
     prepare_socket_dir(dir).map_err(|source| ServeError::SocketDir {
         path: dir.to_path_buf(),
-        source,
+        source: Box::new(source),
     })?;
     let listener = bind_singleton_hardened(&socket)
         .await
         .map_err(|source| ServeError::Bind {
             path: socket.clone(),
-            source,
+            source: Box::new(source),
         })?;
     let idle = IdleTracker::new(settings.idle_timeout);
     let router = Arc::new(build_router(Arc::new(State::new(settings, backends))));
@@ -197,7 +222,7 @@ pub async fn serve(
     .await;
     remove_socket(&socket);
     drop(listener);
-    Ok(exit)
+    Ok(ServeExit::from_uds(exit))
 }
 
 /// Unlink the socket file; already gone is fine.

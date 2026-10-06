@@ -8,10 +8,12 @@
 //! unknown fields. `secrets.resolve` (S8) and `secrets.doctor` are not here.
 //! The server side is S2.
 //!
-//! Requests and [`ScopeKind`] are `#[non_exhaustive]`: build a request with
-//! its `new` constructor, never a struct literal, so a field added in a minor
-//! release does not break callers. The wire rule for such a field is in the
-//! crate docs, "Compatibility".
+//! Every request, every response, [`ScopeKind`] and [`SetOutcome`] are
+//! `#[non_exhaustive]`. Build a request with its `new` constructor, read a
+//! response through serde, and give a `match` on either enum a wildcard arm,
+//! so a field or variant added in a patch release does not break callers. A
+//! new response field takes a serde default; the wire rule for a new request
+//! field is in the crate docs, "Compatibility".
 //! Test: `api_requests_fail_closed_on_bad_names_and_unknown_fields`,
 //! `api_debug_of_value_carrying_types_hides_the_value`,
 //! `api_request_constructors_match_the_wire_shape`.
@@ -47,6 +49,7 @@ pub enum ScopeKind {
 
 /// One pickable scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScopeInfo {
     /// Project or owner.
     pub kind: ScopeKind,
@@ -56,6 +59,7 @@ pub struct ScopeInfo {
 
 /// `secrets.scopes` response, project scope first.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ScopesResponse {
     /// The scopes, in resolution order.
     pub scopes: Vec<ScopeInfo>,
@@ -67,6 +71,7 @@ pub struct ScopesResponse {
 /// What: the row the names-only index stores, as it crosses the wire.
 /// Test: `store_list_reports_length_and_time_never_characters`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct KeyMeta {
     /// The key name.
     pub name: SecretKey,
@@ -97,6 +102,7 @@ impl ListRequest {
 
 /// `secrets.list` response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ListResponse {
     /// The vault listed.
     pub vault: VaultName,
@@ -127,6 +133,7 @@ impl SetRequest {
 /// Whether `set` created or replaced a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SetOutcome {
     /// The key did not exist.
     New,
@@ -136,6 +143,7 @@ pub enum SetOutcome {
 
 /// `secrets.set` response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SetResponse {
     /// New or updated.
     pub outcome: SetOutcome,
@@ -163,6 +171,7 @@ impl DeleteRequest {
 
 /// `secrets.delete` response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DeleteResponse {
     /// Whether the backend or the index held the key.
     pub removed: bool,
@@ -210,6 +219,7 @@ impl CopyRequest {
 
 /// `secrets.copy` response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CopyResponse {
     /// Keys copied.
     pub copied: Vec<SecretKey>,

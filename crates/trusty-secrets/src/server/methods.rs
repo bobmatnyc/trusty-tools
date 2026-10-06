@@ -34,7 +34,8 @@ pub const DOCTOR: &str = "secrets.doctor";
 pub const PROJECT_FIELD: &str = "project";
 
 /// A method body: state and raw params in, a JSON result or a fixed kind out.
-pub type MethodFn = fn(&State, Value) -> Result<Value, ErrorKind>;
+// #9073: crate-private; S8 passes the caller pid into the body.
+pub(crate) type MethodFn = fn(&State, Value) -> Result<Value, ErrorKind>;
 
 /// Split `params` into the project directory and the remaining fields.
 ///
@@ -64,7 +65,7 @@ fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 /// `secrets.scopes`: the project scope, then the owner scope.
 ///
 /// Test: `server_scopes_round_trip_over_a_real_socket`.
-pub fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     if !rest.is_empty() {
         return Err(ErrorKind::InvalidParams);
@@ -78,7 +79,7 @@ pub fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// What: reads the names-only index only; never opens a backend.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_corrupt_index_is_a_fixed_error`.
-pub fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: ListRequest = decode(rest)?;
     let project = ProjectContext::resolve(&dir)?;
@@ -97,7 +98,7 @@ pub fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// logged or formatted here.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_malformed_set_never_echoes_its_value`.
-pub fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: SetRequest = decode(rest)?;
     let project = ProjectContext::resolve(&dir)?;
@@ -110,7 +111,7 @@ pub fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// `secrets.delete`: remove one key from the backend and the index.
 ///
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`.
-pub fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: DeleteRequest = decode(rest)?;
     let project = ProjectContext::resolve(&dir)?;
@@ -158,7 +159,7 @@ impl CopySelection {
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`.
-pub fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: CopyRequest = decode(rest)?;
     if request.from_backend == request.to_backend {
@@ -250,7 +251,7 @@ pub struct DoctorResponse {
 /// integrations), so "available" means "this build opens it". Opening a
 /// backend reads no secret. Reports paths and ids only.
 /// Test: `server_doctor_reports_backends_and_paths_only`.
-pub fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,

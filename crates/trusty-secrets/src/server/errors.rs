@@ -6,7 +6,7 @@
 //! of kinds, and the wire text is built from the method name and the kind
 //! alone. No request field, path, or library message ever reaches it.
 //! What: [`ErrorKind`] (one variant per failure class), its mapping from
-//! [`SecretsError`], and [`ErrorKind::to_rpc`], which renders
+//! [`SecretsError`], and the crate-private `ErrorKind::to_rpc`, which renders
 //! `"<method>: <fixed text>"` plus `data: {"kind": "<kind>"}`.
 //! Test: `server_error_text_is_fixed_per_method_and_kind`,
 //! `server_malformed_set_never_echoes_its_value`,
@@ -77,6 +77,38 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Every kind, for the wire-to-kind lookup and the kind-table tests.
+    pub(crate) const ALL: [Self; 21] = [
+        Self::InvalidParams,
+        Self::ProjectInvalid,
+        Self::ProjectUnresolved,
+        Self::VaultOutOfScope,
+        Self::InvalidValue,
+        Self::NotFound,
+        Self::Unsupported,
+        Self::UnknownBackend,
+        Self::BackendFailed,
+        Self::OrphanedBackendEntry,
+        Self::IndexCorrupt,
+        Self::IndexBusy,
+        Self::StorageUnavailable,
+        Self::ConfigInvalid,
+        Self::HomeUnavailable,
+        Self::SameBackend,
+        Self::AgentUseRefused,
+        Self::InvalidEnvEntry,
+        Self::EnvResolutionFailed,
+        Self::DotenvSyntax,
+        Self::Internal,
+    ];
+
+    /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
+    /// build does not know, e.g. one a newer server sent.
+    /// Test: `client_rpc_failure_reads_every_kind_from_the_wire`.
+    pub(crate) fn from_wire(kind: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == kind)
+    }
+
     /// The machine-readable kind, sent as `error.data.kind`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -172,7 +204,8 @@ impl ErrorKind {
     /// `{"kind": <as_str>}`. `method` is always one of this server's own
     /// `&'static` method names, never the caller's string.
     /// Test: `server_error_text_is_fixed_per_method_and_kind`.
-    pub fn to_rpc(self, method: &'static str) -> RpcError {
+    // #9073: crate-private; `RpcError` is trusty-common's type.
+    pub(crate) fn to_rpc(self, method: &'static str) -> RpcError {
         RpcError::new(self.code(), format!("{method}: {}", self.text()))
             .with_data(serde_json::json!({ "kind": self.as_str() }))
     }
