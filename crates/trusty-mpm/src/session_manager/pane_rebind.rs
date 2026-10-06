@@ -312,6 +312,12 @@ impl SessionManager {
                 identity.pane_id
             )));
         }
+        // #9313: `--all` also takes the automatic pass's project gate.
+        if replaced_only
+            && let Some(why) = outside_project(self.tmux.as_ref(), &record, &identity.pane_id)
+        {
+            return Ok(RebindOutcome::NoMatch(why));
+        }
         self.write_rebind(&record, &target, &identity).await
     }
 

@@ -670,6 +670,44 @@ async fn a_pane_in_another_project_is_not_rebound_automatically() {
     assert!(tmux.mutations().is_empty());
 }
 
+/// #9313 critic finding: `tm sessions rebind --all` takes the automatic pass's
+/// project gate, so a same-named pane from another project is not bound.
+///
+/// Test: this function IS the test.
+#[tokio::test]
+async fn rebind_all_does_not_bind_a_pane_from_another_project() {
+    let mut fake = RebindTmux::new(&["tm-a"], &[("%1", NEW, "tm-a")]);
+    fake.pane_cwds.insert(
+        "tm-a".into(),
+        PathBuf::from("/nonexistent-9313/other-project"),
+    );
+    let tmux = Arc::new(fake);
+    let (_dir, mgr) = manager(Arc::clone(&tmux)).await;
+    let a = seed(&mgr, "tm-a", ManagedSessionState::Stopped, "%12", OLD).await;
+    let state = Arc::new(DaemonState::with_session_manager(Arc::clone(&mgr)));
+
+    let all = rebind_all_core(&state).await;
+
+    let RouteBody::Json(body) = all.body else {
+        panic!("rebind --all answered {}: {:?}", all.status, all.body);
+    };
+    let row = body["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|r| r["id"] == a.to_string())
+        .cloned();
+    assert_eq!(
+        row.as_ref().and_then(|r| r["outcome"].as_str()),
+        Some("no_match"),
+        "{body}"
+    );
+    let (name, pane, server, st) = binding(&mgr, &a).await;
+    assert_eq!((name, pane, server), bound("tm-a", "%12", OLD));
+    assert_eq!(st, ManagedSessionState::Stopped);
+    assert!(tmux.mutations().is_empty());
+}
+
 /// #9313: another writer changes the record between the tmux read and the
 /// write (a resume relaunched it in `%10`). The rebind answers `NoMatch` and
 /// the record keeps what the other writer wrote.
