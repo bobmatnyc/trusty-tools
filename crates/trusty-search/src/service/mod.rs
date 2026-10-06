@@ -19,6 +19,8 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 // #9059: hold an index whose exclude globs do not parse.
 pub(crate) mod exclude_hold;
+// #9029: one indexed file's content and its diff against HEAD.
+pub(crate) mod file_view;
 pub mod fs_discovery;
 pub mod grep;
 // #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.

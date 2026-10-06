@@ -67,6 +67,9 @@ impl SearchAppState {
             // surface on these.
             query_limiter: crate::service::concurrency::ConcurrencyLimiter::from_env(),
             query_timeout: crate::service::query_timeout::QueryTimeoutConfig::from_env(),
+            file_get_limiter: Arc::new(tokio::sync::Semaphore::new(
+                crate::service::server::FILE_GET_MAX_CONCURRENT,
+            )),
             cold_store: Arc::new(crate::service::lazy_loader::ColdIndexStore::new()),
             reindex_progress: Arc::new(DashMap::new()),
             last_reindex_aborted_at: Arc::new(DashMap::new()),

@@ -30,6 +30,8 @@ mod facet_route;
 mod fanout;
 // #9027: per-index deadline and one query embed for the all-index fan-out.
 mod fanout_deadline;
+// #9029: `search.file.get`, one indexed file and its diff.
+mod file_get;
 mod files;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
@@ -340,6 +342,8 @@ pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest
 
 // #9027: warm-all, served on both transports.
 pub(crate) use warm_all::{warm_start_report, warm_status_report};
+// #9029: the socket-only file read.
+pub(crate) use file_get::{file_get_report, FileGetParams, FILE_GET_MAX_CONCURRENT};
 pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 
 /// Build the axum router with the shared state.
