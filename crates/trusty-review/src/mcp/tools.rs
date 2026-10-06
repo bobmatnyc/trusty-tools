@@ -107,6 +107,30 @@ pub fn tool_descriptors() -> Value {
                             "bedrock/us.anthropic.claude-haiku-4-5",
                             "openrouter/openai/gpt-5.4-mini-20260317"
                         ]
+                    },
+                    // #9192: optional PR context, all off by default.
+                    "include_pr_body": {
+                        "type": "boolean",
+                        "description": "Merge the fetched PR body into the reviewer's PR \
+                                       description (capped at 64,000 characters, with a \
+                                       visible marker), ahead of any pr_description. \
+                                       Default false. The response then carries a \
+                                       context_sources ledger."
+                    },
+                    "pr_description": {
+                        "type": "string",
+                        "description": "PR description for the reviewer and the verifier \
+                                       (capped at 64,000 characters)."
+                    },
+                    "pr_discussion": {
+                        "type": "string",
+                        "description": "PR discussion (review and issue comments) for the \
+                                       reviewer and the verifier (capped at 64,000 characters)."
+                    },
+                    "referenced_code": {
+                        "type": "string",
+                        "description": "Referenced or related code the diff depends on, for \
+                                       the reviewer (capped at 64,000 characters)."
                     }
                 }
             }
@@ -202,6 +226,9 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
 // #8649: the handler and its per-call index resolution live in `review_pr.rs`.
 #[path = "review_pr.rs"]
 mod review_pr;
+// #9192: `review_pr`'s optional PR-context parameters.
+#[path = "context_args.rs"]
+mod context_args;
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
 
@@ -577,6 +604,24 @@ fn wrap_result(result: &ReviewResult) -> Value {
                 Value::String(reason.to_string()),
             );
         }
+    }
+    envelope
+}
+
+/// Wrap a `run_review_with` outcome: [`wrap_result`] plus its source ledger.
+///
+/// Why: #9192 keeps `ReviewResult` unchanged, so the ledger of optional
+/// context sources is reported on the envelope, beside `withheld`.
+/// What: adds `context_sources` (an array of records) when the outcome has
+/// any; a review that asked for no new input carries no such key.
+/// Test: `wrap_outcome_adds_context_sources_only_when_present`.
+fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome) -> Value {
+    let mut envelope = wrap_result(&outcome.result);
+    if !outcome.context_sources.is_empty()
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        let sources = serde_json::to_value(&outcome.context_sources).unwrap_or(Value::Null);
+        obj.insert("context_sources".to_string(), sources);
     }
     envelope
 }

@@ -66,6 +66,8 @@ pub(super) struct MapReduceRun {
     pub coverage_contrib: Option<CoverageVerdictContrib>,
     /// Degraded reason from the #590 context gate (None = authoritative).
     pub degraded_reason: Option<String>,
+    /// #9192: false when `include_pr_body` put the capped body in the context.
+    pub body_in_refs: bool,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -413,7 +415,7 @@ async fn fold_reduced_into_result(
     // #9188 D: context citations resolve in what the reviewer was shown.
     let refs = refs_for_gate(
         &run.pr_meta.title,
-        &run.pr_meta.body,
+        run.body_in_refs.then_some(run.pr_meta.body.as_str()), // #9192
         &run.external_context,
         [
             run.context.pr_description.as_deref(),

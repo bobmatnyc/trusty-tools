@@ -28,15 +28,14 @@ use super::runner_helpers::{
 use crate::store::{ClaimOutcome, DedupError};
 use crate::{
     config::{
-        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath,
-        constants::MAX_CALLER_CONTEXT_CHARS, select_review_mode,
+        DiffStats, InvocationSurface, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode,
     },
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
-        caller_preamble::{cap_caller_context, consume_context_preamble},
+        caller_preamble::consume_context_preamble,
         context_gate::{GateOutcome, degraded_banner, preflight_context},
         diff::{
             DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers,
@@ -46,7 +45,8 @@ use crate::{
         optional_context::{
             ReviewOptions,
             ReviewOutcome,
-            assemble::refs_for_gate, // #9188 D: one corpus builder for both paths
+            assemble::{PrBody, apply_caller_context, refs_for_gate}, // #9188 D, #9192
+            ledger::ContextLedger,
             seams::{load_diff_via, pr_meta_via},
         },
         parser::parse_review_response,
@@ -207,8 +207,9 @@ pub async fn run_review(
 /// Why: the owner ruled the library source-compatible, so new inputs arrive
 /// through a new entry point rather than new fields on `CallerContext` or
 /// `ReviewDeps`; [`run_review`] is this with `ReviewOptions::default()`.
-/// What: runs the same pipeline as [`run_review`] and returns its result in a
-/// [`ReviewOutcome`].
+/// What: runs the same pipeline as [`run_review`], plus each input
+/// `options.request` turns on, and returns the result with the ledger of
+/// sources those inputs used (empty unless one is on).
 /// Test: `off_is_byte_identical_unified`, `off_is_byte_identical_mapreduce`,
 /// `off_makes_no_extra_calls`.
 pub async fn run_review_with(
@@ -217,8 +218,12 @@ pub async fn run_review_with(
     deps: ReviewDeps,
     options: ReviewOptions,
 ) -> ReviewOutcome {
-    let result = run_pipeline(config, input, deps, &options).await;
-    ReviewOutcome { result }
+    let mut ledger = ContextLedger::new(options.request.requested_new());
+    let result = run_pipeline(config, input, deps, &options, &mut ledger).await;
+    ReviewOutcome {
+        result,
+        context_sources: ledger.into_records(),
+    }
 }
 
 /// The review pipeline behind [`run_review_with`].
@@ -227,6 +232,7 @@ async fn run_pipeline(
     mut input: ReviewInput,
     deps: ReviewDeps,
     options: &ReviewOptions,
+    ledger: &mut ContextLedger,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
     // `LocalFile`, `GitRange`, and `Stdin` are all treated identically here:
@@ -537,7 +543,9 @@ async fn run_pipeline(
     // GitHub fetch happened).  Cloned because the verifier also needs the
     // description + discussion as author rationale below.
     // #8654: one per-field cap, marked, before either prompt sees the text.
-    cap_caller_context(&mut input.caller_context, MAX_CALLER_CONTEXT_CHARS);
+    // #9192: the requested PR body merges in here, ahead of the caller's text.
+    let body = PrBody::of(is_local, meta_error.as_deref(), &pr_meta.body);
+    apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
@@ -557,6 +565,7 @@ async fn run_pipeline(
             external_context,
             coverage_contrib,
             degraded_reason,
+            body_in_refs: !options.request.include_pr_body,
         };
         return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
     }
@@ -723,7 +732,7 @@ async fn run_pipeline(
     let caller = &input.caller_context;
     let refs = refs_for_gate(
         &pr_meta.title,
-        &pr_meta.body,
+        (!options.request.include_pr_body).then_some(pr_meta.body.as_str()), // #9192
         &external_context,
         [
             caller.pr_description.as_deref(),

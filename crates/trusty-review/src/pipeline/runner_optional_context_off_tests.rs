@@ -424,7 +424,7 @@ fn off_refs_corpus_is_byte_identical() {
     let caller = legacy_caller();
     let refs = refs_for_gate(
         TITLE,
-        BODY,
+        Some(BODY),
         "",
         [
             caller.pr_description.as_deref(),

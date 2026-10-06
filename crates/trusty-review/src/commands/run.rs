@@ -31,9 +31,10 @@ use trusty_review::{
     },
     llm::build_provider,
     pipeline::{
-        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
+        CallerContext, DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
+        TriggerDecision, log_json_path,
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
-        run_review,
+        run_review_with,
     },
     run_output::{run_failure_reason, run_is_failure, run_json_payload},
     store::{DedupNeed, open_dedup_for},
@@ -176,6 +177,14 @@ pub struct RunArgs {
     /// Read the referenced code from a regular file (at most 256 KiB).
     #[arg(long, value_name = "PATH")]
     pub referenced_code_file: Option<std::path::PathBuf>,
+
+    /// Merge the fetched PR body into the reviewer's PR description, capped at
+    /// 64,000 characters with a visible marker, ahead of any --pr-description
+    /// text (#9192). A local diff has no PR body; the review runs without it.
+    /// With a dedup store wired (`--live`), a repeat review of the same head
+    /// is skipped as a duplicate whatever its flags: push a new head to rerun.
+    #[arg(long)]
+    pub include_pr_body: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -299,7 +308,10 @@ pub async fn cmd_run(
     };
 
     let input = run_input(&args, diff_source, reviewer_model.clone(), caller_context);
-    let result = run_review(&config_with_overrides, input, deps).await;
+    let options = ReviewOptions::new(run_request(&args));
+    let result = run_review_with(&config_with_overrides, input, deps, options)
+        .await
+        .result;
 
     if args.json {
         // Serialised before the failure check so a failed review still hands the
@@ -324,6 +336,16 @@ pub async fn cmd_run(
     }
 
     Ok(())
+}
+
+/// The optional inputs `run`'s flags ask for (#9192).
+///
+/// Why: `--include-pr-body` is the one new input `run` takes; the PR-context
+/// text flags are legacy and never turn the source ledger on.
+/// What: the request with `include_pr_body` from the flag.
+/// Test: `run_include_pr_body_flag_parses`.
+pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
+    OptionalContextRequest::default().with_pr_body(args.include_pr_body)
 }
 
 /// #5113: `run` may post a GitHub-PR review, so it must carry the claim gate
@@ -817,6 +839,22 @@ mod tests {
 
         let args = RunArgs::try_parse_from(["run"]).expect("parse");
         assert!(!args.live, "--live must default to false");
+    }
+
+    /// #9192: `--include-pr-body` parses, defaults off, and is the only `run`
+    /// flag that turns the source ledger on; the legacy text flags never do.
+    #[test]
+    fn run_include_pr_body_flag_parses() {
+        let args = RunArgs::try_parse_from(["run", "--include-pr-body"]).expect("parse");
+        assert!(args.include_pr_body);
+        assert!(run_request(&args).requested_new());
+
+        let args = RunArgs::try_parse_from(["run", "--pr-description", "x"]).expect("parse");
+        assert!(
+            !args.include_pr_body,
+            "--include-pr-body must default to false"
+        );
+        assert!(!run_request(&args).requested_new());
     }
 
     #[test]

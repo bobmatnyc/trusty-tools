@@ -2769,3 +2769,7 @@ mod hallucination_corpus;
 // #9192: with every optional input off, the review is byte-identical.
 #[path = "runner_optional_context_off_tests.rs"]
 mod optional_context_off;
+
+// #9192: `include_pr_body` and the source ledger.
+#[path = "runner_pr_body_tests.rs"]
+mod pr_body;
