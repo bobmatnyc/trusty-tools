@@ -110,6 +110,15 @@ pub struct SearchAppState {
     /// What: `QueryTimeoutConfig::from_env`, resolved once per state.
     /// Test: `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
     pub query_timeout: Arc<crate::service::query_timeout::QueryTimeoutConfig>,
+    /// The `search.file.get` limiter (#9029), separate from
+    /// [`Self::query_limiter`] so file reads never take a search's slot.
+    ///
+    /// Why: each call can hold a blocking-pool thread through two git runs of
+    /// up to 10 s each; unbounded, a burst would drain that pool.
+    /// What: `FILE_GET_MAX_CONCURRENT` (8) permits, taken with `try_acquire`
+    /// so a full limiter refuses at once.
+    /// Test: `file_get_is_refused_busy_when_its_limiter_is_full`.
+    pub file_get_limiter: Arc<tokio::sync::Semaphore>,
     /// Cold index store for lazy warm-boot (issue #993).
     ///
     /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` limits eager warm-boot, the
