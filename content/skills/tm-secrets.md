@@ -3,7 +3,7 @@ name: tm-secrets
 description: Where a trusty credential lives today — the 0600 file store and Keychain behind trusty-common, the two tm doctor rows that check them, and the rules for handling a secret value. The tm secrets CLI does not ship yet.
 user-invocable: true
 metadata:
-  version: "1.2.0"
+  version: "1.2.1"
 category: pm-reference
 tags: [secrets, credentials, keychain, doctor, pm-recommended]
 effort: medium
@@ -110,6 +110,11 @@ variable first (#8596, #8248).
   (`$(gcloud auth print-access-token)`), never as a bare run. The pm-guard
   refuses the printing forms for every agent (#8596, #8248).
 - Never put a value in a command's argv (`some-cli --token abc123`).
+- Never list Vercel env vars in a form that can print a value. Filter to
+  NAMES at the source: `vercel env ls <env> | awk 'NR>1{print $1}'` —
+  never `--json`, and never the unfiltered table, which carries
+  value-adjacent data. A value that prints anyway is an exposure to report
+  (#9158).
 - Never put a credential in a LaunchAgent plist, a committed `.env`, or any
   other file a `plutil -p` or a backup will print. That is #8236.
 - Never ask the user to paste a raw secret value into the chat when a store
