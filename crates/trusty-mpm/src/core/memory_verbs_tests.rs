@@ -322,7 +322,7 @@ fn writes(slot: &FactSlot) -> [(MemoryVerb, &'static str); 2] {
 async fn a_fact_key_and_expiry_reach_the_request() {
     let slot = FactSlot {
         fact_key: Some("ws:s1/resume".to_string()),
-        expires_at: Some("2026-10-06T12:00:00Z".to_string()),
+        expires_at: Some("2099-01-01T00:00:00Z".to_string()),
     };
     for (verb, _) in writes(&slot) {
         let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
@@ -335,7 +335,7 @@ async fn a_fact_key_and_expiry_reach_the_request() {
         assert_eq!(params["fact_key"], json!("ws:s1/resume"), "{params}");
         assert_eq!(
             params["expires_at"],
-            json!("2026-10-06T12:00:00Z"),
+            json!("2099-01-01T00:00:00Z"),
             "{params}"
         );
     }
@@ -377,6 +377,30 @@ async fn a_bad_expires_at_is_refused_before_any_rpc() {
 
         assert!(matches!(err, MemoryVerbError::ExpiresAt { .. }), "{err:?}");
         assert!(err.to_string().contains("\"tomorrow\""), "{err}");
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "no RPC may be sent"
+        );
+    }
+}
+
+/// Why (#9142): the daemon stores a past `expires_at` as an unslotted drawer, so
+/// it must be refused here, before any RPC.
+/// Test: itself.
+#[tokio::test]
+async fn a_past_expires_at_is_refused_before_any_rpc() {
+    let slot = FactSlot {
+        fact_key: Some("pr:9254/state".to_string()),
+        expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+    };
+    for (verb, _) in writes(&slot) {
+        let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let err = super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+            .await
+            .expect_err("a past expiry is refused");
+
+        assert!(err.to_string().contains("in the past"), "{err}");
         assert!(
             calls.lock().expect("calls").is_empty(),
             "no RPC may be sent"

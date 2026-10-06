@@ -90,6 +90,47 @@ pub enum MemoryVerbError {
         /// What the parser reported.
         detail: String,
     },
+    /// `--expires-at` is not in the future; nothing was sent (#9142).
+    #[error("--expires-at {value} is already in the past; a slot needs a future expiry")]
+    ExpiresAtPast {
+        /// The value the caller passed.
+        value: String,
+    },
+}
+
+/// Process exit code when a write was stored but its requested slot was refused.
+///
+/// Why (#9142): the daemon stores a refused slot's drawer as an ordinary
+/// (Tier E) drawer and answers `status: "stored"`; exiting 0 would hide that the
+/// fact will not supersede anything. `2` is clap's usage-error code and `1` a
+/// failed call, so a refusal gets its own value.
+/// Test: `a_refused_slot_warns_and_exits_with_the_refusal_code`.
+pub const EXIT_SLOT_REFUSED: i32 = 3;
+
+/// Why the daemon refused the slot a stored write asked for, if it did.
+///
+/// Why (#9142): a refused slot still stores the drawer, so the only signal is
+/// the envelope's `tier` / `tier_c_refused`.
+/// What: `Some(reason)` when the verb sent a `fact_key`, the daemon reports the
+/// drawer stored, and `tier` is not `"C"`. The reason is `tier_c_refused`, or a
+/// note naming the tier the daemon reported. `None` otherwise.
+/// Test: `a_refused_slot_warns_and_exits_with_the_refusal_code`.
+pub fn slot_refusal(verb: &MemoryVerb, result: &Value) -> Option<String> {
+    verb.slot()?.fact_key.as_ref()?;
+    let status = result.get("status").and_then(Value::as_str);
+    if !matches!(status, None | Some("stored")) {
+        return None;
+    }
+    match result.get("tier").and_then(Value::as_str) {
+        Some("C") => None,
+        tier => Some(
+            result
+                .get("tier_c_refused")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("daemon reported tier {}", tier.unwrap_or("(none)"))),
+        ),
+    }
 }
 
 /// The ADR-0028 Tier C slot a write occupies (#9142).
@@ -102,11 +143,12 @@ pub enum MemoryVerbError {
 /// `memory_remember`/`memory_note` schema keys of the same names
 /// (`crates/trusty-memory/src/tools/definitions.rs`). Both `None` sends neither
 /// key, so the request is the pre-#9142 one. The daemon owns the slot grammar
-/// and the 24-hour default expiry; this side only rejects an unparseable
-/// timestamp before anything is sent.
+/// and the 24-hour default expiry; this side only rejects an unparseable or
+/// past timestamp before anything is sent.
 /// Test: `a_fact_key_and_expiry_reach_the_request`,
 /// `a_write_without_slot_flags_sends_the_old_request`,
-/// `a_bad_expires_at_is_refused_before_any_rpc`.
+/// `a_bad_expires_at_is_refused_before_any_rpc`,
+/// `a_past_expires_at_is_refused_before_any_rpc`.
 #[derive(Debug, Clone, Default)]
 pub struct FactSlot {
     /// `--fact-key`: the slot, `<domain>:<id>/<aspect>`.
@@ -116,17 +158,26 @@ pub struct FactSlot {
 }
 
 impl FactSlot {
-    /// Reject an `expires_at` that is not RFC 3339.
+    /// Reject an `expires_at` that is not RFC 3339, or is not in the future.
     ///
-    /// Why: trusty-memory refuses an unparseable timestamp only after the call,
-    /// and a caller typo must fail loudly here rather than reach the daemon.
-    /// Test: `a_bad_expires_at_is_refused_before_any_rpc`.
+    /// Why: trusty-memory rejects an unparseable timestamp, and stores a past one
+    /// unslotted, only after the call. A caller mistake must fail here instead.
+    /// Test: `a_bad_expires_at_is_refused_before_any_rpc`,
+    /// `a_past_expires_at_is_refused_before_any_rpc`.
     fn validate(&self) -> Result<(), MemoryVerbError> {
         if let Some(raw) = self.expires_at.as_deref() {
-            chrono::DateTime::parse_from_rfc3339(raw).map_err(|e| MemoryVerbError::ExpiresAt {
-                value: raw.to_string(),
-                detail: e.to_string(),
+            let at = chrono::DateTime::parse_from_rfc3339(raw).map_err(|e| {
+                MemoryVerbError::ExpiresAt {
+                    value: raw.to_string(),
+                    detail: e.to_string(),
+                }
             })?;
+            // #9142: the daemon refuses `expires_at <= now` the same way.
+            if at <= chrono::Utc::now() {
+                return Err(MemoryVerbError::ExpiresAtPast {
+                    value: raw.to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -358,7 +409,8 @@ pub fn resolve_verb_palace(
 ///
 /// # Errors
 ///
-/// [`MemoryVerbError::ExpiresAt`] when `--expires-at` is not RFC 3339 — raised
+/// [`MemoryVerbError::ExpiresAt`] / [`MemoryVerbError::ExpiresAtPast`] when
+/// `--expires-at` is not RFC 3339 or not in the future — raised
 /// before the palace or socket is resolved, so nothing is sent (#9142);
 /// [`MemoryVerbError::Palace`] when a write has no palace,
 /// [`MemoryVerbError::Socket`] when the socket path cannot be derived, and

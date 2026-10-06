@@ -255,6 +255,10 @@ drawer keeps outranking the current fact in recall.
 | A session's resume state | `ws:<session>/resume` |
 | A PR's state | `pr:<n>/state` |
 
+A key has one `:` and one `/`; each segment uses letters, digits, `.`, `_`
+and `-`; the whole key is at most 128 bytes. A refused key still stores the
+drawer, unslotted, and `tm memory` exits 3.
+
 ```bash
 tm memory remember "<session>: <summary>; next: <step>" --fact-key "ws:<session>/resume"
 tm memory note "PR #<n>: <state>" --fact-key "pr:<n>/state"
