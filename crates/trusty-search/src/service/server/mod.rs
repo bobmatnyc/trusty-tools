@@ -46,6 +46,8 @@ mod indexes_relocate;
 // #6822: the scalar-precision backfill route.
 mod quantize_handlers;
 mod reindex_handlers;
+// #9236: maps a remove-file path onto the stored index-relative key.
+mod remove_path;
 mod residency_sweep;
 // #4289: the create-index-time containment guard over registered index roots.
 mod root_overlap;

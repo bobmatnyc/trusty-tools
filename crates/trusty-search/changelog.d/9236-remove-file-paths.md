@@ -1,0 +1,2 @@
+Fixed
+- `remove-file` (HTTP, socket `search.index.file.remove`, MCP `remove_file`) now accepts an absolute path inside the index root. The daemon maps it to the stored index-relative key with the watcher's rule, so the absolute paths search returns remove the same chunks as their relative form. An absolute path outside the root, a `..` climb out of it, or the root itself answers `400 remove_file_path_outside_root`, whose message names both accepted forms; before, each answered `200 removed_chunks: 0` and removed nothing (#9236).

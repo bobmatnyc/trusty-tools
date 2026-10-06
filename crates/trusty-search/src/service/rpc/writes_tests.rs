@@ -1378,3 +1378,143 @@ async fn a_registry_level_write_is_not_admission_limited() {
         "a delete must not queue behind a saturated write lane it is not in: {answered:?}"
     );
 }
+
+// ------------------------------------------------------- remove-file paths ---
+
+/// Chunks the planted index holds for `key`.
+async fn chunks_for(state: &SearchAppState, id: &str, key: &str) -> Vec<String> {
+    let handle = state.registry.get(&IndexId::new(id)).expect("resident");
+    let indexer = handle.indexer.read().await;
+    indexer.chunk_ids_for_file(key).await
+}
+
+/// Why (#9236): search answers absolute paths, but `remove-file` matched the
+/// stored index-relative key exactly, so an absolute path answered
+/// `200 removed_chunks: 0` and left every chunk indexed.
+/// What: the index-relative removal sets the expected count. Then each
+/// absolute form — under the raw root, under the canonical root
+/// (`/var`↔`/private/var` on macOS), and with a trailing slash — removes that
+/// same count over HTTP, and the raw form does over the socket, leaving no
+/// chunk. Fails without `remove_path::remove_keys`: every absolute form
+/// answers `removed_chunks: 0`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_file_takes_an_absolute_in_root_path_9236() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let put = serde_json::json!({ "path": FILE, "content": CONTENT });
+
+    http_ok(&http, "POST", "/indexes/rp/index-file", put.clone()).await;
+    let relative = serde_json::json!({ "path": FILE });
+    let expected = http_ok(&http, "POST", "/indexes/rp/remove-file", relative).await;
+    let expected = expected["removed_chunks"].as_u64().unwrap_or(0);
+    assert!(
+        expected > 0,
+        "the index-relative removal must remove something"
+    );
+
+    let raw = tmp.path().join(FILE);
+    let canonical = std::fs::canonicalize(tmp.path())
+        .expect("canonical root")
+        .join(FILE);
+    let trailing = format!("{}/", raw.display());
+    for absolute in [
+        raw.display().to_string(),
+        canonical.display().to_string(),
+        trailing,
+    ] {
+        http_ok(&http, "POST", "/indexes/rp/index-file", put.clone()).await;
+        let body = serde_json::json!({ "path": absolute });
+        let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+        assert_eq!(reply["removed_chunks"], expected, "{absolute}: {reply}");
+        assert_eq!(reply["path"], absolute.as_str(), "{absolute}: {reply}");
+        let left = chunks_for(&state, "rp", FILE).await;
+        assert!(left.is_empty(), "{absolute} left {left:?}");
+    }
+
+    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    let over_socket = rpc_ok(
+        &rpc,
+        writes::METHOD_INDEX_FILE_REMOVE,
+        serde_json::json!({ "index_id": "rp", "body": { "path": raw } }),
+    )
+    .await;
+    assert_eq!(over_socket["removed_chunks"], expected, "{over_socket}");
+    assert!(chunks_for(&state, "rp", FILE).await.is_empty());
+}
+
+/// Why (#9236): an absolute path outside the root names no stored key, and a
+/// `200 removed_chunks: 0` told the caller nothing was wrong.
+/// What: a foreign absolute path, a `..` climb out of the root, and the root
+/// itself each answer `400 remove_file_path_outside_root` whose message names
+/// both accepted forms; the socket renders the same refusal as
+/// `CODE_INVALID_PARAMS`; the indexed file keeps every chunk.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_file_refuses_a_path_outside_the_root_9236() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, rpc) = routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let put = serde_json::json!({ "path": FILE, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    let before = chunks_for(&state, "rp", FILE).await;
+    assert!(!before.is_empty(), "the fixture must index something");
+
+    let root = tmp.path().display().to_string();
+    for outside in [
+        "/definitely/not/the/root/src/auth.rs".to_string(),
+        format!("{root}/../elsewhere/{FILE}"),
+        format!("{root}/"),
+    ] {
+        let body = serde_json::json!({ "path": outside });
+        let over_http = http_err(&http, "POST", "/indexes/rp/remove-file", body.clone()).await;
+        assert_eq!(
+            over_http.0,
+            StatusCode::BAD_REQUEST,
+            "{outside}: {}",
+            over_http.1
+        );
+        assert_eq!(
+            over_http.1["error"], "remove_file_path_outside_root",
+            "{outside}"
+        );
+        let message = over_http.1["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("index-relative path") && message.contains(&root),
+            "{outside}: the message must name both accepted forms: {message}"
+        );
+        let over_socket = rpc_err(
+            &rpc,
+            writes::METHOD_INDEX_FILE_REMOVE,
+            serde_json::json!({ "index_id": "rp", "body": body }),
+        )
+        .await;
+        assert_same_refusal(
+            &over_http,
+            &over_socket,
+            trusty_common::uds::server::CODE_INVALID_PARAMS,
+            &outside,
+        );
+        assert_eq!(chunks_for(&state, "rp", FILE).await, before, "{outside}");
+    }
+}
+
+/// Why (#9236): `index-file` stores a pushed absolute path verbatim, so
+/// normalizing it away would strand those chunks — nothing could remove them.
+/// What: an absolute in-root `index-file` write is removed by the same
+/// absolute path. Fails with the literal key dropped from `remove_keys`.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, http, _rpc) =
+        routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
+    let absolute = tmp.path().join(FILE).display().to_string();
+    let put = serde_json::json!({ "path": absolute, "content": CONTENT });
+    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    assert!(!chunks_for(&state, "rp", &absolute).await.is_empty());
+
+    let body = serde_json::json!({ "path": absolute });
+    let reply = http_ok(&http, "POST", "/indexes/rp/remove-file", body).await;
+    assert!(reply["removed_chunks"].as_u64().unwrap_or(0) > 0, "{reply}");
+    assert!(chunks_for(&state, "rp", &absolute).await.is_empty());
+}

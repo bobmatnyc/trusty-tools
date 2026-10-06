@@ -776,6 +776,13 @@ Remove a file (and all its chunks) from the index.
   ```json
   { "index_id": "my-project", "path": "src/auth.rs", "removed_chunks": 4 }
   ```
+  - `path` (#9236) is index-relative, or absolute under the index root. An
+    absolute path is mapped to its index-relative key the way the watcher maps
+    its events, and a key stored verbatim by an absolute `index-file` write is
+    removed too. `path` in the reply echoes the request.
+- **Response 400** `remove_file_path_outside_root` (#9236): an absolute path
+  outside the root, a `..` climb out of it, or the root itself. Nothing is
+  removed; `message` names both accepted forms.
 
 ###### Supported network-mount pattern (EFS/NFS/SMB) — issue #3408
 
