@@ -48,9 +48,11 @@ a fresh one.
 
 ## Once the issue exists: move it with `tm issue transition`
 
-The lifecycle labels (`status:in-progress` → `status:coded` → `status:merged` →
-`status:tested`) are mutually exclusive, and the repo encodes that as a state
-machine in [`issue-state.yaml`](../../issue-state.yaml) at the repo root — the
+Status lives on Project #45 (ToDo → Groomed → In development → Development
+complete → Merged → Deployed → Published); see [TICKETING.md](../../TICKETING.md).
+Until the migration lands, the `status:*` labels (`status:in-progress` →
+`status:coded` → `status:merged` → `status:tested`) are also maintained, are
+mutually exclusive, and the repo encodes them as a state machine in [`issue-state.yaml`](../../issue-state.yaml) at the repo root — the
 file `tm issue`'s CWD tier reads, so every `tm issue` verb run from the repo
 root uses it with no flag.
 
@@ -65,10 +67,10 @@ tm issue repair 1234             # an issue that already carries two status: lab
 `transition` refuses an edge the model does not declare (exit 1, naming the
 states you may move to), and performs the add and the remove as ONE
 `gh issue edit`, so two `status:` labels can never be observed on one issue. The
-`status:tested → closed` edge is declared `requires_note`, which is CLAUDE.md's
-rung 4–6 rule — "closes only from `status:tested`, with live verification
-evidence" — made mechanical; a rung 1–3 fix closes straight from
-`status:coded` instead, with the same `--note` requirement.
+`status:tested → closed` edge is declared `requires_note`, which is TICKETING.md's
+rung 4–6 rule (close at Deployed, with live verification evidence) made
+mechanical; a rung 1–3 fix, docs or CI closes at Merged instead, from
+`status:coded` or `status:merged`, with the same `--note` requirement.
 
 Two limits worth knowing. `tm issue current` and `tm issue transition` both read
 the issue through the shared ticket backend, which refuses a CLOSED issue — so

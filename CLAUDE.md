@@ -93,24 +93,10 @@ appends the unique, actionable items from PM/agent `## Prompt feedback`
 addenda there as one dated comment per session, deduplicated against earlier
 comments. Never a new issue per item; never close it — strike items as they land.
 
-🔴 **Issue lifecycle — open → in-progress → coded → merged → tested → closed.**
-Four mutually exclusive labels between GitHub's native open/closed:
-
-| Label | Meaning |
-|---|---|
-| `status:in-progress` | A session/agent has claimed it and is actively working it |
-| `status:coded` | Implementation pushed on a branch; PR not yet merged |
-| `status:merged` | PR merged to main; rung 4–6 fixes await live verification |
-| `status:tested` | Verified live (installed binary / real run); eligible to close |
-
-Claim goes on at dispatch, named session + date; reclaim only if provably
-stale. Advance with `tm issue transition N status:merged`. Fix PRs use
-`Refs #N`, **never** `Closes #N`. Rung 1–3 closes at merge:
-`tm issue transition N closed --note "PR #M squash <sha>"`, skipping
-`status:merged`/`status:tested`. Rung 4–6 (CLI/daemon/hook fixes needing
-live proof) close only from `status:tested`; a merged fix failing
-verification stays open, returning to `status:coded` only via a follow-up fix.
-Standard of record, including agent behaviour: [TICKETING.md](TICKETING.md).
+🔴 **Issue lifecycle — Status on Project #45:** ToDo → Groomed → In development → Development complete → Merged → Deployed → Published.
+Close rule: rung 1–3, docs and CI close at Merged; rung 4–6 close at Deployed. Fix PRs use `Refs #N`, never `Closes #N`.
+The Status field and the `status:*` labels are both maintained until the migration lands.
+Standard of record: [TICKETING.md](TICKETING.md).
 
 🔴 A `code-critic`/`code-analyzer`/trusty-review finding below HIGH, or a
 self-improvement/post-mortem finding (the `self-improvement` label,

@@ -157,7 +157,7 @@ Owner ruling: item 47, 2026-09-30.
    issue still open in it to the next milestone of the same kind (bugfix or
    feature) — the release report names the moved issues (owner ruling
    2026-09-25). An issue whose fix shipped in this release and only awaits
-   live verification (`status:merged` or `status:tested`) stays in the
+   live verification (Merged, awaiting Deployed) stays in the
    milestone that just closed.
 
 > **Site link (owner ruling):** every crate's `Cargo.toml` `homepage` field
