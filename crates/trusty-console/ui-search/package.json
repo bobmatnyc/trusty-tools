@@ -16,7 +16,7 @@
     "jsdom": "^25.0.0",
     "svelte": "^5.55.7",
     "vite": "^6.4.3",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "highlight.js": "^11.12.0"

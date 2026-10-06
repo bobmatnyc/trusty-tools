@@ -188,7 +188,16 @@ describe('api.listPalaces — the fast roster (issue #6155)', () => {
           reject(err);
         });
         // Nothing ever resolves this — exactly the hung request.
-        queueMicrotask(() => signal.dispatchEvent(new Event('abort')));
+        // vitest 4's jsdom env leaves AbortSignal as Node's but swaps the
+        // global `Event` for jsdom's, which Node's dispatchEvent rejects; take
+        // the Event class from a Node abort event instead.
+        const probe = new AbortController();
+        let NodeEvent;
+        probe.signal.addEventListener('abort', (e) => {
+          NodeEvent = e.constructor;
+        });
+        probe.abort();
+        queueMicrotask(() => signal.dispatchEvent(new NodeEvent('abort')));
       });
     });
 
