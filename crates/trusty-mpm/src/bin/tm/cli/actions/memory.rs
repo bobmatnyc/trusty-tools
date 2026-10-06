@@ -72,11 +72,12 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// #9142: ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        // #9142: Tier C slot flags, passed through to trusty-memory.
+        /// ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
         /// `pr:<n>/state`). The next write to the same key supersedes this one.
         #[arg(long)]
         fact_key: Option<String>,
-        /// #9142: RFC 3339 time the fact stops being current. With `--fact-key`
+        /// RFC 3339 time the fact stops being current. With `--fact-key`
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
@@ -104,11 +105,12 @@ pub(crate) enum MemoryAction {
         /// Tag to store alongside it; repeat for several.
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// #9142: ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
+        // #9142: Tier C slot flags, passed through to trusty-memory.
+        /// ADR-0028 slot, `<domain>:<id>/<aspect>` (`ws:<session>/resume`,
         /// `pr:<n>/state`). The next write to the same key supersedes this one.
         #[arg(long)]
         fact_key: Option<String>,
-        /// #9142: RFC 3339 time the fact stops being current. With `--fact-key`
+        /// RFC 3339 time the fact stops being current. With `--fact-key`
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
