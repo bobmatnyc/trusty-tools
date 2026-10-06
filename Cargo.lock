@@ -11329,7 +11329,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -11501,7 +11501,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11518,7 +11518,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.29.1"
+version = "0.29.2"
 dependencies = [
  "anyhow",
  "async-trait",

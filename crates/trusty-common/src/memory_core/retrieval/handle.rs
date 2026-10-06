@@ -871,9 +871,10 @@ impl PalaceHandle {
     /// left wholly intact rather than half-deleted.
     pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
         let (removed, l1_saved) = self.forget_removing(id).await?;
-        // #9172: a user forget of a recorded dedup survivor is journalled.
+        // #9283: every user forget is journalled, hash only (#9172: a dedup
+        // survivor keeps its copy).
         if let Some(drawer) = &removed {
-            crate::memory_core::maintenance_log::record_survivor_forget(self, drawer);
+            crate::memory_core::maintenance_log::record_user_forget(self, drawer);
         }
         // #8729: journalled before the L1 error surfaces; the row is gone.
         l1_saved?;

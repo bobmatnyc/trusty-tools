@@ -695,13 +695,9 @@ fn kind_of(path: &std::path::Path) -> Kind {
     }
 }
 
-/// Resolve the workspace root from this crate's manifest directory.
+/// The running checkout's workspace root (#9298).
 fn workspace_root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crates/trusty-common has a workspace root two levels up")
-        .to_path_buf()
+    crate::test_harness::test_repo_root().expect("the running checkout's workspace root")
 }
 
 /// Recursively collect the files the label scan covers.

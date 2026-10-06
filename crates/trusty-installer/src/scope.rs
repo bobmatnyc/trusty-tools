@@ -63,8 +63,8 @@ pub fn resolve_scope(explicit: Option<ScopeArg>, cwd: &Path) -> ScopeArg {
 /// `.git` directory or file (worktree case) is found. Returns `false` if the
 /// root is reached without a match.
 ///
-/// Test: `has_git_root(Path::new("/tmp"))` == `false`;
-/// `has_git_root(env!("CARGO_MANIFEST_DIR"))` == `true` (this repo has `.git`).
+/// Test: `git_root_gives_all` (the checkout has `.git`),
+/// `no_git_root_gives_system` (`/tmp` has none).
 fn has_git_root(cwd: &Path) -> bool {
     let mut current = cwd;
     loop {
@@ -85,12 +85,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A directory inside the running checkout (#9298): this crate's own
+    /// directory under the runtime workspace root, which carries `.git`.
+    fn checkout_dir() -> PathBuf {
+        trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root")
+            .join("crates/trusty-installer")
+    }
+
     /// A path containing `.git` → `ScopeArg::All`.
     #[test]
     fn git_root_gives_all() {
-        // The workspace root is a git repo; CARGO_MANIFEST_DIR is inside it.
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(detect_default_scope(&manifest_dir), ScopeArg::All);
+        // The workspace root is a git repo; this crate's directory is inside it.
+        assert_eq!(detect_default_scope(&checkout_dir()), ScopeArg::All);
     }
 
     /// `/tmp` has no `.git` → `ScopeArg::System`.
@@ -108,9 +115,8 @@ mod tests {
             ScopeArg::System
         );
         // Even though the manifest dir has .git, explicit Project is honoured.
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         assert_eq!(
-            resolve_scope(Some(ScopeArg::Project), &manifest_dir),
+            resolve_scope(Some(ScopeArg::Project), &checkout_dir()),
             ScopeArg::Project
         );
     }
@@ -118,8 +124,7 @@ mod tests {
     /// `resolve_scope(None, _)` falls through to detection.
     #[test]
     fn none_scope_detects() {
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        assert_eq!(resolve_scope(None, &manifest_dir), ScopeArg::All);
+        assert_eq!(resolve_scope(None, &checkout_dir()), ScopeArg::All);
         assert_eq!(resolve_scope(None, Path::new("/tmp")), ScopeArg::System);
     }
 }
