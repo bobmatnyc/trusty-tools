@@ -74,8 +74,8 @@ vercel env ls production | awk 'NR>1{print $1}'
 
 **Never replace a value with `vercel env add --force` (#8321).** It can leave
 the old env object behind as a stale duplicate. Run
-`vercel env rm <name> <environment>` first, then `vercel env add`. Confirm
-that `vercel env ls <environment>` shows one row for the name.
+`vercel env rm <name> <environment>` first, then `vercel env add`. Then run
+the names-only listing and confirm the name appears once.
 
 ### Env Audits — Names Only, Scoped, Never `--json`
 
@@ -97,9 +97,8 @@ environment that's empty (or the role-scope gap above). Run
 **List names only, filtered at the source (#9158):**
 `vercel env ls <env> | awk 'NR>1{print $1}'`. The rules above limit what you
 report, not what the command prints. So never `--json`, and never the
-unfiltered table either — the table's other columns are value-adjacent data
-the transcript does not need. A value that prints anyway is an exposure:
-report it.
+unfiltered table either — its other columns are value-adjacent data. A value
+that prints anyway is an exposure: report it.
 
 When a value is genuinely needed (not just its name or encrypted status),
 route it through the secrets model (epic #7517) instead of a `--json` read —
@@ -183,7 +182,8 @@ Add to `package.json` for consistent developer experience:
 ## Troubleshooting
 
 1. Build failures: check `vercel logs DEPLOYMENT_URL`
-2. Environment variable not found: verify `vercel env ls production` (a
+2. Environment variable not found: verify
+   `vercel env ls production | awk 'NR>1{print $1}'` (a
    Developer-role token can return zero rows here even when variables exist
    — see Role & Permission Limits above before treating this as data loss)
 3. Domain not resolving: `vercel domains inspect my-domain.com`
