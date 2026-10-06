@@ -89,6 +89,9 @@ mod excludes_8922_tests;
 // #9059: every ingest path against an index held by an invalid exclude glob.
 #[cfg(test)]
 mod exclude_hold_9059_tests;
+// #9230: every delete path stamps the corpus only when its rows left redb.
+#[cfg(test)]
+mod delete_stamp_9230_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 

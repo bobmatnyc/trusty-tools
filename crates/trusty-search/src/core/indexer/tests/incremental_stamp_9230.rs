@@ -47,7 +47,7 @@ fn plant(idx: &CodeIndexer, unix: u64) {
 
 /// Replace the chunks table with one of the same name and another value type,
 /// so every later chunk upsert fails inside redb with a real error.
-fn break_chunk_writes(idx: &CodeIndexer) {
+pub(crate) fn break_chunk_writes(idx: &CodeIndexer) {
     const CHUNKS: redb::TableDefinition<'static, &str, &[u8]> =
         redb::TableDefinition::new("chunks");
     const DECOY: redb::TableDefinition<'static, &str, u64> = redb::TableDefinition::new("chunks");
@@ -118,16 +118,24 @@ async fn a_tombstone_that_removes_rows_stamps_and_a_noop_write_does_not() {
 }
 
 /// Why: #9230 — a write the chunk cap refused is reported as an error, so it
-/// must not refresh the index's recency.
+/// must not refresh the index's recency. The cap leaves room for one of B's
+/// chunks: B lands in part, rows reach redb, and only the cap refusal keeps
+/// the stamp still. Fails with the stamp moved above the `dropped_by_cap` bail.
 /// Test: this test.
 #[tokio::test]
 async fn a_write_the_chunk_cap_refuses_does_not_stamp() {
     let probe = CodeIndexer::new("stamp-9230-cap-count", "/tmp/stamp-9230");
     probe.index_file("src/a.rs", FILE_A).await.expect("probe");
-    let cap = probe.chunk_count();
+    let a_chunks = probe.chunk_count();
+    probe.index_file("src/b.rs", FILE_B).await.expect("probe");
+    assert!(
+        probe.chunk_count() - a_chunks >= 2,
+        "B must hold at least two chunks for a partial landing"
+    );
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut idx = CodeIndexer::new("stamp-9230-cap", "/tmp/stamp-9230").with_chunk_cap(cap);
+    let mut idx =
+        CodeIndexer::new("stamp-9230-cap", "/tmp/stamp-9230").with_chunk_cap(a_chunks + 1);
     idx.set_corpus_store(Arc::new(
         CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
     ));
@@ -135,6 +143,11 @@ async fn a_write_the_chunk_cap_refuses_does_not_stamp() {
     plant(&idx, OLD_STAMP);
     let refused = idx.index_file("src/b.rs", FILE_B).await;
     assert!(refused.is_err(), "the cap must refuse the second file");
+    assert_eq!(
+        idx.chunk_ids_for_file("src/b.rs").await.len(),
+        1,
+        "one of B's chunks must land, or the cap and the stamp never compete"
+    );
     assert_eq!(stamp(&idx), Some(OLD_STAMP), "a refused write stamped");
 }
 

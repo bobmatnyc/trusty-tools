@@ -6,13 +6,17 @@
 //! delta lost to a stale clone that had one full reindex.
 //! What: [`CodeIndexer::stamp_incremental_commit`] writes "now" into the held
 //! corpus; [`CodeIndexer::record_incremental_commit`] logs a failure of it.
-//! The callers (`index_file_outcome`, `index_files_batch_inner`) stamp only
-//! after their rows reached redb, never on a refused, failed or no-op write.
-//! Test: `indexer::tests::incremental_stamp_9230`.
+//! The callers (`index_file_outcome`, `index_files_batch_inner`, and the
+//! delete paths through [`CodeIndexer::purge_file_committed`] and
+//! [`CodeIndexer::remove_chunk_ids_committed`]) stamp only after their rows
+//! reached or left redb, never on a refused, failed or no-op write.
+//! Test: `indexer::tests::incremental_stamp_9230`,
+//! `service::delete_stamp_9230_tests`.
 
 use anyhow::{Context, Result};
 
-use super::super::CodeIndexer;
+use super::super::{CodeIndexer, RedbChunkDelete};
+use crate::core::registry::IndexId;
 
 /// #9230: test-only fault seam. The stamp write fails for each index id listed
 /// here. Keyed by index id so concurrent tests never see each other's faults.
@@ -54,7 +58,7 @@ impl CodeIndexer {
     /// the resolver reads this index as older, never as fresher than it is.
     /// What: one `warn` naming the index and `what` on failure.
     /// Test: `a_failed_stamp_write_leaves_the_previous_stamp`.
-    pub(super) async fn record_incremental_commit(&self, what: &str) {
+    pub(crate) async fn record_incremental_commit(&self, what: &str) {
         if let Err(e) = self.stamp_incremental_commit().await {
             tracing::warn!(
                 index_id = %self.index_id,
@@ -63,5 +67,68 @@ impl CodeIndexer {
                  project.resolve keeps the previous stamp (#9230): {e:#}"
             );
         }
+    }
+
+    /// [`Self::purge_file`] that reports whether its delete committed (#9230).
+    ///
+    /// Why: a committed delete stamps the corpus, and only a fail-closed
+    /// delete proves the rows left redb. Boot reconcile and the rescan sweep
+    /// keep their warn-only tolerance of a failed redb delete.
+    /// What: purges fail-closed. On an error it logs, then runs the warn-only
+    /// [`Self::purge_file`], whose count or error the caller handles as it
+    /// always has. Returns `(removed, committed)`; `committed` is true only
+    /// when the fail-closed purge removed rows.
+    /// Test: `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
+    pub(crate) async fn purge_file_committed(
+        &self,
+        index_id: &IndexId,
+        rel: &str,
+    ) -> Result<(usize, bool)> {
+        match self
+            .purge_file_with(index_id, rel, RedbChunkDelete::FailClosed)
+            .await
+        {
+            Ok(removed) => Ok((removed, removed > 0)),
+            Err(e) => {
+                tracing::warn!(
+                    index_id = %self.index_id,
+                    file = %rel,
+                    "fail-closed purge failed; purging warn-only, without a \
+                     reindex stamp (#9230): {e:#}"
+                );
+                Ok((self.purge_file(index_id, rel).await?, false))
+            }
+        }
+    }
+
+    /// Drop chunk `ids` from every store; `true` when they left redb (#9230).
+    ///
+    /// Why: the watcher's delete must stamp the corpus when it committed, and
+    /// keep its old tolerance (drop from memory, log) when redb refused.
+    /// What: removes fail-closed. On an error it logs and removes warn-only,
+    /// as the watcher always did. Empty `ids` is `false`.
+    /// Test: `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
+    pub(crate) async fn remove_chunk_ids_committed(&self, ids: &[String]) -> bool {
+        if ids.is_empty() {
+            return false;
+        }
+        let Err(e) = self
+            .remove_chunks_from_stores(ids, RedbChunkDelete::FailClosed)
+            .await
+        else {
+            return true;
+        };
+        tracing::warn!(
+            index_id = %self.index_id,
+            "fail-closed chunk delete failed; removing warn-only, without a \
+             reindex stamp (#9230): {e:#}"
+        );
+        if let Err(e) = self
+            .remove_chunks_from_stores(ids, RedbChunkDelete::WarnOnly)
+            .await
+        {
+            tracing::warn!(index_id = %self.index_id, "warn-only chunk delete failed: {e:#}");
+        }
+        false
     }
 }

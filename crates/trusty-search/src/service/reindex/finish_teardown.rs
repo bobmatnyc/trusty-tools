@@ -159,7 +159,9 @@ pub(super) async fn resolve_corpus_swap(
 ///
 /// Why: `search.project.resolve` picks a repo's most recently indexed index,
 /// and the `index.redb` mtime moves whenever redb opens the file, so a load
-/// looked like a reindex. This stamp moves only here. It is not
+/// looked like a reindex. This stamp moves only on a committed write: here
+/// for a full reindex, and through `CodeIndexer::record_incremental_commit`
+/// for any committed incremental write or delete (#9230). It is not
 /// `PersistedIndex::last_indexed_unix`, which reconcile reads (#4391).
 /// What: writes the current unix time into the handle's corpus `_meta` on a
 /// blocking worker. A handle with no durable corpus is a no-op; a write

@@ -567,8 +567,9 @@ pub async fn handle_modified(
 /// from the HNSW + BM25 corpus so deleted files do not silently linger.
 ///
 /// What: normalizes the event path to the same repo-root-relative key used by
-/// `handle_modified` when it recorded the chunks, then calls `remove_chunk`
-/// for every chunk ID in the index. Uses `watcher_relative_path` with both
+/// `handle_modified` when it recorded the chunks, removes those chunk IDs,
+/// rebuilds the symbol graph once, and stamps the corpus when the delete
+/// left redb (#9230). Uses `watcher_relative_path` with both
 /// the canonical and raw roots so that even when `notify` delivers the path
 /// in a different symlink form (e.g. `/var/…` vs `/private/var/…` on macOS)
 /// the lookup still hits the entry stored by `handle_modified`.
@@ -577,7 +578,8 @@ pub async fn handle_modified(
 /// `removed_deleted_file_dual_root_fallback` unit tests below;
 /// `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` in
 /// `tests/watcher_chunk_cap_orphans_100.rs` covers the case where the entry it
-/// looks up was written by `handle_modified`'s error arm.
+/// looks up was written by `handle_modified`'s error arm; the #9230 stamp by
+/// `a_failed_delete_does_not_stamp_and_the_next_committed_delete_does`.
 ///
 /// Public for that integration test on the same terms as `handle_modified`.
 #[doc(hidden)]
@@ -599,13 +601,18 @@ pub async fn handle_removed(
     else {
         return;
     };
-    // #3049: `remove_chunk` mutates the corpus — same guard as `handle_modified`.
+    if ids.is_empty() {
+        return;
+    }
+    // #3049: the removal mutates the corpus — same guard as `handle_modified`.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
     let idx = indexer.read().await;
-    for id in ids {
-        if let Err(err) = idx.remove_chunk(&id).await {
-            tracing::warn!(?err, %id, "remove_chunk failed");
-        }
+    // #9230: fail-closed, so a delete whose rows left redb stamps the corpus;
+    // a refused redb delete still drops the ids from memory and only logs.
+    let committed = idx.remove_chunk_ids_committed(&ids).await;
+    idx.rebuild_symbol_graph_now().await;
+    if committed {
+        idx.record_incremental_commit(&rel_key).await;
     }
 }
 

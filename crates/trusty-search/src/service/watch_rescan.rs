@@ -288,6 +288,8 @@ pub(crate) async fn reconcile_with_policy(
         .files;
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
+    // #9230: a delete whose rows left redb stamps the corpus once, below.
+    let mut delete_committed = false;
 
     // #6570: the same per-index content-hash cache the reindex pipeline skips
     // unchanged files with. Warmed from the durable corpus when this process
@@ -324,7 +326,9 @@ pub(crate) async fn reconcile_with_policy(
             // the content check existed may sit over plaintext chunks. The
             // file stays `live`, so the sweep below never counts it as gone.
             if crate::core::sops::is_sops_encrypted(&content) {
-                if drop_file(index_id, indexer, &rel).await? > 0 {
+                let (removed, committed) = drop_file(index_id, indexer, &rel).await?;
+                delete_committed |= committed;
+                if removed > 0 {
                     stats.files_excluded += 1;
                 }
                 indexed_files.take(&key).await;
@@ -394,6 +398,10 @@ pub(crate) async fn reconcile_with_policy(
         // graph is O(N + E) over the entire corpus.
         indexer.read().await.rebuild_symbol_graph_now().await;
     }
+    if delete_committed || swept.committed {
+        let idx = indexer.read().await;
+        idx.record_incremental_commit("rescan delete").await;
+    }
 
     Ok(stats)
 }
@@ -440,19 +448,20 @@ async fn warm_hashes_from_corpus(
 }
 
 /// Drop one file's chunks and content hash, mapping a failure to
-/// [`RescanError::Remove`].
+/// [`RescanError::Remove`]. Returns `(removed, committed)`.
 ///
 /// Why (#8922): the hash goes with the chunks, or a re-admitted unchanged file
 /// is hash-skipped forever. No per-file graph rebuild: the pass rebuilds once.
+/// #9230: `committed` (rows left redb) makes the pass stamp the corpus.
 /// Caller obligation (#3049): the same as [`sweep_deleted`]'s — the caller
 /// holds the teardown guard; declared in `scripts/teardown-guard-manifest.tsv`.
 async fn drop_file(
     index_id: &IndexId,
     indexer: &Arc<RwLock<CodeIndexer>>,
     path: &str,
-) -> Result<usize, RescanError> {
+) -> Result<(usize, bool), RescanError> {
     let idx = indexer.read().await;
-    idx.purge_file(index_id, path)
+    idx.purge_file_committed(index_id, path)
         .await
         .map_err(|source| RescanError::Remove {
             index_id: index_id.to_string(),
@@ -468,6 +477,8 @@ struct Swept {
     deleted: usize,
     /// Tracked files still on disk that the policy now excludes (#8922).
     excluded: usize,
+    /// #9230: some removal's rows left redb, so the pass stamps the corpus.
+    committed: bool,
 }
 
 /// Drop chunks for tracked files that the walk did not find: files gone from
@@ -512,7 +523,9 @@ async fn sweep_deleted(
         if on_disk && !excluded {
             continue;
         }
-        let removed = drop_file(index_id, indexer, &tracked.display().to_string()).await?;
+        let (removed, committed) =
+            drop_file(index_id, indexer, &tracked.display().to_string()).await?;
+        swept.committed |= committed;
         indexed_files.take(&tracked).await;
         if excluded {
             // #8922: counted only when chunks actually left.

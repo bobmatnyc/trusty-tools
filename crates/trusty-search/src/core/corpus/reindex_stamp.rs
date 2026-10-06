@@ -3,7 +3,8 @@
 //! Why: `search.project.resolve` ranks a repo's indexes by "most recently
 //! indexed". The `index.redb` mtime cannot answer that, because redb rewrites
 //! the file each time it is opened, so a cold-loaded stale index looked newer
-//! than a freshly reindexed one.
+//! than a freshly reindexed one. Any committed write stamps it: a full
+//! reindex, and an incremental write or delete (#9230).
 //! What: read and write `META_KEY_REINDEXED_UNIX` through a held
 //! [`CorpusStore`], plus [`read_reindexed_unix_at`], which reads a corpus this
 //! process does not hold through a read-only redb open.
@@ -22,12 +23,13 @@ use crate::core::migration::{META_KEY_REINDEXED_UNIX, META_TABLE};
 const READ_ONLY_CACHE_BYTES: usize = 1 << 20;
 
 impl CorpusStore {
-    /// When a reindex last committed this corpus; `None` when never stamped.
+    /// When a write last committed this corpus; `None` when never stamped.
     pub(crate) fn read_reindexed_unix_sync(&self) -> Result<Option<u64>> {
         read_stamp(&self.db)
     }
 
-    /// Record that a reindex committed this corpus at `unix` seconds.
+    /// Record that a write committed this corpus at `unix` seconds: a full
+    /// reindex (#9169) or any committed incremental write or delete (#9230).
     ///
     /// Why: the resolver's recency must change only when a commit lands.
     /// What: one write transaction upserting the 8-byte little-endian value.
