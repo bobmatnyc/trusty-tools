@@ -1,6 +1,6 @@
 //! Service-level mapping from `PathBuf` → chunk IDs currently in the index.
 //!
-//! Why: `CodeIndexer` exposes `add_chunk` / `remove_chunk` keyed by chunk ID,
+//! Why: `CodeIndexer` exposes `add_chunk` / `remove_chunk_ids_committed` keyed by chunk ID,
 //! but the [`crate::service::watcher::FileWatcher`] only knows file paths. We must
 //! remember which chunk IDs a given file produced so a subsequent
 //! `WatchEvent::Removed` can drop them. Tracking this in core would couple

@@ -82,7 +82,7 @@ pub(crate) const PROGRESS_CHUNK_INTERVAL: usize = 32;
 impl CodeIndexer {
     /// Rebuild the symbol graph from the current corpus.
     ///
-    /// Why: called after bulk mutations (`add_chunk`, `remove_chunk`, a batch
+    /// Why: called after bulk mutations (`add_chunk`, a batch
     /// commit, a reindex). It is O(N + E) over the WHOLE corpus, so
     /// single-file writes (`index_file`, `remove_file`) no longer call it
     /// directly: they mark the graph stale and the graph-refresh ticker runs
@@ -97,7 +97,7 @@ impl CodeIndexer {
     pub(super) async fn rebuild_symbol_graph(&self) -> ContribMergeOutcome {
         // Issue #2162 follow-up: this function reads `self.chunks` and
         // `self.entities` directly below, but several call paths
-        // (`remove_file`, `remove_chunk` from the FSEvents watcher,
+        // (`remove_file`, the FSEvents watcher's chunk-id removal,
         // `rebuild_symbol_graph_for_reindex` on a prune-only reindex,
         // the contributed-graph ingest endpoint) reach this function without
         // having rehydrated either structure first. An idle-evicted map read

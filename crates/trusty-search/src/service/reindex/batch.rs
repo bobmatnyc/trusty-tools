@@ -423,10 +423,13 @@ pub(super) async fn prepare_and_parse_batch(
 /// What: acquires the write lock, removes stale chunks for changed files,
 /// commits the new `ParsedBatch`, updates counters and hash cache, checks
 /// memory, and returns a `BatchOutcome`.
+/// A refused pre-commit remove (fail-closed, #9212) skips that file's insert,
+/// withholds its hash and counts in `progress.errors`.
 /// Test: `reindex_walks_directory_and_emits_events` verifies correct chunk
 /// counts and no duplicates after a re-run; the error arms by
-/// `commit_error_clears_the_old_hash` and
-/// `a_failed_redb_write_fails_the_batch_and_withholds_its_hash` (#9230).
+/// `commit_error_clears_the_old_hash`,
+/// `a_failed_redb_write_fails_the_batch_and_withholds_its_hash` (#9230) and
+/// `a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash` (#9212).
 pub(super) async fn commit_parsed_and_finalize(
     ctx: &BatchCtx,
     ready: ParsedReadyBatch,
@@ -472,6 +475,11 @@ pub(super) async fn commit_parsed_and_finalize(
         }
         // Filter the parsed batch to exclude files whose remove failed.
         let parsed = if remove_failures > 0 {
+            // #9212: the remove fails closed, so a refused delete left the
+            // file's rows in every store; it is a run error, not a warning.
+            ctx.progress
+                .errors
+                .fetch_add(remove_failures, AtomicOrdering::Release);
             parsed.retain_files(|f| !remove_failed_files.contains(f))
         } else {
             parsed
