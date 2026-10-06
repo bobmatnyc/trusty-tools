@@ -219,9 +219,19 @@ size. Recovering one is a manual step that the E14 guide documents.
   means using the backup and losing the writes made since.
 - N-1 only means a user who skips several format bumps must step through
   intermediate releases. The E14 table carries that cost.
-- A failed migration takes that palace offline until someone fixes it,
-  where today it opens degraded. This trades availability for no silent
-  divergence.
+- **Accepted: a failed migration takes that palace offline.** The palace is
+  refused, never opened un-migrated, where today it opens degraded
+  (`migrate.rs:22`). This is fail-closed, in line with the 1.0 data-loss
+  rule. The cost is that palace's availability until an operator repairs or
+  restores it. The other palaces keep working. The operator recovers in one
+  of two ways, which the E14 guide documents:
+  - **Re-run:** fix the cause that `doctor` reports (disk space,
+    permissions, an unreadable file), then restart the daemon. The next
+    writer-intent open redoes every step from the files on disk (D3 rule 4).
+  - **Restore:** copy the primary files back from
+    `<data_root>/backups/format-migration/<palace_id>/<from>-to-<to>-<UTC timestamp>/`.
+    The palace is then at N-1 again, and the next open migrates it, or a
+    release from the line that writes N-1 reads it.
 - Each migration release adds a fixture to `testdata/` for good.
 - The 0 → 1 migration touches the whole estate (116 directories under
   `palaces/` on the owner's machine) on the first 1.0 open, so its backup
@@ -231,17 +241,48 @@ size. Recovering one is a manual step that the E14 guide documents.
 
 1. **Retention.** Is "two newest per palace" right, or should backups expire
    by age after a successful later open?
+   **Recommendation:** keep the two newest per palace, with no age-based
+   expiry; only an operator deletes a backup. A successful open does not
+   prove the migrated data is correct. Silent drawer loss is detected only
+   later, by count history
+   ([#9283](https://github.com/bobmatnyc/trusty-tools/issues/9283)), and an
+   age rule would delete the only restore point first. `doctor` already
+   reports the total size (D3 rule 3).
 2. **N-2 path.** Should 1.x ship an explicit `trusty-memory palace migrate
    --chain` that runs older migrations in sequence, instead of requiring
    intermediate installs?
+   **Recommendation:** no `--chain` in 1.x; the E14 table of release lines
+   stays the N-2 path. The owner's N-1 rule keeps one migration per binary.
+   A chain would keep every past migration in the binary and multiply the
+   D4 fixture matrix, which is why "auto-migrate any older format" is
+   rejected below.
 3. **Read-only access to a refused palace.** Should a failed-migration palace
    be readable through the backup for export, or stay fully offline?
+   **Recommendation:** stay fully offline in the binary that failed. The
+   backup is a complete format N-1 palace, so an operator who needs its data
+   restores it (Consequences) and reads it with the release line that writes
+   N-1. A second read path into a backup directory would be a new surface
+   with its own tests, used only in a failure case.
 4. **`recall.redb` class.** It is classed as auxiliary. Does the recall eval
    gate (E13) need it preserved as primary?
+   **Recommendation:** keep it auxiliary. It holds hit/miss telemetry
+   (`crates/trusty-common/src/memory_core/analytics.rs:1-15`), a failure to
+   open it already leaves the palace usable
+   (`crates/trusty-common/src/memory_core/retrieval/handle.rs:525-541`), and
+   recall ranking does not read it. E13 measures recall against a checked-in
+   known-answer corpus ([#9281](https://github.com/bobmatnyc/trusty-tools/issues/9281)),
+   not against this log.
 5. **Memory id minting for sync.** Should the sync migration mint a
    `memory_id` for every existing drawer, or should the id be minted lazily
    at first publish? This is DOC-80's call, and the format bump applies
    either way.
+   **Recommendation:** mint eagerly, inside the sync N → N+1 migration. Every
+   drawer then has a `memory_id` once format N+1 is stamped, which the D4
+   fixture test can assert, and every id is written under the verified
+   backup. Lazy minting makes publish a writer of primary data outside any
+   migration. The DOC-80 draft (PR #9176) already requires a daemon-side
+   map from `memory_id` to the local drawer id, so the eager write fills a
+   table that must exist anyway.
 
 ## Alternatives considered
 

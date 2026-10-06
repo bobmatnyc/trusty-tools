@@ -113,7 +113,8 @@ of 1.x) and `mcp-schema`. Rules:
 - Raising the MSRV is allowed in a 1.x minor and follows ADR-0029. It is never
   done in a patch.
 
-**5. Daemon socket JSON-RPC: out of contract in 1.0.** Two reasons:
+**5. Daemon socket JSON-RPC: out of contract in 1.0.** Decided in the
+Architect review of 2026-10-06. Two reasons:
 
 - It is an internal transport between first-party binaries (ADR-0032). Its
   consumers ship from this workspace.
@@ -124,8 +125,11 @@ The MCP payloads it carries through `tools/call` are already frozen by
 surface 1, because the socket and stdio paths share one dispatcher. Before
 1.0.0, the daemon adds a monotonic integer `protocol_version` to its
 `memory.health`/`memory.status` reply (the ADR-0007 model). In-workspace
-clients check it and degrade when it is lower than they expect. A later 1.x
-minor may bring the socket into contract through an amending ADR.
+clients read it as a handshake on connect and degrade when it is lower than
+they expect. The handshake has its own issue on milestone
+[#135](https://github.com/bobmatnyc/trusty-tools/milestone/135), filed
+2026-10-06. A later 1.x minor may bring the socket into contract through an
+amending ADR.
 
 ### D2. Out of contract
 
@@ -214,7 +218,8 @@ cadence and keeps the 2026-09-26 policy.
   response shape at 1.0.0 lives until 2.0, so the E8/E9/E10 audits before
   1.0.0 matter more than any check after it.
 - trusty-memory becomes the one crate that does not follow the 2026-09-26
-  policy for its frozen surfaces. Release tooling has to know this.
+  policy for its frozen surfaces (open question 6, pending AQ-cz). Release
+  tooling has to know this.
 - Bringing structs under `#[non_exhaustive]` makes downstream struct literals
   fail to compile at the 1.0.0 upgrade. That is a one-time cost, paid in the
   0.x → 1.0 move.
@@ -223,22 +228,63 @@ cadence and keeps the 2026-09-26 policy.
   tight version requirement on trusty-memory.
 
 **Follow-up:** E1–E5 and E8–E10 implement this ADR; ADR-0070 and E6
-implement surface 3; the `protocol_version` field (D1.5) needs an owner
-before 1.0.0.
+implement surface 3; the `protocol_version` handshake (D1.5) is tracked by
+its own issue on milestone #135.
 
 ### Open questions for review
 
 1. **Accepted-break declarations.** `scripts/semver-accepted-breaks/` lets a
    PR merge a declared break. Should it be refused for `trusty-memory`
-   `engine` items in 1.x? The recommendation is yes.
-2. **Socket in or out.** The recommendation is out, with `protocol_version`
-   (D1.5). The alternative is to freeze the `FOLDED_METHODS` names now.
+   `engine` items in 1.x?
+   **Recommendation:** refuse — from 1.0.0 the PR-time check rejects a
+   declaration that names any `trusty_memory::engine::*` item, and accepts
+   one only when its reason cites D3's security exception. The two existing
+   trusty-memory declarations
+   (`scripts/semver-accepted-breaks/trusty-memory-0.28.2.txt`) name only
+   `commands::daemon_lock`, which stays out of contract, so the mechanism
+   keeps working for non-engine items. A declared engine break would ship a
+   break in a minor, which surface 4 forbids.
+2. **Socket in or out — decided.** Out of contract in 1.0, with a
+   `protocol_version` handshake added before 1.0.0 (D1.5). The Architect
+   accepted this on 2026-10-06, and the handshake has its own issue on
+   milestone #135. Freezing the `FOLDED_METHODS` names now was rejected.
 3. **`mcp-schema` types.** `trusty-agents` builds against them. Should they
    join surface 4, or stay out with a pinned requirement?
+   **Recommendation:** stay out of surface 4; the `mcp-schema` feature name
+   stays frozen (D1.4). The schema content (tool names, params, types) is
+   already frozen by surface 1 and the E8 snapshot. The Rust type is a
+   `trusty_mcp::ServiceDescriptor` impl
+   (`crates/trusty-agents/src/rpc/mod.rs:26-45`), so freezing it would freeze
+   trusty-mcp 0.2.x into the contract. Its one consumer is in-workspace and
+   already carries a tight version requirement
+   (`crates/trusty-agents/Cargo.toml:88`).
 4. **Environment variables and the pin file.** They are placed in surface 2.
    Confirm, or move them out of contract.
+   **Recommendation:** keep both in surface 2, with env vars frozen by name
+   and value syntax only; defaults stay out of contract. The pin file is
+   committed into user repositories and decides which palace a project reads
+   (`docs/reference/environment-variables.md:112`, #1217), so a format change
+   orphans palaces. A renamed env var is dropped without an error, but
+   defaults such as `TRUSTY_MEMORY_REDB_CACHE_MB` (`:113`) are performance
+   tuning, which D2 already puts out of contract.
 5. **`anyhow` in public signatures** (E10). `anyhow::Error` is stable but
    untyped. Should the engine expose it at 1.0.0?
+   **Recommendation:** no — every function in a frozen `engine` signature
+   returns a typed `#[non_exhaustive]` `thiserror` error at 1.0.0. The
+   workspace rule is `thiserror` for libraries (`CLAUDE.md:133`), and moving
+   from `anyhow` to a typed error after 1.0.0 is itself a break. Today 49
+   `memory_core` files import `anyhow::Result`, so E10 first narrows what
+   `engine` re-exports and converts only what remains.
+6. **Exception to the 2026-09-26 policy (AQ-cz, pending Bob).**
+   `docs/reference/semver-gate.md:3-15` says a public-API break never forces
+   a major version, and CHECK 5 records a break without blocking it. Should
+   trusty-memory 1.x be an explicit exception, where a break to a frozen
+   surface requires 2.0.0?
+   **Recommendation:** adopt the exception for trusty-memory 1.x only;
+   trusty-common and every other crate keep the 2026-09-26 policy. A 1.0
+   contract without a major-bump rule cannot be enforced: under that policy a
+   1.x minor could remove an MCP tool, the D4 guards could only warn, and
+   CHECK 5 would record the break and publish. **Decision pending AQ-cz.**
 
 ## Alternatives considered
 
