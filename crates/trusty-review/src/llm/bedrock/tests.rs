@@ -873,52 +873,6 @@ fn auto_mode_free_text_reply_reaches_the_review_parser() {
     assert_eq!(parsed.verdict, Verdict::Unknown);
 }
 
-/// An `auto` text reply carrying the review object in a bare fence parses.
-///
-/// Why: the favoured shape of the 37 unparsed Sonnet 5.5 reviews (#9310).
-/// What: prose plus a bare-fenced object, through `response_text` and the
-/// review parser.
-/// Test: this test.
-#[test]
-fn auto_mode_prose_reply_with_review_object_parses() {
-    use crate::models::Verdict;
-    use crate::pipeline::parser::parse_review_response;
-    let prose = "I reviewed the diff.\n\n```\n{\"verdict\":\"REQUEST_CHANGES\",\
-                 \"summary\":\"One bug.\",\"findings\":[]}\n```";
-    let text = super::response_text(&text_only_reply(prose), true);
-    let parsed = parse_review_response(&text);
-    assert!(!parsed.is_fail_safe, "{:?}", parsed.fail_safe_reason);
-    assert_eq!(parsed.verdict, Verdict::RequestChanges);
-}
-
-/// A tool call wins over text, and a once-wrapped tool input parses.
-///
-/// Why: candidate (b) of #9310 — a tool input nested under the tool name.
-/// The tool call must still win when the reply also carries text.
-/// What: a text block with an APPROVE object, then a `toolUse` block whose
-/// input wraps a REQUEST_CHANGES object in `review_output`.
-/// Test: this test.
-#[test]
-fn auto_mode_wrapped_tool_input_wins_over_text() {
-    use crate::models::Verdict;
-    use crate::pipeline::parser::parse_review_response;
-    let text_block = aws_sdk_bedrockruntime::types::ContentBlock::Text(
-        r#"{"verdict":"APPROVE","summary":"Clean.","findings":[]}"#.to_string(),
-    );
-    let tool = tool_use_block(serde_json::json!({
-        "review_output": {"verdict": "REQUEST_CHANGES", "summary": "One bug.", "findings": []}
-    }));
-    let reply = reply_with_blocks(vec![text_block, tool]);
-    let text = super::response_text(&reply, true);
-    let parsed = parse_review_response(&text);
-    assert!(!parsed.is_fail_safe, "{:?}", parsed.fail_safe_reason);
-    assert_eq!(
-        parsed.verdict,
-        Verdict::RequestChanges,
-        "the tool call wins"
-    );
-}
-
 /// The block kinds of a reply are named in order (#9310).
 ///
 /// Why: the parse-failure record needs to say whether the model called the

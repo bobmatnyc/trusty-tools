@@ -5,22 +5,18 @@
 //! problem.  Free-text parsing is retained as a fallback for transport errors
 //! and for callers that do not use forced structured output.
 //!
-//! What: exposes `parse_review_response` which tries four strategies in order:
+//! What: exposes `parse_review_response` which tries three strategies in order:
 //!
 //!  1. Direct JSON parse — tries `serde_json::from_str` on the full body.
 //!     This succeeds when forced structured output is active (Bedrock tool-use
 //!     or OpenRouter json_schema) and the response IS the JSON object.
 //!  2. JSON-block extraction — looks for a ```json ... ``` fenced block at the
 //!     end of the response and deserialises it (legacy free-text path).
-//!  3. Embedded object (#9310) — one complete review object in prose, a bare
-//!     or `JSON`/`jsonc` fence, or one exact tool-input wrapper; see
-//!     `parser_embedded.rs` for the candidate rule. Two distinct objects fail
-//!     closed.
-//!  4. Verdict-keyword scan — scans the last 20% of the body for one of the
+//!  3. Verdict-keyword scan — scans the last 20% of the body for one of the
 //!     known board grade tokens (BLOCK, REQUEST_CHANGES, APPROVE*, APPROVE,
 //!     UNKNOWN) per spec REV-112.
 //!
-//! If strategies 1 to 3 fail the response is fail-safe UNKNOWN, whether or not
+//! If strategies 1 and 2 fail the response is fail-safe UNKNOWN, whether or not
 //! the keyword scan recovered a token — see the fail-CLOSED note below.
 //!
 //! ## Fail-CLOSED posture (#1241 — supersedes spec REV-130)
@@ -34,7 +30,7 @@
 //! `docs/specs/` REV-130 (marked SUPERSEDED) for the rationale.
 //!
 //! ## The keyword scan no longer passes a verdict through (#4491)
-//! The keyword scan (strategy 4 since #9310) used to return the scanned verdict with an empty findings list and
+//! Strategy 3 used to return the scanned verdict with an empty findings list and
 //! `is_fail_safe = false`, so a lost findings payload rendered as `Findings:
 //! none` — indistinguishable from a clean review.  It now feeds the fail-safe
 //! reason instead of the verdict: the scanned token is reported to the operator,
@@ -47,18 +43,12 @@
 //! `parse_fail_safe_unknown_on_empty_response`,
 //! `parse_fail_safe_unknown_on_malformed_json`,
 //! `parse_double_encoded_findings_are_recovered`,
-//! `parse_unparseable_findings_is_loud_not_silently_empty`,
-//! `parse_unfenced_object_after_prose`, `parse_two_distinct_objects_fail_closed`.
+//! `parse_unparseable_findings_is_loud_not_silently_empty`.
 
 use serde::{Deserialize, Deserializer, de};
 use tracing::{debug, warn};
 
 use crate::models::{Effort, Finding, FindingCategory, Verdict};
-
-// #9310: strategy 3, the embedded review object.
-#[path = "parser_embedded.rs"]
-mod embedded;
-use embedded::Embedded;
 
 // ─── Wire types (JSON block deserialization) ──────────────────────────────────
 
@@ -247,60 +237,23 @@ impl ParsedReview {
 /// Why: the pipeline cannot use the raw text directly; structured data is needed
 /// to drive the verdict, findings post-processing, and telemetry.
 ///
-/// What: tries four strategies in priority order:
+/// What: tries three strategies in priority order:
 ///   1. Direct JSON parse — succeeds when forced structured output (Bedrock
 ///      tool-use / OpenRouter json_schema) is active; body IS the clean JSON.
 ///   2. JSON-block extraction — legacy free-text path with fenced JSON block.
-///   3. Embedded object (#9310) — exactly one distinct complete review object
-///      elsewhere in the text; two or more is fail-safe UNKNOWN.
-///   4. Verdict-keyword scan — last-resort spec REV-112 fallback, which now only
+///   3. Verdict-keyword scan — last-resort spec REV-112 fallback, which now only
 ///      annotates the fail-safe reason (#4491).
 ///
-/// If strategies 1 to 3 fail, returns fail-safe UNKNOWN (fail-CLOSED) — the
+/// If strategies 1 and 2 fail, returns fail-safe UNKNOWN (fail-CLOSED) — the
 /// findings are unrecoverable at that point, and a verdict rendered without them
 /// reads as a clean review (#4491).  Ticket #1241 supersedes spec REV-130: the
 /// fail-safe is UNKNOWN, not APPROVE.
 ///
-/// This entry point knows no reviewer input, so strategy 3 cannot drop an
-/// object the model quoted from it; the pipeline calls
-/// [`parse_review_response_with_input`] instead (#9310).
-///
 /// Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
 /// `parse_verdict_keyword_fallback_approve_star`,
 /// `parse_fail_safe_unknown_on_empty_response`,
-/// `parse_double_encoded_findings_are_recovered`,
-/// `parse_bare_fence_review_object`, `parse_two_distinct_objects_fail_closed`.
+/// `parse_double_encoded_findings_are_recovered`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
-    parse_review_response_with_input(body, "")
-}
-
-/// The reviewer input of `req` as one text: the system prompt and every
-/// message, for [`parse_review_response_with_input`] (#9310).
-///
-/// Test: `request_input_text_joins_system_and_messages`.
-pub(crate) fn request_input_text(req: &crate::llm::LlmRequest) -> String {
-    let mut text = req.system.clone();
-    for message in &req.messages {
-        text.push('\n');
-        text.push_str(&message.content);
-    }
-    text
-}
-
-/// [`parse_review_response`], with strategy 3 dropping every candidate the
-/// reviewer `input` already contains.
-///
-/// Why: the diff and PR text in the input are attacker-controlled; a review
-/// object the model quotes from them must never become its verdict (#9310).
-/// What: the four strategies; strategy 3 follows the candidate rule in
-/// `parser_embedded.rs`. A `json` fence holding no valid review object fails
-/// closed before strategy 3 runs. `input` is the text from
-/// [`request_input_text`].
-/// Test: `parse_inline_quote_of_input_object_is_not_trusted`,
-/// `parse_malformed_json_fence_fails_closed_past_an_inline_quote`,
-/// `parse_own_object_beside_quoted_input_object_is_accepted`,
-/// `parse_input_object_reproduced_alone_is_rejected`.
-pub(crate) fn parse_review_response_with_input(body: &str, input: &str) -> ParsedReview {
     if body.trim().is_empty() {
         warn!("LLM returned empty response — applying fail-safe UNKNOWN (fail-closed, #1241)");
         return ParsedReview::fail_safe("empty LLM response");
@@ -319,65 +272,32 @@ pub(crate) fn parse_review_response_with_input(body: &str, input: &str) -> Parse
         return parsed;
     }
 
-    // Strategy 3 (#9310): an auto-mode reply may carry the object outside a
-    // ```json fence. Only a complete object the input lacks counts; a broken
-    // json fence or two distinct objects fail closed.
-    let quoted = match embedded::find_review_object(body, input) {
-        Embedded::Found(block) => {
-            let parsed = parsed_from_block(block);
-            debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via embedded object (#9310)");
-            return parsed;
-        }
-        Embedded::Ambiguous(count) => {
-            return fail_closed(format!(
-                "{count} distinct review objects in the LLM response; none is trusted \
-                 as the review (#9310)"
-            ));
-        }
-        Embedded::MalformedFence => {
-            return fail_closed(format!(
-                "a json fence in the LLM response holds no valid review object, so no \
-                 other object is trusted (#9310); {}",
-                keyword_reason(body)
-            ));
-        }
-        Embedded::NotFound { quoted } => quoted,
-    };
-
-    // Strategy 4: the structured payload did not parse, so the FINDINGS are gone.
+    // Strategy 3: the structured payload did not parse, so the FINDINGS are gone.
     // #4491: a keyword-scanned verdict beside an empty findings list is
     // byte-for-byte indistinguishable from a genuinely clean review, so the
     // scanned token is reported as context in the fail-safe reason and never as
     // the review's own verdict.
-    let mut reason = keyword_reason(body);
-    if quoted > 0 {
-        reason.push_str(&format!(
-            "; {quoted} review object(s) in the reply repeat an object from the \
-             reviewer input and are not trusted (#9310)"
-        ));
-    }
-    fail_closed(reason)
-}
-
-/// The fail-safe UNKNOWN for `reason`, logged at `warn!`.
-fn fail_closed(reason: String) -> ParsedReview {
-    warn!(
-        reason,
-        "failed to parse the LLM response — applying fail-safe UNKNOWN (fail-closed, #4491)"
-    );
-    ParsedReview::fail_safe(reason)
-}
-
-/// The fail-safe reason naming what the REV-112 keyword scan read, if anything.
-fn keyword_reason(body: &str) -> String {
-    match scan_verdict_keyword(body) {
+    let mut reason = match scan_verdict_keyword(body) {
         Some(verdict) => format!(
             "findings could not be parsed from the LLM response; the trailing \
              keyword scan read {verdict}, which is not trusted as a review outcome \
              (spec REV-112 fallback, #4491)"
         ),
         None => "no parseable verdict or findings in LLM response".to_string(),
+    };
+    // #9310: a broken json fence is the model's own object; name it. The reply
+    // fails closed either way, and no other object in it is ever trusted.
+    if has_malformed_json_fence(body) {
+        reason = format!(
+            "a json fence in the LLM response holds no valid review object (#9310); {reason}"
+        );
     }
+    warn!(
+        body_len = body.len(),
+        reason,
+        "failed to parse the LLM response — applying fail-safe UNKNOWN (fail-closed, #4491)"
+    );
+    ParsedReview::fail_safe(reason)
 }
 
 // ─── Strategy 1: Direct JSON parse (structured output) ───────────────────────
@@ -400,17 +320,8 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
         return None;
     }
     let block: LlmOutputBlock = serde_json::from_str(trimmed).ok()?;
-    Some(parsed_from_block(block))
-}
-
-/// The successful `ParsedReview` for a deserialised output block.
-///
-/// Why: strategies 1 to 3 build the same result; one builder keeps the
-/// fail-CLOSED verdict rule in one place (#9310).
-/// What: an unrecognised verdict token reads UNKNOWN, never APPROVE (#1241);
-/// the grade is validated and the findings converted.
-/// Test: `parse_direct_json_unknown_verdict`, `parse_unfenced_object_after_prose`.
-fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
+    // Fail-CLOSED (#1241): an unrecognised verdict token inside otherwise-valid
+    // JSON must NOT silently default to APPROVE — surface UNKNOWN instead.
     let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
     let grade = extract_grade_field(&block.grade);
     let findings = block
@@ -418,7 +329,7 @@ fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
         .into_iter()
         .map(convert_llm_finding)
         .collect();
-    ParsedReview {
+    Some(ParsedReview {
         verdict,
         grade,
         grade_pre_floor: None,
@@ -426,7 +337,7 @@ fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
         findings,
         is_fail_safe: false,
         fail_safe_reason: None,
-    }
+    })
 }
 
 // ─── Strategy 2: JSON block (legacy free-text) ────────────────────────────────
@@ -455,7 +366,25 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
             return None;
         }
     };
-    Some(parsed_from_block(block))
+
+    // Fail-CLOSED (#1241): unrecognised verdict token → UNKNOWN, never APPROVE.
+    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
+    let grade = extract_grade_field(&block.grade);
+    let findings = block
+        .findings
+        .into_iter()
+        .map(convert_llm_finding)
+        .collect();
+
+    Some(ParsedReview {
+        verdict,
+        grade,
+        grade_pre_floor: None,
+        summary: block.summary,
+        findings,
+        is_fail_safe: false,
+        fail_safe_reason: None,
+    })
 }
 
 /// Convert an `LlmFinding` wire type to the internal `Finding` type.
@@ -501,7 +430,7 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     finding
 }
 
-// ─── Strategy 4: Verdict keyword scan ────────────────────────────────────────
+// ─── Strategy 3: Verdict keyword scan ────────────────────────────────────────
 
 /// Scan the last 20% of the body for a verdict keyword (spec REV-112).
 ///
@@ -533,6 +462,51 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
         return Some(Verdict::Unknown);
     }
     None
+}
+
+// ─── Malformed json fence (#9310) ─────────────────────────────────────────────
+
+/// Whether `body` holds a `json`/`jsonc` fence whose body is not a valid
+/// review object.
+///
+/// Why: when the model's own fenced object is broken, the fail-safe reason
+/// should say so; a reply like that is never parsed from anywhere else (#9310).
+/// What: line-based. A line whose trimmed text starts with three backticks
+/// opens a fence, and a later bare backtick line closes it; an unclosed fence
+/// runs to the end. A fence tagged `json` or `jsonc` (any case) is malformed
+/// when its trimmed body does not deserialise as `LlmOutputBlock`. Only the
+/// fail-safe reason depends on this; the verdict is UNKNOWN either way.
+/// Test: `parse_malformed_json_fence_is_named_and_unknown`,
+/// `parse_valid_uppercase_json_fence_is_not_called_malformed`.
+fn has_malformed_json_fence(body: &str) -> bool {
+    let malformed = |text: &str| serde_json::from_str::<LlmOutputBlock>(text.trim()).is_err();
+    // `Some(is_json)` while inside a fence, with the byte offset its body starts at.
+    let mut open: Option<(bool, usize)> = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let line_end = offset + line.len();
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            let info = trimmed.trim_start_matches('`').trim();
+            match open {
+                None => {
+                    let tag = info.split_whitespace().next().unwrap_or("");
+                    let is_json =
+                        tag.eq_ignore_ascii_case("json") || tag.eq_ignore_ascii_case("jsonc");
+                    open = Some((is_json, line_end));
+                }
+                Some((is_json, start)) if info.is_empty() => {
+                    if is_json && malformed(&body[start..offset]) {
+                        return true;
+                    }
+                    open = None;
+                }
+                Some(_) => {}
+            }
+        }
+        offset = line_end;
+    }
+    matches!(open, Some((true, start)) if malformed(&body[start..]))
 }
 
 // ─── Grade field extraction ───────────────────────────────────────────────────

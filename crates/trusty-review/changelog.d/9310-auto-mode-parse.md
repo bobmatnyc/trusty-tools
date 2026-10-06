@@ -1,15 +1,8 @@
-Fixed
-- A review reply that carries one complete review object outside a ```` ```json ````
-  fence now parses: after or before prose, in a bare, `JSON` or `jsonc` fence,
-  or as a tool input wrapped once in `review_output` or `input`. Bedrock 5.5
-  models on `toolChoice` auto answer this way. Two different review objects in
-  one reply, an object in a non-JSON code fence, and a keyword-only reply stay
-  fail-safe UNKNOWN (#9310).
-- An embedded review object equal to any JSON object in the reviewer input
-  (the diff, PR text and prompt) is never trusted, so a quoted fixture cannot
-  become the verdict. A `json` fence holding no valid review object fails
-  closed instead of trusting another object in the reply (#9310).
+Added
 - A review that fails to parse now records its reply shape (stop reason, output
   tokens, text length, and a short masked head and tail) in the warning log and
   in the `review not parsed` error. The Bedrock provider logs the content-block
   kinds of a structured reply that carried no tool call (#9310).
+- When a reply's ```` ```json ```` or ```` ```jsonc ```` fence holds no valid
+  review object, the fail-safe reason now says so. The review stays fail-safe
+  UNKNOWN, and no other object in the reply is trusted (#9310).
