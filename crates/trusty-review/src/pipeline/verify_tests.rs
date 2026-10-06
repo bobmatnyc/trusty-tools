@@ -710,6 +710,32 @@ fn parse_judgment_plain_verdicts_unchanged() {
     }
 }
 
+/// #9292: quote marks around a verdict word do not hide it, so a quoted
+/// REFUTED beside an un-negated CONFIRMED is still a refutation; the
+/// adversarial forms traced in review keep their results.
+#[test]
+fn parse_judgment_quoted_and_adversarial_forms() {
+    let rows = [
+        (
+            "Verdict: 'REFUTED'. The author CONFIRMED the path exists",
+            Some(Judgment::Refuted),
+        ),
+        ("'REFUTED'", Some(Judgment::Refuted)),
+        ("\u{2018}REFUTED\u{2019}", Some(Judgment::Refuted)),
+        ("'UNVERIFIABLE'", Some(Judgment::Unverifiable)),
+        ("Verdict: NOT REFUTED \u{2014} CONFIRMED", None),
+        ("**REFUTED**", Some(Judgment::Refuted)),
+        ("REFUTED\n", Some(Judgment::Refuted)),
+        ("Not a real bug. REFUTED.", Some(Judgment::Refuted)),
+    ];
+    let wrong: Vec<_> = rows
+        .iter()
+        .map(|(text, want)| (*text, parse_judgment(text), *want))
+        .filter(|(_, got, want)| got != want)
+        .collect();
+    assert!(wrong.is_empty(), "(text, got, want): {wrong:#?}");
+}
+
 /// #5309: an `Unverifiable` outcome must strip the signals that let a finding
 /// pin the BLOCK floor — the same demotion the hygiene passes apply when they
 /// pre-stamp it — so a claim carries identical weight whichever route

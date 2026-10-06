@@ -782,6 +782,7 @@ const CLAUSE_BREAKS: &[char] = &[
 /// `None`, which the round withholds as unjudged. `None` when no token appears.
 /// Test: `parse_judgment_negated_verdict_is_not_that_verdict`,
 /// `parse_judgment_plain_verdicts_unchanged`,
+/// `parse_judgment_quoted_and_adversarial_forms`,
 /// `parse_judgment_ambiguous_prose_never_confirms`.
 fn keyword_judgment(upper: &str) -> Option<Judgment> {
     // #9292: a negated UNVERIFIABLE/REFUTED is not that verdict.
@@ -817,9 +818,11 @@ fn keyword_holds(upper: &str, keyword: &str) -> bool {
     seen
 }
 
-/// The words of `text`, keeping apostrophes so "CAN'T" stays one word.
+/// The words of `text`, keeping interior apostrophes so "CAN'T" stays one word.
 fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        // #9292: a quoted verdict ('REFUTED', ‘REFUTED’) must still match.
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '\u{2019}'))
         .filter(|w| !w.is_empty())
 }
 
