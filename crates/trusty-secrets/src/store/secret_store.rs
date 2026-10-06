@@ -185,12 +185,15 @@ impl SecretStore {
     /// The vault a reference resolves to, by the names-only index.
     ///
     /// Why: DOC-74 §15.3 — `secret://KEY` checks the project vault, then the
-    /// owner vault; explicit forms check only the vault they name. Resolution
-    /// reads names, never values.
+    /// owner vault; explicit forms check only the vault they name, and that
+    /// vault must be one of `scopes` (#9328). Resolution reads names, never
+    /// values.
     /// What: the first vault whose index holds the key, or
-    /// [`SecretsError::NotFound`] naming every vault searched.
+    /// [`SecretsError::NotFound`] naming every vault searched. A pinned vault
+    /// outside `scopes` is [`SecretsError::VaultOutOfScope`], before any read.
     /// Test: `store_resolution_prefers_project_over_owner`,
-    /// `store_resolution_miss_is_not_found`.
+    /// `store_resolution_miss_is_not_found`,
+    /// `resolve_pinned_reference_outside_the_scopes_is_refused`.
     pub fn locate(
         &self,
         reference: &SecretRef,
@@ -211,7 +214,12 @@ impl SecretStore {
     ) -> Result<(VaultName, KeyMeta), SecretsError> {
         let key = reference.key();
         let candidates: Vec<VaultName> = match reference.pinned_vault() {
-            Some(vault) => vec![vault],
+            // #9328: ruling 06 R1 — a pinned vault must be one of the
+            // caller's own, refused before the index is read.
+            Some(vault) => {
+                scopes.require_in_scope(&vault)?;
+                vec![vault]
+            }
             None => scopes.lookup_order().cloned().collect(),
         };
         for vault in &candidates {

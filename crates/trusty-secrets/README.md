@@ -36,9 +36,16 @@ use" flag. It never holds a value.
 | Project | One repository | `trusty/<owner>/<repo>` |
 | Owner | Every project of one GitHub owner | `trusty/<owner>` |
 
-The owner and repository come from the `origin` git remote. A lookup for
-`secret://KEY` checks the project vault first, then the owner vault. If the
-scope cannot be determined, the call fails. It never guesses.
+The owner and repository come from the `origin` git remote, which must be a
+`github.com` https, ssh or scp-form URL; any other host or scheme is refused. A lookup for `secret://KEY` checks
+the project vault first, then the owner vault. If the scope cannot be
+determined, the call fails. It never guesses.
+
+A `secrets.vault` override in the tracked `.trusty-tools/trusty-secrets.yaml`
+may name only `trusty/<owner>/<name>` under the remote's owner. To point a
+checkout at any other vault, add it to the machine config instead
+(`~/.trusty-tools/trusty-common/config.yaml`, `secrets.project_vaults`, keyed
+by `<owner>/<repo>`). See DOC-74 §6.1.
 
 ## References
 
@@ -49,6 +56,9 @@ A reference names a secret without carrying its value.
 | `secret://KEY` | project vault, then owner vault |
 | `secret://<owner>/KEY` | the owner vault |
 | `secret://<owner>/<repo>/KEY` | that project vault |
+
+An explicit form may name only the caller's own project or owner vault. Any
+other vault is refused before anything is read.
 
 A key is 1 to 256 characters of `[A-Za-z0-9_.-]`, starting with a letter,
 digit or `_`.
@@ -113,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index_dir = std::env::temp_dir().join("trusty-secrets-example");
     let store = SecretStore::new(Arc::new(MemoryBackend::new()), NamesIndex::at(index_dir));
 
-    let scopes = ScopeSet::from_identity(&OwnerName::new("acme")?, &RepoName::new("web")?, None);
+    let scopes = ScopeSet::from_identity(&OwnerName::new("acme")?, &RepoName::new("web")?, None)?;
     let key = SecretKey::new("API_KEY")?;
 
     let set = store.set(scopes.project(), &key, &SecretValue::new("sk-live-0123456789"))?;

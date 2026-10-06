@@ -65,12 +65,12 @@ fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 /// `secrets.scopes`: the project scope, then the owner scope.
 ///
 /// Test: `server_scopes_round_trip_over_a_real_socket`.
-pub(crate) fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     if !rest.is_empty() {
         return Err(ErrorKind::InvalidParams);
     }
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     to_json(&project.scopes().to_response())
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> 
 pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: ListRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let keys = state.index.list(&request.vault)?;
     to_json(&ListResponse {
@@ -101,7 +101,7 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: SetRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let store = SecretStore::new(project.backend(state)?, state.index.clone());
     let response = store.set(&request.vault, &request.key, &request.value)?;
@@ -114,7 +114,7 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: DeleteRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let store = SecretStore::new(project.backend(state)?, state.index.clone());
     to_json(&store.delete(&request.vault, &request.key)?)
@@ -165,7 +165,7 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     if request.from_backend == request.to_backend {
         return Err(ErrorKind::SameBackend);
     }
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     let vault = project.scopes().project().clone();
     let source = (state.backends)(&request.from_backend)?;
     let destination = (state.backends)(&request.to_backend)?;
@@ -259,10 +259,10 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let project = request
         .project
         .as_deref()
-        .map(ProjectContext::resolve)
+        .map(|dir| ProjectContext::resolve(state, dir))
         .transpose()?;
     let selected = match &project {
-        Some(project) => project.resolved_config(state)?.backend,
+        Some(project) => project.resolved_config().backend,
         None => {
             let machine = crate::store::config::load_machine_at(&state.settings.machine_config)?;
             crate::store::config::resolve(None, machine.as_ref()).backend

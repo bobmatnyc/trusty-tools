@@ -17,7 +17,7 @@ spec_refs:
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
 **Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
-**Last-updated:** 2026-10-02
+**Last-updated:** 2026-10-06
 **PRD:** [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) — the WHAT and WHY of the console secrets service. This document is the HOW.
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation.
@@ -236,6 +236,28 @@ This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
 2026-10-01).
 
+**Vault override narrowing — owner ruling 06, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)), R2 "Owner's
+vaults only".** The project file is tracked, so anyone who can land a change
+in the repository can edit it. Its `secrets.vault` may name only a project
+vault under the owner derived from the git remote: `trusty/<owner>/<name>`.
+Any other value — another owner's vault, or the owner vault `trusty/<owner>`
+itself — is refused with `vault_out_of_scope`. The refusal never falls back
+to the derived vault. A wider override is honoured only from the untracked
+machine config, keyed by the remote's `<owner>/<repo>` (keys compare
+case-insensitively):
+
+```yaml
+secrets:
+  project_vaults:
+    acme/web: trusty/acme-platform/shared   # machine-only; may name any vault
+```
+
+A machine `project_vaults` entry for the checkout's `<owner>/<repo>` wins over
+the project file's `secrets.vault`. A checkout with no `origin` remote has no
+owner to check an override against, so its scope is undetermined whatever
+either file says.
+
 ### 6.2 Backend-specific settings
 
 ```yaml
@@ -259,8 +281,10 @@ Default vault name is derived, never chosen ad hoc: `trusty/<owner>/<repo>`,
 where `<owner>/<repo>` comes from the same git-remote-derived identity `tm`
 already resolves for GitHub account selection (memory: "tm GitHub account
 selection" — owner ruling that a managed session picks the right account from
-the remote). A project may override it explicitly (§6.1) when it wants to
-share a vault across repos or match an existing 1Password vault name.
+the remote). A project may override it explicitly (§6.1). The tracked
+project file's `secrets.vault` shares a vault only among one owner's repos
+(`trusty/<owner>/<name>`); the machine config's `secrets.project_vaults` map
+(§6.1) may share one across owners or match an existing 1Password vault name.
 
 ---
 
@@ -657,6 +681,11 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Resolved 2026-09-23** ([#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5802789914)):
    explicit `secrets.vault` override only. The 2026-10-01 owner vault
    (§15.3) covers sharing across one owner's repos.
+   **Narrowed 2026-10-06 by owner ruling 06 R2
+   ([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)):** the
+   override in the tracked project file may share a vault only among one
+   owner's repos (`trusty/<owner>/<name>`). Sharing across owners needs the
+   machine config's `secrets.project_vaults` (§6.1).
 6. **`tm secrets copy`'s scope.** Confirmed in-scope: moving a project's own
    vault contents between backends. Out of scope unless the owner says
    otherwise: copying between two *different* projects' vaults, which is a
@@ -770,12 +799,41 @@ in-process through the `store` feature, so its values never cross a socket.
 A project key wins over an owner key with the same name (owner answers
 2026-10-01).
 
+**github.com only — owner ruling 06 R3, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)).** The vault
+names carry no host, so a remote on any other host would map to a github.com
+project's vaults. In 0.1.0 the `origin` remote must be on `github.com` in
+one of these forms, each with or without `.git`:
+
+- `https://[<userinfo>@]github.com[:<port>]/<owner>/<repo>`
+- `ssh://[<user>@]github.com[:<port>]/<owner>/<repo>`, also spelled
+  `git+ssh://` or `ssh+git://`
+- scp form `[<user>@]github.com:<owner>/<repo>`
+
+Any other host, any other scheme (`http://`, `git://`, `file://`, ...), and
+any remote-helper URL holding `::` (`<helper>::<address>`) is refused with the
+fixed `remote_host_unsupported` error, which names neither the host nor the
+URL.
+GitHub Enterprise Server support comes later and is additive; the host is
+not added to vault names.
+
 **Reference grammar.**
 
 - `secret://KEY` — look up `KEY` in the names-only index: the project vault
   first, then the owner vault. A miss is `SecretsError::NotFound`.
 - `secret://<owner>/KEY` — the owner vault, explicitly.
 - `secret://<owner>/<repo>/KEY` — a project vault, explicitly.
+
+**Own vaults only — owner ruling 06 R1, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)).** An
+explicit form may name only a vault in the caller's own lookup order: the
+project vault or its owner vault. Any other vault, including a sibling repo
+of the same owner, is refused with `SecretsError::VaultOutOfScope`
+(`vault_out_of_scope` on the wire) before the index or a backend is read; the
+refusal carries no value. Without this rule, a `.env` edited in a pull
+request to `DB=secret://victim/prod-repo/DB_URL` would inject another
+project's secret. Cross-project access comes later, through the S8 grant
+registry (§15.9).
 
 The names-only index stores key names and per-key metadata. It stores no
 plaintext (owner answer 2026-10-01).

@@ -202,6 +202,29 @@ pub enum SecretsError {
         reason: &'static str,
     },
 
+    /// A pinned reference or a tracked `secrets.vault` override named a vault
+    /// outside the caller's own scopes. Raised before any index or backend
+    /// read, so it says nothing about what that vault holds.
+    // #9328: owner ruling 06 R1 and R2.
+    #[error("vault {vault} is outside this project's scopes: {reason}")]
+    VaultOutOfScope {
+        /// The vault named, already validated.
+        vault: String,
+        /// Which rule refused it.
+        reason: &'static str,
+    },
+
+    /// The `origin` remote is not on github.com.
+    // #9328: owner ruling 06 R3 — GHES and other hosts come later.
+    #[error(
+        "cannot determine the secrets scope for {dir}: the `origin` remote is not on \
+         github.com, and only github.com remotes are supported"
+    )]
+    UnsupportedRemoteHost {
+        /// The directory probed.
+        dir: PathBuf,
+    },
+
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,

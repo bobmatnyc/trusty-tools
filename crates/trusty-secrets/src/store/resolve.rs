@@ -7,8 +7,8 @@
 //! chain includes Claude Code; this module only enforces the flag.
 //! What: [`resolve_reference`] and [`resolve_env`], with [`EnvEntry`] as
 //! input and [`ResolvedVar`] as output. Lookup is [`SecretStore::read`]'s own
-//! path: project vault, then owner vault, an explicit reference pins one
-//! vault, and the backend read is uncached (§15.3, §15.5).
+//! path: project vault, then owner vault, an explicit reference pins one of
+//! those two vaults (#9328), and the backend read is uncached (§15.3, §15.5).
 //! Test: `resolve_tests.rs` beside this file.
 
 use std::fmt;
@@ -26,12 +26,15 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// flag is enforced in one place (DOC-74 §15.8).
 /// What: locates the key in the names-only index (project vault, then owner
 /// vault; an explicit `<owner>/KEY` or `<owner>/<repo>/KEY` searches only
-/// that vault). With `agent_parent`, a row whose "agents may use" flag is
+/// that vault, which must be one of `scopes`, else
+/// [`SecretsError::VaultOutOfScope`] before any read — #9328). With
+/// `agent_parent`, a row whose "agents may use" flag is
 /// OFF is [`SecretsError::AgentUseRefused`], raised before the backend is
 /// read. A key with no index row is [`SecretsError::NotFound`] in either
 /// mode, and the backend is not read. Otherwise the uncached backend read.
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
+/// `resolve_pinned_reference_outside_the_scopes_is_refused`,
 /// `resolve_miss_is_not_found`,
 /// `resolve_agent_gate_refuses_flag_off_before_any_read`,
 /// `resolve_agent_gate_refuses_a_key_with_no_row_without_reading`,
@@ -127,7 +130,9 @@ pub enum VarSource {
 /// caller which values came from a reference (the ones to scrub from the
 /// child's output).
 /// Test: `resolve_sentinel_never_appears_in_output_types`.
+// #9328: `#[non_exhaustive]`; only this crate builds one.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResolvedVar {
     /// The env variable name.
     pub name: String,
