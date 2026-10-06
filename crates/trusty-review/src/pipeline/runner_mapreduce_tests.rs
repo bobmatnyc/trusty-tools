@@ -1525,16 +1525,64 @@ async fn run_review_mapreduce_synthesis_approve_graded_d_is_request_changes() {
     assert_eq!(result.grade.as_deref(), Some("D"));
 }
 
+/// Refutes every finding whose verifier section contains `refute`, and
+/// confirms the rest.
+struct RefutingVerifier {
+    refute: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for RefutingVerifier {
+    fn name(&self) -> &str {
+        "refuting-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let text = crate::pipeline::verify_batch::test_support::answer(&req, |section| {
+            if section.contains(self.refute) {
+                "REFUTED"
+            } else {
+                "CONFIRMED"
+            }
+            .to_string()
+        });
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
 /// #9310 control: the synthesis grade floor is the grade alone, not
 /// `derive_verdict_with_grade`. Synthesis APPROVE graded B+ beside two
-/// confident Medium findings stays APPROVE; re-adding the count-based Medium
-/// floor would raise it.
+/// confident Medium findings, one of which the verifier refutes, stays
+/// APPROVE. Re-adding the count-based Medium floor at the fold makes the
+/// pre-verification verdict REQUEST_CHANGES, which the withhold policy then
+/// never relaxes to APPROVE. With nothing refuted the verifier's own
+/// `rederive_verdict` re-applies the count floor on every implementation, so
+/// that shape cannot tell the two apart.
 #[tokio::test]
 async fn run_review_mapreduce_synthesis_two_mediums_not_refloored() {
-    let chunk = r#"{"verdict":"APPROVE","summary":"two notes","findings":[{"title":"slow build","body":"`build` recomputes the sum on every call.","severity":"medium","confidence":0.9,"file":"src/big.rs","line":1},{"title":"repeated call","body":"`compute_value` is called with the same argument on every line.","severity":"medium","confidence":0.9,"file":"src/file0.rs","line":2}]}"#;
+    let chunk = r#"{"verdict":"APPROVE","summary":"two notes","findings":[{"title":"slow build","body":"`pub fn build(a: i32` recomputes the sum on every call.","severity":"medium","confidence":0.9,"file":"src/big.rs","line":1},{"title":"repeated call","body":"`compute_value(some_argument_here)` repeats the same call on every line.","severity":"medium","confidence":0.9,"file":"src/file0.rs","line":2}]}"#;
     let synthesis = r#"{"verdict":"APPROVE","grade":"B+","summary":"two minor notes."}"#;
-    let result = run_scripted(chunk, synthesis).await;
-    assert_eq!(result.findings.len(), 2, "{result:?}");
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedReviewer {
+        marker: tail_signature,
+        chunk,
+        synthesis,
+    });
+    let mut review_deps = deps(llm);
+    review_deps.verifier = Some(Arc::new(RefutingVerifier {
+        refute: "repeats the same call",
+    }));
+    let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
+    assert_eq!(result.findings.len(), 1, "{result:?}");
+    assert_eq!(result.withheld_findings.len(), 1, "{result:?}");
     assert_eq!(result.verdict, Verdict::Approve, "{result:?}");
 }
 
