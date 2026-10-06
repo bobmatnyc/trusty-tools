@@ -365,6 +365,35 @@ fn an_uncountable_palace_is_named_and_never_green() {
     );
 }
 
+/// Why (#9283, Fail-Open Check): a palace whose deletion journal cannot be
+/// read can never go red, so a check that passes beside it reads as healthy
+/// while it cannot judge a drop.
+/// What: one palace compares clean, the other's journal path is a directory;
+/// the check warns and names the palace and the read error.
+#[test]
+fn an_unreadable_journal_is_named_and_never_green() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let now = Utc::now();
+    let t0 = now - Duration::days(1);
+    write_history(
+        tmp.path(),
+        &[
+            count("ok", t0, Some(5)),
+            count("ok", now, Some(5)),
+            count("broken", t0, Some(4)),
+            count("broken", now, Some(4)),
+        ],
+    );
+    let journal_path = tmp
+        .path()
+        .join("broken")
+        .join("maintenance_deletions.jsonl");
+    std::fs::create_dir_all(&journal_path).expect("journal path as a directory");
+    let r = verdict(tmp.path(), now);
+    assert_eq!(r.status, CheckStatus::Warn, "{r:?}");
+    assert!(detail(&r).contains("journal unreadable: broken: "), "{r:?}");
+}
+
 /// Why (#9283): one day of counts is the expected first-day state, not an
 /// undetermined probe — reporting it Unknown made every first-day doctor run
 /// exit 1 (#4001 counts Unknown as unhealthy). It is still not green.
