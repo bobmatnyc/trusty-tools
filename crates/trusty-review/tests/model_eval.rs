@@ -609,8 +609,9 @@ async fn live_leg_refuses_an_unpriced_model() {
 /// The live driver with fake providers. Each review costs $0.0022 (1k input
 /// tokens at Sonnet 5.5's $2.20/M), so a $0.005 cap lets pass 1 (L1, K1)
 /// finish and pass 2's L1 spend the rest; K1 of pass 2 is never scheduled.
-/// The three completed cells are compared (one model, so none is dropped);
-/// the report carries config, git SHA and rows.
+/// Pass 2 is cut, so only pass 1's two cells are compared, and pass 2's
+/// completed L1 review is dropped (AQ-ce). The report carries config, git SHA
+/// and rows.
 #[tokio::test]
 async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     let out = tempfile::tempdir().expect("tempdir");
@@ -646,9 +647,26 @@ async fn live_leg_writes_a_report_and_stops_at_the_cap() {
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("JSON");
     assert_eq!(json["config"]["passes"], 3);
-    assert_eq!(json["compared_cells"], 3, "(1,L1), (1,K1), (2,L1)");
-    assert_eq!(json["summary"][0]["totals"]["diffs"], 3);
-    assert_eq!(json["dropped_cells_by_model"][SONNET_55], 0);
+    // AQ-ce: pass 2 is cut, so only pass 1's cells are scored.
+    assert_eq!(json["full_passes"], serde_json::json!([1]));
+    assert_eq!(json["cut_passes"], serde_json::json!([2]));
+    assert_eq!(json["compared_cells"], 2, "(1,L1), (1,K1)");
+    assert_eq!(json["summary"][0]["totals"]["diffs"], 2);
+    // Pass 2's L1 review finished before the cut, and still is not scored.
+    let cut_l1 = json["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|r| r["pass"] == 2 && r["diff"] == "L1")
+        .expect("pass 2 ran L1");
+    assert!(
+        cut_l1["incomplete"].is_null(),
+        "the review itself completed"
+    );
+    assert_eq!(
+        json["dropped_cells_by_model"][SONNET_55], 1,
+        "(2,L1) dropped"
+    );
     assert_eq!(json["incomplete_by_model_pass"][1]["rows"], 1);
     assert!(json.get("git_sha").is_some());
     let row = &json["rows"][0];
@@ -729,6 +747,11 @@ async fn models_are_scored_on_common_cells() {
     assert_eq!(rows, 4);
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&report).expect("report")).expect("JSON");
+    assert_eq!(
+        json["full_passes"],
+        serde_json::json!([1]),
+        "a throttle does not cut a pass"
+    );
     assert_eq!(json["compared_cells"], 1, "only L1 is common");
     for (i, model) in [SONNET_55, SONNET_46].into_iter().enumerate() {
         let t = &json["summary"][i]["totals"];

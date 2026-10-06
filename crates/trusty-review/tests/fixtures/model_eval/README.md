@@ -91,15 +91,20 @@ output tokens each come to about $1.10. The run
 refuses to start if any model has no Bedrock price, because an unpriced model
 would meter as $0 and never reach the cap.
 
-**Comparison.** Every model is scored on the same cells: the (pass, diff)
-pairs every model completed. A cell one model did not complete (throttled,
-cut by the cap, unjudged, or never scheduled) is dropped for all models. The
-line printed above the table, and `compared_cells` and
-`dropped_cells_by_model` in the JSON, say how many cells were compared and how
-many each model lost.
+**Comparison.** Only full passes are scored (owner ruling AQ-ce: "score only
+the FULL passes that complete; cut passes are excluded"). A pass is full when
+every model reviewed every diff in it and the cap refused none of those calls.
+A pass the cap cut contributes nothing, not even reviews that finished before
+the cut. Within full passes, every model is scored on the same cells: the
+(pass, diff) pairs every model completed. A cell one model did not complete
+(throttled or unjudged) is dropped for all models. The line printed above the
+table, and `full_passes`, `cut_passes`, `compared_cells` and
+`dropped_cells_by_model` in the JSON, say which passes counted, how many cells
+were compared and how many each model lost.
 
 **Output.** `<out>/<UTC timestamp>.json` holds the config, the git SHA, the
-spend, any stop reason, `compared_cells`, `dropped_cells_by_model`, incomplete
+spend, any stop reason, `full_passes`, `cut_passes`, `compared_cells`,
+`dropped_cells_by_model`, incomplete
 rows per model and pass, a per-model summary over the common cells, and one
 row per model, pass and diff. Each row has: caught, false positives, extras, hallucinations and the
 unresolved survivors, the `incomplete` reason, withheld findings by reason, reviewer and verifier

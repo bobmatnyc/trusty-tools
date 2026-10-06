@@ -8,8 +8,10 @@
 //! `TRUSTY_EVAL_LIVE=1`; [`run_live`] checks every model is priced, then runs
 //! passes x models x diffs through [`review_diff`] with providers from the
 //! injected factory, and schedules nothing new once the shared [`Budget`] is
-//! spent. It scores every model on the same [`common_cells`], the
-//! (pass, diff) cells every model completed; incomplete rows are counted per
+//! spent. Only full passes are scored ([`split_passes`]; a pass the cap cut
+//! is excluded, AQ-ce), and every model is scored on the same
+//! [`common_cells`], the (pass, diff) cells of full passes every model
+//! completed; incomplete rows are counted per
 //! model and pass, and dropped cells per model. It writes `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
 //! only place a network provider is built, and it is never called when the
 //! opt-in is absent.
@@ -188,13 +190,38 @@ async fn model_pass(
     Ok(rows)
 }
 
-/// The (pass, diff) cells every model completed: each model has a row there
-/// and none of those rows is incomplete. Every model is scored on exactly
-/// these cells, so one model's throttle or cap cut drops that cell for all.
-pub fn common_cells(rows: &[Row], models: &[String]) -> BTreeSet<(u32, String)> {
+/// The passes the cap did not cut, and those it did, among passes that
+/// started. AQ-ce (Bob 2026-10-05): "score only the FULL passes that
+/// complete; cut passes are excluded". A pass is full when every model has a
+/// row for each of `entries` diffs and the cap refused none of them; a
+/// started pass that is not full is cut.
+pub fn split_passes(
+    rows: &[Row],
+    models: &[String],
+    passes: u32,
+    entries: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let started = |p: u32| rows.iter().any(|r| r.pass == p);
+    let full = |p: u32| {
+        models.iter().all(|m| {
+            let mine: Vec<&Row> = rows
+                .iter()
+                .filter(|r| r.pass == p && &r.model == m)
+                .collect();
+            mine.len() == entries && !mine.iter().any(|r| r.cut_by_cap())
+        })
+    };
+    (1..=passes).filter(|&p| started(p)).partition(|&p| full(p))
+}
+
+/// The (pass, diff) cells, within `full` passes, that every model completed:
+/// each model has a row there and none of those rows is incomplete. Every
+/// model is scored on exactly these cells, so one model's throttle drops that
+/// cell for all, and a cut pass contributes no cell at all.
+pub fn common_cells(rows: &[Row], models: &[String], full: &[u32]) -> BTreeSet<(u32, String)> {
     let done = |m: &String| -> BTreeSet<(u32, String)> {
         rows.iter()
-            .filter(|r| &r.model == m && r.incomplete.is_none())
+            .filter(|r| &r.model == m && r.incomplete.is_none() && full.contains(&r.pass))
             .map(|r| (r.pass, r.diff.clone()))
             .collect()
     };
@@ -267,9 +294,10 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
             }
         }
     }
-    let cells = common_cells(&rows, &settings.models);
+    let (full, cut) = split_passes(&rows, &settings.models, settings.passes, entries.len());
+    let cells = common_cells(&rows, &settings.models, &full);
     let in_cells = |r: &Row| cells.contains(&(r.pass, r.diff.clone()));
-    let passes_in_cells = cells.iter().map(|(p, _)| *p).collect::<BTreeSet<_>>().len() as u32;
+    let passes_in_cells = full.len() as u32;
     let summary: Vec<(String, u32, Totals)> = settings
         .models
         .iter()
@@ -292,7 +320,7 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
     let incomplete = incomplete_by_pass(&rows, &settings.models, settings.passes);
     let table = markdown_table(&summary);
     println!(
-        "compared on {} (pass, diff) cells every model completed; dropped per model: {}",
+        "full passes {full:?}, cut passes {cut:?}; compared on {} (pass, diff) cells every model completed in a full pass; dropped per model: {}",
         cells.len(),
         serde_json::Value::Object(dropped.clone())
     );
@@ -308,6 +336,8 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
         "finished_utc": chrono::Utc::now().to_rfc3339(),
         "spent_usd": budget.spent(),
         "stopped_reason": stopped,
+        "full_passes": full,
+        "cut_passes": cut,
         "compared_cells": cells.len(),
         "dropped_cells_by_model": dropped,
         "incomplete_by_model_pass": incomplete,
