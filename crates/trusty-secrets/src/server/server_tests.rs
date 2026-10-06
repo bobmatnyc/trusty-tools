@@ -63,6 +63,9 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         index_root: tmp.path().join("index"),
         machine_config: tmp.path().join("machine.yaml"),
         idle_timeout,
+        // #4567: the audit log stays in the temp dir too.
+        audit_log: tmp.path().join("audit").join("audit.jsonl"),
+        audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
     };
     // #9326: the build default is `file` where no Keychain is compiled; pin
     // `keychain` (the in-memory double here) so every host runs one path.
@@ -179,7 +182,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 24] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 26] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1081,7 +1084,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 24;
+    const ARMS: usize = 26;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1107,7 +1110,9 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::RemoteHostUnsupported => 20,
             ErrorKind::StorageRefused => 21,
             ErrorKind::TrackedBackendRefused => 22,
-            ErrorKind::Internal => 23,
+            ErrorKind::AuditUnavailable => 23,
+            ErrorKind::TrackedAuditRefused => 24,
+            ErrorKind::Internal => 25,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1497,6 +1502,8 @@ fn settings_flags_beat_env_beat_defaults() {
             "/f/m.yaml",
             "--idle-timeout-secs",
             "2",
+            "--audit-log",
+            "/f/a.jsonl",
         ]),
         env,
     )
@@ -1509,6 +1516,7 @@ fn settings_flags_beat_env_beat_defaults() {
             "/f/m.yaml".into(),
             Duration::from_secs(2),
         )
+        .with_audit_log("/f/a.jsonl".into())
     );
 
     if let Some(home) = dirs::home_dir() {
@@ -1562,3 +1570,7 @@ fn settings_reject_unknown_and_incomplete_flags() {
         ));
     }
 }
+
+// #4567: the audit-trail tests share this module's fixture.
+#[path = "audit_tests.rs"]
+mod audit_tests;

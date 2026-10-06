@@ -31,6 +31,7 @@ fn config_backend_precedence_table() {
     let project = ProjectSecretsConfig {
         backend: Some(backend("keeper")),
         vault: Some(VaultName::new("trusty/acme/shared").unwrap()),
+        ..ProjectSecretsConfig::default()
     };
     let bare_project = ProjectSecretsConfig::default();
 

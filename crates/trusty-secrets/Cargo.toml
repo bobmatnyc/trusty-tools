@@ -50,6 +50,12 @@ name = "on_demand_server"
 path = "tests/on_demand_server.rs"
 required-features = ["server"]
 
+# #4567: sets RLIMIT_FSIZE for its whole process, so it is its own binary.
+[[test]]
+name = "audit_post_success"
+path = "tests/audit_post_success.rs"
+required-features = ["server"]
+
 # #9328: imports `store`, so an `api`-only test run must skip it.
 [[test]]
 name = "keychain_roundtrip"

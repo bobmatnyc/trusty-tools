@@ -49,6 +49,10 @@ pub struct MachineSecretsConfig {
     // remote's owner may be chosen, because this file is not tracked.
     #[serde(default)]
     pub project_vaults: BTreeMap<String, VaultName>,
+    /// `false` turns the credential access audit off on this machine.
+    // #4567: DOC-45 C-7.10 — only this untracked file may suppress the audit.
+    #[serde(default)]
+    pub audit: Option<bool>,
 }
 
 impl MachineSecretsConfig {
@@ -77,6 +81,10 @@ pub struct ProjectSecretsConfig {
     /// be `trusty/<owner>/<name>` under the remote's owner (#9328).
     #[serde(default)]
     pub vault: Option<VaultName>,
+    /// Read only so the server can refuse `audit: false` here: a tracked file
+    /// may never turn the credential access audit off (#4567).
+    #[serde(default)]
+    pub audit: Option<bool>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
