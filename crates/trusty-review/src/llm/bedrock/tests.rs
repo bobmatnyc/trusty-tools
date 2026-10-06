@@ -703,6 +703,97 @@ fn system_blocks_add_the_tool_line_only_for_auto_models() {
     );
 }
 
+// ── Per-model temperature (#9304) ─────────────────────────────────────────
+
+/// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
+const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "eu.anthropic.claude-opus-5-5",
+    "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "us-gov.anthropic.claude-opus-5-5",
+    "claude-opus-5-5",
+    "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5-5-20260901-v1:0",
+];
+
+/// Ids that keep `temperature`: older Claude, Nova, and an id that names no
+/// model (an application-inference-profile ARN).
+const TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "bedrock/us.anthropic.claude-sonnet-4-5",
+    "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon.nova-pro-v1:0",
+    "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+];
+
+/// The Converse request omits `temperature` for Sonnet 5.5 and Opus 5.5 in
+/// every id shape, and keeps it for every other model.
+///
+/// Why: Bedrock rejects `temperature` for Opus 5.5 with `ValidationException`
+/// ("`temperature` is deprecated for this model"), so every Opus 5.5 review
+/// failed (#9304); Sonnet 5.5 rejects non-default sampling values too.
+/// What: builds the inference configuration for each id and checks that
+/// `temperature` is absent or carries the request's value, and that
+/// `max_tokens` is unchanged either way.
+/// Test: this test.
+#[test]
+fn inference_config_omits_temperature_only_for_claude_5_5() {
+    let req = structured_request("reviewer");
+    let absent = AUTO_MODEL_IDS.iter().chain(NO_TEMPERATURE_MODEL_IDS);
+    for model in absent {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), None, "{model} must omit temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+    let present = FORCED_MODEL_IDS.iter().chain(TEMPERATURE_MODEL_IDS);
+    for model in present {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), Some(0.3), "{model} keeps temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+}
+
+/// Every compare-set candidate and the reviewer default has a stated
+/// temperature answer.
+///
+/// Why: these are the ids the Q86 model eval runs; two of them are 5.5 models
+/// that reject `temperature` (#9304).
+/// What: pins the answer per `COMPARE_CANDIDATE_MODELS` entry, in order, so an
+/// added candidate fails here until it gets one.
+/// Test: this test.
+#[test]
+fn inference_config_temperature_covers_every_compare_candidate() {
+    use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
+    let req = structured_request("reviewer");
+    let expected = [
+        (
+            "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(0.3),
+        ),
+        ("bedrock/us.anthropic.claude-sonnet-4-6", Some(0.3)),
+        ("bedrock/us.anthropic.claude-sonnet-5-5", None),
+        ("bedrock/us.anthropic.claude-opus-5-5", None),
+    ];
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids, COMPARE_CANDIDATE_MODELS,
+        "a compare candidate has no case"
+    );
+    for (model, temperature) in expected {
+        assert_eq!(
+            super::inference_config(&req, model).temperature(),
+            temperature,
+            "temperature for {model}"
+        );
+    }
+    assert_eq!(
+        super::inference_config(&req, DEFAULT_REVIEWER_MODEL).temperature(),
+        None,
+        "the default reviewer must omit temperature"
+    );
+}
+
 /// A Converse reply holding one text block and no `toolUse` block.
 fn text_only_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
     use aws_sdk_bedrockruntime::types::{
