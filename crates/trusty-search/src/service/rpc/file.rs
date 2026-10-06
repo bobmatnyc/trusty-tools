@@ -13,7 +13,8 @@
 //! by a deadline; no index lock is taken, so it cannot queue behind a query.
 //! The method has its own limiter of eight concurrent calls instead of a lane;
 //! a ninth is refused at once with the 503 `server_busy` body, which
-//! [`rpc_error_from_http`] renders as the retryable `CODE_UNAVAILABLE`.
+//! [`rpc_error_from_http`](crate::service::rpc::error::rpc_error_from_http)
+//! renders as the retryable `CODE_UNAVAILABLE`.
 //!
 //! Params: `{index_id, path, diff?: "none" | "head"}`. A refusal is an error
 //! frame whose `data` is the refusal body (`error`, `index_id`, and `reason`
@@ -43,7 +44,8 @@ pub const METHODS: &[&str] = &[METHOD_FILE_GET];
 /// Why: the socket entry point for the dashboard file viewer (#9029).
 /// What: decodes [`FileGetParams`] and runs
 /// [`crate::service::server::file_get_report`]. A refusal becomes the code
-/// [`rpc_error_from_http`] picks for its status, with the whole body as `data`
+/// [`rpc_error_from_http`](crate::service::rpc::error::rpc_error_from_http)
+/// picks for its status, with the whole body as `data`
 /// so a caller can branch on `error` and `reason` for every status, not only
 /// a 503.
 /// Test: `file_get_over_the_daemon_socket_returns_content_and_head_diff`,
