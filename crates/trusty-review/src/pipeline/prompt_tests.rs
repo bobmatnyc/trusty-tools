@@ -567,7 +567,6 @@ fn review_schema_is_openai_strict_compliant() {
             "file",
             "line",
             "severity",
-            "source_citation",
             "suggested_replacement",
             "title"
         ]
