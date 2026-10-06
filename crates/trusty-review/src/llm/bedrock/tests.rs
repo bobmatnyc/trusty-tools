@@ -510,6 +510,8 @@ const AUTO_MODEL_IDS: &[&str] = &[
     "anthropic.claude-opus-5-5",
     "us.anthropic.claude-opus-5-5",
     "bedrock/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
 ];
 
 /// Model ids that keep the forced `toolChoice`.
@@ -518,6 +520,8 @@ const FORCED_MODEL_IDS: &[&str] = &[
     "bedrock/us.anthropic.claude-sonnet-4-6",
     "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5",
+    "us.amazon.nova-pro-v1:0",
 ];
 
 /// Sonnet 5.5 and Opus 5.5 get `auto`; Sonnet 4.6 and Haiku 4.5 get the
@@ -589,6 +593,24 @@ fn forced_tool_choice_capability_per_model_id_shape() {
         ),
         ("us.anthropic.claude-opus-4-8", true),
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
+        // #9292: region prefixes absent from the shared prefix list.
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
+            false,
+        ),
+        ("jp.anthropic.claude-sonnet-5-5-20260901-v1:0", false),
+        ("us-gov.anthropic.claude-opus-5-5", false),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            true,
+        ),
+        ("au.anthropic.claude-sonnet-4-5", true),
+        ("us.amazon.nova-pro-v1:0", true),
+        ("claude-sonnet-5-5", false),
     ];
     for (model, expected) in cases {
         assert_eq!(

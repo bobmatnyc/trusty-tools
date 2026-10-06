@@ -27,7 +27,7 @@ use aws_sdk_bedrockruntime::types::{
 };
 use aws_smithy_types::Document;
 
-use super::{INFERENCE_PROFILE_PREFIXES, arn, normalize_model_family};
+use super::{arn, normalize_model_family};
 use crate::llm::BEDROCK_MODEL_PREFIX;
 use crate::llm::error::LlmError;
 
@@ -41,9 +41,10 @@ const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-o
 /// `ValidationException`, so a forced structured-output call to either fails
 /// every time (#9292). Every other model keeps the forced request it had.
 /// What: strips a `bedrock/` routing prefix, reads the embedded model id out
-/// of an inference-profile or foundation-model ARN, strips the cross-region
-/// prefix (`us.`, `global.`, ...), the `anthropic.` vendor and any date or
-/// version suffix, then returns `false` for the 5.5 families and `true` for
+/// of an inference-profile or foundation-model ARN, and takes the model name
+/// after the `anthropic.` vendor segment, whatever single region segment
+/// precedes it (`us.`, `apac.`, `au.`, ...). It strips any date or version
+/// suffix, then returns `false` for the 5.5 families and `true` for
 /// everything else. An application-inference-profile ARN names no model, so
 /// forcing is unknown there; it returns `false`, because `auto` is the one
 /// choice every model accepts and a non-tool reply already fails closed in
@@ -60,13 +61,21 @@ pub(crate) fn supports_forced_tool_choice(model: &str) -> bool {
             None => return false,
         },
     };
-    let bare = INFERENCE_PROFILE_PREFIXES
-        .iter()
-        .find_map(|pfx| model.strip_prefix(pfx))
-        .unwrap_or(model);
-    let family = normalize_model_family(bare);
-    let family = family.strip_prefix("anthropic.").unwrap_or(family);
+    let family = normalize_model_family(anthropic_model_name(model));
     !NO_FORCED_TOOL_CHOICE_FAMILIES.contains(&family)
+}
+
+/// The model name after the `anthropic.` vendor in `<region>.anthropic.<name>`
+/// or `anthropic.<name>`; any other id comes back unchanged.
+// #9292: anchored on the vendor, not a region list, so a region prefix the
+// shared list lacks (`apac.`, `au.`) still classifies.
+fn anthropic_model_name(model: &str) -> &str {
+    const VENDOR: &str = "anthropic.";
+    model
+        .split_once('.')
+        .and_then(|(_, tail)| tail.strip_prefix(VENDOR))
+        .or_else(|| model.strip_prefix(VENDOR))
+        .unwrap_or(model)
 }
 
 /// The one system-prompt line an `auto`-mode request adds (#9292).
