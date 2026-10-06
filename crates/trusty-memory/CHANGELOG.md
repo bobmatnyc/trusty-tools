@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.29.1] — 2026-10-06
+
+### Fixed
+
+- `memory_recall` and `memory_recall_deep` now keep a user-scope ruling that answers the query inside `top_k`, even when many project drawers outscore it. After the score sort, each folded ruling whose content holds at least half of the query's content terms (and at least two) is lifted to rank 3 or better, in a reserved slot inside the cut. The leg still adds at most `ceil(top_k / 3)` rulings, and a ruling the query is not about keeps its score rank (#9143).
+
 ## [0.29.0] — 2026-10-06
 
 ### Added

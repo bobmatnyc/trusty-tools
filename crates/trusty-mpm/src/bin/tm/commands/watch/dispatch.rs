@@ -18,6 +18,7 @@
 
 use serde::Deserialize;
 
+use trusty_mpm::core::remote_url_redact::redact_stored_url;
 use trusty_mpm::runtime::RuntimeKind;
 
 use super::github::MatchedIssue;
@@ -111,8 +112,10 @@ pub(crate) async fn dispatch_issue(
     match mode {
         DispatchMode::DryRun => {
             println!(
-                "[dry-run] would dispatch #{} ({}) → branch `{branch}` off `{base_ref}` of {repo_url}",
-                issue.number, issue.url
+                "[dry-run] would dispatch #{} ({}) → branch `{branch}` off `{base_ref}` of {}",
+                issue.number,
+                issue.url,
+                redact_stored_url(repo_url)
             );
             println!("           title: {}", issue.title);
             Ok(false)

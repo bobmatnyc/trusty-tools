@@ -50,7 +50,7 @@ fn a_search_error_degrades_and_keeps_every_primary_hit() {
         reason: DegradedReason::SearchFailed,
         cached: false,
     };
-    let degraded = fold_rulings(&mut results, vec![Err(failed.clone())], 10, None);
+    let degraded = fold_rulings(&mut results, vec![Err(failed.clone())], "q", 10, None).degraded;
     assert_eq!(contents(&results), ["project a", "project b"]);
     assert_eq!(degraded, [failed]);
     assert_eq!(
@@ -74,7 +74,7 @@ fn the_same_ruling_from_two_palaces_appears_once() {
             hit(already_in_project, &["standing-rule"], 0.65, 2),
         ]),
     ];
-    let degraded = fold_rulings(&mut results, outcomes, 9, None);
+    let degraded = fold_rulings(&mut results, outcomes, "q", 9, None).degraded;
     assert!(degraded.is_empty());
     let count = |c: &str| results.iter().filter(|r| r.drawer.content() == c).count();
     assert_eq!(count(text), 1, "{:?}", contents(&results));
@@ -95,9 +95,30 @@ fn rulings_contribute_at_most_a_third_of_top_k() {
         hit("note", &["note"], 0.99, 2),
         hit("weak", &["ruling"], 0.10, 2),
     ])];
-    fold_rulings(&mut results, outcomes, 6, Some(0.2));
+    fold_rulings(&mut results, outcomes, "q", 6, Some(0.2));
     assert_eq!(contents(&results), ["project a", "project b", "r1", "r2"]);
     assert!(results[2..].iter().all(|r| r.layer == 1));
+}
+
+/// Why (#9143 AC2): the rank floor may only lift rulings the cap admitted, and
+/// only those that answer the query.
+/// What: three rulings answer the query and one does not; `top_k` 6 caps the
+/// leg at 2. The best answering ruling is floored; the off-topic ruling is
+/// folded on score but not floored; the third answering ruling, past the cap,
+/// is neither folded nor floored.
+#[test]
+fn only_capped_rulings_that_answer_the_query_are_floored() {
+    let query = "issue titles name the symptom";
+    let mut results = primary();
+    let on_topic = hit("issue titles name the symptom", &["bob-ruling"], 0.70, 2);
+    let off_topic = hit("commits never land on local main", &["ruling"], 0.60, 2);
+    let past_cap = hit("issue titles name a symptom too", &["ruling"], 0.50, 2);
+    let (on_id, past_id) = (on_topic.drawer.id, past_cap.drawer.id);
+    let outcomes = vec![Ok(vec![on_topic, off_topic, past_cap])];
+    let fold = fold_rulings(&mut results, outcomes, query, 6, None);
+    assert_eq!(fold.floored, [on_id]);
+    assert_eq!(results.len(), 4, "{:?}", contents(&results));
+    assert!(results.iter().all(|r| r.drawer.id != past_id));
 }
 
 /// Push `palace`'s recorded failure past [`RULINGS_RETRY_AFTER`].

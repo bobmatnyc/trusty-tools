@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::{MemoryVerb, MemoryVerbError, MemoryVerbOptions};
+use super::{FactSlot, MemoryVerb, MemoryVerbError, MemoryVerbOptions};
 
 /// Every `(method, params)` a stub daemon was sent.
 type Calls = Arc<Mutex<Vec<(String, Value)>>>;
@@ -94,6 +94,7 @@ fn arguments_carry_only_the_schema_keys_supplied() {
         content: "prefers snake_case".to_string(),
         room: None,
         tags: vec!["style".to_string()],
+        slot: FactSlot::default(),
     }
     .arguments();
     assert_eq!(note["content"], json!("prefers snake_case"));
@@ -140,6 +141,7 @@ async fn a_write_sends_a_write_method_over_the_socket() {
                 text: "the ledger is owned by ops".to_string(),
                 room: None,
                 tags: vec![],
+                slot: FactSlot::default(),
             },
             super::REMEMBER_METHOD,
             "text",
@@ -149,6 +151,7 @@ async fn a_write_sends_a_write_method_over_the_socket() {
                 content: "deploy target is prod-east".to_string(),
                 room: None,
                 tags: vec![],
+                slot: FactSlot::default(),
             },
             super::NOTE_METHOD,
             "content",
@@ -220,6 +223,7 @@ fn a_write_without_a_resolvable_palace_is_refused() {
         content: "x".to_string(),
         room: None,
         tags: vec![],
+        slot: FactSlot::default(),
     };
     let err = super::resolve_verb_palace(&write, &opts).expect_err("a write needs a palace");
     assert!(matches!(err, MemoryVerbError::Palace { .. }), "{err:?}");
@@ -268,6 +272,7 @@ async fn json_envelope_keys_are_always_present() {
             text: "a fact worth keeping around".to_string(),
             room: None,
             tags: vec![],
+            slot: FactSlot::default(),
         },
         &opts_at(Some("p"), daemon.socket(), cwd.path()),
     )
@@ -284,4 +289,121 @@ async fn json_envelope_keys_are_always_present() {
         encoded["socket"],
         json!(daemon.socket().display().to_string())
     );
+}
+
+/// A `remember` and a `note` carrying `slot`, with their text keys.
+fn writes(slot: &FactSlot) -> [(MemoryVerb, &'static str); 2] {
+    [
+        (
+            MemoryVerb::Remember {
+                text: "session s1 resumes at the review gate".to_string(),
+                room: None,
+                tags: vec![],
+                slot: slot.clone(),
+            },
+            "text",
+        ),
+        (
+            MemoryVerb::Note {
+                content: "PR 9254 is green and awaiting merge".to_string(),
+                room: None,
+                tags: vec![],
+                slot: slot.clone(),
+            },
+            "content",
+        ),
+    ]
+}
+
+/// Why (#9142): a slot only supersedes the prior fact if the key and expiry
+/// reach trusty-memory under its own schema keys, `fact_key` and `expires_at`.
+/// Test: itself.
+#[tokio::test]
+async fn a_fact_key_and_expiry_reach_the_request() {
+    let slot = FactSlot {
+        fact_key: Some("ws:s1/resume".to_string()),
+        expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+    };
+    for (verb, _) in writes(&slot) {
+        let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+            .await
+            .expect("the stub answers");
+
+        let (_, params) = only_call(&calls);
+        assert_eq!(params["fact_key"], json!("ws:s1/resume"), "{params}");
+        assert_eq!(
+            params["expires_at"],
+            json!("2099-01-01T00:00:00Z"),
+            "{params}"
+        );
+    }
+}
+
+/// Why (#9142): omitting both flags must leave the request byte-identical to
+/// the pre-#9142 one — no `fact_key`/`expires_at` key, not even `null`.
+/// Test: itself.
+#[tokio::test]
+async fn a_write_without_slot_flags_sends_the_old_request() {
+    for (verb, text_key) in writes(&FactSlot::default()) {
+        let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+            .await
+            .expect("the stub answers");
+
+        let (_, params) = only_call(&calls);
+        let text = params[text_key].clone();
+        assert_eq!(params, json!({ text_key: text, "palace": "p" }));
+    }
+}
+
+/// Why (#9142): an unparseable `--expires-at` is a caller typo. It must fail
+/// before any RPC, never be dropped and never reach the daemon.
+/// Test: itself.
+#[tokio::test]
+async fn a_bad_expires_at_is_refused_before_any_rpc() {
+    let slot = FactSlot {
+        fact_key: Some("pr:9254/state".to_string()),
+        expires_at: Some("tomorrow".to_string()),
+    };
+    for (verb, _) in writes(&slot) {
+        let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let err = super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+            .await
+            .expect_err("a bad timestamp is refused");
+
+        assert!(matches!(err, MemoryVerbError::ExpiresAt { .. }), "{err:?}");
+        assert!(err.to_string().contains("\"tomorrow\""), "{err}");
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "no RPC may be sent"
+        );
+    }
+}
+
+/// Why (#9142): the daemon stores a past `expires_at` as an unslotted drawer, so
+/// it must be refused here, before any RPC.
+/// Test: itself.
+#[tokio::test]
+async fn a_past_expires_at_is_refused_before_any_rpc() {
+    let slot = FactSlot {
+        fact_key: Some("pr:9254/state".to_string()),
+        expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+    };
+    for (verb, _) in writes(&slot) {
+        let (daemon, calls) = recording_daemon(json!({ "status": "stored" })).await;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let err = super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+            .await
+            .expect_err("a past expiry is refused");
+
+        assert!(err.to_string().contains("in the past"), "{err}");
+        assert!(
+            calls.lock().expect("calls").is_empty(),
+            "no RPC may be sent"
+        );
+    }
 }

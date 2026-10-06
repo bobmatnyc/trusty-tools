@@ -14,9 +14,14 @@
 //!
 //! When `LlmRequest.response_schema` is set, the provider builds a
 //! `ToolConfiguration` with a single tool and forces `toolChoice = TOOL`
-//! (the named tool).  The model's `toolUse.input` JSON is extracted and
-//! returned as `LlmResponse.text` — clean, directly deserializable JSON
-//! with no fence-stripping required.
+//! (the named tool), or sets `toolChoice = auto` plus one system-prompt line
+//! for a model that rejects forcing (#9292, see
+//! `tool_use::supports_forced_tool_choice`).  The model's `toolUse.input`
+//! JSON is extracted and returned as `LlmResponse.text` — clean, directly
+//! deserializable JSON with no fence-stripping required.
+//!
+//! `temperature` is omitted for a model that rejects it (#9304, see
+//! `accepts_temperature`).
 //!
 //! Region resolution: an explicit region > the region inside a Bedrock model
 //! ARN > `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`.
@@ -237,10 +242,7 @@ impl BedrockProvider {
         let model = req.effective_model(&self.model);
 
         // Build system blocks and conversation messages from the LlmRequest.
-        let mut system_blocks: Vec<SystemContentBlock> = Vec::new();
-        if !req.system.is_empty() {
-            system_blocks.push(SystemContentBlock::Text(req.system.clone()));
-        }
+        let system_blocks = system_blocks(req, model);
 
         let mut converse_messages: Vec<Message> = Vec::new();
         for msg in &req.messages {
@@ -263,10 +265,7 @@ impl BedrockProvider {
             ));
         }
 
-        let inference = InferenceConfiguration::builder()
-            .max_tokens(req.max_tokens as i32)
-            .temperature(req.temperature)
-            .build();
+        let inference = inference_config(req, model);
 
         let mut sdk_req = client
             .converse()
@@ -285,9 +284,11 @@ impl BedrockProvider {
             sdk_req = sdk_req.request_metadata(key, value);
         }
 
-        // When a response_schema is set, inject tool-use forcing.
+        // When a response_schema is set, inject tool-use forcing — or `auto`
+        // for a model that rejects forcing (#9292).
         if let Some(ref schema) = req.response_schema {
-            let tool_config = build_tool_config(&schema.name, &schema.schema)?;
+            let tool_config =
+                tool_use::build_tool_config_for_model(model, &schema.name, &schema.schema)?;
             sdk_req = sdk_req.tool_config(tool_config);
         }
 
@@ -298,17 +299,7 @@ impl BedrockProvider {
 
         let latency_ms = start.elapsed().as_millis() as u64;
 
-        // Extract text: prefer toolUse.input (structured) over plain text.
-        let text = if req.response_schema.is_some() {
-            // When tool-use forcing is active, the model MUST emit a ToolUse
-            // block.  Extract the input JSON directly.  If the block is absent
-            // (unexpected), fall back to plain text extraction.
-            tool_use::extract_tool_use_json(&resp)
-                .or_else(|| extract_converse_text(&resp))
-                .unwrap_or_default()
-        } else {
-            extract_converse_text(&resp).unwrap_or_default()
-        };
+        let text = response_text(&resp, req.response_schema.is_some());
 
         let (input_tokens, output_tokens) = extract_token_usage(&resp);
         let cost_usd = estimate_bedrock_cost_usd(model, input_tokens, output_tokens);
@@ -478,7 +469,94 @@ where
     }
 }
 
+// ─── Request helpers ──────────────────────────────────────────────────────────
+
+/// The Converse system blocks for `req` sent to `model`.
+///
+/// Why: a model that rejects a forced `toolChoice` gets `auto` instead, and
+/// `auto` alone no longer requires a tool call, so the request asks for it in
+/// the system prompt (#9292).
+/// What: `req.system` as one block when non-empty; then, only for a
+/// structured request to a model that rejects forcing, one more block holding
+/// [`tool_use::auto_tool_instruction`]. Any other request gets exactly the
+/// blocks it had before #9292.
+/// Test: `system_blocks_add_the_tool_line_only_for_auto_models`.
+fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
+    let mut blocks = Vec::new();
+    if !req.system.is_empty() {
+        blocks.push(SystemContentBlock::Text(req.system.clone()));
+    }
+    if let Some(schema) = &req.response_schema
+        && !tool_use::supports_forced_tool_choice(model)
+    {
+        blocks.push(SystemContentBlock::Text(tool_use::auto_tool_instruction(
+            &schema.name,
+        )));
+    }
+    blocks
+}
+
+/// Model families whose Bedrock Converse API rejects `temperature` with
+/// `ValidationException` (#9304).
+const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+
+/// Whether `model` accepts a `temperature` on Bedrock Converse.
+///
+/// Why: Opus 5.5 rejects `temperature` ("`temperature` is deprecated for this
+/// model"), and Sonnet 5.5 rejects any non-default value, so every review
+/// call to either failed (#9304).
+/// What: `false` only for a family in [`NO_TEMPERATURE_FAMILIES`], read with
+/// the #9292 parser [`tool_use::bedrock_model_family`]. An id that parser
+/// cannot read — an application-inference-profile ARN — keeps `temperature`:
+/// for a model that accepts it, dropping it silently swaps the configured
+/// value for the model default, while a wrong `true` fails loudly with the
+/// same `ValidationException` this fix removes.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`.
+fn accepts_temperature(model: &str) -> bool {
+    tool_use::bedrock_model_family(model).is_none_or(|f| !NO_TEMPERATURE_FAMILIES.contains(&f))
+}
+
+/// The Converse inference configuration for `req` sent to `model`.
+///
+/// What: `max_tokens` always; `temperature` only when
+/// [`accepts_temperature`] holds.
+/// Test: `inference_config_omits_temperature_only_for_claude_5_5`,
+/// `inference_config_temperature_covers_every_compare_candidate`.
+fn inference_config(req: &LlmRequest, model: &str) -> InferenceConfiguration {
+    // #9304: the 5.5 families reject `temperature`; omit the field for them.
+    let temperature = accepts_temperature(model).then_some(req.temperature);
+    InferenceConfiguration::builder()
+        .max_tokens(req.max_tokens as i32)
+        .set_temperature(temperature)
+        .build()
+}
+
 // ─── Response helpers ─────────────────────────────────────────────────────────
+
+/// The reply text the pipeline parses: the `toolUse.input` JSON for a
+/// structured request, else the joined text blocks.
+///
+/// Why: a forced call always answers with a `toolUse` block, but an `auto`
+/// call (#9292) may answer in prose; that prose must reach the caller's
+/// parser, which parses JSON text or fails closed, never an empty string
+/// read as success.
+/// What: when `structured`, [`tool_use::extract_tool_use_json`], falling back
+/// to [`extract_converse_text`]; otherwise the text alone. Empty when neither
+/// yields anything.
+/// Test: `auto_mode_free_text_reply_reaches_the_review_parser`.
+fn response_text(
+    resp: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+    structured: bool,
+) -> String {
+    let tool_json = if structured {
+        tool_use::extract_tool_use_json(resp)
+    } else {
+        None
+    };
+    tool_json
+        .or_else(|| extract_converse_text(resp))
+        .unwrap_or_default()
+}
 
 /// Extract joined text from a Converse response output.
 ///

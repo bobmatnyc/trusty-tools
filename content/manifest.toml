@@ -11,7 +11,7 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.1.2"
+version = "2.2.0"
 schema_major = 1
 
 [[member]]
@@ -356,15 +356,15 @@ version = "1.2.1"
 
 [[member]]
 path = "skills/tm-session-management.md"
-version = "1.1.0"
+version = "1.2.0"
 
 [[member]]
 path = "skills/tm-session-pause.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/tm-session-resume.md"
-version = "1.1.0"
+version = "1.2.0"
 
 [[member]]
 path = "skills/tm-slack.md"
