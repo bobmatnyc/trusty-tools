@@ -341,7 +341,7 @@ pub(crate) fn org_map_pin(
                 "{e}. The session's gh for {} is given a token that authenticates as \
                  nobody until the [accounts] table is fixed (#9091).",
                 // #9124: the origin may embed `user:token@`.
-                crate::core::remote_url_redact::redact_url(origin)
+                crate::core::remote_url_redact::redact_stored_url(origin)
             )),
         }),
     }

@@ -219,7 +219,10 @@ const EVERY_METHOD: [&str; 10] = [
 
 /// Where the daemon declares its own method names and frame budget.
 fn daemon_rpc_rs() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../trusty-analyze/src/service/rpc.rs")
+    // #9298: the running checkout, not the one that built this binary.
+    trusty_common::test_harness::test_repo_root()
+        .expect("the running checkout's workspace root")
+        .join("crates/trusty-analyze/src/service/rpc.rs")
 }
 
 /// Read one `pub const <name>: u64 = <product of integers>;` out of a source

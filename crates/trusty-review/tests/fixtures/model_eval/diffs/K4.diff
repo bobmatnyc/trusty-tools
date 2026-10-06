@@ -1,0 +1,25 @@
+diff --git a/crates/trusty-search/src/query/score.rs b/crates/trusty-search/src/query/score.rs
+index 1111111..2222222 100644
+--- a/crates/trusty-search/src/query/score.rs
++++ b/crates/trusty-search/src/query/score.rs
+@@ -1,13 +1,18 @@
+ //! Rank fusion.
++
++/// Reciprocal-rank weight of a 0-based `rank`.
++fn rrf(rank: usize) -> f64 {
++    1.0 / (60.0 + rank as f64 + 1.0)
++}
+ 
+ /// Fuse two rank lists with reciprocal-rank fusion.
+ pub fn fuse(a: &[u64], b: &[u64]) -> Vec<(u64, f64)> {
+     let mut scores = std::collections::HashMap::new();
+     for (rank, id) in a.iter().enumerate() {
+-        *scores.entry(*id).or_insert(0.0) += 1.0 / (60.0 + rank as f64 + 1.0);
++        *scores.entry(*id).or_insert(0.0) += rrf(rank);
+     }
+     for (rank, id) in b.iter().enumerate() {
+-        *scores.entry(*id).or_insert(0.0) += 1.0 / (60.0 + rank as f64 + 1.0);
++        *scores.entry(*id).or_insert(0.0) += rrf(rank);
+     }
+     let mut out: Vec<(u64, f64)> = scores.into_iter().collect();
+     out.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.0.cmp(&y.0)));

@@ -5,8 +5,12 @@
 //! What: a real staged reindex (incremental, then force) against a colocated
 //! corpus, a reload of that corpus, and the direct-write arm of
 //! `resolve_corpus_swap`.
+//! #9230 adds the negative arms: a failed, memory-aborted or rolled-back
+//! reindex leaves the stamp it found.
 //! Test: `a_committed_reindex_stamps_the_corpus_and_a_reload_does_not`,
-//! `the_direct_write_path_stamps_the_live_corpus`.
+//! `the_direct_write_path_stamps_the_live_corpus`,
+//! `a_failed_or_memory_aborted_reindex_does_not_stamp`,
+//! `a_rolled_back_reindex_keeps_the_previous_stamp`.
 
 use std::sync::Arc;
 
@@ -114,4 +118,80 @@ async fn the_direct_write_path_stamps_the_live_corpus() {
     )
     .await;
     assert!(stamp_of(&handle).await.is_some());
+}
+
+/// Run the direct-write arm of `resolve_corpus_swap` with `outcome` and
+/// `memory_aborted`, and return the live corpus's stamp afterwards.
+async fn direct_write_stamp(
+    tag: &str,
+    outcome: ReindexOutcome,
+    memory_aborted: bool,
+) -> Option<u64> {
+    let (_root, handle) = colocated_index(tag);
+    resolve_corpus_swap(
+        &handle,
+        &handle.id,
+        handle.root_path.as_path(),
+        None,
+        &StagingResolution::Commit,
+        &outcome,
+        memory_aborted,
+        false,
+    )
+    .await;
+    stamp_of(&handle).await
+}
+
+/// Why: #9230 (PR-A review) — a reindex whose embed pass failed, or one the
+/// memory guard aborted, committed nothing the resolver may call fresh.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_or_memory_aborted_reindex_does_not_stamp() {
+    let failed = ReindexOutcome::Failed {
+        reason: "every batch failed to embed".into(),
+    };
+    assert_eq!(direct_write_stamp("failed-9230", failed, false).await, None);
+    assert_eq!(
+        direct_write_stamp("aborted-9230", ReindexOutcome::Ready, true).await,
+        None
+    );
+}
+
+/// Why: #9230 (PR-A review) — a rolled-back staged reindex discards staging
+/// and reattaches the live corpus, whose stamp must be the one it had.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rolled_back_reindex_keeps_the_previous_stamp() {
+    let (root, handle) = colocated_index("rollback-9230");
+    let live = handle
+        .indexer
+        .write()
+        .await
+        .take_corpus_store()
+        .expect("live corpus");
+    live.write_reindexed_unix_sync(100).expect("plant stamp");
+    drop(live);
+    let tmp = root.path().join(".trusty-search/index.redb.tmp");
+    let staging = CorpusStore::open_fresh(&tmp).expect("staging");
+    handle
+        .indexer
+        .write()
+        .await
+        .set_corpus_store(Arc::new(staging));
+
+    resolve_corpus_swap(
+        &handle,
+        &handle.id,
+        handle.root_path.as_path(),
+        Some(tmp.as_path()),
+        &StagingResolution::Rollback {
+            reason: "test rollback".into(),
+        },
+        &ReindexOutcome::Ready,
+        false,
+        false,
+    )
+    .await;
+    assert!(!tmp.exists(), "the rollback deletes staging");
+    assert_eq!(stamp_of(&handle).await, Some(100));
 }

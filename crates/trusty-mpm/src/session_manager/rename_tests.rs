@@ -95,7 +95,7 @@ async fn rename_suffixes_collision_with_record() {
         .rename(&a, &b_name)
         .await
         .expect("collision must auto-suffix, never reject");
-    assert_eq!(updated.tmux_name, format!("{b_name}-2"));
+    assert_eq!(updated.tmux_name, format!("{b_name}-02")); // #9238: two digits
     // `b`'s own record is untouched.
     assert_eq!(mgr.get(&b).await.expect("get b").tmux_name, b_name);
 }
@@ -116,11 +116,11 @@ async fn rename_suffixes_collision_with_live_tmux() {
         .rename(&id, "tm-foreign-live")
         .await
         .expect("collision with a live foreign session must auto-suffix, never reject");
-    assert_eq!(updated.tmux_name, "tm-foreign-live-2");
+    assert_eq!(updated.tmux_name, "tm-foreign-live-02"); // #9238
 }
 
 /// `rename` picks the smallest FREE ordinal — a second collision on top of an
-/// already-taken `-2` must skip to `-3`, not fail or loop back.
+/// already-taken `-02` must skip to `-03`, not fail or loop back (#9238).
 #[tokio::test]
 async fn rename_suffix_skips_to_next_free_ordinal() {
     let dir = TempDir::new().unwrap();
@@ -136,14 +136,14 @@ async fn rename_suffix_skips_to_next_free_ordinal() {
     let first = mgr
         .rename(&a, &b_name)
         .await
-        .expect("first collision suffixes to -2");
-    assert_eq!(first.tmux_name, format!("{b_name}-2"));
+        .expect("first collision suffixes to -02");
+    assert_eq!(first.tmux_name, format!("{b_name}-02"));
 
     let second = mgr
         .rename(&c, &b_name)
         .await
-        .expect("second collision must skip the now-taken -2 and land on -3");
-    assert_eq!(second.tmux_name, format!("{b_name}-3"));
+        .expect("second collision must skip the now-taken -02 and land on -03");
+    assert_eq!(second.tmux_name, format!("{b_name}-03"));
 }
 
 /// Two CONCURRENT renames of two different STOPPED sessions to the same
@@ -158,7 +158,7 @@ async fn rename_suffix_skips_to_next_free_ordinal() {
 /// whole check/dedupe/persist sequence.
 /// What: seeds two Stopped records, fires both renames to `tm-contested`
 /// concurrently via `tokio::join!`, and asserts the persisted names are
-/// distinct — one bare, one `-2`-suffixed.
+/// distinct — one bare, one `-02`-suffixed (#9238).
 /// Test: this function IS the test.
 #[tokio::test]
 async fn rename_concurrent_stopped_renames_to_same_target_never_collide() {
@@ -184,8 +184,8 @@ async fn rename_concurrent_stopped_renames_to_same_target_never_collide() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["tm-contested", "tm-contested-2"],
-        "one wins the bare name, the other takes the -2 suffix"
+        ["tm-contested", "tm-contested-02"],
+        "one wins the bare name, the other takes the -02 suffix"
     );
 }
 

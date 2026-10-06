@@ -869,7 +869,7 @@ Before declaring a publish complete:
 - [ ] Milestone closed the same day, open issues moved to the next milestone
       of the same kind (bugfix or feature); the release report names the
       moved issues (owner ruling 2026-09-25). An issue only awaiting live
-      verification (`status:merged` or `status:tested`) stays in the closed
+      verification (Merged, awaiting Deployed) stays in the closed
       milestone.
 
 ## Connection-Safe Daemon Restart (issue #534)

@@ -80,32 +80,87 @@ fn resolve_unscoped_prefers_project_over_owner() {
 }
 
 /// Why: an explicit `<owner>/KEY` or `<owner>/<repo>/KEY` names exactly one
-/// vault; it must not fall back to the caller's scopes.
+/// of the caller's vaults; it must not fall back to the other one.
 /// Test: itself.
 #[test]
 fn resolve_explicit_reference_reads_only_its_vault() {
     let (_tmp, backend, store) = fixture();
     set(&store, &project(), "SHARED", "project-value");
     set(&store, &owner(), "SHARED", "owner-value");
-    set(&store, &other_project(), "API_ONLY", "api-value");
+    set(&store, &owner(), "OWNER_ONLY", "owner-only");
 
     assert_eq!(
         resolve(&store, "secret://acme/SHARED", false).unwrap(),
         "owner-value"
     );
     assert_eq!(
-        resolve(&store, "secret://acme/api/API_ONLY", false).unwrap(),
-        "api-value"
+        resolve(&store, "secret://acme/web/SHARED", false).unwrap(),
+        "project-value"
     );
     let reads = backend.reads();
-    match resolve(&store, "secret://acme/api/SHARED", false) {
+    match resolve(&store, "secret://acme/web/OWNER_ONLY", false) {
         Err(SecretsError::NotFound { key, searched }) => {
-            assert_eq!(key, "SHARED");
-            assert_eq!(searched, "trusty/acme/api", "only the pinned vault");
+            assert_eq!(key, "OWNER_ONLY");
+            assert_eq!(searched, "trusty/acme/web", "only the pinned vault");
         }
         other => panic!("expected NotFound, got {other:?}"),
     }
     assert_eq!(backend.reads(), reads, "a miss never reads the backend");
+}
+
+/// Why: #9328 vector (a), owner ruling 06 R1 — a pinned
+/// `secret://<owner>[/<repo>]/KEY` was honoured for any vault, so a `.env`
+/// edited in a PR to `DB=secret://victim/prod-repo/DB_URL` injected another
+/// project's value. A pinned vault outside the caller's lookup order is now
+/// refused before the index or backend is read, with or without an agent
+/// parent, through `locate`, `resolve_reference` and `resolve_env`, and the
+/// error carries no value. A sibling repo of the same owner is out of scope
+/// too. Red on the unfixed code: every reference below resolves to its
+/// value.
+/// Test: itself.
+#[test]
+fn resolve_pinned_reference_outside_the_scopes_is_refused() {
+    let (_tmp, backend, store) = fixture();
+    let victim_project = VaultName::new("trusty/victim/prod-repo").unwrap();
+    let victim_owner = VaultName::new("trusty/victim").unwrap();
+    set(&store, &victim_project, "DB_URL", SENTINEL);
+    set(&store, &victim_owner, "DB_URL", SENTINEL);
+    set(&store, &other_project(), "DB_URL", SENTINEL);
+    let reads = backend.reads();
+
+    for (raw, vault) in [
+        (
+            "secret://victim/prod-repo/DB_URL",
+            "trusty/victim/prod-repo",
+        ),
+        ("secret://victim/DB_URL", "trusty/victim"),
+        ("secret://acme/api/DB_URL", "trusty/acme/api"),
+    ] {
+        for agent_parent in [false, true] {
+            let err = resolve(&store, raw, agent_parent).unwrap_err();
+            match &err {
+                SecretsError::VaultOutOfScope { vault: named, .. } => assert_eq!(named, vault),
+                other => panic!("{raw}: expected VaultOutOfScope, got {other:?}"),
+            }
+            assert!(!format!("{err} {err:?}").contains(SENTINEL), "{raw}");
+        }
+        assert!(matches!(
+            store.locate(&reference(raw), &scopes()),
+            Err(SecretsError::VaultOutOfScope { .. })
+        ));
+
+        let entries = [EnvEntry::new("DB", raw)];
+        let err = resolve_env(&store, &scopes(), &entries, false).unwrap_err();
+        match &err {
+            SecretsError::EnvResolution { source, .. } => assert!(
+                matches!(**source, SecretsError::VaultOutOfScope { .. }),
+                "{raw}: {source:?}"
+            ),
+            other => panic!("{raw}: expected EnvResolution, got {other:?}"),
+        }
+        assert!(!format!("{err} {err:?}").contains(SENTINEL), "{raw}");
+    }
+    assert_eq!(backend.reads(), reads, "a refusal never reads the backend");
 }
 
 /// Why: a miss is `SecretsError::NotFound`, never an empty value.

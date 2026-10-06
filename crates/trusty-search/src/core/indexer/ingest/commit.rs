@@ -138,10 +138,11 @@ impl CodeIndexer {
         let bm25_ms = bm25_start.elapsed().as_millis() as u64;
 
         self.commit_embeddings_cache(&all_chunks, embeddings).await;
-        if self.corpus.is_some() {
-            self.commit_corpus_to_redb(&all_chunks, &entities_by_file)
+        // #9230: an incremental write stamps the corpus only when this landed.
+        let corpus_write_failed = self.corpus.is_some()
+            && !self
+                .commit_corpus_to_redb(&all_chunks, &entities_by_file)
                 .await;
-        }
         // The pre-filter above read the corpus under a READ lock and released
         // it; `commit_corpus` re-checks under the write lock. A concurrent
         // commit that filled the remaining headroom in that window makes the
@@ -169,6 +170,7 @@ impl CodeIndexer {
             vector_upsert_ms,
             kg_ms,
             chunks_dropped_by_cap: pre_filter_dropped.saturating_add(late_dropped),
+            corpus_write_failed,
         })
     }
 
@@ -385,7 +387,8 @@ impl CodeIndexer {
     /// `CorpusStore::upsert_batch` in a single redb transaction.
     /// What: clones the chunks plus entities, moves them onto a blocking worker,
     /// and writes both tables in one atomic transaction. Failures are logged at
-    /// `warn` and swallowed.
+    /// `warn`; the return is `false` for one, so an incremental write does not
+    /// stamp a corpus its rows never reached (#9230).
     ///
     /// Issue #4122: this is the single durable redb write, and the `None` arm
     /// below is what makes the UNGATED bulk-reindex path safe on a
@@ -399,9 +402,9 @@ impl CodeIndexer {
         &self,
         chunks: &[RawChunk],
         entities_by_file: &[(String, Vec<RawEntity>)],
-    ) {
+    ) -> bool {
         let Some(corpus) = self.corpus.clone() else {
-            return;
+            return true;
         };
         debug_assert!(
             !self.corpus_open_failed,
@@ -419,7 +422,7 @@ impl CodeIndexer {
         })
         .await;
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => return true,
             Ok(Err(e)) => tracing::warn!(
                 "index '{index_id}': redb corpus write failed ({e}) — \
                  in-memory commit succeeded; on-disk corpus will re-converge \
@@ -427,6 +430,7 @@ impl CodeIndexer {
             ),
             Err(e) => tracing::warn!("index '{index_id}': redb corpus write task panicked ({e})"),
         }
+        false
     }
 
     /// Insert each `(file_path, entities)` tuple into the per-file entity map.

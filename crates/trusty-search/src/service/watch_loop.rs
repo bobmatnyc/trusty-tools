@@ -1,7 +1,7 @@
 //! Glue between [`crate::service::watcher::FileWatcher`] and `CodeIndexer`.
 //!
 //! Why: The watcher emits raw filesystem events; the indexer wants
-//! `index_file` / `remove_chunk` calls. This module bridges them and
+//! `index_file` / `remove_chunk_ids_committed` calls. This module bridges them and
 //! maintains an [`IndexedFiles`] side-map so that file deletions can locate
 //! the chunk IDs that need to come out of the HNSW + corpus.
 //!
@@ -15,6 +15,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::chunker::chunk_ast;
 use crate::core::CodeIndexer;
@@ -28,6 +29,9 @@ use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::watch_rescan::RescanFollowUp;
 use crate::service::watcher::{FileWatcher, WatchEvent};
+use crate::service::watcher_teardown::{
+    drop_bounded_async, drop_bounded_blocking, WatcherGuard, WATCHER_TEARDOWN_BOUND,
+};
 
 /// Handle for a running watch loop. Drop it (or call [`WatcherTask::stop`]) to
 /// stop watching: the OS watcher is torn down and the consumer task is aborted.
@@ -38,12 +42,19 @@ use crate::service::watcher::{FileWatcher, WatchEvent};
 /// (dropping a `JoinHandle` leaves the task running). Holding an `AbortHandle`
 /// and aborting it on `Drop` guarantees the consumer task is actually cancelled
 /// when the manager tears watchers down, so no orphaned tasks survive a stop.
-/// What: owns the `FileWatcher` (OS watch lifetime) and an `AbortHandle` for the
-/// consumer task; `Drop` aborts the consumer and drops the watcher.
-/// Test: `watcher_task_stop_aborts_consumer` below.
+/// What: owns the OS watcher (OS watch lifetime) and the consumer task's
+/// `JoinHandle`; `Drop` aborts the consumer and tears the watcher down within
+/// `teardown_bound` (#9315, see `watcher_teardown`).
+/// Test: `watcher_task_stop_aborts_consumer` below,
+/// `dropping_a_watcher_task_is_bounded_too`.
 pub struct WatcherTask {
-    _watcher: FileWatcher,
+    // #9315: type-erased so teardown can move it to its own thread, and so a
+    // test can install a guard whose drop blocks. `None` once torn down.
+    watcher: Option<WatcherGuard>,
     join: JoinHandle<()>,
+    // #9315: names the index in the stuck-teardown warning.
+    label: String,
+    teardown_bound: Duration,
 }
 
 impl WatcherTask {
@@ -64,27 +75,52 @@ impl WatcherTask {
     /// usually landed inside `open_corpus_with_retry`'s single 50 ms retry.
     /// What: aborts the consumer `JoinHandle` and awaits it. A cancelled task
     /// resolves to `Err(JoinError::Cancelled)`, which is the expected outcome
-    /// and is discarded. The `FileWatcher` is dropped when `self` is dropped at
-    /// the end of the call, releasing the kqueue/inotify/fsevent handle. The
-    /// wait is bounded by construction: an idle or lock-parked task is dropped
-    /// by `abort()` itself, and a running one cancels at its next await.
+    /// and is discarded. The wait is bounded by construction: an idle or
+    /// lock-parked task is dropped by `abort()` itself, and a running one
+    /// cancels at its next await. Only then is the OS watcher dropped, on its
+    /// own thread and awaited for at most `teardown_bound` (5 s in production):
+    /// an FSEvents drop that never returns is detached and logged (#9315).
     /// Test: `watcher_task_stop_aborts_consumer`,
-    /// `stop_for_index_releases_the_indexer_before_it_returns`.
+    /// `stop_for_index_releases_the_indexer_before_it_returns`,
+    /// `stop_returns_within_the_bound_when_the_watcher_drop_never_returns`.
     pub async fn stop(mut self) {
         self.join.abort();
         // `JoinHandle` is `Unpin` and cannot be moved out of `self` (this type
         // has a `Drop` impl), so await it through a `&mut` borrow.
         let _ = (&mut self.join).await;
-        // `_watcher` drops here, terminating the OS watch.
+        // #9315: the consumer is gone first (corpus safety, #3049); only then
+        // is the OS watch torn down, with a bound — fseventsd may never reply.
+        if let Some(watcher) = self.watcher.take() {
+            drop_bounded_async(watcher, &self.label, self.teardown_bound).await;
+        }
+    }
+
+    /// A task holding `guard` in place of a real OS watcher (#9315 test seam).
+    #[cfg(test)]
+    pub(crate) fn with_guard_for_test(
+        guard: WatcherGuard,
+        join: JoinHandle<()>,
+        label: &str,
+        teardown_bound: Duration,
+    ) -> Self {
+        Self {
+            watcher: Some(guard),
+            join,
+            label: label.to_owned(),
+            teardown_bound,
+        }
     }
 }
 
 impl Drop for WatcherTask {
     /// Abort the consumer task on drop so a dropped handle never leaks a
-    /// long-running tokio task (the OS watcher is torn down by `FileWatcher`'s
-    /// own `Drop`).
+    /// long-running tokio task, then tear the OS watcher down within the
+    /// bound — a no-op after [`WatcherTask::stop`] (#9315).
     fn drop(&mut self) {
         self.join.abort();
+        if let Some(watcher) = self.watcher.take() {
+            drop_bounded_blocking(watcher, &self.label, self.teardown_bound);
+        }
     }
 }
 
@@ -94,7 +130,7 @@ impl Drop for WatcherTask {
 /// belong to which path (e.g. an explicit `remove_file` HTTP handler).
 pub fn spawn_watch_loop(
     root_path: &Path,
-    // #3049: the watcher is a WRITER (`index_file` / `remove_chunk`), so it
+    // #3049: the watcher is a WRITER (`index_file` / chunk-id removal), so it
     // needs the id to take this index's teardown-lock read side. Passing the id
     // rather than the whole handle keeps the existing `Arc<RwLock<CodeIndexer>>`
     // seam that the watcher tests construct directly.
@@ -146,6 +182,7 @@ pub(crate) fn spawn_watch_loop_with_registry(
     let raw_root = root_path.to_path_buf();
     let canonical_root =
         std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    let index_label = index_id.to_string();
 
     let join = tokio::spawn(async move {
         // Consecutive failed reconciles, driving the retry backoff. Reset to 0
@@ -211,8 +248,8 @@ pub(crate) fn spawn_watch_loop_with_registry(
                                 "reconciled watched tree after a dropped-event rescan",
                             );
                         }
-                        // The pass ran, but some files could not be read, so
-                        // their contents are still unknown to the index.
+                        // The pass ran, but some files could not be read or
+                        // removed (#9230), so the index does not match the tree.
                         Ok(stats) => {
                             tracing::warn!(
                                 index_id = %index_id,
@@ -222,8 +259,9 @@ pub(crate) fn spawn_watch_loop_with_registry(
                                 chunks_indexed = stats.chunks_indexed,
                                 files_removed = stats.files_removed,
                                 files_unreadable = stats.files_unreadable,
+                                files_failed = stats.files_failed,
                                 "watched tree is NOT fully reconciled after a dropped-event \
-                                 rescan — some files could not be read; will retry",
+                                 rescan — some files could not be read or removed; will retry",
                             );
                         }
                         Err(err) => {
@@ -302,8 +340,10 @@ pub(crate) fn spawn_watch_loop_with_registry(
     });
 
     Ok(WatcherTask {
-        _watcher: watcher,
+        watcher: Some(Box::new(watcher)),
         join,
+        label: format!("index {index_label} ({})", root_path.display()),
+        teardown_bound: WATCHER_TEARDOWN_BOUND,
     })
 }
 
@@ -405,7 +445,8 @@ pub fn watcher_relative_path(canonical_root: &Path, raw_root: &Path, event_path:
 ///
 /// Test: `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` and
 /// `partial_commit_at_cap_then_edit_replaces_the_landed_chunk` in
-/// `tests/watcher_chunk_cap_orphans_100.rs`.
+/// `tests/watcher_chunk_cap_orphans_100.rs`; the #9230 stale-chunk delete by
+/// `watcher_edit_delete_stamps_only_when_committed`.
 ///
 /// Public so that integration test can call it directly instead of racing real
 /// OS watcher events for a state the debouncer makes hard to hit on purpose;
@@ -488,8 +529,8 @@ pub async fn handle_modified(
     let path_str = watcher_relative_path(canonical_root, raw_root, path);
 
     // #3049 round 4: acquired BEFORE the stale-chunk removal below, not just
-    // before `index_file`. `remove_chunk` deletes from redb via
-    // `delete_chunks_from_redb`, so the removal loop is a durable write of its
+    // before `index_file`. `remove_chunk_ids_committed` deletes from redb
+    // (fail-closed, #9212), so the removal is a durable write of its
     // own; taking the guard after it left that loop racing a delete's
     // `remove_dir_all`. Held to the end of the function, which covers the
     // `index_file` write too.
@@ -501,9 +542,22 @@ pub async fn handle_modified(
         .await
     {
         let idx = indexer.read().await;
-        for id in stale_ids {
-            if let Err(err) = idx.remove_chunk(&id).await {
-                tracing::warn!(?err, %id, "remove_chunk failed");
+        // #9230: fail-closed and stamped, so an edit whose new content commits
+        // no chunks still moves `reindexed_unix`. A refused delete keeps the
+        // ids and their entry, and this edit is retried on the next event.
+        match idx.remove_chunk_ids_committed(&stale_ids).await {
+            Ok(true) => {
+                idx.rebuild_symbol_graph_now().await;
+                idx.record_incremental_commit(&path_str).await;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(?err, file = %path_str, "watcher stale-chunk delete failed; kept for retry (#9230)");
+                drop(idx);
+                indexed_files
+                    .record(std::path::PathBuf::from(&path_str), stale_ids)
+                    .await;
+                return;
             }
         }
     }
@@ -567,8 +621,10 @@ pub async fn handle_modified(
 /// from the HNSW + BM25 corpus so deleted files do not silently linger.
 ///
 /// What: normalizes the event path to the same repo-root-relative key used by
-/// `handle_modified` when it recorded the chunks, then calls `remove_chunk`
-/// for every chunk ID in the index. Uses `watcher_relative_path` with both
+/// `handle_modified` when it recorded the chunks, removes those chunk IDs,
+/// rebuilds the symbol graph once, and stamps the corpus when the delete
+/// left redb (#9230). A failed redb delete keeps the ids and re-records the
+/// entry, so a later event or rescan retries it. Uses `watcher_relative_path` with both
 /// the canonical and raw roots so that even when `notify` delivers the path
 /// in a different symlink form (e.g. `/var/…` vs `/private/var/…` on macOS)
 /// the lookup still hits the entry stored by `handle_modified`.
@@ -577,7 +633,8 @@ pub async fn handle_modified(
 /// `removed_deleted_file_dual_root_fallback` unit tests below;
 /// `partial_commit_at_cap_then_delete_leaves_no_orphan_chunks` in
 /// `tests/watcher_chunk_cap_orphans_100.rs` covers the case where the entry it
-/// looks up was written by `handle_modified`'s error arm.
+/// looks up was written by `handle_modified`'s error arm; the #9230 stamp by
+/// `watcher_delete_stamps_only_when_committed`.
 ///
 /// Public for that integration test on the same terms as `handle_modified`.
 #[doc(hidden)]
@@ -599,12 +656,27 @@ pub async fn handle_removed(
     else {
         return;
     };
-    // #3049: `remove_chunk` mutates the corpus — same guard as `handle_modified`.
+    if ids.is_empty() {
+        return;
+    }
+    // #3049: the removal mutates the corpus — same guard as `handle_modified`.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(index_id).await;
     let idx = indexer.read().await;
-    for id in ids {
-        if let Err(err) = idx.remove_chunk(&id).await {
-            tracing::warn!(?err, %id, "remove_chunk failed");
+    // #9230: fail-closed, so a delete whose rows left redb stamps the corpus;
+    // a refused one keeps the ids in memory and re-tracks them for a retry.
+    match idx.remove_chunk_ids_committed(&ids).await {
+        Ok(committed) => {
+            idx.rebuild_symbol_graph_now().await;
+            if committed {
+                idx.record_incremental_commit(&rel_key).await;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?err, file = %rel_key, "watcher delete failed; kept for retry (#9230)");
+            drop(idx);
+            indexed_files
+                .record(std::path::PathBuf::from(&rel_key), ids)
+                .await;
         }
     }
 }

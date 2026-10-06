@@ -3,7 +3,7 @@ name: tm-session-resume
 description: Resume from a paused PM session — scan project-local snapshots, validate the project matches, load the latest (or a selected) session, and restore todos and context
 user-invocable: true
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 category: pm-workflow
 tags: [session, resume, context, pm-recommended]
 effort: medium
@@ -255,6 +255,12 @@ checkpoint-rewind (Esc-Esc / `/rewind`):
   and load it into a **fresh** conversation — useful for long-form work spanning
   many separate conversations, or a clean context window carrying just the
   essential summary.
+
+## Update the Resume Slot (#9142)
+
+Once resumed, rewrite `ws:<session>/resume` with `tm memory remember
+--fact-key`, and each changed PR's `pr:<n>/state`, so recall returns the
+current state. Slot rules: `/tm-session-management`.
 
 ## Token Budget
 

@@ -28,6 +28,7 @@ use crate::{
     pipeline::{
         parser::parse_review_response,
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
+        reply_shape::describe_reply,
     },
     voice::VoiceConfig,
 };
@@ -201,6 +202,15 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
     match llm.complete(req).await {
         Ok(resp) => {
             let parsed = parse_review_response(&resp.text);
+            if parsed.is_fail_safe {
+                // #9310: record the unparsed chunk reply's shape; the raw text is not kept.
+                warn!(
+                    file = %file,
+                    reason = ?parsed.fail_safe_reason,
+                    shape = %describe_reply(&resp),
+                    "map stage: chunk review not parsed — fail-safe UNKNOWN"
+                );
+            }
             debug!(
                 file = %file,
                 verdict = %parsed.verdict,

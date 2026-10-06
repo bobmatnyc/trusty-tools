@@ -761,9 +761,10 @@ pub(crate) fn install_to_with(
 /// The checkout's agent roster, for bin-target tests that install.
 #[cfg(test)]
 pub(crate) fn test_roster() -> trusty_mpm::core::content_source::AgentRoster {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    // #9298: the runtime checkout, never the compile-time build path.
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let content =
-        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
     trusty_mpm::core::content_source::AgentRoster::load(&content).expect("repo roster")
 }
 
@@ -771,9 +772,10 @@ pub(crate) fn test_roster() -> trusty_mpm::core::content_source::AgentRoster {
 /// (#9012).
 #[cfg(test)]
 pub(crate) fn test_content() -> trusty_mpm::core::content_source::FrameworkContent {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    // #9298: the runtime checkout, never the compile-time build path.
+    let root = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let content =
-        trusty_agents_common::agent_content::checkout_content(root).expect("repo content");
+        trusty_agents_common::agent_content::checkout_content(&root).expect("repo content");
     trusty_mpm::core::content_source::FrameworkContent::load(&content).expect("repo content")
 }
 

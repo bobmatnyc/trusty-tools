@@ -63,7 +63,7 @@
 //! Test: this file IS the test; see `support` for the shared
 //! `project_with_agents` fixture.
 
-mod support;
+use crate::support;
 
 use support::project_with_agents;
 

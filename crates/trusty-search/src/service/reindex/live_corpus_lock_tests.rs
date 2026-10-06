@@ -194,6 +194,11 @@ async fn a_deferred_promotion_is_reported_in_status_and_is_not_complete() {
         Some(&br#"{"probe":"7991"}"#[..]),
         "#7991: the checkpoint must be intact — the clear runs only on promotion"
     );
+    // #9230: a deferred promotion records no reindex commit.
+    assert_eq!(
+        staging.read_reindexed_unix_sync().expect("read stamp"),
+        None
+    );
     let reason = indexer
         .promotion_deferred()
         .expect("#7991: the refusal must be recorded where status can report it")

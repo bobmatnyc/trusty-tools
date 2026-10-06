@@ -21,6 +21,25 @@
 //! No item in this crate prints, logs, or formats a secret value. Errors and
 //! `Debug` output carry names and locations only.
 //!
+//! # Compatibility
+//!
+//! The request, response and config structs and the public enums are
+//! `#[non_exhaustive]`. Build a request with its constructor, read a response
+//! through serde, and give every `match` on an enum from this crate a
+//! wildcard arm.
+//!
+//! Adding a field, a variant or a provided trait method is a compatible
+//! change. While the crate is 0.x, a compatible change ships as a patch
+//! release (0.1.0 to 0.1.1), which a `trusty-secrets = "0.1"` dependency
+//! picks up. Only a breaking change moves the minor number (0.1 to 0.2).
+//!
+//! On the wire, every request denies unknown fields, so a server refuses a
+//! field newer than itself. A new request field is therefore optional, with a
+//! serde default that keeps the old behaviour, and a client must not send it
+//! to a server older than the release that added it. A new response field
+//! also takes a serde default, so a client still decodes an older server's
+//! answer.
+//!
 //! Test: unit tests beside each module; the real-Keychain round trip is the
 //! ignored `keychain_real_roundtrip_store_list_remove` in
 //! `tests/keychain_roundtrip.rs`.

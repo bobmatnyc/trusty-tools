@@ -16,32 +16,31 @@
 //! reach that daemon would pass for the wrong reason and could disturb it, so
 //! this file isolates on three axes and then ASSERTS the isolation held:
 //!
-//! 1. `TRUSTY_DATA_DIR` points at a fresh tempdir, which is what
-//!    `service::http_addr_path()` and `daemon_port_path()` resolve against.
-//! 2. Both discovery files in that dir are seeded with THIS test's ephemeral
-//!    port, so even `daemon_base_url()`'s fallback path cannot reach the
-//!    compiled-in default `127.0.0.1:7878`.
+//! 1. `TRUSTY_DATA_DIR` points at a fresh tempdir, which is what the child's
+//!    `DaemonClient::resolve()` derives the daemon socket from (#9168).
+//! 2. The in-process daemon serves its real socket router at exactly that
+//!    path, and `TRUSTY_SEARCH_SOCKET` is removed from the child's environment,
+//!    so the child can reach no other socket — and, since #9168, `serve` never
+//!    dials TCP at all.
 //! 3. `HOME` points at a second tempdir, so nothing reads or writes the
 //!    operator's real `~/.trusty-search/` or `~/.codex/`.
 //!
-//! The daemon under test is a real `service::server::build_router` on a
-//! loopback port inside this process — the same construction
-//! `mcp_structured_503_5350.rs` uses — so the assertions are about the real
-//! request path, not a hand-written fixture. `assert_answering_daemon_is_ours`
-//! then proves the child talked to it and not to anything else.
+//! The daemon under test is the real `service::socket` router inside this
+//! process — the same construction `mcp_structured_503_5350.rs` uses — so the
+//! assertions are about the real request path, not a hand-written fixture.
+//! `assert_answering_daemon_is_ours` then proves the child talked to it and not
+//! to anything else.
 //!
-//! Not covered here: a `serve` session with NO reachable daemon.
-//! `handle_serve` builds its `DaemonBridgeConfig` with `no_spawn: false` and
-//! reads no environment override, so such a session spawns a real
-//! `start --foreground` daemon which outlives the killed `serve` child — a
-//! first draft of that case left one listening on port 7882. There is no
-//! hermetic way to drive it until `serve` gains a no-spawn switch. The
-//! unreachable-daemon report itself is covered in `mcp/tools/tests_health.rs`.
+//! Not covered here: a `serve` session with NO reachable daemon. `handle_serve`
+//! auto-starts one through `daemon_guard::ensure_daemon_up`, and that daemon
+//! would outlive the killed `serve` child. The socket wait itself is covered by
+//! `ensure_daemon_up_names_the_socket_when_it_never_answers`, and the
+//! unreachable-daemon report by `mcp/tools/tests_health.rs`.
 //!
-//! Test: `cargo test -p trusty-search --test mcp_stdio_e2e_5264`
+//! Test: `cargo test -p trusty-search --test integration mcp_stdio_e2e_5264::`
 
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
+use crate::socket_daemon;
+use crate::test_daemon;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -58,7 +57,9 @@ use trusty_search::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use trusty_search::core::store::{UsearchStore, VectorStore};
 use trusty_search::core::Embedder;
 use trusty_search::mcp::tools::HEALTH_OK;
-use trusty_search::service::server::{build_router, SearchAppState};
+use trusty_search::service::server::SearchAppState;
+
+use socket_daemon::{serve_state_at, SocketDaemon};
 
 /// Index id this session works with. Deliberately unlike any real project id on
 /// a developer machine, so a leak to the production daemon cannot accidentally
@@ -69,13 +70,12 @@ const INDEX_ID: &str = "e2e-5264-isolated-fixture";
 /// it proves the hit came from OUR corpus.
 const NEEDLE: &str = "zqx_authenticate_5264";
 
-/// Serve the real daemon router with one populated index, on an ephemeral
-/// loopback port.
+/// Serve the real socket router with one populated index, at `socket`.
 ///
 /// What: builds a `CodeIndexer` over a `MockEmbedder` — no ONNX, no sidecar, no
 /// network — adds one chunk containing [`NEEDLE`], registers it, and serves
-/// `build_router` on `127.0.0.1:0`. Returns the bound address.
-async fn spawn_isolated_daemon(root: &Path) -> std::net::SocketAddr {
+/// the daemon's socket router on `socket`.
+async fn spawn_isolated_daemon(root: &Path, socket: &Path) -> SocketDaemon {
     let dim = 16;
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
     let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch"));
@@ -116,15 +116,7 @@ async fn spawn_isolated_daemon(root: &Path) -> std::net::SocketAddr {
         root.to_path_buf(),
     ));
 
-    let app = build_router(SearchAppState::new(registry));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    addr
+    serve_state_at(SearchAppState::new(registry), socket).await
 }
 
 /// A live MCP stdio session against the built binary.
@@ -138,20 +130,11 @@ struct Session {
 impl Session {
     /// Spawn `trusty-search serve` with a fully isolated environment.
     ///
-    /// Why: `serve`'s `ensure_search_daemon_up` will SPAWN a daemon if it
-    /// cannot reach one, and an un-isolated spawn would bind the real default
-    /// port. Seeding both discovery files with the in-process daemon's address
-    /// means the reachability probe succeeds on the first try and no child
-    /// daemon is ever launched.
-    fn spawn(data_dir: &Path, home: &Path, addr: std::net::SocketAddr) -> Self {
-        // `service::http_addr_path()` → `$TRUSTY_DATA_DIR/http_addr`;
-        // `commands::daemon_utils::daemon_port_path()` → `$TRUSTY_DATA_DIR/daemon.port`.
-        // Seeding BOTH closes the fallback that would otherwise resolve the
-        // compiled-in default port.
-        std::fs::write(data_dir.join("http_addr"), addr.to_string()).expect("seed http_addr");
-        std::fs::write(data_dir.join("daemon.port"), addr.port().to_string())
-            .expect("seed daemon.port");
-
+    /// Why: `serve`'s `ensure_daemon_up` will SPAWN a daemon if its socket
+    /// does not answer. The in-process daemon already serves
+    /// `$TRUSTY_DATA_DIR/trusty-search.sock`, so the probe succeeds on the
+    /// first try and no child daemon is ever launched.
+    fn spawn(data_dir: &Path, home: &Path) -> Self {
         // #8900: stamped, so a daemon `serve` auto-starts if discovery ever
         // misses dies with this test binary instead of outliving the run.
         let mut child = test_daemon::command()
@@ -162,6 +145,8 @@ impl Session {
             // re-point discovery at the operator's real instance.
             .env_remove("TRUSTY_INDEX")
             .env_remove("TRUSTY_DATA_DIR_OVERRIDE")
+            // #9168: the socket comes from TRUSTY_DATA_DIR alone.
+            .env_remove("TRUSTY_SEARCH_SOCKET")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -244,19 +229,14 @@ impl Drop for Session {
 /// it, a regression in discovery that silently routed the child to the
 /// machine-wide daemon would leave every other assertion still passing —
 /// exactly the failure mode the scoping repro hit.
-fn assert_answering_daemon_is_ours(report: &Value, addr: std::net::SocketAddr) {
-    let base = report["daemon"]["base_url"]
+fn assert_answering_daemon_is_ours(report: &Value, socket: &Path) {
+    let answered = report["daemon"]["socket"]
         .as_str()
         .expect("the health report names the answering daemon (#5264)");
     assert_eq!(
-        base,
-        format!("http://{addr}"),
+        answered,
+        socket.display().to_string(),
         "the MCP session reached a daemon other than this test's isolated instance"
-    );
-    assert_ne!(
-        addr.port(),
-        7878,
-        "the ephemeral port must never collide with the default production port"
     );
     let indexes = report["daemon"]["indexes"].as_u64().expect("index count");
     assert_eq!(
@@ -278,11 +258,14 @@ fn mcp_stdio_session_initializes_and_serves_tools_against_an_isolated_daemon() {
     let root = tempfile::tempdir().expect("index root");
 
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let addr = runtime.block_on(spawn_isolated_daemon(root.path()));
+    // #9168: the path the child's `DaemonClient::resolve()` derives from
+    // TRUSTY_DATA_DIR (`service::socket::resolve_socket_path`).
+    let socket = data_dir.path().join("trusty-search.sock");
+    let daemon = runtime.block_on(spawn_isolated_daemon(root.path(), &socket));
     // Hold the runtime for the whole test: dropping it would stop serving.
     let _guard = runtime.enter();
 
-    let mut session = Session::spawn(data_dir.path(), home.path(), addr);
+    let mut session = Session::spawn(data_dir.path(), home.path());
 
     // 1. initialize — the step the #5264 process never reached.
     let init = session.call(
@@ -317,7 +300,7 @@ fn mcp_stdio_session_initializes_and_serves_tools_against_an_isolated_daemon() {
 
     // 3. search_health — reports ok AND names the daemon that answered (#5264).
     let health = session.tool("search_health", json!({ "index_id": INDEX_ID }));
-    assert_answering_daemon_is_ours(&health, addr);
+    assert_answering_daemon_is_ours(&health, &daemon.socket);
     assert_eq!(
         health["status"], HEALTH_OK,
         "health against a populated index must be ok: {health}"
@@ -327,8 +310,8 @@ fn mcp_stdio_session_initializes_and_serves_tools_against_an_isolated_daemon() {
 
     // 4. index discovery — the session finds the index rather than being told.
     let indexes = session.tool("list_indexes", json!({}));
-    // The tool forwards `GET /indexes?details=true`, so each element is an
-    // object carrying `id` alongside its disk stats.
+    // The tool forwards `search.indexes.list` with details, so each element is
+    // an object carrying `id` alongside its disk stats.
     let ids: Vec<&str> = indexes["indexes"]
         .as_array()
         .expect("indexes array")

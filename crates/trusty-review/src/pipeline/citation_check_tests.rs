@@ -396,6 +396,12 @@ fn distinct_lines_are_never_contradictory() {
 
 // ─── Helper unit tests ───────────────────────────────────────────────────────
 
+/// The pre-#9188 view of [`locator_span`]: path and start line.
+fn split_locator(locator: &str) -> (String, Option<u32>) {
+    let (path, span) = locator_span(locator);
+    (path, span.map(|(start, _)| start))
+}
+
 #[test]
 fn split_locator_extracts_line() {
     assert_eq!(
@@ -635,4 +641,143 @@ fn a_dropped_hunk_widens_the_span_rather_than_narrowing_it() {
         None,
         "a line inside a Stage-B-dropped hunk is still a real line of the diff"
     );
+}
+
+// ─── Ranged and anchor locators (#9188) ──────────────────────────────────────
+
+/// `src/a.rs` diffed over lines 1-20, quoting one real line.
+fn ranged_index() -> DiffContentIndex {
+    DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "src/a.rs",
+        vec![hunk(
+            "@@ -1,3 +1,20 @@",
+            &["+let total = amounts.iter().sum::<u64>();"],
+        )],
+    )]))
+}
+
+/// A finding on `src/a.rs` whose only evidence is one `[code: …]` bracket.
+fn bracket_finding(bracket: &str) -> Finding {
+    Finding::new(
+        "src/a.rs",
+        "logic-error",
+        format!("The sum can overflow {bracket}."),
+        "s",
+        0.9,
+        Effort::High,
+    )
+}
+
+#[test]
+fn a_ranged_citation_with_a_verbatim_excerpt_is_kept() {
+    for locator in [
+        "src/a.rs:10-20",
+        "src/a.rs:L10",
+        "src/a.rs:L10-L20",
+        "src/a.rs#L10-L20",
+    ] {
+        let mut findings = vec![bracket_finding(&format!(
+            "[code: `{locator}` — \"let total = amounts.iter().sum::<u64>();\"]"
+        ))];
+        let mut withheld = Vec::new();
+        enforce_citation_integrity(&mut findings, &ranged_index(), &mut withheld);
+        assert!(
+            withheld.is_empty(),
+            "{locator}: a true ranged citation was withheld: {:?}",
+            withheld.iter().map(|w| &w.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(findings.len(), 1, "{locator}");
+    }
+}
+
+#[test]
+fn a_ranged_citation_starting_past_the_diff_is_withheld() {
+    for locator in [
+        "src/a.rs:30-40",
+        "src/a.rs:L30",
+        "src/a.rs:L30-L40",
+        "src/a.rs#L30-L40",
+    ] {
+        let mut findings = vec![bracket_finding(&format!(
+            "[code: `{locator}` — see the loop]"
+        ))];
+        let mut withheld = Vec::new();
+        enforce_citation_integrity(&mut findings, &ranged_index(), &mut withheld);
+        assert!(
+            findings.is_empty(),
+            "{locator}: a fabricated range was kept"
+        );
+        assert_eq!(
+            withheld[0].reason,
+            format!(
+                "{CITATION_REASON}: [code: …] citation's line is beyond the file's last diffed line"
+            ),
+            "{locator}"
+        );
+    }
+}
+
+#[test]
+fn locator_span_reads_ranges_anchors_and_columns() {
+    for (locator, span) in [
+        ("a.rs:10-20", (10, 20)),
+        ("a.rs:L10", (10, 10)),
+        ("a.rs:L10-L20", (10, 20)),
+        ("a.rs#L10-L20", (10, 20)),
+        ("a.rs:10:5", (10, 10)),
+        ("a.rs:12", (12, 12)),
+        ("a.rs:20-10", (20, 20)),
+    ] {
+        assert_eq!(
+            locator_span(locator),
+            ("a.rs".to_string(), Some(span)),
+            "{locator}"
+        );
+    }
+    assert_eq!(
+        locator_span(r"C:\x.rs:5"),
+        (r"C:\x.rs".to_string(), Some((5, 5)))
+    );
+}
+
+#[test]
+fn locator_span_leaves_lineless_and_malformed_locators_whole() {
+    for locator in [
+        "a.rs",
+        "docs/foo.md:section",
+        "docs/foo.md#section",
+        r"C:\x.rs",
+        "a.rs:12-x",
+        "a.rs:99999999999",
+        "a.rs:1-99999999999",
+    ] {
+        assert_eq!(
+            locator_span(locator),
+            (locator.to_string(), None),
+            "{locator}"
+        );
+    }
+}
+
+#[test]
+fn a_ranged_citation_never_contradicts_a_line_inside_it() {
+    let index = DiffContentIndex::from_filtered(&filtered(vec![kept_file(
+        "src/a.rs",
+        vec![hunk(
+            "@@ -1,3 +1,20 @@",
+            &[
+                "+let total = amounts.iter().sum::<u64>();",
+                "+let average = total / amounts.len() as u64;",
+            ],
+        )],
+    )]));
+    let mut findings = vec![
+        bracket_finding("[code: `src/a.rs:10` — \"let total = amounts.iter().sum::<u64>();\"]"),
+        bracket_finding(
+            "[code: `src/a.rs:10-11` — \"let average = total / amounts.len() as u64;\"]",
+        ),
+    ];
+    let n = enforce_citation_integrity(&mut findings, &index, &mut Vec::new());
+    assert_eq!(n, 0, "a range may quote any line in it");
+    assert_eq!(findings.len(), 2);
 }

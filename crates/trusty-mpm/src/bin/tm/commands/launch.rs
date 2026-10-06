@@ -709,7 +709,7 @@ fn unparseable_origin_refusal(origin_url: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "could not parse a GitHub owner/repo from origin remote: {:?}\n\
          Run `tm connect` to start a session in the live checkout instead.",
-        trusty_mpm::core::remote_url_redact::redact_url(origin_url)
+        trusty_mpm::core::remote_url_redact::redact_stored_url(origin_url)
     )
 }
 

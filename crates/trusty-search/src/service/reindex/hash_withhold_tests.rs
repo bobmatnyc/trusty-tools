@@ -4,7 +4,8 @@
 //! over chunks that never landed, or an old hash left in place when the new
 //! one was withheld, kept a file out of search until a forced reindex.
 //! What: end-to-end reindex runs under a chunk cap, a commit that fails at the
-//! vector upsert, and the withhold pass's logging and keep rules.
+//! vector upsert or at the redb write (#9230), and the withhold pass's
+//! logging and keep rules.
 //! Test: `cargo test -p trusty-search -- hash_withhold_tests`.
 
 use std::fs;
@@ -20,7 +21,7 @@ use super::progress::ReindexProgress;
 use super::spawn_reindex_awaitable;
 use crate::core::chunker::{chunk_ast, json_exceeds_window_ceiling};
 use crate::core::embed::{Embedder, MockEmbedder};
-use crate::core::indexer::{CodeIndexer, ParsedBatch, TEST_FAIL_REMOVE};
+use crate::core::indexer::{CodeIndexer, ParsedBatch, TEST_FAIL_CHUNK_DELETE, TEST_FAIL_REMOVE};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::core::store::{VectorHit, VectorStore};
 use crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES;
@@ -385,6 +386,138 @@ async fn commit_error_clears_the_old_hash() {
         ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
         Some(WITHHELD_HASH),
         "ALPHA's hash must not survive the failed commit"
+    );
+}
+
+/// #9230: the redb-write-failure arm. `commit_parsed_batch` logs a failed
+/// redb write and answers `Ok`; the batch must still fail, as the error arm
+/// does, so it neither counts as indexed nor keeps a hash for chunks redb
+/// lacks. Fails against 8fe9e93737: no error, BRAVO's hash recorded.
+#[tokio::test]
+async fn a_failed_redb_write_fails_the_batch_and_withholds_its_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut indexer = CodeIndexer::new("redb-write-fail-9230", dir.path());
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
+    ));
+    crate::core::indexer::break_chunk_writes(&indexer);
+    let handle = handle_over("redb-write-fail-9230", dir.path(), indexer);
+    let ctx = ctx_for(&handle);
+    let key = PathBuf::from("a.rs");
+    ctx.hashes.insert(key.clone(), hash_content(ALPHA));
+
+    let (new, _) = chunk_ast("a.rs", BRAVO);
+    let ready = ParsedReadyBatch {
+        parsed: ParsedBatch {
+            embeddings: vec![None; new.len()],
+            chunks: new,
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        },
+        new_hashes: vec![(key.clone(), hash_content(BRAVO))],
+        batch_files: 1,
+        changed_corpus_paths: vec!["a.rs".to_string()],
+        final_chunkless_paths: Vec::new(),
+    };
+    commit_parsed_and_finalize(&ctx, ready).await;
+
+    assert_eq!(
+        ctx.progress.errors.load(Ordering::Acquire),
+        1,
+        "a batch whose redb write failed must be reported as failed"
+    );
+    assert_eq!(
+        ctx.progress.indexed_count(),
+        0,
+        "a failed batch indexed nothing"
+    );
+    assert_eq!(
+        ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "no hash may claim content the durable corpus lacks"
+    );
+}
+
+/// #9212: the batch's pre-commit remove fails closed. Why: it deleted
+/// warn-only, so a refused redb delete dropped ALPHA from memory, BRAVO
+/// committed over ALPHA's surviving rows and BRAVO's hash was recorded.
+/// What: seeds ALPHA, then commits BRAVO under the redb delete fault and
+/// asserts ALPHA's ids and rows are unchanged, BRAVO did not land, the hash
+/// is withheld and the failure is counted. Fails against d6529ca1f5.
+#[tokio::test]
+async fn a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash() {
+    let id = "refused-pre-commit-remove-9212";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut indexer = CodeIndexer::new(id, dir.path());
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
+    );
+    indexer.set_corpus_store(corpus.clone());
+    indexer.index_file("a.rs", ALPHA).await.expect("seed ALPHA");
+    let handle = handle_over(id, dir.path(), indexer);
+    let ctx = ctx_for(&handle);
+    let key = PathBuf::from("a.rs");
+    ctx.hashes.insert(key.clone(), hash_content(ALPHA));
+    let rows = || -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = corpus
+            .load_all_chunks()
+            .expect("rows")
+            .into_iter()
+            .filter(|c| c.file == "a.rs")
+            .map(|c| (c.id, c.content))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let rows_before = rows();
+    let mut ids_before = handle.indexer.read().await.chunk_ids_for_file("a.rs").await;
+    ids_before.sort();
+    assert!(!rows_before.is_empty(), "setup: ALPHA landed in redb");
+
+    let (new, _) = chunk_ast("a.rs", BRAVO);
+    let ready = ParsedReadyBatch {
+        parsed: ParsedBatch {
+            embeddings: vec![None; new.len()],
+            chunks: new,
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        },
+        new_hashes: vec![(key.clone(), hash_content(BRAVO))],
+        batch_files: 1,
+        changed_corpus_paths: vec!["a.rs".to_string()],
+        final_chunkless_paths: Vec::new(),
+    };
+    TEST_FAIL_CHUNK_DELETE.lock().unwrap().push(id.to_string());
+    commit_parsed_and_finalize(&ctx, ready).await;
+    TEST_FAIL_CHUNK_DELETE.lock().unwrap().retain(|f| f != id);
+
+    let mut ids_after = handle.indexer.read().await.chunk_ids_for_file("a.rs").await;
+    ids_after.sort();
+    assert_eq!(ids_after, ids_before, "a refused remove changed memory");
+    assert_eq!(
+        rows(),
+        rows_before,
+        "a refused remove changed the redb rows"
+    );
+    assert!(
+        !landed_text(&handle, "a.rs")
+            .await
+            .contains("bravo_one_8976"),
+        "BRAVO must not commit over ALPHA's surviving rows"
+    );
+    assert_eq!(
+        ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "BRAVO's hash must be withheld, so the next reindex retries"
+    );
+    assert_eq!(
+        ctx.progress.errors.load(Ordering::Acquire),
+        1,
+        "the refused remove is reported"
     );
 }
 

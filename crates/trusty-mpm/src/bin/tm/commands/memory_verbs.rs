@@ -7,16 +7,22 @@
 //! What: [`run`] builds [`MemoryVerbOptions`], runs the verb, and prints either
 //! the stable JSON envelope (`--json`) or a human summary. Returns `Err` — a
 //! non-zero exit — when the palace could not be resolved, the socket could not
-//! be derived, or the daemon did not answer.
+//! be derived, or the daemon did not answer. Exits
+//! [`EXIT_SLOT_REFUSED`] (3) when a write was stored but its `--fact-key` slot
+//! was refused (#9142).
 //! Test: `cli_parses_memory_recall`, `cli_parses_memory_remember_with_tags`,
 //! `cli_parses_memory_note` in `tests.rs`; the socket behaviour is covered by
 //! `tests/memory_verbs_socket.rs`.
 
 use std::path::PathBuf;
 
+use std::io::Write as _;
+
 use anyhow::Context as _;
 use serde_json::Value;
-use trusty_mpm::core::memory_verbs::{MemoryVerb, MemoryVerbOptions, MemoryVerbOutcome, run_verb};
+use trusty_mpm::core::memory_verbs::{
+    EXIT_SLOT_REFUSED, MemoryVerb, MemoryVerbOptions, MemoryVerbOutcome, run_verb, slot_refusal,
+};
 
 /// Longest slice of a recalled drawer printed per line.
 ///
@@ -27,7 +33,9 @@ const SNIPPET_CHARS: usize = 160;
 /// Run one no-MCP memory verb.
 ///
 /// Why: keeps `commands::memory`'s dispatcher one arm per action.
-/// What: see the module doc.
+/// What: see the module doc. A refused slot prints a warning (stderr under
+/// `--json`, whose stdout is unchanged) and exits [`EXIT_SLOT_REFUSED`]; the
+/// stored drawer is left as it is and nothing is retried.
 /// Test: `tests/memory_verbs_socket.rs`.
 pub(crate) async fn run(
     verb: MemoryVerb,
@@ -41,13 +49,22 @@ pub(crate) async fn run(
         cwd: None,
     };
     let outcome = run_verb(&verb, &opts).await?;
+    // #9142: a refused slot still stores the drawer; make that loud.
+    let refusal = slot_refusal(&verb, &outcome.result);
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&outcome).context("serialise the memory envelope")?
         );
+        if let Some(reason) = &refusal {
+            eprintln!("WARNING: slot refused: {reason}");
+        }
     } else {
-        print_summary(&outcome);
+        print_summary(&outcome, refusal.as_deref());
+    }
+    if refusal.is_some() {
+        std::io::stdout().flush().ok();
+        std::process::exit(EXIT_SLOT_REFUSED);
     }
     Ok(())
 }
@@ -60,9 +77,9 @@ pub(crate) async fn run(
 /// What: a recall prints one line per hit plus a count; a write prints the
 /// daemon's own `status`, its reason when it skipped, and the drawer id when it
 /// stored. A palace index (the #6318 answer to a recall with no palace) prints
-/// the hint the daemon supplied.
+/// the hint the daemon supplied. A `refusal` adds a WARNING line (#9142).
 /// Test: cosmetic; exercised through `tests/memory_verbs_socket.rs`.
-fn print_summary(outcome: &MemoryVerbOutcome) {
+fn print_summary(outcome: &MemoryVerbOutcome, refusal: Option<&str>) {
     let palace = outcome.palace.as_deref().unwrap_or("(none resolved)");
     match outcome.count {
         Some(count) => {
@@ -97,6 +114,9 @@ fn print_summary(outcome: &MemoryVerbOutcome) {
             match outcome.result.get("reason").and_then(Value::as_str) {
                 Some(reason) => println!("{status} → palace {palace}: {reason}"),
                 None => println!("{status} {drawer} → palace {palace}"),
+            }
+            if let Some(reason) = refusal {
+                println!("WARNING: slot refused: {reason} — drawer {drawer} was stored unslotted");
             }
         }
     }

@@ -253,3 +253,47 @@ async fn a_dead_daemon_exits_non_zero_naming_the_socket() {
         started.elapsed()
     );
 }
+
+/// Why (#9142): a refused slot still stores the drawer (`tier: "E"`), so a
+/// silent `stored` and exit 0 would hide that the fact supersedes nothing. An
+/// admitted slot (`tier: "C"`) stays a plain success.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_slot_warns_and_exits_with_the_refusal_code() {
+    for (tier, refused, want_code) in [
+        ("E", Some("fact_key \"bad\" has no `<domain>:` prefix"), 3),
+        ("C", None, 0),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("memory.sock");
+        let mut body =
+            json!({ "palace": "p", "status": "stored", "drawer_id": "d9", "tier": tier });
+        if let Some(reason) = refused {
+            body["tier_c_refused"] = json!(reason);
+        }
+        let (_stop, _calls) = serve(&socket, body).await;
+
+        let out = run_tm(
+            &socket,
+            Some("p"),
+            &[
+                "remember",
+                "session s1 resumes at review",
+                "--fact-key",
+                "bad",
+            ],
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(want_code), "tier {tier}: {stdout}");
+        assert!(stdout.contains("d9"), "the drawer id is printed: {stdout}");
+        match refused {
+            Some(reason) => assert!(
+                stdout.contains(&format!("WARNING: slot refused: {reason}"))
+                    && stdout.contains("stored unslotted"),
+                "{stdout}"
+            ),
+            None => assert!(!stdout.contains("WARNING"), "{stdout}"),
+        }
+    }
+}

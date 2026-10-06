@@ -350,7 +350,7 @@ async fn a_deferred_rebuild_survives_a_reopen() {
     assert!(!idx.symbol_graph_is_stale(), "a rebuilt graph boots fresh");
 }
 
-/// #8959: `purge_file`, the no-rebuild removal the watcher rescan and the git
+/// #8959: `purge_file_committed`, the no-rebuild removal the watcher rescan and the git
 /// reconcile pass call per file, stamps the durable mark before it removes
 /// anything. Fails with the stamp removed from `purge_file_with`: the reopened
 /// index booted the old persisted graph as current and served the purged
@@ -372,7 +372,7 @@ async fn a_purge_without_its_rebuild_is_rebuilt_after_a_reopen() {
         .await
         .expect("seed batch persists the graph");
         let id = crate::core::registry::IndexId::new(ID);
-        let removed = idx.purge_file(&id, PATH).await.expect("purge");
+        let (removed, _) = idx.purge_file_committed(&id, PATH).await.expect("purge");
         assert!(removed > 0, "the fixture must purge chunks");
         // Dropped before the caller's per-pass rebuild: a crash in the pass.
     }
@@ -632,5 +632,66 @@ async fn concurrent_writes_to_one_path_keep_only_the_last_version() {
         ids.iter()
             .all(|id| !id.contains("osprey_first") && !id.contains("zebra_quokka_old")),
         "an earlier version's chunks stayed on the path: {ids:?}"
+    );
+}
+
+/// `path`'s chunk ids in memory and its rows in redb, both sorted.
+async fn ids_and_rows(
+    idx: &crate::core::indexer::CodeIndexer,
+    path: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut ids = idx.chunk_ids_for_file(path).await;
+    ids.sort();
+    let corpus = idx.corpus_store().expect("corpus");
+    let mut rows: Vec<String> = corpus
+        .load_all_chunks()
+        .expect("rows")
+        .into_iter()
+        .filter(|c| c.file == path)
+        .map(|c| c.id)
+        .collect();
+    rows.sort();
+    (ids, rows)
+}
+
+/// #9212: `remove_file` defaults to fail-closed. Why: it deleted warn-only,
+/// so a refused redb delete answered `Ok` with the chunks gone from memory
+/// and still in redb, which the next boot loaded back. What: under the redb
+/// delete fault, `remove_file` is an `Err` with memory and rows unchanged;
+/// the explicit `WarnOnly` control shows the old split; a clean retry
+/// removes both. Fails against d6529ca1f5: `remove_file` answered `Ok`.
+#[tokio::test]
+async fn remove_file_fails_closed_on_a_refused_redb_delete() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let id = "remove-file-fail-closed-9212";
+    let idx = corpus_indexer(id, &dir.path().join("index.redb"));
+    idx.index_file(PATH, OLD).await.expect("seed");
+    let before = ids_and_rows(&idx, PATH).await;
+    assert!(!before.0.is_empty() && !before.1.is_empty(), "setup");
+
+    {
+        let _fault = FailChunkDelete::arm(id);
+        assert!(
+            idx.remove_file(PATH).await.is_err(),
+            "a refused delete is an Err"
+        );
+        assert_eq!(ids_and_rows(&idx, PATH).await, before, "state changed");
+
+        // Control: the explicit warn-only mode answers Ok and splits memory
+        // from redb — the behaviour `remove_file` had before #9212.
+        idx.remove_file_with(PATH, crate::core::indexer::RedbChunkDelete::WarnOnly)
+            .await
+            .expect("warn-only answers Ok");
+        let (ids, rows) = ids_and_rows(&idx, PATH).await;
+        assert!(ids.is_empty(), "warn-only drops memory");
+        assert_eq!(rows, before.1, "warn-only leaves the redb rows");
+    }
+
+    idx.index_file(PATH, OLD).await.expect("re-seed");
+    assert!(idx.remove_file(PATH).await.expect("clean remove") > 0);
+    let (ids, rows) = ids_and_rows(&idx, PATH).await;
+    assert!(
+        ids.is_empty() && rows.is_empty(),
+        "the clean remove left {ids:?} {rows:?}"
     );
 }

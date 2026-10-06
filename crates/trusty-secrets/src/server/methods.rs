@@ -34,7 +34,8 @@ pub const DOCTOR: &str = "secrets.doctor";
 pub const PROJECT_FIELD: &str = "project";
 
 /// A method body: state and raw params in, a JSON result or a fixed kind out.
-pub type MethodFn = fn(&State, Value) -> Result<Value, ErrorKind>;
+// #9073: crate-private; S8 passes the caller pid into the body.
+pub(crate) type MethodFn = fn(&State, Value) -> Result<Value, ErrorKind>;
 
 /// Split `params` into the project directory and the remaining fields.
 ///
@@ -64,12 +65,12 @@ fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
 /// `secrets.scopes`: the project scope, then the owner scope.
 ///
 /// Test: `server_scopes_round_trip_over_a_real_socket`.
-pub fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     if !rest.is_empty() {
         return Err(ErrorKind::InvalidParams);
     }
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     to_json(&project.scopes().to_response())
 }
 
@@ -78,10 +79,10 @@ pub fn scopes(_state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// What: reads the names-only index only; never opens a backend.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_corrupt_index_is_a_fixed_error`.
-pub fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: ListRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let keys = state.index.list(&request.vault)?;
     to_json(&ListResponse {
@@ -97,10 +98,10 @@ pub fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// logged or formatted here.
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_malformed_set_never_echoes_its_value`.
-pub fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: SetRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let store = SecretStore::new(project.backend(state)?, state.index.clone());
     let response = store.set(&request.vault, &request.key, &request.value)?;
@@ -110,10 +111,10 @@ pub fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// `secrets.delete`: remove one key from the backend and the index.
 ///
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`.
-pub fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: DeleteRequest = decode(rest)?;
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     project.require_in_scope(&request.vault)?;
     let store = SecretStore::new(project.backend(state)?, state.index.clone());
     to_json(&store.delete(&request.vault, &request.key)?)
@@ -158,13 +159,13 @@ impl CopySelection {
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`.
-pub fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let (dir, rest) = split_project(params)?;
     let request: CopyRequest = decode(rest)?;
     if request.from_backend == request.to_backend {
         return Err(ErrorKind::SameBackend);
     }
-    let project = ProjectContext::resolve(&dir)?;
+    let project = ProjectContext::resolve(state, &dir)?;
     let vault = project.scopes().project().clone();
     let source = (state.backends)(&request.from_backend)?;
     let destination = (state.backends)(&request.to_backend)?;
@@ -213,6 +214,7 @@ struct DoctorRequest {
 
 /// One backend's row in the doctor table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BackendStatus {
     /// The backend id.
     pub id: BackendId,
@@ -223,7 +225,9 @@ pub struct BackendStatus {
 }
 
 /// `secrets.doctor` response: backend availability and paths only.
+// #9073: §7 `detect_backends` grows the doctor table, so callers read it only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct DoctorResponse {
     /// The socket this server answers on.
     pub socket: PathBuf,
@@ -247,7 +251,7 @@ pub struct DoctorResponse {
 /// integrations), so "available" means "this build opens it". Opening a
 /// backend reads no secret. Reports paths and ids only.
 /// Test: `server_doctor_reports_backends_and_paths_only`.
-pub fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
+pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
@@ -255,10 +259,10 @@ pub fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let project = request
         .project
         .as_deref()
-        .map(ProjectContext::resolve)
+        .map(|dir| ProjectContext::resolve(state, dir))
         .transpose()?;
     let selected = match &project {
-        Some(project) => project.resolved_config(state)?.backend,
+        Some(project) => project.resolved_config().backend,
         None => {
             let machine = crate::store::config::load_machine_at(&state.settings.machine_config)?;
             crate::store::config::resolve(None, machine.as_ref()).backend

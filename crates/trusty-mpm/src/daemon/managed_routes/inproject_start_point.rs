@@ -160,7 +160,8 @@ fn fetch(base_path: &Path, refspec: &str) -> Result<(), String> {
 
 /// The error a failed fetch reports: its exit status and stderr on one line.
 /// #9124: git's fetch stderr can quote the remote URL, token included, so the
-/// stderr is redacted.
+/// stderr is redacted. #9259: free text, so `redact_url`, not
+/// `redact_stored_url`.
 /// Test: `a_fetch_failure_never_quotes_the_remote_token`.
 fn fetch_failure(status: &impl std::fmt::Display, stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr);

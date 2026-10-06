@@ -18,8 +18,8 @@ use regex::Regex;
 use super::GateError;
 use crate::models::Finding;
 use crate::pipeline::citation_check::{
-    BRACKET_CITATION_RE, CODE_CITATION_RE, MIN_SPAN_LEN, collect_delimited, normalize,
-    normalize_path,
+    BRACKET_CITATION_RE, CODE_CITATION_RE, MIN_SPAN_LEN, collect_delimited, line_suffix_span,
+    normalize, normalize_path,
 };
 
 /// An identifier-shaped word: `name`, `a::b::c`, optionally followed by `(`.
@@ -208,23 +208,17 @@ pub(super) fn bracket_anchors(rest: &str) -> Anchors {
 }
 
 /// Split a `[code: …]` locator into its path and optional inclusive line span.
+/// Test: `parse_locator_reads_lines_and_ranges`, `locator_span_agrees_with_parse_locator`.
 pub(super) fn parse_locator(locator: &str) -> Result<(String, Option<(u32, u32)>), GateError> {
     let Some((path, suffix)) = locator.rsplit_once(':') else {
         return Ok((locator.trim().to_string(), None));
     };
-    let suffix = suffix.trim().trim_start_matches(['L', 'l']);
-    if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
-        return Ok((locator.trim().to_string(), None));
+    // #9188: one suffix rule, shared with `citation_check::locator_span`.
+    match line_suffix_span(suffix) {
+        None => Ok((locator.trim().to_string(), None)),
+        Some(Err(_)) => Err(GateError::BadLocator(locator.to_string())),
+        Some(Ok(span)) => Ok((path.trim().to_string(), Some(span))),
     }
-    let bad = || GateError::BadLocator(locator.to_string());
-    let (a, b) = suffix.split_once('-').unwrap_or((suffix, suffix));
-    let start = a.trim().parse::<u32>().map_err(|_| bad())?;
-    let end = b
-        .trim()
-        .trim_start_matches(['L', 'l'])
-        .parse::<u32>()
-        .map_err(|_| bad())?;
-    Ok((path.trim().to_string(), Some((start, end.max(start)))))
 }
 
 /// A `[jira:]`/`[gh:]`/`[confluence:]` citation (#9188 D).

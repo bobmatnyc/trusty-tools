@@ -1,0 +1,50 @@
+diff --git a/crates/trusty-review/src/integrations/github/commentable.rs b/crates/trusty-review/src/integrations/github/commentable.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-review/src/integrations/github/commentable.rs
+@@ -0,0 +1,44 @@
++//! Which new-side lines of a patch can carry an inline review comment.
++
++use std::collections::BTreeSet;
++
++/// New-side line numbers GitHub accepts an inline comment on.
++#[derive(Debug, Default)]
++pub struct CommentableLines {
++    lines: BTreeSet<u32>,
++}
++
++impl CommentableLines {
++    /// Read one file's `patch` text from the GitHub API.
++    pub fn from_patch(patch: &str) -> Self {
++        let mut lines = BTreeSet::new();
++        let mut next_new = 0u32;
++        for line in patch.lines() {
++            if let Some(header) = line.strip_prefix("@@ ") {
++                next_new = header
++                    .split_whitespace()
++                    .find_map(|t| t.strip_prefix('+'))
++                    .and_then(|t| t.split(',').next())
++                    .and_then(|n| n.parse().ok())
++                    .unwrap_or(0);
++                continue;
++            }
++            match line.chars().next() {
++                Some('+') | Some(' ') => {
++                    lines.insert(next_new);
++                    next_new += 1;
++                }
++                Some('-') => {
++                    next_new += 1;
++                }
++                _ => {}
++            }
++        }
++        Self { lines }
++    }
++
++    /// Whether `line` can carry a comment.
++    pub fn contains(&self, line: u32) -> bool {
++        self.lines.contains(&line)
++    }
++}

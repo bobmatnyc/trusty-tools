@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use trusty_common::github_path::parse_remote_url;
 use trusty_mpm::client::{DaemonClient, ManagedSessionSummary};
+use trusty_mpm::core::remote_url_redact::redact_stored_url;
 use trusty_mpm::project::record::repo_url_matches;
 use trusty_mpm::project::{Project, local_checkout_for};
 
@@ -517,26 +518,36 @@ impl NewSessionFlow {
 /// argument, and no `register` leg — the project is already in the registry.
 /// `Err` when `repo_url` names no project directory, and when the directory it
 /// names is not on this host: that message names the expected path and the
-/// `git clone` that would produce it. There is deliberately no fall back to the
+/// `git clone` that would produce it, the stored URL masked by
+/// `redact_stored_url` (#9285). There is deliberately no fall back to the
 /// URL — the daemon would only refuse it again, later and less clearly.
 /// Test: `new_session_confirming_a_registered_project_sends_its_local_checkout`,
 /// `new_session_registered_project_without_a_checkout_names_the_clone_step`,
-/// `new_session_entry_reuses_a_registered_project`.
+/// `new_session_entry_reuses_a_registered_project`,
+/// `new_session_registered_row_without_a_directory_masks_the_stored_password_9285`,
+/// `new_session_registered_row_without_a_checkout_masks_the_stored_password_9285`.
 pub(crate) fn request_for_registered(
     name: &str,
     repo: &str,
     checkout: Option<&Path>,
 ) -> Result<NewSessionRequest, String> {
+    let shown = redact_stored_url(repo);
     let Some(checkout) = checkout else {
         return Err(format!(
-            "{name} is registered as {repo}, which names no project directory — \
+            "{name} is registered as {shown}, which names no project directory — \
              re-register it with the path of its checkout"
         ));
     };
     let path = checkout.display();
     if !checkout.is_dir() {
+        // #9285: a masked URL is no runnable command, so only a clean one keeps it.
+        if shown == repo {
+            return Err(format!(
+                "{name} has no checkout at {path} — clone it first: git clone {repo} {path}"
+            ));
+        }
         return Err(format!(
-            "{name} has no checkout at {path} — clone it first: git clone {repo} {path}"
+            "{name} has no checkout at {path} — clone it first from {shown} into {path}"
         ));
     }
     Ok(NewSessionRequest {

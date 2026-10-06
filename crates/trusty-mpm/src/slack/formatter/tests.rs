@@ -405,3 +405,18 @@ fn mrkdwn_escape_neutralizes_channel_broadcast_span() {
         "the literal broadcast span must not survive escaping: {escaped}"
     );
 }
+
+/// #9259: the project line masks a stored `repo_url`'s password, a quoted one
+/// included.
+#[test]
+fn format_fleet_by_project_slack_masks_a_quoted_stored_password() {
+    let fleet = vec![ProjectFleetView {
+        project_name: "proj".into(),
+        repo_url: "https://u:pa'ss9259@host/o/r".into(),
+        sessions: vec![],
+    }];
+    let body = SlackFormatter::format(&CommandResult::ManagedFleet(fleet));
+    assert!(!body.contains("ss9259"), "a password fragment survived");
+    assert!(!body.contains("u:pa"), "the user:password pair survived");
+    assert!(body.contains("*proj* — `https://***@host/o/r`"), "{body}");
+}

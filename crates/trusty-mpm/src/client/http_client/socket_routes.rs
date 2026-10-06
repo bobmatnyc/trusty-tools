@@ -199,6 +199,17 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/sessions/managed/{id}/delete",
         "mpm.managed.delete",
     ),
+    // #9313: `tm sessions rebind`.
+    (
+        "POST",
+        "/api/v1/sessions/managed/{id}/rebind",
+        "mpm.managed.rebind",
+    ),
+    (
+        "POST",
+        "/api/v1/sessions/managed/rebind",
+        "mpm.managed.rebind_all",
+    ),
     // ---- registry, deliverables, manager, pairing, delegation (slice 5) ----
     ("GET", "/projects", "mpm.projects.list"),
     ("POST", "/projects", "mpm.projects.register"),

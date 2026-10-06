@@ -270,7 +270,7 @@ impl ProjectRegistry {
             return;
         };
         // #9124: a remote URL may embed `user:token@`; every arm logs this.
-        let shown = crate::core::remote_url_redact::redact_url(repo_url);
+        let shown = crate::core::remote_url_redact::redact_stored_url(repo_url);
         let Some(name) = derive_name_from_url(repo_url) else {
             warn!(
                 repo_url = %shown,

@@ -828,7 +828,8 @@ async fn run_review_truncated_output_is_unknown() {
 /// telling the reader the review did not parse.
 /// What: drives a response whose findings payload cannot be decoded, asserts the
 /// verdict is UNKNOWN and `result.error` names the parse failure (which
-/// `print_review_result` renders as a `Pipeline error:` line).
+/// `print_review_result` renders as a `Pipeline error:` line) and, since
+/// #9310, the reply shape: stop reason, output tokens and a short head.
 #[tokio::test]
 async fn run_review_findings_parse_failure_sets_error() {
     let (source, _tmp) = local_diff_source("+fn x() {}\n");
@@ -859,6 +860,15 @@ async fn run_review_findings_parse_failure_sets_error() {
     assert!(
         err.contains("findings"),
         "the error must say the findings were not parsed: {err}"
+    );
+    // #9310: the harness row carries the reply shape, the raw reply is not kept.
+    assert!(
+        err.contains("reply shape: stop=none output_tokens=50"),
+        "the error must carry the reply shape: {err}"
+    );
+    assert!(
+        err.contains(r#"head="{\"summary\":\"looks fine\""#),
+        "the error must carry the reply head: {err}"
     );
 }
 
@@ -2765,3 +2775,11 @@ mod verify_coverage;
 // #9188: the offline zero-hallucination corpus runner.
 #[path = "runner_hallucination_corpus_tests.rs"]
 mod hallucination_corpus;
+
+// #9192: with every optional input off, the review is byte-identical.
+#[path = "runner_optional_context_off_tests.rs"]
+mod optional_context_off;
+
+// #9192: `include_pr_body` and the source ledger.
+#[path = "runner_pr_body_tests.rs"]
+mod pr_body;

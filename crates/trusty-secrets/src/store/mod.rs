@@ -31,7 +31,9 @@ pub use mask::{MASK_HEAD_CHARS, mask_secret};
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};
 pub use resolve::{EnvEntry, ResolvedVar, VarSource, resolve_env, resolve_reference};
-pub use scope::{ScopeSet, parse_remote_identity};
+pub use scope::{
+    RemoteRefusal, SUPPORTED_REMOTE_HOST, ScopeSet, VaultOverride, parse_remote_identity,
+};
 pub use secret_store::SecretStore;
 
 #[cfg(test)]

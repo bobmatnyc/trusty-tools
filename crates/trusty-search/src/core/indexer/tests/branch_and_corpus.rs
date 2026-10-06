@@ -273,7 +273,7 @@ async fn test_corpus_store_warm_boot_empty_is_zero() {
     assert_eq!(bare.load_chunks_from_redb().await.unwrap(), 0);
 }
 
-/// Phase 2: `remove_file` / `remove_chunk` must evict from the durable redb
+/// Phase 2: `remove_file` / `remove_chunk_ids_committed` must evict from the durable redb
 /// corpus too — otherwise a warm-boot resurrects the deleted chunks.
 #[tokio::test]
 async fn test_corpus_store_deletes_on_remove() {

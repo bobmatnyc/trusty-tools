@@ -1,9 +1,8 @@
 //! Structured diagnostics for the `search_health` MCP tool (#5264).
 //!
-//! Why: the arm used to forward `GET /health` verbatim, so a caller got one of
-//! two useless answers. When nothing was listening it got a raw reqwest string
-//! (`GET http://127.0.0.1:7878/health: error trying to connect: tcp connect
-//! error: Connection refused`) with no remedy in it; when a daemon DID answer
+//! Why: the arm used to forward the daemon's health body verbatim, so a caller
+//! got one of two useless answers. When nothing was listening it got a raw
+//! transport string with no remedy in it; when a daemon DID answer
 //! it got a bare `200` that named neither which daemon replied nor whether the
 //! caller's own project was indexed on it. A probe from an isolated project
 //! silently attached to this machine's production daemon — 42 indexes, 430k
@@ -15,8 +14,10 @@
 //! differently — nothing listening, something answering badly, and a healthy
 //! daemon that has no index for this project. Every state carries a
 //! `remediation` string naming the command that fixes it. The daemon's own
-//! `/health` fields pass through verbatim; this module adds no field the daemon
-//! did not send, following the same rule [`super::unavailable`] states.
+//! `search.health` fields pass through verbatim; this module adds no field the
+//! daemon did not send, following the same rule [`super::unavailable`] states.
+//! #9168: the probes go over the daemon's socket, so the report names the
+//! `socket` that answered where it used to name a `base_url`.
 //!
 //! Test: `mcp/tools/tests_health.rs`, and end to end over a real stdio session
 //! in the crate's `mcp_stdio_e2e_5264` integration test.
@@ -33,12 +34,13 @@ use crate::mcp::cwd_scope::{
     confirm_candidate, derive_cwd_candidate, parse_index_entries, Confirmation, CwdCandidate,
     DaemonIndex,
 };
+use crate::service::rpc::reads::{METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
 
 /// The daemon answered and the resolved project index holds chunks.
 pub const HEALTH_OK: &str = "ok";
-/// Nothing is listening at the daemon address this session resolved.
+/// Nothing is serving the daemon socket this session resolved.
 pub const HEALTH_DAEMON_UNREACHABLE: &str = "daemon_unreachable";
-/// Something answered the health probe, but not with a 2xx health object.
+/// Something answered the health probe, but not with a health object.
 pub const HEALTH_DAEMON_ERROR: &str = "daemon_error";
 /// The daemon is healthy; it has no index registered for this project.
 pub const HEALTH_INDEX_NOT_REGISTERED: &str = "index_not_registered";
@@ -83,9 +85,9 @@ pub const HEALTH_INDEX_HELD: &str = "index_held";
 /// Longest response-body excerpt echoed back in a diagnostic.
 const BODY_EXCERPT_CHARS: usize = 400;
 
-/// Fields of the daemon's `/health` body forwarded into the report.
+/// Fields of the daemon's `search.health` body forwarded into the report.
 ///
-/// Together with `base_url` these are what let a caller tell "healthy" from
+/// Together with `socket` these are what let a caller tell "healthy" from
 /// "healthy, but not the daemon I meant": an isolated instance reports one or
 /// two indexes and a few thousand chunks where the machine-wide daemon reports
 /// dozens and hundreds of thousands.
@@ -104,15 +106,15 @@ const DAEMON_IDENTITY_FIELDS: &[&str] = &[
 /// Why (#5264): a health probe whose only failure mode is a transport string
 /// cannot tell an agent what to do next, and one that reports `200` without
 /// naming the responder cannot tell it whether the right daemon replied.
-/// What: probes `GET /health`, and on success probes the resolved project's
-/// `GET /indexes/{id}/status`, then folds both into one report. Never returns
+/// What: probes `search.health`, and on success probes the resolved
+/// project's `search.index.status`, then folds both into one report. Never returns
 /// `Err`: a daemon that cannot be reached is itself the health verdict, so it
 /// belongs in the response body rather than in an error envelope the caller
 /// would have to parse prose out of. The report's `healthy` boolean is the
 /// field to branch on, because a successful tool call no longer implies a
 /// healthy daemon.
 /// Test: `search_health_reports_daemon_unreachable_with_remediation`,
-/// `search_health_reports_a_non_2xx_daemon`,
+/// `search_health_reports_a_daemon_that_answers_badly`,
 /// `search_health_reports_an_unregistered_project_index`,
 /// `search_health_names_the_answering_daemon`,
 /// `search_health_does_not_report_ok_when_no_index_could_be_resolved`,
@@ -133,12 +135,12 @@ pub(super) async fn handle_search_health(server: &McpServer, args: &Value) -> Va
 /// What: identical to the wrapper except that `scope` is supplied.
 /// Test: `search_health_does_not_report_ok_when_no_index_could_be_resolved`.
 pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> Value {
-    let base = server.base_url.clone();
+    let base = server.daemon.socket().display().to_string();
 
     let health = match probe_daemon(server).await {
         DaemonProbe::Unreachable { detail } => {
             let daemon = serde_json::json!({
-                "base_url": base,
+                "socket": base,
                 "reachable": false,
                 "error": detail,
             });
@@ -146,30 +148,32 @@ pub(super) async fn report_health(server: &McpServer, scope: Option<Scope>) -> V
                 HEALTH_DAEMON_UNREACHABLE,
                 daemon,
                 Value::Null,
-                format!("No trusty-search daemon is listening at {base} ({detail})."),
+                format!("No trusty-search daemon is serving socket {base} ({detail})."),
                 "Start it with `trusty-search start`, then retry. If a daemon IS \
-                 running elsewhere, the address was resolved from this process's \
-                 TRUSTY_DATA_DIR — check that it points at the intended instance.",
+                 running elsewhere, the socket was resolved from this process's \
+                 TRUSTY_DATA_DIR (or TRUSTY_SEARCH_SOCKET) — check that it points at \
+                 the intended instance.",
             );
         }
-        DaemonProbe::HttpError { status, body } => {
+        DaemonProbe::Error { rpc_code, detail } => {
             let daemon = serde_json::json!({
-                "base_url": base,
+                "socket": base,
                 "reachable": true,
-                "http_status": status,
-                "body": body,
+                "rpc_code": rpc_code,
+                "error": detail,
             });
             return report(
                 HEALTH_DAEMON_ERROR,
                 daemon,
                 Value::Null,
                 format!(
-                    "Something is listening at {base} but answered /health with HTTP {status}."
+                    "Something is serving socket {base} but did not answer search.health \
+                     with a health object: {detail}."
                 ),
-                "Check `trusty-search status` and the daemon log. An HTTP status \
-                 from a process that is not trusty-search means another service \
-                 holds this port — stop it, or point this session at the right \
-                 daemon with TRUSTY_DATA_DIR.",
+                "Check `trusty-search status` and the daemon log. A refusal from a \
+                 process that is not trusty-search means another service holds this \
+                 socket — stop it, or point this session at the right daemon with \
+                 TRUSTY_DATA_DIR.",
             );
         }
         DaemonProbe::Ok(body) => body,
@@ -376,7 +380,7 @@ fn index_scope(index_id: &str, source: &'static str, detail: Value) -> Value {
 }
 
 /// Which daemon answered, in one sentence the model reads before the payload.
-fn summarize_daemon(base: &str, daemon: &Value) -> String {
+fn summarize_daemon(socket: &str, daemon: &Value) -> String {
     let field = |k: &str| {
         daemon
             .get(k)
@@ -387,16 +391,16 @@ fn summarize_daemon(base: &str, daemon: &Value) -> String {
     let indexes = field("indexes").unwrap_or_else(|| "?".into());
     let chunks = field("total_chunks").unwrap_or_else(|| "?".into());
     format!(
-        "The trusty-search daemon at {base} answered: version {version}, \
+        "The trusty-search daemon on socket {socket} answered: version {version}, \
          {indexes} index(es), {chunks} chunks."
     )
 }
 
-/// Forward the daemon's own identifying `/health` fields, plus the address it
+/// Forward the daemon's own identifying health fields, plus the socket it
 /// answered on.
-fn daemon_identity(base: &str, health: &Value) -> Value {
+fn daemon_identity(socket: &str, health: &Value) -> Value {
     let mut out = Map::new();
-    out.insert("base_url".into(), Value::from(base));
+    out.insert("socket".into(), Value::from(socket));
     out.insert("reachable".into(), Value::Bool(true));
     for key in DAEMON_IDENTITY_FIELDS {
         if let Some(v) = health.get(*key) {
@@ -456,7 +460,7 @@ pub(super) enum Scope {
 /// `healthy: true`, while the index actually rooted at the cwd sat unused on
 /// the same daemon. `serve`'s startup pin already refuses that collision
 /// (#5264, #6864); this applies the same verdict.
-/// What: reads `GET /indexes?details=true` and runs
+/// What: reads `search.indexes.list` (details) and runs
 /// [`confirm_candidate`]. A matching root probes the derived id (`cwd`); an
 /// index registered under another id at this root probes that one
 /// (`cwd_root_match`); an unserved id probes the derived id so the usual
@@ -543,120 +547,88 @@ async fn confirm_cwd_scope(
     }
 }
 
-/// `GET /indexes?details=true`, parsed into id/root pairs (#8229).
+/// The details listing, parsed into id/root pairs (#8229).
 async fn fetch_index_entries(server: &McpServer) -> Result<Vec<DaemonIndex>, String> {
-    let url = format!("{}/indexes?details=true", server.base_url);
-    let resp = server
-        .http
-        .get(&url)
-        .send()
+    let params = serde_json::json!({ "details": true });
+    let body = server
+        .daemon
+        .call(METHOD_INDEXES_LIST, params)
         .await
-        .map_err(|e| e.to_string())?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {status} from {url}"));
-    }
-    let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+        .map_err(|e| server.describe(&e))?;
     Ok(parse_index_entries(&body))
 }
 
-/// What `GET /health` did.
+/// What `search.health` did.
 enum DaemonProbe {
-    /// The TCP connection never produced an HTTP response.
+    /// Nothing is serving the socket.
     Unreachable { detail: String },
-    /// An HTTP response arrived that was not a 2xx health object.
-    HttpError { status: u16, body: String },
-    /// A 2xx JSON object.
+    /// Something answered, but not with a health object.
+    Error {
+        rpc_code: Option<i64>,
+        detail: String,
+    },
+    /// A JSON health object.
     Ok(Value),
 }
 
-/// Probe `GET /health` while preserving WHY it failed.
+/// Probe `search.health` while preserving WHY it failed.
 ///
-/// Why (#5264): [`McpServer::get`] flattens a refused connection and a 500 into
-/// the same `DispatchError::Transport(String)`. The two need different
-/// remediation — start the daemon, versus find out what else holds the port —
-/// so this is deliberately the one place in the crate that reads
-/// `reqwest::Error`'s classifiers instead of its `Display` text.
-/// What: three verdicts. A 2xx body that is not a JSON object counts as an HTTP
-/// error, because a process answering `/health` with something else is not this
-/// daemon and saying "healthy" about it would be the exact failure #5264 filed.
+/// Why (#5264): a refused dial and a refusal from whatever answered need
+/// different remediation — start the daemon, versus find out what else holds
+/// the socket. #9168: the client's unreachable kind is that split on the
+/// socket (`DaemonCallError::is_unreachable`), so no error text is parsed.
+/// What: three verdicts. A success that is not a JSON object counts as an
+/// error, because a process answering the health method with something else
+/// is not this daemon and saying "healthy" about it would be the exact failure
+/// #5264 filed.
 /// Test: `search_health_reports_daemon_unreachable_with_remediation`,
-/// `search_health_reports_a_non_2xx_daemon`,
+/// `search_health_reports_a_daemon_that_answers_badly`,
 /// `search_health_rejects_a_2xx_body_that_is_not_a_health_object`.
 async fn probe_daemon(server: &McpServer) -> DaemonProbe {
-    let url = format!("{}/health", server.base_url);
-    let resp = match server.http.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            let kind = if e.is_connect() {
-                "connection refused"
-            } else if e.is_timeout() {
-                "timed out"
-            } else {
-                "request failed"
-            };
-            return DaemonProbe::Unreachable {
-                detail: format!("{kind}: {e}"),
-            };
-        }
-    };
-    let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return DaemonProbe::HttpError {
-            status: status.as_u16(),
-            body: excerpt(&text),
-        };
-    }
-    match serde_json::from_str::<Value>(&text) {
+    match server.daemon.health().await {
         Ok(v) if v.is_object() => DaemonProbe::Ok(v),
-        _ => DaemonProbe::HttpError {
-            status: status.as_u16(),
-            body: format!("2xx body is not a JSON health object: {}", excerpt(&text)),
+        Ok(v) => DaemonProbe::Error {
+            rpc_code: None,
+            detail: format!(
+                "the answer is not a JSON health object: {}",
+                excerpt(&v.to_string())
+            ),
+        },
+        Err(e) if e.is_unreachable() => DaemonProbe::Unreachable {
+            detail: e.to_string(),
+        },
+        Err(e) => DaemonProbe::Error {
+            rpc_code: e.code(),
+            detail: excerpt(&server.describe(&e)),
         },
     }
 }
 
-/// What `GET /indexes/{id}/status` said.
+/// What `search.index.status` said.
 enum IndexProbe {
-    /// The daemon 404'd: this project has no index here.
+    /// The daemon answered `not found`: this project has no index here.
     Missing,
-    /// The daemon answered, but with neither 200 nor 404.
+    /// The daemon answered, but with neither a status nor `not found`.
     Unknown { detail: String },
-    /// A 2xx status body.
+    /// A status body.
     Present { body: Value },
 }
 
-/// Probe one index's status, keeping `404` distinct from every other failure.
+/// Probe one index's status, keeping `not found` distinct from every other
+/// failure.
 ///
-/// Why: `404` is the "this project is unindexed" signal the health report owes
-/// its caller; folding it in with a 503 or a transport failure would tell an
-/// agent to reindex when it should have retried.
+/// Why: `not found` is the "this project is unindexed" signal the health
+/// report owes its caller; folding it in with an unavailable refusal or a
+/// transport failure would tell an agent to reindex when it should have
+/// retried.
 /// Test: `search_health_reports_an_unregistered_project_index`.
 async fn probe_index(server: &McpServer, index_id: &str) -> IndexProbe {
-    let url = format!("{}/indexes/{}/status", server.base_url, index_id);
-    let resp = match server.http.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return IndexProbe::Unknown {
-                detail: format!("request failed: {e}"),
-            };
-        }
-    };
-    let status = resp.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
-        return IndexProbe::Missing;
-    }
-    let text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return IndexProbe::Unknown {
-            detail: format!("HTTP {}: {}", status.as_u16(), excerpt(&text)),
-        };
-    }
-    match serde_json::from_str::<Value>(&text) {
+    let params = serde_json::json!({ "index_id": index_id });
+    match server.daemon.call(METHOD_INDEX_STATUS, params).await {
         Ok(body) => IndexProbe::Present { body },
+        Err(e) if e.is_not_found() => IndexProbe::Missing,
         Err(e) => IndexProbe::Unknown {
-            detail: format!("undecodable 2xx status body: {e}"),
+            detail: excerpt(&server.describe(&e)),
         },
     }
 }

@@ -17,6 +17,8 @@
 
 pub mod core;
 pub mod core_kg;
+// #8246: ranked recall, split from `core.rs` at the SLOC cap.
+pub mod core_recall;
 pub mod helpers;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;
@@ -28,6 +30,10 @@ pub mod user_config;
 #[cfg(test)]
 #[path = "core_kg_tests.rs"]
 mod core_kg_tests;
+// #9141: `recall_all` in `core_recall.rs` keeps the empty-palace skip.
+#[cfg(test)]
+#[path = "core_recall_tests.rs"]
+mod core_recall_tests;
 #[cfg(test)]
 #[path = "core_tests.rs"]
 mod core_tests;

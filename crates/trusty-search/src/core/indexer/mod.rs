@@ -121,6 +121,9 @@ pub(crate) use files::TEST_FAIL_REMOVE;
 // #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
 #[cfg(test)]
 pub(crate) use ingest::supersede::TEST_FAIL_CHUNK_DELETE;
+// #9230: a real redb chunk-write failure for `service::reindex::hash_withhold_tests`.
+#[cfg(test)]
+pub(crate) use tests::incremental_stamp_9230::break_chunk_writes;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;

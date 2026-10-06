@@ -36,7 +36,12 @@ use exhaustive::{EXHAUSTIVE_SCAN_MAX_POINTS, exhaustive_nearest, resolve_shadowe
 mod graph_arm;
 use graph_arm::graph_nearest;
 
+mod key_cache;
+use key_cache::KeyCache;
+
+mod quiet_insert;
 mod replay;
+mod stranded;
 
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
 ///
@@ -110,6 +115,10 @@ pub enum HnswStoreError {
     /// A maintenance write outran its deadline and was rolled back (#8749).
     #[error(transparent)]
     WriteDeadline(#[from] WriteTxnError),
+    /// #9187: an insert that `hnsw_rs` prints from could not run with stdout
+    /// silenced, so it did not run.
+    #[error("could not silence stdout around an hnsw_rs insert: {0}")]
+    StdoutGuard(std::io::Error),
     /// Returned by every write method when the store is in snapshot
     /// (read-only) mode. Callers should surface this verbatim — the
     /// message is the canonical guidance for issue #59.
@@ -121,39 +130,9 @@ pub enum HnswStoreError {
     ReadOnly,
 }
 
-// Why: redb's `?` operator needs a `From<redb::StorageError>` (etc.) impl
-// to convert. The `#[from] Box<redb::StorageError>` derive only generates
-// `From<Box<redb::StorageError>>`, so we add an explicit hop that boxes
-// the inner error on the fly. This keeps call sites using `?` clean
-// without forcing every caller to `.map_err(Box::new)`.
-impl From<redb::Error> for HnswStoreError {
-    fn from(e: redb::Error) -> Self {
-        Self::Redb(Box::new(e))
-    }
-}
-impl From<redb::StorageError> for HnswStoreError {
-    fn from(e: redb::StorageError) -> Self {
-        Self::RedbStorage(Box::new(e))
-    }
-}
-impl From<redb::TransactionError> for HnswStoreError {
-    fn from(e: redb::TransactionError) -> Self {
-        Self::RedbTransaction(Box::new(e))
-    }
-}
-impl From<redb::TableError> for HnswStoreError {
-    fn from(e: redb::TableError) -> Self {
-        Self::RedbTable(Box::new(e))
-    }
-}
-impl From<redb::CommitError> for HnswStoreError {
-    fn from(e: redb::CommitError) -> Self {
-        Self::RedbCommit(Box::new(e))
-    }
-}
-
 mod alloc;
 mod open_init;
+mod redb_error_from;
 use alloc::allocate_vector_id;
 
 /// Public result alias to keep call-site signatures concise.
@@ -248,6 +227,12 @@ pub struct HnswStore {
     shadowed: RwLock<std::collections::HashSet<u64>>,
     /// #8749: the palace a deadline abort names; see [`Self::with_palace`].
     palace: Arc<str>,
+    /// #9187: serialises graph inserts so `quiet_insert` reads an exact count.
+    insert_gate: parking_lot::Mutex<()>,
+    /// #9174: graph points a search for their own vector misses; scanned exactly.
+    stranded: RwLock<Vec<stranded::StrandedGroup>>,
+    /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
+    keys: KeyCache,
     /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
     ///
     /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
@@ -354,7 +339,19 @@ impl HnswStore {
         }
         // #9141: parallel insert into the single-layer graph (owner ruling
         // 25). See `replay` for what that does and does not guarantee.
-        replay::replay(&index, &live);
+        let started = std::time::Instant::now();
+        replay::replay(&index, &live).map_err(HnswStoreError::StdoutGuard)?;
+        let replayed = started.elapsed();
+        // #9174: found once per open; `upsert` adds the points it strands.
+        let stranded = stranded::stranded_points(&index);
+        // #9141: the per-open cost of the #9174 self-search, for live checks.
+        tracing::debug!(
+            points = live.len(),
+            stranded_groups = stranded.len(),
+            replay_ms = replayed.as_millis() as u64,
+            stranded_ms = (started.elapsed() - replayed).as_millis() as u64,
+            "hnsw open: graph replay and stranded-point scan"
+        );
 
         // Also consider the highest mapped id from VECTOR_KEYS in case
         // VECTORS was cleared but the mapping survived (defensive).
@@ -387,12 +384,15 @@ impl HnswStore {
         }
 
         Ok(Self {
+            keys: KeyCache::new(&db),
             db,
             index: Arc::new(RwLock::new(index)),
             dim,
             read_only,
             shadowed: RwLock::new(std::collections::HashSet::new()),
             palace: Arc::from("unnamed palace"),
+            insert_gate: parking_lot::Mutex::new(()),
+            stranded: RwLock::new(stranded),
             #[cfg(test)]
             compact_race_barrier: RwLock::new(None),
             #[cfg(test)]
@@ -460,7 +460,8 @@ impl HnswStore {
     /// vector_id under one write txn, writes the postcard-encoded vector to
     /// `VECTORS`, writes the UUID→id mapping to `VECTOR_KEYS`, and removes
     /// any prior tombstone for this id. Then inserts the vector into the
-    /// in-memory graph.
+    /// in-memory graph, and records it for an exact scan if a search for its
+    /// own vector does not reach it (#9174).
     ///
     /// #5005: allocation for a NEW uuid reads and bumps the persisted
     /// `VECTOR_ID_SEQ` counter inside this same write transaction, so two live
@@ -512,6 +513,7 @@ impl HnswStore {
             let _ = tombstones.remove(vector_id)?;
         }
         wtx.commit()?;
+        self.keys.invalidate(); // #9141
 
         // #5171: mark BEFORE the graph can serve the shadow point. The two
         // steps cannot be atomic, and the asymmetry runs one way: a search
@@ -526,7 +528,16 @@ impl HnswStore {
         if shadows_previous {
             self.shadowed.write().insert(vector_id);
         }
-        self.index.read().insert((vector, vector_id as usize));
+        // #9187: the redb row is committed either way; on Err the next open
+        // replays it.
+        let _gate = self.insert_gate.lock();
+        let index = self.index.read();
+        quiet_insert::insert_quietly(&index, vector, vector_id as usize)
+            .map_err(HnswStoreError::StdoutGuard)?;
+        // #9174: a point its own search misses is scanned exactly instead.
+        if !stranded::newest_is_reachable(&index, vector, vector_id) {
+            stranded::add_stranded(&mut self.stranded.write(), vector, vector_id);
+        }
 
         Ok(vector_id)
     }
@@ -534,8 +545,8 @@ impl HnswStore {
     /// Cosine-similarity search returning (uuid, distance) pairs.
     ///
     /// Why: Callers identify drawers by UUID, not by HNSW-internal `usize`.
-    /// We resolve the mapping with a single redb `iter()` over
-    /// `VECTOR_KEYS` (small, in-memory after the first scan) so the search
+    /// We resolve the mapping from a cached inversion of `VECTOR_KEYS`,
+    /// re-read only after a write (#9141, see `key_cache`), so the search
     /// path is a single in-memory graph traversal plus a hash lookup per
     /// hit. Tombstoned ids are filtered out before the lookup so callers
     /// never see deleted points.
@@ -561,11 +572,16 @@ impl HnswStore {
     /// count, and the candidate pool with what survives the tombstone filter, so
     /// deleted ids cannot spend the caller's `k` result slots. See
     /// [`graph_arm`].
+    ///
+    /// #9174: the graph arm also scores every point its search cannot find,
+    /// exactly; see [`stranded`].
     /// Test: `upsert_and_search_round_trips`, `delete_filters_results`,
     /// `search_returns_the_exact_top_k_below_the_exhaustive_threshold`,
     /// `search_is_exact_at_the_exhaustive_threshold`,
     /// `search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours`,
-    /// `search_scores_a_re_upserted_drawer_by_its_current_vector`.
+    /// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
+    /// `search_finds_drawers_the_graph_cannot_reach`,
+    /// `search_reads_vector_keys_once_until_a_store_write`.
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>> {
         if query.len() != self.dim {
             return Err(HnswStoreError::DimensionMismatch {
@@ -574,23 +590,10 @@ impl HnswStore {
             });
         }
 
-        // Build (id → uuid) reverse map and a tombstone set up front. Both
-        // tables are tiny relative to the vector data, so this is cheap.
-        let mut reverse: HashMap<u64, String> = HashMap::new();
-        let mut tombstones: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        {
-            let rtx = self.db.begin_read()?;
-            let keys = rtx.open_table(VECTOR_KEYS)?;
-            for entry in keys.iter()? {
-                let (k, v) = entry?;
-                reverse.insert(v.value(), k.value().to_string());
-            }
-            let dead = rtx.open_table(DELETED_VECTORS)?;
-            for entry in dead.iter()? {
-                let (k, _) = entry?;
-                tombstones.insert(k.value());
-            }
-        }
+        // #9141: the (id → uuid) reverse map and tombstone set, re-read from
+        // redb only when a write has landed since the last search.
+        let keys = self.keys.get(&self.db)?;
+        let (reverse, tombstones) = (&keys.reverse, &keys.tombstones);
 
         // #5171: `reverse.len()` is the LIVE drawer count — `get_nb_point()`
         // also counts tombstones and shadows, so a small palace could churn
@@ -603,13 +606,16 @@ impl HnswStore {
         let mut raw: Vec<(u64, f32)> = {
             let index = self.index.read();
             if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
-                exhaustive_nearest(&index, query, &tombstones)
+                exhaustive_nearest(&index, query, tombstones)
             } else {
                 // #5179: both budgets are functions of the collection, not
                 // constants — a fixed `ef` let recall decay as the palace grew,
                 // and a fixed `2k` candidate count let deleted points spend the
                 // caller's result slots. See [`graph_arm`].
-                graph_nearest(&index, query, &tombstones, k, reverse.len())
+                let mut hits = graph_nearest(&index, query, tombstones, k, reverse.len());
+                // #9174: the graph search misses stranded points; score them all.
+                stranded::merge_stranded(&mut hits, &self.stranded.read(), query, tombstones);
+                hits
             }
         };
 
@@ -669,6 +675,7 @@ impl HnswStore {
             };
         }
         wtx.commit()?;
+        self.keys.invalidate(); // #9141
         Ok(removed)
     }
 
@@ -810,6 +817,7 @@ impl HnswStore {
             }
         }
         wtx.check_before_commit()?.commit()?;
+        self.keys.invalidate(); // #9141
         tracing::warn!(
             groups = audit.aliased.len(),
             freed = freed.len(),
@@ -982,6 +990,7 @@ impl HnswStore {
             }
         }
         wtx.check_before_commit()?.commit()?;
+        self.keys.invalidate(); // #9141
         Ok(removed)
     }
 }

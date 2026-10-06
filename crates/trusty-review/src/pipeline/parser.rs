@@ -76,63 +76,86 @@ struct LlmOutputBlock {
     findings: Vec<LlmFinding>,
 }
 
-/// The two shapes a model actually emits for `findings`.
+/// Prefix of the error a double-encoded findings string raises when it does
+/// not decode; `describe_block_error` lets it through (#9310).
+const FINDINGS_DECODE_ERROR: &str = "the double-encoded findings string does not decode";
+
+/// Visitor for the two shapes a model actually emits for `findings`.
 ///
 /// Why: a provider occasionally returns the findings array **double-encoded** —
 /// a JSON *string* whose contents are the array — instead of the array itself
-/// (#4491).  Serde rejects that as a type mismatch, the whole block fails to
-/// deserialize, and the evidence is lost.
-/// What: an untagged enum that accepts either shape; `deserialize_findings`
-/// decodes the string variant a second time.
-/// Test: `parse_double_encoded_findings_are_recovered`.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum FindingsField {
-    /// The schema-conformant shape: a real JSON array.
-    Array(Vec<LlmFinding>),
-    /// The double-encoded shape: a JSON string holding the array (#4491).
-    Encoded(String),
+/// (#4491). #9310: a visitor, not an untagged enum, so a bad finding keeps its
+/// own serde error ("missing field `body`") instead of "did not match any
+/// variant".
+/// What: `visit_seq` reads a real array; `visit_str` decodes the string once
+/// more, mapping an empty string to no findings. Any other JSON type is an
+/// invalid-type error, as with the untagged enum before.
+/// Test: `parse_double_encoded_findings_are_recovered`,
+/// `parse_finding_without_body_fails_safe_naming_body`.
+struct FindingsVisitor;
+
+impl<'de> de::Visitor<'de> for FindingsVisitor {
+    type Value = Vec<LlmFinding>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a findings array or a JSON string holding one")
+    }
+
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut findings = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(finding) = seq.next_element()? {
+            findings.push(finding);
+        }
+        Ok(findings)
+    }
+
+    fn visit_str<E: de::Error>(self, raw: &str) -> Result<Self::Value, E> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        warn!("findings arrived double-encoded as a JSON string — decoding again (#4491)");
+        // #9310: the inner error is described, never echoed, as it can quote the reply.
+        serde_json::from_str(trimmed).map_err(|e| {
+            E::custom(format!(
+                "{FINDINGS_DECODE_ERROR}: {}",
+                describe_block_error(&e)
+            ))
+        })
+    }
 }
 
 /// Deserialize `findings`, tolerating one layer of double encoding (#4491).
 ///
 /// Why: dropping the whole block over an encoding quirk cost PR #4483 three
 /// findings that were reported as `Findings: none`.
-/// What: passes a real array through; decodes a string variant once more, mapping
-/// an empty string to no findings.  A second decode failure is propagated as a
-/// deserialization error so the caller fails CLOSED rather than reporting zero
-/// findings for a payload that carried some.
+/// What: delegates to [`FindingsVisitor`]. A second decode failure is
+/// propagated as a deserialization error so the caller fails CLOSED rather
+/// than reporting zero findings for a payload that carried some.
 /// Test: `parse_double_encoded_findings_are_recovered`,
 /// `parse_unparseable_findings_is_loud_not_silently_empty`.
 fn deserialize_findings<'de, D>(deserializer: D) -> Result<Vec<LlmFinding>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    match FindingsField::deserialize(deserializer)? {
-        FindingsField::Array(findings) => Ok(findings),
-        FindingsField::Encoded(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Ok(Vec::new());
-            }
-            warn!("findings arrived double-encoded as a JSON string — decoding again (#4491)");
-            serde_json::from_str(trimmed).map_err(de::Error::custom)
-        }
-    }
+    deserializer.deserialize_any(FindingsVisitor)
 }
 
 /// A single finding from the LLM JSON output block.
 ///
 /// Why: the LLM emits findings as structured JSON; we convert them to the
 /// internal `Finding` type.
-/// What: mirrors the finding schema in the system prompt.  All fields except
-/// `title` and `body` are optional and default gracefully.  `category` is new in
+/// What: mirrors the finding schema in the system prompt.  Only `body` is
+/// required; every other field defaults gracefully, and a blank `title` is
+/// derived from `body` in `convert_llm_finding` (#9310).  `category` is new in
 /// #1359 (back gate); it is `#[serde(default)]` (→ `Correctness`) so responses
 /// from models that do not emit it — and every pre-#1359 fixture — still parse.
 /// Test: covered transitively by `parse_json_block_happy_path` and
 /// `parse_method_conformance_finding_category` in `parser_tests`.
 #[derive(Debug, Deserialize)]
 struct LlmFinding {
+    // #9310: Claude in tool-choice auto omits `title`; it is derived, never required.
+    #[serde(default)]
     title: String,
     body: String,
     #[serde(default)]
@@ -259,17 +282,30 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         return ParsedReview::fail_safe("empty LLM response");
     }
 
+    // #9310: the first serde error from strategy 1 or 2, named in the reason.
+    let mut block_error = None;
+
     // Strategy 1: direct JSON parse (structured output path).
     // When response_schema is used, the provider returns only the JSON object.
-    if let Some(parsed) = try_parse_direct_json(body) {
-        debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via direct JSON (structured output)");
-        return parsed;
+    match try_parse_direct_json(body) {
+        Some(Ok(parsed)) => {
+            debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via direct JSON (structured output)");
+            return parsed;
+        }
+        Some(Err(e)) => block_error = Some(e),
+        None => {}
     }
 
     // Strategy 2: JSON block (legacy free-text path).
-    if let Some(parsed) = try_parse_json_block(body) {
-        debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via JSON block");
-        return parsed;
+    match try_parse_json_block(body) {
+        Some(Ok(parsed)) => {
+            debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via JSON block");
+            return parsed;
+        }
+        Some(Err(e)) => {
+            block_error.get_or_insert(e);
+        }
+        None => {}
     }
 
     // Strategy 3: the structured payload did not parse, so the FINDINGS are gone.
@@ -277,7 +313,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     // byte-for-byte indistinguishable from a genuinely clean review, so the
     // scanned token is reported as context in the fail-safe reason and never as
     // the review's own verdict.
-    let reason = match scan_verdict_keyword(body) {
+    let mut reason = match scan_verdict_keyword(body) {
         Some(verdict) => format!(
             "findings could not be parsed from the LLM response; the trailing \
              keyword scan read {verdict}, which is not trusted as a review outcome \
@@ -285,6 +321,20 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         ),
         None => "no parseable verdict or findings in LLM response".to_string(),
     };
+    // #9310: a broken json fence is the model's own object; name it. The reply
+    // fails closed either way, and no other object in it is ever trusted.
+    if has_malformed_json_fence(body) {
+        reason = format!(
+            "a json fence in the LLM response holds no valid review object (#9310); {reason}"
+        );
+    }
+    // #9310: name the serde cause and position; never the reply text.
+    if let Some(e) = block_error {
+        reason = format!(
+            "{reason}; the review object did not deserialize: {}",
+            describe_block_error(&e)
+        );
+    }
     warn!(
         body_len = body.len(),
         reason,
@@ -302,27 +352,52 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
 /// clean JSON object — no fence, no surrounding prose.  Parsing it directly
 /// avoids the fragile fence-stripping logic entirely.
 /// What: trims whitespace and calls `serde_json::from_str` on the full body.
-/// Returns `None` if the body is not a valid `LlmOutputBlock` JSON object
-/// (falls through to the fence-based strategy).
+/// Returns `None` when the body does not start with `{`, and `Some(Err)` with
+/// the serde error when it does but is not a valid `LlmOutputBlock` (#9310);
+/// either way the caller falls through to the fence-based strategy.
 /// Test: `parse_direct_json_happy_path`,
-/// `parse_direct_json_request_changes_with_findings`.
-fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
+/// `parse_direct_json_request_changes_with_findings`,
+/// `parse_block_without_verdict_fails_safe_naming_verdict`.
+fn try_parse_direct_json(body: &str) -> Option<Result<ParsedReview, serde_json::Error>> {
     let trimmed = body.trim();
     // Only attempt if it looks like a JSON object (starts with '{').
     if !trimmed.starts_with('{') {
         return None;
     }
-    let block: LlmOutputBlock = serde_json::from_str(trimmed).ok()?;
-    // Fail-CLOSED (#1241): an unrecognised verdict token inside otherwise-valid
-    // JSON must NOT silently default to APPROVE — surface UNKNOWN instead.
+    Some(serde_json::from_str::<LlmOutputBlock>(trimmed).map(parsed_from_block))
+}
+
+/// Build the `ParsedReview` for a deserialized review object.
+///
+/// Why: strategies 1 and 2 share one conversion, so the verdict rule and the
+/// derived-title count cannot drift between them.
+/// What: an unrecognised verdict token becomes UNKNOWN, never APPROVE
+/// (fail-CLOSED, #1241). Findings with a blank `title` are counted and the
+/// count is logged once per parsed reply, without content (#9310).
+/// Test: `parse_untitled_finding_keeps_verdict_and_derives_title`,
+/// `parse_fail_safe_unknown_on_unparseable_verdict`.
+fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
     let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
     let grade = extract_grade_field(&block.grade);
+    // #9310: count derived titles so reviewer schema drift stays visible.
+    let derived = block
+        .findings
+        .iter()
+        .filter(|f| f.title.trim().is_empty())
+        .count();
+    if derived > 0 {
+        warn!(
+            derived_titles = derived,
+            findings = block.findings.len(),
+            "reviewer findings arrived without a title; derived each from its body (#9310)"
+        );
+    }
     let findings = block
         .findings
         .into_iter()
         .map(convert_llm_finding)
         .collect();
-    Some(ParsedReview {
+    ParsedReview {
         verdict,
         grade,
         grade_pre_floor: None,
@@ -330,7 +405,7 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
         findings,
         is_fail_safe: false,
         fail_safe_reason: None,
-    })
+    }
 }
 
 // ─── Strategy 2: JSON block (legacy free-text) ────────────────────────────────
@@ -341,9 +416,11 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
 /// provides the full findings list with confidence scores.
 /// What: scans for the last occurrence of ```json ... ``` in the response;
 /// if found, deserialises the JSON and converts findings to the internal type.
-/// Returns `None` if no valid JSON block is found.
-/// Test: `parse_json_block_happy_path`, `parse_json_block_handles_fence_variants`.
-fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
+/// Returns `None` if no closed ```json fence is found, and `Some(Err)` with the
+/// serde error when the fenced text is not a valid review object (#9310).
+/// Test: `parse_json_block_happy_path`, `parse_json_block_handles_fence_variants`,
+/// `parse_finding_without_body_fails_safe_naming_body`.
+fn try_parse_json_block(body: &str) -> Option<Result<ParsedReview, serde_json::Error>> {
     // Find the last ```json fence.
     let fence_start = body.rfind("```json")?;
     let after_fence = &body[fence_start + 7..]; // skip ```json
@@ -352,32 +429,111 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
     let fence_end = after_fence.find("```")?;
     let json_text = after_fence[..fence_end].trim();
 
-    let block: LlmOutputBlock = match serde_json::from_str(json_text) {
-        Ok(b) => b,
-        Err(e) => {
-            debug!("JSON block parse error: {e}");
-            return None;
+    Some(serde_json::from_str::<LlmOutputBlock>(json_text).map(parsed_from_block))
+}
+
+/// Describe a review-object serde error without quoting the reply (#9310).
+///
+/// Why: the fail-safe reason reaches `result.error` and the PR check, so it
+/// must name the cause — but serde messages for a wrong type or an unknown
+/// enum variant quote the offending value, which is reply content.
+/// What: keeps the message for syntax and EOF errors (fixed serde_json text)
+/// and for `missing field`/`duplicate field` errors (the name is a struct
+/// field, never input) and the double-encoded findings error (itself built
+/// here). Any other data error becomes a fixed phrase. Line and column are
+/// always appended.
+/// Test: `parse_block_without_verdict_fails_safe_naming_verdict`,
+/// `parse_error_reason_never_echoes_reply_content`.
+fn describe_block_error(e: &serde_json::Error) -> String {
+    let location = format!(" at line {} column {}", e.line(), e.column());
+    let full = e.to_string();
+    let message = full.strip_suffix(location.as_str()).unwrap_or(&full);
+    let message = match e.classify() {
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => message,
+        serde_json::error::Category::Data => {
+            safe_data_message(message).unwrap_or("a field holds an invalid type or value")
         }
+        serde_json::error::Category::Io => "an I/O error",
     };
+    format!("{message}{location}")
+}
 
-    // Fail-CLOSED (#1241): unrecognised verdict token → UNKNOWN, never APPROVE.
-    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
-    let grade = extract_grade_field(&block.grade);
-    let findings = block
-        .findings
-        .into_iter()
-        .map(convert_llm_finding)
-        .collect();
+/// The part of a serde data-error message that names only schema, if any.
+///
+/// Why/What: a "missing field" or "duplicate field" message is cut after the
+/// quoted field name, which must be a plain identifier; a decode error raised by
+/// [`FindingsVisitor`] is kept whole, since its detail is already described.
+/// Anything else is `None` (#9310).
+/// Test: `parse_error_reason_never_echoes_reply_content`.
+fn safe_data_message(message: &str) -> Option<&str> {
+    if message.starts_with(FINDINGS_DECODE_ERROR) {
+        return Some(message);
+    }
+    for prefix in ["missing field `", "duplicate field `"] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            let name = rest.split('`').next()?;
+            let is_ident =
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            return is_ident.then(|| &message[..prefix.len() + name.len() + 1]);
+        }
+    }
+    None
+}
 
-    Some(ParsedReview {
-        verdict,
-        grade,
-        grade_pre_floor: None,
-        summary: block.summary,
-        findings,
-        is_fail_safe: false,
-        fail_safe_reason: None,
-    })
+/// Longest derived finding title, in chars, ellipsis included (#9310).
+const DERIVED_TITLE_MAX_CHARS: usize = 120;
+
+/// Title for an untitled finding whose `body` is blank too (#9310).
+const UNTITLED_FINDING_PLACEHOLDER: &str = "Untitled finding";
+
+/// Derive a finding title from its `body` (#9310).
+///
+/// Why: Claude in Bedrock tool-choice auto omits `title` on many findings, and
+/// a required `title` failed the whole reply to UNKNOWN.
+/// What: the first sentence of the first non-blank line of `body` — text up to
+/// the first `.`, `!` or `?` followed by whitespace or the line end, with a
+/// trailing `.` dropped — or that whole line when it has no sentence end. Over
+/// `DERIVED_TITLE_MAX_CHARS` chars it is cut on a char boundary and ends in
+/// `…`. A blank `body` gives `UNTITLED_FINDING_PLACEHOLDER`. Never empty.
+///
+/// Fail-open check: this only fills a missing field of a finding inside an
+/// otherwise valid review object. It never creates a verdict, never parses
+/// prose, and never turns a parse failure into APPROVE; `body` and `verdict`
+/// stay required.
+/// Test: `parse_long_or_multi_sentence_body_yields_capped_first_sentence`,
+/// `parse_untitled_empty_body_gets_placeholder`.
+fn derive_title(body: &str) -> String {
+    let Some(line) = body.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return UNTITLED_FINDING_PLACEHOLDER.to_string();
+    };
+    let sentence = first_sentence(line).trim_end_matches('.').trim_end();
+    let title = cap_chars(if sentence.is_empty() { line } else { sentence });
+    debug_assert!(!title.is_empty() && title.chars().count() <= DERIVED_TITLE_MAX_CHARS);
+    title
+}
+
+/// `line` up to and including its first sentence end, or all of it.
+fn first_sentence(line: &str) -> &str {
+    let mut chars = line.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let at_end = chars.peek().is_none_or(|(_, next)| next.is_whitespace());
+        if matches!(c, '.' | '!' | '?') && at_end {
+            return &line[..i + c.len_utf8()];
+        }
+    }
+    line
+}
+
+/// `text` capped at `DERIVED_TITLE_MAX_CHARS` chars, ellipsis included.
+fn cap_chars(text: &str) -> String {
+    if text.chars().nth(DERIVED_TITLE_MAX_CHARS).is_none() {
+        return text.to_string();
+    }
+    let cut = text
+        .char_indices()
+        .nth(DERIVED_TITLE_MAX_CHARS - 1)
+        .map_or(text.len(), |(i, _)| i);
+    format!("{}…", text[..cut].trim_end())
 }
 
 /// Convert an `LlmFinding` wire type to the internal `Finding` type.
@@ -405,7 +561,13 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     };
     let category = f.category;
     let line = f.line;
-    let mut finding = Finding::new(file, f.title, f.body, String::new(), f.confidence, effort)
+    // #9310: only a blank title is replaced; a non-empty one passes through as sent.
+    let title = if f.title.trim().is_empty() {
+        derive_title(&f.body)
+    } else {
+        f.title
+    };
+    let mut finding = Finding::new(file, title, f.body, String::new(), f.confidence, effort)
         .with_category(category);
     finding.line = line;
     // Carry the failure consequence through for the inline comment (#1416).
@@ -455,6 +617,51 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
         return Some(Verdict::Unknown);
     }
     None
+}
+
+// ─── Malformed json fence (#9310) ─────────────────────────────────────────────
+
+/// Whether `body` holds a `json`/`jsonc` fence whose body is not a valid
+/// review object.
+///
+/// Why: when the model's own fenced object is broken, the fail-safe reason
+/// should say so; a reply like that is never parsed from anywhere else (#9310).
+/// What: line-based. A line whose trimmed text starts with three backticks
+/// opens a fence, and a later bare backtick line closes it; an unclosed fence
+/// runs to the end. A fence tagged `json` or `jsonc` (any case) is malformed
+/// when its trimmed body does not deserialise as `LlmOutputBlock`. Only the
+/// fail-safe reason depends on this; the verdict is UNKNOWN either way.
+/// Test: `parse_malformed_json_fence_is_named_and_unknown`,
+/// `parse_valid_uppercase_json_fence_is_not_called_malformed`.
+fn has_malformed_json_fence(body: &str) -> bool {
+    let malformed = |text: &str| serde_json::from_str::<LlmOutputBlock>(text.trim()).is_err();
+    // `Some(is_json)` while inside a fence, with the byte offset its body starts at.
+    let mut open: Option<(bool, usize)> = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let line_end = offset + line.len();
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            let info = trimmed.trim_start_matches('`').trim();
+            match open {
+                None => {
+                    let tag = info.split_whitespace().next().unwrap_or("");
+                    let is_json =
+                        tag.eq_ignore_ascii_case("json") || tag.eq_ignore_ascii_case("jsonc");
+                    open = Some((is_json, line_end));
+                }
+                Some((is_json, start)) if info.is_empty() => {
+                    if is_json && malformed(&body[start..offset]) {
+                        return true;
+                    }
+                    open = None;
+                }
+                Some(_) => {}
+            }
+        }
+        offset = line_end;
+    }
+    matches!(open, Some((true, start)) if malformed(&body[start..]))
 }
 
 // ─── Grade field extraction ───────────────────────────────────────────────────

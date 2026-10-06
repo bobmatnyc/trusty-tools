@@ -48,6 +48,9 @@ readme = "README.md"
 homepage = "https://trustytools.dev"
 keywords = ["cli", "mcp", "orchestration", "agents", "harness"]
 categories = ["command-line-utilities", "development-tools"]
+# #9302: `tests/*.rs` files are modules of the targets below, not one binary
+# each; every new macOS executable pays an XProtect scan on its first exec.
+autotests = false
 
 [[bin]]
 name = "tcode"
@@ -56,6 +59,22 @@ path = "src/main.rs"
 [lib]
 name = "trusty_code"
 path = "src/lib.rs"
+
+# ── Integration tests (#9302) ─────────────────────────────────────────────────
+# `integration` mounts every module that leaves process-global state alone.
+# The two below need a process of their own: one sets `$HOME`, the other
+# re-execs its own binary with `--exact <test>`.
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "hermetic_palace_e2e"
+path = "tests/hermetic_palace_e2e.rs"
+
+[[test]]
+name = "logging_e2e"
+path = "tests/logging_e2e.rs"
 
 [dependencies]
 # Core error handling and async runtime

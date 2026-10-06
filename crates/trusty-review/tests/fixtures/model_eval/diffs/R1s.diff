@@ -1,0 +1,38 @@
+diff --git a/crates/trusty-common/src/gh_exec.rs b/crates/trusty-common/src/gh_exec.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/gh_exec.rs
+@@ -0,0 +1,32 @@
++//! Run `gh` with a deadline.
++
++use std::process::{Child, Command, Stdio};
++use std::time::{Duration, Instant};
++
++/// Why a `gh` call failed.
++#[derive(Debug)]
++pub enum GhError {
++    /// The process could not start or be polled.
++    Io(std::io::Error),
++    /// The deadline passed.
++    TimedOut,
++}
++
++/// Run `gh args`, giving up after `timeout`.
++pub fn run_gh(args: &[&str], timeout: Duration) -> Result<std::process::ExitStatus, GhError> {
++    let mut child: Child = Command::new("gh")
++        .args(args)
++        .stdout(Stdio::null())
++        .spawn()
++        .map_err(GhError::Io)?;
++    let started = Instant::now();
++    loop {
++        if let Some(status) = child.try_wait().map_err(GhError::Io)? {
++            return Ok(status);
++        }
++        if started.elapsed() >= timeout {
++            return Err(GhError::TimedOut);
++        }
++        std::thread::sleep(Duration::from_millis(50));
++    }
++}

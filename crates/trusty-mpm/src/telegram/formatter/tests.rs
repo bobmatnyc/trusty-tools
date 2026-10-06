@@ -507,6 +507,36 @@ fn format_fleet_by_project_escapes_html_in_project_fields() {
     );
 }
 
+/// #9285: a stored `repo_url` keeps any `user:password@` it was registered
+/// with, so the fleet line masks it, a quoted or spaced password included, and
+/// still HTML-escapes what remains.
+#[test]
+fn format_fleet_by_project_masks_a_stored_password_9285() {
+    for url in [
+        "https://u:pa'ss9285@host/repo&foo<bar>",
+        "https://u:pa ss9285@host/repo&foo<bar>",
+    ] {
+        let fleet = vec![ProjectFleetView {
+            project_name: "proj".into(),
+            repo_url: url.into(),
+            sessions: vec![],
+        }];
+        let text = format_fleet_by_project(&fleet);
+        assert!(
+            !text.contains("ss9285"),
+            "a password fragment survived: {text}"
+        );
+        assert!(
+            !text.contains("u:pa"),
+            "the user:password pair survived: {text}"
+        );
+        assert!(
+            text.contains("<code>https://***@host/repo&amp;foo&lt;bar&gt;</code>"),
+            "{text}"
+        );
+    }
+}
+
 /// Provisioning state maps to the yellow glyph.
 ///
 /// Why: `state_glyph` must emit 🟡 for `"provisioning"` to keep the three-tier

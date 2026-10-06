@@ -59,12 +59,16 @@ pub mod grade_reconcile;
 pub mod letter_grade;
 pub mod mapreduce;
 pub mod output;
+// #9192: optional review inputs and the `run_review_with` entry point.
+pub mod optional_context;
 pub mod parser;
 pub mod post;
 // #8651: the per-repo trusty-search index every GitHub-PR surface reviews
 // against, and each surface's degrade contract for an unreadable registry.
 pub mod pr_index;
 pub mod prompt;
+// #9310: the bounded reply shape a parse failure records.
+pub(crate) mod reply_shape;
 pub mod runner;
 // Why: the map-reduce branch of `run_review` (split → map → reduce → fold) is
 // extracted here to keep runner.rs under the 500-line cap (#610 / #1643).
@@ -107,6 +111,7 @@ pub use grade::{derive_verdict, derive_verdict_with_grade};
 pub use letter_grade::{
     Grade, clamp_grade_to_verdict, default_grade_for_verdict, verdict_for_grade,
 };
+pub use optional_context::{OptionalContextRequest, ReviewOptions, ReviewOutcome};
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_response};
 pub use post::{
@@ -117,7 +122,7 @@ pub use prompt::{
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,
     reviewer_system_prompt_with_coverage,
 };
-pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review};
+pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review, run_review_with};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};
 pub use verify_liveness::{LivenessDecision, enforce_verifier_liveness, probe_verifier_liveness};

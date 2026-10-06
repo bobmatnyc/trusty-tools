@@ -29,10 +29,9 @@
 //! That yields a clean two-valued signal: exit 2 means clap *rejected* the
 //! env value, any other exit means clap accepted it.
 //!
-//! Test: `cargo test -p trusty-search --test no_auto_discover_env`
+//! Test: `cargo test -p trusty-search --test integration no_auto_discover_env::`
 
-#[path = "support/test_daemon.rs"]
-mod test_daemon;
+use crate::test_daemon;
 
 use std::time::Duration;
 
