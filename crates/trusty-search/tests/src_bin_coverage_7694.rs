@@ -146,11 +146,11 @@ const EXPECTED_UNINDEXED_SEGMENTS: &[&str] = &[
     "test_resources",
 ];
 
-/// Repository root, derived from this crate's manifest directory.
+/// Repository root of the checkout cargo is running this test for.
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    // #9298: a compile-time path names the build worktree, which a shared CARGO_TARGET_DIR reuses.
+    trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout root; set TRUSTY_TEST_REPO_ROOT to the workspace root")
 }
 
 /// The "as good as ripgrep" pin: every tracked `.rs` file in THIS repository is
