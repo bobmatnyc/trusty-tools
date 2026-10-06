@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.29.3] — 2026-10-06
+
+### Fixed
+
+- `memory_recall_all` opens the palaces of each batch up to four at a time instead of one after another. Batch size, the empty-palace skip, and the release of every palace the call opened are unchanged (#9141).
+
 ## [0.29.2] — 2026-10-06
 
 ### Added

@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.2] — 2026-10-06
+
+### Added
+
+- `credentials::ExternalCliCommand`: the shared runner that hands a `Secret` to a vendor CLI (`op`, `keeper`, `vercel`, `gh`) on stdin only, never argv or env. Errors and `Debug` output never carry the value or the child's output, a missing binary fails closed as `ExternalCliError::NotInstalled`, and the child is killed and reaped when the stdin write fails ([#9311](https://github.com/bobmatnyc/trusty-tools/issues/9311))
+
+### Fixed
+
+- Vector search no longer re-reads every `VECTOR_KEYS` and `DELETED_VECTORS` row on each call. `HnswStore` caches the reverse map and tombstone set and rebuilds them only after a write commits; the cache is shared by every store open on the same palace file, so a write through one handle reaches the others (#9141).
+- A recall's hit-log rows are written in one redb commit instead of one commit per hit (`RecallLog::record_batch`). A failed hit-log write is now logged at `warn` with its row count instead of being discarded; the recall still answers (#9141).
+- `CredentialSandbox::enter` now removes `GIT_CONFIG_COUNT`, every `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pair and `GIT_CONFIG_PARAMETERS` as one set, and restores them on drop. It used to remove only the keys, so git inside the sandbox failed with "missing config key GIT_CONFIG_KEY_0" in a shell that exports `GIT_CONFIG_COUNT`, such as a tm session (#9222).
+
 ## [0.54.1] — 2026-10-06
 
 ### Added
