@@ -186,30 +186,40 @@ async fn file_get_is_refused_busy_when_its_limiter_is_full() {
 }
 
 /// #9029: a call releases its slot when it completes, served or refused, so
-/// one free slot serves any number of calls in turn.
+/// one free slot serves any number of calls in turn. Each round asserts its
+/// own outcome (#9212 follow-up to #9306): a refusal of any kind is not
+/// "not busy" proof, so the served rounds must answer content.
 #[tokio::test]
 async fn file_get_frees_its_slot_when_the_call_completes() {
     let s = serve().await;
     let _held = Arc::clone(&s.state.file_get_limiter)
         .try_acquire_many_owned(FILE_GET_MAX_CONCURRENT as u32 - 1)
         .expect("leave one slot");
-    for (round, path) in ["src/lib.rs", "src/nope.rs", "src/kept.rs"]
-        .iter()
-        .enumerate()
+    for (round, (path, served)) in [
+        ("src/lib.rs", Some("pub fn one() {}\n")),
+        ("src/nope.rs", None),
+        ("src/kept.rs", Some("pub fn kept() {}\n")),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let got = s
             .client
             .call(METHOD_FILE_GET, json!({ "index_id": INDEX, "path": path }))
             .await;
-        let busy = got
-            .as_ref()
-            .err()
-            .and_then(|e| e.data())
-            .is_some_and(|d| d["error"] == "server_busy");
-        assert!(
-            !busy,
-            "round {round} ({path}): the last slot was not freed: {got:?}"
-        );
+        match (served, got) {
+            (Some(content), Ok(body)) => {
+                assert_eq!(body["content"], content, "round {round} ({path}): {body}");
+            }
+            (None, Err(e)) => {
+                assert_eq!(
+                    e.code(),
+                    Some(CODE_NOT_FOUND),
+                    "round {round} ({path}): {e}"
+                );
+            }
+            (_, got) => panic!("round {round} ({path}): the last slot was not freed: {got:?}"),
+        }
     }
     assert_eq!(s.state.file_get_limiter.available_permits(), 1);
 }
