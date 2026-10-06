@@ -71,10 +71,12 @@ pub enum SettingsError {
 /// Everything `serve` needs to know before it binds.
 ///
 /// Why: see the module docs.
-/// What: four plain fields; build one directly in a test, or through
-/// [`ServerSettings::from_args`] in the binary.
+/// What: four plain fields; build one with [`ServerSettings::new`], or
+/// through [`ServerSettings::from_args`] in the binary.
 /// Test: `settings_flags_beat_env_beat_defaults`.
+// #9328: `#[non_exhaustive]` so a later setting is not a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ServerSettings {
     /// The socket to bind.
     pub socket: PathBuf,
@@ -87,6 +89,21 @@ pub struct ServerSettings {
 }
 
 impl ServerSettings {
+    /// Settings from explicit values, for a caller that does not parse argv.
+    pub fn new(
+        socket: PathBuf,
+        index_root: PathBuf,
+        machine_config: PathBuf,
+        idle_timeout: Duration,
+    ) -> Self {
+        Self {
+            socket,
+            index_root,
+            machine_config,
+            idle_timeout,
+        }
+    }
+
     /// Settings from a `serve` command line and an environment lookup.
     ///
     /// What: `args` excludes the program name and starts with `serve`. Each

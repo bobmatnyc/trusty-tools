@@ -37,6 +37,8 @@ pub(crate) static TEST_FAIL_CHUNK_DELETE: std::sync::Mutex<Vec<String>> =
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RedbChunkDelete {
     /// Drop from memory, then delete from redb and only log a failure.
+    /// #9212: test-only; every production delete fails closed.
+    #[cfg(test)]
     WarnOnly,
     /// #8959: delete from redb first; a failure is returned with memory
     /// untouched, so a retry finds the same ids.
@@ -103,13 +105,12 @@ impl CodeIndexer {
     /// Remove every chunk id from the HNSW store, corpus, embedding cache,
     /// and BM25 index.
     ///
-    /// Why: shared between `remove_file` (bulk per-file deletion) and could
-    /// be reused for future bulk-deletion paths. Each lock is acquired once
+    /// Why: shared by every chunk-delete path. Each lock is acquired once
     /// for the whole batch to bound write-lock contention.
-    /// What: `WarnOnly` drops the ids from memory, then deletes them from redb
-    /// and only logs a failure. `FailClosed` deletes from redb first and
-    /// returns its failure with memory untouched (#8959).
-    /// Test: `test_remove_chunk_removes_from_results`;
+    /// What: `FailClosed` deletes from redb first and returns its failure with
+    /// memory untouched (#8959). The test-only `WarnOnly` drops the ids from
+    /// memory, then deletes them from redb and only logs a failure.
+    /// Test: `test_remove_chunk_ids_removes_from_results`;
     /// `FailClosed` by `a_failed_tombstone_delete_fails_the_write_and_leaves_no_old_ids_after_reopen`.
     pub(crate) async fn remove_chunks_from_stores(
         &self,
@@ -117,6 +118,7 @@ impl CodeIndexer {
         mode: RedbChunkDelete,
     ) -> Result<()> {
         match mode {
+            #[cfg(test)]
             RedbChunkDelete::WarnOnly => {
                 self.drop_chunk_ids_from_memory(ids).await;
                 // Issue #28: mirror the deletion into the durable redb corpus.

@@ -1,0 +1,5 @@
+Fixed
+- A reindex prune whose redb delete is refused now keeps the deleted file's chunks, entity list and content hash in every store so the next reindex retries it, counts it in the `complete` event's `errors`, and leaves `indexed_head_sha` and `last_indexed_at` unstamped; it used to drop the file from memory only, and its rows came back at the next boot (#9212).
+- A full-reindex batch whose pre-commit delete of a changed file is refused now keeps that file's old chunks in memory and redb, skips its new chunks, withholds its content hash and counts the failure in `errors`; the old chunks used to leave memory only and the new ones committed beside the surviving rows (#9212).
+- Boot reconcile no longer stamps the HEAD SHA when any file in its delta fails. A partial failure used to stamp anyway, so a refused delete was never retried; the next boot now recomputes the delta and retries it (#9212).
+- `CodeIndexer::remove_file` now fails closed: a refused redb delete is an error with the file's chunks left in memory, instead of `Ok` with the chunks gone from memory and still in redb (#9212).
