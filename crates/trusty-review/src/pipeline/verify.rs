@@ -755,29 +755,77 @@ fn structured_judgment(text: &str) -> Option<Option<Judgment>> {
     found
 }
 
-/// Words that make a CONFIRMED keyword ambiguous (#8904).
-const NEGATIONS: &[&str] = &["NOT", "NO", "NOR", "NEVER", "CANNOT", "UNCONFIRMED"];
+/// Words that make a verdict keyword ambiguous (#8904; `UNREFUTED`, #9292).
+const NEGATIONS: &[&str] = &[
+    "NOT",
+    "NO",
+    "NOR",
+    "NEVER",
+    "CANNOT",
+    "UNCONFIRMED",
+    "UNREFUTED",
+];
+
+/// Characters that end the clause a negation scopes over (#9292).
+const CLAUSE_BREAKS: &[char] = &[
+    '.', ',', ';', ':', '!', '?', '\n', '(', ')', '\u{2013}', '\u{2014}',
+];
 
 /// Keyword fallback for a provider that ignored the forced schema (#8904).
 ///
-/// What: UNVERIFIABLE wins, then REFUTED — the readings that do not confirm.
-/// CONFIRMED is returned only when neither appears and the text carries no
-/// negation ("not confirmed", "unconfirmed", "can't"); an ambiguous answer is
-/// `None`, which the round withholds. `None` when no token appears.
+/// Why: under toolChoice auto (#9292) the verifier can answer in free text, and
+/// a substring match read "not REFUTED" as a refutation that dropped the finding.
+/// What: UNVERIFIABLE wins, then REFUTED — each only as a whole word with no
+/// negation earlier in its clause (see [`keyword_holds`]). CONFIRMED is returned
+/// only when neither holds and the text carries no negation anywhere ("not
+/// confirmed", "unconfirmed", "can't"). An ambiguous or negated answer is
+/// `None`, which the round withholds as unjudged. `None` when no token appears.
+/// Test: `parse_judgment_negated_verdict_is_not_that_verdict`,
+/// `parse_judgment_plain_verdicts_unchanged`,
+/// `parse_judgment_ambiguous_prose_never_confirms`.
 fn keyword_judgment(upper: &str) -> Option<Judgment> {
-    if upper.contains("UNVERIFIABLE") {
+    // #9292: a negated UNVERIFIABLE/REFUTED is not that verdict.
+    if keyword_holds(upper, "UNVERIFIABLE") {
         return Some(Judgment::Unverifiable);
     }
-    if upper.contains("REFUTED") {
+    if keyword_holds(upper, "REFUTED") {
         return Some(Judgment::Refuted);
     }
     if !upper.contains("CONFIRMED") {
         return None;
     }
-    let negated = upper
-        .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
-        .any(|w| NEGATIONS.contains(&w) || w.ends_with("N'T") || w.ends_with("N\u{2019}T"));
+    let negated = words(upper).any(is_negation);
     (!negated).then_some(Judgment::Confirmed)
+}
+
+/// Whether `keyword` appears as a whole word and no occurrence follows a
+/// negation in the same clause (#9292). Any negated occurrence makes it `false`.
+fn keyword_holds(upper: &str, keyword: &str) -> bool {
+    let mut seen = false;
+    for clause in upper.split(CLAUSE_BREAKS) {
+        let mut negated = false;
+        for word in words(clause) {
+            if word == keyword {
+                if negated {
+                    return false;
+                }
+                seen = true;
+            }
+            negated |= is_negation(word);
+        }
+    }
+    seen
+}
+
+/// The words of `text`, keeping apostrophes so "CAN'T" stays one word.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '\u{2019}'))
+        .filter(|w| !w.is_empty())
+}
+
+/// Whether `word` (uppercase) negates a verdict keyword.
+fn is_negation(word: &str) -> bool {
+    NEGATIONS.contains(&word) || word.ends_with("N'T") || word.ends_with("N\u{2019}T")
 }
 
 /// Map an exact judgment token (any case, trimmed) to a [`Judgment`].

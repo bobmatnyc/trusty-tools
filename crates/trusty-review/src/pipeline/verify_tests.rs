@@ -661,6 +661,55 @@ fn parse_judgment_ambiguous_prose_never_confirms() {
     );
 }
 
+/// #9292: under toolChoice auto the verifier can answer in free text, and a
+/// negated verdict keyword must never be read as that verdict. "not REFUTED"
+/// once dropped a real finding as refuted; every negated row is now unjudged
+/// (`None`), which the round withholds without relaxing the verdict.
+#[test]
+fn parse_judgment_negated_verdict_is_not_that_verdict() {
+    for negated in [
+        "not REFUTED",
+        "NOT REFUTED",
+        "The finding is not refuted by the diff.",
+        "This cannot be refuted",
+        "It isn't refuted",
+        "UNREFUTED",
+        "I would not say this is refuted",
+        "not confirmed",
+        "NOT CONFIRMED",
+        "not UNVERIFIABLE",
+    ] {
+        assert_eq!(parse_judgment(negated), None, "{negated:?}");
+    }
+    // The unjudged reading is withheld as a verifier failure, never a refutation.
+    let outcomes = judgments_for("not REFUTED", 1);
+    assert!(
+        matches!(
+            outcomes.as_slice(),
+            [(VerifyOutcome::TruncationRefuted, VerifierReach::Failed)]
+        ),
+        "{outcomes:?}"
+    );
+}
+
+/// #9292: the negation check is clause-local, so un-negated verdicts — and a
+/// verdict whose negation sits in another clause — parse exactly as before.
+#[test]
+fn parse_judgment_plain_verdicts_unchanged() {
+    for (text, want) in [
+        ("REFUTED", Judgment::Refuted),
+        ("refuted", Judgment::Refuted),
+        ("Verdict: REFUTED", Judgment::Refuted),
+        ("Not a real bug. REFUTED.", Judgment::Refuted),
+        ("No, this is refuted", Judgment::Refuted),
+        ("CONFIRMED", Judgment::Confirmed),
+        ("Verdict: CONFIRMED", Judgment::Confirmed),
+        ("UNVERIFIABLE", Judgment::Unverifiable),
+    ] {
+        assert_eq!(parse_judgment(text), Some(want), "{text:?}");
+    }
+}
+
 /// #5309: an `Unverifiable` outcome must strip the signals that let a finding
 /// pin the BLOCK floor — the same demotion the hygiene passes apply when they
 /// pre-stamp it — so a claim carries identical weight whichever route
