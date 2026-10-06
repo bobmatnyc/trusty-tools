@@ -45,19 +45,19 @@ trusty-console	webhook::tests::integration_from_env_fails_closed_when_the_secret
 trusty-embedderd	uds_bit_identical_vs_in_process	HuggingFace ONNX model download; UDS server vs in-process vectors, no daemon, no binary
 trusty-installer	download::release::tests::resolve_latest_tag_live	public GitHub release API read; job GITHUB_TOKEN, no other key
 trusty-installer	download::tests::try_install_prebuilt_live	public GitHub release API + one trusty-installer asset download; job GITHUB_TOKEN, no other key
-trusty-search	migration_e2e_already_current_is_noop	loads the default ONNX embedder in-process; temp redb corpus, no daemon
-trusty-search	migration_e2e_empty_corpus_advances_to_current	loads the default ONNX embedder in-process; temp redb corpus, no daemon
-trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
+trusty-search	migration_e2e::migration_e2e_already_current_is_noop	loads the default ONNX embedder in-process; temp redb corpus, no daemon
+trusty-search	migration_e2e::migration_e2e_empty_corpus_advances_to_current	loads the default ONNX embedder in-process; temp redb corpus, no daemon
+trusty-search	typeahead::typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 
-# THE UNSELECTED REMAINDER. 151 ignored tests are enumerable in this workspace
-# on the Linux runner; the 25 rows above run, and 126 do not. A macOS checkout
+# THE UNSELECTED REMAINDER. 141 ignored tests are enumerable in this workspace
+# on the Linux runner; the 25 rows above run, and 116 do not. A macOS checkout
 # enumerates one more (trusty-mpm's macOS-only
 # `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
 # local `--list-only` run there reads 127 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
-# WHY 126 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
+# WHY 116 ARE NOT RUN. Sampled reasons, from their own `#[ignore]` strings:
 # API keys this workflow does not hold (OPENROUTER, ANTHROPIC, FIREWORKS,
 # TOGETHER, ATLASCLOUD, OPENAI, AWS), a live trusty-search daemon on :7878, a
 # compiled trusty-bm25-daemon / trusty-embedderd binary on disk, a bootstrapped
@@ -98,4 +98,4 @@ trusty-search	typeahead_blended_mode_returns_results_tagged_by_source	loads the 
 # reading, one high for Linux. 128 -> 126.
 #
 # LOWERING THIS NUMBER IS ALWAYS WELCOME. Raising it is a review decision.
-# UNSELECTED-BASELINE: 126
+# UNSELECTED-BASELINE: 116
