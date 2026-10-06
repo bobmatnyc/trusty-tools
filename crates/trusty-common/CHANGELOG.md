@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.1] — 2026-10-06
+
+### Added
+
+- `test_harness::test_repo_root()` and the pure `resolve_repo_root()` name the Cargo workspace a test reads repository content from, at runtime: `TRUSTY_TEST_REPO_ROOT` (`test_harness::REPO_ROOT_ENV`) first, then the runtime `CARGO_MANIFEST_DIR`, then the current directory, each walked up to the `[workspace]` manifest. It never falls back to a compile-time path (#9298).
+
+### Fixed
+
+- Tests that read repository content outside this crate resolve the checkout at runtime through `trusty_common::test_harness::test_repo_root()`, so a test binary built in one worktree under a shared `CARGO_TARGET_DIR` no longer reads another worktree's files (#9298).
+
+### Changed
+
+- A user forget (`PalaceHandle::forget`: `memory_forget`, the HTTP/UDS drawer delete, and so `palace reclaim --apply`) now writes a `user_forget` record to `maintenance_deletions.jsonl` (#9283). The record carries the drawer id, time and a new optional `content_hash` field, and never a content copy, so forgotten text cannot be recovered from the journal. A forgotten dedup survivor is still recorded as `forget_of_merged_survivor` with its copy (#9172). Adds `DeletionReason::UserForget` and `MaintenanceDeletion::with_content_hash_of`.
+
 ## [0.54.0] — 2026-10-06
 
 ### Added
