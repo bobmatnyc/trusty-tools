@@ -1,6 +1,14 @@
 # 0046. The client declares the search mode; the fused score is removed
 
 - **Status:** Proposed
+- **Status note (2026-10-06, owner ruling AQ-cq):** Proposed, re-scoped as additive.
+  trusty-search 1.0 freezes today's search response shape: a flat fused result
+  list with `score`. This ADR now describes an additive change: a caller that
+  declares a mode gets labelled result sets; an undeclared query keeps the flat
+  fused list and `score`. Removing the fused `score`, the flat-to-labelled
+  envelope change for undeclared queries, and making KG traversal opt-in (with
+  dropping classifier routing) are deferred to 2.0. No implementation work is
+  scheduled now.
 - **Date:** 2026-08-12
 - **Scope:** crate `trusty-search` — the search entry point, lane selection, and
   the result envelope; consuming code in `trusty-review`, `trusty-code`, and the
@@ -130,7 +138,7 @@ We will make the search mode a client declaration and remove the fused score.
 2. **BM25 and KG are both returned, paged, and un-fused**, as distinct labelled
    sets. A caller sees which question produced which results.
 3. **RRF fusion is removed.** `rrf_fuse` and the single blended `score` field
-   leave the search path.
+   leave the search path. (Deferred to 2.0 — see status note.)
 4. **Cosine is exposed as a sort, never as a published score.** A caller may ask
    for a result set to be ordered by cosine similarity to the query. The
    similarity value orders that one set; it is not published as a
@@ -138,7 +146,8 @@ We will make the search mode a client declaration and remove the fused score.
 5. **Dedicated endpoints per use case**, rather than one endpoint inferring which
    use case it is serving.
 6. **A query with no declared mode returns BM25 and KG, both sets, page 1**,
-   un-fused and separately labelled:
+   un-fused and separately labelled (deferred to 2.0 — see status note; 1.0
+   keeps the flat fused list and `score` for an undeclared query):
 
    ```
    POST /indexes/:id/search  { "text": "..." }
