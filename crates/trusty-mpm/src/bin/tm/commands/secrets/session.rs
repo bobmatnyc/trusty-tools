@@ -4,7 +4,7 @@
 //! directory, and an error text that cannot carry a value — so they live
 //! once here.
 //! What: [`Ctx`]; [`Ctx::call`] / [`Ctx::call_raw`] (one `secrets.*` request,
-//! the project folded into the params); [`Ctx::vault`] (the project or owner
+//! the project folded into the params); [`Ctx::project_vault`] (the project
 //! scope from `secrets.scopes`); [`describe`] (a `ClientError` as fixed text:
 //! the server's own fixed message, a spawn failure, or a transport failure
 //! with its detail dropped); [`entry_key`] (`KEY` or `<group>.<KEY>`).
@@ -77,20 +77,16 @@ impl Ctx<'_> {
             .map_err(|_| anyhow!("tm secrets: {method}: the answer did not decode"))
     }
 
-    /// The project vault, or the owner vault when `owner`.
-    pub(crate) async fn vault(&self, owner: bool) -> anyhow::Result<VaultName> {
-        let kind = if owner {
-            ScopeKind::Owner
-        } else {
-            ScopeKind::Project
-        };
+    /// The project vault from `secrets.scopes` — the only scope the CLI
+    /// writes (#7521, DOC-74 §15.3).
+    pub(crate) async fn project_vault(&self) -> anyhow::Result<VaultName> {
         let scopes: ScopesResponse = self.call(method::SCOPES, Value::Null).await?;
         scopes
             .scopes
             .into_iter()
-            .find(|scope| scope.kind == kind)
+            .find(|scope| scope.kind == ScopeKind::Project)
             .map(|scope| scope.vault)
-            .ok_or_else(|| anyhow!("tm secrets: the server reported no {kind:?} scope"))
+            .ok_or_else(|| anyhow!("tm secrets: the server reported no project scope"))
     }
 }
 

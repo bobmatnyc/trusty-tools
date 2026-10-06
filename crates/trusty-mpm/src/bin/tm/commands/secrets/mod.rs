@@ -75,14 +75,12 @@ pub(crate) async fn dispatch(
         SecretsAction::Set {
             key,
             group,
-            owner,
             value,
             extra,
         } => {
             let args = verbs::SetArgs {
                 key: key.text(),
                 group: group.as_ref().map(|g| g.text()),
-                owner,
                 value: value.as_ref().map(|v| v.text()),
                 extra: !extra.is_empty(),
             };

@@ -861,8 +861,8 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project and owner secrets: `set`, `list`, `doctor`. No verb
-    /// prints a value.
+    /// Store project secrets and list key names: `set`, `list`, `doctor`.
+    /// No verb prints a value.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
         /// Secrets action to perform.

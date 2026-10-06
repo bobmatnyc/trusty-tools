@@ -497,7 +497,10 @@ tm secrets exec --dotenv .env -- <command...>  # parses .env, resolves each secr
 owner ruled "let's just use 'set', remove 'add'" and "make --paste the
 default, throw an error if there is no value in the clipboard". `set` is the
 one write verb and upserts. The optional positional `group` label namespaces
-the key; the same key and group always resolve the same entry. Every CLI verb
+the key: the entry key is `<group>.<KEY>`, and a group is 1–16 characters of
+`[A-Za-z0-9_-]`. A group holds no `.`, so the same KEY and group always
+resolve to the same entry. `set` writes the project scope only; the owner
+scope is set from the console (§15.3). Every CLI verb
 is a thin layer over the `trusty-secrets` crate (§15.2,
 [#7521](https://github.com/bobmatnyc/trusty-tools/issues/7521)).
 

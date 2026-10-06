@@ -211,7 +211,7 @@ fn stored(backend: &MemoryBackend, vault: &str, key: &str) -> Option<String> {
 fn cli_parses_every_secrets_verb() {
     for args in [
         vec!["set", "K"],
-        vec!["set", "K", "grp", "--owner", "--value", "-"],
+        vec!["set", "K", "grp", "--value", "-"],
         vec!["list"],
         vec!["doctor"],
     ] {
@@ -224,6 +224,8 @@ fn cli_parses_every_secrets_verb() {
     }
     // `set` needs a key.
     assert!(Cli::try_parse_from(["tm", "secrets", "set"]).is_err());
+    // #7521: the owner scope is the console's (DOC-74 §15.3).
+    assert!(Cli::try_parse_from(["tm", "secrets", "set", "K", "--owner"]).is_err());
 }
 
 #[test]
@@ -340,7 +342,18 @@ async fn set_with_a_group_namespaces_the_key() {
 async fn list_prints_key_names_only() {
     let h = harness().await;
     run(&h, VALUE, &["set", "A_KEY"]).await;
-    run(&h, SHORT, &["set", "B_KEY", "--owner"]).await;
+    // The CLI writes the project scope only; seed the owner scope directly.
+    let ctx = Ctx {
+        client: &h.client,
+        project: &h.repo,
+        clipboard: &Fixed(""),
+        stdin: &Fixed(""),
+    };
+    let params = serde_json::json!({ "vault": "trusty/acme", "key": "B_KEY", "value": SHORT });
+    let _: serde_json::Value = ctx
+        .call(trusty_secrets::api::methods::method::SET, params)
+        .await
+        .expect("owner-scope set");
     let outcome = run(&h, "", &["list"]).await;
     assert_eq!(
         outcome.out,
@@ -387,6 +400,61 @@ async fn doctor_reports_socket_and_backends_without_values() {
         bare.out
     );
     assert!(bare.out.contains(": reachable"), "{}", bare.out);
+}
+
+/// #7521: a server that refuses `secrets.doctor` answered, so the socket is
+/// reachable; the refusal is the error.
+#[tokio::test]
+async fn doctor_reports_a_refusing_server_as_reachable() {
+    let h = harness().await;
+    std::fs::write(
+        h.tmp.path().join("machine.yaml"),
+        "secrets:\n  default_backend:\n    - not-a-backend-id\n",
+    )
+    .expect("write machine.yaml");
+    let outcome = run(&h, "", &["doctor"]).await;
+    let socket = h.client.socket().display().to_string();
+    assert_eq!(outcome.out, format!("socket {socket}: reachable\n"));
+    assert!(
+        outcome.err().contains("config section is invalid"),
+        "{}",
+        outcome.err()
+    );
+}
+
+/// #7521: a configured backend this build cannot open fails doctor after
+/// the table.
+#[tokio::test]
+async fn doctor_fails_when_the_selected_backend_is_unavailable() {
+    let h = harness().await;
+    std::fs::write(
+        h.tmp.path().join("machine.yaml"),
+        "secrets:\n  default_backend: onepassword\n",
+    )
+    .expect("write machine.yaml");
+    let outcome = run(&h, "", &["doctor"]).await;
+    assert!(
+        outcome.out.contains("selected backend: onepassword\n"),
+        "{}",
+        outcome.out
+    );
+    assert!(
+        outcome.out.contains("backend keychain: available ["),
+        "{}",
+        outcome.out
+    );
+    assert!(
+        outcome.out.ends_with("backend onepassword: unavailable\n"),
+        "{}",
+        outcome.out
+    );
+    assert!(
+        outcome
+            .err()
+            .contains("the selected backend `onepassword` is unavailable"),
+        "{}",
+        outcome.err()
+    );
 }
 
 #[tokio::test]

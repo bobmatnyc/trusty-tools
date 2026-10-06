@@ -51,7 +51,8 @@ impl fmt::Debug for ArgText {
 /// checkout and prints names only, never a value.
 #[derive(Debug, Subcommand)]
 pub(crate) enum SecretsAction {
-    /// Add or replace one key. The value comes from the clipboard.
+    /// Add or replace one key of the project scope. The value comes from the
+    /// clipboard.
     ///
     /// An empty clipboard is an error and stores nothing. `--value -` reads
     /// stdin instead; a value is never an argument. The confirmation shows
@@ -62,9 +63,6 @@ pub(crate) enum SecretsAction {
         key: ArgText,
         /// Optional label; the key is stored as `<group>.<KEY>`.
         group: Option<ArgText>,
-        /// Write the owner scope `trusty/<owner>` instead of the project's.
-        #[arg(long)]
-        owner: bool,
         /// Only `-` (read stdin) is accepted.
         #[arg(long, value_name = "-")]
         value: Option<ArgText>,

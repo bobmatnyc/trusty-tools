@@ -16,7 +16,7 @@ use anyhow::{anyhow, bail};
 use serde_json::{Value, json};
 use trusty_secrets::SecretValue;
 use trusty_secrets::api::methods::{ListResponse, ScopesResponse, SetOutcome, SetResponse, method};
-use trusty_secrets::server::{DOCTOR, DoctorResponse};
+use trusty_secrets::server::{ClientError, DOCTOR, DoctorResponse};
 
 use super::Ctx;
 use super::session::{describe, entry_key, rpc_kind};
@@ -33,7 +33,6 @@ const VALUE_FLAG_REFUSED: &str =
 pub(super) struct SetArgs<'a> {
     pub(super) key: &'a str,
     pub(super) group: Option<&'a str>,
-    pub(super) owner: bool,
     /// `--value`'s text; only `-` is accepted.
     pub(super) value: Option<&'a str>,
     /// Whether a third positional argument was given.
@@ -47,8 +46,11 @@ fn outcome_word(outcome: SetOutcome) -> &'static str {
     }
 }
 
-/// `set KEY [group]`: upsert one key from the clipboard or stdin.
+/// `set KEY [group]`: upsert one key of the project scope from the clipboard
+/// or stdin.
 ///
+/// Why: DOC-74 §15.3 gives the owner scope to the console; the CLI writes
+/// the project scope only.
 /// What: refuses argv values before reading anything; reads the source,
 /// trims surrounding whitespace, refuses an empty result before any socket
 /// call, then prints `(new|updated) secret set KEY: <mask_secret>`.
@@ -75,7 +77,8 @@ pub(super) async fn set(
     if value.is_empty() {
         bail!("tm secrets set: {empty}; nothing was stored");
     }
-    let vault = ctx.vault(args.owner).await?;
+    // #7521: project scope only; the owner scope is the console's (§15.3).
+    let vault = ctx.project_vault().await?;
     let params = json!({ "vault": vault, "key": key, "value": value });
     let response: SetResponse = ctx.call(method::SET, params).await?;
     let word = outcome_word(response.outcome);
@@ -107,8 +110,12 @@ pub(super) async fn list(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(
 ///
 /// What: asks with the project; when the project has no scopes (no checkout,
 /// no remote) reports that and asks again without it. A socket that cannot
-/// be started or reached, or a selected backend that is unavailable, exits 1.
+/// be started or reached exits 1 as `unreachable`; a server refusal exits 1
+/// as `reachable` with the server's text; a selected backend that is
+/// unavailable exits 1 after the backend table.
 /// Test: `doctor_reports_socket_and_backends_without_values`,
+/// `doctor_reports_a_refusing_server_as_reachable`,
+/// `doctor_fails_when_the_selected_backend_is_unavailable`,
 /// `every_verb_fails_without_a_value_when_the_socket_is_unreachable`.
 pub(super) async fn doctor(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
     let socket = ctx.client.socket();
@@ -122,7 +129,12 @@ pub(super) async fn doctor(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result
     let report = match answer {
         Ok(report) => report,
         Err(e) => {
-            writeln!(out, "socket {}: unreachable", socket.display())?;
+            // #7521: only a server that answered can send an `Rpc` refusal.
+            let state = match e {
+                ClientError::Rpc(_) => "reachable",
+                _ => "unreachable",
+            };
+            writeln!(out, "socket {}: {state}", socket.display())?;
             bail!(describe(&e, socket));
         }
     };
