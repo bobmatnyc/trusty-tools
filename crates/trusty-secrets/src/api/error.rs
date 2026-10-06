@@ -225,6 +225,33 @@ pub enum SecretsError {
         dir: PathBuf,
     },
 
+    /// A value file or directory failed its safety check: a symlink, the
+    /// wrong file type, permissions beyond 0600/0700, or another owner.
+    /// Raised before any value is read; the operation does not proceed.
+    // #9326: the file backend's refusal; names the path, never the value.
+    #[error("secrets storage {path} is refused: it {reason}")]
+    StorageRefused {
+        /// The file or directory refused.
+        path: PathBuf,
+        /// Which rule it broke.
+        reason: &'static str,
+    },
+
+    /// A tracked project config selected the `file` backend on a build with a
+    /// Keychain, where only the untracked machine config may. Raised before
+    /// any backend is opened.
+    // #9326: Architect ruling, basis ruling 06 R2; never echoes the file.
+    #[error(
+        "secrets config {path} is tracked and may not select the `file` backend \
+         on a build with a Keychain; remove `backend: file` from it and set \
+         `secrets.default_backend: file` in the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml instead"
+    )]
+    TrackedBackendRefused {
+        /// The tracked project config file.
+        path: PathBuf,
+    },
+
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,

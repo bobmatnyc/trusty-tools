@@ -64,6 +64,13 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         machine_config: tmp.path().join("machine.yaml"),
         idle_timeout,
     };
+    // #9326: the build default is `file` where no Keychain is compiled; pin
+    // `keychain` (the in-memory double here) so every host runs one path.
+    std::fs::write(
+        &settings.machine_config,
+        "secrets:\n  default_backend: keychain\n",
+    )
+    .unwrap();
     Fixture {
         tmp,
         settings,
@@ -172,7 +179,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 22] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 24] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -566,12 +573,21 @@ async fn server_doctor_reports_backends_and_paths_only() {
     assert_eq!(bare.selected_backend, BackendId::keychain());
     assert_eq!(
         bare.backends,
-        [BackendStatus {
-            id: BackendId::keychain(),
-            available: true,
-            capabilities: vec!["READ".to_string(), "WRITE".to_string()],
-        }]
+        [
+            BackendStatus {
+                id: BackendId::keychain(),
+                available: true,
+                capabilities: vec!["READ".to_string(), "WRITE".to_string()],
+            },
+            // #9326: listed beside the Keychain; this fixture maps no `file`.
+            BackendStatus {
+                id: BackendId::file(),
+                available: false,
+                capabilities: Vec::new(),
+            },
+        ]
     );
+    assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(
         &fx.settings.socket,
@@ -585,6 +601,208 @@ async fn server_doctor_reports_backends_and_paths_only() {
         with_project.project_config,
         Some(root.join(PROJECT_CONFIG_SUBPATH))
     );
+    server.stop().await;
+}
+
+/// A factory for `fx` that also maps `file` to a value-file backend under
+/// the fixture's temp dir.
+fn with_file_backend(fx: &Fixture) -> (BackendFactory, crate::store::FileBackend) {
+    let file = crate::store::FileBackend::at(fx.tmp.path().join("values"));
+    let base = fx.backends();
+    let shared = file.clone();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "file" => Ok(Arc::new(shared.clone()) as Arc<dyn SecretBackend>),
+        _ => base(id),
+    });
+    (factory, file)
+}
+
+/// Why: #9326 AC4, owner ruling f5 — doctor reports the file backend as a
+/// degraded posture whether config chose it or the build default did.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_doctor_reports_the_file_posture() {
+    let fx = fixture();
+    let (factory, _file) = with_file_backend(&fx);
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: file\n",
+    )
+    .unwrap();
+    let server = fx.start_with(factory).await;
+    let doctor: DoctorResponse =
+        serde_json::from_value(ok(call(&fx.settings.socket, DOCTOR, Value::Null).await)).unwrap();
+    assert_eq!(doctor.selected_backend, BackendId::file());
+    assert_eq!(doctor.posture, Some(StoragePosture::FileDegraded));
+    let file_row = doctor
+        .backends
+        .iter()
+        .find(|row| row.id == BackendId::file())
+        .unwrap();
+    assert!(file_row.available);
+    assert_eq!(file_row.capabilities, ["READ", "WRITE", "LIST_NAMES"]);
+
+    // No config at all: the build default, which is `file` off macOS.
+    std::fs::remove_file(&fx.settings.machine_config).unwrap();
+    let bare: DoctorResponse =
+        serde_json::from_value(ok(call(&fx.settings.socket, DOCTOR, Value::Null).await)).unwrap();
+    let default = crate::store::default_backend();
+    assert_eq!(bare.selected_backend, default);
+    assert_eq!(bare.posture, Some(StoragePosture::of(&default)));
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(bare.posture, Some(StoragePosture::FileDegraded));
+    #[cfg(target_os = "macos")]
+    assert_eq!(bare.posture, Some(StoragePosture::Keychain));
+    server.stop().await;
+}
+
+/// Why: #9326 — a client older than a new posture variant still decodes the
+/// doctor answer, reading the unknown posture as `Other`.
+/// Red without `#[serde(other)]` on `StoragePosture::Other`.
+/// Test: itself.
+#[test]
+fn server_unknown_posture_decodes_as_other() {
+    let posture: StoragePosture = serde_json::from_value(json!("hsm_sealed")).unwrap();
+    assert_eq!(posture, StoragePosture::Other);
+    let known: StoragePosture = serde_json::from_value(json!("file_degraded")).unwrap();
+    assert_eq!(known, StoragePosture::FileDegraded);
+}
+
+/// Why: #9326 AC1 — set, list, delete and copy work through the file
+/// backend, and neither the index nor any answer carries a value.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_file_backend_set_list_delete_and_copy() {
+    let fx = fixture();
+    // #9326: only the untracked machine config may select `file` everywhere.
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: file\n",
+    )
+    .unwrap();
+    let (factory, file) = with_file_backend(&fx);
+    let server = fx.start_with(factory).await;
+    let socket = &fx.settings.socket;
+    let project = vault("trusty/acme/web");
+
+    let set = call(
+        socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A", "value": VALUE}),
+    )
+    .await;
+    assert!(!wire(&set).contains(VALUE));
+    ok(set);
+    assert_eq!(fx.keychain.len(), 0, "the machine config chose `file`");
+    assert_eq!(
+        file.get(&project, &key("A")).unwrap().unwrap().expose(),
+        VALUE
+    );
+    let list = call(
+        socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await;
+    assert!(!wire(&list).contains(VALUE));
+    assert_eq!(ok(list)["keys"][0]["name"], "A");
+
+    // file -> keychain, then keychain -> file for a key only the Keychain has.
+    let out = ok(call(
+        socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "file", "to_backend": "keychain"}),
+    )
+    .await);
+    assert_eq!(out, json!({"copied": ["A"], "failed": []}));
+    assert_eq!(
+        fx.keychain
+            .get(&project, &key("A"))
+            .unwrap()
+            .unwrap()
+            .expose(),
+        VALUE
+    );
+    fx.keychain
+        .set(&project, &key("B"), &SecretValue::new(SENTINEL))
+        .unwrap();
+    let back = call(
+        socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "file",
+               "keys": ["B"]}),
+    )
+    .await;
+    assert!(!wire(&back).contains(SENTINEL));
+    assert_eq!(ok(back), json!({"copied": ["B"], "failed": []}));
+    assert_eq!(
+        file.get(&project, &key("B")).unwrap().unwrap().expose(),
+        SENTINEL
+    );
+
+    for entry in std::fs::read_dir(&fx.settings.index_root).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(VALUE) && !text.contains(SENTINEL), "{text}");
+    }
+
+    ok(call(
+        socket,
+        method::DELETE,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A"}),
+    )
+    .await);
+    assert!(file.get(&project, &key("A")).unwrap().is_none());
+    assert_eq!(file.list_names(&project).unwrap(), [key("B")]);
+    server.stop().await;
+}
+
+/// Why: #9326, Architect ruling (basis ruling 06 R2) — on a Keychain build a
+/// tracked project config may not move values to plaintext files. The
+/// refusal is a fixed kind that names the machine key and echoes nothing
+/// from the repository; nothing is written. Off macOS `file` stays allowed.
+/// Red when `check_project_backend` lets the project `file` through.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_file_backend_is_refused_on_a_keychain_build() {
+    let fx = fixture();
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        format!("# {SENTINEL}\nsecrets:\n  backend: file\n"),
+    )
+    .unwrap();
+    let (factory, file) = with_file_backend(&fx);
+    let server = fx.start_with(factory).await;
+    let set = call(
+        &fx.settings.socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A", "value": VALUE}),
+    )
+    .await;
+    let project = vault("trusty/acme/web");
+    if cfg!(target_os = "macos") {
+        let text = wire(&set);
+        assert!(!text.contains(SENTINEL) && !text.contains(VALUE), "{text}");
+        assert!(text.contains("secrets.default_backend"), "{text}");
+        assert_eq!(
+            fixed_error(&set, method::SET),
+            ErrorKind::TrackedBackendRefused
+        );
+        assert!(file.get(&project, &key("A")).unwrap().is_none());
+        assert_eq!(
+            fx.keychain.len(),
+            0,
+            "never a silent switch to the Keychain"
+        );
+    } else {
+        ok(set);
+        assert_eq!(
+            file.get(&project, &key("A")).unwrap().unwrap().expose(),
+            VALUE
+        );
+    }
     server.stop().await;
 }
 
@@ -863,7 +1081,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 22;
+    const ARMS: usize = 24;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -887,7 +1105,9 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::EnvResolutionFailed => 18,
             ErrorKind::DotenvSyntax => 19,
             ErrorKind::RemoteHostUnsupported => 20,
-            ErrorKind::Internal => 21,
+            ErrorKind::StorageRefused => 21,
+            ErrorKind::TrackedBackendRefused => 22,
+            ErrorKind::Internal => 23,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1173,7 +1393,25 @@ async fn server_exits_when_idle_and_removes_its_socket() {
 async fn server_second_instance_is_refused_and_the_first_keeps_serving() {
     let fx = fixture();
     let first = fx.start().await;
-    let second = serve(fx.settings.clone(), fx.backends(), std::future::ready(())).await;
+    // #9326: the socket accepts before the first binder drops its bind lock,
+    // so under load the second binder can meet `BindInProgress`, a transient
+    // refusal (#8759). Retry inside a bound; the assertion below is unchanged.
+    let started = std::time::Instant::now();
+    let second = loop {
+        let attempt = serve(fx.settings.clone(), fx.backends(), std::future::ready(())).await;
+        let in_progress = matches!(
+            &attempt,
+            Err(ServeError::Bind { source, .. })
+                if matches!(
+                    source.downcast_ref::<UdsSecurityError>(),
+                    Some(UdsSecurityError::BindInProgress { .. })
+                )
+        );
+        if !in_progress || started.elapsed() > Duration::from_secs(5) {
+            break attempt;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert!(
         matches!(
             second,

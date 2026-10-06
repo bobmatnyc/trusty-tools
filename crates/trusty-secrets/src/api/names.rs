@@ -272,9 +272,18 @@ impl BackendId {
         Ok(Self(lowered))
     }
 
+    /// The 0600 value-file backend (#9326): the default only on a host with
+    /// no Keychain backend, otherwise chosen only by config.
+    pub const FILE: &'static str = "file";
+
     /// The `keychain` backend id.
     pub fn keychain() -> Self {
         Self(Self::KEYCHAIN.to_string())
+    }
+
+    /// The `file` backend id.
+    pub fn file() -> Self {
+        Self(Self::FILE.to_string())
     }
 
     /// A backend id from a compile-time literal the crate itself defines.

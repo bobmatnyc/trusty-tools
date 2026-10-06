@@ -224,6 +224,40 @@ pub struct BackendStatus {
     pub capabilities: Vec<String>,
 }
 
+/// How the selected backend keeps values at rest (#9326).
+///
+/// Why: owner ruling f5 — the 0600 file backend is a degraded posture, and
+/// doctor must say so whether config chose it or the host has no Keychain.
+/// What: decided from the selected backend id alone. An unknown wire value
+/// decodes as [`StoragePosture::Other`].
+/// Test: `server_doctor_reports_the_file_posture`,
+/// `server_unknown_posture_decodes_as_other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StoragePosture {
+    /// The OS Keychain holds values.
+    Keychain,
+    /// Values are plaintext 0600 files in 0700 directories: degraded.
+    FileDegraded,
+    /// Another backend; its row in [`DoctorResponse::backends`] describes it.
+    /// Also what an older client decodes a posture it does not know as.
+    // #9326: `serde(other)`, so a variant added later never fails a decode.
+    #[serde(other)]
+    Other,
+}
+
+impl StoragePosture {
+    /// The posture of backend `id`.
+    pub fn of(id: &BackendId) -> Self {
+        match id.as_str() {
+            BackendId::KEYCHAIN => Self::Keychain,
+            BackendId::FILE => Self::FileDegraded,
+            _ => Self::Other,
+        }
+    }
+}
+
 /// `secrets.doctor` response: backend availability and paths only.
 // #9073: §7 `detect_backends` grows the doctor table, so callers read it only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,14 +277,20 @@ pub struct DoctorResponse {
     pub selected_backend: BackendId,
     /// Every backend this build knows, plus the selected one.
     pub backends: Vec<BackendStatus>,
+    /// The selected backend's at-rest posture. `None` only when decoding an
+    /// answer from a server older than #9326.
+    #[serde(default)]
+    pub posture: Option<StoragePosture>,
 }
 
 /// `secrets.doctor`: which backends this build can open, and where it looks.
 ///
 /// What: S2 has no `detect_backends` yet (§7 lands with the CLI-backed
 /// integrations), so "available" means "this build opens it". Opening a
-/// backend reads no secret. Reports paths and ids only.
-/// Test: `server_doctor_reports_backends_and_paths_only`.
+/// backend reads no secret. Reports paths, ids and the selected backend's
+/// [`StoragePosture`] only.
+/// Test: `server_doctor_reports_backends_and_paths_only`,
+/// `server_doctor_reports_the_file_posture`.
 pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
@@ -268,7 +308,8 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
             crate::store::config::resolve(None, machine.as_ref()).backend
         }
     };
-    let mut ids = vec![BackendId::keychain()];
+    // #9326: the file backend is listed beside the Keychain.
+    let mut ids = vec![BackendId::keychain(), BackendId::file()];
     if !ids.contains(&selected) {
         ids.push(selected.clone());
     }
@@ -291,6 +332,7 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
         machine_config: state.settings.machine_config.clone(),
         project_root: project.as_ref().map(|p| p.root().to_path_buf()),
         project_config: project.as_ref().map(ProjectContext::config_path),
+        posture: Some(StoragePosture::of(&selected)),
         selected_backend: selected,
         backends,
     })

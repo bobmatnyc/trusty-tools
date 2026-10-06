@@ -11782,6 +11782,7 @@ dependencies = [
  "dirs 5.0.1",
  "fd-lock",
  "keyring",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml",
