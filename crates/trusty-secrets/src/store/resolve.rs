@@ -130,7 +130,9 @@ pub enum VarSource {
 /// caller which values came from a reference (the ones to scrub from the
 /// child's output).
 /// Test: `resolve_sentinel_never_appears_in_output_types`.
+// #9328: `#[non_exhaustive]`; only this crate builds one.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ResolvedVar {
     /// The env variable name.
     pub name: String,

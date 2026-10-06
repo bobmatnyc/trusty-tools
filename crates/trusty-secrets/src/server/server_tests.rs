@@ -857,6 +857,46 @@ async fn server_project_path_must_be_an_absolute_directory() {
     server.stop().await;
 }
 
+/// Why: #9328 — a kind missing from `ErrorKind::ALL` reads as `None` on the
+/// client. The match below is exhaustive, so a new variant fails to compile
+/// until it gets the next index; `ARMS` is that index plus one.
+/// Test: itself.
+#[test]
+fn error_kind_all_lists_every_variant_once() {
+    const ARMS: usize = 22;
+    fn index(kind: ErrorKind) -> usize {
+        match kind {
+            ErrorKind::InvalidParams => 0,
+            ErrorKind::ProjectInvalid => 1,
+            ErrorKind::ProjectUnresolved => 2,
+            ErrorKind::VaultOutOfScope => 3,
+            ErrorKind::InvalidValue => 4,
+            ErrorKind::NotFound => 5,
+            ErrorKind::Unsupported => 6,
+            ErrorKind::UnknownBackend => 7,
+            ErrorKind::BackendFailed => 8,
+            ErrorKind::OrphanedBackendEntry => 9,
+            ErrorKind::IndexCorrupt => 10,
+            ErrorKind::IndexBusy => 11,
+            ErrorKind::StorageUnavailable => 12,
+            ErrorKind::ConfigInvalid => 13,
+            ErrorKind::HomeUnavailable => 14,
+            ErrorKind::SameBackend => 15,
+            ErrorKind::AgentUseRefused => 16,
+            ErrorKind::InvalidEnvEntry => 17,
+            ErrorKind::EnvResolutionFailed => 18,
+            ErrorKind::DotenvSyntax => 19,
+            ErrorKind::RemoteHostUnsupported => 20,
+            ErrorKind::Internal => 21,
+        }
+    }
+    assert_eq!(ErrorKind::ALL.len(), ARMS);
+    for (i, kind) in ErrorKind::ALL.into_iter().enumerate() {
+        assert_eq!(index(kind), i, "{kind:?} is out of place in ErrorKind::ALL");
+        assert_eq!(ErrorKind::from_wire(kind.as_str()), Some(kind));
+    }
+}
+
 /// Why: DOC-74 §15.6 — every failure is fixed text per method and kind,
 /// never the router's `params do not decode: {e}`.
 /// Test: itself.
@@ -1225,12 +1265,12 @@ fn settings_flags_beat_env_beat_defaults() {
     .unwrap();
     assert_eq!(
         flags,
-        ServerSettings {
-            socket: "/f/s.sock".into(),
-            index_root: "/f/index".into(),
-            machine_config: "/f/m.yaml".into(),
-            idle_timeout: Duration::from_secs(2),
-        }
+        ServerSettings::new(
+            "/f/s.sock".into(),
+            "/f/index".into(),
+            "/f/m.yaml".into(),
+            Duration::from_secs(2),
+        )
     );
 
     if let Some(home) = dirs::home_dir() {

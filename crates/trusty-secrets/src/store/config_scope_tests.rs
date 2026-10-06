@@ -8,7 +8,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::config::{
-    MachineSecretsConfig, ProjectSecretsConfig, load_machine_at, load_project_at, resolve,
+    MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig, load_machine_at, load_project_at,
+    resolve,
 };
 use super::*;
 use crate::api::methods::ScopeKind;
@@ -34,6 +35,9 @@ fn config_backend_precedence_table() {
     let bare_project = ProjectSecretsConfig::default();
 
     assert_eq!(resolve(None, None).backend.as_str(), "keychain");
+    let default = ResolvedConfig::default();
+    assert_eq!(default.backend.as_str(), "keychain");
+    assert!(default.vault_override.is_none());
     assert_eq!(
         resolve(None, Some(&machine)).backend.as_str(),
         "onepassword"

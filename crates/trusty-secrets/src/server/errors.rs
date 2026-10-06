@@ -24,8 +24,10 @@ use crate::api::SecretsError;
 /// [`ErrorKind::text`] the human sentence, [`ErrorKind::code`] the JSON-RPC
 /// code. `#[non_exhaustive]` binds other crates only: the matches in this
 /// file stay exhaustive, so a new kind fails the build until it has a kind
-/// string, a sentence and a code.
-/// Test: `server_error_text_is_fixed_per_method_and_kind`.
+/// string, a sentence and a code. A new kind must also join
+/// `ErrorKind::ALL`, or the client reads it from the wire as `None`.
+/// Test: `server_error_text_is_fixed_per_method_and_kind`,
+/// `error_kind_all_lists_every_variant_once`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {

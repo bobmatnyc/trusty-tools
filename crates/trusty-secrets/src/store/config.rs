@@ -89,6 +89,15 @@ pub struct ResolvedConfig {
     pub vault_override: Option<VaultName>,
 }
 
+/// `resolve(None, None)`: the Keychain backend and no vault override.
+/// Test: `config_backend_precedence_table`.
+// #9328: `#[non_exhaustive]` blocks a literal, so other crates start here.
+impl Default for ResolvedConfig {
+    fn default() -> Self {
+        resolve(None, None)
+    }
+}
+
 /// Apply the DOC-74 §6.1 precedence.
 ///
 /// Test: `config_backend_precedence_table`.
