@@ -21,6 +21,8 @@
 #     envlocal-green the same layout without the file starts the stub
 #     stop-owned     `--stop DIR` ends a stubbed daemon started by the launcher,
 #                    removes sandbox.pid, and the launcher exits
+#     second-launcher a second start on a live sandbox refuses non-zero; the
+#                    first daemon survives with sandbox.pid unchanged, then stops
 #     stop-decoy     `--stop DIR` refuses a recorded pid whose argv lacks DIR and
 #                    leaves it alive
 #     live           with a real trusty-memory binary: start, socket under
@@ -228,6 +230,56 @@ else
   pass stop-owned
 fi
 wait "$LAUNCHER6" 2>/dev/null || true
+
+# 6b. second-launcher: a live sandbox refuses a second start and keeps its daemon.
+DIR6B="$TMP_ROOT/case6b"
+mkdir -p "$DIR6B"
+run_launcher --bin "$HOLD" --dir "$DIR6B" > "$TMP_ROOT/case6b.log" 2>&1 &
+LAUNCHER6B=$!
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$DIR6B/sandbox.pid" ]; do sleep 0.1; i=$((i + 1)); done
+CHILD6B="$(cat "$DIR6B/sandbox.pid" 2>/dev/null || true)"
+# Backgrounded and bounded: a launcher without the guard starts a second stub
+# and never returns, which must fail this case, not hang the selftest.
+run_launcher --bin "$HOLD" --dir "$DIR6B" > "$TMP_ROOT/case6b-second.log" 2>&1 &
+SECOND6B=$!
+i=0
+while [ "$i" -lt 50 ] && kill -0 "$SECOND6B" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+STATUS6B=0
+AFTER6B="$(cat "$DIR6B/sandbox.pid" 2>/dev/null || true)"
+if kill -0 "$SECOND6B" 2>/dev/null; then
+  STATUS6B=running
+  # Its stub now owns sandbox.pid: stop it, then the first stub by its pid.
+  bash "$LAUNCHER" --stop "$DIR6B" >/dev/null 2>&1 || true
+  wait "$SECOND6B" 2>/dev/null || true
+  [ -z "$CHILD6B" ] || kill "$CHILD6B" 2>/dev/null || true
+else
+  wait "$SECOND6B" || STATUS6B=$?
+fi
+OUT6B="$(cat "$TMP_ROOT/case6b-second.log")"
+if [ -z "$CHILD6B" ]; then
+  fail second-launcher "the first launcher wrote no sandbox.pid: $(cat "$TMP_ROOT/case6b.log")"
+elif [ "$STATUS6B" = 0 ] || [ "$STATUS6B" = running ] \
+  || ! printf '%s' "$OUT6B" | grep -qF "pid $CHILD6B already runs this sandbox"; then
+  fail second-launcher "second start: exit $STATUS6B, want non-zero with the refusal: $OUT6B"
+elif ! kill -0 "$CHILD6B" 2>/dev/null || [ "$AFTER6B" != "$CHILD6B" ]; then
+  fail second-launcher "first daemon $CHILD6B dead or sandbox.pid changed to [$AFTER6B]"
+else
+  pass second-launcher
+fi
+set +e
+OUT6C="$(bash "$LAUNCHER" --stop "$DIR6B" 2>&1)"
+STATUS6C=$?
+set -e
+i=0
+while [ "$i" -lt 50 ] && kill -0 "$LAUNCHER6B" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+if [ "$STATUS6C" -ne 0 ] || { [ -n "$CHILD6B" ] && kill -0 "$CHILD6B" 2>/dev/null; } \
+  || [ -e "$DIR6B/sandbox.pid" ] || kill -0 "$LAUNCHER6B" 2>/dev/null; then
+  fail second-launcher-stop "exit $STATUS6C; daemon or launcher alive, or pidfile kept: $OUT6C"
+else
+  pass second-launcher-stop
+fi
+wait "$LAUNCHER6B" 2>/dev/null || true
 
 # 7. stop-decoy: a recorded pid whose argv lacks DIR is refused and survives.
 DIR7="$TMP_ROOT/case7"

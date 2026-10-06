@@ -332,6 +332,17 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
+# A second launcher on a live sandbox would overwrite sandbox.pid and orphan
+# the first daemon. A dead or foreign pid is stale and does not block.
+if [ -f "$SANDBOX/sandbox.pid" ]; then
+  prev=""
+  read -r prev < "$SANDBOX/sandbox.pid" || true
+  # owned_pid first: it rejects a non-numeric or group-shaped value before kill -0.
+  if owned_pid "$prev" "$SANDBOX" && is_alive "$prev"; then
+    die "pid $prev already runs this sandbox ($SANDBOX/sandbox.pid); stop it with: scripts/sandbox_memory_daemon.sh --stop $SANDBOX"
+  fi
+fi
+
 mkdir -p "$SANDBOX/home" "$SANDBOX/data" "$SANDBOX/bin"
 ln -sfn "$BIN" "$LINK"
 
