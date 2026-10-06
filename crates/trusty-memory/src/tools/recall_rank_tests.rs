@@ -183,3 +183,61 @@ fn ranking_window_doubles_top_k_and_caps() {
     assert_eq!(ranking_window(500, None), 500, "never below top_k");
     assert_eq!(ranking_window(10, Some(0.4)), 40, "the floor's window wins");
 }
+
+/// Tied hits in DESCENDING drawer-id order, so an input-order-preserving sort
+/// leaves them backwards.
+fn tied_hits_in_reverse_id_order(now: DateTime<Utc>) -> Vec<RecallResult> {
+    let mut hits: Vec<RecallResult> = (0..6)
+        .map(|_| hit(drawer("tie", &["kg"], Duration::zero(), now), 0.5))
+        .collect();
+    hits.sort_by(|a, b| b.drawer.id.cmp(&a.drawer.id));
+    hits
+}
+
+fn ids_ascending(hits: &[RecallResult]) -> bool {
+    hits.windows(2).all(|w| w[0].drawer.id < w[1].drawer.id)
+}
+
+/// Why (#9280): equal scores kept the lane's order, and a rebuilt vector index
+/// can return tied drawers in a different order on each open.
+/// What: six tied hits fed in descending id order must rank by ascending
+/// drawer id after demotion, and a lower layer still wins a tie first.
+#[test]
+fn tied_scores_rank_by_drawer_id_whatever_the_input_order() {
+    let now = Utc::now();
+    let mut results = tied_hits_in_reverse_id_order(now);
+    demote_stale_snapshots(&mut results, now);
+    assert!(
+        ids_ascending(&results),
+        "ties must rank by drawer id: {results:#?}"
+    );
+
+    let mut pinned = hit(drawer("tie", &["kg"], Duration::zero(), now), 0.5);
+    pinned.layer = 1;
+    pinned.drawer.id = Uuid::max();
+    results.push(pinned);
+    demote_stale_snapshots(&mut results, now);
+    assert_eq!(
+        results[0].layer, 1,
+        "a lower layer wins a tie before the id"
+    );
+}
+
+/// Why (#9280): the RRF fusion re-sort is the last sort before demotion on the
+/// BM25 path, and it left tied drawers in input order.
+/// What: six tied hits in descending id order, fused with a BM25 hit that
+/// boosts none of them; the fused list must rank them by ascending id.
+#[test]
+fn fusion_ranks_tied_drawers_by_id_whatever_the_input_order() {
+    use crate::bm25_lane::BM25Hit;
+    let mut results = tied_hits_in_reverse_id_order(Utc::now());
+    let unrelated = BM25Hit {
+        doc_id: Uuid::new_v4().to_string(),
+        score: 1.0,
+    };
+    crate::tools::bm25::fuse_bm25_into_recall(&mut results, &[unrelated], 10);
+    assert!(
+        ids_ascending(&results),
+        "ties must rank by drawer id: {results:#?}"
+    );
+}
