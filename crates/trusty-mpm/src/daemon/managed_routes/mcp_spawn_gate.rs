@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 use trusty_common::github_path::parse_github_path;
 
+use crate::core::remote_url_redact::redact_stored_url;
 use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root, workspace_subpath};
 use crate::project::{Project, ProjectRegistry, derive_name_from_url};
 
@@ -300,7 +301,8 @@ pub fn is_known_repo(projects: &[Project], config: &TrustyToolsConfig, repo_url:
 /// passes silently (`Ok(())`).
 /// Test: `tests::ensure_mcp_spawn_allowed_disabled_by_default`,
 /// `tests::ensure_mcp_spawn_allowed_enabled_but_unregistered`,
-/// `tests::ensure_mcp_spawn_allowed_enabled_and_registered`.
+/// `tests::ensure_mcp_spawn_allowed_enabled_and_registered`,
+/// `tests::ensure_mcp_spawn_allowed_refusal_masks_a_stored_password_9285`.
 pub async fn ensure_mcp_spawn_allowed(
     registry: &ProjectRegistry,
     config: &TrustyToolsConfig,
@@ -320,11 +322,12 @@ pub async fn ensure_mcp_spawn_allowed(
         .await
         .map_err(|e| format!("failed to read project registry: {e}"))?;
     if !is_known_repo(&projects, config, repo_url) {
-        let name_hint = derive_name_from_url(repo_url).unwrap_or_else(|| repo_url.to_string());
+        let shown = redact_stored_url(repo_url);
+        let name_hint = derive_name_from_url(repo_url).unwrap_or_else(|| shown.to_string());
         return Err(format!(
-            "refusing MCP-initiated spawn for unregistered repo `{repo_url}`; register it \
+            "refusing MCP-initiated spawn for unregistered repo `{shown}`; register it \
              first with the `project_register` MCP tool (name=\"{name_hint}\", \
-             repo_url=\"{repo_url}\") or add it under `projects:` in \
+             repo_url=\"{shown}\") or add it under `projects:` in \
              ~/.trusty-tools/trusty-mpm/config.yaml, then retry"
         ));
     }
@@ -752,6 +755,48 @@ mod tests {
                 .expect_err("must refuse an unregistered repo even when spawning is enabled");
         assert!(err.contains("unregistered"), "{err}");
         assert!(err.contains("project_register"), "{err}");
+    }
+
+    /// #9285: the refusal echoes `repo_url` twice and falls back to it as the
+    /// name hint, so all three print it masked.
+    #[tokio::test]
+    #[serial]
+    async fn ensure_mcp_spawn_allowed_refusal_masks_a_stored_password_9285() {
+        let _env = EnvGuard::unset();
+        let dir = TempDir::new().expect("tempdir");
+        let registry = ProjectRegistry::load(dir.path()).await.expect("load");
+        let cfg = TrustyToolsConfig {
+            daemon: Some(DaemonConfig {
+                allow_mcp_spawn: Some(true),
+            }),
+            ..Default::default()
+        };
+        for (url, masked) in [
+            (
+                "https://u:pa'ss9285@github.com/acme/widget",
+                "https://***@github.com/acme/widget",
+            ),
+            (
+                "https://u:pa ss9285@github.com/acme/widget",
+                "https://***@github.com/acme/widget",
+            ),
+            // No repo segment, so the name hint falls back to the URL itself.
+            ("https://u:pa'ss9285@host/", "https://***@host/"),
+        ] {
+            let err = ensure_mcp_spawn_allowed(&registry, &cfg, url)
+                .await
+                .expect_err("an unregistered repo is refused");
+            assert!(
+                !err.contains("ss9285"),
+                "a password fragment survived: {err}"
+            );
+            assert!(
+                !err.contains("u:pa"),
+                "the user:password pair survived: {err}"
+            );
+            assert!(err.contains(&format!("repo `{masked}`")), "{err}");
+            assert!(err.contains(&format!("repo_url=\"{masked}\"")), "{err}");
+        }
     }
 
     #[tokio::test]

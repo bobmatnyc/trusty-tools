@@ -133,7 +133,9 @@ pub(crate) async fn register(client: &DaemonClient, input: RegisterInput) -> any
     let project = client.registry_register_project(&args).await?;
     println!(
         "registered project '{}' ({} @ {})",
-        project.name, project.repo_url, project.default_branch
+        project.name,
+        trusty_mpm::core::remote_url_redact::redact_stored_url(&project.repo_url),
+        project.default_branch
     );
     // #7166 review follow-up: a successful upsert that REPLACES a previously
     // pinned account is a fact worth a visible trail, not just a failure warning.

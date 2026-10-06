@@ -2306,6 +2306,33 @@ fn new_session_entry_without_a_checkout_names_the_clone_step() {
     );
 }
 
+/// #9285: the "names no checkout directory" refusal echoes the typed clone URL,
+/// which a `user:password@` can ride in on, so it prints the URL masked.
+#[test]
+fn new_session_entry_with_no_checkout_masks_the_typed_password_9285() {
+    fn no_checkout(_: &str) -> Option<PathBuf> {
+        None
+    }
+    let err = super::new_session_entry::request_for_entry_with(
+        "https://u:pa'ss9285@github.com/acme/gadget",
+        &targets(),
+        no_checkout,
+    )
+    .expect_err("a URL with no checkout directory cannot be started");
+    assert!(
+        !err.contains("ss9285"),
+        "a password fragment survived: {err}"
+    );
+    assert!(
+        !err.contains("u:pa"),
+        "the user:password pair survived: {err}"
+    );
+    assert!(
+        err.starts_with("https://***@github.com/acme/gadget names no checkout"),
+        "{err}"
+    );
+}
+
 /// An entry naming a project the registry already holds never re-registers it.
 ///
 /// Why: `register` is an unqualified upsert, so a redundant call would replace
