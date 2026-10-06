@@ -93,15 +93,21 @@ pub fn check_drawer_counts() -> CheckResult {
 /// The check's verdict for the history under `root` at `now`.
 ///
 /// Why/What: design §4. Fail when any palace's newest window is
-/// unexplained; else Warn when a palace was removed or the newest snapshot is
-/// stale; else Pass when at least one palace compared clean; else Unknown
-/// (no history, baseline pending, unreadable counts). A history holding lines
+/// unexplained; else Warn when a palace was removed, the newest snapshot is
+/// stale, a palace's newest count is unavailable, or a palace's deletion
+/// journal is unreadable (#9283: each named with its reason, because such a
+/// palace can never go red); else Pass when at least one palace compared
+/// clean; else Warn when every palace is waiting for its second count (the
+/// first-day baseline); else Unknown (no history). A history holding lines
 /// from a newer schema is refused: Unknown, never judged.
 /// Test: `drawer_counts_doctor_goes_red_on_unjournaled_drop`,
 /// `drawer_counts_doctor_green_when_journaled`,
 /// `drawer_counts_doctor_green_for_user_forget`,
 /// `v2_incompatible_reset_to_empty_turns_doctor_red`,
-/// `future_schema_line_is_refused_not_dropped`.
+/// `future_schema_line_is_refused_not_dropped`,
+/// `an_uncountable_palace_is_named_and_never_green`,
+/// `a_first_day_baseline_warns_instead_of_undetermined`,
+/// `an_unreadable_journal_is_named_and_never_green`.
 pub(crate) fn verdict(root: &Path, now: DateTime<Utc>) -> CheckResult {
     let history = match counts::read_history(root) {
         Ok(h) => h,
@@ -118,6 +124,7 @@ pub(crate) fn verdict(root: &Path, now: DateTime<Utc>) -> CheckResult {
     }
     let verdicts = analysis::judge(&history, &|p| load_journal(root, p));
     let (mut red, mut removed, mut unknown, mut clean) = (vec![], vec![], vec![], 0usize);
+    let (mut uncountable, mut unreadable, mut pending) = (vec![], vec![], 0usize);
     for (palace, v) in &verdicts {
         match v {
             Verdict::Unexplained(w) => red.push(format!(
@@ -128,11 +135,15 @@ pub(crate) fn verdict(root: &Path, now: DateTime<Utc>) -> CheckResult {
                 removed.push(format!("{palace} (last seen {last_day})"))
             }
             Verdict::Clean(_) => clean += 1,
-            Verdict::BaselinePending => unknown.push(format!("{palace}: baseline pending")),
-            Verdict::Unavailable => unknown.push(format!("{palace}: count unavailable")),
-            Verdict::JournalUnreadable(e) => {
-                unknown.push(format!("{palace}: journal unreadable: {e}"))
+            Verdict::BaselinePending => {
+                pending += 1;
+                unknown.push(format!("{palace}: baseline pending"));
             }
+            Verdict::Unavailable => uncountable.push(format!(
+                "{palace}: {}",
+                newest_reason(&history, palace).unwrap_or("reason not recorded")
+            )),
+            Verdict::JournalUnreadable(e) => unreadable.push(format!("{palace}: {e}")),
         }
     }
     let tail = if unknown.is_empty() {
@@ -157,17 +168,50 @@ pub(crate) fn verdict(root: &Path, now: DateTime<Utc>) -> CheckResult {
                 (now - t).num_hours()
             )
         });
-    if !removed.is_empty() || stale.is_some() {
-        let mut parts: Vec<String> = stale.into_iter().collect();
-        if !removed.is_empty() {
-            parts.push(format!("palace removed: {}", removed.join(", ")));
-        }
+    let mut parts: Vec<String> = stale.into_iter().collect();
+    if !removed.is_empty() {
+        parts.push(format!("palace removed: {}", removed.join(", ")));
+    }
+    // #9283: an uncountable palace can never go red, so it never reads green.
+    if !uncountable.is_empty() {
+        parts.push(format!(
+            "{} palace(s) uncountable: {}",
+            uncountable.len(),
+            uncountable.join("; ")
+        ));
+    }
+    // #9283: without its journal a palace's drop cannot be judged either.
+    if !unreadable.is_empty() {
+        parts.push(format!("journal unreadable: {}", unreadable.join("; ")));
+    }
+    if !parts.is_empty() {
         return CheckResult::warn(LABEL, format!("{}{tail}", parts.join("; ")));
     }
     if clean > 0 {
         return CheckResult::pass(LABEL, format!("{clean} palace(s) explained{tail}"));
     }
+    // #9283: the first day is an observed state, not an undetermined probe;
+    // Unknown here failed every first-day doctor run (#4001).
+    if pending > 0 {
+        return CheckResult::warn(
+            LABEL,
+            format!(
+                "baseline pending: {pending} palace(s) counted once; the first comparison \
+                 follows the next UTC day's snapshot"
+            ),
+        );
+    }
     CheckResult::unknown(LABEL, format!("no palace comparable yet{tail}"))
+}
+
+/// The reason recorded on `palace`'s newest snapshot line, if any (#9283).
+fn newest_reason<'h>(history: &'h History, palace: &str) -> Option<&'h str> {
+    history
+        .lines
+        .iter()
+        .filter(|l| l.palace == palace && l.ack.is_none())
+        .max_by_key(|l| l.at)
+        .and_then(|l| l.reason.as_deref())
 }
 
 /// The refusal text for a history holding newer-schema lines.
