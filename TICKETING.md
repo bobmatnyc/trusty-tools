@@ -151,7 +151,7 @@ gh project item-add 45 --owner bobmatnyc --url https://github.com/bobmatnyc/trus
 ## Lifecycle
 
 Status lives in the `Status` single-select field on project #45 (trusty-tools-master), not in labels.
-Seven values, in order: ToDo, Groomed, In development, Development complete, Merged, Deployed, Published.
+Seven values, in order: Backlog, Groomed, In development, Development complete, Merged, Deployed, Published.
 GitHub's open/closed state is separate. Two date fields, `Deployed on` and `Published on`, record those stages.
 
 **Hand-maintained period (owner ruling fc).** The migration and the tooling follow-ups (`tm issue
@@ -163,7 +163,7 @@ at migration and deleted after one release soak.
 
 | Status | Entry condition | Moved by | Evidence |
 |---|---|---|---|
-| ToDo | Issue created | auto-add workflow, ticketing agent | none |
+| Backlog | Issue created | auto-add workflow, ticketing agent | none |
 | Groomed | Selected for work | ticketing agent, on PM instruction | selecting session in a comment |
 | In development | Engineer session claimed it | PM at dispatch | claim comment, session and date |
 | Development complete | PR open, `Refs #N` | `tm pr open` | PR link |
@@ -234,7 +234,7 @@ Every issue body and every comment ends with the attribution line below.
 | `comment_verbosity` | pointer-first — links and the decisive line; evidence inline only where the reader cannot act without it |
 | `rollup_issue` | [#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021) |
 | `pr_issue_link` | `Refs #N` (fixed) |
-| `status_on_creation` | ToDo — filing is not a dispatch; In development waits for a brief that says work starts now |
+| `status_on_creation` | Backlog — filing is not a dispatch; In development waits for a brief that says work starts now |
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
 | `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>` |
 | `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |

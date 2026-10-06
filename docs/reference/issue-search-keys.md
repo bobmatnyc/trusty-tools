@@ -48,7 +48,7 @@ a fresh one.
 
 ## Once the issue exists: move it with `tm issue transition`
 
-Status lives on Project #45 (ToDo → Groomed → In development → Development
+Status lives on Project #45 (Backlog → Groomed → In development → Development
 complete → Merged → Deployed → Published); see [TICKETING.md](../../TICKETING.md).
 Until the migration lands, the `status:*` labels (`status:in-progress` →
 `status:coded` → `status:merged` → `status:tested`) are also maintained, are
