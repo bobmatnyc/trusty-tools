@@ -734,8 +734,11 @@ struct Body {
 /// before it compares a line with the word, so `a\`, `EOF` does not end the
 /// body and `\`, `EOF` may. Where the joined and the line-by-line reading
 /// disagree on a line, `Err` — the scan cannot place the body's end.
+/// #9180 critic: the logical line is kept only while it could still equal
+/// the word ([`Logical`]), so a long continued run scans in linear time.
 /// Test: `heredoc_bodies_claim_nothing_when_unterminated`,
-/// `heredoc_bodies_refuse_a_continuation_they_cannot_place_9180`.
+/// `heredoc_bodies_refuse_a_continuation_they_cannot_place_9180`,
+/// `heredoc_bodies_scan_a_long_continued_body_in_linear_time_9180`.
 fn body_span(
     command: &str,
     lines: &[(usize, usize)],
@@ -747,13 +750,13 @@ fn body_span(
     };
     let ends = |text: &str, last| is_terminator(text, &delimiter.word, delimiter.strip_tabs, last);
     // The logical line so far, `\`-newline removed, while one is continuing.
-    let mut logical: Option<String> = None;
+    let mut logical: Option<Logical> = None;
     for (index, (start, end)) in lines.iter().enumerate().skip(from) {
         let last = index + 1 == lines.len();
         let text = &command[*start..*end];
-        let whole = logical.take().map(|head| format!("{head}{text}"));
+        let whole = logical.take().map(|head| head.join(text, delimiter));
         if let Some(whole) = &whole
-            && ends(text, last) != ends(whole, last)
+            && ends(text, last) != whole.text.as_deref().is_some_and(|w| ends(w, last))
         {
             return Err(Abandon::Delimiter);
         }
@@ -765,11 +768,47 @@ fn body_span(
             }));
         }
         if !delimiter.quoted && odd_trailing_backslashes(text) {
-            let whole = whole.unwrap_or_else(|| text.to_string());
-            logical = Some(whole[..whole.len() - 1].to_string());
+            let mut whole = whole.unwrap_or_else(|| {
+                Logical {
+                    text: Some(String::new()),
+                }
+                .join(text, delimiter)
+            });
+            if let Some(kept) = &mut whole.text {
+                // Drop the `\` whose newline the shell removes.
+                kept.pop();
+            }
+            logical = Some(whole);
         }
     }
     Ok(None)
+}
+
+/// A continued body line as [`body_span`] compares it with a delimiter word
+/// (#9180): `None` once it is longer than the word with leading `<<-` tabs
+/// dropped, since appending only lengthens it and it can never match.
+struct Logical {
+    text: Option<String>,
+}
+
+impl Logical {
+    /// `self` followed by the line `text`, kept to at most one byte past the
+    /// word, so no line is copied whole.
+    fn join(self, text: &str, delimiter: &Delimiter) -> Self {
+        let Some(mut head) = self.text else {
+            return self;
+        };
+        let text = if delimiter.strip_tabs && head.is_empty() {
+            text.trim_start_matches('\t')
+        } else {
+            text
+        };
+        if head.len() + text.len() > delimiter.word.len() + 1 {
+            return Self { text: None };
+        }
+        head.push_str(text);
+        Self { text: Some(head) }
+    }
 }
 
 /// Whether `text` ends in an odd run of `\`, so its newline is a continuation.

@@ -10,8 +10,51 @@
 //! Test: the `evaluate_bash_command_*` substitution rows in `tests.rs`;
 //! `continuation_tests::the_forbidden_verb_guard_reads_heredoc_expansions_9180`.
 
+use std::cell::Cell;
+
 use super::substitutions;
 use super::{MAX_SUBSTITUTION_DEPTH, SHELL_EDIT_REASON, Substitution, evaluate_bash_command_inner};
+
+/// Substitution bodies one command may judge before it denies (#9180).
+///
+/// Why: an unquoted `cat` here-document's `$(…)` is judged by the
+/// here-document path and again by the segment path, so each nested level
+/// doubled the work: 24 levels in ~500 bytes ran 2^24 evaluations, past the
+/// hook's 10 s timeout, which then failed every later rule open.
+/// What: [`judge_bodies`] spends one unit per body it judges and denies with
+/// [`CLASSIFY_WORK_REASON`] once [`Walk::spend`] reports the budget gone, as
+/// `MAX_DELETE_WORK` does for the rm-root floor. Real commands judge a few
+/// dozen bodies.
+pub(super) const MAX_CLASSIFY_WORK: usize = 4096;
+
+/// Deny reason once [`MAX_CLASSIFY_WORK`] is spent (#9180). Not
+/// [`SHELL_EDIT_REASON`]: that one is budget-eligible, so the PM's per-turn
+/// file-change budget would allow the command the guard could not finish.
+pub(crate) const CLASSIFY_WORK_REASON: &str = "this command nests more substitution and \
+     here-document bodies than the guard will judge, so it cannot classify what would actually \
+     run (#9180). Split it into smaller commands.";
+
+/// The forbidden-verb guard's recursion state: the substitution `depth` and
+/// the work counter one command shares across every level (#9180).
+#[derive(Clone, Copy)]
+pub(super) struct Walk<'a> {
+    depth: usize,
+    work: &'a Cell<usize>,
+}
+
+impl<'a> Walk<'a> {
+    /// The depth-0 walk of one command, counting into `work`.
+    pub(super) fn new(work: &'a Cell<usize>) -> Self {
+        Self { depth: 0, work }
+    }
+
+    /// Spends one unit; `false` once [`MAX_CLASSIFY_WORK`] is spent.
+    /// Test: `continuation_tests::the_forbidden_verb_guard_counts_its_work_9180`.
+    fn spend(self) -> bool {
+        self.work.set(self.work.get() + 1);
+        self.work.get() <= MAX_CLASSIFY_WORK
+    }
+}
 
 /// Inspect every substitution in a segment — `$(…)`, `<(…)`, `>(…)`, and
 /// backticks — for hidden forbidden verbs.
@@ -51,16 +94,23 @@ use super::{MAX_SUBSTITUTION_DEPTH, SHELL_EDIT_REASON, Substitution, evaluate_ba
 /// `evaluate_bash_command_denies_output_process_substitution_by_classification`,
 /// `evaluate_bash_command_allows_readonly_process_substitution`,
 /// `evaluate_bash_command_denies_unbalanced_process_substitution`.
-pub(super) fn classify_command_substitutions(segment: &str, depth: usize) -> Option<&'static str> {
-    judge_bodies(substitutions::segment_substitutions(segment), depth)
+pub(super) fn classify_command_substitutions(
+    segment: &str,
+    walk: Walk<'_>,
+) -> Option<&'static str> {
+    judge_bodies(substitutions::segment_substitutions(segment), walk)
 }
 
 /// Judge each substitution body as a command `depth + 1` levels down: the core
 /// of [`classify_command_substitutions`], shared with the here-document bodies
-/// [`substitutions::heredoc_expansions`] lists (#9180).
-/// Test: `continuation_tests::the_forbidden_verb_guard_reads_heredoc_expansions_9180`.
-pub(super) fn judge_bodies(bodies: Vec<Substitution>, depth: usize) -> Option<&'static str> {
-    if depth >= MAX_SUBSTITUTION_DEPTH {
+/// [`substitutions::heredoc_expansions`] lists (#9180). #9180 critic: each
+/// body judged spends one unit of the command's [`Walk`] budget, and a spent
+/// budget denies like the depth cap.
+/// Test: `continuation_tests::the_forbidden_verb_guard_reads_heredoc_expansions_9180`,
+/// `continuation_tests::the_forbidden_verb_guard_counts_its_work_9180`,
+/// `continuation_tests::a_doubling_heredoc_nest_denies_in_bounded_time_9180`.
+pub(super) fn judge_bodies(bodies: Vec<Substitution>, walk: Walk<'_>) -> Option<&'static str> {
+    if walk.depth >= MAX_SUBSTITUTION_DEPTH {
         // Too deeply nested to safely decompose — deny conservatively rather
         // than recurse further and risk a stack overflow.
         return Some(SHELL_EDIT_REASON);
@@ -69,8 +119,14 @@ pub(super) fn judge_bodies(bodies: Vec<Substitution>, depth: usize) -> Option<&'
         match body {
             // Unbalanced opener — cannot decompose; deny conservatively.
             Substitution::Unclosed(_) => return Some(SHELL_EDIT_REASON),
+            // #9180: a spent budget denies, so nested bodies cannot multiply.
+            Substitution::Closed(_) if !walk.spend() => return Some(CLASSIFY_WORK_REASON),
             Substitution::Closed(text) => {
-                if let Some(reason) = evaluate_bash_command_inner(&text, depth + 1) {
+                let deeper = Walk {
+                    depth: walk.depth + 1,
+                    ..walk
+                };
+                if let Some(reason) = evaluate_bash_command_inner(&text, deeper) {
                     return Some(reason);
                 }
             }

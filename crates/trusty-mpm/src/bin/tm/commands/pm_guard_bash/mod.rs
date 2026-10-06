@@ -96,7 +96,7 @@ mod shell_lex;
 mod substitutions;
 // #9180: the forbidden-verb verdict on substitution and here-document bodies.
 mod substitution_verdicts;
-use substitution_verdicts::{classify_command_substitutions, judge_bodies};
+use substitution_verdicts::{Walk, classify_command_substitutions, judge_bodies};
 mod worktree_remove;
 // #8849: the removal guard's ancestry route for a HEAD behind its merged head.
 mod worktree_remove_ancestry;
@@ -272,7 +272,8 @@ const MAX_WRAPPER_DEPTH: usize = 8;
 /// ([`shell_lex::WrappedCommand::Unlexable`]), or a wrapper nested past
 /// [`MAX_WRAPPER_DEPTH`], or a here-document delimiter the body scanner cannot
 /// read as the shell does (#9150). #9180: the continuation-joined spelling
-/// is checked too. `None` — the ordinary case — leaves every
+/// is checked too, and a command that opens a here-document while it
+/// redefines a data reader ([`heredoc_line::heredoc_refusal`]) is refused. `None` — the ordinary case — leaves every
 /// rule to classify the command as before.
 /// Test: `unclassifiable_command_flags_ansi_c_quoting`,
 /// `unclassifiable_command_flags_an_unlexable_wrapper`,
@@ -286,9 +287,10 @@ pub(crate) fn unclassifiable_command(command: &str) -> Option<&'static str> {
 
 /// Depth-aware core of [`unclassifiable_command`].
 fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
-    // #9150: no rule can tell which lines run past an unreadable delimiter.
-    if heredoc::HeredocBodies::scan(command).is_unscannable() {
-        return Some(heredoc::HEREDOC_DELIMITER_REASON);
+    // #9150: no rule can tell which lines run past an unreadable delimiter;
+    // #9180: nor whether a body runs once a data reader is redefined.
+    if let Some(reason) = heredoc_line::heredoc_refusal(command) {
+        return Some(reason);
     }
     // #9180: `$\`, newline, `'\x2f'` is `$'\x2f'` to the shell.
     if let Some(reason) = continuation::joined(command).and_then(|j| unclassifiable_at(&j, depth)) {
@@ -334,14 +336,15 @@ fn unclassifiable_at(command: &str, depth: usize) -> Option<&'static str> {
 /// Test: `evaluate_bash_command_denies_*`, `evaluate_bash_command_allows_*`,
 /// `evaluate_bash_command_denies_composition_*`.
 pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
-    evaluate_bash_command_inner(command, 0)
+    evaluate_bash_command_inner(command, Walk::new(&std::cell::Cell::new(0)))
 }
 
 /// Depth-aware core of [`evaluate_bash_command`].
 ///
 /// Why: command substitutions recurse back into this classifier; carrying an
-/// explicit `depth` lets [`classify_command_substitutions`] bound that
-/// recursion (see [`MAX_SUBSTITUTION_DEPTH`]) instead of trusting the stack.
+/// explicit [`Walk`] lets [`classify_command_substitutions`] bound that
+/// recursion (see [`MAX_SUBSTITUTION_DEPTH`]) instead of trusting the stack,
+/// and #9180 bounds its total work across levels.
 /// What: splits on the shell composition operators `&&`, `||`, `;`, `|`, a bare
 /// `&`, and a newline (see [`split_shell_segments`]), runs
 /// [`classify_bash_segment`] on each — denying if ANY segment names a forbidden
@@ -354,8 +357,9 @@ pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
 /// an unquoted here-document body expands — nested ones included — is judged
 /// as a substitution body.
 /// Test: covered via `evaluate_bash_command_*` (this is its core);
-/// `continuation_tests::the_forbidden_verb_guard_reads_heredoc_expansions_9180`.
-fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static str> {
+/// `continuation_tests::the_forbidden_verb_guard_reads_heredoc_expansions_9180`,
+/// `continuation_tests::a_doubling_heredoc_nest_denies_in_bounded_time_9180`.
+fn evaluate_bash_command_inner(command: &str, walk: Walk<'_>) -> Option<&'static str> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return None;
@@ -368,15 +372,15 @@ fn evaluate_bash_command_inner(command: &str, depth: usize) -> Option<&'static s
     }
     // #9180: the continuation-joined spelling, then what the here-documents expand.
     let joined = continuation::joined(trimmed);
-    if let Some(reason) = joined.and_then(|j| evaluate_bash_command_inner(&j, depth)) {
+    if let Some(reason) = joined.and_then(|j| evaluate_bash_command_inner(&j, walk)) {
         return Some(reason);
     }
     let expanded = substitutions::heredoc_expansions(trimmed);
-    if let Some(reason) = expanded.map_or(Some(SHELL_EDIT_REASON), |b| judge_bodies(b, depth)) {
+    if let Some(reason) = expanded.map_or(Some(SHELL_EDIT_REASON), |b| judge_bodies(b, walk)) {
         return Some(reason);
     }
     for segment in split_shell_segments(trimmed) {
-        if let Some(reason) = classify_bash_segment(&segment, depth) {
+        if let Some(reason) = classify_bash_segment(&segment, walk) {
             return Some(reason);
         }
     }
@@ -543,9 +547,9 @@ fn split_shell_segments_raw(command: &str) -> Vec<&str> {
 /// matches the two-token forms `git apply` / `npm test` via
 /// [`effective_tool_name`]; and finally inspects any command substitution /
 /// subshell in the segment via [`classify_command_substitutions`] (carrying
-/// the recursion `depth`). Empty/whitespace segments allow.
+/// the recursion [`Walk`]). Empty/whitespace segments allow.
 /// Test: covered via `evaluate_bash_command_*` (this is its per-segment core).
-fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
+fn classify_bash_segment(segment: &str, walk: Walk<'_>) -> Option<&'static str> {
     let trimmed = segment.trim();
     if trimmed.is_empty() {
         return None;
@@ -583,7 +587,7 @@ fn classify_bash_segment(segment: &str, depth: usize) -> Option<&'static str> {
     if effective_tool_name(trimmed) == "npm test" {
         return Some(BUILD_TEST_REASON);
     }
-    classify_command_substitutions(trimmed, depth)
+    classify_command_substitutions(trimmed, walk)
 }
 
 /// Best-effort target path for a shell command already classified as a

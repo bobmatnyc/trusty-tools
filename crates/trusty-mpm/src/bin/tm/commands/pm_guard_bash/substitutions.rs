@@ -22,7 +22,7 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use super::heredoc::{HeredocBodies, blank_spans};
-use super::heredoc_line::{line_names, line_runs_a_shell};
+use super::heredoc_line::{line_names, line_reads_as_data};
 use super::shell_lex::QuoteScan;
 use super::{is_evaluator, split_shell_segments};
 
@@ -295,29 +295,31 @@ fn names_a_runner(line: &str, runners: &[&str]) -> bool {
     line_names(line, |word| runners.contains(&word))
 }
 
-/// The text of each here-document body a shell runs — its operator line
-/// names a shell, or one of `runners` — as that shell receives it (#9155).
+/// The text of each here-document body a shell may run, as that shell
+/// receives it (#9155).
 ///
 /// Why: such a body is a command of its own, but the segment splitter cuts it
 /// at every newline, so a here-document nested in it (`bash <<'O'` around
 /// `bash <<I` around `echo '$(rm -rf /)'`) was never read whole and its
 /// single-quoted substitution never expanded.
-/// What: each body [`HeredocBodies::bodies`] lists whose operator line runs a
-/// shell ([`line_runs_a_shell`]) or names a runner; an unquoted-delimiter body
+/// What: each body [`HeredocBodies::bodies`] lists whose operator line does
+/// not read it as data ([`line_reads_as_data`]); an unquoted-delimiter body
 /// is first unescaped as the outer shell does ([`unescape_expanding_body`]).
 /// #9180: the list holds a body the scan claimed nothing for — one with no
 /// terminator, read to the end of input, or one in a command whose quotes do
 /// not balance — so a here-document nested in it is still read.
+/// #9180 critic: fail-closed — a body is shell-run unless every program on
+/// its operator line is a literal data reader, so `$(printf bas)h`, `b$X`, a
+/// function, `.`, `source`, `eval` and `tcsh` run theirs.
 /// Test: `shell_run_heredoc_bodies_are_read_as_whole_commands_9155`,
-/// `shell_run_heredoc_bodies_include_an_unterminated_body_9180`.
-pub(crate) fn shell_run_heredoc_bodies(command: &str, runners: &[&str]) -> Vec<String> {
+/// `shell_run_heredoc_bodies_include_an_unterminated_body_9180`,
+/// `continuation_tests::the_floor_reads_every_unnamed_program_body_9180`.
+pub(crate) fn shell_run_heredoc_bodies(command: &str) -> Vec<String> {
     HeredocBodies::scan(command)
         .bodies()
         .iter()
-        .filter(|body| {
-            let line = &command[body.operator_line.0..body.operator_line.1];
-            line_runs_a_shell(line) || names_a_runner(line, runners)
-        })
+        // #9180: unknown programs run their body.
+        .filter(|body| !line_reads_as_data(&command[body.operator_line.0..body.operator_line.1]))
         .map(|body| {
             let text = &command[body.span.0..body.span.1];
             if body.expands {
@@ -356,7 +358,7 @@ fn collect_expansions(command: &str, depth: usize, found: &mut Vec<Substitution>
             found.push(body);
         }
     }
-    shell_run_heredoc_bodies(command, HEREDOC_RUNNERS)
+    shell_run_heredoc_bodies(command)
         .iter()
         .all(|body| collect_expansions(body, depth + 1, found))
 }
@@ -532,14 +534,14 @@ mod tests {
     #[test]
     fn shell_run_heredoc_bodies_are_read_as_whole_commands_9155() {
         assert_eq!(
-            shell_run_heredoc_bodies("bash <<'O'\nbash <<I\nx\nI\nO", &[]),
+            shell_run_heredoc_bodies("bash <<'O'\nbash <<I\nx\nI\nO"),
             ["bash <<I\nx\nI\n"]
         );
         assert_eq!(
-            shell_run_heredoc_bodies("sudo -s <<O\necho \\$(a) \\\\ \\q\nO", &["sudo"]),
+            shell_run_heredoc_bodies("sudo -s <<O\necho \\$(a) \\\\ \\q\nO"),
             ["echo $(a) \\ \\q\n"]
         );
-        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI\nO", &["sudo"]).is_empty());
+        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI\nO").is_empty());
     }
 
     /// #9180: an unterminated shell-run body is returned to the end of input,
@@ -547,14 +549,11 @@ mod tests {
     #[test]
     fn shell_run_heredoc_bodies_include_an_unterminated_body_9180() {
         assert_eq!(
-            shell_run_heredoc_bodies("bash <<'O'\ncat <<I\nx\nI", &[]),
+            shell_run_heredoc_bodies("bash <<'O'\ncat <<I\nx\nI"),
             ["cat <<I\nx\nI"]
         );
-        assert_eq!(
-            shell_run_heredoc_bodies("(sudo -s<<'O'\nx\nO\n)", &["sudo"]),
-            ["x\n"]
-        );
-        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI", &[]).is_empty());
+        assert_eq!(shell_run_heredoc_bodies("(sudo -s<<'O'\nx\nO\n)"), ["x\n"]);
+        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI").is_empty());
     }
 
     /// #9180: the expansions of a here-document nested in a shell-run body

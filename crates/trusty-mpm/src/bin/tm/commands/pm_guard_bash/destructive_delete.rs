@@ -485,7 +485,7 @@ fn classify_at_depth(
 }
 
 /// The commands `command` runs as text of their own: each here-document body
-/// a shell or a [`HEREDOC_RUNNERS`] program runs, and the inner string of each
+/// a shell may run (#9180: any but a data reader's), and the inner string of each
 /// top-level `sh -c` / `bash -c` / `eval` / `xargs` wrapper (#9155).
 ///
 /// Why: the segment splitter cuts both at every newline, so `bash <<'O'`
@@ -496,7 +496,7 @@ fn classify_at_depth(
 /// each top-level segment. A deeper wrapper is reached by the recursion.
 /// Test: `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`.
 fn nested_commands(command: &str) -> Vec<String> {
-    let mut found = shell_run_heredoc_bodies(command, HEREDOC_RUNNERS);
+    let mut found = shell_run_heredoc_bodies(command);
     for raw in split_shell_segments_raw(command) {
         if let shell_lex::WrappedCommand::Inner(inner) = shell_lex::wrapped_command(raw.trim()) {
             found.push(inner);

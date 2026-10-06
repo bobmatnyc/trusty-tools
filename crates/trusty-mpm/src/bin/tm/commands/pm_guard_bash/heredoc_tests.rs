@@ -432,3 +432,18 @@ fn heredoc_bodies_keep_every_body_when_abandoned_9180() {
     assert_eq!(bodies.bodies().len(), 1);
     assert!(!HeredocBodies::scan("cat <<'X'\nx\nX").lost_confidence());
 }
+
+/// #9180 critic: a body of a million continued lines (~3 MB) scans in linear
+/// time; the logical line was copied on every continued line, O(L^2), which
+/// the critic's 200 000-line (~600 KB) shape already spent seconds on.
+#[test]
+fn heredoc_bodies_scan_a_long_continued_body_in_linear_time_9180() {
+    let command = format!("cat <<X\n{}b\nX", "a\\\n".repeat(1_000_000));
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found = HeredocBodies::scan(&command);
+        send.send(found.spans().len()).ok();
+    });
+    let spans = recv.recv_timeout(std::time::Duration::from_secs(2));
+    assert_eq!(spans, Ok(1), "no scan within 2 s");
+}
