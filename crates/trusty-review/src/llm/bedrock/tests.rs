@@ -1156,3 +1156,37 @@ fn capture_write_failure_leaves_the_response_identical() {
     );
     assert!(!dir.exists());
 }
+
+/// A `toolUse` reply whose findings omit `title` parses with its verdict (#9310).
+///
+/// Why: in tool-choice auto, Claude on Bedrock calls `review_output` but may
+/// omit `title`; that reply was UNKNOWN before the title was derived.
+/// What: a structured reply with one untitled finding goes through
+/// `response_text` and `parse_review_response`.
+/// Test: this test.
+#[test]
+fn tool_use_reply_with_untitled_findings_parses() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let input = serde_json::json!({
+        "verdict": "REQUEST_CHANGES",
+        "summary": "One defect.",
+        "findings": [{
+            "body": "The retry loop never backs off. It hammers the API.",
+            "severity": "medium",
+            "confidence": 0.7,
+            "file": "src/client.rs",
+            "line": 40
+        }]
+    });
+    let text = super::response_text(&reply_with_blocks(vec![tool_use_block(input)]), true);
+    let parsed = parse_review_response(&text);
+    assert!(
+        !parsed.is_fail_safe,
+        "reason: {:?}",
+        parsed.fail_safe_reason
+    );
+    assert_eq!(parsed.verdict, Verdict::RequestChanges);
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(parsed.findings[0].kind, "The retry loop never backs off");
+}

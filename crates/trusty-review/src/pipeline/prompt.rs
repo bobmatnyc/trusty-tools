@@ -165,6 +165,15 @@ pub fn review_response_schema() -> ResponseSchema {
                             "type": ["string", "null"],
                             "description": "EXACT replacement code for the line(s) at `line`, suitable for a one-click GitHub suggestion block. Provide ONLY when the fix is a concrete code replacement that maps to specific line(s) at this location; otherwise null and describe the fix in `body`. Do NOT include a code fence or surrounding prose — just the literal replacement line(s)."
                         },
+                        // #9310: `source_citation` (#1419) is a real `LlmFinding`
+                        // field the prompt asks for, but strict mode's
+                        // `additionalProperties: false` made it unsendable. Nullable,
+                        // like `suggested_replacement`, so strict mode requires the
+                        // key but the model sends `null` when it has no citation.
+                        "source_citation": {
+                            "type": ["string", "null"],
+                            "description": "Exact spec, ticket, doc or code-location source that grounds this finding, when a context snippet carries one. Otherwise null — never invent a citation."
+                        },
                         // `code_provable` (#PR84) is a plain boolean added to
                         // `required` by `enforce_strict_mode` for OpenAI strict.
                         // It is the core-algorithmic-correctness gate: only a
