@@ -157,7 +157,10 @@ over UDS" and "Should be lightweight and fast."
 One backend trait covers stores and sync targets. Keychain ships first. Then
 one PR per integration: 1Password, Vercel, GitHub Actions, Keeper. Doppler and
 AWS Secrets Manager fit the same trait. Vercel's development target is opt-in
-per key, because Vercel development values are readable.
+per key, because Vercel development values are readable. trusty-secrets 0.1.0
+stores credentials in the macOS Keychain by default; the 0600 file is only a
+fallback where no Keychain exists (owner ruling f5, 2026-10-06;
+[#4570](https://github.com/bobmatnyc/trusty-tools/issues/4570) is in 0.1.0).
 
 **Why:** Owner ruling: "It should have integrations with keychain, 1P, keeper,
 Vercel etc."
@@ -322,7 +325,8 @@ the console.
 
 ### Out of Scope
 
-- A Go client (later).
+- A Go client (ruling f6, 2026-10-06: out of 0.1.0).
+- Doppler and AWS Secrets Manager integrations (ruling f6, 2026-10-06: out of 0.1.0).
 - Machine-scope secrets.
 - Showing, exporting or revealing a stored value.
 - `copy` across projects (ruling 2026-09-23: `copy` stays in-project).
@@ -336,7 +340,7 @@ All rulings are the owner's, dated, and recorded on
 
 | Date | Ruling |
 |------|--------|
-| 2026-09-11 | Default store is the machine's encrypted store; per-project store choice; auto-detect local tools; a source `.env` is never deleted after import. |
+| 2026-09-11 | Default store is the machine's encrypted store (the macOS Keychain, per f5, 2026-10-06); per-project store choice; auto-detect local tools; a source `.env` is never deleted after import. |
 | 2026-09-12 | Headless: accept a service-account token from an env var for 1Password/Keeper; otherwise fail closed. |
 | 2026-09-17 | `set` replaces `add` (upsert); clipboard is the default value source; confirm with first 8 characters and length. |
 | 2026-09-23 | Scheduled for 2.0.0; cross-repo sharing only via explicit `secrets.vault`; `copy` stays in-project. |
@@ -346,6 +350,8 @@ All rulings are the owner's, dated, and recorded on
 | 2026-10-01 | "It should have integrations with keychain, 1P, keeper, Vercel etc." / "It should also have integrations with programming languages." |
 | 2026-10-01 | List shows length and updated_at only; first 8 characters once on set. Owner scope = GitHub owner from the git remote; no machine scope; project > owner. Remote: "Local or Tailscale." Order: Keychain through the console page first, then one PR per integration. Default taken: Vercel development target opt-in per key. |
 | 2026-10-01 | Per-key "agents may use" flag, default OFF. All three language tiers are in scope. |
+| 2026-10-06 | f5 "Keychain default": trusty-secrets 0.1.0 stores credentials in the macOS Keychain by default; the 0600 file is only a fallback where no Keychain exists. [#4570](https://github.com/bobmatnyc/trusty-tools/issues/4570) is in 0.1.0; this supersedes the 2026-09-21 "500 file" reading. |
+| 2026-10-06 | f6 "Both out": Doppler/AWS timing and the Go client are out of 0.1.0. |
 
 ---
 
@@ -388,11 +394,11 @@ DOC-74 §15.9 holds the slice table with test-ladder rungs.
 
 ## Open Questions
 
-1. **Doppler and AWS Secrets Manager timing.** The trait covers both as CLI
+1. **Resolved (f6 "Both out", 2026-10-06): out of 0.1.0.** **Doppler and AWS Secrets Manager timing.** The trait covers both as CLI
    sources. The owner's integration order names 1Password, Vercel, GitHub
    Actions and Keeper. Do Doppler and AWS follow in that queue, or wait for
    demand?
-2. **Go client timing.** Go is out of scope for this PRD. Which release picks
+2. **Resolved (f6 "Both out", 2026-10-06): out of 0.1.0.** **Go client timing.** Go is out of scope for this PRD. Which release picks
    it up?
 
 ---
