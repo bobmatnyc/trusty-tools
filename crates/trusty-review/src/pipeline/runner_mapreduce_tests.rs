@@ -89,7 +89,7 @@ impl LlmProvider for RecordingReviewer {
             // after an LLM synthesis pass.  A Medium finding might be holistically
             // softened by synthesis (the intended calibration); a High finding must
             // ALWAYS floor to BLOCK/REQUEST_CHANGES regardless of synthesis (#1663).
-            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
+            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"`pub fn build(a: i32, b: i32, c: i32, previous: Option<i32>)` changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
@@ -504,9 +504,11 @@ async fn mapreduce_phantom_missing_file_finding_does_not_block() {
 
     let result = run_review(&config, input(source), deps(llm)).await;
 
+    // #9188 A: the phantom was the only finding and it was withheld, so the
+    // review has no verified finding: `Unknown`, never BLOCK and never APPROVE.
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
+        Verdict::Unknown,
         "a claim the changeset itself refutes must not drive the verdict (#1873)"
     );
     assert!(
@@ -1060,11 +1062,13 @@ async fn mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff() {
         "a finding citing a file absent from the diff reached the merged review — the \
          citation check is not wired into the map-reduce path (#4042 / #4045): {leaked:?}"
     );
+    // #9188 A: every finding was withheld, so the review is `Unknown` — the
+    // fabricated BLOCK does not survive, and nothing verified approves it either.
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
+        Verdict::Unknown,
         "the only non-APPROVE chunk rested on the fabricated finding, so the merged \
-         verdict must relax to APPROVE rather than block a clean diff"
+         verdict must not block a clean diff"
     );
 }
 

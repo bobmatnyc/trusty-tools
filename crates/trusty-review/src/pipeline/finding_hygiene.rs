@@ -318,7 +318,9 @@ pub fn demote_diff_absent_speculation(findings: &mut [Finding]) -> usize {
 /// neither already `Approve` nor the terminal `Unknown`, resets `verdict` to
 /// `Approve` and `grade` to `None` (letting the caller's existing
 /// `default_grade_for_verdict` fallback recompute a grade consistent with
-/// APPROVE) and logs why. No-op otherwise.
+/// APPROVE) and logs why. No-op otherwise. Kept with its original signature
+/// for API compatibility; [`relax_wiped_verdict`] also returns the model's
+/// original verdict (#9188).
 /// Test: `relaxes_verdict_when_all_findings_wiped_this_run`,
 /// `does_not_relax_when_findings_were_already_empty`,
 /// `does_not_relax_when_findings_survive`.
@@ -328,11 +330,28 @@ pub fn relax_verdict_if_evidence_wiped(
     findings_before: usize,
     findings: &[Finding],
 ) {
+    let _ = relax_wiped_verdict(verdict, grade, findings_before, findings);
+}
+
+/// [`relax_verdict_if_evidence_wiped`], returning the model's original
+/// verdict when it relaxed one (#9188, Architect ruling option A).
+///
+/// Why: the caller carries that verdict to `settle_no_survivors`, so a
+/// blocking review whose every finding was wiped ends UNKNOWN, not APPROVE.
+/// What: same relaxation; `Some(original)` when it relaxed, `None` otherwise.
+/// Test: `relaxes_verdict_when_all_findings_wiped_this_run`,
+/// `does_not_touch_an_already_approve_verdict`.
+pub fn relax_wiped_verdict(
+    verdict: &mut Verdict,
+    grade: &mut Option<String>,
+    findings_before: usize,
+    findings: &[Finding],
+) -> Option<Verdict> {
     if findings_before == 0 || !findings.is_empty() {
-        return;
+        return None;
     }
     if *verdict == Verdict::Approve || *verdict == Verdict::Unknown {
-        return;
+        return None;
     }
     warn!(
         prior_findings = findings_before,
@@ -341,8 +360,8 @@ pub fn relax_verdict_if_evidence_wiped(
          top-level verdict/grade rested on the same evidence and cannot be \
          trusted either; relaxing to APPROVE (#4042, #4044)"
     );
-    *verdict = Verdict::Approve;
     *grade = None;
+    Some(std::mem::replace(verdict, Verdict::Approve))
 }
 
 /// Return the first marker from `markers` found (case-insensitively) in

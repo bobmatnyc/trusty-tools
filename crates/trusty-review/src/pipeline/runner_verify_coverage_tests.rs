@@ -80,9 +80,9 @@ async fn review_findings(
 }
 
 /// (a) A non-verdict-changing fabricated finding — an advisory Medium at 0.80
-/// on an APPROVE review — is sent to the verifier, refuted, and not posted;
-/// the emptied review is withheld as UNKNOWN with no grade, an error, and the
-/// withhold note leading the body.
+/// on an APPROVE review — is sent to the verifier, refuted, and not posted.
+/// AQ-7t (Bob 2026-10-05): the emptied review keeps APPROVE with no error, and
+/// the withhold note leads the body.
 #[tokio::test]
 async fn run_review_posts_no_refuted_advisory_finding() {
     let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
@@ -95,9 +95,8 @@ async fn run_review_posts_no_refuted_advisory_finding() {
         "#8904: a refuted finding must not be posted, got {:?}",
         result.findings
     );
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
-    assert!(result.error.is_some());
+    assert_eq!(result.verdict, Verdict::Approve, "{:?}", result.error);
+    assert!(result.error.is_none(), "{:?}", result.error);
     assert!(
         result
             .review_body
@@ -128,12 +127,14 @@ async fn run_review_unjudged_finding_is_counted_as_withheld_unverified() {
 /// #4044 ("withhold all", 2026-09-30): verification enabled but no verifier
 /// provider (its build failed) posts nothing. The finding is withheld with
 /// reason "no verifier", marked `Unverifiable` so the #4459 alarm counts it,
-/// and the review is UNKNOWN with no grade.
+/// and the blocking review is UNKNOWN with no grade (AQ-7t).
 #[tokio::test]
 async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
     let config = default_config();
     assert!(config.verification.enabled, "precondition");
-    let result = review_advisory(&config, None).await;
+    let finding =
+        medium_at_sum_line("`amounts.iter().sum::<u64>()` can overflow on large invoices.");
+    let result = review_findings(&config, None, "REQUEST_CHANGES", vec![finding]).await;
 
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert_eq!(withheld_reasons(&result), vec!["no verifier"]);
@@ -149,6 +150,7 @@ async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
     assert_eq!(result.unverified_count, 1);
     assert_eq!(result.verdict, Verdict::Unknown);
     assert_eq!(result.grade, None);
+    assert!(crate::run_output::run_is_failure(&result));
     assert!(
         result
             .review_body
@@ -160,9 +162,9 @@ async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
 
 /// #4044 ("withhold all", 2026-09-30; supersedes #8904's 09-29 rule):
 /// verification disabled by config posts nothing. Every finding is withheld
-/// with reason "no verifier" and the review is UNKNOWN with no grade — never
-/// an APPROVE resting on findings nobody checked. Disabling is an operator
-/// choice, so nothing is counted as an outage.
+/// with reason "no verifier" and the blocking review is UNKNOWN with no grade
+/// (AQ-7t). Disabling is an operator choice, so nothing is counted as an
+/// outage.
 #[tokio::test]
 async fn run_review_disabled_verification_withholds_every_finding() {
     let mut config = default_config();
@@ -171,7 +173,7 @@ async fn run_review_disabled_verification_withholds_every_finding() {
         medium_at_sum_line("`amounts.iter().sum::<u64>()` can overflow on large invoices."),
         medium_at_sum_line("`amounts.iter().sum::<u64>()` ignores negative refunds."),
     ];
-    let result = review_findings(&config, None, "APPROVE", findings).await;
+    let result = review_findings(&config, None, "REQUEST_CHANGES", findings).await;
 
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert_eq!(
@@ -196,6 +198,54 @@ async fn run_review_disabled_verification_withholds_every_finding() {
         "{}",
         result.review_body
     );
+}
+
+/// AQ-7t (Bob 2026-10-05) on the no-verifier path: an APPROVE review whose
+/// every finding no verifier round checked keeps APPROVE and exits 0, with
+/// `withheld_count` and `verdict_status` in `run --json`. Covers verification
+/// enabled with no verifier built, and verification disabled by config.
+#[tokio::test]
+async fn run_review_no_verifier_all_withheld_approve_stays_approve_and_exits_zero() {
+    let mut disabled = default_config();
+    disabled.verification.enabled = false;
+    for (config, why) in [
+        (default_config(), "no verifier provider could be built"),
+        (disabled, "verification is disabled"),
+    ] {
+        let result = review_advisory(&config, None).await;
+        let json = crate::run_output::run_json_payload(&result);
+
+        assert_eq!(
+            result.verdict,
+            Verdict::Approve,
+            "{why}: {:?}",
+            result.error
+        );
+        assert!(
+            !crate::run_output::run_is_failure(&result),
+            "{why}: an all-withheld APPROVE exits 0: {:?}",
+            result.error
+        );
+        assert!(result.findings.is_empty(), "{why}: {:?}", result.findings);
+        assert_eq!(json["verdict"], "APPROVE", "{why}: {json}");
+        assert_eq!(
+            json["verdict_status"], "no_verified_findings",
+            "{why}: {json}"
+        );
+        assert_eq!(json["withheld_count"], 1, "{why}: {json}");
+        assert_eq!(
+            json["withheld_by_reason"]["no_verifier"], 1,
+            "{why}: {json}"
+        );
+        assert!(json.get("error").is_none(), "{why}: {json}");
+        assert!(
+            result
+                .review_body
+                .starts_with(&format!("1 findings withheld: no verifier ({why})")),
+            "{}",
+            result.review_body
+        );
+    }
 }
 
 /// Counts verifier requests and refutes every finding.
@@ -329,8 +379,9 @@ async fn run_review_records_a_refuted_finding_as_withheld() {
 
 /// #4044 (owner ruling on #8905, 2026-09-30): only a CONFIRMED finding is
 /// posted. A finding the verifier judges UNVERIFIABLE is withheld with the
-/// reason "unverifiable" and counted as withheld-unverified; the APPROVE
-/// review it was an advisory on keeps its verdict (the #8949 rule).
+/// reason "unverifiable" and counted as withheld-unverified. It was the
+/// review's only finding; AQ-7t (Bob 2026-10-05): the APPROVE review keeps its
+/// verdict and reports `verdict_status` instead of turning `Unknown`.
 /// Red on `origin/main`: it was posted as a demoted advisory.
 #[tokio::test]
 async fn run_review_withholds_an_unverifiable_finding() {
@@ -347,7 +398,11 @@ async fn run_review_withholds_an_unverifiable_finding() {
     assert_eq!(withheld_reasons(&result), vec!["unverifiable"]);
     assert_eq!(result.withheld_unverified_count, 1);
     assert_eq!(result.unverified_count, 1);
-    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.verdict, Verdict::Approve, "{:?}", result.error);
+    assert_eq!(
+        result.verdict_status.as_deref(),
+        Some("no_verified_findings")
+    );
     assert!(
         result
             .review_body

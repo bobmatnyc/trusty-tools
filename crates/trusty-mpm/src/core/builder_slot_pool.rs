@@ -36,6 +36,14 @@
 //! **A slot holding a live build is never replaced (#8794).** Seeding checks
 //! the cargo `flock`s in the slot and refuses while one is held.
 //!
+//! **A seed is bounded (#9239).** The clone runs against a deadline
+//! ([`SlotPool::seed_within`]); past it `cp` is killed, its staging tree is
+//! discarded, and the slot is committed COLD, so the lease holder builds
+//! instead of waiting on a clone measured at 30-76 minutes under I/O pressure.
+//! Every seed first sweeps dead owners' staging trees for every slot index,
+//! and a slot path is handed out only once its marker reads as seeded
+//! ([`SlotPool::committed`]). See [`staging`].
+//!
 //! Nothing here decides ADMISSION. The count comes from the build lease
 //! ([`crate::core::build_lease::admission`], #8261); this module only turns a
 //! granted slot index into a directory.
@@ -44,10 +52,25 @@
 //! #8311 is the 42,000-directory leak from tests that wrote under the real home.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use trusty_common::github_path::GithubPath;
 
 mod handover;
+// #9239: the bounded clone, the all-slot sweep and the status listing.
+pub mod staging;
+
+use staging::{CloneError, Cloner, clone_directory};
+
+/// The seed bound [`SlotPool::seed`] applies (#9239): the longest lease wait.
+///
+/// Why: no seed is unbounded any more; a caller with its own budget passes it
+/// to [`SlotPool::seed_within`] instead.
+pub const DEFAULT_SEED_WAIT: Duration =
+    Duration::from_secs(crate::core::build_lease::config::MAX_LEASE_WAIT_SECS);
+
+/// The cold-slot detail prefix when the clone missed its bound (#9239).
+const TIMED_OUT_PREFIX: &str = "copy-on-write clone did not finish within";
 
 /// The marker file that records a slot directory has been seeded.
 ///
@@ -193,6 +216,8 @@ pub struct SlotPool {
     checkout: Option<PathBuf>,
     /// #8794: slots `0..ceiling` are the only ones a claim may start seeding.
     ceiling: u32,
+    /// #9239: builds the clone command; `cp -c -R` outside tests.
+    cloner: Cloner,
 }
 
 impl SlotPool {
@@ -212,7 +237,39 @@ impl SlotPool {
             identity,
             checkout: None,
             ceiling: ceiling.max(1),
+            cloner: staging::cp_clone,
         }
+    }
+
+    /// Swap the clone command, so a test can prove the seed bound (#9239).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_cloner(mut self, cloner: Cloner) -> Self {
+        self.cloner = cloner;
+        self
+    }
+
+    /// `<root>/<owner>/<repo>`: the directory holding this repo's slots.
+    #[must_use]
+    pub fn repo_dir(&self) -> PathBuf {
+        self.root
+            .join(&self.identity.owner)
+            .join(&self.identity.repo)
+    }
+
+    /// Slot `index`'s path, only when its seed has committed (#9239).
+    ///
+    /// Why: a builder must never be handed a directory whose seed has not
+    /// committed — a half-cloned tree, or a staging tree. This is the one test
+    /// a caller applies before it sets `CARGO_TARGET_DIR`.
+    /// What: `Some(slot_path)` when [`SEED_MARKER`] reads as seeded, else
+    /// `None`. Never a staging path: it only ever returns `slot-<index>`.
+    /// Test: `a_marker_that_cannot_be_retired_is_never_committed`,
+    /// `a_reservation_on_a_seeded_slot_is_ready`.
+    #[must_use]
+    pub fn committed(&self, index: u32) -> Option<PathBuf> {
+        let path = self.slot_path(index);
+        marker_reads_seeded(&path).then_some(path)
     }
 
     /// The number of slot indexes, from zero, a claim may start seeding.
@@ -230,10 +287,7 @@ impl SlotPool {
     /// Test: `slot_paths_are_keyed_by_owner_and_repo`.
     #[must_use]
     pub fn slot_path(&self, index: u32) -> PathBuf {
-        self.root
-            .join(&self.identity.owner)
-            .join(&self.identity.repo)
-            .join(format!("slot-{index}"))
+        self.repo_dir().join(format!("slot-{index}"))
     }
 
     /// Is slot `index` usable right now, and if not, prepare for its seed.
@@ -279,8 +333,9 @@ impl SlotPool {
     /// pre-sized to the ceiling, so a machine that never reaches its ceiling
     /// never pays that disk. Seeding is one-time because a re-clone over a live
     /// build's artifacts would corrupt them; [`SEED_MARKER`] is what makes it
-    /// one-time across daemon restarts. This is the UNBOUNDED half of the pool
-    /// and must never run on a path a hook is waiting on — see the module doc.
+    /// one-time across daemon restarts. This is the slow half of the pool and
+    /// must never run on a path a hook is waiting on — see the module doc.
+    /// #9239: bounded by [`DEFAULT_SEED_WAIT`]; see [`Self::seed_within`].
     /// What: returns the slot's path and how it came to be. A directory whose
     /// marker reads as seeded is returned untouched. A slot where a cargo build
     /// holds its lock is refused and left as it is (#8794). A clone the
@@ -316,6 +371,40 @@ impl SlotPool {
         index: u32,
         clone_from: Option<&Path>,
     ) -> Result<(PathBuf, SeedKind), SlotPoolError> {
+        self.seed_within(index, clone_from, DEFAULT_SEED_WAIT)
+    }
+
+    /// [`Self::seed`], with the clone bounded by `wait` (#9239).
+    ///
+    /// Why: `tm build-lease` runs the seed while it holds the slot's lease, so
+    /// an unbounded clone held that builder — and every builder waiting on the
+    /// lease — for hours. The bound is the caller's own wait budget.
+    /// What: first sweeps every dead owner's staging tree beside the slots
+    /// (any index, non-blocking), then seeds as [`Self::seed`] does, except
+    /// that a clone still running at `wait` is killed and the slot is committed
+    /// as a cold [`SeedKind::ColdDirectory`] naming the bound. The returned
+    /// path always reads as committed; every error grants no directory.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seed`]. A marker that exists but does not read as seeded and
+    /// cannot be retired is [`SlotPoolError::SeedFailed`], never a grant.
+    ///
+    /// Test: `a_clone_past_its_deadline_is_killed_and_discarded`,
+    /// `a_dead_owners_staging_under_another_index_is_swept`,
+    /// `a_marker_that_cannot_be_retired_is_never_committed`.
+    pub fn seed_within(
+        &self,
+        index: u32,
+        clone_from: Option<&Path>,
+        wait: Duration,
+    ) -> Result<(PathBuf, SeedKind), SlotPoolError> {
+        // #9239: the deadline starts before the sweep, so nothing below outlasts it.
+        let deadline = Instant::now()
+            .checked_add(wait)
+            .unwrap_or_else(|| Instant::now() + DEFAULT_SEED_WAIT);
+        // #9239: every index, every lease — not only the slot being seeded.
+        staging::sweep_abandoned_staging(&self.repo_dir());
         let path = self.slot_path(index);
         if marker_reads_seeded(&path) {
             return Ok((path, SeedKind::AlreadySeeded));
@@ -324,7 +413,7 @@ impl SlotPool {
         // so how often seeding refuses or fails is measurable there.
         let repo = format!("{}/{}", self.identity.owner, self.identity.repo);
         tracing::info!(slot = %path.display(), %repo, "builder slot seed: replace attempt");
-        let result = seed_unmarked(&path, clone_from);
+        let result = seed_unmarked(&path, clone_from, self.cloner, deadline);
         match &result {
             Ok(kind) => {
                 tracing::info!(slot = %path.display(), %repo, outcome = "seeded", seed = ?kind, "builder slot seed: outcome");
@@ -344,17 +433,32 @@ impl SlotPool {
 }
 
 /// The unseeded half of [`SlotPool::seed`]: guard, clone, mark (#8794).
-fn seed_unmarked(path: &Path, clone_from: Option<&Path>) -> Result<SeedKind, SlotPoolError> {
+fn seed_unmarked(
+    path: &Path,
+    clone_from: Option<&Path>,
+    cloner: Cloner,
+    deadline: Instant,
+) -> Result<SeedKind, SlotPoolError> {
     // #8794: an unseeded slot can still hold a live build — a builder given
     // this directory by hand, or one admitted while the seed was pending. It is
     // refused before the clone as well as before the replace, so a refusal
     // costs no clone.
     refuse_active_build(path)?;
     retire_unseeded_marker(path);
-    sweep_abandoned_staging(path);
     let seed = match clone_from.filter(|src| src.is_dir()) {
-        Some(src) => match clone_directory(src, path) {
+        Some(src) => match clone_directory(src, path, cloner, deadline) {
             Ok(()) => SeedKind::ClonedFromShared,
+            // #9239: the clone missed its bound and was killed; start cold.
+            Err(CloneError::TimedOut(waited)) => {
+                if marker_reads_seeded(path) {
+                    return Ok(SeedKind::AlreadySeeded);
+                }
+                replace_with_cold(path)?;
+                SeedKind::ColdDirectory(format!(
+                    "{TIMED_OUT_PREFIX} {}s (#9239); the slot starts cold",
+                    waited.as_secs()
+                ))
+            }
             // A clone that lost the publish race to another run: the warm case.
             Err(CloneError::Published) => return Ok(SeedKind::AlreadySeeded),
             Err(CloneError::ActiveBuild(lock)) => {
@@ -417,10 +521,24 @@ fn publish_marker(path: &Path, seed: SeedKind) -> Result<SeedKind, SlotPoolError
             drop(std::fs::remove_file(seed_failure_path(path)));
             Ok(seed)
         }
+        // #9239: a lost election is the warm case ONLY when the winner's
+        // marker reads as seeded; one that could not be retired is no grant.
         Err(SlotPoolError::Create { source, .. })
             if source.kind() == std::io::ErrorKind::AlreadyExists =>
         {
-            Ok(SeedKind::AlreadySeeded)
+            if marker_reads_seeded(path) {
+                Ok(SeedKind::AlreadySeeded)
+            } else {
+                let detail = format!(
+                    "{} exists but does not read as seeded, and could not be retired",
+                    marker.display()
+                );
+                record_seed_failure(path, &detail);
+                Err(SlotPoolError::SeedFailed {
+                    path: path.to_path_buf(),
+                    detail,
+                })
+            }
         }
         Err(err) => Err(err),
     }
@@ -566,68 +684,33 @@ fn unique_nanos() -> u128 {
         .map_or(0, |d| d.as_nanos())
 }
 
-/// This run's private staging directory for `dst`.
-///
-/// Why: a fixed staging name is a shared mutable directory between any two seed
-/// runs, and the first act of a seed is to clear it — so the later run deletes
-/// the earlier one's tree mid-copy. The in-daemon registry cannot prevent that
-/// pairing across a restart: `std::process::Command` sets no death signal (macOS
-/// has none), so a `cp -c -R` outlives the daemon that spawned it while the new
-/// daemon's registry starts empty (#8261 critic round 3). PID plus nanoseconds
-/// is unique across both processes and repeated seeds within one.
-/// What: `<parent>/.<slot>.seeding.<pid>.<nanos>`.
-/// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
-fn staging_path(parent: &Path, slot: &str) -> PathBuf {
-    parent.join(format!(
-        "{STAGING_PREFIX_DOT}{slot}.seeding.{}.{}",
-        std::process::id(),
-        unique_nanos()
-    ))
-}
-
 /// The leading character every staging directory's name carries.
 const STAGING_PREFIX_DOT: &str = ".";
 
-/// Delete staging trees left by seed runs whose process is gone (#8261).
+/// Make `path` an empty cold slot after a clone missed its bound (#9239).
 ///
-/// Why: a staging tree is a full clone of the shared target directory, so an
-/// abandoned one is real disk — and abandoning one is now possible, because a
-/// `cp` that outlives its daemon can be killed before it publishes. Liveness is
-/// the only safe test: deleting a LIVE run's staging tree would restore exactly
-/// the two-writer corruption the unique name removes.
-/// What: scans the slot's parent for `.<slot>.seeding.<pid>.<nanos>` entries and
-/// removes only those whose `<pid>` is confirmed dead. An unparseable name, or a
-/// pid that is alive or undeterminable, is left alone (ADR-0045).
-/// Test: `two_staging_trees_for_one_index_publish_exactly_one_slot`.
-fn sweep_abandoned_staging(dst: &Path) {
-    let (Some(parent), Some(slot)) = (
-        dst.parent(),
-        dst.file_name().and_then(std::ffi::OsStr::to_str),
-    ) else {
-        return;
-    };
-    let prefix = format!("{STAGING_PREFIX_DOT}{slot}.seeding.");
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(&prefix)) else {
-            continue;
-        };
-        let Ok(pid) = rest.split('.').next().unwrap_or_default().parse::<u32>() else {
-            continue;
-        };
-        if crate::core::process::is_process_alive(pid) {
-            continue;
-        }
-        if let Err(err) = std::fs::remove_dir_all(entry.path()) {
-            tracing::warn!(
-                "could not sweep abandoned builder-slot staging {}: {err}",
-                entry.path().display()
-            );
-        }
+/// What: refuses a slot a live cargo build holds; moves any unseeded tree
+/// already at `path` aside with one rename ([`staging::discard`]); then
+/// creates the empty directory. The caller publishes the marker.
+fn replace_with_cold(path: &Path) -> Result<(), SlotPoolError> {
+    let _locks = hold_idle_build_locks(path).map_err(|lock| SlotPoolError::ActiveBuild {
+        path: path.to_path_buf(),
+        lock,
+    })?;
+    if path.exists()
+        && let Err(err) = staging::discard(path)
+    {
+        let detail = format!(
+            "could not move the unseeded {} aside: {err}",
+            path.display()
+        );
+        record_seed_failure(path, &detail);
+        return Err(SlotPoolError::SeedFailed {
+            path: path.to_path_buf(),
+            detail,
+        });
     }
+    create_cold(path)
 }
 
 /// Create an empty slot directory, parents included.
@@ -636,134 +719,6 @@ fn create_cold(path: &Path) -> Result<(), SlotPoolError> {
         path: path.to_path_buf(),
         source,
     })
-}
-
-/// Copy-on-write clone `src` to `dst`, or say why not.
-///
-/// Why: `cp -c` is the only portable way to ask APFS for a clone from Rust
-/// without an `fcntl`/`clonefile` binding, and the cost matters: a clone of the
-/// 207 GB shared directory is near-zero disk and seconds of wall clock, against
-/// ~200 s for the cold build it replaces.
-/// What: `cp -c -R` on macOS, into a staging sibling that is then renamed into
-/// place. Any non-zero exit, any missing `cp`, and every non-macOS platform
-/// return `Err(detail)` — the caller then creates a cold directory, because a
-/// slot that works slowly beats no slot at all.
-///
-/// **Never `cp -c -R <src> <dst>` onto an existing `dst`.** BSD `cp` then writes
-/// `dst/<basename(src)>` and still exits 0, so the slot would be reported
-/// [`SeedKind::ClonedFromShared`] with an empty top level and a nested copy
-/// underneath — a cold build that claims to be warm (#8261 critic round). The
-/// staging tree has no such case, and the rename is atomic.
-///
-/// **The staging tree is private to this run** ([`staging_path`]), and `dst` is
-/// replaced only while it carries no [`SEED_MARKER`]. Together those two make a
-/// second run — one that survived a daemon restart, which the in-memory registry
-/// cannot see — unable to delete this run's tree or to overwrite a slot a
-/// builder was granted (#8261 critic round 3).
-///
-/// **A live build's directory is never replaced (#8794).** The cargo locks in
-/// `dst` are taken ([`hold_idle_build_locks`]) right before the replace and
-/// held until the clone is in place; a held one aborts with
-/// [`CloneError::ActiveBuild`] and `dst` is left as it was.
-///
-/// # Errors
-///
-/// [`CloneError`], which tells the caller whether a cold slot, a refusal, or an
-/// unseeded retry is the right outcome.
-///
-/// Test: `a_missing_clone_source_still_yields_a_usable_cold_slot`,
-/// `two_staging_trees_for_one_index_publish_exactly_one_slot`, and
-/// `a_fresh_slot_is_cloned_from_the_shared_directory`,
-/// `an_unmarked_directory_is_reseeded_without_nesting`,
-/// `a_slot_with_a_held_cargo_lock_is_not_replaced`,
-/// `a_failed_replace_leaves_no_seeded_marker` on macOS.
-fn clone_directory(src: &Path, dst: &Path) -> Result<(), CloneError> {
-    if !cfg!(target_os = "macos") {
-        return Err(CloneError::Unsupported(format!(
-            "{UNSUPPORTED_PREFIX}; this is {}",
-            std::env::consts::OS
-        )));
-    }
-    let Some(parent) = dst.parent() else {
-        return Err(CloneError::Failed(format!(
-            "{} has no parent directory",
-            dst.display()
-        )));
-    };
-    if let Err(err) = std::fs::create_dir_all(parent) {
-        return Err(CloneError::Failed(format!(
-            "could not create {}: {err}",
-            parent.display()
-        )));
-    }
-    let slot = dst
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or("slot");
-    let staging = staging_path(parent, slot);
-    // `cp -c` fails outright rather than falling back to a full byte copy when
-    // the volume cannot clone, which is the behaviour wanted here: a silent
-    // 207 GB real copy would fill the disk this design is trying to conserve.
-    let output = std::process::Command::new("cp")
-        .arg("-c")
-        .arg("-R")
-        .arg(src)
-        .arg(&staging)
-        .output()
-        .map_err(|err| CloneError::Failed(format!("could not run cp: {err}")))?;
-    if !output.status.success() {
-        drop(std::fs::remove_dir_all(&staging));
-        return Err(CloneError::Failed(format!(
-            "cp -c exited {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    // Re-read the marker here, not only at `seed`'s entry: a run that survived
-    // a daemon restart can have published this slot while `cp` was running, and
-    // replacing a MARKED directory would destroy a tree a builder holds.
-    if marker_reads_seeded(dst) {
-        drop(std::fs::remove_dir_all(&staging));
-        return Err(CloneError::Published);
-    }
-    // #8794: `cp` can run for minutes, so a build that started meanwhile is
-    // caught here, and the locks stay held until the clone is in place.
-    let _locks = match hold_idle_build_locks(dst) {
-        Ok(locks) => locks,
-        Err(lock) => {
-            drop(std::fs::remove_dir_all(&staging));
-            return Err(CloneError::ActiveBuild(lock));
-        }
-    };
-    if dst.exists()
-        && let Err(err) = std::fs::remove_dir_all(dst)
-    {
-        drop(std::fs::remove_dir_all(&staging));
-        return Err(CloneError::Failed(format!(
-            "could not replace the unseeded {}: {err}",
-            dst.display()
-        )));
-    }
-    std::fs::rename(&staging, dst).map_err(|err| {
-        drop(std::fs::remove_dir_all(&staging));
-        CloneError::Failed(format!(
-            "could not move the clone into {}: {err}",
-            dst.display()
-        ))
-    })
-}
-
-/// Why a clone did not land, sorted by what the seed should do next (#8794).
-#[derive(Debug)]
-enum CloneError {
-    /// This platform cannot clone at all: a cold slot is the documented outcome.
-    Unsupported(String),
-    /// Another run published the slot first: the warm case.
-    Published,
-    /// A live build holds this lock in the slot: refuse, touch nothing.
-    ActiveBuild(PathBuf),
-    /// The clone or the replace failed: no marker, retry next time.
-    Failed(String),
 }
 
 /// Fixtures shared by every suite that hands a pool slot over (#8794).
@@ -1157,54 +1112,53 @@ mod tests {
         }
     }
 
-    /// Restores a directory's mode on drop, so the temp root can be removed.
-    struct Writable(PathBuf);
-    impl Drop for Writable {
-        fn drop(&mut self) {
-            use std::os::unix::fs::PermissionsExt;
-            drop(std::fs::set_permissions(
-                &self.0,
-                std::fs::Permissions::from_mode(0o755),
-            ));
-        }
+    /// A clone command that starts a staging tree and then fails.
+    fn failing_clone(_src: &Path, staging: &Path) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "mkdir -p \"$1\" && echo 'no clone' >&2 && exit 1",
+            "sh",
+        ])
+        .arg(staging);
+        cmd
     }
 
-    /// #8794: a replace that fails partway (slot-6: `Directory not empty`)
-    /// leaves a tree in an unknown state. It must write NO marker — the old
-    /// code stamped `ColdDirectory("<error>")`, which read as seeded — and the
-    /// failure is recorded beside the slot instead.
+    /// #8794: a seed that fails partway leaves a tree in an unknown state. It
+    /// must write NO marker — the old code stamped `ColdDirectory("<error>")`,
+    /// which read as seeded — and the failure is recorded beside the slot.
+    /// #9239: the replace is now one rename, so the failure is the clone's.
     #[test]
     fn a_failed_replace_leaves_no_seeded_marker() {
         if !cfg!(target_os = "macos") {
             // No clone runs off macOS, so there is no replace to fail.
             return;
         }
-        use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().expect("temp root");
         let shared = warm_shared(tmp.path());
-        let pool = pool(&tmp.path().join("pool"));
+        let pool = pool(&tmp.path().join("pool")).with_cloner(failing_clone);
         let slot = pool.slot_path(0);
-        let pinned = slot.join("debug/pinned");
-        std::fs::create_dir_all(&pinned).expect("an unseeded slot tree");
-        std::fs::write(pinned.join("artifact.rlib"), b"x").expect("an undeletable file");
-        std::fs::set_permissions(&pinned, std::fs::Permissions::from_mode(0o555))
-            .expect("make the replace fail");
-        let _restore = Writable(pinned.clone());
+        std::fs::create_dir_all(slot.join("debug")).expect("an unseeded slot tree");
+        std::fs::write(slot.join("debug/artifact.rlib"), b"x").expect("an artifact");
 
         let err = pool
             .seed(0, Some(&shared))
-            .expect_err("a failed replace is a failed seed");
+            .expect_err("a failed clone is a failed seed");
 
         assert!(
-            matches!(&err, SlotPoolError::SeedFailed { detail, .. } if detail.contains("could not replace")),
+            matches!(&err, SlotPoolError::SeedFailed { detail, .. } if detail.contains("cp -c exited")),
             "{err:?}"
+        );
+        assert!(
+            slot.join("debug/artifact.rlib").is_file(),
+            "a failed clone leaves the slot as it was"
         );
         assert!(
             !slot.join(SEED_MARKER).exists(),
             "a failed seed must leave no marker"
         );
         let recorded = std::fs::read_to_string(seed_failure_path(&slot)).expect("the failure");
-        assert!(recorded.contains("could not replace"), "{recorded}");
+        assert!(recorded.contains("no clone"), "{recorded}");
         assert!(matches!(
             pool.reserve_path(0).expect("a writable root"),
             SlotReservation::Seeding(_)

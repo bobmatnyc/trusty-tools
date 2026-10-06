@@ -14,6 +14,7 @@
 //! ground truth asserts recall/precision computation and fuzzy matcher.
 //! Pure functions are tested without hitting a real LLM or GitHub.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
@@ -23,10 +24,14 @@ use tracing::warn;
 use trusty_review::{
     config::{InvocationSurface, ReviewConfig},
     integrations::{github::RunMode, search_client::HttpSearchClient},
-    models::{Finding, Verdict},
+    models::{Finding, ReviewResult, Verdict},
     pipeline::{
-        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
+        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision,
+        diff::load_diff,
+        diff_analyzer::DiffAnalyzer,
+        run_review,
         runner_helpers::resolve_diff_token,
+        withheld_contract::{unresolvable_survivors, withheld_by_reason},
     },
 };
 
@@ -144,6 +149,15 @@ pub struct CalibrationReport {
     /// 1.0 = every Rust semantic finding was a false positive).  Returns 0.0 (no FPs)
     /// when no Rust semantic findings exist in the run.
     pub rust_semantic_fp_rate: f64,
+    /// #9188: posted findings whose citation does not resolve at the PR's
+    /// head, over every corpus PR. The threshold is 0. A PR whose diff could
+    /// not be re-read counts every survivor (fail closed).
+    #[serde(default)]
+    pub unresolvable_survivor_count: usize,
+    /// #9188: withheld findings over every corpus PR, by reason class
+    /// (`withheld_contract::reason_class`).
+    #[serde(default)]
+    pub withheld_by_reason: BTreeMap<String, usize>,
 }
 
 // ─── Verdict bars (#1897 acceptance gate, wired for #2974) ───────────────────
@@ -459,6 +473,8 @@ pub fn compute_metrics(
         per_pr,
         verdict_bars: None,
         rust_semantic_fp_rate,
+        unresolvable_survivor_count: 0,
+        withheld_by_reason: BTreeMap::new(),
     })
 }
 
@@ -502,6 +518,9 @@ pub fn load_corpus(path: &Path) -> Result<Vec<CorpusEntry>> {
 /// warning and yields no findings and `Verdict::Unknown` — which agrees with no
 /// reference verdict, so a failed PR drags the agreement bar down rather than
 /// silently shrinking the sample.
+/// #9188: also re-reads the PR diff and counts survivors that do not resolve
+/// at its head (`withheld_contract::unresolvable_survivors`); when the diff
+/// cannot be re-read, every survivor counts (fail closed).
 /// Test: called in `cmd_calibrate`; pure functions (`is_recalled`,
 /// `compute_metrics`, `compute_verdict_bars`) are tested separately in
 /// `calibrate_tests.rs` without hitting real services.
@@ -510,7 +529,7 @@ async fn run_pipeline_for_entry(
     entry: &CorpusEntry,
     reviewer_model: &str,
     deps: ReviewDeps,
-) -> (Vec<Finding>, Verdict) {
+) -> EntryOutcome {
     // #1632: resolve the token through `resolve_diff_token` — the SAME funnel
     // `run_review`'s own Step 2c uses (`runner.rs`) — instead of re-deriving the
     // `GithubClient`/`AuthStrategy` dance here. A second independent
@@ -529,12 +548,12 @@ async fn run_pipeline_for_entry(
         Err(e) => {
             warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
                   "calibrate: GitHub token resolution failed: {e}");
-            return (Vec::new(), Verdict::Unknown);
+            return EntryOutcome::failed();
         }
     };
 
     let input = ReviewInput {
-        diff_source,
+        diff_source: diff_source.clone(),
         reviewer_model: reviewer_model.to_string(),
         write_log: false,    // never write log files during calibration
         print_result: false, // suppress stdout during batch run
@@ -549,7 +568,50 @@ async fn run_pipeline_for_entry(
     };
 
     let result = run_review(config, input, deps).await;
-    (result.findings, result.verdict)
+    // #9188: resolve the survivors against the head diff, read again.
+    let unresolvable = match load_diff(&diff_source).await {
+        Ok(raw) => unresolvable_survivors(
+            &result.findings,
+            &DiffAnalyzer::default().analyze(&raw).await,
+        ),
+        Err(e) => {
+            warn!(
+                pr = entry.pr,
+                "calibrate: could not re-read the diff (#9188): {e}"
+            );
+            result.findings.len()
+        }
+    };
+    EntryOutcome::from_result(result, unresolvable)
+}
+
+/// What one corpus PR's review produced (#2974, #9188).
+struct EntryOutcome {
+    findings: Vec<Finding>,
+    verdict: Verdict,
+    unresolvable: usize,
+    withheld_by_reason: BTreeMap<String, usize>,
+}
+
+impl EntryOutcome {
+    /// A PR the pipeline could not review: no findings, `Unknown`.
+    fn failed() -> Self {
+        Self {
+            findings: Vec::new(),
+            verdict: Verdict::Unknown,
+            unresolvable: 0,
+            withheld_by_reason: BTreeMap::new(),
+        }
+    }
+
+    fn from_result(result: ReviewResult, unresolvable: usize) -> Self {
+        Self {
+            withheld_by_reason: withheld_by_reason(&result.withheld_findings),
+            findings: result.findings,
+            verdict: result.verdict,
+            unresolvable,
+        }
+    }
 }
 
 // ─── Subcommand handler ───────────────────────────────────────────────────────
@@ -600,6 +662,7 @@ pub async fn cmd_calibrate(
     // `ReviewDeps` contains `Arc<dyn LlmProvider>` which is not cheaply cloneable.
     let mut trusty_results: Vec<Vec<Finding>> = Vec::with_capacity(corpus.len());
     let mut trusty_verdicts: Vec<Verdict> = Vec::with_capacity(corpus.len());
+    let (mut unresolvable, mut withheld) = (0usize, BTreeMap::<String, usize>::new());
     for (i, entry) in corpus.iter().enumerate() {
         eprintln!(
             "calibrate: [{}/{}] {}/{}#{}",
@@ -627,13 +690,20 @@ pub async fn cmd_calibrate(
                 continue;
             }
         };
-        let (findings, verdict) = run_pipeline_for_entry(&cfg, entry, &reviewer_model, deps).await;
-        trusty_results.push(findings);
-        trusty_verdicts.push(verdict);
+        let outcome = run_pipeline_for_entry(&cfg, entry, &reviewer_model, deps).await;
+        unresolvable += outcome.unresolvable;
+        for (reason, n) in outcome.withheld_by_reason {
+            *withheld.entry(reason).or_insert(0) += n;
+        }
+        trusty_results.push(outcome.findings);
+        trusty_verdicts.push(outcome.verdict);
     }
 
     let mut report = compute_metrics(&corpus, &trusty_results)?;
     report.verdict_bars = compute_verdict_bars(&corpus, &trusty_verdicts);
+    report.unresolvable_survivor_count = unresolvable; // #9188
+    report.withheld_by_reason = withheld;
+    eprintln!("calibrate: unresolvable_survivor_count={unresolvable} (#9188 threshold: 0)");
     let json = serde_json::to_string_pretty(&report).context("serialising calibration report")?;
 
     // #2974: say out loud when the verdict bars measured nothing. A corpus with

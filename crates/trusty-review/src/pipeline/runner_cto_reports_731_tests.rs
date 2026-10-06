@@ -84,8 +84,10 @@ fn mix_json(finding_1: Outcome) -> String {
                 ),
                 Outcome::Confirmed | Outcome::Unjudged => (confidence, format!("observation {n}")),
             };
-            // #8905: every finding quotes the code its line holds, or the gate drops it.
-            let body = format!("{body} at `compute()`");
+            // #8905: every finding quotes the code its line holds, or the gate
+            // drops it. #9188 E: a bare `compute()` names code without quoting
+            // it, so the quote is the line's code.
+            let body = format!("{body} at `value = compute()`");
             let line = if n == 18 { "" } else { r#","line":1"# };
             format!(
                 r#"{{"title":"finding {n}","body":"{body}","severity":"{severity}","confidence":{confidence},"file":"app/module.py"{line},"category":"{category}","code_provable":{}}}"#,

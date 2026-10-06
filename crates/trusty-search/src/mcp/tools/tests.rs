@@ -5,14 +5,15 @@
 //! and the cross-cutting tool characteristics (all tools appear in
 //! `tools/list`, schema requires the right fields, `grep`/`search_all`
 //! param validation).
-//! What: unit tests that either do not need a live daemon (mock base URL
-//! `http://127.0.0.1:1` that cannot connect) or spin up a tiny axum mock
-//! daemon on a loopback port.
+//! What: unit tests that either do not need a live daemon (a socket path
+//! nothing serves) or answer through a mock daemon on a scratch socket
+//! (`test_daemon.rs`, #9168).
 //! Test: this file.
 
 use serde_json::Value;
 
-use super::{error_codes, McpServer, Request};
+use super::test_daemon::{last_params, methods, recording_daemon, unreachable_server, MockDaemon};
+use super::{error_codes, Request};
 
 pub(super) fn req(method: &str, params: Value) -> Request {
     Request {
@@ -25,7 +26,7 @@ pub(super) fn req(method: &str, params: Value) -> Request {
 
 #[tokio::test]
 async fn rejects_wrong_jsonrpc_version() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let r = Request {
         jsonrpc: Some("1.0".into()),
         id: Some(Value::from(7u64)),
@@ -40,7 +41,7 @@ async fn rejects_wrong_jsonrpc_version() {
 
 #[tokio::test]
 async fn unknown_tool_returns_method_not_found() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("not_a_tool", Value::Null)).await;
     let err = resp.error.expect("expected error");
     assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
@@ -48,7 +49,7 @@ async fn unknown_tool_returns_method_not_found() {
 
 #[tokio::test]
 async fn missing_params_returns_invalid_params() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server
         .dispatch(req("index_file", serde_json::json!({})))
         .await;
@@ -58,7 +59,7 @@ async fn missing_params_returns_invalid_params() {
 
 #[tokio::test]
 async fn tools_list_returns_all_tools() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -95,7 +96,7 @@ async fn tools_list_returns_all_tools() {
 /// payload Claude Code expects on startup.
 #[tokio::test]
 async fn test_initialize_response() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let r = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(Value::from(1u64)),
@@ -119,7 +120,7 @@ async fn test_initialize_response() {
 /// MCP clients can render the full manifest.
 #[tokio::test]
 async fn test_tools_list_response() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -153,7 +154,7 @@ async fn test_tools_list_response() {
 /// Issue #36 — JSON-RPC method-not-found surfaces as -32601.
 #[tokio::test]
 async fn test_unknown_method_returns_error() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server
         .dispatch(req("definitely_not_a_method", Value::Null))
         .await;
@@ -165,7 +166,7 @@ async fn test_unknown_method_returns_error() {
 /// must NOT emit a response, signalled by `Response::suppress = true`.
 #[tokio::test]
 async fn notification_initialized_is_suppressed() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let r = Request {
         jsonrpc: Some("2.0".into()),
         id: None, // notifications carry no id
@@ -181,7 +182,7 @@ async fn notification_initialized_is_suppressed() {
 /// invariant — if a new HTTP route lands without a matching tool, this fails.
 #[tokio::test]
 async fn test_tools_list_complete() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -214,10 +215,10 @@ async fn test_tools_list_complete() {
 }
 
 /// Issue #10 — `search_all` requires the `query` arg and rejects missing it
-/// before any HTTP round-trip.
+/// before any daemon round-trip.
 #[tokio::test]
 async fn search_all_missing_query_returns_invalid_params() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server
         .dispatch(req("search_all", serde_json::json!({})))
         .await;
@@ -227,7 +228,7 @@ async fn search_all_missing_query_returns_invalid_params() {
 
 #[tokio::test]
 async fn tools_call_without_name_returns_invalid_params() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server
         .dispatch(req("tools/call", serde_json::json!({})))
         .await;
@@ -235,10 +236,10 @@ async fn tools_call_without_name_returns_invalid_params() {
     assert_eq!(err.code, error_codes::INVALID_PARAMS);
 }
 
-/// `grep` is listed and missing-pattern fast-fails before any HTTP hop.
+/// `grep` is listed and missing-pattern fast-fails before any daemon hop.
 #[tokio::test]
 async fn grep_missing_pattern_returns_invalid_params() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("grep", serde_json::json!({}))).await;
     let err = resp.error.expect("expected error");
     assert_eq!(err.code, error_codes::INVALID_PARAMS);
@@ -248,40 +249,20 @@ async fn grep_missing_pattern_returns_invalid_params() {
 ///
 /// Why: when the MCP client passes `max_count` (ripgrep's `--max-count`
 /// flag name) the dispatcher must translate it to `max_results` before
-/// POSTing to the daemon. Without the alias the parameter was silently
+/// calling the daemon. Without the alias the parameter was silently
 /// dropped and the daemon applied its default cap of 100 regardless.
 /// What: asserts that a `grep` call with `max_count=5` (and no
 /// `max_results`) forwards `max_results: 5` in the daemon request body.
-/// Test: spins up a tiny mock daemon that echoes back the request body,
-/// then asserts the forwarded body contains `max_results == 5`.
+/// Test: a mock socket daemon records the `search.grep` params, then the
+/// forwarded body is checked for `max_results == 5`.
 #[tokio::test]
 async fn grep_max_count_alias_forwarded_as_max_results() {
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    let (daemon, calls) = recording_daemon(|_, _| {
+        Ok(serde_json::json!({ "matches": [], "total": 0, "truncated": false }))
+    })
+    .await;
 
-    let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
-    let captured_clone = Arc::clone(&captured);
-
-    async fn grep_handler(
-        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<Value>>>>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        *captured.lock().await = Some(body);
-        Json(serde_json::json!({ "matches": [], "total": 0, "truncated": false }))
-    }
-
-    let app = Router::new()
-        .route("/indexes/idx/grep", post(grep_handler))
-        .with_state(captured_clone);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
+    let server = daemon.server();
     let resp = server
         .dispatch(req(
             "grep",
@@ -293,7 +274,9 @@ async fn grep_max_count_alias_forwarded_as_max_results() {
         ))
         .await;
     assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-    let body = captured.lock().await.clone().expect("no request captured");
+    let params = last_params(&calls, "search.grep").expect("no request captured");
+    assert_eq!(params["index_id"], "idx");
+    let body = &params["body"];
     assert_eq!(
         body.get("max_results").and_then(Value::as_u64),
         Some(5),
@@ -304,7 +287,7 @@ async fn grep_max_count_alias_forwarded_as_max_results() {
 /// `grep` appears in `tools/list` with a `pattern`-required schema.
 #[tokio::test]
 async fn grep_listed_in_tools_with_required_pattern() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
@@ -328,94 +311,57 @@ async fn grep_listed_in_tools_with_required_pattern() {
 // Issue #138 — per-lane MCP tools: shared mock-daemon helper
 // ----------------------------------------------------------------
 
-/// Spin up a one-shot axum mock daemon on a loopback port.
+/// Captured values from a mock daemon, read after the dispatch returns.
+pub(super) type Captured<T> = std::sync::Arc<std::sync::Mutex<Vec<T>>>;
+
+/// A mock socket daemon answering the status and both search methods.
 ///
 /// Why: the per-lane tool tests in `tests_lane.rs` all need a controllable
-/// daemon — this helper lets each test specify exactly what `GET
-/// /indexes/:id/status` and `POST /indexes/:id/search` return, and
-/// captures the inbound request bodies so tests can assert the correct
-/// `SearchQuery` shape was dispatched.
-/// What: returns `(base_url, captured_search_bodies, captured_search_paths)`.
+/// daemon — this helper lets each test specify exactly what
+/// `search.index.status` and `search.query` return, and captures the inbound
+/// request bodies so tests can assert the correct `SearchQuery` shape was
+/// dispatched.
+/// What: returns `(daemon, captured_search_bodies, captured_search_routes)`.
+/// A route reads `search.query <index_id>` or `search.query.all`; a body is
+/// the `SearchQuery` (per-index) or the global request (fan-out). #9168: a
+/// scratch socket replaced the loopback axum listener.
 /// Test: used by every test in `tests_lane.rs`.
 pub(super) async fn spawn_mock_daemon(
     status_response: Value,
     search_response: Value,
-) -> (
-    String,
-    std::sync::Arc<tokio::sync::Mutex<Vec<Value>>>,
-    std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
-) {
-    use axum::extract::{Path, State};
-    use axum::routing::{get, post};
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    #[derive(Clone)]
-    struct MockState {
-        status_response: Value,
-        search_response: Value,
-        captured_bodies: Arc<Mutex<Vec<Value>>>,
-        captured_paths: Arc<Mutex<Vec<String>>>,
-    }
-
-    let captured_bodies: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let captured_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let state = MockState {
-        status_response,
-        search_response,
-        captured_bodies: Arc::clone(&captured_bodies),
-        captured_paths: Arc::clone(&captured_paths),
-    };
-
-    async fn status_handler(Path(id): Path<String>, State(s): State<MockState>) -> Json<Value> {
-        // Inject the index_id so the handler returns a payload that
-        // looks like a real daemon response.
-        let mut v = s.status_response.clone();
-        if v.is_object() {
-            v["index_id"] = Value::String(id);
+) -> (MockDaemon, Captured<Value>, Captured<String>) {
+    let bodies: Captured<Value> = Default::default();
+    let routes: Captured<String> = Default::default();
+    let (b, r) = (bodies.clone(), routes.clone());
+    let (daemon, _calls) = recording_daemon(move |method, params| match method {
+        "search.index.status" => {
+            // Inject the index_id so the payload looks like a real status.
+            let mut v = status_response.clone();
+            if v.is_object() {
+                v["index_id"] = params["index_id"].clone();
+            }
+            Ok(v)
         }
-        Json(v)
-    }
-
-    async fn search_handler_mock(
-        Path(id): Path<String>,
-        State(s): State<MockState>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        s.captured_paths
-            .lock()
-            .await
-            .push(format!("/indexes/{id}/search"));
-        s.captured_bodies.lock().await.push(body);
-        Json(s.search_response.clone())
-    }
-
-    // #7676: the global fan-out endpoint answers with the same body, so a
-    // `search_all` call with no index can be exercised through this harness.
-    async fn global_search_handler_mock(
-        State(s): State<MockState>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        s.captured_paths.lock().await.push("/search".to_string());
-        s.captured_bodies.lock().await.push(body);
-        Json(s.search_response.clone())
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}/status", get(status_handler))
-        .route("/indexes/{id}/search", post(search_handler_mock))
-        .route("/search", post(global_search_handler_mock))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let base_url = format!("http://{addr}");
-    (base_url, captured_bodies, captured_paths)
+        "search.query" => {
+            let id = params["index_id"].as_str().unwrap_or_default();
+            r.lock().expect("routes").push(format!("search.query {id}"));
+            b.lock().expect("bodies").push(params["body"].clone());
+            Ok(search_response.clone())
+        }
+        // #7676: the global fan-out answers with the same body, so a
+        // `search_all` call with no index can be exercised through this harness.
+        "search.query.all" => {
+            r.lock().expect("routes").push(method.to_string());
+            b.lock().expect("bodies").push(params.clone());
+            Ok(search_response.clone())
+        }
+        other => Err(trusty_common::uds::server::RpcError::new(
+            trusty_common::uds::server::CODE_METHOD_NOT_FOUND,
+            format!("mock: {other}"),
+        )),
+    })
+    .await;
+    (daemon, bodies, routes)
 }
 
 // Issue #1373 — pinned-index resolution + serve-time pin
@@ -430,7 +376,7 @@ pub(super) async fn spawn_mock_daemon(
 /// Test: this is the test.
 #[test]
 fn resolve_index_id_prefers_explicit_then_pinned() {
-    let pinned = McpServer::new("http://127.0.0.1:1").with_pinned_index("my-project");
+    let pinned = unreachable_server().with_pinned_index("my-project");
     // Omitted → pinned.
     assert_eq!(
         pinned.resolve_index_id(&serde_json::json!({})),
@@ -448,7 +394,7 @@ fn resolve_index_id_prefers_explicit_then_pinned() {
     );
 
     // No pin: omitted → None (unchanged legacy behaviour).
-    let unpinned = McpServer::new("http://127.0.0.1:1");
+    let unpinned = unreachable_server();
     assert_eq!(unpinned.resolve_index_id(&serde_json::json!({})), None);
     assert_eq!(
         unpinned.resolve_index_id(&serde_json::json!({ "index_id": "x" })),
@@ -465,7 +411,7 @@ fn resolve_index_id_prefers_explicit_then_pinned() {
 /// Test: this is the test.
 #[test]
 fn blank_pin_is_treated_as_no_pin() {
-    let s = McpServer::new("http://127.0.0.1:1").with_pinned_index("   ");
+    let s = unreachable_server().with_pinned_index("   ");
     assert_eq!(s.resolve_index_id(&serde_json::json!({})), None);
 }
 
@@ -479,12 +425,12 @@ fn blank_pin_is_treated_as_no_pin() {
 /// a parameter error. The success shape is asserted in
 /// `tests_index_directory::unresolved_read_tools_return_the_index_directory`,
 /// which drives a live mock.
-/// What: dispatches `search` (no index_id, no pin) at a dead port and asserts
-/// the error is INTERNAL_ERROR, not INVALID_PARAMS.
+/// What: dispatches `search` (no index_id, no pin) at an absent socket and
+/// asserts the error is INTERNAL_ERROR, not INVALID_PARAMS.
 /// Test: this is the test.
 #[tokio::test]
 async fn search_without_pin_consults_the_index_directory() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "fn main" })))
         .await;
@@ -502,18 +448,17 @@ async fn search_without_pin_consults_the_index_directory() {
 /// Why: the core acceptance criterion — a pinned session must resolve a bare
 /// `search` to its own project index, never sweeping or guessing.
 /// What: spins up the mock daemon, dispatches `search` (query only) against a
-/// server pinned to `pinned-proj`, and asserts the daemon saw a POST to
-/// `/indexes/pinned-proj/search`.
+/// server pinned to `pinned-proj`, and asserts the daemon saw `search.query`
+/// for `pinned-proj`.
 /// Test: this is the test.
 #[tokio::test]
 async fn pinned_search_defaults_index_id_to_pin() {
-    let (base_url, _bodies, paths) = spawn_mock_daemon(
+    let (daemon, _bodies, paths) = spawn_mock_daemon(
         serde_json::json!({ "search_capabilities": ["vector", "kg"] }),
         serde_json::json!({ "results": [], "intent": "Definition", "latency_ms": 1 }),
     )
     .await;
-    let server =
-        McpServer::with_client(base_url, reqwest::Client::new()).with_pinned_index("pinned-proj");
+    let server = daemon.server().with_pinned_index("pinned-proj");
 
     let resp = server
         .dispatch(req("search", serde_json::json!({ "query": "fn main" })))
@@ -523,13 +468,13 @@ async fn pinned_search_defaults_index_id_to_pin() {
         "pinned search should succeed: {resp:?}"
     );
 
-    let seen = paths.lock().await;
+    let seen = paths.lock().expect("routes");
     assert_eq!(seen.len(), 1, "exactly one daemon search call: {seen:?}");
-    assert_eq!(seen[0], "/indexes/pinned-proj/search");
+    assert_eq!(seen[0], "search.query pinned-proj");
 }
 
-/// With a pin, `grep` with no `index_id` scopes to the pinned index endpoint
-/// instead of the global fan-out `/grep`.
+/// With a pin, `grep` with no `index_id` scopes to the pinned index
+/// (`search.grep`) instead of the global fan-out (`search.grep.all`).
 ///
 /// Why: #1373 requires fan-out tools to scope to the pin so a project session
 /// never sweeps every registered index.
@@ -538,92 +483,34 @@ async fn pinned_search_defaults_index_id_to_pin() {
 /// Test: this is the test.
 #[tokio::test]
 async fn pinned_grep_scopes_to_pinned_index() {
-    use axum::extract::{Path, State};
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    let (daemon, calls) = recording_daemon(|_, _| Ok(serde_json::json!({ "matches": [] }))).await;
 
-    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-    async fn per_index_grep(
-        Path(id): Path<String>,
-        State(c): State<Arc<Mutex<Vec<String>>>>,
-        Json(_body): Json<Value>,
-    ) -> Json<Value> {
-        c.lock().await.push(format!("/indexes/{id}/grep"));
-        Json(serde_json::json!({ "matches": [] }))
-    }
-    async fn global_grep(
-        State(c): State<Arc<Mutex<Vec<String>>>>,
-        Json(_body): Json<Value>,
-    ) -> Json<Value> {
-        c.lock().await.push("/grep".to_string());
-        Json(serde_json::json!({ "matches": [] }))
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}/grep", post(per_index_grep))
-        .route("/grep", post(global_grep))
-        .with_state(Arc::clone(&captured));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let base_url = format!("http://{addr}");
-
-    let server =
-        McpServer::with_client(base_url, reqwest::Client::new()).with_pinned_index("pinned-proj");
+    let server = daemon.server().with_pinned_index("pinned-proj");
     let resp = server
         .dispatch(req("grep", serde_json::json!({ "pattern": "fn foo" })))
         .await;
     assert!(resp.error.is_none(), "pinned grep should succeed: {resp:?}");
 
-    let seen = captured.lock().await;
-    assert_eq!(seen.as_slice(), &["/indexes/pinned-proj/grep".to_string()]);
+    assert_eq!(methods(&calls), ["search.grep"]);
+    let params = last_params(&calls, "search.grep").expect("a grep call");
+    assert_eq!(params["index_id"], "pinned-proj");
 }
 
-/// Spin up a mock daemon that captures the `POST /indexes` body, dispatch
-/// `create_index` with `args`, and return what the daemon received.
+/// Dispatch `create_index` with `args` against a mock socket daemon and
+/// return the `search.index.create` params it received.
 ///
 /// Why: the #4356 forwarding claim is about the WIRE body, so asserting on the
 /// dispatcher's inputs would prove nothing.
-/// What: mirrors `grep_max_count_alias_forwarded_as_max_results`'s harness,
-/// routed at `/indexes`.
+/// What: mirrors `grep_max_count_alias_forwarded_as_max_results`'s harness.
 async fn captured_create_index_body(args: Value) -> Value {
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
-
-    async fn create_handler(
-        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<Value>>>>,
-        Json(body): Json<Value>,
-    ) -> Json<Value> {
-        *captured.lock().await = Some(body);
-        Json(serde_json::json!({ "id": "idx", "created": true }))
-    }
-
-    let app = Router::new()
-        .route("/indexes", post(create_handler))
-        .with_state(Arc::clone(&captured));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
-    let resp = server.dispatch(req("create_index", args)).await;
+    let (daemon, calls) =
+        recording_daemon(|_, _| Ok(serde_json::json!({ "id": "idx", "created": true }))).await;
+    let resp = daemon.server().dispatch(req("create_index", args)).await;
     assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-    let body = captured.lock().await.clone();
-    body.expect("no request captured")
+    last_params(&calls, "search.index.create").expect("no request captured")
 }
 
-/// #4356: `create_index` forwards `exclude_globs` to `POST /indexes`.
+/// #4356: `create_index` forwards `exclude_globs` to `search.index.create`.
 ///
 /// Why: the daemon has accepted `exclude_globs` on this endpoint since the
 /// repo-config work, but the MCP tool never sent it — so an MCP caller
@@ -700,47 +587,24 @@ async fn create_index_omits_malformed_exclude_globs() {
 // Issue #6422 — delete_index purges on-disk data by default
 // ----------------------------------------------------------------
 
-/// Dispatch `delete_index` against a mock daemon and return the DELETE it made.
+/// Dispatch `delete_index` against a mock daemon and return the params it sent.
 ///
-/// Why: the whole #6422 change on this surface is which query string leaves the
-/// tool, and only the daemon's view of the request can prove it. The mock
-/// answers the shape `DELETE /indexes/{id}` really answers so the dispatcher
+/// Why: the whole #6422 change on this surface is which `delete_data` leaves
+/// the tool, and only the daemon's view of the request can prove it. The mock
+/// answers the shape `search.index.delete` really answers so the dispatcher
 /// takes its success path.
-/// What: returns the full request URI (path plus query) the daemon received.
+/// What: returns the `search.index.delete` params the daemon received.
 /// Test: used by the `delete_index_*` tests below.
-async fn captured_delete_index_uri(args: Value) -> String {
-    use axum::routing::delete;
-    use axum::{Json, Router};
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-
-    let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let captured_clone = Arc::clone(&captured);
-
-    async fn delete_handler(
-        axum::extract::State(captured): axum::extract::State<Arc<Mutex<Option<String>>>>,
-        uri: axum::http::Uri,
-    ) -> Json<Value> {
-        *captured.lock().await = Some(uri.to_string());
-        Json(serde_json::json!({
+async fn captured_delete_index_params(args: Value) -> Value {
+    let (daemon, calls) = recording_daemon(|_, _| {
+        Ok(serde_json::json!({
             "id": "idx", "ok": true, "removed": true, "data_deleted": true
         }))
-    }
-
-    let app = Router::new()
-        .route("/indexes/{id}", delete(delete_handler))
-        .with_state(captured_clone);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-
-    let server = McpServer::new(format!("http://{addr}"));
-    let resp = server.dispatch(req("delete_index", args)).await;
+    })
+    .await;
+    let resp = daemon.server().dispatch(req("delete_index", args)).await;
     assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-    let uri = captured.lock().await.clone();
-    uri.expect("no DELETE captured")
+    last_params(&calls, "search.index.delete").expect("no delete captured")
 }
 
 /// Why (#6422, closure condition 1): the owner ruling, on the MCP surface. A
@@ -750,9 +614,10 @@ async fn captured_delete_index_uri(args: Value) -> String {
 /// Test: this is the test.
 #[tokio::test]
 async fn delete_index_purges_data_by_default() {
-    let uri = captured_delete_index_uri(serde_json::json!({ "index_id": "idx" })).await;
+    let params = captured_delete_index_params(serde_json::json!({ "index_id": "idx" })).await;
     assert_eq!(
-        uri, "/indexes/idx?delete_data=true",
+        params,
+        serde_json::json!({ "index_id": "idx", "delete_data": true }),
         "an argument-free delete_index must ask for the on-disk data too"
     );
 }
@@ -764,15 +629,16 @@ async fn delete_index_purges_data_by_default() {
 /// Test: this is the test.
 #[tokio::test]
 async fn delete_index_honours_the_deregister_only_opt_out() {
-    let uri =
-        captured_delete_index_uri(serde_json::json!({ "index_id": "idx", "delete_data": false }))
-            .await;
-    assert_eq!(uri, "/indexes/idx?delete_data=false");
+    let params = captured_delete_index_params(
+        serde_json::json!({ "index_id": "idx", "delete_data": false }),
+    )
+    .await;
+    assert_eq!(params["delete_data"], serde_json::json!(false));
 
     let explicit_true =
-        captured_delete_index_uri(serde_json::json!({ "index_id": "idx", "delete_data": true }))
+        captured_delete_index_params(serde_json::json!({ "index_id": "idx", "delete_data": true }))
             .await;
-    assert_eq!(explicit_true, "/indexes/idx?delete_data=true");
+    assert_eq!(explicit_true["delete_data"], serde_json::json!(true));
 }
 
 /// Why (#4123's rule, carried into #6422): a destructive toggle is never
@@ -781,7 +647,7 @@ async fn delete_index_honours_the_deregister_only_opt_out() {
 /// Test: this is the test — no daemon is needed, the error precedes the call.
 #[tokio::test]
 async fn delete_index_rejects_a_non_boolean_delete_data() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     for bad in [
         serde_json::json!("false"),
         serde_json::json!(0),
@@ -811,7 +677,7 @@ async fn delete_index_rejects_a_non_boolean_delete_data() {
 /// Test: this is the test.
 #[tokio::test]
 async fn delete_index_schema_advertises_the_opt_out() {
-    let server = McpServer::new("http://127.0.0.1:1");
+    let server = unreachable_server();
     let resp = server.dispatch(req("tools/list", Value::Null)).await;
     let result = resp.result.expect("expected result");
     let tools = result
