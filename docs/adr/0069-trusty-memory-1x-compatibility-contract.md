@@ -17,7 +17,18 @@
   memory sync lands in 1.x; ruling 2026-10-06 (Bob, "I can override"): the
   workspace versioning policy of 2026-09-26 (`docs/reference/semver-gate.md`)
   stays, so a major version needs Bob's word and trusty-memory has no standing
-  exception
+  exception; the six adopted 1.0 criteria (Bob, 2026-10-06): (1) zero open
+  P0/P1, every data-loss issue at `status:tested`, and 7 days with no
+  unexplained drawer-count drop; (2) a versioned palace format plus an ADR
+  (refuse newer, auto-migrate N-1, back up before migrating); (3) the MCP
+  freeze (names and required params frozen, additive-only in 1.x, one minor of
+  deprecation); (4) a stable engine public Rust API; (5) a recall eval as a
+  release gate (0/10 superseded-above-current; hit@1 never below the measured
+  baseline); (6) documented backup, restore and upgrade, each with one live
+  test; embedding truncation is prevented before 1.0
+  ([#9275](https://github.com/bobmatnyc/trusty-tools/issues/9275),
+  [#9284](https://github.com/bobmatnyc/trusty-tools/issues/9284)); no tie to the
+  trusty-agents 1.0 date
 - **Supersedes / Superseded by:** — (amends trusty-memory crate decision
   [0001](../trusty-memory/decisions/0001-frontend-core-split.md) on acceptance;
   see Related Decisions)
@@ -86,8 +97,8 @@ responses); exit codes. Exit codes in 1.x: `0` success, `1` runtime failure,
 `2` usage error. A subcommand's documented nonzero code is frozen. A new code
 may be added only for a new subcommand or flag, never for an existing
 condition. The documented environment variables and the project pin file
-(`.trusty-tools/trusty-memory.yaml`, whose `schema_version` follows ADR-0070's
-refuse-newer rule) are part of this surface.
+(`.trusty-tools/trusty-memory.yaml`, whose `schema_version` follows the
+pin-file refuse-newer rule in ADR-0070 D2) are part of this surface.
 
 **3. On-disk palace format.** Frozen by reference to
 [ADR-0070](0070-versioned-palace-format-with-n-minus-1-migration.md): the
@@ -95,7 +106,10 @@ palace format version, the refuse-newer and N-1 migration rules, and the
 export format (`SHARE_FORMAT_VERSION`). A format change in 1.x is legal only
 as an N → N+1 migration under ADR-0070.
 
-**4. Engine Rust API.** Frozen: every item reachable as
+**4. Engine Rust API.** The engine ships inside trusty-memory as a library
+plus binaries: the `trusty_memory` lib, with `trusty_memory::engine::*` built
+with `--no-default-features`, plus the daemon and CLI binaries behind the
+default `server` feature. Frozen: every item reachable as
 `trusty_memory::engine::*` when the crate is built with
 `--no-default-features`, unless it is `#[doc(hidden)]`. Also frozen: the
 cargo feature names `server` (default), `daemon` (an alias of `server` for all
@@ -164,13 +178,14 @@ These may change in any release:
   | Engine | rustdoc `#[deprecated(since = "1.y.0", note = "use <replacement>")]`. |
   | Format | Formats are never deprecated in 1.x. ADR-0070 migrates them. |
 
-- **Removal only in a major release,** and a major needs Bob's override (D6).
+- **Removal needs Bob's override (D6),** and the release type is Bob's call
+  when he gives it.
   A deprecated item keeps working through the last 1.x release.
 - **Fix exception.** A patch may correct behaviour that contradicts the
   documented contract; that is a fix, not a break, and needs a changelog entry
   that names it. A security fix that must break a surface because no additive
-  fix exists is still a break: it needs the override of D6 and ships as a
-  major.
+  fix exists is still a break: it needs the override of D6, and the release
+  type is Bob's call.
 
 ### D4. Enforcement
 
@@ -214,9 +229,9 @@ cadence and keeps the 2026-09-26 policy.
 Decided (Bob, 2026-10-06, "I can override"): trusty-memory has **no standing
 semver exception**. The 2026-09-26 rule stays (`docs/reference/semver-gate.md`):
 a major version only on Bob's word. After 1.0, a breaking change to a promised
-surface requires Bob's explicit override; when he gives it, that release is a
-major (2.0.0, and so on). It is never automatic, and a break without the
-override is refused. The D4 guards (snapshots, `cargo-semver-checks`, the
+surface requires Bob's explicit override; the release type is Bob's call when
+he gives it. There is no automatic rule: no break is a major or a minor by
+default, and a break without the override is refused. The D4 guards (snapshots, `cargo-semver-checks`, the
 `#[non_exhaustive]` lint) detect a break and stop it pending the override.
 trusty-common and every other crate keep the 2026-09-26 policy unchanged.
 
@@ -232,8 +247,8 @@ review:
   declarations (`scripts/semver-accepted-breaks/trusty-memory-0.28.2.txt`)
   name only `commands::daemon_lock`, which stays out of contract, so the
   mechanism keeps working for non-engine items. Even an accepted security
-  declaration needs the override of D6, because a declared engine break would
-  otherwise ship in a minor.
+  declaration needs the override of D6, because a declared engine break is still
+  a break, and the release type is Bob's call.
 - **Daemon socket.** Decided (Bob, 2026-10-06): out of contract in 1.0, with a
   `protocol_version` handshake added before 1.0.0 (D1.5), tracked by
   [#9288](https://github.com/bobmatnyc/trusty-tools/issues/9288) on milestone
@@ -278,7 +293,7 @@ review:
   response shape at 1.0.0 lives until 2.0, so the E8/E9/E10 audits before
   1.0.0 matter more than any check after it.
 - A break to a frozen surface after 1.0 stops at the guards until Bob gives
-  the override, and then ships as a major (D6). The 2026-09-26 policy applies
+  the override, and the release type is then Bob's call (D6). The 2026-09-26 policy applies
   to trusty-memory unchanged; there is no exception, so a release that
   carries a break needs Bob's word first.
 - Bringing structs under `#[non_exhaustive]` makes downstream struct literals
@@ -302,7 +317,7 @@ None remaining at review (2026-10-06).
 
 - **A standing exception: a break to a frozen surface forces a major
   automatically.** Rejected (Bob, 2026-10-06, "I can override"): the
-  2026-09-26 rule stays, and a major needs Bob's explicit word (D6). The
+  2026-09-26 rule stays, and a break needs Bob's explicit word (D6). The
   guards stop a break, and the override is the only way it ships.
 - **Freeze everything public, including the server types and the socket.**
   Rejected: it freezes about 40 server modules and about 95 socket names that

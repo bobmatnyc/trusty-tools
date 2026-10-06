@@ -106,6 +106,19 @@ version.
 
 Each derived file carries a tag naming the format version that built it. A
 derived file whose tag does not match is rebuilt, not migrated or refused.
+The project pin file (`.trusty-tools/trusty-memory.yaml`) is not part of a
+palace, but it carries its own `schema_version` (`ProjectPin`,
+`crates/trusty-common/src/palace_resolve.rs:100`; current value
+`PIN_SCHEMA_VERSION = 1`, `:60`) and follows the same refuse-newer rule. A
+binary that meets a pin file whose `schema_version` is newer than it
+understands refuses to act on it: it does not rewrite the file or drop its
+fields, and it reports a clear error naming the file and both versions. Today
+the reader (`read_project_pin`, `crates/trusty-common/src/palace_resolve.rs:340`)
+never checks the value, and the only writer
+(`write_project_pin`, `crates/trusty-memory/src/project_root/pin_file.rs:46`)
+re-serialises the whole struct, which drops unknown fields; both change before
+1.0.0. ADR-0069 surface 2 points here.
+
 The sync connector's state directory sits beside the palaces, not inside
 them (DOC-80 §3), and is outside this format.
 
