@@ -281,8 +281,10 @@ Default vault name is derived, never chosen ad hoc: `trusty/<owner>/<repo>`,
 where `<owner>/<repo>` comes from the same git-remote-derived identity `tm`
 already resolves for GitHub account selection (memory: "tm GitHub account
 selection" — owner ruling that a managed session picks the right account from
-the remote). A project may override it explicitly (§6.1) when it wants to
-share a vault across repos or match an existing 1Password vault name.
+the remote). A project may override it explicitly (§6.1). The tracked
+project file's `secrets.vault` shares a vault only among one owner's repos
+(`trusty/<owner>/<name>`); the machine config's `secrets.project_vaults` map
+(§6.1) may share one across owners or match an existing 1Password vault name.
 
 ---
 
@@ -800,9 +802,18 @@ A project key wins over an owner key with the same name (owner answers
 **github.com only — owner ruling 06 R3, 2026-10-06
 ([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)).** The vault
 names carry no host, so a remote on any other host would map to a github.com
-project's vaults. In 0.1.0 the `origin` remote must be on `github.com`
-(https, `ssh://` or scp form); any other host is refused with the fixed
-`remote_host_unsupported` error, which names neither the host nor the URL.
+project's vaults. In 0.1.0 the `origin` remote must be on `github.com` in
+one of these forms, each with or without `.git`:
+
+- `https://[<userinfo>@]github.com[:<port>]/<owner>/<repo>`
+- `ssh://[<user>@]github.com[:<port>]/<owner>/<repo>`, also spelled
+  `git+ssh://` or `ssh+git://`
+- scp form `[<user>@]github.com:<owner>/<repo>`
+
+Any other host, any other scheme (`http://`, `git://`, `file://`, ...), and
+any remote-helper URL holding `::` (`<helper>::<address>`) is refused with the
+fixed `remote_host_unsupported` error, which names neither the host nor the
+URL.
 GitHub Enterprise Server support comes later and is additive; the host is
 not added to vault names.
 

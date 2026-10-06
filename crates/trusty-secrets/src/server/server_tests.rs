@@ -748,7 +748,8 @@ async fn server_tracked_vault_override_outside_the_owner_is_refused() {
 
 /// Why: #9328 vector (c), owner ruling 06 R3 — a non-github.com remote is a
 /// fixed `remote_host_unsupported` error that names neither the host nor the
-/// path; github.com in https and ssh forms still resolves.
+/// path; github.com in https and ssh forms still resolves, and github.com
+/// over any other scheme or a `<helper>::` prefix is the same error.
 /// Red on the unfixed code: `secrets.scopes` answers `trusty/acme/web` for
 /// the `evil.example` remote.
 /// Test: itself.
@@ -775,6 +776,23 @@ async fn server_non_github_remote_is_a_fixed_error() {
         ErrorKind::RemoteHostUnsupported
     );
     assert!(!wire(&response).contains("evil"), "{}", wire(&response));
+
+    // #9328: github.com over a scheme DOC-74 §15.3 does not accept.
+    for (name, url) in [
+        ("file", "file://github.com/acme/app"),
+        ("git", "git://github.com/acme/app"),
+        ("http", "http://github.com/acme/app"),
+        ("helper", "x::https://github.com/acme/app"),
+    ] {
+        let dir = checkout(name, url);
+        let response = call(&fx.settings.socket, method::SCOPES, json!({"project": dir})).await;
+        assert_eq!(
+            fixed_error(&response, method::SCOPES),
+            ErrorKind::RemoteHostUnsupported,
+            "{url}"
+        );
+        assert!(!wire(&response).contains("acme/app"), "{}", wire(&response));
+    }
 
     for (name, url) in [
         ("https", "https://github.com/Acme/Web.git"),

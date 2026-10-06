@@ -36,8 +36,8 @@ use" flag. It never holds a value.
 | Project | One repository | `trusty/<owner>/<repo>` |
 | Owner | Every project of one GitHub owner | `trusty/<owner>` |
 
-The owner and repository come from the `origin` git remote, which must be on
-`github.com`; any other host is refused. A lookup for `secret://KEY` checks
+The owner and repository come from the `origin` git remote, which must be a
+`github.com` https, ssh or scp-form URL; any other host or scheme is refused. A lookup for `secret://KEY` checks
 the project vault first, then the owner vault. If the scope cannot be
 determined, the call fails. It never guesses.
 

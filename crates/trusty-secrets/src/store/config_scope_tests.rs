@@ -146,6 +146,9 @@ fn scope_remote_url_table() {
         "https://github.com/bobmatnyc/trusty-tools",
         "https://x-access-token:ghs_secret@github.com/bobmatnyc/trusty-tools.git",
         "ssh://git@github.com:22/bobmatnyc/trusty-tools/",
+        // #9328: git reads both spellings as `ssh`.
+        "git+ssh://git@github.com/bobmatnyc/trusty-tools.git",
+        "ssh+git://git@github.com/bobmatnyc/trusty-tools.git",
     ] {
         let (owner, repo) = parse_remote_identity(url).expect(url);
         assert_eq!(
@@ -256,7 +259,9 @@ fn checkout_with_origin(url: &str) -> TempDir {
 /// Why: #9328 vector (c), owner ruling 06 R3 — the remote host was dropped,
 /// so `evil.example/acme/app` mapped to `github.com/acme/app`'s vaults. Any
 /// host but github.com is now refused with fixed text that names neither the
-/// host nor the URL; github.com in https and ssh forms still derives.
+/// host nor the URL; github.com in https and ssh forms still derives. Only
+/// the https, ssh and scp forms are accepted, so github.com over `file`,
+/// `git`, `http` or a `<helper>::` prefix is the same refusal.
 /// Red on the unfixed code: `parse_remote_identity` returns `Ok` for every
 /// URL in the first table.
 /// Test: itself.
@@ -269,6 +274,11 @@ fn scope_non_github_remote_is_refused_with_fixed_text() {
         "https://github.com.evil.example/acme/app",
         "https://evil.example#@github.com/acme/app",
         "https://gitlab.com/acme/app.git",
+        // #9328: github.com over a scheme DOC-74 §15.3 does not accept.
+        "file://github.com/acme/app",
+        "git://github.com/acme/app",
+        "http://github.com/acme/app",
+        "x::https://github.com/acme/app",
     ] {
         let refusal = parse_remote_identity(url).expect_err(url);
         assert_eq!(refusal, RemoteRefusal::UnsupportedHost, "{url}");

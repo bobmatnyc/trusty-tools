@@ -44,6 +44,7 @@ const TRACKED_OVERRIDE_OUT_OF_SCOPE: &str = "a `secrets.vault` override in the t
 /// What: a fixed reason, never the URL.
 /// Test: `scope_remote_url_table`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive] // #9328: room for later refusal reasons without a SemVer break.
 pub enum RemoteRefusal {
     /// The URL is not `<host>/<owner>/<repo>`-shaped.
     Malformed(&'static str),
@@ -74,20 +75,37 @@ impl RemoteRefusal {
     }
 }
 
+/// The URL schemes a remote may use; git reads `git+ssh` and `ssh+git` as
+/// `ssh`.
+// #9328: DOC-74 §15.3 accepts https, ssh and scp form only.
+const ACCEPTED_SCHEMES: [&str; 4] = ["https", "ssh", "git+ssh", "ssh+git"];
+
 /// Parse `<owner>/<repo>` out of a github.com remote URL.
 ///
-/// What: accepts `scheme://[user@]github.com[:port]/owner/repo` and
-/// scp-style `[user@]github.com:owner/repo`, with or without `.git` and
-/// trailing slashes. The host, case-insensitive, must be exactly
-/// [`SUPPORTED_REMOTE_HOST`]; any other host is
-/// [`RemoteRefusal::UnsupportedHost`]. The path must be exactly two
-/// segments, each a valid owner/repository name. Errors are fixed reasons;
-/// the URL never appears in them.
+/// What: accepts `https://`, `ssh://`, `git+ssh://` or `ssh+git://`
+/// `[user@]github.com[:port]/owner/repo`, and scp-style
+/// `[user@]github.com:owner/repo`, with or without `.git` and trailing
+/// slashes. Any other scheme (`http`, `git`, `file`, ...) and any URL
+/// holding `::` (a `<helper>::<address>` remote) is
+/// [`RemoteRefusal::UnsupportedHost`]. The host, case-insensitive, must be
+/// exactly [`SUPPORTED_REMOTE_HOST`]; any other host is the same refusal.
+/// The path must be exactly two segments, each a valid owner/repository
+/// name. Errors are fixed reasons; the URL never appears in them.
 /// Test: `scope_remote_url_table`,
 /// `scope_non_github_remote_is_refused_with_fixed_text`.
 pub fn parse_remote_identity(url: &str) -> Result<(OwnerName, RepoName), RemoteRefusal> {
     let url = url.trim();
+    // #9328: a `<helper>::<address>` remote runs a remote helper, so the
+    // address after `::` says nothing about how git reaches the repository.
+    if url.contains("::") {
+        return Err(RemoteRefusal::UnsupportedHost);
+    }
     let (authority, path) = match url.split_once("://") {
+        // #9328: `file://github.com/...` is a local path and `http`/`git`
+        // are unauthenticated transports; none of them is github.com.
+        Some((scheme, _)) if !ACCEPTED_SCHEMES.contains(&scheme) => {
+            return Err(RemoteRefusal::UnsupportedHost);
+        }
         Some((_, rest)) => rest.split_once('/'),
         None => url.split_once(':'),
     }
@@ -128,6 +146,7 @@ pub fn parse_remote_identity(url: &str) -> Result<(OwnerName, RepoName), RemoteR
 /// operator's own and may pick any vault.
 /// Test: `scope_tracked_override_outside_the_owner_is_refused`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive] // #9328: room for later override sources without a SemVer break.
 pub enum VaultOverride {
     /// From the tracked `.trusty-tools/trusty-secrets.yaml`.
     Tracked(VaultName),
