@@ -32,6 +32,7 @@
 use std::path::PathBuf;
 
 use trusty_common::github_path::parse_remote_url;
+use trusty_mpm::core::remote_url_redact::redact_stored_url;
 
 use super::new_session::{NewProject, NewSessionRequest, Target};
 
@@ -188,7 +189,8 @@ pub(crate) fn request_for_entry(
 /// What: see [`request_for_entry`]; `checkout_for` answers where an
 /// unregistered project's clone URL is checked out on this host.
 /// Test: `new_session_entry_builds_a_clone_and_register_request`,
-/// `new_session_entry_without_a_checkout_names_the_clone_step`.
+/// `new_session_entry_without_a_checkout_names_the_clone_step`,
+/// `new_session_entry_with_no_checkout_masks_the_typed_password_9285`.
 pub(crate) fn request_for_entry_with(
     text: &str,
     targets: &[Target],
@@ -230,7 +232,7 @@ pub(crate) fn request_for_entry_with(
         // as …") cannot reach a project that is not registered.
         return Err(format!(
             "{} names no checkout directory on this host",
-            entry.repo_url
+            redact_stored_url(&entry.repo_url)
         ));
     };
     let mut request =

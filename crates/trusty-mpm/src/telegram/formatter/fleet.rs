@@ -10,6 +10,7 @@
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 use crate::client::{ProjectFleetView, fleet_state_glyph};
+use crate::core::remote_url_redact::redact_stored_url;
 
 use super::{callback_fits, html_escape, short_id};
 
@@ -25,7 +26,8 @@ use super::{callback_fits, html_escape, short_id};
 ///   🟢 active  🔴 stopped/errored/decommissioned  🟡 provisioning
 /// Glyph mapping is delegated to [`crate::client::fleet_state_glyph`] so it
 /// stays consistent with the Slack adapter.
-/// Test: `format_fleet_by_project_renders_projects` in `tests.rs`.
+/// Test: `format_fleet_by_project_renders_projects`,
+/// `format_fleet_by_project_masks_a_stored_password_9285` in `tests.rs`.
 pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
     if fleet.is_empty() {
         return "No registered projects.".to_string();
@@ -35,7 +37,7 @@ pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
         text.push_str(&format!(
             "\n\n<b>{}</b> — <code>{}</code>",
             html_escape(&pf.project_name),
-            html_escape(&pf.repo_url),
+            html_escape(&redact_stored_url(&pf.repo_url)),
         ));
         if pf.sessions.is_empty() {
             text.push_str("\n  —");
