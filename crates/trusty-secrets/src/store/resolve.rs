@@ -111,6 +111,7 @@ impl fmt::Debug for EnvEntry {
 
 /// Where a resolved env value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VarSource {
     /// The entry's raw text, passed through unchanged.
     Literal,

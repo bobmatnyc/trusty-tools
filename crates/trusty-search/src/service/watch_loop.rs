@@ -15,6 +15,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::chunker::chunk_ast;
 use crate::core::CodeIndexer;
@@ -28,6 +29,9 @@ use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::watch_rescan::RescanFollowUp;
 use crate::service::watcher::{FileWatcher, WatchEvent};
+use crate::service::watcher_teardown::{
+    drop_bounded_async, drop_bounded_blocking, WatcherGuard, WATCHER_TEARDOWN_BOUND,
+};
 
 /// Handle for a running watch loop. Drop it (or call [`WatcherTask::stop`]) to
 /// stop watching: the OS watcher is torn down and the consumer task is aborted.
@@ -38,12 +42,19 @@ use crate::service::watcher::{FileWatcher, WatchEvent};
 /// (dropping a `JoinHandle` leaves the task running). Holding an `AbortHandle`
 /// and aborting it on `Drop` guarantees the consumer task is actually cancelled
 /// when the manager tears watchers down, so no orphaned tasks survive a stop.
-/// What: owns the `FileWatcher` (OS watch lifetime) and an `AbortHandle` for the
-/// consumer task; `Drop` aborts the consumer and drops the watcher.
-/// Test: `watcher_task_stop_aborts_consumer` below.
+/// What: owns the OS watcher (OS watch lifetime) and the consumer task's
+/// `JoinHandle`; `Drop` aborts the consumer and tears the watcher down within
+/// `teardown_bound` (#9315, see `watcher_teardown`).
+/// Test: `watcher_task_stop_aborts_consumer` below,
+/// `dropping_a_watcher_task_is_bounded_too`.
 pub struct WatcherTask {
-    _watcher: FileWatcher,
+    // #9315: type-erased so teardown can move it to its own thread, and so a
+    // test can install a guard whose drop blocks. `None` once torn down.
+    watcher: Option<WatcherGuard>,
     join: JoinHandle<()>,
+    // #9315: names the index in the stuck-teardown warning.
+    label: String,
+    teardown_bound: Duration,
 }
 
 impl WatcherTask {
@@ -64,27 +75,52 @@ impl WatcherTask {
     /// usually landed inside `open_corpus_with_retry`'s single 50 ms retry.
     /// What: aborts the consumer `JoinHandle` and awaits it. A cancelled task
     /// resolves to `Err(JoinError::Cancelled)`, which is the expected outcome
-    /// and is discarded. The `FileWatcher` is dropped when `self` is dropped at
-    /// the end of the call, releasing the kqueue/inotify/fsevent handle. The
-    /// wait is bounded by construction: an idle or lock-parked task is dropped
-    /// by `abort()` itself, and a running one cancels at its next await.
+    /// and is discarded. The wait is bounded by construction: an idle or
+    /// lock-parked task is dropped by `abort()` itself, and a running one
+    /// cancels at its next await. Only then is the OS watcher dropped, on its
+    /// own thread and awaited for at most `teardown_bound` (5 s in production):
+    /// an FSEvents drop that never returns is detached and logged (#9315).
     /// Test: `watcher_task_stop_aborts_consumer`,
-    /// `stop_for_index_releases_the_indexer_before_it_returns`.
+    /// `stop_for_index_releases_the_indexer_before_it_returns`,
+    /// `stop_returns_within_the_bound_when_the_watcher_drop_never_returns`.
     pub async fn stop(mut self) {
         self.join.abort();
         // `JoinHandle` is `Unpin` and cannot be moved out of `self` (this type
         // has a `Drop` impl), so await it through a `&mut` borrow.
         let _ = (&mut self.join).await;
-        // `_watcher` drops here, terminating the OS watch.
+        // #9315: the consumer is gone first (corpus safety, #3049); only then
+        // is the OS watch torn down, with a bound — fseventsd may never reply.
+        if let Some(watcher) = self.watcher.take() {
+            drop_bounded_async(watcher, &self.label, self.teardown_bound).await;
+        }
+    }
+
+    /// A task holding `guard` in place of a real OS watcher (#9315 test seam).
+    #[cfg(test)]
+    pub(crate) fn with_guard_for_test(
+        guard: WatcherGuard,
+        join: JoinHandle<()>,
+        label: &str,
+        teardown_bound: Duration,
+    ) -> Self {
+        Self {
+            watcher: Some(guard),
+            join,
+            label: label.to_owned(),
+            teardown_bound,
+        }
     }
 }
 
 impl Drop for WatcherTask {
     /// Abort the consumer task on drop so a dropped handle never leaks a
-    /// long-running tokio task (the OS watcher is torn down by `FileWatcher`'s
-    /// own `Drop`).
+    /// long-running tokio task, then tear the OS watcher down within the
+    /// bound — a no-op after [`WatcherTask::stop`] (#9315).
     fn drop(&mut self) {
         self.join.abort();
+        if let Some(watcher) = self.watcher.take() {
+            drop_bounded_blocking(watcher, &self.label, self.teardown_bound);
+        }
     }
 }
 
@@ -146,6 +182,7 @@ pub(crate) fn spawn_watch_loop_with_registry(
     let raw_root = root_path.to_path_buf();
     let canonical_root =
         std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    let index_label = index_id.to_string();
 
     let join = tokio::spawn(async move {
         // Consecutive failed reconciles, driving the retry backoff. Reset to 0
@@ -303,8 +340,10 @@ pub(crate) fn spawn_watch_loop_with_registry(
     });
 
     Ok(WatcherTask {
-        _watcher: watcher,
+        watcher: Some(Box::new(watcher)),
         join,
+        label: format!("index {index_label} ({})", root_path.display()),
+        teardown_bound: WATCHER_TEARDOWN_BOUND,
     })
 }
 
