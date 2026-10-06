@@ -990,7 +990,7 @@ fn refused_spawn_env(
              machine's global account (#8510). Fix: `tm projects register <name> --repo-url \
              {} --gh-account {who} --gh-config-dir <dir>`.",
             // #9124: the origin may embed `user:token@`.
-            crate::core::remote_url_redact::redact_url(origin)
+            crate::core::remote_url_redact::redact_stored_url(origin)
         ),
     };
     GhSpawnEnv {

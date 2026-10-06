@@ -185,3 +185,59 @@ fn redact_stored_url_keeps_a_clean_url_as_redact_url_shows_it() {
         Cow::Borrowed(_)
     ));
 }
+
+/// Why (#9259): every type that prints one stored URL must mask a password
+/// holding a quote or space, as `redact_stored_url` does.
+/// What: each row's URL goes through every Display and Debug impl this module
+/// can construct; no password fragment and no `user:p` prefix may survive.
+/// Test: this test.
+#[test]
+fn every_single_url_type_masks_a_quoted_or_spaced_password() {
+    use crate::core::local_repo_url::NonLocalRepoUrl;
+    use crate::core::standalone::registry::RegistryError;
+    let rows = [
+        ("https://u:pa'ss9259@host/o/r", "u:p"),
+        ("https://u:p\"a\"ss9259@host/o/r", "u:p"),
+        ("https://u:pa ss9259@host/o/r", "u:p"),
+        ("https://user:\"p@ss9259\"@host/repo", "user:"),
+    ];
+    for (i, (url, prefix)) in rows.into_iter().enumerate() {
+        let non_local = NonLocalRepoUrl {
+            repo_url: url.to_owned(),
+        };
+        let duplicate = RegistryError::DuplicateAlias {
+            alias: "a".to_owned(),
+            existing_url: url.into(),
+        };
+        #[allow(unused_mut)]
+        let mut shown = vec![
+            ("RedactedUrl Debug", format!("{:?}", RedactedUrl::from(url))),
+            ("NonLocalRepoUrl Display", non_local.to_string()),
+            ("NonLocalRepoUrl Debug", format!("{non_local:?}")),
+            ("DuplicateAlias Display", duplicate.to_string()),
+            ("DuplicateAlias Debug", format!("{duplicate:?}")),
+        ];
+        #[cfg(feature = "daemon")]
+        {
+            let e = crate::daemon::error::DaemonError::ProjectNotFoundForRepoUrl {
+                repo_url: url.into(),
+            };
+            shown.push(("ProjectNotFoundForRepoUrl Display", e.to_string()));
+            shown.push(("ProjectNotFoundForRepoUrl Debug", format!("{e:?}")));
+        }
+        for (what, text) in shown {
+            assert!(
+                !text.contains("ss9259"),
+                "row {i}: {what} kept a password fragment"
+            );
+            assert!(
+                !text.contains(prefix),
+                "row {i}: {what} kept the {prefix:?} prefix"
+            );
+            assert!(
+                text.contains("***@host/"),
+                "row {i}: {what} lost the masked host"
+            );
+        }
+    }
+}

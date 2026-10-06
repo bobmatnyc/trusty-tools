@@ -561,7 +561,7 @@ fn account_only_refusal(pin: &RegistryPin, account: &str, failures: &[String]) -
         .as_ref()
         .map_or(("<name>", "<url>"), |(n, u)| (n.as_str(), u.as_str()));
     // #9124: the refusal reaches the daemon log; never the record's token.
-    let url = crate::core::remote_url_redact::redact_url(url);
+    let url = crate::core::remote_url_redact::redact_stored_url(url);
     let checked = if failures.is_empty() {
         String::new()
     } else {
