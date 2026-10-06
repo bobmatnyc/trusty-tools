@@ -1,0 +1,15 @@
+diff --git a/crates/trusty-mpm/src/catchup/paging.rs b/crates/trusty-mpm/src/catchup/paging.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-mpm/src/catchup/paging.rs
+@@ -0,0 +1,9 @@
++//! Paging over catch-up items.
++
++/// One page of `items`, `limit` long, starting at `offset`.
++pub fn page<T: Clone>(items: &[T], offset: usize, limit: usize) -> Vec<T> {
++    if offset >= items.len() {
++        return Vec::new();
++    }
++    items[offset..offset + limit].to_vec()
++}

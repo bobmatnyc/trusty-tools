@@ -1,0 +1,25 @@
+diff --git a/crates/trusty-common/src/pid_claim.rs b/crates/trusty-common/src/pid_claim.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/pid_claim.rs
+@@ -0,0 +1,19 @@
++//! Claim a daemon's pid file so only one instance runs.
++
++use std::io::Write;
++use std::path::Path;
++
++/// Claim `path` for this process; false when another daemon holds it.
++pub fn claim_pid_file(path: &Path) -> std::io::Result<bool> {
++    if path.exists() {
++        return Ok(false);
++    }
++    let mut file = std::fs::File::create(path)?;
++    writeln!(file, "{}", std::process::id())?;
++    Ok(true)
++}
++
++/// Release a claim taken by `claim_pid_file`.
++pub fn release_pid_file(path: &Path) -> std::io::Result<()> {
++    std::fs::remove_file(path)
++}

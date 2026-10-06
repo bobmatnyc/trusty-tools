@@ -1,0 +1,45 @@
+diff --git a/crates/trusty-search/src/core/index_handle.rs b/crates/trusty-search/src/core/index_handle.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/core/index_handle.rs
+@@ -0,0 +1,39 @@
++//! A registered index and its change hook.
++
++use std::sync::{Arc, Mutex};
++
++/// Called after each commit.
++pub type Hook = Box<dyn Fn() + Send + Sync>;
++
++/// One open index.
++pub struct IndexHandle {
++    /// Index id.
++    pub id: String,
++    commits: Mutex<u64>,
++    on_commit: Mutex<Option<Hook>>,
++}
++
++impl IndexHandle {
++    /// Open a handle for `id`.
++    pub fn open(id: &str) -> Arc<Self> {
++        let handle = Arc::new(Self {
++            id: id.to_string(),
++            commits: Mutex::new(0),
++            on_commit: Mutex::new(None),
++        });
++        let me = Arc::clone(&handle);
++        let hook: Hook = Box::new(move || {
++            let mut n = me.commits.lock().unwrap_or_else(|e| e.into_inner());
++            *n += 1;
++        });
++        *handle.on_commit.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
++        handle
++    }
++
++    /// Run the commit hook.
++    pub fn committed(&self) {
++        if let Some(hook) = self.on_commit.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
++            hook();
++        }
++    }
++}

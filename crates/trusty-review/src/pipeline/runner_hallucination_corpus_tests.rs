@@ -7,20 +7,22 @@
 //! What: for each case in `tests/fixtures/citation_corpus/`, drives
 //! `run_review` with a stub reviewer that returns the case's `reviewer` JSON
 //! and a stub verifier that answers the case's `verifier` judgment, then
-//! counts hallucinations: survivors labelled false or that [`oracle_resolves`]
+//! counts hallucinations: survivors labelled false or that `oracle::resolves`
 //! cannot resolve at the head, forbidden prose in the body, and a review with
 //! no survivor whose verdict blocks or whose grade a withheld finding shaped.
 //! It also checks each case's survivor count and verdict (`expect_verdict`;
 //! AQ-7t, Bob 2026-10-05: an all-withheld APPROVE / APPROVE* keeps it).
 //! Test: `hallucination_count_is_zero`.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
 use super::*;
-use crate::models::Finding;
+
+// The resolver is shared with `tests/model_eval.rs`, so it lives under `tests/`.
+#[path = "../../tests/support/oracle.rs"]
+mod oracle;
 
 /// One corpus case; see `tests/fixtures/citation_corpus/README.md`.
 #[derive(Deserialize)]
@@ -125,108 +127,16 @@ async fn run_case(case: &Case, diff: &str) -> ReviewResult {
     .await
 }
 
-fn norm(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Line-numbered text of every file in a diff, by new-side line number.
-type Lines = HashMap<String, HashMap<u32, String>>;
-
-/// New-side text of every file in `diff`, and the removed (base) text placed
-/// at the new-side position of its deletion: the next new-side line, or the
-/// hunk's last one for a trailing deletion. Written apart from the gate so the
-/// corpus does not grade the gate with its own code.
-fn diff_lines(diff: &str) -> (Lines, Lines) {
-    let (mut head, mut base) = (Lines::new(), Lines::new());
-    let (mut file, mut next, mut pending) = (String::new(), 0u32, Vec::new());
-    let mut flush = |file: &str, at: u32, pending: &mut Vec<String>| {
-        if !pending.is_empty() {
-            let slot: &mut String = base
-                .entry(file.to_string())
-                .or_default()
-                .entry(at)
-                .or_default();
-            *slot = norm(&format!("{slot} {}", pending.join(" ")));
-            pending.clear();
-        }
-    };
-    for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ b/") {
-            file = path.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("@@ ") {
-            flush(&file, next.saturating_sub(1), &mut pending);
-            let new = rest.split_whitespace().find_map(|t| t.strip_prefix('+'));
-            next = new
-                .and_then(|n| n.split(',').next())
-                .and_then(|n| n.parse().ok())
-                .unwrap_or(0);
-        } else if let Some(body) = line.strip_prefix("-").filter(|_| !line.starts_with("---")) {
-            pending.push(norm(body));
-        } else if let Some(body) = line.strip_prefix('+').or_else(|| line.strip_prefix(' ')) {
-            flush(&file, next, &mut pending);
-            head.entry(file.clone())
-                .or_default()
-                .insert(next, norm(body));
-            next += 1;
-        }
-    }
-    flush(&file, next.saturating_sub(1), &mut pending);
-    (head, base)
-}
-
-/// The lines of `file` in `lines`, matched as the gate's caller cites it.
-fn file_lines<'a>(lines: &'a Lines, file: &str) -> Option<&'a HashMap<u32, String>> {
-    lines
-        .iter()
-        .find(|(k, _)| **k == file || k.ends_with(&format!("/{file}")))
-        .map(|(_, v)| v)
-}
-
-/// The corpus's own resolver: the finding's file is at the head, its line
-/// exists there, every backtick code span it quotes is in that file, and one
-/// of them is on the cited line. A finding that quotes no code never resolves.
-/// A finding about a removal (`removal`, by ground truth) also resolves its
-/// quotes against the removed lines, placed at their deletion's position.
-fn oracle_resolves(f: &Finding, (head, base): &(Lines, Lines), removal: bool) -> bool {
-    let Some(lines) = file_lines(head, &f.file) else {
-        return false;
-    };
-    let removed = file_lines(base, &f.file).filter(|_| removal);
-    let Some(mut on_line) = f.line.and_then(|l| lines.get(&l)).cloned() else {
-        return false;
-    };
-    let mut whole: String = lines.values().cloned().collect::<Vec<_>>().join(" ");
-    if let Some(removed) = removed {
-        whole = format!(
-            "{whole} {}",
-            removed.values().cloned().collect::<Vec<_>>().join(" ")
-        );
-        if let Some(gone) = f.line.and_then(|l| removed.get(&l)) {
-            on_line = format!("{on_line} {gone}");
-        }
-    }
-    let spans: Vec<String> = f
-        .description
-        .split('`')
-        .skip(1)
-        .step_by(2)
-        .map(norm)
-        .filter(|s| s.len() >= 3 && !s.contains(".rs:"))
-        .collect();
-    !spans.is_empty()
-        && spans.iter().all(|s| whole.contains(s.as_str()))
-        && spans.iter().any(|s| on_line.contains(s.as_str()))
-}
-
 /// Hallucinations in one reviewed case.
 fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
-    let lines = diff_lines(diff);
+    let lines = oracle::diff_lines(diff);
     let survivors = result
         .findings
         .iter()
         .filter(|f| {
+            let removal = case.removals.contains(&f.kind);
             case.hallucinated.contains(&f.kind)
-                || !oracle_resolves(f, &lines, case.removals.contains(&f.kind))
+                || !oracle::resolves(&f.file, f.line, &f.description, &lines, removal)
         })
         .count();
     let prose = case
@@ -235,17 +145,13 @@ fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
         .filter(|p| result.review_body.contains(p.as_str()))
         .count();
     // AQ-7t (Bob 2026-10-05): with no survivor, a withheld finding may neither
-    // block nor shape the grade. An approving verdict keeps the grade its band
-    // gives an empty survivor set; UNKNOWN carries none.
-    let survivorless_grade = match result.verdict {
-        Verdict::Approve => Some("A+"),
-        Verdict::ApproveWithReservations => Some("C+"),
-        _ => None,
-    };
-    let withheld_shapes_verdict = result.findings.is_empty()
-        && !result.withheld_findings.is_empty()
-        && (matches!(result.verdict, Verdict::RequestChanges | Verdict::Block)
-            || result.grade.as_deref() != survivorless_grade);
+    // block nor shape the grade.
+    let withheld_shapes_verdict = oracle::withheld_shapes_verdict(
+        result.findings.len(),
+        result.withheld_findings.len(),
+        &result.verdict.to_string(),
+        result.grade.as_deref(),
+    );
     survivors + prose + usize::from(withheld_shapes_verdict)
 }
 

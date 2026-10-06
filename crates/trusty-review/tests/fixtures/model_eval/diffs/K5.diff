@@ -1,0 +1,26 @@
+diff --git a/crates/trusty-search/src/service/flush.rs b/crates/trusty-search/src/service/flush.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/service/flush.rs
+@@ -0,0 +1,20 @@
++//! Flush buffered documents to the writer task.
++
++use std::sync::Mutex;
++use tokio::sync::mpsc::Sender;
++
++/// Documents waiting to be written.
++pub static BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
++
++/// Move every buffered document to `tx`.
++pub async fn flush(tx: &Sender<String>) -> Result<usize, String> {
++    let batch: Vec<String> = {
++        let mut buf = BUFFER.lock().unwrap_or_else(|e| e.into_inner());
++        std::mem::take(&mut *buf)
++    };
++    let n = batch.len();
++    for doc in batch {
++        tx.send(doc).await.map_err(|e| e.to_string())?;
++    }
++    Ok(n)
++}

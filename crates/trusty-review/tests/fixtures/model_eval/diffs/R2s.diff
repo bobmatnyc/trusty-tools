@@ -1,0 +1,24 @@
+diff --git a/crates/trusty-common/src/atomic_write.rs b/crates/trusty-common/src/atomic_write.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/atomic_write.rs
+@@ -0,0 +1,18 @@
++//! Write a file atomically: temp file, then rename.
++
++use std::io::Write;
++use std::path::Path;
++
++/// Replace `path` with `bytes` so readers never see a partial file.
++pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
++    let tmp = path.with_extension("tmp");
++    let mut file = std::fs::File::create(&tmp)?;
++    file.write_all(bytes)?;
++    file.sync_all()?;
++    drop(file);
++    if let Err(e) = std::fs::rename(&tmp, path) {
++        let _ = std::fs::remove_file(&tmp);
++        return Err(e);
++    }
++    Ok(())
++}

@@ -1,0 +1,36 @@
+diff --git a/crates/trusty-common/src/git_log.rs b/crates/trusty-common/src/git_log.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/git_log.rs
+@@ -0,0 +1,30 @@
++//! Recent commit subjects for a repository.
++
++use std::path::Path;
++use std::process::Command;
++
++/// Why the log could not be read.
++#[derive(Debug)]
++pub enum LogError {
++    /// The path does not exist.
++    Missing,
++    /// git failed or could not start.
++    Git(String),
++}
++
++/// The last `n` commit subjects of the repository at `path`.
++pub fn recent_subjects(path: &str, n: usize) -> Result<Vec<String>, LogError> {
++    if !Path::new(path).exists() {
++        return Err(LogError::Missing);
++    }
++    let script = format!("git -C {path} log --format=%s -n {n}");
++    let out = Command::new("sh")
++        .arg("-c")
++        .arg(&script)
++        .output()
++        .map_err(|e| LogError::Git(e.to_string()))?;
++    if !out.status.success() {
++        return Err(LogError::Git(String::from_utf8_lossy(&out.stderr).into_owned()));
++    }
++    Ok(String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect())
++}

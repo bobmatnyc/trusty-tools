@@ -1,0 +1,27 @@
+diff --git a/crates/trusty-common/src/credentials/table_store.rs b/crates/trusty-common/src/credentials/table_store.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/credentials/table_store.rs
+@@ -0,0 +1,21 @@
++//! A small TOML-backed credential table.
++
++use std::collections::BTreeMap;
++use std::path::Path;
++
++/// One credential table, keyed by service name.
++pub type Table = BTreeMap<String, String>;
++
++/// Read the table at `path`.
++fn load_table(path: &Path) -> Table {
++    let text = std::fs::read_to_string(path).unwrap_or_default();
++    toml::from_str(&text).unwrap_or_default()
++}
++
++/// Store `secret` under `service`, rewriting the whole file.
++pub fn set(path: &Path, service: &str, secret: &str) -> std::io::Result<()> {
++    let mut table = load_table(path);
++    table.insert(service.to_string(), secret.to_string());
++    let text = toml::to_string(&table).map_err(std::io::Error::other)?;
++    std::fs::write(path, text)
++}

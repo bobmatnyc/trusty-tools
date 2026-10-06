@@ -1,0 +1,32 @@
+diff --git a/crates/trusty-review/src/pipeline/verify_round.rs b/crates/trusty-review/src/pipeline/verify_round.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-review/src/pipeline/verify_round.rs
+@@ -0,0 +1,26 @@
++//! Collect one verification round.
++
++/// A finding's judgment from the verifier.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Judgment {
++    /// The finding holds.
++    Confirmed,
++    /// The finding is wrong.
++    Refuted,
++}
++
++/// One verifier answer: finding index and judgment, or the call's error.
++pub type Answer = Result<(usize, Judgment), String>;
++
++/// Indices of findings to keep after a round over `count` findings.
++///
++/// A finding is dropped only when the verifier refuted it.
++pub fn kept_after_round(count: usize, answers: Vec<Answer>) -> Vec<usize> {
++    let refuted: Vec<usize> = answers
++        .into_iter()
++        .filter_map(Result::ok)
++        .filter(|(_, j)| *j == Judgment::Refuted)
++        .map(|(i, _)| i)
++        .collect();
++    (0..count).filter(|i| !refuted.contains(i)).collect()
++}

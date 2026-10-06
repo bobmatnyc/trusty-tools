@@ -1,0 +1,123 @@
+{
+  "about": "A deliberately bad model. L1: no finding (miss). E1: right line, no anchor (miss, extra). C1: grounded but outside the span (miss, extra). B1: the right finding, refuted by the verifier. L3: caught, but names `oldest_pending_seq()`, which the file does not have (hallucination). K2: an invented but grounded defect on a clean diff (false positive). R3: caught.",
+  "model": "us.anthropic.claude-sonnet-5-5",
+  "outputs": {
+    "E1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "E1-doc",
+            "body": "`fn load_table(path: &Path) -> Table` should say what it returns for a missing file.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/credentials/table_store.rs",
+            "line": 10,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "C1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "C1-pid-write",
+            "body": "`writeln!(file, \"{}\", std::process::id())?;` writes the pid; the claim should use create_new.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-common/src/pid_claim.rs",
+            "line": 12,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "B1": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "B1-boundary-panic",
+            "body": "`items[offset..offset + limit]` is not clamped to items.len(), so the last partial page panics with a slice index out of range.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/catchup/paging.rs",
+            "line": 8,
+            "code_provable": true
+          }
+        ]
+      },
+      "refuted": [
+        "B1-boundary-panic"
+      ]
+    },
+    "L3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "L3-logic-wrong-extreme",
+            "body": "`.max_by_key(|p| p.arrival);` selects the newest aged job, not the oldest, so the longest-waiting job can still starve; use min_by_key. The helper `oldest_pending_seq()` in this file already does it right.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-search/src/service/reindex/aged_pick.rs",
+            "line": 25,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "K2": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "K2-panic",
+            "body": "`stamps.iter().max().expect(\"non-empty: checked above\")` panics when stamps is empty.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/session/latest.rs",
+            "line": 9,
+            "code_provable": true
+          }
+        ]
+      }
+    },
+    "R3": {
+      "reviewer": {
+        "prose": "See the findings.",
+        "verdict": "REQUEST_CHANGES",
+        "grade": "C",
+        "summary": "Defects found.",
+        "findings": [
+          {
+            "title": "R3-swallowed-error",
+            "body": "`std::fs::read_to_string(&gitignore_path).unwrap_or_default()` treats an unreadable .gitignore as empty, so a second managed block is appended.",
+            "severity": "medium",
+            "confidence": 0.9,
+            "file": "crates/trusty-mpm/src/core/scaffold_gitignore.rs",
+            "line": 81,
+            "code_provable": true
+          }
+        ]
+      }
+    }
+  }
+}

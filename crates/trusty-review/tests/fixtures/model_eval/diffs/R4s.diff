@@ -1,0 +1,51 @@
+diff --git a/crates/trusty-common/src/error_capture/pending.rs b/crates/trusty-common/src/error_capture/pending.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-common/src/error_capture/pending.rs
+@@ -0,0 +1,45 @@
++//! Track error reports in flight to the collector.
++
++use std::collections::HashMap;
++use std::sync::Mutex;
++
++/// Reports sent but not yet acknowledged, by fingerprint.
++#[derive(Default)]
++pub struct Pending {
++    inflight: Mutex<HashMap<String, u32>>,
++}
++
++/// The collector's reply.
++pub enum Ack {
++    /// Stored.
++    Ok,
++    /// Rejected or failed.
++    Failed(String),
++}
++
++impl Pending {
++    /// Send `fingerprint` through `send`, tracking it while in flight.
++    pub fn report(&self, fingerprint: &str, send: impl FnOnce() -> Ack) -> Result<(), String> {
++        self.inflight
++            .lock()
++            .unwrap_or_else(|e| e.into_inner())
++            .entry(fingerprint.to_string())
++            .and_modify(|n| *n += 1)
++            .or_insert(1);
++        match send() {
++            Ack::Ok => {
++                self.inflight
++                    .lock()
++                    .unwrap_or_else(|e| e.into_inner())
++                    .remove(fingerprint);
++                Ok(())
++            }
++            Ack::Failed(e) => Err(e),
++        }
++    }
++
++    /// Reports currently tracked.
++    pub fn len(&self) -> usize {
++        self.inflight.lock().unwrap_or_else(|e| e.into_inner()).len()
++    }
++}
