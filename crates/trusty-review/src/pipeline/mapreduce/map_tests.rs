@@ -334,3 +334,50 @@ async fn map_stamps_file_on_findings() {
         other => panic!("expected Reviewed, got {other:?}"),
     }
 }
+
+/// The verdict of the single chunk outcome a reply of `json` produces.
+async fn chunk_verdict(json: &str) -> Verdict {
+    let llm: Arc<dyn LlmProvider> = Arc::new(RecordingLlm::with_response(json));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+    let units = vec![review_unit("src/target.rs", "+fn t() {}")];
+    match run_map_stage(&units, &llm, &c, 4).await.remove(0) {
+        MapOutcome::Reviewed { verdict, .. } => verdict,
+        other => panic!("expected Reviewed, got {other:?}"),
+    }
+}
+
+/// #9310: a chunk's grade is part of its verdict, so a chunk reply of APPROVE
+/// graded F is a rejection (BLOCK), as `derive_verdict_with_grade` reads it.
+#[tokio::test]
+async fn map_chunk_approve_graded_f_reads_block() {
+    let json = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[]}"#;
+    assert_eq!(chunk_verdict(json).await, Verdict::Block);
+}
+
+/// #9310 control: the grade only ever tightens a chunk verdict. A passing,
+/// absent or unparseable grade leaves it, and a passing grade never relaxes a
+/// rejection.
+#[tokio::test]
+async fn map_chunk_grade_never_relaxes_a_verdict() {
+    let cases = [
+        (
+            r#"{"verdict":"APPROVE","grade":"B","findings":[]}"#,
+            Verdict::Approve,
+        ),
+        (r#"{"verdict":"APPROVE","findings":[]}"#, Verdict::Approve),
+        (
+            r#"{"verdict":"APPROVE","grade":"great","findings":[]}"#,
+            Verdict::Approve,
+        ),
+        (
+            r#"{"verdict":"REQUEST_CHANGES","grade":"A","findings":[]}"#,
+            Verdict::RequestChanges,
+        ),
+    ];
+    for (json, expected) in cases {
+        assert_eq!(chunk_verdict(json).await, expected, "{json}");
+    }
+}

@@ -1832,6 +1832,79 @@ fn citation_grammar_accepts_documented_shapes() {
     }
 }
 
+// ── #9310: the citation grammar matches the whole citation string ────────────
+
+/// The verdicts a model-APPROVE review takes with one confident High finding
+/// citing `citation`, through `derive_verdict` and `derive_verdict_with_grade`
+/// (grade A, so only the severity floor can raise the verdict).
+fn floored_with_citation(citation: &str) -> (Verdict, Verdict) {
+    let mut f = speculative_finding(Effort::High, 0.9);
+    f.source_citation = Some(citation.to_string());
+    let plain = derive_verdict(Verdict::Approve, std::slice::from_ref(&f));
+    let (graded, _) = derive_verdict_with_grade(Verdict::Approve, Grade::A, &[f]);
+    (plain, graded)
+}
+
+/// #9310: an identifier embedded in prose is not a citation. Each of these
+/// matched the unanchored grammar, so the High finding drove BLOCK.
+#[test]
+fn pr84_prose_with_embedded_ref_does_not_reopen_block() {
+    for citation in [
+        "see #1 trust me",
+        "ok #123 maybe",
+        "§ 1 trust me",
+        "the docs at x.y:1 say so",
+    ] {
+        let (plain, graded) = floored_with_citation(citation);
+        assert_ne!(plain, Verdict::Block, "derive_verdict, {citation:?}");
+        assert_ne!(graded, Verdict::Block, "with_grade, {citation:?}");
+    }
+}
+
+/// #9310: `#0` names no issue and a bare `§1` names no document, so neither
+/// qualifies a High finding for the BLOCK floor.
+#[test]
+fn pr84_hash_zero_and_bare_section_do_not_reopen_block() {
+    for citation in ["#0", "§1"] {
+        let (plain, graded) = floored_with_citation(citation);
+        assert_ne!(plain, Verdict::Block, "derive_verdict, {citation:?}");
+        assert_ne!(graded, Verdict::Block, "with_grade, {citation:?}");
+    }
+}
+
+/// #9310: through `derive_verdict_with_grade` a malformed citation leaves the
+/// High finding in the Medium tier, as `pr84_uncited_high_finding_does_not_block`
+/// pins for an uncited one: the verdict is REQUEST_CHANGES, not BLOCK.
+#[test]
+fn pr84_bad_citation_high_finding_is_not_block_through_derive_verdict_with_grade() {
+    let (_, graded) = floored_with_citation("see #1 trust me");
+    assert_eq!(graded, Verdict::RequestChanges);
+}
+
+/// #9310 control: every well-formed citation — the documented shapes, the
+/// `code:` / `jira:` / `gh:` prefixes the prompt teaches, and a list of
+/// well-formed citations — still drives BLOCK through both entry points.
+#[test]
+fn well_formed_citations_still_block_through_both_entry_points() {
+    for citation in [
+        "src/handler.ts:42",
+        "IMPL-2026-05-009 WP-9",
+        "TICKET-123",
+        "#123",
+        "PRD § 4.2",
+        "PRD §4.2",
+        "code: src/a.rs:3",
+        "code: `src/a.rs:3`",
+        "jira:PROJ-1",
+        "gh: #123",
+        "src/a.rs:3, src/b.rs:4",
+    ] {
+        let (plain, graded) = floored_with_citation(citation);
+        assert_eq!(plain, Verdict::Block, "derive_verdict, {citation:?}");
+        assert_eq!(graded, Verdict::Block, "with_grade, {citation:?}");
+    }
+}
+
 // ── #PR84 adversarial-review follow-up: downgrade-scope tightening (item 2/LOW) ─
 //
 // The RULE 2 sanitize (`has_disqualified_high && !has_high`) previously fired
