@@ -277,7 +277,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     // byte-for-byte indistinguishable from a genuinely clean review, so the
     // scanned token is reported as context in the fail-safe reason and never as
     // the review's own verdict.
-    let reason = match scan_verdict_keyword(body) {
+    let mut reason = match scan_verdict_keyword(body) {
         Some(verdict) => format!(
             "findings could not be parsed from the LLM response; the trailing \
              keyword scan read {verdict}, which is not trusted as a review outcome \
@@ -285,6 +285,13 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         ),
         None => "no parseable verdict or findings in LLM response".to_string(),
     };
+    // #9310: a broken json fence is the model's own object; name it. The reply
+    // fails closed either way, and no other object in it is ever trusted.
+    if has_malformed_json_fence(body) {
+        reason = format!(
+            "a json fence in the LLM response holds no valid review object (#9310); {reason}"
+        );
+    }
     warn!(
         body_len = body.len(),
         reason,
@@ -455,6 +462,51 @@ fn scan_verdict_keyword(body: &str) -> Option<Verdict> {
         return Some(Verdict::Unknown);
     }
     None
+}
+
+// ─── Malformed json fence (#9310) ─────────────────────────────────────────────
+
+/// Whether `body` holds a `json`/`jsonc` fence whose body is not a valid
+/// review object.
+///
+/// Why: when the model's own fenced object is broken, the fail-safe reason
+/// should say so; a reply like that is never parsed from anywhere else (#9310).
+/// What: line-based. A line whose trimmed text starts with three backticks
+/// opens a fence, and a later bare backtick line closes it; an unclosed fence
+/// runs to the end. A fence tagged `json` or `jsonc` (any case) is malformed
+/// when its trimmed body does not deserialise as `LlmOutputBlock`. Only the
+/// fail-safe reason depends on this; the verdict is UNKNOWN either way.
+/// Test: `parse_malformed_json_fence_is_named_and_unknown`,
+/// `parse_valid_uppercase_json_fence_is_not_called_malformed`.
+fn has_malformed_json_fence(body: &str) -> bool {
+    let malformed = |text: &str| serde_json::from_str::<LlmOutputBlock>(text.trim()).is_err();
+    // `Some(is_json)` while inside a fence, with the byte offset its body starts at.
+    let mut open: Option<(bool, usize)> = None;
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let line_end = offset + line.len();
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            let info = trimmed.trim_start_matches('`').trim();
+            match open {
+                None => {
+                    let tag = info.split_whitespace().next().unwrap_or("");
+                    let is_json =
+                        tag.eq_ignore_ascii_case("json") || tag.eq_ignore_ascii_case("jsonc");
+                    open = Some((is_json, line_end));
+                }
+                Some((is_json, start)) if info.is_empty() => {
+                    if is_json && malformed(&body[start..offset]) {
+                        return true;
+                    }
+                    open = None;
+                }
+                Some(_) => {}
+            }
+        }
+        offset = line_end;
+    }
+    matches!(open, Some((true, start)) if malformed(&body[start..]))
 }
 
 // ─── Grade field extraction ───────────────────────────────────────────────────

@@ -124,6 +124,8 @@ pub struct Metered {
     inner: Arc<dyn LlmProvider>,
     budget: Arc<Budget>,
     usage: Mutex<Usage>,
+    // #9310: reply texts, joined to raw-capture files by `live::join_captures`.
+    replies: Mutex<Vec<String>>,
 }
 
 impl Metered {
@@ -133,12 +135,21 @@ impl Metered {
             inner,
             budget,
             usage: Mutex::new(Usage::default()),
+            replies: Mutex::new(Vec::new()),
         })
     }
 
     /// What this provider has spent so far.
     pub fn usage(&self) -> Usage {
         *self.usage.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The text of every reply this provider returned, in order (#9310).
+    pub fn replies(&self) -> Vec<String> {
+        self.replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn record(&self, f: impl FnOnce(&mut Usage)) {
@@ -185,6 +196,10 @@ impl LlmProvider for Metered {
                 u.unpriced += 1;
             }
         });
+        self.replies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(resp.text.clone());
         Ok(resp)
     }
 }

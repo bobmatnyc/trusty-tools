@@ -75,6 +75,7 @@ TRUSTY_EVAL_LIVE=1 cargo test -p trusty-review --test model_eval \
 | `TRUSTY_EVAL_CONCURRENCY` | 4, clamped to 8 | reviews in flight |
 | `TRUSTY_EVAL_ONLY` | all | comma-separated entry ids, for a cheap smoke run |
 | `TRUSTY_EVAL_OUT_DIR` | `$CARGO_TARGET_DIR/model_eval` | report directory |
+| `TRUSTY_REVIEW_CAPTURE_DIR` | unset | raw reviewer replies, one 0600 JSON file per call; each row's `capture_files` names its files. Use a fresh dir per run (#9310) |
 
 The verifier is always Haiku 4.5 (`DEFAULT_VERIFIER_MODEL`), whatever the
 operator's config says.

@@ -222,6 +222,12 @@ pub struct Row {
     /// Why the review did not complete; `None` when it did. An incomplete row
     /// is left out of every score (see [`incomplete_reason`]).
     pub incomplete: Option<String>,
+    /// Reviewer reply texts, for the raw-capture join; not in the report.
+    #[serde(skip)]
+    pub replies: Vec<String>,
+    /// Raw-capture file names of this row's reviewer replies (#9310); empty
+    /// unless a live run sets `TRUSTY_REVIEW_CAPTURE_DIR`.
+    pub capture_files: Vec<String>,
 }
 
 impl Row {
@@ -372,6 +378,7 @@ pub async fn review_diff(
     let started = Instant::now();
     let result = run_review(config, input, deps).await;
     let wall_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let replies = reviewer.replies();
     let (reviewer, verifier) = (reviewer.usage(), checker.usage());
     Row {
         model: reviewer_model.to_string(),
@@ -384,6 +391,8 @@ pub async fn review_diff(
         reviewer,
         verifier,
         wall_ms,
+        replies,
+        capture_files: Vec::new(),
     }
 }
 
