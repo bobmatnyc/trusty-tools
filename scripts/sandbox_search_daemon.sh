@@ -14,13 +14,23 @@
 #     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
 #            TRUSTY_DATA_DIR=<dir>/data \
 #            [FASTEMBED_CACHE_DIR=<model cache>] [<KNOBS the caller set>] \
-#            <bin> start --foreground --no-auto-discover \
+#            <bin> start --foreground [--no-auto-discover] \
 #                  --data-dir <dir>/data --port <N>
 #   No other variable reaches the daemon: no token, no API key, no OPENROUTER*,
 #   ANTHROPIC*, GITHUB* or SLACK* name. KNOBS (pass through only when the
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
 #   TRUSTY_EMBEDDERD_BIN.
+#   Auto-discovery: `--no-auto-discover` is passed unless `--auto-discover` is
+#   given, which omits it so a live check of #8176 can see the daemon's own
+#   default on an explicit data dir. It does NOT pass the daemon's
+#   `--auto-discover` opt-in. The scan roots come from `dirs::home_dir()` (HOME,
+#   so <dir>/home: `Projects`, `code`, `src`, or `scan_paths` in a config.yaml
+#   under <dir>/home), never the real home. A fresh <dir>/home holds none, so
+#   the scan returns before it contacts any daemon. Do not create such a root
+#   under <dir>/home: the scan registers what it finds through the daemon
+#   address read from <dir>/data, which falls back to the live port if that
+#   file is not readable yet (`DaemonAddrLayout::resolve_base_url`).
 #   Working directory: the daemon runs with cwd <dir>/home. At startup it walks
 #   up from its cwd for a `.env.local` and loads it (`load_env_local_once`,
 #   crates/trusty-common/src/credentials/dotenv.rs). The script refuses a
@@ -62,7 +72,8 @@
 #   only for the names this script pins or the knobs above.
 #
 # Usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--port N] [--dir DIR]
-#                                         [--model-cache PATH] [--dry-run]
+#                                         [--model-cache PATH] [--auto-discover]
+#                                         [--dry-run]
 #        scripts/sandbox_search_daemon.sh --stop DIR
 #   --bin PATH          the trusty-search binary (default: on PATH)
 #   --port N            requested loopback port (default: a free port from 17900;
@@ -70,6 +81,8 @@
 #   --dir DIR           an existing sandbox directory (default: a new `mktemp -d`);
 #                       must not be, or resolve to, the real home
 #   --model-cache PATH  an existing fastembed cache directory to reuse
+#   --auto-discover     omit --no-auto-discover (default: it is passed); the
+#                       scan stays inside <dir>/home, see Auto-discovery above
 #   --dry-run           print the exact env and argv, then exit 0; creates and
 #                       starts nothing
 #   --stop DIR          stop the daemon recorded in DIR/sandbox.pid
@@ -99,7 +112,7 @@ die() {
 
 usage() {
   echo "usage: scripts/sandbox_search_daemon.sh [--bin PATH] [--port N] [--dir DIR]" >&2
-  echo "                                        [--model-cache PATH] [--dry-run]" >&2
+  echo "                                        [--model-cache PATH] [--auto-discover] [--dry-run]" >&2
   echo "       scripts/sandbox_search_daemon.sh --stop DIR" >&2
   exit 2
 }
@@ -228,6 +241,7 @@ PORT=""
 DIR=""
 MODEL_CACHE=""
 STOP_DIR=""
+AUTO_DISCOVER=0
 DRY_RUN=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -236,6 +250,7 @@ while [ "$#" -gt 0 ]; do
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --model-cache) [ "$#" -ge 2 ] || usage; MODEL_CACHE="$2"; shift 2 ;;
     --stop) [ "$#" -ge 2 ] || usage; STOP_DIR="$2"; shift 2 ;;
+    --auto-discover) AUTO_DISCOVER=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage ;;
     *) echo "sandbox_search_daemon: unknown argument: $1" >&2; usage ;;
@@ -344,7 +359,12 @@ for name in $KNOBS; do
     ENV_WORDS+=("$name=${!name}")
   fi
 done
-ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data" --port "$PORT")
+# #8176: --auto-discover leaves the flag off; the daemon's own default decides.
+if [ "$AUTO_DISCOVER" -eq 1 ]; then
+  ARGV=("$BIN" start --foreground --data-dir "$SANDBOX/data" --port "$PORT")
+else
+  ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data" --port "$PORT")
+fi
 
 echo "sandbox_search_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_search_daemon: port: $PORT"
