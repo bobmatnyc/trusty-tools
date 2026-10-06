@@ -37,6 +37,7 @@
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 
+use super::quiet_insert::{insert_quietly, inserts_before_print_point};
 use super::{HNSW_EF_CONSTRUCTION, HNSW_INITIAL_CAPACITY, HNSW_MAX_NB_CONNECTION};
 
 /// Layer count of every graph this store builds.
@@ -73,17 +74,36 @@ pub(super) fn new_index() -> Hnsw<'static, f32, DistCosine> {
 /// with no neighbours (`hnsw.rs:1083-1098`). In a parallel insert into an
 /// empty graph several first inserts can read no entry point at once, and
 /// every one but the winner is stored with no edges, so no search reaches it.
-/// What: `insert_slice` for the first row sets the entry point; one
-/// `parallel_insert_slice` inserts the rest, each of which then links to the
-/// graph.
+/// #9187: `hnsw_rs` prints to stdout on every 50,000th insert, and only a
+/// serial insert can be silenced without racing other threads.
+/// What: `insert_slice` for the first row sets the entry point. The rest go
+/// through `parallel_insert_slice` in batches that each stop one insert short
+/// of a print point; that insert runs alone through
+/// [`super::quiet_insert::insert_quietly`]. Below 50,000 rows this is one batch,
+/// as before. Fails only when stdout cannot be silenced, and then the graph is
+/// partial.
 /// Test: `reopening_a_palace_answers_every_query_identically`,
-/// `replay_leaves_no_point_without_neighbours`.
-pub(super) fn replay(index: &Hnsw<'static, f32, DistCosine>, live: &[(Vec<f32>, usize)]) {
-    let Some(((first, first_id), rest)) = live.split_first() else {
-        return;
+/// `replay_leaves_no_point_without_neighbours`, `no_hnsw_insert_writes_to_stdout`.
+pub(super) fn replay(
+    index: &Hnsw<'static, f32, DistCosine>,
+    live: &[(Vec<f32>, usize)],
+) -> std::io::Result<()> {
+    let Some(((first, first_id), mut rest)) = live.split_first() else {
+        return Ok(());
     };
     // See #9141: the entry point exists before any parallel insert reads it.
-    index.insert_slice((first.as_slice(), *first_id));
-    let refs: Vec<(&[f32], usize)> = rest.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
-    index.parallel_insert_slice(&refs);
+    insert_quietly(index, first, *first_id)?;
+    while !rest.is_empty() {
+        // #9187: no parallel batch reaches a print point.
+        let free = inserts_before_print_point(index.get_nb_point()).min(rest.len());
+        let (batch, tail) = rest.split_at(free);
+        let refs: Vec<(&[f32], usize)> = batch.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
+        index.parallel_insert_slice(&refs);
+        let Some(((vector, id), tail)) = tail.split_first() else {
+            break;
+        };
+        insert_quietly(index, vector, *id)?;
+        rest = tail;
+    }
+    Ok(())
 }
