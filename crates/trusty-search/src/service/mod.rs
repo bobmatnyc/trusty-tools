@@ -82,6 +82,8 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #9315: bounded OS-watcher teardown behind `WatcherTask`.
+pub(crate) mod watcher_teardown;
 // #8922: the walker's admission decision for a pushed `index_file` write.
 pub(crate) mod write_admission;
 
