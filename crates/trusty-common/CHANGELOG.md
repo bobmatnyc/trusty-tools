@@ -6,6 +6,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.0] — 2026-10-06
+
+### Added
+
+- Each maintenance journal record written by a dream pass, a TTL purge through the handle, or a forget of a dedup survivor carries a `drawer` copy of the removed drawer: content, room, tags, importance, creation time and `fact_key`, so a wrongly removed drawer can be recreated. The copy is kept when the L1 snapshot save after the delete fails (the record is written before the error returns) and when the journal append fails (the `error` line that stands in for the record carries it as journal JSON) (#8729).
+- `PalaceRegistry::with_data_root` and `PalaceRegistry::data_root` name the root a registry's palaces live under; `PalaceRegistry::open` sets it. The trusty-memory dream scheduler uses it to reach palaces that are not open (#9173).
+
+### Fixed
+
+- Dream dedup writes the merged survivor to the palace store before it deletes the loser, so merged text survives a reopen; if that write fails, both drawers stay. The merge no longer cuts text at 500 bytes, and appends nothing when the survivor already holds the loser's text. A merge whose text would pass 4 KiB is skipped and both drawers are kept, so a recurring near-duplicate cannot grow one drawer without bound (#9172).
+- Dream dedup picks the current drawer as survivor: a `fact_key` slot holder, then a `ruling`-tagged drawer, then the newer `created_at`, then the higher importance. Two slot holders are never merged (#9172).
+- Forgetting a drawer that the maintenance journal names as a dedup survivor writes a `forget_of_merged_survivor` record (#9172).
+- One palace handle runs one dream cycle at a time. A cycle that starts while another runs on the same palace (the idle loop, the dream rotation, `dream_run`) returns empty stats without running a pass, so it can no longer delete a drawer the running cycle has just merged text into (#9172).
+- `memory_core`: in a palace above 4,096 vectors, the vector lane finds a drawer that the HNSW graph search cannot. `hnsw_rs` prunes and evicts neighbour edges so that a point next to many identical vectors can end with no incoming edge, and an outlier can sit outside the search budget; on a copy of the 6,931-drawer trusty-tools palace that left 7–8 drawers out of their own top 10. Each open now searches for every point's own vector and keeps the points that search misses, each upsert does the same for its point, and every graph-arm query scores those points exactly, one distance per distinct vector. A point that a later upsert strands is picked up at the next open. Drawers whose vector is shared by more than 10 others still cannot all rank in a top 10 (#9174).
+- `memory_core`: opening or growing a palace past 50,000 vectors no longer writes `hnsw_rs`'s insert-count line to stdout, which corrupted the JSON-RPC stream of a daemon serving MCP over stdio. The insert that `hnsw_rs` 0.3.4 prints from runs alone, with stdout pointed at `/dev/null` under Rust's stdout lock; every other insert, including the parallel replay, runs as before. If stdout cannot be silenced, that insert does not run and the open or upsert fails with the new `HnswStoreError::StdoutGuard` variant. The enum is public and not `#[non_exhaustive]`, so an exhaustive `match` on it must add an arm (#9187).
+
 ## [0.53.5] — 2026-10-05
 
 ### Added
