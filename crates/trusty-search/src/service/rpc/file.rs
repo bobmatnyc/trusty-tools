@@ -11,6 +11,9 @@
 //!
 //! Free: one file read capped at 1 MiB and at most two git runs, each bounded
 //! by a deadline; no index lock is taken, so it cannot queue behind a query.
+//! The method has its own limiter of eight concurrent calls instead of a lane;
+//! a ninth is refused at once with the 503 `server_busy` body, which
+//! [`rpc_error_from_http`] renders as the retryable `CODE_UNAVAILABLE`.
 //!
 //! Params: `{index_id, path, diff?: "none" | "head"}`. A refusal is an error
 //! frame whose `data` is the refusal body (`error`, `index_id`, and `reason`
@@ -45,6 +48,7 @@ pub const METHODS: &[&str] = &[METHOD_FILE_GET];
 /// a 503.
 /// Test: `file_get_over_the_daemon_socket_returns_content_and_head_diff`,
 /// `file_get_refusals_keep_their_codes_over_the_socket`,
+/// `file_get_is_refused_busy_when_its_limiter_is_full`,
 /// `rpc_router_registers_every_documented_method`.
 pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     let held = Arc::clone(state);

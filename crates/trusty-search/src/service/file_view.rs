@@ -102,8 +102,9 @@ fn refusal(status: StatusCode, index_id: &str, error: &str, reason: &str, msg: &
 /// Read one indexed file and, when asked, its diff against `HEAD`.
 ///
 /// Why: see the module docs.
-/// What: `path` is root-relative or absolute. An empty path, a NUL byte, or a
-/// `..` segment is 400 `invalid_path`. An absolute path outside the root is
+/// What: a held index (#9059) is 503 `reason: "index_held"` for every path,
+/// checked before the path is touched. `path` is root-relative or absolute.
+/// An empty path, a NUL byte, or a `..` segment is 400 `invalid_path`. An absolute path outside the root is
 /// refused before the filesystem is touched. The path is then canonicalised;
 /// a miss, a symlink resolving outside the root, a non-file, and a walker
 /// exclusion are all [`not_found`]. An undecidable admission is 503. Content
@@ -117,7 +118,8 @@ fn refusal(status: StatusCode, index_id: &str, error: &str, reason: &str, msg: &
 /// `traversal_is_refused_before_the_filesystem`,
 /// `a_symlink_escaping_the_root_is_not_found`, `sops_content_is_refused`,
 /// `content_and_diff_over_their_caps_are_cut_and_flagged`,
-/// `a_git_failure_is_a_diff_error_not_an_empty_diff`.
+/// `a_git_failure_is_a_diff_error_not_an_empty_diff`,
+/// `a_held_index_answers_one_refusal_for_every_path`.
 pub fn read_indexed_file(
     handle: &IndexHandle,
     path: &str,
@@ -125,6 +127,17 @@ pub fn read_indexed_file(
     limits: &Limits,
 ) -> Result<Value, Refusal> {
     let index_id = handle.id.0.as_str();
+    // #9029: a held index refuses every path alike, before the path is read,
+    // so an existing excluded file and a missing one cannot be told apart.
+    if let Some(hold) = crate::service::exclude_hold::hold(handle) {
+        return Err(refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            index_id,
+            "file_admission_undetermined",
+            "index_held",
+            &hold.reason(),
+        ));
+    }
     let given = Path::new(path);
     if path.is_empty() || path.contains('\0') {
         return Err(refusal(
@@ -319,7 +332,7 @@ fn diff_error(e: &GitRunError) -> Value {
     let error = match e {
         GitRunError::TimedOut(_) => "git_timed_out",
         GitRunError::Spawn(_) => "git_unavailable",
-        GitRunError::Exit { .. } | GitRunError::Wait(_) => "git_failed",
+        GitRunError::Exit { .. } | GitRunError::Wait(_) | GitRunError::Read(_) => "git_failed",
     };
     tracing::warn!(error, "file.get diff failed (#9029): {e}");
     json!({ "base": "HEAD", "status": "error", "error": error, "message": e.to_string() })

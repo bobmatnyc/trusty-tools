@@ -14,9 +14,9 @@ use crate::core::indexer::CodeIndexer;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::daemon_client::DaemonClient;
 use crate::service::file_view::tests::repo;
-use crate::service::rpc::error::{CODE_FORBIDDEN, CODE_NOT_FOUND};
+use crate::service::rpc::error::{CODE_FORBIDDEN, CODE_NOT_FOUND, CODE_UNAVAILABLE};
 use crate::service::rpc::file::METHOD_FILE_GET;
-use crate::service::server::SearchAppState;
+use crate::service::server::{SearchAppState, FILE_GET_MAX_CONCURRENT};
 
 const INDEX: &str = "file-get-9029";
 
@@ -25,6 +25,7 @@ struct Served {
     tmp: tempfile::TempDir,
     root: std::path::PathBuf,
     client: DaemonClient,
+    state: Arc<SearchAppState>,
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
@@ -44,7 +45,7 @@ async fn serve() -> Served {
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(crate::service::socket::serve_until_shutdown(
         bound,
-        state,
+        Arc::clone(&state),
         async {
             let _ = stopped.await;
         },
@@ -53,6 +54,7 @@ async fn serve() -> Served {
         tmp,
         root,
         client: DaemonClient::at(socket),
+        state,
         _stop: stop,
     }
 }
@@ -153,4 +155,61 @@ async fn file_get_refusals_keep_their_codes_over_the_socket() {
         let err = call(bad.clone()).await.expect_err("bad params");
         assert_eq!(err.code(), Some(CODE_INVALID_PARAMS), "{bad}: {err}");
     }
+}
+
+/// #9029: with every `search.file.get` slot taken, a call is refused at once
+/// with the shared retryable 503 `server_busy` body, and is served again once
+/// the slots are released.
+#[tokio::test]
+async fn file_get_is_refused_busy_when_its_limiter_is_full() {
+    let s = serve().await;
+    let params = json!({ "index_id": INDEX, "path": "src/lib.rs" });
+    let held = Arc::clone(&s.state.file_get_limiter)
+        .try_acquire_many_owned(FILE_GET_MAX_CONCURRENT as u32)
+        .expect("fill the limiter");
+
+    let got = s.client.call(METHOD_FILE_GET, params.clone()).await;
+    assert!(got.is_err(), "a full limiter must refuse: {got:?}");
+    let busy = got.expect_err("refused");
+    assert_eq!(busy.code(), Some(CODE_UNAVAILABLE), "{busy}");
+    assert_eq!(
+        busy.data().map(|d| &d["error"]),
+        Some(&json!("server_busy")),
+        "{busy}"
+    );
+
+    drop(held);
+    s.client
+        .call(METHOD_FILE_GET, params)
+        .await
+        .expect("served once the slots are free");
+}
+
+/// #9029: a call releases its slot when it completes, served or refused, so
+/// one free slot serves any number of calls in turn.
+#[tokio::test]
+async fn file_get_frees_its_slot_when_the_call_completes() {
+    let s = serve().await;
+    let _held = Arc::clone(&s.state.file_get_limiter)
+        .try_acquire_many_owned(FILE_GET_MAX_CONCURRENT as u32 - 1)
+        .expect("leave one slot");
+    for (round, path) in ["src/lib.rs", "src/nope.rs", "src/kept.rs"]
+        .iter()
+        .enumerate()
+    {
+        let got = s
+            .client
+            .call(METHOD_FILE_GET, json!({ "index_id": INDEX, "path": path }))
+            .await;
+        let busy = got
+            .as_ref()
+            .err()
+            .and_then(|e| e.data())
+            .is_some_and(|d| d["error"] == "server_busy");
+        assert!(
+            !busy,
+            "round {round} ({path}): the last slot was not freed: {got:?}"
+        );
+    }
+    assert_eq!(s.state.file_get_limiter.available_permits(), 1);
 }

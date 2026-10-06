@@ -160,6 +160,9 @@ pub enum GitRunError {
     /// Waiting on the child failed.
     #[error("git could not be waited on: {0}")]
     Wait(std::io::Error),
+    /// git's stdout could not be read to its end, so its output is unknown.
+    #[error("git's output could not be read: {0}")]
+    Read(std::io::Error),
 }
 
 /// One bounded git run's stdout.
@@ -207,7 +210,12 @@ pub fn run_git_bounded(
         Some(limit) => {
             let deadline = std::time::Instant::now() + limit;
             loop {
-                if let Some(status) = child.try_wait().map_err(GitRunError::Wait)? {
+                // #9029: a failed poll still kills and reaps the child.
+                let polled = child.try_wait().inspect_err(|_| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                });
+                if let Some(status) = polled.map_err(GitRunError::Wait)? {
                     break status;
                 }
                 if std::time::Instant::now() >= deadline {
@@ -221,12 +229,17 @@ pub fn run_git_bounded(
             }
         }
     };
-    // #9029: a lost stdout must not read as empty output.
+    // #9029: a lost or unreadable stdout must not read as empty output.
     let (stdout, truncated) = out_reader
         .join()
-        .map_err(|_| GitRunError::Wait(std::io::Error::other("stdout reader panicked")))?;
+        .map_err(|_| GitRunError::Wait(std::io::Error::other("stdout reader panicked")))?
+        .map_err(GitRunError::Read)?;
     if !status.success() {
-        let (stderr, _) = err_reader.join().unwrap_or_default();
+        let (stderr, _) = err_reader
+            .join()
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
         return Err(GitRunError::Exit {
             code: status.code(),
             stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
@@ -236,20 +249,27 @@ pub fn run_git_bounded(
 }
 
 /// Read a pipe to its end, keeping at most `cap` bytes.
-fn drain_capped(pipe: Option<impl std::io::Read>, cap: usize) -> (Vec<u8>, bool) {
+///
+/// What: an `Interrupted` read is retried; any other read error is returned,
+/// so a failed read is never taken for the end of the output (#9029).
+/// Test: `drain_capped_retries_an_interrupt_and_fails_on_a_read_error`.
+fn drain_capped(pipe: Option<impl std::io::Read>, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
     let Some(mut pipe) = pipe else {
-        return (Vec::new(), false);
+        return Ok((Vec::new(), false));
     };
     let (mut kept, mut truncated, mut buf) = (Vec::new(), false, [0u8; 8192]);
-    while let Ok(n) = pipe.read(&mut buf) {
-        if n == 0 {
-            break;
-        }
+    loop {
+        let n = match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         let room = cap.saturating_sub(kept.len());
         kept.extend_from_slice(&buf[..n.min(room)]);
         truncated |= n > room;
     }
-    (kept, truncated)
+    Ok((kept, truncated))
 }
 
 /// Split a NUL-delimited git output stream into its non-empty fields.

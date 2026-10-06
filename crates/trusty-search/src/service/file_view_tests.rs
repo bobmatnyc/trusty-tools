@@ -110,16 +110,27 @@ fn head_diff_reports_a_working_tree_change() {
     assert_eq!(new["diff"]["status"], "untracked", "{new}");
 }
 
-/// #9029: a missing file, a real file outside the root, and a file the walker
-/// excludes all answer one byte-identical 404, so the method cannot probe
-/// the filesystem.
+/// #9029: a missing file, a real file outside the root, and every file the
+/// walker excludes — a skip dir, a gitignored file, an `exclude_globs` match,
+/// `.env`, `id_rsa` — answer one byte-identical 404, so the method cannot
+/// probe the filesystem.
 #[test]
 fn a_missing_file_and_an_outside_file_answer_one_body() {
-    let fx = fixture();
+    let mut fx = fixture();
+    fx.handle.exclude_globs = vec!["**/by_glob.rs".to_owned()];
     let outside = fx._tmp.path().join("outside.rs");
     std::fs::write(&outside, "secret\n").expect("outside file");
     std::fs::create_dir_all(fx.root.join("node_modules/pkg")).expect("skip dir");
     std::fs::write(fx.root.join("node_modules/pkg/index.js"), "x\n").expect("excluded");
+    std::fs::write(fx.root.join(".gitignore"), "src/ignored.rs\n").expect(".gitignore");
+    std::fs::write(fx.root.join("src/ignored.rs"), "pub fn i() {}\n").expect("ignored");
+    std::fs::write(fx.root.join("src/by_glob.rs"), "pub fn g() {}\n").expect("by glob");
+    std::fs::write(fx.root.join(".env"), "API_TOKEN=secret\n").expect(".env");
+    std::fs::write(
+        fx.root.join("id_rsa"),
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+    )
+    .expect("id_rsa");
 
     let missing = get(&fx, "src/nope.rs", DiffMode::None).expect_err("missing");
     assert_eq!(missing.0, StatusCode::NOT_FOUND);
@@ -128,6 +139,10 @@ fn a_missing_file_and_an_outside_file_answer_one_body() {
         outside.to_str().expect("utf-8 path"),
         "node_modules/pkg/index.js",
         "src",
+        "src/ignored.rs",
+        "src/by_glob.rs",
+        ".env",
+        "id_rsa",
     ] {
         let refused = get(&fx, path, DiffMode::Head).expect_err(path);
         assert_eq!(
@@ -135,6 +150,27 @@ fn a_missing_file_and_an_outside_file_answer_one_body() {
             "{path} must look exactly like a missing file"
         );
     }
+}
+
+/// #9029: a held index (#9059) answers one retryable 503 for every path, so
+/// an existing excluded file and a missing one cannot be told apart.
+#[test]
+fn a_held_index_answers_one_refusal_for_every_path() {
+    let mut fx = fixture();
+    fx.handle.exclude_globs = vec!["**/secrets/[**".to_owned()];
+    std::fs::write(fx.root.join(".env"), "API_TOKEN=secret\n").expect(".env");
+
+    let existing = get(&fx, ".env", DiffMode::None).expect_err("held: existing");
+    let missing = get(&fx, "src/nope.rs", DiffMode::None).expect_err("held: missing");
+    assert_eq!(existing, missing, "a held index must not reveal existence");
+    assert_eq!(
+        existing.0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        existing.1
+    );
+    assert_eq!(existing.1["reason"], "index_held");
+    assert_eq!(existing.1["retryable"], true);
 }
 
 /// #9029: a `..` segment, an empty path and a NUL byte are refused as invalid

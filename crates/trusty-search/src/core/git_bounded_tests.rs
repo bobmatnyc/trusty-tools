@@ -81,3 +81,51 @@ fn bounded_git_caps_stdout_and_says_so() {
     assert_eq!(whole.stdout, b"abcdefghij");
     assert!(!whole.truncated);
 }
+
+/// A pipe that yields scripted reads, then reports end of input.
+struct ScriptedPipe(std::collections::VecDeque<std::io::Result<Vec<u8>>>);
+
+impl std::io::Read for ScriptedPipe {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self.0.pop_front() {
+            None => Ok(0),
+            Some(Err(e)) => Err(e),
+            Some(Ok(bytes)) => {
+                buf[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+    }
+}
+
+/// #9029: an interrupted read is retried, and a read that fails mid-stream is
+/// an error, never the end of the output.
+#[test]
+fn drain_capped_retries_an_interrupt_and_fails_on_a_read_error() {
+    use std::io::{Error, ErrorKind};
+    let interrupted = ScriptedPipe(
+        [
+            Ok(b"abc".to_vec()),
+            Err(Error::from(ErrorKind::Interrupted)),
+            Ok(b"def".to_vec()),
+        ]
+        .into(),
+    );
+    let (kept, truncated) = drain_capped(Some(interrupted), 64).expect("an interrupt is retried");
+    assert_eq!(kept, b"abcdef");
+    assert!(!truncated);
+
+    let failing = ScriptedPipe(
+        [
+            Ok(b"abc".to_vec()),
+            Err(Error::other("the pipe broke")),
+            Ok(b"never read".to_vec()),
+        ]
+        .into(),
+    );
+    let got = drain_capped(Some(failing), 64);
+    assert!(
+        got.is_err(),
+        "a mid-stream read error must not read as end of output: {got:?}"
+    );
+}
