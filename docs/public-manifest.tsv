@@ -112,6 +112,7 @@ PAGE	tools	docs/trusty-analyze/README.md	/tools/trusty-analyze	trusty-analyze
 PAGE	tools	docs/trusty-code/README.md	/tools/trusty-code	trusty-code
 PAGE	tools	docs/trusty-common/README.md	/tools/trusty-common	trusty-common
 PAGE	tools	docs/trusty-embedderd/README.md	/tools/trusty-embedderd	trusty-embedderd
+PAGE	tools	docs/trusty-secrets/README.md	/tools/trusty-secrets	trusty-secrets
 PAGE	tools	docs/trusty-console/README.md	/tools/trusty-console	trusty-console
 PAGE	tools	docs/trusty-console/secrets.md	/tools/trusty-console/secrets	Console Secrets Service (planned)
 
