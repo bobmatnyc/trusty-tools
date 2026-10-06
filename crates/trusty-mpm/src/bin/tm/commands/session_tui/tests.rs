@@ -2306,6 +2306,59 @@ fn new_session_entry_without_a_checkout_names_the_clone_step() {
     );
 }
 
+/// #9285: a registered row with no project directory names its stored URL,
+/// which can carry a `user:password@`, so the refusal prints it masked.
+#[test]
+fn new_session_registered_row_without_a_directory_masks_the_stored_password_9285() {
+    let err = super::new_session::request_for_registered(
+        "cto",
+        "https://u:pa'ss9285@github.com/acme/cto",
+        None,
+    )
+    .expect_err("a row with no project directory cannot be started");
+    assert!(
+        !err.contains("ss9285"),
+        "a password fragment survived: {err}"
+    );
+    assert!(
+        !err.contains("u:pa"),
+        "the user:password pair survived: {err}"
+    );
+    assert!(
+        err.contains("cto is registered as https://***@github.com/acme/cto,"),
+        "{err}"
+    );
+}
+
+/// #9285: the clone step for an uncloned registered row names the stored URL
+/// masked; a masked URL is no `git clone` command, so the step is worded as
+/// prose. A clean URL keeps the pasteable command
+/// (`new_session_entry_without_a_checkout_names_the_clone_step`).
+#[test]
+fn new_session_registered_row_without_a_checkout_masks_the_stored_password_9285() {
+    let err = super::new_session::request_for_registered(
+        "cto",
+        "https://u:pa'ss9285@github.com/acme/cto",
+        Some(Path::new("/nonexistent/9285/cto")),
+    )
+    .expect_err("a row with no checkout cannot be started");
+    assert!(
+        !err.contains("ss9285"),
+        "a password fragment survived: {err}"
+    );
+    assert!(
+        !err.contains("u:pa"),
+        "the user:password pair survived: {err}"
+    );
+    assert!(!err.contains("git clone"), "{err}");
+    assert!(
+        err.contains(
+            "clone it first from https://***@github.com/acme/cto into /nonexistent/9285/cto"
+        ),
+        "{err}"
+    );
+}
+
 /// #9285: the "names no checkout directory" refusal echoes the typed clone URL,
 /// which a `user:password@` can ride in on, so it prints the URL masked.
 #[test]

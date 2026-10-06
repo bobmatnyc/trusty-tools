@@ -323,7 +323,8 @@ pub async fn ensure_mcp_spawn_allowed(
         .map_err(|e| format!("failed to read project registry: {e}"))?;
     if !is_known_repo(&projects, config, repo_url) {
         let shown = redact_stored_url(repo_url);
-        let name_hint = derive_name_from_url(repo_url).unwrap_or_else(|| shown.to_string());
+        // #9285: from the masked URL — the raw one can yield a password-bearing hint.
+        let name_hint = derive_name_from_url(&shown).unwrap_or_else(|| shown.to_string());
         return Err(format!(
             "refusing MCP-initiated spawn for unregistered repo `{shown}`; register it \
              first with the `project_register` MCP tool (name=\"{name_hint}\", \
@@ -782,16 +783,20 @@ mod tests {
             ),
             // No repo segment, so the name hint falls back to the URL itself.
             ("https://u:pa'ss9285@host/", "https://***@host/"),
+            // A raw `/` in the password, and the scp form: the name hint is
+            // derived from these, so it must come from the masked URL.
+            ("https://u:pa/ss9285@host", "https://***@host"),
+            ("u:pw9285@host:repo", "***@host:repo"),
         ] {
             let err = ensure_mcp_spawn_allowed(&registry, &cfg, url)
                 .await
                 .expect_err("an unregistered repo is refused");
             assert!(
-                !err.contains("ss9285"),
+                !err.contains("ss9285") && !err.contains("pw9285"),
                 "a password fragment survived: {err}"
             );
             assert!(
-                !err.contains("u:pa"),
+                !err.contains("u:pa") && !err.contains("u:pw"),
                 "the user:password pair survived: {err}"
             );
             assert!(err.contains(&format!("repo `{masked}`")), "{err}");
