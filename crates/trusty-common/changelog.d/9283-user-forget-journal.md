@@ -1,2 +1,0 @@
-Changed
-- A user forget (`PalaceHandle::forget`: `memory_forget`, the HTTP/UDS drawer delete, and so `palace reclaim --apply`) now writes a `user_forget` record to `maintenance_deletions.jsonl` (#9283). The record carries the drawer id, time and a new optional `content_hash` field, and never a content copy, so forgotten text cannot be recovered from the journal. A forgotten dedup survivor is still recorded as `forget_of_merged_survivor` with its copy (#9172). Adds `DeletionReason::UserForget` and `MaintenanceDeletion::with_content_hash_of`.

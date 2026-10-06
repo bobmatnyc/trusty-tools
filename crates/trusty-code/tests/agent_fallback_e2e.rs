@@ -30,7 +30,7 @@
 //! resolves purely via the embedded fallback in the SAME run.
 //! Test: this file IS the test.
 
-mod support;
+use crate::support;
 
 use serde_json::json;
 

@@ -17,9 +17,9 @@
 //! opt-in is absent.
 //! Test: `live_leg_is_inert_without_opt_in`, `live_settings_read_overrides`,
 //! `live_leg_refuses_an_unpriced_model`, `live_leg_writes_a_report_and_stops_at_the_cap`,
-//! `models_are_scored_on_common_cells`.
+//! `models_are_scored_on_common_cells`, `capture_files_join_rows_by_reply_text`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +67,9 @@ pub struct LiveSettings {
     pub only: Vec<String>,
     /// Report directory (`TRUSTY_EVAL_OUT_DIR`, else `<target>/model_eval`).
     pub out_dir: PathBuf,
+    /// Raw reviewer-reply capture directory (`TRUSTY_REVIEW_CAPTURE_DIR`, the
+    /// variable the Bedrock provider reads); rows name their files (#9310).
+    pub capture_dir: Option<PathBuf>,
 }
 
 fn list(raw: Option<String>) -> Vec<String> {
@@ -125,6 +128,10 @@ pub fn live_settings(env: Env<'_>) -> Result<Option<LiveSettings>, String> {
         concurrency,
         only: list(env("TRUSTY_EVAL_ONLY")),
         out_dir,
+        capture_dir: env("TRUSTY_REVIEW_CAPTURE_DIR")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
     }))
 }
 
@@ -255,6 +262,55 @@ pub fn incomplete_by_pass(rows: &[Row], models: &[String], passes: u32) -> serde
     serde_json::Value::Array(out)
 }
 
+/// Point each row at the raw-capture files of its reviewer replies (#9310).
+///
+/// Why: an offline scorer joins report rows to raw replies by file name.
+/// What: reads every `*.json` in `dir`, keys it by its `reply` field, and sets
+/// each row's `capture_files` to the sorted names whose reply equals one of
+/// the row's reviewer replies; identical replies share their files. An
+/// unreadable dir or file is skipped with a note on stderr, so the join never
+/// fails a run. Use a fresh dir per run: an older capture with the same reply
+/// text would join too.
+/// Test: `capture_files_join_rows_by_reply_text`.
+pub fn join_captures(dir: &Path, rows: &mut [Row]) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("capture join skipped: {}: {e}", dir.display());
+            return;
+        }
+    };
+    let mut by_reply: HashMap<String, Vec<String>> = HashMap::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let reply = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|record| record.get("reply")?.as_str().map(str::to_string));
+        match reply {
+            Some(reply) => by_reply.entry(reply).or_default().push(name.to_string()),
+            None => eprintln!("capture join skipped unreadable {name}"),
+        }
+    }
+    for row in rows.iter_mut() {
+        let mut files: Vec<String> = row
+            .replies
+            .iter()
+            .filter_map(|reply| by_reply.get(reply))
+            .flatten()
+            .cloned()
+            .collect();
+        files.sort();
+        files.dedup();
+        row.capture_files = files;
+    }
+}
+
 /// Run the live comparison, or return [`LiveOutcome::Skipped`] without
 /// building a provider when the opt-in is absent.
 pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome, String> {
@@ -293,6 +349,9 @@ pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome,
                 break 'passes;
             }
         }
+    }
+    if let Some(dir) = &settings.capture_dir {
+        join_captures(dir, &mut rows);
     }
     let (full, cut) = split_passes(&rows, &settings.models, settings.passes, entries.len());
     let cells = common_cells(&rows, &settings.models, &full);

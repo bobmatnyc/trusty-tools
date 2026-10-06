@@ -23,7 +23,7 @@
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared by both scenarios.
 
-mod support;
+use crate::support;
 
 use std::time::Duration;
 

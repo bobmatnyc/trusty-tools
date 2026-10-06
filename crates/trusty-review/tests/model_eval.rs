@@ -590,6 +590,59 @@ fn live_settings_read_overrides() {
     assert_eq!((s.passes, s.max_usd, s.only.len()), (1, 2.5, 2));
     let bad = env_of(&[("TRUSTY_EVAL_LIVE", "1"), ("TRUSTY_EVAL_PASSES", "x")]);
     assert!(live_settings(&bad).is_err());
+    // #9310: raw capture is off unless the provider's variable names a dir.
+    assert_eq!(s.capture_dir, None);
+    let env = env_of(&[
+        ("TRUSTY_EVAL_LIVE", "1"),
+        ("TRUSTY_REVIEW_CAPTURE_DIR", "/tmp/captures"),
+    ]);
+    let s = live_settings(&env).expect("parses").expect("enabled");
+    assert_eq!(
+        s.capture_dir,
+        Some(std::path::PathBuf::from("/tmp/captures"))
+    );
+}
+
+/// A row names the raw-capture files whose reply equals one of its reviewer
+/// replies (#9310).
+///
+/// Why: an offline scorer joins report rows to the raw replies by file name.
+/// What: a capture dir with a matching file, a non-matching file, a file with
+/// no `reply`, and a non-JSON file; only the matching name is joined, and it
+/// is serialised in the row while the reply texts are not.
+/// Test: this test.
+#[test]
+fn capture_files_join_rows_by_reply_text() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let write = |name: &str, body: &str| {
+        std::fs::write(tmp.path().join(name), body).expect("write capture");
+    };
+    write("reply-a.json", r#"{"reply":"R1","model":"m"}"#);
+    write("reply-b.json", r#"{"reply":"other"}"#);
+    write("reply-c.json", r#"{"text":"R1"}"#);
+    write("notes.txt", "R1");
+    let mut rows = vec![Row {
+        model: "m".to_string(),
+        pass: 1,
+        diff: "L1".to_string(),
+        tier: Tier::Seeded,
+        kind: None,
+        score: eval::DiffScore::default(),
+        reviewer: metered::Usage::default(),
+        verifier: metered::Usage::default(),
+        wall_ms: 0,
+        incomplete: None,
+        replies: vec!["R1".to_string()],
+        capture_files: Vec::new(),
+    }];
+    live::join_captures(tmp.path(), &mut rows);
+    assert_eq!(rows[0].capture_files, vec!["reply-a.json".to_string()]);
+    let json = serde_json::to_value(&rows[0]).expect("row serialises");
+    assert_eq!(json["capture_files"][0], "reply-a.json");
+    assert!(
+        json.get("replies").is_none(),
+        "reply texts stay out of the report"
+    );
 }
 
 /// A model with no Bedrock price would meter as $0 and slip past the cap, so
