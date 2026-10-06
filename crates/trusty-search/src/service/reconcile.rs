@@ -692,7 +692,9 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// What: for each repo-relative path in `files`, asks
 /// `index_admission::admits` (#8922): an admitted file → `indexer.index_file`
 /// (which refuses sops content); an excluded or deleted file →
-/// `purge_file` (its chunks and content hash); an undetermined answer
+/// `purge_file_committed` (its chunks and content hash; a delete that left
+/// redb stamps `reindexed_unix` once, #9230; a delete redb refused counts as
+/// failed and leaves the file's chunks in place); an undetermined answer
 /// touches nothing and counts as failed.
 /// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
 /// reindex requests (which need a write lock) are not blocked for the entire
@@ -708,8 +710,9 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// Test: `reconcile_stale_index_stamps_new_sha`,
 ///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs,
 ///       `boot_reconcile_delta_honours_the_walker_policy`,
-///       `boot_reconcile_delta_leaves_an_undetermined_file_alone` and
-///       `every_ingest_path_refuses_a_held_index`.
+///       `boot_reconcile_delta_leaves_an_undetermined_file_alone`,
+///       `every_ingest_path_refuses_a_held_index` and
+///       `a_delete_only_reconcile_after_the_others_full_reindex_resolves_to_it`.
 pub(super) async fn apply_delta(
     handle: &Arc<IndexHandle>,
     index_id: &str,
@@ -727,6 +730,8 @@ pub(super) async fn apply_delta(
     let mut removed = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
+    // #9230: a delete whose rows left redb stamps the corpus once, below.
+    let mut delete_committed = false;
 
     for rel_path_str in files {
         let abs_path = root.join(rel_path_str);
@@ -784,10 +789,13 @@ pub(super) async fn apply_delta(
                 let idx = handle.indexer.read().await;
                 // #8922: the content hash goes with the chunks, and the graph
                 // is rebuilt once after the loop rather than per file.
-                idx.purge_file(&handle.id, rel_path_str).await
+                idx.purge_file_committed(&handle.id, rel_path_str).await
             };
             match result {
-                Ok(n) if n > 0 => removed += n,
+                Ok((n, committed)) if n > 0 => {
+                    removed += n;
+                    delete_committed |= committed;
+                }
                 Ok(_) => skipped += 1,
                 Err(e) => {
                     failed += 1;
@@ -803,7 +811,11 @@ pub(super) async fn apply_delta(
     if removed > 0 {
         let _teardown_guard =
             crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
-        handle.indexer.read().await.rebuild_symbol_graph_now().await;
+        let idx = handle.indexer.read().await;
+        idx.rebuild_symbol_graph_now().await;
+        if delete_committed {
+            idx.record_incremental_commit("reconcile delete").await;
+        }
     }
 
     // Only stamp the new HEAD SHA when at least one operation succeeded.
