@@ -56,7 +56,7 @@ fn docs_resolve(description: &str, docs: &Docs) -> bool {
             && sha.chars().all(|c| c.is_ascii_hexdigit())
             && docs.head.starts_with(&sha);
         if !at_head
-            || body.matches('"').count() % 2 != 0
+            || !body.matches('"').count().is_multiple_of(2)
             || quotes.is_empty()
             || !quotes.iter().all(|q| text.contains(q.as_str()))
         {

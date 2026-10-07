@@ -72,6 +72,7 @@ impl DocCorpus {
     }
 
     /// Whether no doc is citable.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.docs.is_empty()
     }
@@ -126,7 +127,7 @@ fn check_one(body: &str, corpus: &DocCorpus) -> Option<(&'static str, Option<Str
         return malformed();
     };
     // #9193: an unpaired quote means a `]` cut the excerpt short; never check a fragment.
-    let unpaired = body.matches('"').count() % 2 != 0;
+    let unpaired = !body.matches('"').count().is_multiple_of(2);
     if path.is_empty() || sha.is_empty() || excerpts.is_empty() || unpaired {
         return malformed();
     }
