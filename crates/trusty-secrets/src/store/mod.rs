@@ -26,7 +26,7 @@ pub mod resolve;
 mod scope;
 mod secret_store;
 
-pub use backend::{Capabilities, SecretBackend, default_backend, open_backend};
+pub use backend::{Capabilities, SecretBackend, default_backend, local_backends, open_backend};
 pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};

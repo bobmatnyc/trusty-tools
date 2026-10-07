@@ -118,6 +118,11 @@ environment variable moves it, including `TRUSTY_SECRETS_INDEX_DIR`. No method r
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
 
+`delete` removes the key from every backend this build can store values in
+(the Keychain on macOS, and the file backend), not only the configured one, so
+a value left behind by a backend switch or a `copy` is removed too. If any
+backend fails to delete, the call fails and the key stays listed.
+
 ## Audit trail
 
 The server records each credential access in
