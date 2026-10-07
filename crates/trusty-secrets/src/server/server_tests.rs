@@ -121,8 +121,24 @@ impl Fixture {
     }
 
     async fn start_with(&self, backends: BackendFactory) -> Running {
+        self.start_state(self.state(backends)).await
+    }
+
+    /// The state [`Self::start_with`] serves.
+    ///
+    /// What: the fixture's machine config is also the account's own file
+    /// consent config, as in production when no flag or `$HOME` moves it.
+    // #7524 H1: never the real account home's config in a test.
+    fn state(&self, backends: BackendFactory) -> State {
+        let mut state = State::new(self.settings.clone(), backends);
+        state.file_consent_config = Some(self.settings.machine_config.clone());
+        state
+    }
+
+    /// Serve `state` on the fixture's socket.
+    async fn start_state(&self, state: State) -> Running {
         let (tx, rx) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(self.settings.clone(), backends, async move {
+        let task = tokio::spawn(router::serve_state(state, async move {
             let _ = rx.await;
         }));
         wait_serving(&self.settings.socket).await;
