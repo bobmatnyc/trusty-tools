@@ -1122,13 +1122,15 @@ fn parse_review_reply_reads_only_the_tool_input() {
 
 // ── #9310: reviewer severity, null fields, one decode position ───────────
 
-/// #9310 item 2.2: the reviewer's severity is kept on the finding, and its
-/// effort mapping is unchanged.
+/// #9310 item 2.2: the reviewer's severity is kept on the finding and maps to
+/// effort as before, with one change: a severity padded with whitespace now
+/// counts at its level (`" high "` is High effort; it was Low).
 #[test]
 fn parse_finding_carries_reviewer_severity() {
     for (raw, severity, effort) in [
         ("critical", Some(Severity::Critical), Effort::High),
         ("HIGH", Some(Severity::High), Effort::High),
+        (" high ", Some(Severity::High), Effort::High),
         ("medium", Some(Severity::Medium), Effort::Medium),
         ("low", Some(Severity::Low), Effort::Low),
         ("urgent", None, Effort::Low),
