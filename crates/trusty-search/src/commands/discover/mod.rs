@@ -249,6 +249,7 @@ pub async fn auto_discover_and_index() {
 /// daemon writes `http_addr`. The resolver used to answer the default port
 /// then; it now errors, so the first read can come too early.
 /// What: [`daemon_base_url`] every 250 ms; `None` at the deadline.
+/// Test: `wait_for_published_base_gives_up_at_its_budget`.
 async fn wait_for_published_base(budget: Duration) -> Option<String> {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
@@ -266,6 +267,41 @@ async fn wait_for_published_base(budget: Duration) -> Option<String> {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use serial_test::serial;
+
+    use super::wait_for_published_base;
+    use crate::commands::daemon_http::tests::DataDir;
+
+    /// #9214: the published-address wait in `auto_discover_and_index` ends at
+    /// its budget with no address when the daemon published none.
+    ///
+    /// Why: the Fail-Open Check on the skip arm — the wait must neither hang
+    /// nor fall back to a guessed address such as `127.0.0.1:7878`.
+    /// What: an empty isolated data dir and a 300 ms budget; asserts `None`,
+    /// that the wait lasted the budget, and that it ended well under a second.
+    /// Test: this function.
+    #[tokio::test]
+    #[serial]
+    async fn wait_for_published_base_gives_up_at_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = DataDir::set(dir.path());
+        let budget = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(2), wait_for_published_base(budget))
+            .await
+            .expect("the wait ends at its budget instead of hanging");
+        let elapsed = started.elapsed();
+
+        assert_eq!(got, None, "no address was published, so none is returned");
+        assert!(elapsed >= budget, "the wait gave up early: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the wait overran: {elapsed:?}"
+        );
+    }
 
     fn tempdir_unique(label: &str) -> PathBuf {
         let pid = std::process::id();

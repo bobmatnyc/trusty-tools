@@ -33,14 +33,16 @@ const ADDR_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 /// stopped or runs with `--no-http`; guessing `:7878` then reached a different
 /// daemon, so the caller now gets an error instead.
 /// What: returns `http://{host}:{port}`, no trailing slash. A live `http_addr`
-/// wins. Otherwise a readable port file decides the port on `127.0.0.1`, and
-/// the `http_addr` file is refreshed when that address answers (#117).
+/// wins. Otherwise a port file whose port answers on `127.0.0.1` decides, and
+/// the `http_addr` file is refreshed to it (#117).
 ///
 /// # Errors
 ///
-/// When neither discovery file names an address. The message names both files.
+/// When neither discovery file names an address that answers. The message
+/// names both files.
 ///
 /// Test: `daemon_base_url_refuses_when_no_address_is_published`,
+/// `daemon_base_url_refuses_a_stale_port_file`,
 /// `daemon_base_url_prefers_isolated_instance_over_stale_default_cache`,
 /// `daemon_base_url_falls_back_when_http_addr_dead`.
 pub fn daemon_base_url() -> Result<String> {
@@ -56,23 +58,26 @@ pub fn daemon_base_url() -> Result<String> {
         }
     }
     let port_file = layout.port_file_path();
-    // #9214: no default port — an unpublished address is an error, not :7878.
-    let Some(port) = port_file
+    // #9214: a port file a crashed or SIGKILLed daemon left behind names a
+    // dead port, so it counts only when the daemon answers there.
+    let live_addr = port_file
         .as_ref()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<u16>().ok())
-    else {
+        .map(|port| format!("127.0.0.1:{port}"))
+        .filter(|addr| reachable(addr));
+    // #9214: no default port — an unpublished address is an error, not :7878.
+    let Some(live_addr) = live_addr else {
         return Err(anyhow!(
-            "the trusty-search daemon has published no HTTP address ({} and {} \
-             are absent) — it is stopped, or was started with --no-http; start it \
-             with `trusty-search start`",
+            "the trusty-search daemon has published no live HTTP address ({} and \
+             {} are absent, or name a port nothing answers on) — it is stopped, \
+             or was started with --no-http; start it with `trusty-search start`",
             display(addr_file.as_deref()),
             display(port_file.as_deref()),
         ));
     };
-    let live_addr = format!("127.0.0.1:{port}");
     // #3602: the refresh goes through the atomic writer; best-effort.
-    if let Some(path) = addr_file.as_ref().filter(|_| reachable(&live_addr)) {
+    if let Some(path) = addr_file.as_ref() {
         let _ = write_addr_file_atomic(path, &live_addr);
     }
     Ok(format!("http://{live_addr}"))
@@ -145,17 +150,19 @@ fn display(path: Option<&std::path::Path>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     //! The fail-closed HTTP base resolver (#3545, #9214).
 
     use super::*;
     use serial_test::serial;
 
     /// Point `TRUSTY_DATA_DIR` at `dir` for the life of the guard.
-    struct DataDir;
+    ///
+    /// Shared with `commands::discover`'s tests (#9214).
+    pub(in crate::commands) struct DataDir;
 
     impl DataDir {
-        fn set(dir: &std::path::Path) -> Self {
+        pub(in crate::commands) fn set(dir: &std::path::Path) -> Self {
             // SAFETY: every caller is `#[serial]` — the crate's one env group.
             unsafe { std::env::set_var("TRUSTY_DATA_DIR", dir) };
             DataDir
@@ -191,6 +198,42 @@ mod tests {
         assert!(text.contains("daemon.port"), "{text}");
         assert!(text.contains("--no-http"), "{text}");
         assert!(!text.contains("http://"), "no URL is guessed: {text}");
+    }
+
+    /// #9214: a `daemon.port` file naming a port nothing answers on gets the
+    /// same fail-closed error as no file at all.
+    ///
+    /// Why: a daemon that crashed or was SIGKILLed leaves its port file
+    /// behind. Fails against the resolver that returned the port file's URL
+    /// unprobed.
+    /// What: an isolated data dir whose only discovery file is a port file
+    /// naming a closed port; asserts `Err`, the no-address message, no URL,
+    /// and that `http_addr` was not refreshed to the dead address.
+    /// Test: this function.
+    #[test]
+    #[serial]
+    fn daemon_base_url_refuses_a_stale_port_file() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed); // nothing listens on it now
+
+        let dir = tempfile::tempdir().unwrap();
+        let _env = DataDir::set(dir.path());
+        let port_path = super::super::daemon_utils::daemon_port_path().unwrap();
+        std::fs::write(&port_path, closed_port.to_string()).unwrap();
+
+        let err = daemon_base_url().expect_err("the port file names a dead port");
+        let text = err.to_string();
+
+        assert!(text.contains("http_addr"), "{text}");
+        assert!(text.contains("daemon.port"), "{text}");
+        assert!(text.contains("--no-http"), "{text}");
+        assert!(!text.contains("http://"), "no URL is returned: {text}");
+        let http_addr_path = trusty_search::service::http_addr_path().unwrap();
+        assert!(
+            !http_addr_path.exists(),
+            "a dead address is never published"
+        );
     }
 
     /// Regression for issue #3545: an isolated `TRUSTY_DATA_DIR` instance must
