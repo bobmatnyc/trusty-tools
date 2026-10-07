@@ -18,6 +18,8 @@
 //! refactor is purely structural.
 
 // Shared support modules
+// #9214: the fail-closed HTTP resolver for the subcommands still on HTTP.
+pub mod daemon_http;
 pub mod daemon_utils;
 pub mod doctor_checks;
 pub(crate) mod doctor_pipeline;

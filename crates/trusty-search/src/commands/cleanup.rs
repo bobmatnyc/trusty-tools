@@ -30,7 +30,7 @@
 //! The refusal arms are covered by the `cleanup_*` tests at the foot of this
 //! file.
 
-use super::daemon_utils::daemon_base_url;
+use super::daemon_http::daemon_base_url;
 use anyhow::{bail, Result};
 use colored::Colorize;
 use std::io::{BufRead, Write};
@@ -74,7 +74,7 @@ pub struct CleanupArgs {
 /// Test: `cargo run -p trusty-search -- cleanup --dry-run` prints the table
 /// and exits without deleting; `cleanup --yes` deletes without prompting.
 pub async fn handle_cleanup(yes: bool, dry_run: bool) -> Result<()> {
-    let base = daemon_base_url();
+    let base = daemon_base_url()?;
     let client = trusty_common::server::daemon_http_client()?;
 
     // 1) List registered index ids.
