@@ -298,6 +298,40 @@ pub fn update<S: ReleaseSource + ?Sized>(
         content::validate_tag(tag)?;
     }
     let _guard = UpdateGuard::acquire(cache)?;
+    update_locked(cache, source, content_ref)
+}
+
+/// Installs the newest release when, and only when, no lock is present
+/// (#9396: tm's first use, ADR-0064 decision 5).
+///
+/// Why: a fresh install has no `content-lock.toml`, so nothing composes until
+/// a release is pinned. Two first uses can race, and an operator's own
+/// `tm content update` can land between a caller's "no lock" check and this
+/// call; the pin that is already there must win.
+/// What: under the update lock, a present lock file (valid or not) answers
+/// `Ok(None)` and nothing is fetched or written. Otherwise this is
+/// [`update`] with no `content_ref`: the same release selection, sidecar
+/// check, verification and atomic writes.
+/// Test: `install_if_missing_keeps_a_lock_written_while_it_waited`,
+/// `concurrent_first_use_leaves_one_valid_lock`.
+pub fn install_if_missing<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+) -> Result<Option<UpdateOutcome>, CacheError> {
+    let _guard = UpdateGuard::acquire(cache)?;
+    // #9396: checked under the lock, so a pin written while this waited wins.
+    if cache.join(LOCK_FILE_NAME).symlink_metadata().is_ok() {
+        return Ok(None);
+    }
+    update_locked(cache, source, None).map(Some)
+}
+
+/// The body of [`update`], run while the caller holds the update lock.
+fn update_locked<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+    content_ref: Option<&str>,
+) -> Result<UpdateOutcome, CacheError> {
     let current = match read_lock(cache) {
         Ok(lock) => lock,
         Err(_) if content_ref.is_some() => None,

@@ -104,6 +104,8 @@ fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
         "{}",
         remedy[0]
     );
+    // #9396: the remedy named first is `tm content update`.
+    assert!(remedy[0].contains("tm content update"), "{}", remedy[0]);
 }
 
 /// #9011 code-critic r1: no content means zero agents, even when the framework
