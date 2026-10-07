@@ -49,6 +49,8 @@ fn outcome_word(outcome: SetOutcome) -> &'static str {
     match outcome {
         SetOutcome::New => "new",
         SetOutcome::Updated => "updated",
+        // #7521: `SetOutcome` is `#[non_exhaustive]`.
+        _ => "stored",
     }
 }
 

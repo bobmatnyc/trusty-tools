@@ -81,12 +81,12 @@ async fn harness() -> Harness {
         &repo,
         &["remote", "add", "origin", "git@github.com:Acme/Web.git"],
     );
-    let settings = ServerSettings {
-        socket: tmp.path().join("run").join("s.sock"),
-        index_root: tmp.path().join("index"),
-        machine_config: tmp.path().join("machine.yaml"),
-        idle_timeout: Duration::from_secs(60),
-    };
+    let settings = ServerSettings::new(
+        tmp.path().join("run").join("s.sock"),
+        tmp.path().join("index"),
+        tmp.path().join("machine.yaml"),
+        Duration::from_secs(60),
+    );
     let keychain = Arc::new(MemoryBackend::new());
     let spare = Arc::new(MemoryBackend::new());
     let (kc, sp) = (Arc::clone(&keychain), Arc::clone(&spare));
