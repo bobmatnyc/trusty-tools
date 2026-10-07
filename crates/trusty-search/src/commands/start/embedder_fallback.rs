@@ -582,58 +582,149 @@ mod tests {
 
     // ── Reviewer-required concurrency proof (HIGH fix) ──────────────────
 
-    /// The finding's mandated regression test: drives REAL concurrent
-    /// `embed_via` calls against a real (mock-binary) `LazyEmbedderHandle`
-    /// mid-respawn, and proves the latch does not trip before the
-    /// supervisor's own give-up ceiling — no matter how many requests fail
-    /// concurrently against the same stale client during a single crash
-    /// episode.
+    /// Hang guard for each test-driven step below (#3569). A passing run
+    /// never waits it out: every step ends on an event the test observes.
+    #[cfg(unix)]
+    const CYCLE_HANG_GUARD_SECS: u64 = 120;
+
+    /// How many times the mock in
+    /// `fallback_does_not_trip_on_concurrent_failures_before_supervisor_gives_up`
+    /// has been spawned by the supervisor (its own counter file; `0` before
+    /// the first spawn).
+    #[cfg(unix)]
+    fn mock_spawns(counter: &std::path::Path) -> u32 {
+        std::fs::read_to_string(counter)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Wait until `done` holds, failing at once if the mock was spawned more
+    /// than `max_spawns` times.
     ///
-    /// Why: the existing tests above only exercise the adapter in isolation
-    /// against synthetic single-threaded fakes and cannot catch the
-    /// concurrency bug the OLD threshold-counting design had: several
-    /// requests failing "simultaneously" against one dead client could cross
-    /// a count threshold on the very first crash, while the supervisor's own
-    /// restart budget was nowhere near exhausted. This test drives the real
+    /// Why (#3569): the verdict is decided by spawn counts, not by how long a
+    /// loaded host takes. A supervisor that keeps respawning instead of giving
+    /// up fails on the first extra spawn; [`CYCLE_HANG_GUARD_SECS`] only ends a
+    /// run in which the supervisor stopped making progress.
+    #[cfg(unix)]
+    async fn await_cycle(
+        counter: &std::path::Path,
+        max_spawns: u32,
+        step: &str,
+        mut done: impl FnMut() -> bool,
+    ) {
+        let progressed = tokio::time::timeout(
+            std::time::Duration::from_secs(CYCLE_HANG_GUARD_SECS),
+            async {
+                loop {
+                    let spawns = mock_spawns(counter);
+                    assert!(
+                        spawns <= max_spawns,
+                        "{step}: the supervisor spawned the mock {spawns} times, \
+                         more than {max_spawns} — it kept respawning instead of \
+                         giving up at max_restarts=1"
+                    );
+                    if done() {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await;
+        assert!(
+            progressed.is_ok(),
+            "{step}: the supervisor neither advanced nor gave up within \
+             {CYCLE_HANG_GUARD_SECS}s"
+        );
+    }
+
+    /// Run the mock once with `--warm` and wait for its answer.
+    ///
+    /// Why (#3569, same cause as #9240): the first exec of a freshly written
+    /// script is the slow one, and a first spawn whose startup probe timed
+    /// out left the old marker-file mock unable to ever reach the supervisor.
+    /// Paying that cost here keeps the supervisor's first spawn a warm exec.
+    #[cfg(unix)]
+    async fn warm_mock(script: &std::path::Path) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(CYCLE_HANG_GUARD_SECS),
+            async {
+                let mut child = trusty_common::spawn_retry::retry_on_etxtbsy_async(|| {
+                    tokio::process::Command::new(script)
+                        .arg("--warm")
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true)
+                        .spawn()
+                })
+                .await
+                .expect("spawn the mock for its warm-up");
+                let mut stdin = child.stdin.take().expect("piped stdin");
+                stdin
+                    .write_all(b"warm\n")
+                    .await
+                    .expect("write warm-up line");
+                drop(stdin);
+                let mut line = String::new();
+                BufReader::new(child.stdout.take().expect("piped stdout"))
+                    .read_line(&mut line)
+                    .await
+                    .expect("read warm-up answer");
+                let _ = child.wait().await;
+                line
+            },
+        )
+        .await
+        .expect("the mock never answered its warm-up");
+        assert!(answer.contains("embeddings"), "warm-up answered {answer:?}");
+    }
+
+    /// Creates the release file on drop, so a respawn the mock is holding
+    /// exits even when the test fails before releasing it.
+    #[cfg(unix)]
+    struct ReleaseOnDrop(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, b"");
+        }
+    }
+
+    /// The latch must not trip on concurrent failures during one crash
+    /// episode, and must trip once the real supervisor gives up.
+    ///
+    /// Why: the adapter tests above use synthetic fakes and cannot catch the
+    /// concurrency bug the OLD threshold-counting design had — several
+    /// requests failing at once against one dead client crossed a count
+    /// threshold on the first crash, while the supervisor's restart budget
+    /// was nowhere near exhausted. This test drives the real
     /// `LazyEmbedderHandle` → `EmbedderSupervisor` → `StdioEmbedderClient`
-    /// stack end to end (a real, if trivial, child process) so it exercises
-    /// the actual lock ordering `embed_via` and the supervision loop use, not
-    /// a hand-simulated race.
+    /// stack against a mock child process.
     ///
-    /// What: uses a `/bin/sh` mock `trusty-embedderd --stdio` that answers
-    /// exactly one JSON-RPC request (the VERY FIRST spawn's startup probe)
-    /// then exits non-zero; every later invocation (detected via a marker
-    /// file the script drops on its first run) exits immediately WITHOUT
-    /// reading or answering — deterministically failing that respawn's own
-    /// startup probe. This distinction matters (CI follow-up, see below):
-    /// `supervision_loop` resets `consecutive_failures` to 0 on ANY respawn
-    /// whose OWN startup probe succeeds, regardless of how quickly the new
-    /// process then dies. A mock where every attempt "answers once, then
-    /// crashes" therefore only escalates the counter if a respawn's probe
-    /// happens to lose a race against the mock's near-instant exit — which
-    /// is scheduler-dependent, not guaranteed. Making the second-and-later
-    /// invocations fail their probe BY CONSTRUCTION (never emitting a
-    /// response at all) removes that race: `consecutive_failures` is
-    /// guaranteed, not merely likely, to cross `max_restarts` after exactly
-    /// two observed crash-cycles. With `max_restarts: 1` and
-    /// `backoff_max_secs: 0` (near-instant respawns), reaching
-    /// `supervisor_gave_up() == true` requires the supervisor to observe TWO
-    /// full crash cycles.
-    ///   1. Fire 8 concurrent `embed_batch` calls through the
-    ///      `FallbackEmbedderAdapter` wrapping a `LazySlotEmbedderAdapter`
-    ///      over that handle, all at once. Only one of them wins the
-    ///      single-flight spawn; all 8 then race to use the same (almost
-    ///      certainly already-dead, since the mock exits right after its own
-    ///      probe) client. Asserts NONE of them observe the fallback's
-    ///      distinctive output — proving the latch did not trip on the
-    ///      FIRST crash despite 8 "simultaneous" failures, which the old
-    ///      threshold design (default effective threshold as low as 2) would
-    ///      have tripped on.
-    ///   2. Polls (bounded by a generous but now purely-a-safety-net timeout
-    ///      — see the deterministic design below) firing further calls until
-    ///      `handle.supervisor_gave_up()` observes `true` — i.e. the real
-    ///      supervisor has crossed its own `max_restarts` ceiling — then
-    ///      asserts a subsequent call IS served by the fallback.
+    /// #3569: the test now drives both crash-restart cycles itself instead of
+    /// polling for give-up under a wall-clock ceiling. The old mock marked
+    /// itself "spawned once" before answering its first startup probe; when
+    /// that probe timed out on a loaded host, every later spawn exited at once,
+    /// no supervisor ever started, and the 45 s poll expired.
+    ///
+    /// What: the mock counts its spawns in a file. Spawn 1 answers its
+    /// startup probe and exits 1 (crash cycle 1). Every later spawn waits for
+    /// a release file the test creates, then exits without answering, so its
+    /// probe fails (crash cycle 2). With `max_restarts: 1` the supervisor
+    /// must give up after exactly two spawns.
+    ///   1. Warm the mock, then fire 8 concurrent `embed_batch` calls. None
+    ///      may be served by the fallback.
+    ///   2. Await spawn 2 (the supervisor saw cycle 1 and is respawning). The
+    ///      supervisor must not have given up, and a call still propagates the
+    ///      primary error.
+    ///   3. Release spawn 2 and await the supervisor's give-up. A third spawn
+    ///      fails the test at once.
+    ///   4. A call is now served by the fallback.
+    ///
     /// Test: this test.
     ///
     /// Issue #3689: `#[serial]` — see
@@ -646,75 +737,50 @@ mod tests {
         use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
         use std::os::unix::fs::PermissionsExt;
 
-        // Mock `trusty-embedderd --stdio` (CI follow-up, PR #3560): the
-        // FIRST invocation answers exactly one JSON-RPC request (the initial
-        // `spawn_stdio` startup probe) and then exits non-zero — this is
-        // what gives Phase 1 a briefly-live client to fail 8 concurrent
-        // requests against. It then drops a marker file next to itself.
-        // EVERY LATER invocation (the marker file already exists) exits
-        // immediately WITHOUT reading stdin or writing a response — its
-        // startup probe fails outright (broken pipe / EOF), by construction,
-        // not by a scheduling race.
-        //
-        // Why this matters: `supervision_loop` (trusty-common's
-        // `supervisor.rs`) resets `consecutive_failures` to 0 on ANY respawn
-        // whose own startup probe SUCCEEDS, no matter how quickly that
-        // process then dies. A mock where every attempt "answers once, then
-        // crashes" only escalates the failure counter past the first crash
-        // if some respawn's probe happens to lose a timing race against the
-        // mock's near-instant exit (the reader task observing EOF before / vs.
-        // after the probe's own response is delivered) — a race that a fast,
-        // idle macOS dev box tends to win (probe usually fails, escalating
-        // quickly) but a slower/more-contended Linux CI runner does not
-        // reliably lose the same way, so the counter can keep resetting to 0
-        // indefinitely and never reach `should_give_up`. That is the actual
-        // root cause of the CI-only failure — not "CI is slower" in a way a
-        // bigger timeout fixes, but "the old mock made the SECOND respawn's
-        // probe outcome a coin flip the design relied on always losing."
-        // The marker file removes the coin flip entirely: the second
-        // respawn's probe is guaranteed to fail, so `consecutive_failures`
-        // is guaranteed — not merely likely — to cross `max_restarts=1`
-        // after exactly two observed crash-cycles, on any platform, in low
-        // single-digit milliseconds.
         let dir = tempfile::tempdir().expect("create tempdir");
-        let script_path = dir.path().join("mock-embedderd-crash-once.sh");
-        let marker_path = dir.path().join("spawned-once.marker");
+        let script_path = dir.path().join("mock-embedderd-two-cycles.sh");
+        let counter_path = dir.path().join("spawns");
+        let release_path = dir.path().join("release-cycle-2");
+        let _release_on_drop = ReleaseOnDrop(release_path.clone());
         std::fs::write(
             &script_path,
             format!(
                 r#"#!/bin/sh
-MARKER="{marker}"
-if [ -f "$MARKER" ]; then
-  # Second and every later invocation: crash immediately, never reading or
-  # answering the startup probe — deterministically fails that respawn's
-  # `spawn_child` probe (no response ever arrives), unlike the first
-  # invocation below.
+if [ "$1" = "--warm" ]; then
+  IFS= read -r line
+  printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":1}}\n'
+  exit 0
+fi
+COUNTER="{counter}"
+n=$(( $(cat "$COUNTER" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$COUNTER.tmp" && mv "$COUNTER.tmp" "$COUNTER"
+if [ "$n" -gt 1 ]; then
+  while [ ! -e "{release}" ]; do sleep 0.02; done
   exit 1
 fi
-touch "$MARKER"
 IFS= read -r line
 id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
 [ -n "$id" ] || id=1
 printf '{{"jsonrpc":"2.0","result":{{"embeddings":[[0.1]]}},"id":%s}}\n' "$id"
 exit 1
 "#,
-                marker = marker_path.display(),
+                counter = counter_path.display(),
+                release = release_path.display(),
             ),
         )
         .expect("write mock script");
         let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms).expect("chmod +x");
+        warm_mock(&script_path).await;
+        assert_eq!(mock_spawns(&counter_path), 0, "the warm-up is not counted");
 
         let handle = Arc::new(LazyEmbedderHandle::new(
             script_path,
             SupervisorConfig {
-                // Only matters for the FIRST invocation (which always
-                // answers near-instantly) — every later invocation fails
-                // its probe via broken-pipe/EOF long before this elapses,
-                // by construction (see the mock script above), so this is
-                // pure headroom, not part of the deterministic mechanism.
-                startup_timeout_secs: 2,
+                // A ceiling, not a budget: spawn 1 answers at once, and the
+                // test releases spawn 2 well inside it.
+                startup_timeout_secs: CYCLE_HANG_GUARD_SECS,
                 backoff_max_secs: 0,
                 max_restarts: 1,
                 idle_shutdown_secs: 0,
@@ -729,12 +795,11 @@ exit 1
             Ok(Arc::new(AlwaysOkEmbedder) as Arc<dyn Embedder>)
         }));
 
-        // ── Phase 1: 8 concurrent calls against the FIRST spawn ──────────
+        // ── Step 1: 8 concurrent calls against spawn 1 ───────────────────
         //
-        // Only one wins the single-flight spawn; all 8 then race to use the
-        // resulting (almost immediately dead) client. With max_restarts=1,
-        // giving up requires the supervisor to observe TWO crashes — this
-        // batch can account for at most the first.
+        // Only one wins the single-flight spawn; all 8 then use the client of
+        // a child that exits right after its probe. Cycle 2 is held by the
+        // test, so the supervisor cannot give up while these run.
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let adapter = Arc::clone(&adapter);
@@ -744,64 +809,47 @@ exit 1
         }
         for (i, t) in tasks.into_iter().enumerate() {
             let r = t.await.expect("task must not panic");
+            // An Err is expected (the primary's own failure propagating);
+            // the only forbidden outcome is the fallback's output.
             if let Ok(v) = r {
                 assert_ne!(
                     v,
                     vec![vec![9.0_f32; 4]],
-                    "call {i}: the latch must NOT have tripped from this first \
-                     batch of concurrent failures — the supervisor cannot \
-                     possibly have crossed its max_restarts=1 ceiling from a \
-                     single crash episode, no matter how many requests failed \
-                     against it concurrently"
+                    "call {i}: the latch must NOT trip on concurrent failures \
+                     during a single crash episode"
                 );
             }
-            // An Err here is also fine and expected (the primary's own
-            // transient failure propagating) — the only forbidden outcome is
-            // an early trip to the fallback's distinctive output.
         }
 
-        // ── Phase 2: poll until the REAL supervisor gives up ─────────────
-        //
-        // With the marker-file mock above, escalation to give-up is
-        // deterministic — the second respawn's probe is GUARANTEED to fail
-        // (not merely likely to, on a fast enough box), so
-        // `consecutive_failures` crosses `max_restarts=1` after exactly two
-        // detected crash-cycles, typically in low single-digit milliseconds
-        // (two process spawn/exec cycles, no backoff since
-        // `backoff_max_secs: 0`). The 45s bound below is pure headroom for
-        // real `fork`+`exec` scheduling variance under host contention — not
-        // part of the mechanism that makes this test pass. Measured
-        // locally: 130+ consecutive runs at a 5s bound had exactly one
-        // timeout (~0.8%), always attributable to this dev box running
-        // dozens of unrelated concurrent processes, never to the counter
-        // failing to escalate — i.e. the residual variance is real OS
-        // scheduling noise, not the same non-deterministic "coin flip" the
-        // old mock design had (where the counter could fail to escalate at
-        // all, for arbitrarily long). The bound was widened from 10s to 45s
-        // (matching the sibling fixed-ceiling flakes in this same family —
-        // epic #3524 slice 6) to give a CI-loaded runner a safe margin; this
-        // is headroom for that noise, not a re-run of the original mistake
-        // of trading a hard failure for a slower flake. This is still a
-        // condition-based poll (returns the instant the flag flips), never
-        // a fixed sleep.
-        let gave_up = tokio::time::timeout(std::time::Duration::from_secs(45), async {
-            loop {
-                if handle.supervisor_gave_up() {
-                    return;
-                }
-                let _ = adapter.embed_batch(&["poke"]).await;
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
+        // ── Step 2: the supervisor saw cycle 1 and is respawning ─────────
+        await_cycle(&counter_path, 2, "crash cycle 1", || {
+            mock_spawns(&counter_path) == 2 || handle.supervisor_gave_up()
         })
         .await;
+        assert_eq!(
+            mock_spawns(&counter_path),
+            2,
+            "the supervisor gave up after one crash cycle; max_restarts=1 \
+             allows a respawn"
+        );
         assert!(
-            gave_up.is_ok(),
-            "the real supervisor never reached its give-up ceiling within 45s \
-             of a persistent crash loop with max_restarts=1 — the deterministic \
-             marker-file mock should make this converge in milliseconds"
+            !handle.supervisor_gave_up(),
+            "the supervisor must not give up while the test holds spawn 2"
+        );
+        let mid = adapter.embed_batch(&["mid-respawn"]).await;
+        assert!(
+            mid.is_err(),
+            "mid-respawn, the primary's error must propagate; got {mid:?}"
         );
 
-        // ── Phase 3: the latch must now be tripped ───────────────────────
+        // ── Step 3: release cycle 2 and await the give-up ────────────────
+        std::fs::write(&release_path, b"").expect("release spawn 2");
+        await_cycle(&counter_path, 2, "crash cycle 2", || {
+            handle.supervisor_gave_up()
+        })
+        .await;
+
+        // ── Step 4: the latch is now tripped ─────────────────────────────
         let r = adapter.embed_batch(&["after give-up"]).await;
         assert_eq!(
             r.unwrap(),
