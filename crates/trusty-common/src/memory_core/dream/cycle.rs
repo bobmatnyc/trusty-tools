@@ -216,14 +216,18 @@ pub(super) async fn dedup_pass(
     started: std::time::Instant,
     budget: Duration,
     dedup_threshold: f32,
+    embedder: Option<Arc<dyn Embedder + Send + Sync>>,
 ) -> Result<usize> {
     // Reuse the process-wide shared embedder instead of constructing a
     // fresh ONNX session for every dream cycle (issue #57). The previous
     // per-cycle construction multiplied the daemon's memory footprint by
-    // the number of palaces.
-    let embedder = shared_embedder()
-        .await
-        .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
+    // the number of palaces. #9391: `Some` is a test dreamer's own embedder.
+    let embedder = match embedder {
+        Some(embedder) => embedder,
+        None => shared_embedder()
+            .await
+            .map_err(|e| e.context("acquire shared embedder for dream dedup"))?,
+    };
     dedup_pass_with_embedder(
         handle,
         started,

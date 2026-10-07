@@ -21,6 +21,8 @@ pub mod kg_compact;
 mod recall_benchmark;
 // #7106: the inference-backed half, split out of `cycle`.
 mod semantic;
+// #9391: the settled-corpus marker that lets an unchanged palace skip embedding.
+mod settled;
 
 #[cfg(test)]
 mod concurrency_tests;
@@ -32,6 +34,9 @@ mod maintenance_election_tests;
 // #8733: atomic `dream_stats.json` publication.
 #[cfg(test)]
 mod persisted_stats_tests;
+// #9391: an unchanged palace's second cycle embeds nothing.
+#[cfg(test)]
+mod settled_corpus_tests;
 #[cfg(test)]
 mod tests;
 

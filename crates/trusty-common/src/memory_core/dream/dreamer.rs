@@ -16,6 +16,8 @@ use super::guard::CompactionGuard;
 use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
 use super::semantic::semantic_consolidation_pass;
+use super::settled;
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::PalaceId;
 use crate::memory_core::registry::PalaceRegistry;
 use crate::memory_core::retrieval::PalaceHandle;
@@ -64,6 +66,9 @@ pub struct Dreamer {
     pub(super) semantic_consolidation_disabled: AtomicBool,
     /// #8246: run after every cycle that claimed its palace; see [`AfterCycle`].
     pub(super) after_cycle: Option<AfterCycle>,
+    /// #9391: the embedder the dedup pass and recall benchmark use. `None`
+    /// (every production dreamer) resolves the process-wide `shared_embedder`.
+    pub(super) embedder: Option<Arc<dyn Embedder + Send + Sync>>,
 }
 
 impl Dreamer {
@@ -81,6 +86,7 @@ impl Dreamer {
             consolidator: None,
             semantic_consolidation_disabled: AtomicBool::new(false),
             after_cycle: None,
+            embedder: None,
         }
     }
 
@@ -101,6 +107,7 @@ impl Dreamer {
             consolidator: Some(consolidator),
             semantic_consolidation_disabled: AtomicBool::new(false),
             after_cycle: None,
+            embedder: None,
         }
     }
 
@@ -114,6 +121,16 @@ impl Dreamer {
     /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
     pub fn with_after_cycle(mut self, hook: AfterCycle) -> Self {
         self.after_cycle = Some(hook);
+        self
+    }
+
+    /// This dreamer, embedding with `embedder` instead of the shared one.
+    ///
+    /// Why (#9391): a test must count the embed calls of one cycle, and the
+    /// process-wide `shared_embedder` is shared by every test in the binary.
+    #[cfg(test)]
+    pub(super) fn with_embedder(mut self, embedder: Arc<dyn Embedder + Send + Sync>) -> Self {
+        self.embedder = Some(embedder);
         self
     }
 
@@ -236,12 +253,18 @@ impl Dreamer {
     /// #8246: every cycle that claims `handle` then calls the
     /// [`AfterCycle`] hook, whether it returns `Ok` or `Err`.
     ///
+    /// #9391: when the palace's drawer set matches the one a previous full
+    /// cycle left unchanged (see `settled`), steps 2 and 6 and the recall
+    /// benchmark are skipped, so the cycle does no embedding work. The other
+    /// passes still run, so age-based pruning continues on an idle palace.
+    ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
     /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
     /// `dream_cycle_semantic_consolidation_no_inference`,
     /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`,
     /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`,
-    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
+    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`,
+    /// `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         // #7106: wait for a slot in the process-wide bound before doing any
         // work. The daemon runs one loop per resident palace and they all woke
@@ -281,9 +304,26 @@ impl Dreamer {
         // Count drawers before any pass so we can compute the compression ratio.
         let drawers_before = handle.drawers.read().len() as u64;
 
+        // #9391: skip the embedding passes on a corpus a full cycle already
+        // left unchanged. Taken BEFORE any pass, so a write that lands
+        // mid-cycle leaves the recorded marker stale and the next cycle runs.
+        let fingerprint = settled::corpus_fingerprint(handle, &self.config);
+        let unchanged = handle
+            .data_dir
+            .as_deref()
+            .is_some_and(|dir| settled::is_settled(dir, &fingerprint));
+        if unchanged {
+            tracing::debug!(
+                palace = %handle.id,
+                "dream cycle: corpus unchanged since its last settled cycle; \
+                 skipping dedup, recall benchmark and semantic consolidation"
+            );
+        }
+        let benchmark = self.config.recall_benchmark_enabled && !unchanged;
+
         // Recall benchmark before consolidation — skip silently on failure or when disabled.
-        let recall_score_before = if self.config.recall_benchmark_enabled {
-            run_benchmark(handle).await
+        let recall_score_before = if benchmark {
+            run_benchmark(handle, self.embedder.clone()).await
         } else {
             None
         };
@@ -295,9 +335,20 @@ impl Dreamer {
         } else {
             0
         };
-        let merged = dedup_pass(handle, started, budget, self.config.dedup_threshold)
+        let merged = if unchanged {
+            0
+        } else {
+            let embedder = self.embedder.clone();
+            dedup_pass(
+                handle,
+                started,
+                budget,
+                self.config.dedup_threshold,
+                embedder,
+            )
             .await
-            .context("dream dedup pass")?;
+            .context("dream dedup pass")?
+        };
         let pruned = prune_pass(handle, started, budget, self.config.prune_importance)
             .await
             .context("dream prune pass")?;
@@ -307,14 +358,19 @@ impl Dreamer {
         let closets_updated = refresh_closets(handle);
 
         // ── Phase: Semantic consolidation (optional, inference-gated) ──────────
-        let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) =
+        let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) = if unchanged {
+            (0, 0, 0)
+        } else {
             semantic_consolidation_pass(
                 handle,
                 &self.config,
                 self.consolidator.clone(),
                 &self.semantic_consolidation_disabled,
             )
-            .await;
+            .await
+        };
+        // #9391: a budget-truncated pass did not examine the whole corpus.
+        let within_budget = started.elapsed() < budget;
 
         // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
         if let Err(e) = handle.flush() {
@@ -331,8 +387,8 @@ impl Dreamer {
         let fading = detect_fading(handle, &self.config.fading);
 
         // Recall benchmark after consolidation — skip silently on failure or when disabled.
-        let recall_score_after = if self.config.recall_benchmark_enabled {
-            run_benchmark(handle).await
+        let recall_score_after = if benchmark {
+            run_benchmark(handle, self.embedder.clone()).await
         } else {
             None
         };
@@ -404,9 +460,31 @@ impl Dreamer {
             if let Err(e) = persisted.save(data_dir) {
                 tracing::warn!(palace = %handle.id, "persist dream_stats.json failed: {e:#}");
             }
+            // #9391: a full, in-budget cycle that changed nothing settles the
+            // corpus it started from; the next cycle on it skips embedding.
+            if !unchanged
+                && within_budget
+                && changed_nothing(&stats)
+                && let Err(e) = settled::record_settled(data_dir, &fingerprint)
+            {
+                tracing::warn!(palace = %handle.id, "persist dream_settled.json failed: {e:#}");
+            }
         }
         Ok(stats)
     }
+}
+
+/// Whether a cycle left its palace's drawer set as it found it (#9391).
+fn changed_nothing(stats: &DreamStats) -> bool {
+    [
+        stats.merged,
+        stats.pruned,
+        stats.content_pruned,
+        stats.compacted,
+        stats.semantically_consolidated,
+    ]
+    .iter()
+    .all(|n| *n == 0)
 }
 
 /// Emit the standard per-cycle telemetry for a dream loop.

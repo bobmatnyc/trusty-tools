@@ -1417,7 +1417,7 @@ async fn dream_cycle_compression_ratio_nonzero_after_dedup() {
 async fn dream_recall_benchmark_empty_palace_returns_none() {
     let handle = open_test_handle("dream-bench-empty").await;
     // Palace is empty — no drawers seeded.
-    let result = super::recall_benchmark::run_benchmark(&handle).await;
+    let result = super::recall_benchmark::run_benchmark(&handle, None).await;
     assert_eq!(
         result, None,
         "empty palace must yield None from recall benchmark"
@@ -1450,7 +1450,7 @@ async fn dream_recall_benchmark_returns_score_with_drawers() {
         .await
         .unwrap();
 
-    let result = super::recall_benchmark::run_benchmark(&handle).await;
+    let result = super::recall_benchmark::run_benchmark(&handle, None).await;
     let score = result.expect("expected Some(score) with seeded drawers");
     assert!(
         score.is_finite() && score >= 0.0,
