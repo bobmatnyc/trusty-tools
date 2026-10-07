@@ -293,3 +293,77 @@ async fn a_root_whose_start_timed_out_is_not_reported_as_watched() {
     );
     manager.stop_all().await;
 }
+
+/// A stuck `FileWatcher` start does not stall a current_thread runtime: while
+/// `spawn_for_index_with_mount_kind` waits on it, another task on the same
+/// runtime runs. An inline build would hold the runtime's only thread until
+/// the start returned.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial(watcher_start)]
+async fn a_stuck_start_does_not_stall_a_current_thread_runtime() {
+    use crate::core::registry::{IndexHandle, IndexId};
+    use crate::core::CodeIndexer;
+    use crate::service::network_fs::MountKind;
+    use crate::service::watcher_manager::WatcherManager;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().to_path_buf();
+    let id = IndexId::new("current-thread-9339");
+    let indexer = Arc::new(tokio::sync::RwLock::new(CodeIndexer::new(
+        "current-thread-9339",
+        root.clone(),
+    )));
+    let handle = Arc::new(IndexHandle::bare(id.clone(), indexer, root.clone()));
+
+    // Hold the real start; a std thread releases it at OUTER whatever the
+    // runtime does, so an inline build fails this test instead of hanging.
+    let release = hold_next_start_for(&root);
+    let fallback = release.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(OUTER);
+        drop(fallback);
+    });
+
+    let ticked = Arc::new(AtomicBool::new(false));
+    let tick_flag = Arc::clone(&ticked);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        tick_flag.store(true, Ordering::SeqCst);
+    });
+
+    let manager = WatcherManager::new();
+    let spawn_done = Arc::new(AtomicBool::new(false));
+    let spawn = {
+        let done = Arc::clone(&spawn_done);
+        let manager = manager.clone();
+        let handle = Arc::clone(&handle);
+        async move {
+            manager
+                .spawn_for_index_with_mount_kind(&handle, MountKind::Local)
+                .await;
+            done.store(true, Ordering::SeqCst);
+        }
+    };
+    // Waits for the other task, then releases the held start.
+    let observe = async {
+        let started = Instant::now();
+        while !ticked.load(Ordering::SeqCst) && started.elapsed() < OUTER {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let ticked_while_held = ticked.load(Ordering::SeqCst) && !spawn_done.load(Ordering::SeqCst);
+        let _ = release.send(());
+        (ticked_while_held, started.elapsed())
+    };
+    let ((), (ticked_while_held, waited)) = tokio::join!(spawn, observe);
+
+    assert!(
+        ticked_while_held,
+        "another task must run while the watcher start is held (waited {waited:?})"
+    );
+    assert!(waited < OUTER, "the other task waited {waited:?}");
+    assert!(
+        manager.is_watching(&id).await,
+        "the released start must leave a running watcher"
+    );
+    manager.stop_all().await;
+}

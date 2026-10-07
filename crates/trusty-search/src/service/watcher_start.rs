@@ -64,6 +64,35 @@ pub(crate) fn starts_in_flight_for(root: &Path) -> usize {
     usize::from(in_flight().contains(root))
 }
 
+/// Test-only holds: a start for a held root waits on its thread, before the
+/// OS start, until the test releases it (#9339 seam for a silent fseventsd).
+#[cfg(test)]
+static TEST_HOLDS: LazyLock<Mutex<std::collections::HashMap<PathBuf, mpsc::Receiver<()>>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Hold the next start for `root` until the returned sender sends or drops.
+#[cfg(test)]
+pub(crate) fn hold_next_start_for(root: &Path) -> mpsc::Sender<()> {
+    let (release, held) = mpsc::channel();
+    TEST_HOLDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(root.to_path_buf(), held);
+    release
+}
+
+/// Block this start thread while a test holds `root`.
+#[cfg(test)]
+fn wait_if_held(root: &Path) {
+    let held = TEST_HOLDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(root);
+    if let Some(held) = held {
+        let _ = held.recv();
+    }
+}
+
 /// Run `start` for `root` on a dedicated thread and wait at most `bound`.
 ///
 /// Why: an unbounded wait on fseventsd hangs every caller of
@@ -98,6 +127,8 @@ where
         .name("watcher-start".into())
         .spawn(move || {
             let started = Instant::now();
+            #[cfg(test)]
+            wait_if_held(&thread_root);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(start))
                 .unwrap_or_else(|_| Err(anyhow!("file watcher start panicked")));
             let won = thread_state
