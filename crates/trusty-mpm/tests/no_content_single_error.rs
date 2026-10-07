@@ -124,10 +124,13 @@ fn sessions_start_offline_names_the_switch_and_both_remedies() {
         .unwrap_or_else(|| panic!("no remedy line\nstdout: {stdout}\nstderr: {stderr}"));
     assert!(line.contains("TRUSTY_CONTENT_OFFLINE=1"), "{line}");
     assert!(line.contains("tm content update"), "{line}");
-    assert!(
-        line.contains("tm content install --from <bundle.tar.gz>"),
-        "{line}"
-    );
+    // #9396: the manual install names the `gh release download` step too.
+    for needle in [
+        "gh release download <tag> --repo bobmatnyc/trusty-tools",
+        "tm content install --from <dir>/<tag>.tar.gz",
+    ] {
+        assert!(line.contains(needle), "{needle} missing: {line}");
+    }
 }
 
 /// #9011 code-critic r1: no content means zero agents, even when the framework

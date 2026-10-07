@@ -512,10 +512,8 @@ pub(crate) fn check_output_style_staleness(
 
     // #9012: the bundled bodies are runtime content; with none there is no
     // reference, so staleness is unknown, never clean.
-    let content = match project_dir {
-        Some(dir) => crate::core::content_source::framework_content_for(dir),
-        None => crate::core::content_source::framework_content(),
-    };
+    let content = // #9396: read-only; never fetches the content release.
+    crate::core::content_source::framework_content_local(project_dir);
     let content = match content {
         Ok(content) => content,
         Err(err) => {
