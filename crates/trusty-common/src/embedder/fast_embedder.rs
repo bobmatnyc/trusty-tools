@@ -15,7 +15,7 @@
 //! that call `FastEmbedder::init_options` directly.
 
 use super::types::{
-    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, MAX_EMBED_TOKENS, OrtThreadingOptions,
+    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions,
     embed_in_bounded_batches, is_zero_vector, resolve_embed_onnx_batch,
     resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
@@ -374,11 +374,10 @@ impl FastEmbedder {
     /// request. On non-Apple platforms, or if CoreML registration fails for
     /// any reason, we transparently fall back to the default CPU provider.
     /// What: returns `(TextInitOptions, ExecutionProvider)` where the tag
-    /// reflects which backend was actually wired in. Every option set
-    /// truncates input at [`MAX_EMBED_TOKENS`] (#9391).
-    /// Test: `every_session_truncates_input_at_the_token_bound`; on an
-    /// M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu` is set (then
-    /// `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is always `Cpu`.
+    /// reflects which backend was actually wired in.
+    /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
+    /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
+    /// always `Cpu`.
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
@@ -406,10 +405,7 @@ impl FastEmbedder {
         unsafe {
             std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir);
         }
-        // #9391: an explicit token bound, not fastembed's 512 default.
-        let opts = TextInitOptions::new(model)
-            .with_cache_dir(cache_dir)
-            .with_max_length(MAX_EMBED_TOKENS);
+        let opts = TextInitOptions::new(model).with_cache_dir(cache_dir);
 
         // Always register an explicit CPU EP with the memory arena DISABLED.
         //
@@ -761,15 +757,18 @@ impl super::types::Embedder for FastEmbedder {
     /// what that costs in bytes.
     /// What: reads the cache under its lock, collecting misses with their input
     /// slots; embeds only the misses, in
-    /// [`resolve_embed_onnx_batch`]-sized batches, on a blocking thread holding
-    /// the model mutex; then caches each vector and reassembles the result in
+    /// [`resolve_embed_onnx_batch`]-sized batches (#9391: shortened to stay
+    /// within [`EMBED_BATCH_BYTE_BUDGET`](super::types::EMBED_BATCH_BYTE_BUDGET)),
+    /// on a blocking thread holding the model mutex; then caches each vector and reassembles the result in
     /// INPUT order, cache hits and freshly computed vectors interleaved. An
     /// all-zero vector from any batch fails the whole call, as does an error or
     /// a wrong-length result from any single batch.
     /// Test: `bounded_batches_never_exceed_the_ceiling` and its siblings in
     /// `batching_tests.rs` cover the batching contract without a model;
-    /// `fastembed_returns_correct_dim` and `fastembed_cache_hit_is_idempotent`
-    /// (`#[ignore]`, real ONNX) cover the end-to-end path.
+    /// `a_budget_split_leaves_every_vector_bit_identical` (real model) pins the
+    /// budget's output; `fastembed_returns_correct_dim` and
+    /// `fastembed_cache_hit_is_idempotent` (`#[ignore]`, real ONNX) cover the
+    /// end-to-end path.
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());

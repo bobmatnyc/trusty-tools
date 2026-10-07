@@ -64,6 +64,9 @@ mod provider_tests;
 // env-knob cases share the ONE `ENV_LOCK`.
 #[cfg(test)]
 mod batching_tests;
+// #9391: the per-call byte budget leaves every vector bit-identical.
+#[cfg(test)]
+mod budget_identity_tests;
 
 pub use fast_embedder::FastEmbedder;
 pub use types::{

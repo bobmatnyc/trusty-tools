@@ -9,8 +9,8 @@
 //! `resolve_expected_provider`, `is_zero_vector`, and — since #7106 — the
 //! per-inference batch ceiling (`DEFAULT_EMBED_ONNX_BATCH`,
 //! `resolve_embed_onnx_batch`, `embed_in_bounded_batches`) that every
-//! `FastEmbedder::embed_batch` caller is funnelled through, and since #9391
-//! the per-input token bound (`MAX_EMBED_TOKENS`).
+//! `FastEmbedder::embed_batch` caller is funnelled through, and since #9391 its
+//! per-call input budget (`EMBED_BATCH_BYTE_BUDGET`, `budgeted_len`).
 //! Test: tests in `mod.rs` cover all exported symbols from this file; the
 //! #7106 batching primitives are covered by `batching_tests.rs`.
 
@@ -532,18 +532,46 @@ pub(crate) fn is_zero_vector(vector: &[f32]) -> bool {
 /// Test: `embed_onnx_batch_defaults_when_unset`.
 pub(crate) const DEFAULT_EMBED_ONNX_BATCH: usize = 16;
 
-/// Tokens of one input that reach ONNX; the rest is truncated (#9391).
+/// Bound on `inputs in one ONNX call × the longest one's cost`, in bytes (#9391).
 ///
-/// Why: fastembed's default is 512, and a batch pads to its longest member, so
-/// one long drawer sized every attention tensor of its batch at 512². The
-/// sentence-transformers config for all-MiniLM-L6-v2 truncates at 256 word
-/// pieces (`max_seq_length`), and the model was fine-tuned on 128, so tokens
-/// past 256 add little to the vector. At 256 each attention tensor is a
-/// quarter of its 512 size.
-/// What: `256`, counting the `[CLS]`/`[SEP]` tokens. An input that tokenizes
-/// to 256 or fewer embeds as before; a longer one embeds its first 256 tokens.
-/// Test: `every_session_truncates_input_at_the_token_bound`.
-pub(crate) const MAX_EMBED_TOKENS: usize = 256;
+/// Why: a batch pads to its longest member, so one long drawer sized every
+/// attention tensor of its 16-input batch at up to 512 tokens — the 123–128 MB
+/// blocks seen during dream spikes. Truncating inputs would change stored
+/// vectors; splitting the batch changes only how many inputs share a call.
+/// What: `8192`. With [`EMBED_INPUT_BYTE_CAP`] that keeps a full 16-input call
+/// for inputs up to 512 bytes and drops to 4 inputs per call at the 512-token
+/// length, a quarter of the pre-#9391 worst case. UTF-8 byte length stands in
+/// for token count because the tokenizer runs inside fastembed.
+/// Test: `long_inputs_split_under_the_byte_budget`.
+pub(crate) const EMBED_BATCH_BYTE_BUDGET: usize = 8192;
+
+/// The most one input can cost against [`EMBED_BATCH_BYTE_BUDGET`] (#9391).
+///
+/// Why: fastembed truncates at 512 tokens, about 2 KiB of English, so the
+/// tensor stops growing there and a longer input must not cost more.
+pub(crate) const EMBED_INPUT_BYTE_CAP: usize = 2048;
+
+/// How many leading `inputs` one ONNX call takes (#9391).
+///
+/// Why: see [`EMBED_BATCH_BYTE_BUDGET`].
+/// What: the longest prefix of at most `batch` inputs whose count times its
+/// largest per-input cost (byte length clamped to `1..=EMBED_INPUT_BYTE_CAP`)
+/// stays within the budget. Never less than 1, so an input over the budget on
+/// its own still gets a call. Inputs are not reordered or altered.
+/// Test: `long_inputs_split_under_the_byte_budget`.
+pub(crate) fn budgeted_len(inputs: &[String], batch: usize) -> usize {
+    let mut taken = 0usize;
+    let mut widest = 0usize;
+    for input in inputs.iter().take(batch.max(1)) {
+        let next_widest = widest.max(input.len().clamp(1, EMBED_INPUT_BYTE_CAP));
+        if taken > 0 && (taken + 1).saturating_mul(next_widest) > EMBED_BATCH_BYTE_BUDGET {
+            break;
+        }
+        widest = next_widest;
+        taken += 1;
+    }
+    taken.max(1)
+}
 
 /// Resolve the per-inference ONNX batch bound from the process environment.
 ///
@@ -573,7 +601,8 @@ pub(crate) fn resolve_embed_onnx_batch() -> usize {
 }
 
 /// Feed `inputs` to `embed_chunk` in slices of at most `batch`, concatenating
-/// the results in input order.
+/// the results in input order. #9391: a slice also stays within
+/// [`EMBED_BATCH_BYTE_BUDGET`] (see [`budgeted_len`]).
 ///
 /// Why (#7106): this is the choke point that bounds the ONNX peak for EVERY
 /// caller. Bounding it in each caller instead leaves the next caller to
@@ -584,7 +613,7 @@ pub(crate) fn resolve_embed_onnx_batch() -> usize {
 /// before exporting any of it, so its own chunking bounds the attention tensor
 /// but still accumulates one hidden-state tensor per chunk across the whole
 /// call. Chunking here keeps only the finished 384-float vectors between calls.
-/// What: walks `inputs.chunks(batch)`, hands each slice and the ceiling itself
+/// What: walks `inputs` in [`budgeted_len`]-sized slices, hands each slice and the ceiling itself
 /// to `embed_chunk`, and appends what comes back. The ceiling travels alongside
 /// the slice because fastembed needs it as an explicit `Some(batch_size)`;
 /// passing the ceiling rather than the slice length keeps it `>= texts.len()`,
@@ -608,7 +637,11 @@ where
 {
     let batch = batch.max(1);
     let mut out: Vec<Vec<f32>> = Vec::with_capacity(inputs.len());
-    for chunk in inputs.chunks(batch) {
+    let mut rest = inputs;
+    while !rest.is_empty() {
+        // #9391: the budget can shorten a slice; it never reorders or edits one.
+        let (chunk, tail) = rest.split_at(budgeted_len(rest, batch));
+        rest = tail;
         let vectors = embed_chunk(chunk, batch)?;
         if vectors.len() != chunk.len() {
             anyhow::bail!(

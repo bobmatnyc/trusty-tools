@@ -1,0 +1,2 @@
+Fixed
+- `FastEmbedder` bounds each ONNX call by input size as well as count. A batch pads to its longest input, so one long drawer sized every attention tensor of its 16-input call at up to 512 tokens. A call now takes only as many inputs as keep `inputs × longest input` within 8 KiB, with an input over 2 KiB counted as 2 KiB, so a call of 512-token inputs holds 4 instead of 16. Inputs are not truncated or reordered, and every vector is bit-identical to the vector an unsplit call returns (#9391).
