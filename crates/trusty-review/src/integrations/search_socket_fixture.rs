@@ -3,7 +3,7 @@
 //! Why: the socket leg must be proven without a live daemon, and on a developer
 //! machine the real socket is live — a test that reached it would pass or fail
 //! on whatever that daemon holds.
-//! What: binds a `UnixListener` at a caller-chosen temp path, answers each
+//! What: binds a hardened `UnixListener` at a caller-chosen temp path, answers each
 //! newline-framed JSON-RPC request with the caller's canned reply, and records
 //! every `(method, params)` it was sent.
 //! Test: used by `search_transport_tests.rs` and the subprocess client tests.
@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 
 /// A canned answer: a `result`, or an `error` as `(code, message, data)`.
 pub(crate) type Reply = Result<Value, (i64, String, Option<Value>)>;
@@ -32,15 +31,10 @@ impl FakeSearchSocket {
         path: &Path,
         reply: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
     ) -> Self {
-        if let Some(parent) = path.parent() {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::create_dir_all(parent).expect("create the socket's parent");
-            // The client refuses a socket whose directory is not 0700, as the
-            // daemon's hardened bind leaves it.
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .expect("narrow the socket's parent to 0700");
-        }
-        let listener = UnixListener::bind(path).expect("bind the fake search socket");
+        // The daemon's own bind: a 0700 directory and a 0600 socket, which is
+        // what the client checks before it dials.
+        let listener =
+            trusty_common::uds::bind_hardened(path).expect("bind the fake search socket");
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&calls);
         let reply = Arc::new(reply);

@@ -28,19 +28,12 @@ use crate::report::investigate::trace_client::{HttpTraceSource, TraceError, Trac
 
 const DATA_DIR_OVERRIDE: &str = "TRUSTY_DATA_DIR_OVERRIDE";
 
-/// A 0700 temp dir short enough for a Unix socket path on macOS (104 bytes).
-///
-/// 0700 because the client refuses a socket in any wider directory; a dead
-/// socket must fail on the dial, not on that check.
+/// A temp dir short enough for a Unix socket path on macOS (104 bytes).
 fn short_tempdir() -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt as _;
-    let dir = tempfile::Builder::new()
+    tempfile::Builder::new()
         .prefix("b5")
         .tempdir_in("/tmp")
-        .expect("tempdir under /tmp");
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("narrow the tempdir to 0700");
-    dir
+        .expect("tempdir under /tmp")
 }
 
 /// Isolate the default socket path and clear both transport env vars.
@@ -181,7 +174,8 @@ async fn dead_socket_file_does_not_fall_back_to_http() {
     let dir = short_tempdir();
     let _env = isolated(&dir);
     let dead = dir.path().join("dead.sock");
-    drop(std::os::unix::net::UnixListener::bind(&dead).expect("bind, then drop"));
+    // Hardened, so the dial fails on the dead daemon, not the mode check.
+    drop(trusty_common::uds::bind_hardened(&dead).expect("bind, then drop"));
     let (url, hits) = http_stub("200 OK", healthy().to_string()).await;
     let pin = EnvGuard::set(TRUSTY_SEARCH_SOCKET_ENV, &dead.to_string_lossy());
 
