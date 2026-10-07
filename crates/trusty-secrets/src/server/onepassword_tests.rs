@@ -402,7 +402,10 @@ async fn server_onepassword_enablement_ignores_a_spawner_chosen_machine_config()
 
 /// Why: #7519, ruling 74 — an account machine config that cannot be read,
 /// or no account home at all, leaves 1Password off whatever the spawner's
-/// file says, and the server still serves the other backends.
+/// file says, and set and list still serve the other backends. A delete
+/// refuses instead, before any backend is touched: 1Password may still hold
+/// a copy from when the file was readable. Red while delete swept without
+/// 1Password and removed the row.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
@@ -426,9 +429,45 @@ async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
     let server = start_with_account(&fx, Some(account)).await;
     ok(set(&fx, "A").await);
     assert_eq!(listed(&fx).await[0]["name"], json!("A"));
-    assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
+    // #7519: an unreadable account file refuses the delete; the row stays.
+    let refused = delete(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&refused, method::DELETE),
+        ErrorKind::ConfigInvalid
+    );
+    assert_eq!(listed(&fx).await[0]["name"], json!("A"));
+    assert!(!fx.keychain.is_empty(), "the refused delete touched a backend");
     server.stop().await;
     assert!(!marker.exists(), "the spawner-pinned program ran");
+}
+
+/// Why: #7519 — an account machine config that does not parse refuses a
+/// delete before any backend is touched, and the index row stays; a missing
+/// one still means "skip 1Password", so the same delete then succeeds.
+/// Red while delete read a parse error as "1Password off".
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_refuses_when_the_account_config_does_not_parse() {
+    let fx = fixture();
+    let account = fx.tmp.path().join("account").join("config.yaml");
+    std::fs::create_dir_all(account.parent().unwrap()).unwrap();
+    std::fs::write(&account, "secrets: [unclosed\n").unwrap();
+    assert!(crate::store::config::load_machine_at(&account).is_err());
+
+    let server = start_with_account(&fx, Some(account.clone())).await;
+    ok(set(&fx, "A").await);
+    let refused = delete(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&refused, method::DELETE),
+        ErrorKind::ConfigInvalid
+    );
+    assert_eq!(listed(&fx).await[0]["name"], json!("A"));
+    assert!(!fx.keychain.is_empty(), "the refused delete touched a backend");
+
+    std::fs::remove_file(&account).unwrap();
+    assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
+    assert_eq!(listed(&fx).await, json!([]));
+    server.stop().await;
 }
 
 /// Why: #7519 owner ruling — a crash skips the template guard's drop and

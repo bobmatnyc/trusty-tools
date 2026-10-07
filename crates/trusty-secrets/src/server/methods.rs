@@ -26,12 +26,12 @@ use super::audit::AuditMethod;
 use super::errors::ErrorKind;
 use super::gate::{Recording, audited};
 use super::project::ProjectContext;
-use super::router::{State, account_machine};
+use super::router::State;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
-use crate::store::config::MachineSecretsConfig;
+use crate::store::config::{MachineSecretsConfig, load_machine_at};
 use crate::store::{Capabilities, SecretBackend, SecretStore, cli_backends, swept_backends};
 
 /// `secrets.doctor` — not among S1's method names.
@@ -135,13 +135,17 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 
 /// `secrets.delete`: remove one key from every backend and the index.
 ///
-/// What: the scope check runs before any backend is opened. The key is
-/// then deleted from the configured backend and from [`other_backends`]
-/// through [`SecretStore::delete_across`] (#7519). #4567 — audited like
-/// [`set`].
+/// What: the scope check runs before any backend is opened. Then the
+/// account's machine config is read by [`sweep_machine`]: an error refuses
+/// the delete before any backend is touched, and the index row stays
+/// (#7519). The key is then deleted from the configured backend and from
+/// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
+/// #4567 — audited like [`set`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`,
 /// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Delete, Recording::Once, |gate| {
@@ -151,16 +155,35 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
+        // #7519: a missing account file skips 1Password; an unreadable one
+        // refuses, since a 1Password copy from when it was readable may remain.
+        let account = sweep_machine(state)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
         // #7519: a backend switch or a copy leaves values in other backends.
         // Ruling 74: the CLI backends swept are the ones the factory opens,
         // so enablement comes from the account's file, not the spawner's.
-        let account = account_machine(state.file_consent_config.as_deref());
         let others = other_backends(state, &project.resolved_config().backend, account.as_ref())?;
         gate.admit()?;
         let response = store.delete_across(&request.vault, &request.key, &others)?;
         to_json(&response)
     })
+}
+
+/// The account machine config whose CLI backends a delete sweeps (#7519).
+///
+/// Why: set, get and list treat an unreadable account file as "1Password
+/// off", which fails closed for them. For a delete it fails open: a key
+/// written to 1Password while the file was readable would stay there while
+/// the index row went.
+/// What: `None` when the server knows no account file or the file is
+/// missing; a read or parse error is returned as its [`ErrorKind`].
+/// Test: `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`.
+fn sweep_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKind> {
+    match state.file_consent_config.as_deref() {
+        Some(path) => Ok(load_machine_at(path)?),
+        None => Ok(None),
+    }
 }
 
 /// Every backend but `configured` that may hold a key (#7519).
