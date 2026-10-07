@@ -12,7 +12,7 @@
 //! [`AgentContentError::FetchFailed`], which names `tm content update` and
 //! the manual install; no unverified byte is ever served. A failed fetch is
 //! not retried for [`RETRY_AFTER`], and the fetch never holds a tokio worker.
-//! [`OFFLINE_ENV`] skips the fetch.
+//! [`OFFLINE_ENV`] skips the fetch; a miss under it names the switch.
 //! Test: `first_use_tests.rs`.
 //!
 //! # Spec References
@@ -31,9 +31,9 @@ use super::bundle_cache::{
     CacheError, Fallback, UpdateOutcome, github_source, install_if_missing,
 };
 
-/// Set to anything but `0` or empty to skip the first-use fetch: the
-/// not-installed error is returned as it is. Test harnesses set it so no
-/// spawned `tm` reaches the network.
+/// Set to anything but `0` or empty to skip the first-use fetch: a missing
+/// lock is then an error naming this switch and the remedies. Test harnesses
+/// set it so no spawned `tm` reaches the network.
 pub const OFFLINE_ENV: &str = "TRUSTY_CONTENT_OFFLINE";
 
 /// How long a failed first-use fetch is not retried (#9396).
@@ -54,7 +54,7 @@ pub fn resolve_or_fetch(dev: DevOverride) -> Result<ResolvedContent, AgentConten
 
 /// [`resolve_or_fetch`] against an explicit cache.
 ///
-/// What: with [`OFFLINE_ENV`] set, plain resolution; otherwise
+/// What: with [`OFFLINE_ENV`] set, [`resolve_offline_in`]; otherwise
 /// [`resolve_or_fetch_in`] against GitHub, the fetch running on its own
 /// thread so a caller inside an async runtime cannot hit the blocking HTTP
 /// client's runtime panic.
@@ -62,8 +62,11 @@ pub fn resolve_or_fetch_at(
     cache: &Path,
     dev: DevOverride,
 ) -> Result<ResolvedContent, AgentContentError> {
-    if offline_from(std::env::var(OFFLINE_ENV).ok().as_deref()) {
-        return resolve_content_in(cache, dev);
+    if let Some(value) = std::env::var(OFFLINE_ENV)
+        .ok()
+        .filter(|v| offline_from(Some(v)))
+    {
+        return resolve_offline_in(cache, dev, &value);
     }
     resolve_or_fetch_in(cache, dev, fetch_from_github)
 }
@@ -78,6 +81,34 @@ thread_local! {
     /// production path never reaches it (#9396).
     pub(crate) static FETCH_OVERRIDE: std::cell::Cell<Option<FetchFn>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// Resolves with the first-use fetch switched off by `OFFLINE_ENV=value`.
+///
+/// Why: a plain not-installed error under the switch hides why tm did not
+/// fetch, so the operator cannot tell a switched-off fetch from a missing
+/// one (#9396).
+/// What: a `NotInstalled` answer becomes [`AgentContentError::FetchFailed`]
+/// whose reason names the switch and says to unset it; the error's remedy
+/// names `tm content update` and the offline `tm content install --from`.
+/// Any other result is returned as it is.
+/// Test: `sessions_start_offline_names_the_switch_and_both_remedies`.
+fn resolve_offline_in(
+    cache: &Path,
+    dev: DevOverride,
+    value: &str,
+) -> Result<ResolvedContent, AgentContentError> {
+    match resolve_content_in(cache, dev) {
+        // #9396: name the switch, so a skipped fetch never reads as a missing one.
+        Err(AgentContentError::NotInstalled { .. }) => Err(AgentContentError::FetchFailed {
+            reason: format!(
+                "`{OFFLINE_ENV}={}` is set, which turns the first-use fetch off \
+                 (unset it to let tm fetch the release itself)",
+                value.trim()
+            ),
+        }),
+        other => other,
+    }
 }
 
 /// [`install_if_missing`] against GitHub, on a thread of its own: the
