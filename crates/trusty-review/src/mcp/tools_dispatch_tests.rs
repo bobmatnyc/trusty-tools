@@ -753,3 +753,90 @@ async fn review_diff_context_reaches_the_reviewer_prompt() {
         "the context must not ride the diff as a preamble"
     );
 }
+
+// ── #9197: `review_diff` takes `issue_docs` ─────────────────────────────────
+
+const ISSUE_DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+                          @@ -1 +1 @@\n-fn a() {}\n+fn a() { println!(\"a\"); }\n";
+
+/// An offline state whose reviewer records its prompts, and an env guard
+/// pinning `TRUSTY_SEARCH_SOCKET` to a missing path for the test (#9214).
+fn capturing_state() -> (
+    AppState,
+    Arc<PromptCapture>,
+    crate::integrations::search_transport::fixture::EnvGuard,
+) {
+    let missing = std::env::temp_dir().join(format!(
+        "trusty-review-9197-mcp-no-search-{}.sock",
+        std::process::id()
+    ));
+    let pin = crate::integrations::search_transport::fixture::EnvGuard::set(
+        trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV,
+        &missing.to_string_lossy(),
+    );
+    let llm = Arc::new(PromptCapture(std::sync::Mutex::new(Vec::new())));
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = Some(false);
+    config.context.require_analyze = false;
+    let state = AppState::new(
+        config,
+        llm.clone(),
+        Arc::new(FakeSearchDispatch),
+        Some(Arc::new(ReadyAnalyzeDispatch)),
+    );
+    (state, llm, pin)
+}
+
+/// #9197: on a local diff, `issue_docs` reach the reviewer prompt and the
+/// envelope names the `issues` source.
+#[serial_test::serial]
+#[tokio::test]
+async fn review_diff_issue_docs_reach_the_reviewer_prompt() {
+    let (state, llm, _pin) = capturing_state();
+    let args = json!({
+        "diff": ISSUE_DIFF,
+        "issue_docs": [{"id": "77", "title": "Totals", "body": "ISSUE_CANARY_9197"}],
+    });
+    let result = call_tool("review_diff", &args, &state)
+        .await
+        .expect("a valid review_diff call is not a protocol error");
+    assert_eq!(result["isError"], json!(false), "{result}");
+    let prompts = llm.0.lock().map(|p| p.clone()).unwrap_or_default();
+    let reviewer = prompts.first().expect("the reviewer must be called");
+    assert!(reviewer.contains("### Issue #77 — Totals"), "{reviewer}");
+    assert!(reviewer.contains("ISSUE_CANARY_9197"), "{reviewer}");
+    // The caller row (no `context`) comes first, then the issues row.
+    assert_eq!(result["context_sources"][0]["source"], "caller_context", "{result}");
+    assert_eq!(result["context_sources"][1]["source"], "issues", "{result}");
+    assert_eq!(result["context_sources"][1]["state"], "used", "{result}");
+}
+
+/// #9197 (Architect ruling Q2): `review_diff` runs through `run_review_with`;
+/// with no `issue_docs` its envelope carries no `context_sources` key.
+#[serial_test::serial]
+#[tokio::test]
+async fn review_diff_without_issue_docs_reports_no_context_sources() {
+    let (state, _llm, _pin) = capturing_state();
+    let result = call_tool("review_diff", &json!({"diff": ISSUE_DIFF}), &state)
+        .await
+        .expect("a valid review_diff call is not a protocol error");
+    assert_eq!(result["isError"], json!(false), "{result}");
+    assert!(result.get("context_sources").is_none(), "{result}");
+}
+
+/// #9197: a malformed `issue_docs` is `InvalidParams`, raised before any
+/// review runs.
+#[serial_test::serial]
+#[tokio::test]
+async fn review_diff_rejects_malformed_issue_docs_before_reviewing() {
+    let (state, llm, _pin) = capturing_state();
+    let args = json!({"diff": ISSUE_DIFF, "issue_docs": [{"id": "PROJ-1", "body": "b"}]});
+    let err = call_tool("review_diff", &args, &state)
+        .await
+        .expect_err("a JIRA-shaped id is refused");
+    assert!(
+        matches!(&err, ToolError::InvalidParams(m) if m.contains("'id'")),
+        "{err:?}"
+    );
+    assert!(llm.0.lock().map(|p| p.is_empty()).unwrap_or(false), "no review ran");
+}

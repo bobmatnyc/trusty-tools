@@ -354,6 +354,7 @@ pub fn build_review_prompt(
         reviewer_model,
         voice_config,
         false,
+        "", // #9197: the public builders carry no extra section
     )
 }
 
@@ -386,6 +387,44 @@ pub fn build_review_prompt_with_coverage(
         reviewer_model,
         voice_config,
         coverage_gating_enabled,
+        "", // #9197: the public builders carry no extra section
+    )
+}
+
+/// [`build_review_prompt_with_coverage`] plus caller-requested sections (#9197).
+///
+/// Why: Architect ruling Q1(a): optional context blocks reach the prompt
+/// through a crate-private seam, so `ReviewContext` and the public builders
+/// keep their shape.
+/// What: `extra_sections` is rendered markdown placed after `## Referenced
+/// Code` and before `## Related code`; an empty string renders nothing, so
+/// the request equals the public builder's.
+/// Test: `an_empty_extra_section_renders_nothing`,
+/// `supplied_issue_doc_reaches_the_reviewer_prompt`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_review_prompt_with_sections(
+    owner: &str,
+    repo: &str,
+    pr_meta: &ReviewPrMeta,
+    diff: &str,
+    context: &ReviewContext,
+    external_context: &str,
+    reviewer_model: &str,
+    voice_config: &VoiceConfig,
+    coverage_gating_enabled: bool,
+    extra_sections: &str,
+) -> LlmRequest {
+    build_review_prompt_inner(
+        owner,
+        repo,
+        pr_meta,
+        diff,
+        context,
+        external_context,
+        reviewer_model,
+        voice_config,
+        coverage_gating_enabled,
+        extra_sections,
     )
 }
 
@@ -406,8 +445,17 @@ fn build_review_prompt_inner(
     reviewer_model: &str,
     voice_config: &VoiceConfig,
     coverage_gating_enabled: bool,
+    extra_sections: &str,
 ) -> LlmRequest {
-    let user_message = build_user_message(owner, repo, pr_meta, diff, context, external_context);
+    let user_message = build_user_message(
+        owner,
+        repo,
+        pr_meta,
+        diff,
+        context,
+        external_context,
+        extra_sections,
+    );
     LlmRequest {
         model: strip_provider_prefix(reviewer_model).to_string(),
         system: build_system_prompt_with_coverage(voice_config, coverage_gating_enabled),
@@ -492,3 +540,8 @@ mod tests;
 #[cfg(test)]
 #[path = "prompt_voice_tests.rs"]
 mod voice_tests;
+
+// #9197: the crate-private extra-sections seam.
+#[cfg(test)]
+#[path = "prompt_sections_tests.rs"]
+mod sections_tests;

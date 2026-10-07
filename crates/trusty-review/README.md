@@ -193,8 +193,17 @@ empty result.
   citation corpus see the same capped text. A local diff has no PR body; the
   review runs and the ledger records the body `unavailable`.
 - `--report-context` asks for the source ledger with no other new input.
+- `--issue-docs-file <PATH>` (#9197) gives the reviewer the issues the change
+  addresses: a JSON array of `{"id": "#42", "title": "…", "body": "…",
+  "url": "…"}` in a regular file of at most 256 KiB. Ids are GitHub issue
+  numbers only. Each body is capped at 16,000 characters with a visible
+  marker; at most 8 docs and 48,000 body characters are shown, and a doc past
+  either limit is left out whole and recorded `omitted`. The docs render as
+  `## Linked issues`, each body fenced as data. A `[gh: #N — "excerpt"]`
+  citation resolves only against text the reviewer saw. The verifier never
+  sees issue text. Works on a local diff.
 
-With `--include-pr-body` or `--report-context`, `--json` prints
+With `--include-pr-body`, `--issue-docs-file` or `--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
 one line per source that was `unavailable` or `truncated`. Without either flag,
 `--json` prints the review object alone, exactly as before. The text flags and
@@ -266,11 +275,13 @@ Optional PR context (#9192), all off by default:
 | `pr_description` | string | PR description for the reviewer and the verifier. |
 | `pr_discussion` | string | Review and issue comments for the reviewer and the verifier. |
 | `referenced_code` | string | Related code the diff depends on, for the reviewer. |
+| `issue_docs` | array | Issues the change addresses (#9197), `[{id, title?, body, url?}]`; also on `review_diff`. Same caps and rules as `run --issue-docs-file`. A malformed value is an invalid-params error. |
 
-A mistyped text param is ignored with a warning. When any of the four is
+A mistyped text param is ignored with a warning. When any of the five is
 sent, the response envelope carries `context_sources`: one record per source
-(`pr_body`, `caller_context`) with state `used`, `truncated`, `absent` or
-`unavailable`. The `ReviewResult` text inside the envelope is unchanged.
+(`pr_body`, `caller_context`, `issues`) with state `used`, `truncated`,
+`absent` or `unavailable`, and per-item rows (`omitted` names a doc left out
+whole). The `ReviewResult` text inside the envelope is unchanged.
 
 Returns a `ReviewResult` JSON object with:
 - `grade` (A+ | A | A- | B+ | B | B- | C+ | C | C- | D+ | D | D- | F) — letter grade

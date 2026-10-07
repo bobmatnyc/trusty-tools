@@ -29,7 +29,7 @@ use crate::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
         mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
-        optional_context::assemble::refs_for_gate,
+        optional_context::assemble::{AppliedContext, refs_for_review}, // #9192, #9197
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{CallerContext, ReviewDeps, ReviewInput},
@@ -67,8 +67,8 @@ pub(super) struct MapReduceRun {
     pub coverage_contrib: Option<CoverageVerdictContrib>,
     /// Degraded reason from the #590 context gate (None = authoritative).
     pub degraded_reason: Option<String>,
-    /// #9192: false when `include_pr_body` put the capped body in the context.
-    pub body_in_refs: bool,
+    /// #9192 corpus switch and #9197 issue section from `apply_caller_context`.
+    pub(crate) applied: AppliedContext,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -122,7 +122,8 @@ pub(super) async fn run_mapreduce_branch(
     );
     // #9310 ruling 50: `grade_floor` is the synthesis or worst-chunk floor (Q2).
     let (mut reduced, wiped_model_verdict, grade_floor): (ReducedReview, _, _) =
-        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config).await;
+        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config, &run.applied.sections)
+            .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -460,16 +461,8 @@ async fn fold_reduced_into_result(
         input.caller_context.pr_discussion.as_deref(),
     );
     // #9188 D: context citations resolve in what the reviewer was shown.
-    let refs = refs_for_gate(
-        &run.pr_meta.title,
-        run.body_in_refs.then_some(run.pr_meta.body.as_str()), // #9192
-        &run.external_context,
-        [
-            run.context.pr_description.as_deref(),
-            run.context.pr_discussion.as_deref(),
-            run.context.referenced_code.as_deref(),
-        ],
-    );
+    // #9197: plus the issue section every chunk prompt carried.
+    let refs = refs_for_review(&run.pr_meta, &run.external_context, &run.context, &run.applied);
     let inputs = GateInputs {
         filtered: &run.filtered,
         diff: &run.raw_diff,

@@ -29,7 +29,7 @@ use crate::{
     pipeline::{
         letter_grade::grade_floor,  // #9310 ruling 50: a chunk's grade floor
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
-        prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
+        prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_sections},
         reply_shape::describe_reply,
         verdict_status::judged_verdict, // #9310: a chunk's grade floors its verdict
     },
@@ -92,7 +92,7 @@ pub async fn run_map_stage(
     ctx: &MapContext<'_>,
     concurrency: usize,
 ) -> Vec<MapOutcome> {
-    run_map_stage_graded(units, llm, ctx, concurrency)
+    run_map_stage_graded(units, llm, ctx, concurrency, "")
         .await
         .into_iter()
         .map(|(outcome, _)| outcome)
@@ -105,13 +105,16 @@ pub async fn run_map_stage(
 /// Why: the floor must be read from the reviewer's own grade before hygiene
 /// relaxes a chunk, and `MapOutcome` is public, so the floor travels beside it.
 /// What: `letter_grade::grade_floor` of each `Reviewed` chunk's raw grade;
-/// APPROVE (no floor) for a skipped or failed unit.
-/// Test: `run_map_stage_graded_reports_each_chunk_floor`.
+/// APPROVE (no floor) for a skipped or failed unit. #9197: every chunk prompt
+/// carries `extra_sections`, as the unified prompt does.
+/// Test: `run_map_stage_graded_reports_each_chunk_floor`,
+/// `mapreduce_chunk_prompts_carry_the_issue_block`.
 pub(crate) async fn run_map_stage_graded(
     units: &[MapUnit],
     llm: &Arc<dyn LlmProvider>,
     ctx: &MapContext<'_>,
     concurrency: usize,
+    extra_sections: &str,
 ) -> Vec<(MapOutcome, Verdict)> {
     let conc = concurrency.max(1);
     debug!(
@@ -126,7 +129,10 @@ pub(crate) async fn run_map_stage_graded(
     // lifetimes (it is `tokio::spawn`-ed by the webhook service), avoiding the
     // higher-ranked-lifetime Send failure that a borrowed `&MapContext` would
     // otherwise introduce.
-    let tasks: Vec<MapTask> = units.iter().map(|u| plan_unit(u, ctx)).collect();
+    let tasks: Vec<MapTask> = units
+        .iter()
+        .map(|u| plan_unit(u, ctx, extra_sections))
+        .collect();
 
     // Tasks that need no LLM call resolve immediately; only `Call` tasks fan out.
     stream::iter(tasks)
@@ -167,7 +173,7 @@ enum MapTask {
 /// `Resolved(Failed{hunk_oversized:true})` (#1639 backstop); otherwise builds the
 /// reviewer prompt and returns `Call`.
 /// Test: covered by `map_*` tests.
-fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
+fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>, extra_sections: &str) -> MapTask {
     match &unit.kind {
         MapUnitKind::MetadataOnly { note } => MapTask::Resolved(MapOutcome::Skipped {
             file: unit.file.clone(),
@@ -190,7 +196,7 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
                     hunk_oversized: true,
                 });
             }
-            let req = build_review_prompt_with_coverage(
+            let req = build_review_prompt_with_sections(
                 ctx.owner,
                 ctx.repo,
                 ctx.pr_meta,
@@ -200,6 +206,7 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
                 ctx.reviewer_model,
                 ctx.voice_config,
                 ctx.coverage_enabled,
+                extra_sections, // #9197
             );
             MapTask::Call {
                 file: unit.file.clone(),

@@ -116,7 +116,9 @@ pub use grade::{derive_verdict, derive_verdict_with_grade};
 pub use letter_grade::{
     Grade, clamp_grade_to_verdict, default_grade_for_verdict, verdict_for_grade,
 };
-pub use optional_context::{OptionalContextRequest, ReviewOptions, ReviewOutcome};
+pub use optional_context::{
+    IssueDoc, IssueDocsError, OptionalContextRequest, ReviewOptions, ReviewOutcome,
+};
 pub use output::{log_json_path, print_review_result, write_review_log};
 pub use parser::{ParsedReview, parse_review_reply, parse_review_response};
 pub use post::{
