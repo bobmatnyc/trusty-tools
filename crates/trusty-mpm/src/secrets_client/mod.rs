@@ -4,10 +4,15 @@
 //! `secrets_get_ref` MCP tool are both clients of the trusty-secrets socket.
 //! The CLI lives in the `tm` bin and the MCP catalog in this library, so the
 //! request shape and the fixed error text both callers rely on live here once.
-//! What: [`with_project`] folds the project directory into a request's params;
-//! [`describe`] renders a [`ClientError`] as text that cannot carry a request
-//! field; [`default_client`] is the process-wide handle for the default socket;
-//! [`get_ref`] backs the MCP tool. Nothing here logs a value.
+//! What: [`with_project`](crate::secrets_client::with_project) folds the
+//! project directory into a request's params;
+//! [`describe`](crate::secrets_client::describe) renders a
+//! [`ClientError`](trusty_secrets::server::ClientError) as text that cannot
+//! carry a request field;
+//! [`default_client`](crate::secrets_client::default_client) is the
+//! process-wide handle for the default socket;
+//! [`get_ref()`](crate::secrets_client::get_ref()) backs the MCP tool. Nothing
+//! here logs a value.
 //! Test: `tests.rs` beside this module — the tool end to end through
 //! `crate::mcp::dispatch` over a real socket, plus the helpers' fixed text.
 //! The CLI's own suite (`bin/tm/commands/secrets/tests.rs`) covers the CLI.
