@@ -45,6 +45,10 @@ mod helpers_tests;
 #[cfg(test)]
 #[path = "recall_stream_tests.rs"]
 mod recall_stream_tests;
+// #9299: the ADR-0071 recall_all scope and coverage criteria.
+#[cfg(test)]
+#[path = "recall_scope_tests.rs"]
+mod recall_scope_tests;
 
 // Re-export the full public surface so external call sites
 // (`crate::service::X`) keep resolving exactly as they did against the former

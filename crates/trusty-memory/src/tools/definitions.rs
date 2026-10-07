@@ -435,13 +435,14 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_recall_all",
-                "description": "Semantic search across ALL palaces simultaneously. Returns the top-k most relevant drawers ranked by similarity, regardless of which palace they belong to. Each result includes a `palace_id` field identifying its source.",
+                "description": "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason` and `open_failed`. Each result includes a `palace_id` field identifying its source.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "q":     {"type": "string", "description": "Free-text query"},
                         "top_k": {"type": "integer", "default": 10},
                         "deep":  {"type": "boolean", "default": false},
+                        "scope": { "type": "string", "enum": ["resident", "all"], "default": "resident", "description": "resident: search loaded palaces only, open none. all: open and search every non-empty palace (ADR-0071)." },
                         "include_creator_tags": {"type": "boolean", "default": false, "description": "Same semantics as memory_recall's `include_creator_tags`. This tool takes no `min_score`: one floor across palaces would mean a different thing in each corpus."}
                     },
                     "required": ["q"],

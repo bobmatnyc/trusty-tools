@@ -27,7 +27,7 @@ use trusty_common::memory_core::retrieval::{
     RecallResult, RecallScope,
 };
 
-use crate::service::recall_stream::recall_streamed;
+use crate::service::recall_stream::{recall_all_scoped, RecallAllScope};
 
 use super::bm25::{bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
@@ -396,6 +396,18 @@ async fn recall_all_without_embedder(
     merged
 }
 
+/// MCP `memory_recall_all`: cross-palace recall with a scope and a coverage
+/// report (ADR-0071, #9299).
+///
+/// Why: the default searched every palace on disk by cold-opening it, and the
+/// response could not say what it had missed.
+/// What: parses `q`, `top_k`, `deep` and `scope` (`resident` by default,
+/// `all` for the streamed walk; anything else is an error), runs
+/// `recall_all_scoped`, demotes stale snapshots, cuts to `top_k`, and returns
+/// `query`, `results` and the ADR-0071 D4 coverage fields.
+/// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`,
+/// `open_failure_is_reported_on_every_surface`,
+/// `recall_all_rejects_an_unknown_scope`.
 pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> Result<Value> {
     let query = args
         .get("q")
@@ -403,6 +415,9 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         .ok_or_else(|| anyhow!("memory_recall_all: missing 'q'"))?;
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let deep = args.get("deep").and_then(|v| v.as_bool()).unwrap_or(false);
+    // #9299 (ADR-0071): resident palaces by default; `scope: "all"` opens.
+    let scope =
+        RecallAllScope::parse(args.get("scope")).context("memory_recall_all: invalid 'scope'")?;
     // Owner ruling 2026-09-14: the fan-out builds its own payload (it carries a
     // `palace_id` the single-palace envelope has no field for), but the tag
     // projection is the same one — a cross-palace hit's provenance is no more
@@ -413,23 +428,16 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // #8246: fetch about 2 * top_k so demotion can lift a hit past the cut.
     let window = ranking_window(top_k, None);
 
-    // List every palace on disk, then search them a batch at a time. Palaces
-    // that fail to open are skipped with a warning so a single bad
-    // namespace cannot fail the whole fan-out.
-    let palaces = crate::service::helpers::list_palaces_blocking(state).await?;
-    // #9141: an empty palace is skipped without being opened.
-    let (palaces, palaces_skipped) =
-        crate::service::recall_stream::skip_empty_palaces(state, palaces).await;
-
-    // #7125: `recall_streamed` still opens every palace — a cache-only answer
-    // would silently drop most of the corpus — but holds only one batch at a
-    // time and hands back everything the query itself brought in.
+    // #9299: `recall_all_scoped` lists the palaces, skips provably empty ones
+    // (#9141), and either searches the resident set or streams the estate in
+    // bounded batches (#7125). A palace that fails to open is reported in the
+    // coverage, not just logged.
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     // #4836: gated on the embedder's real state, as the per-palace paths are.
-    let mut results = if !vector_lane_available(state) {
-        recall_streamed(
+    let outcome = if !vector_lane_available(state) {
+        recall_all_scoped(
             state,
-            &palaces,
+            scope,
             "memory_recall_all",
             window,
             |handles| async move {
@@ -441,13 +449,14 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         // #4836: `embedder()` now yields the type-erased shared embedder
         // directly, so the local re-erasure this used to need is gone.
         let embedder = state.embedder().await?;
-        recall_streamed(state, &palaces, "memory_recall_all", window, |handles| {
+        recall_all_scoped(state, scope, "memory_recall_all", window, |handles| {
             let embedder = embedder.clone();
             async move { recall_across_palaces(&handles, &embedder, query, window, deep).await }
         })
         .await
         .context("recall_across_palaces")?
     };
+    let mut results = outcome.results;
     // #8246: the merged list gets the same snapshot demotion, then the cut.
     demote_stale_snapshots_across(&mut results, chrono::Utc::now());
     results.truncate(top_k);
@@ -467,11 +476,10 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
             })
         })
         .collect();
-    Ok(json!({
-        "query": query,
-        "results": payload,
-        // #9141 AC 2: how much of the estate the fan-out actually opened.
-        "palaces_searched": palaces.len(),
-        "palaces_skipped": palaces_skipped,
-    }))
+    let mut out = serde_json::Map::new();
+    out.insert("query".into(), json!(query));
+    out.insert("results".into(), json!(payload));
+    // #9299 (ADR-0071 D4): scope and coverage on every response.
+    outcome.coverage.insert_into(scope, &mut out);
+    Ok(Value::Object(out))
 }

@@ -11,6 +11,7 @@
 
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
+use crate::service::recall_stream::RecallAllScope;
 use crate::service::{load_user_config, palace_info_from, DreamStatusPayload, MemoryService};
 use crate::AppState;
 use serde::Deserialize;
@@ -156,13 +157,15 @@ pub(crate) fn all_tools() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "memory_recall_all".into(),
-            description: "Semantic search across ALL palaces simultaneously. Returns the top-k most relevant drawers ranked by similarity, regardless of which palace they belong to. Each result includes a `palace_id` field identifying its source.".into(),
+            // #9299: the default scope and `coverage` are part of the contract.
+            description: "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason` and `open_failed`. Each result includes a `palace_id` field identifying its source.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "q": { "type": "string", "description": "Free-text query" },
                     "top_k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 10 },
-                    "deep": { "type": "boolean", "default": false }
+                    "deep": { "type": "boolean", "default": false },
+                    "scope": { "type": "string", "enum": ["resident", "all"], "default": "resident", "description": "resident: search loaded palaces only, open none. all: open and search every non-empty palace (ADR-0071)." }
                 },
                 "required": ["q"],
             }),
@@ -267,9 +270,11 @@ pub(crate) async fn execute_tool(name: &str, args: &str, state: &AppState) -> Va
                 .get("deep")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            match q {
-                Some(q) => execute_recall_all(state, q, top_k, deep).await,
-                None => json!({ "error": "missing required argument: q" }),
+            // #9299: an unknown scope is an error, never a silent default.
+            match (q, RecallAllScope::parse(parsed.get("scope"))) {
+                (Some(q), Ok(scope)) => execute_recall_all(state, q, top_k, deep, scope).await,
+                (None, _) => json!({ "error": "missing required argument: q" }),
+                (_, Err(e)) => json!({ "error": format!("{e:#}") }),
             }
         }
         _ => json!({ "error": format!("unknown tool: {name}") }),
@@ -346,18 +351,20 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
 /// Chat `memory_recall_all`: the ranked cross-palace recall (#8246).
 ///
 /// Why: this was a copy of `MemoryService::recall_all` without its demotion.
-/// What: delegates to [`MemoryService::recall_all`]; same JSON array shape.
+/// What: delegates to [`MemoryService::recall_all_scoped`]; the same
+/// `results` object with the ADR-0071 coverage fields (#9299).
 /// Test: `demotion_applies_on_every_recall_surface` covers the shared method;
-/// `recall_all_returns_open_palaces_to_baseline` pins the residency bound.
+/// `open_failure_is_reported_on_every_surface` drives this entry point.
 pub(crate) async fn execute_recall_all(
     state: &AppState,
     query: &str,
     top_k: usize,
     deep: bool,
+    scope: RecallAllScope,
 ) -> Value {
     // #8246: one implementation, so the chat surface demotes as well.
     MemoryService::new(state.clone())
-        .recall_all(query, top_k, deep)
+        .recall_all_scoped(query, top_k, deep, scope)
         .await
 }
 
