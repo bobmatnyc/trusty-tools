@@ -127,6 +127,8 @@ mod tool {
     const PARTS: [&str; 2] = ["sk-live-", "TAIL-7522-c0ffee"];
     /// The owner vault of the same remote.
     const OWNER_VAULT: &str = "trusty/acme";
+    /// The harness machine config: selects the memory `keychain` on every OS.
+    const PINNED_MACHINE_CONFIG: &str = "secrets:\n  default_backend: keychain\n";
 
     /// A served socket over one memory backend, in a temp dir.
     struct Harness {
@@ -165,6 +167,19 @@ mod tool {
             tmp.path().join("index"),
             tmp.path().join("machine.yaml"),
             Duration::from_secs(60),
+        );
+        // #7522: with no machine config the server picks the build's default
+        // backend, `keychain` on macOS but `file` elsewhere (#9326), and this
+        // factory serves no `file`. Pin `keychain` so every OS selects it.
+        std::fs::write(&settings.machine_config, PINNED_MACHINE_CONFIG)
+            .expect("write machine.yaml");
+        let pinned = trusty_secrets::store::config::load_machine_at(&settings.machine_config)
+            .expect("load machine.yaml")
+            .and_then(|m| m.default_backend);
+        assert_eq!(
+            pinned,
+            Some(BackendId::keychain()),
+            "the harness must pin the memory `keychain` backend on every OS"
         );
         let keychain = Arc::new(MemoryBackend::new());
         let backends: BackendFactory = Arc::new(move |id: &BackendId| {
