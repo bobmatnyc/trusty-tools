@@ -62,6 +62,7 @@ fn seed_registry_toml(
 /// returns only the matching index.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_repo_identity_details_and_filter() {
     use super::indexes::ListIndexesParams;
     use crate::core::{

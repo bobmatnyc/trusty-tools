@@ -77,6 +77,7 @@ async fn meta_for(state: &Arc<SearchAppState>, text: &str) -> serde_json::Value 
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_meta_reports_the_exact_match_floor() {
     // Why: #7675 requirement 3 — the response must say which floor applied and
     // which literal it matched, so a caller can explain the top hit.

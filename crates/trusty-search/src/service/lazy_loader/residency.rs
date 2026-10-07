@@ -954,6 +954,7 @@ mod tests {
     // ── cold_park_index ──────────────────────────────────────────────────
 
     #[tokio::test]
+    #[serial_test::parallel]
     async fn cold_park_index_moves_hot_to_cold() {
         let registry = IndexRegistry::default();
         let cold = ColdIndexStore::new();
@@ -998,6 +999,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::parallel]
     async fn cold_park_index_registers_cold_before_detaching() {
         // Regression guard for the ordering invariant documented on
         // `cold_park_index`: even though we can't observe the exact
@@ -1139,6 +1141,7 @@ mod tests {
     /// handle is handed straight back and `id` stays live and discoverable
     /// throughout.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn cold_park_index_restores_concurrently_swapped_handle_instead_of_orphaning() {
         let registry = IndexRegistry::default();
         let cold = ColdIndexStore::new();
@@ -1218,6 +1221,7 @@ mod tests {
     /// immediately below for the fixed counterpart using the pattern the real
     /// handlers now follow.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn cold_park_index_handler_naive_reap_before_park_orphans_index() {
         let registry = IndexRegistry::default();
         let cold = ColdIndexStore::new();
@@ -1291,6 +1295,7 @@ mod tests {
     /// stale metadata (a park that silently reverts a very-recent
     /// relocate/reindex-override) rather than orphaned in neither store.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn cold_park_index_handler_reap_guarded_before_park_never_orphans() {
         let registry = IndexRegistry::default();
         let cold = ColdIndexStore::new();

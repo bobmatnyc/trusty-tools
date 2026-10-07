@@ -141,6 +141,7 @@ async fn hash_keys_follow_the_registry_layout_not_the_repo_dir() {
 /// `TRUSTY_DATA_DIR`.
 /// Test: this test. With the probe restored the row survives.
 #[tokio::test]
+#[serial_test::parallel]
 async fn root_move_clears_the_hash_table_of_a_data_dir_index_over_a_repo_dir() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::IndexId;

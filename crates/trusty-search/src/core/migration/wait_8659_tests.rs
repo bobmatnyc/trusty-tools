@@ -23,6 +23,7 @@ use crate::service::server::{index_status_report, SearchAppState};
 /// with its pending migrations and the holder, and stops reporting once it
 /// gets the permit. On pre-fix code `migration_waiting` is absent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_waiting_migration_is_logged_and_reported_with_its_holder() {
     let dir = tempfile::tempdir().expect("tempdir");
     let id = "wait-8659";

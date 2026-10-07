@@ -92,6 +92,7 @@ async fn status_and_search_meta(
 
 /// Four chunks over a cap of two: both bodies report two dropped.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_and_search_meta_report_bm25_truncation_over_the_cap() {
     if !crate::service::test_isolation::run_isolated(
         "service::server::tests_9235::status_and_search_meta_report_bm25_truncation_over_the_cap",
@@ -116,6 +117,7 @@ async fn status_and_search_meta_report_bm25_truncation_over_the_cap() {
 
 /// Four chunks under a cap of 1000: both bodies report no truncation.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_and_search_meta_report_no_bm25_truncation_under_the_cap() {
     if !crate::service::test_isolation::run_isolated(
         "service::server::tests_9235::status_and_search_meta_report_no_bm25_truncation_under_the_cap",
@@ -140,6 +142,7 @@ async fn status_and_search_meta_report_no_bm25_truncation_under_the_cap() {
 /// not "nothing dropped" (the Fail-Open Check). Before the fix an unreadable
 /// count read as 0 and the status reported `bm25_truncated: false`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_reports_bm25_truncation_unavailable_when_the_durable_count_errors() {
     let id = "bm25-unreadable-9235";
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -79,6 +79,7 @@ async fn test_load_chunks_missing_file_returns_zero() {
 /// `assert!(active <= 1)` invariant would not even be expressible because
 /// each call would spawn an independent task.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_persist_coalesces_concurrent_calls() {
     let idx = make_indexer();
     idx.add_chunk(raw("a", "a.rs", "fn a() {}")).await.unwrap();
@@ -163,6 +164,7 @@ async fn test_persist_coalesces_concurrent_calls() {
 /// counting; then fires a forced call and asserts the counter is untouched.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn test_incremental_persist_throttles_to_interval() {
     let idx = make_indexer();
 

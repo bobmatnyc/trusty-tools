@@ -156,6 +156,7 @@ async fn create_index_refuses_unlisted_root() {
 /// The same root, once approved, registers normally — the gate denies by
 /// policy, not by breaking registration.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_accepts_allowlisted_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("approved");
@@ -178,6 +179,7 @@ async fn create_index_accepts_allowlisted_root() {
 /// A root the `tm` project registry lists is approved with no `allowlist.toml`
 /// entry — #767's "registered as a project" category.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_accepts_registered_project_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("project");
@@ -201,6 +203,7 @@ async fn create_index_accepts_registered_project_root() {
 /// A worktree provisioned under an approved root is approved by derivation —
 /// #767's "explicitly provisioned locations" category.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_accepts_provisioned_worktree() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("wt-parent");
@@ -237,6 +240,7 @@ async fn create_index_refuses_sibling_of_approved_root() {
 /// multi-index repos declare exactly this shape, and the sub-root exposes
 /// strictly less than the approved root already does.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_accepts_subdirectory_of_approved_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let root = safe_root("subdir-parent");
@@ -323,6 +327,7 @@ async fn allow_sensitive_path_does_not_bypass_the_allowlist() {
 /// The one thing the flag DOES do: an APPROVED root under a temp prefix
 /// registers with it, and is refused by the prefix denylist without it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn allow_sensitive_path_relaxes_only_the_prefix_denylist() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = std::fs::canonicalize(tmp.path()).expect("canonicalize");
@@ -373,6 +378,7 @@ async fn allow_sensitive_path_still_obeys_the_credential_denylist() {
 /// Relocating an index onto an un-approved root is refused — relocate is index
 /// creation at a new root and must not be a side door around the gate.
 #[tokio::test]
+#[serial_test::parallel]
 async fn relocate_refuses_unlisted_root() {
     let fx = tempfile::tempdir().expect("tempdir");
     let approved = safe_root("reloc-approved");

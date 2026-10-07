@@ -117,6 +117,7 @@ fn two_facet_state(
 /// relative to.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn pinned_semantic_on_a_worktree_routes_to_the_base_facet() {
     let (_dirs, state) = two_facet_state("acme/widget", "acme/widget");
     let axum::Json(body) = super::search::search_handler(
@@ -174,6 +175,7 @@ async fn semantic_routing_does_not_cross_repo_identities() {
 /// caller wanted (ADR-0046).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn an_unpinned_query_is_not_routed_to_the_base_facet() {
     let (_dirs, state) = two_facet_state("acme/widget", "acme/widget");
     let unpinned: crate::core::indexer::SearchQuery =
