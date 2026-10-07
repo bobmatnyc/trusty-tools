@@ -283,6 +283,7 @@ fn install_with_a_failed_first_use_fetch_fails_closed() {
                 Err(CacheError::Network {
                     url: "https://api.github.com".to_owned(),
                     reason: "network is unreachable".to_owned(),
+                    tag: None,
                     fallback: Fallback::None,
                 })
             })?;

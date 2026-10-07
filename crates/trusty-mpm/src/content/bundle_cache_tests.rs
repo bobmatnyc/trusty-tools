@@ -93,6 +93,7 @@ impl ReleaseSource for FakeSource {
             return Err(FetchError {
                 url: self.asset_url(tag, file),
                 reason: "network is unreachable".into(),
+                status: None,
             });
         }
         if let Some(gate) = self.gate.as_ref().filter(|g| g.file == file) {
@@ -111,6 +112,7 @@ impl ReleaseSource for FakeSource {
             return Err(FetchError {
                 url: "fake://tags".into(),
                 reason: "network is unreachable".into(),
+                status: None,
             });
         }
         let mut tags: Vec<String> = self
@@ -128,6 +130,7 @@ impl ReleaseSource for FakeSource {
             return Err(FetchError {
                 url: format!("fake://releases/tags/{tag}"),
                 reason: "HTTP 404 Not Found".into(),
+                status: Some(404),
             });
         }
         Ok(Release {
@@ -297,7 +300,12 @@ fn update_refuses_a_release_without_a_sidecar() {
         }
         other => panic!("expected SidecarNotPublished, got {other:?}"),
     }
-    assert!(err.to_string().contains(INSTALL_HINT), "{err}");
+    // #9396: the manual install, for the concrete tag.
+    assert!(
+        err.to_string()
+            .contains(&format!("tm content install --from <dir>/{A}.tar.gz")),
+        "{err}"
+    );
     assert!(!cache.path().join(LOCK_FILE_NAME).exists());
     assert!(!cache.path().join(format!("{A}.tar.gz")).exists());
 }
@@ -1171,3 +1179,6 @@ fn install_if_missing_keeps_a_lock_written_while_it_waited() {
 
 #[path = "first_use_tests.rs"]
 mod first_use_tests;
+
+#[path = "retry_tests.rs"]
+mod retry_tests;
