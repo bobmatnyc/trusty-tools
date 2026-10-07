@@ -255,7 +255,10 @@ pub struct ReviewConfig {
 
     // ── Service dependencies ───────────────────────────────────────────────
     /// trusty-search base URL (`TRUSTY_SEARCH_URL`, default `http://localhost:7878`).
-    pub search_url: String,
+    ///
+    /// #9214: the HTTP leg only. A present trusty-search socket wins over the
+    /// default value; see `integrations::search_transport::SearchTransport::resolve`.
+    pub search_url: String, // #9214 phase C: delete
     /// trusty-analyze's Unix socket (`PR_INTELLIGENCE_ANALYZER_SOCKET`, default
     /// [`default_analyzer_socket`]).
     pub analyzer_socket: std::path::PathBuf,
@@ -495,8 +498,11 @@ impl ReviewConfig {
             openrouter_api_key: std::env::var(trusty_common::env_vars::ENV_OPENROUTER_API_KEY)
                 .unwrap_or_default(),
             fireworks_api_key: std::env::var("FIREWORKS_API_KEY").unwrap_or_default(),
-            search_url: std::env::var("TRUSTY_SEARCH_URL")
-                .unwrap_or_else(|_| "http://localhost:7878".to_string()),
+            // #9214 phase C: delete — the HTTP leg's URL.
+            search_url: std::env::var(crate::integrations::search_transport::TRUSTY_SEARCH_URL_ENV)
+                .unwrap_or_else(|_| {
+                    crate::integrations::search_transport::DEFAULT_SEARCH_URL.to_string()
+                }),
             analyzer_socket: std::env::var("PR_INTELLIGENCE_ANALYZER_SOCKET")
                 .ok()
                 .filter(|s| !s.is_empty())

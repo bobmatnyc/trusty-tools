@@ -4,14 +4,16 @@
 //! Why not `crate::integrations::search_client`: that client targets
 //! `ReviewConfig::search_url` — the review pipeline's configured address — while
 //! the report pass must address the daemon the audit actually indexed, which is
-//! whatever [`DaemonAddrLayout::TRUSTY_SEARCH`] resolves (an OS-assigned port and
+//! whatever `DaemonAddrLayout::TRUSTY_SEARCH` resolves (an OS-assigned port and
 //! every `TRUSTY_DATA_DIR`-isolated instance included). It also needs two things
 //! that trait does not carry: `call_chain`, whose body is `text/plain` rather
 //! than JSON, and a `path_prefix`-scoped search. Address resolution and the
 //! proxy-free client builder are both `trusty-common`'s, so nothing here is a
 //! second implementation of either.
 //!
-//! What: [`TraceSource`] is the seam — [`HttpTraceSource`] talks to the daemon,
+//! What: [`TraceSource`] is the seam — [`HttpTraceSource`] talks to the daemon
+//! over its socket or, until #9214 phase C, HTTP (see
+//! [`crate::integrations::search_transport`]),
 //! and a stub stands in for it under test. [`TraceError`] separates the three
 //! failures that read identically at the socket but mean different things to a
 //! reader: the daemon is not there, the index is not registered, the symbol is
@@ -22,10 +24,14 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use trusty_common::daemon_guard::DaemonAddrLayout;
+use serde_json::json;
+use trusty_common::search_rpc::METHOD_HEALTH;
 
-use crate::integrations::search_client::IndexInfo;
-use crate::report::index_registry::fetch_registered_indexes;
+use crate::integrations::search_client::{IndexInfo, SearchClientError};
+use crate::integrations::search_transport::{
+    METHOD_CALL_CHAIN, METHOD_QUERY, SearchTransport, call_socket,
+};
+use crate::report::index_registry::fetch_registered_indexes_via;
 
 /// Why one trusty-search read could not answer.
 ///
@@ -151,12 +157,17 @@ const TRACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 /// How much of an error body is quoted back into a no-trace line.
 const MAX_ERROR_BODY: usize = 200;
 
+/// Bound for the socket leg's liveness probe (#9214).
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The live [`TraceSource`].
 pub struct HttpTraceSource {
-    /// Base URL, no trailing slash.
-    base_url: String,
+    /// HTTP base URL, no trailing slash; empty on the socket leg.
+    base_url: String, // #9214 phase C: delete
     /// Proxy-free loopback client.
-    http: reqwest::Client,
+    http: reqwest::Client, // #9214 phase C: delete
+    /// #9214: which leg every read takes.
+    transport: SearchTransport,
 }
 
 impl HttpTraceSource {
@@ -165,27 +176,41 @@ impl HttpTraceSource {
     /// Why: a hard-coded `127.0.0.1:7878` misses an auto-ported daemon and every
     /// `TRUSTY_DATA_DIR`-isolated one — the same reason
     /// `trusty-audit`'s `grounding::daemons::search_base_url` resolves through
-    /// [`DaemonAddrLayout`] rather than a literal.
-    /// What: resolves the base URL, then builds the shared proxy-free loopback
-    /// client with [`TRACE_TIMEOUT`]. `None` when the TLS backend will not
-    /// initialise, which the caller reports as an unreachable daemon.
-    /// Test: `trace_client_tests::the_shared_search_layout_is_the_one_being_resolved`.
+    /// [`trusty_common::daemon_guard::DaemonAddrLayout`] rather than a literal.
+    /// What: #9214 — [`SearchTransport::resolve_advertised`] picks the socket
+    /// when one is present, else the `DaemonAddrLayout` HTTP address; then
+    /// builds the shared proxy-free loopback client with [`TRACE_TIMEOUT`].
+    /// `None` when the TLS backend will not initialise, which the caller
+    /// reports as an unreachable daemon.
+    /// Test: `trace_client_tests::the_shared_search_layout_is_the_one_being_resolved`,
+    /// `search_transport_tests::trace_entry_node_and_usages_go_over_the_socket`.
     #[must_use]
     pub fn resolved() -> Option<Self> {
-        let base_url = DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url();
-        Self::at(base_url)
+        Self::with_transport(SearchTransport::resolve_advertised())
     }
 
-    /// Build a source against an explicit base URL.
+    /// Build a source against an explicit base URL (the HTTP leg).
     #[must_use]
     pub fn at(base_url: impl Into<String>) -> Option<Self> {
-        let http = trusty_common::http_client::loopback_client_builder()
+        let url = base_url.into().trim_end_matches('/').to_string();
+        Self::with_transport(SearchTransport::Http(url)) // #9214 phase C: delete
+    }
+
+    /// Build a source over an already-resolved transport (#9214).
+    #[must_use]
+    pub fn with_transport(transport: SearchTransport) -> Option<Self> {
+        let http = trusty_common::http_client::loopback_client_builder() // #9214 phase C: delete
             .timeout(TRACE_TIMEOUT)
             .build()
             .ok()?;
+        let base_url = match &transport {
+            SearchTransport::Http(url) => url.clone(), // #9214 phase C: delete
+            SearchTransport::Socket(_) => String::new(),
+        };
         Some(Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            base_url,
             http,
+            transport,
         })
     }
 
@@ -218,13 +243,20 @@ struct SearchBody {
 #[async_trait]
 impl TraceSource for HttpTraceSource {
     async fn reachable(&self) -> bool {
+        // #9214: the socket leg asks `search.health`.
+        if let Some(socket) = self.transport.socket_path() {
+            return call_socket(socket, METHOD_HEALTH, json!({}), PROBE_TIMEOUT)
+                .await
+                .is_ok();
+        }
+        // #9214 phase C: delete — the HTTP probe below.
         trusty_common::daemon_guard::probe_once(&format!("{}/health", self.base_url)).await
     }
 
     /// #6677: read from THIS source's daemon, so a test server and an
     /// auto-ported daemon are both addressed by the same code path.
     async fn registered_indexes(&self) -> Vec<IndexInfo> {
-        fetch_registered_indexes(&self.base_url).await
+        fetch_registered_indexes_via(self.transport.clone()).await
     }
 
     async fn entry_node(&self, index_id: &str, symbol: &str) -> Result<CallChainEntry, TraceError> {
@@ -232,6 +264,23 @@ impl TraceSource for HttpTraceSource {
         // report that still carries the `[ENTRY]` node. Every edge in it is
         // discarded; asking for fewer is what keeps a symbol like `get` — 2391
         // caller edges on this workspace — from being paid for at all.
+        // #9214: `search.call_chain` answers the same text as a bare string.
+        if let Some(socket) = self.transport.socket_path() {
+            let params = json!({
+                "index_id": index_id,
+                "entry_point": symbol,
+                "direction": "outgoing",
+                "max_depth": 1,
+                "include_source": false,
+            });
+            let report = call_socket(socket, METHOD_CALL_CHAIN, params, TRACE_TIMEOUT)
+                .await
+                .map_err(|e| from_search_error(e, index_id, symbol))?;
+            let text = report.as_str().unwrap_or_default();
+            return parse_entry_node(text)
+                .ok_or_else(|| TraceError::SymbolAbsent(symbol.to_string()));
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/indexes/{index_id}/call_chain", self.base_url);
         let resp = self
             .http
@@ -264,15 +313,30 @@ impl TraceSource for HttpTraceSource {
         limit: usize,
         snippet_bytes: usize,
     ) -> Result<Vec<TraceUsage>, TraceError> {
+        let body = json!({
+            "text": symbol,
+            "top_k": limit,
+            "path_prefix": path_prefix,
+        });
+        // #9214: `search.query` nests the HTTP body under `body`.
+        if let Some(socket) = self.transport.socket_path() {
+            let params = json!({ "index_id": index_id, "body": body });
+            let value = call_socket(socket, METHOD_QUERY, params, TRACE_TIMEOUT)
+                .await
+                .map_err(|e| from_search_error(e, index_id, symbol))?;
+            let parsed: SearchBody =
+                serde_json::from_value(value).map_err(|e| TraceError::Api {
+                    status: 200,
+                    body: format!("unparseable search body: {e}"),
+                })?;
+            return Ok(to_usages(parsed, limit, snippet_bytes));
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/indexes/{index_id}/search", self.base_url);
         let resp = self
             .http
             .post(&url)
-            .json(&serde_json::json!({
-                "text": symbol,
-                "top_k": limit,
-                "path_prefix": path_prefix,
-            }))
+            .json(&body)
             .send()
             .await
             .map_err(|e| TraceError::Unreachable(format!("POST {url}: {e}")))?;
@@ -288,23 +352,41 @@ impl TraceSource for HttpTraceSource {
             status,
             body: format!("unparseable search body: {e}"),
         })?;
-        Ok(parsed
-            .results
-            .into_iter()
-            .take(limit)
-            .map(|h| TraceUsage {
-                file: h.path,
-                line: h.start_line,
-                snippet: bound(
-                    if h.compact_snippet.is_empty() {
-                        &h.content
-                    } else {
-                        &h.compact_snippet
-                    },
-                    snippet_bytes,
-                ),
-            })
-            .collect())
+        Ok(to_usages(parsed, limit, snippet_bytes))
+    }
+}
+
+/// Shape a search body's hits into bounded usage records.
+fn to_usages(parsed: SearchBody, limit: usize, snippet_bytes: usize) -> Vec<TraceUsage> {
+    parsed
+        .results
+        .into_iter()
+        .take(limit)
+        .map(|h| TraceUsage {
+            file: h.path,
+            line: h.start_line,
+            snippet: bound(
+                if h.compact_snippet.is_empty() {
+                    &h.content
+                } else {
+                    &h.compact_snippet
+                },
+                snippet_bytes,
+            ),
+        })
+        .collect()
+}
+
+/// Map a socket-leg failure onto the taxonomy (#9214).
+///
+/// `call_socket` already turned `-32004` into `Api{404}` with the daemon's
+/// message, which names `unknown index` or `entry point not found` exactly as
+/// the HTTP body did, so [`classify`] splits the two the same way.
+/// Test: `search_transport_tests::trace_entry_node_and_usages_go_over_the_socket`.
+fn from_search_error(e: SearchClientError, index_id: &str, symbol: &str) -> TraceError {
+    match e {
+        SearchClientError::Api { status, body } => classify(status, &body, index_id, symbol),
+        other => TraceError::Unreachable(other.to_string()),
     }
 }
 
