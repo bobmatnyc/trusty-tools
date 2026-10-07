@@ -276,7 +276,9 @@ pub(crate) fn is_default_socket(socket: &Path) -> bool {
 /// be resolved counts as a match, failing closed like an unknown `$HOME`.
 /// Test: `settings_socket_alias_through_a_symlinked_dir_is_the_same_socket`,
 /// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
-/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+/// `settings_dotdot_over_a_missing_dir_is_the_default_socket`,
+/// `settings_non_ascii_missing_name_is_the_default_socket`.
 pub(crate) fn same_socket(a: &Path, b: &Path) -> bool {
     match (dir_identity(a), dir_identity(b)) {
         (Some(a), Some(b)) => a == b,
@@ -285,17 +287,19 @@ pub(crate) fn same_socket(a: &Path, b: &Path) -> bool {
 }
 
 /// A directory as the device and inode of its deepest existing ancestor,
-/// plus the lowercased names below it that do not exist yet.
+/// plus the ASCII-lowercased names below it that do not exist yet.
 type DirIdentity = ((u64, u64), Vec<String>);
 
 /// The [`DirIdentity`] of `socket`'s parent directory.
 ///
 /// What: an empty parent (a bare relative name) is `.`. The kernel resolves
 /// the existing part, so case, `.`, `..`, `//` and symlinks reach one inode.
-/// Missing names are compared lowercased, because the server creates them
-/// and a case-insensitive filesystem would fold them; a `..` among them
-/// applies lexically, which is exact because none exists to be a symlink.
-/// `None` for no parent, or a `stat` that fails other than by absence.
+/// Missing names are compared ASCII-lowercased, because the server creates
+/// them and a case-insensitive filesystem would fold them. `None` (the
+/// default socket, failing closed) for no parent, a `stat` that fails other
+/// than by absence, or a missing part that is `..` or a name that is not
+/// ASCII — `create_dir_all` resolves the one and the filesystem may fold
+/// the other in ways this comparison does not model (#7524).
 fn dir_identity(socket: &Path) -> Option<DirIdentity> {
     use std::os::unix::fs::MetadataExt;
     let parent = socket.parent()?;
@@ -310,11 +314,10 @@ fn dir_identity(socket: &Path) -> Option<DirIdentity> {
                 let mut missing = Vec::new();
                 for part in &parts[exists..] {
                     match part {
-                        Component::ParentDir => {
-                            missing.pop()?;
-                        }
+                        Component::ParentDir => return None,
                         Component::Normal(name) => {
-                            missing.push(name.to_string_lossy().to_lowercase());
+                            let name = name.to_str().filter(|n| n.is_ascii())?;
+                            missing.push(name.to_ascii_lowercase());
                         }
                         _ => {}
                     }
