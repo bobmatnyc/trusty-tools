@@ -446,9 +446,18 @@ shapes and message phrases the backend reads are unconfirmed.
   `login` record per key, titled with the key, the value in `password`.
 - *Fail closed.* Anything other than a confirmed success is a failure. Every
   write is read back and compared; every delete is checked by a new listing.
-  Exit 0 with text that is not the expected answer is a failure. A key or
-  folder is missing only when a successful listing does not show it — never
-  because of stderr text.
+  Exit 0 with text that is not the expected answer is a failure. A key is
+  missing only when a successful listing of its confirmed folder does not
+  show it, and a folder only when a successful listing of its parent shows
+  no folder of exactly that name — never because of stderr text. A folder
+  exists only when the listings from the root down show exactly one folder
+  of exactly each segment's name; nothing is read, written or removed
+  before that. A successful `ls` of the folder's own path proves nothing.
+- *Live check.* The first run against a real account pins whether
+  Commander's `ls` of a missing path exits 0 with the parent's entries that
+  match the last segment as a case-insensitive pattern (the shims assume it
+  may), and whether path resolution folds case when two sibling folders
+  differ only in case. The backend matches folder names exactly.
 - *Delete.* `rm` moves a record to Keeper's trash; that satisfies the delete
   sweep, which includes Keeper wherever it includes 1Password.
 - *Headless limitation.* Commander works headless only after a person has

@@ -14,7 +14,9 @@
 //! every stored value for `get`), prints a stderr text and exits 1 — the
 //! worst case for A2; [`KeeperShim::stdout_only`] prints a text on stdout,
 //! exits 0, and does nothing; [`KeeperShim::locked`] fails every call;
-//! [`KeeperShim::fail_path`] fails `ls` of one path only.
+//! [`KeeperShim::fail_path`] fails `ls` of one path only. By default `ls`
+//! of a missing path fails; [`KeeperShim::glob_missing_paths`] makes it
+//! exit 0 with the parent's entries filtered by the last segment.
 //! Test: the tests that build one.
 
 use std::path::{Path, PathBuf};
@@ -37,6 +39,11 @@ while :; do
     *) break ;;
   esac
 done
+keep() {
+  [ -z "$pat" ] && return 0
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in $pat) return 0 ;; esac
+  return 1
+}
 cmd=$1
 [ "$cmd" = - ] && cmd=batch
 last=''
@@ -61,23 +68,31 @@ case "$cmd" in
       echo "ls: Invalid folder path: $last" >&2
       exit 1
     fi
+    dir=$last
+    pat=''
     if [ "$last" != / ] && ! grep -qx "$last" "$L/folders"; then
-      echo "ls: Invalid folder path: $last" >&2
-      exit 1
+      case "$last" in */*) up=${last%/*} ;; *) up=/ ;; esac
+      if [ -f "$L/globmiss" ] && { [ "$up" = / ] || grep -qx "$up" "$L/folders"; }; then
+        dir=$up
+        pat=$(printf '%s' "${last##*/}" | tr '[:upper:]' '[:lower:]')
+      else
+        echo "ls: Invalid folder path: $last" >&2
+        exit 1
+      fi
     fi
     printf '['
     sep=''
     while IFS= read -r f; do
       [ -n "$f" ] || continue
       case "$f" in */*) parent=${f%/*} ;; *) parent=/ ;; esac
-      if [ "$parent" = "$last" ]; then
+      if [ "$parent" = "$dir" ] && keep "${f##*/}"; then
         printf '%s{"type":"folder","uid":"fld","name":"%s"}' "$sep" "${f##*/}"
         sep=','
       fi
     done < "$L/folders"
     for r in "$L"/records/*; do
       [ -f "$r" ] || continue
-      if [ "$(sed -n 1p "$r")" = "$last" ]; then
+      if [ "$(sed -n 1p "$r")" = "$dir" ] && keep "$(sed -n 2p "$r")"; then
         printf '%s{"type":"record","uid":"%s","title":"%s","record_type":"%s"}' \
           "$sep" "${r##*/}" "$(sed -n 2p "$r")" "$(sed -n 3p "$r")"
         sep=','
@@ -216,6 +231,13 @@ impl KeeperShim {
     /// Fail `ls` of exactly `path`, though the folder exists.
     pub(crate) fn fail_path(&self, path: &str) {
         self.write("failpath", path);
+    }
+
+    /// Make `ls` of a missing path whose parent exists exit 0 with the
+    /// parent's entries whose name matches the last segment as a
+    /// case-insensitive glob, as Commander may.
+    pub(crate) fn glob_missing_paths(&self) {
+        self.write("globmiss", "");
     }
 
     /// Each call's argv, one line per call, script path excluded.

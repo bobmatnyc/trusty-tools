@@ -81,15 +81,14 @@ fn keeper_set_writes_through_a_stdin_batch_only() {
     backend.set(&vault(), &key("API_KEY"), &value()).unwrap();
     let uid = shim.records()[0].0.clone();
     let get = format!("get --format json -- {uid}");
-    assert_eq!(
-        subcommands(&shim),
-        [
-            "ls --format json trusty/acme/web",
-            "-",
-            "ls --format json trusty/acme/web",
-            get.as_str(),
-        ]
-    );
+    let walk = [
+        "ls --format json /",
+        "ls --format json trusty",
+        "ls --format json trusty/acme",
+        "ls --format json trusty/acme/web",
+    ];
+    let expected: Vec<&str> = [&walk[..], &["-"], &walk[..], &[get.as_str()]].concat();
+    assert_eq!(subcommands(&shim), expected);
     let add = format!(
         "record-add --folder=trusty/acme/web --title=API_KEY --record-type=login password=$BASE64:{}\n",
         encoded()
@@ -165,12 +164,12 @@ fn keeper_batch_commands_carry_the_value_only_as_base64() {
 /// Test: itself.
 #[test]
 fn keeper_misses_come_only_from_a_successful_listing() {
-    // An empty folder: one listing, and a miss.
+    // An empty folder: the walk and one listing of it, and a miss.
     let shim = KeeperShim::new();
     let backend = shim.backend();
     assert!(backend.get(&vault(), &key("K")).unwrap().is_none());
     assert!(!backend.delete(&vault(), &key("K")).unwrap());
-    assert_eq!(subcommands(&shim).len(), 2);
+    assert_eq!(subcommands(&shim).len(), 8);
 
     // No folder: the walk from the root finds `acme` missing.
     let shim = KeeperShim::new();
@@ -179,11 +178,7 @@ fn keeper_misses_come_only_from_a_successful_listing() {
     assert!(backend.get(&vault(), &key("K")).unwrap().is_none());
     assert_eq!(
         subcommands(&shim),
-        [
-            "ls --format json trusty/acme/web",
-            "ls --format json /",
-            "ls --format json trusty",
-        ]
+        ["ls --format json /", "ls --format json trusty"]
     );
     assert!(!backend.delete(&vault(), &key("K")).unwrap());
     let err = backend.set(&vault(), &key("K"), &value()).unwrap_err();
@@ -220,6 +215,44 @@ fn keeper_misses_come_only_from_a_successful_listing() {
         assert!(!shown(&err).contains(VALUE));
     }
     assert_eq!(shim.records().len(), 1);
+}
+
+/// Why: #7519 — Commander's `ls` of a missing path may exit 0 with the
+/// parent's entries that match the last segment as a case-insensitive glob.
+/// A vault whose folder is missing must then never read, update or remove
+/// the parent's record of the key's title: `get` is a miss, `delete` is
+/// `false`, and `set` refuses (an absent folder is an error), adding
+/// nothing. A case-variant folder is not the vault's folder. Red when
+/// `lookup` takes a successful `ls` of the vault's path as the folder.
+/// Test: itself.
+#[test]
+fn keeper_never_touches_the_parent_when_the_vault_folder_is_missing() {
+    for folders in [
+        &["trusty", "trusty/acme"][..],
+        &["trusty", "trusty/acme", "trusty/acme/Web"],
+    ] {
+        let shim = KeeperShim::new();
+        shim.glob_missing_paths();
+        shim.set_folders(folders);
+        shim.seed("rec1", "trusty/acme", "WEB", "login", "acme-owner-value");
+        let backend = shim.backend();
+        assert!(backend.get(&vault(), &key("WEB")).unwrap().is_none());
+        assert!(!backend.delete(&vault(), &key("WEB")).unwrap());
+        let err = backend.set(&vault(), &key("WEB"), &value()).unwrap_err();
+        assert!(backend_error(&err, "no folder"), "{err:?}");
+        assert_eq!(
+            shim.records(),
+            [("rec1".into(), "WEB".into(), "acme-owner-value".into())]
+        );
+        assert!(shim.trash().is_empty());
+        assert!(shim.stdin_log().is_empty(), "{}", shim.stdin_log());
+        let calls = subcommands(&shim);
+        assert!(
+            calls.iter().all(|c| c.starts_with("ls --format json ")),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.ends_with("trusty/acme/web")));
+    }
 }
 
 /// Why: ruling 5 — `rm` moves a record to Keeper's trash, which satisfies

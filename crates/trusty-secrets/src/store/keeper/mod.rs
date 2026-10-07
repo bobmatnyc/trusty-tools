@@ -10,12 +10,15 @@
 //! What, per operation (`<v>` is the trusty vault name, which is also the
 //! Keeper folder path, e.g. `trusty/acme/web`; `<uid>` a listed uid). Every
 //! call is `keeper --config <file> --batch-mode ...`:
-//! - every operation first lists the folder, `ls --format json <v>`, and
-//!   keeps the record rows titled with the key. A row of another type than
-//!   `login` is refused, so no other record is read, edited or removed.
-//!   When the listing fails, the backend lists from the root down; only a
-//!   successful listing that lacks a path segment makes the folder absent
-//!   (ruling 3). No stderr text is ever read as a miss.
+//! - every operation first confirms the folder: it lists `/`, then each
+//!   prefix of `<v>`, and needs exactly one folder named exactly as the
+//!   next segment. `ls` of a missing path may exit 0 with the parent's
+//!   matching entries, so only this walk proves the folder exists. A
+//!   segment a successful listing lacks makes the folder absent (ruling 3);
+//!   any failed listing is an error, and no stderr text is ever a miss.
+//!   Then it lists the folder, `ls --format json <v>`, and keeps the record
+//!   rows titled with the key. A row of another type than `login` is
+//!   refused, so no other record is read, edited or removed.
 //! - `get`: no row is `Ok(None)`; one row is `get --format json -- <uid>`,
 //!   whose record must be that uid, title and type; two are an error.
 //! - `set`: an absent folder is an error. No row is a `record-add`, one row
@@ -97,14 +100,6 @@ enum Lookup {
     Rows(Vec<Listed>),
 }
 
-/// One `ls` run.
-enum Listing {
-    /// It exited 0 and parsed.
-    Entries(Vec<Entry>),
-    /// It failed in a way a missing folder could explain.
-    Failed(SecretsError),
-}
-
 /// [`SecretsError::CliNotInstalled`] for `program`, with the pin hint.
 fn not_installed(program: &OsStr) -> SecretsError {
     SecretsError::CliNotInstalled {
@@ -162,28 +157,27 @@ impl KeeperBackend {
     /// `ls --format json <path>`.
     ///
     /// What: a locked run, and a run that exited 0 with a locked phrase on
-    /// stdout instead of a listing, are `Err(BackendLocked)`; spawn and
-    /// timeout failures are `Err` too. Any other failure, including exit 0
-    /// with text that is not a listing, is [`Listing::Failed`].
+    /// stdout instead of a listing, are [`SecretsError::BackendLocked`]. Any
+    /// other failure, including exit 0 with text that is not a listing, is
+    /// an error too: never a miss (ruling 3).
     fn list(
         &self,
         vault: &VaultName,
         key: &SecretKey,
         path: &str,
-    ) -> Result<Listing, SecretsError> {
+    ) -> Result<Vec<Entry>, SecretsError> {
         let run = self
             .command(vault, key)?
             .args(["ls", "--format", "json", path])
             .run()?;
         match run.verdict {
             Verdict::Ok => match record::parse_listing(run.stdout.expose()) {
-                Ok(entries) => Ok(Listing::Entries(entries)),
+                Ok(entries) => Ok(entries),
                 // #7519: ruling 3 — exit 0 with an error on stdout fails.
                 Err(_) if markers_in(run.stdout.expose()) => Err(self.locked()),
-                Err(reason) => Ok(Listing::Failed(self.failed(vault, key, reason))),
+                Err(reason) => Err(self.failed(vault, key, reason)),
             },
-            Verdict::Locked => Err(self.run_error(run, vault, key)),
-            _ => Ok(Listing::Failed(self.run_error(run, vault, key))),
+            _ => Err(self.run_error(run, vault, key)),
         }
     }
 
@@ -196,44 +190,39 @@ impl KeeperBackend {
 
     /// The `login` rows titled `key` in the vault's folder, or
     /// [`Lookup::NoFolder`].
+    ///
+    /// What: the vault's folder is listed only after
+    /// [`Self::folder_confirmed`]; a failed listing is an error.
     fn lookup(&self, vault: &VaultName, key: &SecretKey) -> Result<Lookup, SecretsError> {
-        match self.list(vault, key, vault.as_str())? {
-            Listing::Entries(entries) => {
-                let rows = record::titled(entries, key);
-                if rows
-                    .iter()
-                    .any(|row| row.record_type != record::RECORD_TYPE)
-                {
-                    return Err(self.failed(vault, key, FOREIGN));
-                }
-                Ok(Lookup::Rows(rows))
-            }
-            // #7519: ruling 3 — a failed listing is a miss only when a
-            // successful one shows the folder is not there.
-            Listing::Failed(err) => {
-                if self.folder_absent(vault, key)? {
-                    Ok(Lookup::NoFolder)
-                } else {
-                    Err(err)
-                }
-            }
+        // #7519: `ls` of a missing path may exit 0 with the parent's entries
+        // matching its last segment, so its success proves no folder.
+        if !self.folder_confirmed(vault, key)? {
+            return Ok(Lookup::NoFolder);
         }
+        let rows = record::titled(self.list(vault, key, vault.as_str())?, key);
+        if rows
+            .iter()
+            .any(|row| row.record_type != record::RECORD_TYPE)
+        {
+            return Err(self.failed(vault, key, FOREIGN));
+        }
+        Ok(Lookup::Rows(rows))
     }
 
-    /// Whether listings from the root down show no folder at `vault`'s path.
+    /// Whether listings from the root down show the folder at `vault`'s path.
     ///
-    /// What: lists `/`, then each prefix of the path. A segment no
-    /// successful listing shows is `true`; every segment present is
-    /// `false`; a failed listing on the way is its error.
-    fn folder_absent(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+    /// What: lists `/`, then each confirmed prefix of the path, and needs
+    /// exactly one folder named exactly as the next segment — no case
+    /// folding, no glob. A segment no successful listing shows is `false`
+    /// (ruling 3); every segment shown once is `true`; two folders with one
+    /// name, or a failed listing on the way, are an error.
+    /// Test: `keeper_never_touches_the_parent_when_the_vault_folder_is_missing`.
+    fn folder_confirmed(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         let mut parent = String::from("/");
         for segment in vault.as_str().split('/') {
-            let entries = match self.list(vault, key, &parent)? {
-                Listing::Entries(entries) => entries,
-                Listing::Failed(err) => return Err(err),
-            };
+            let entries = self.list(vault, key, &parent)?;
             match record::folders_named(&entries, segment) {
-                0 => return Ok(true),
+                0 => return Ok(false),
                 1 => {}
                 _ => return Err(self.failed(vault, key, AMBIGUOUS_FOLDER)),
             }
@@ -243,7 +232,7 @@ impl KeeperBackend {
                 format!("{parent}/{segment}")
             };
         }
-        Ok(false)
+        Ok(true)
     }
 
     /// The single row: none is `None`, two or more an error.
