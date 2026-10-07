@@ -113,12 +113,21 @@ pub(crate) fn describe(error: &ClientError, socket: &Path) -> String {
     }
 }
 
-/// The machine-readable kind of a server refusal, e.g. `project_unresolved`.
-pub(crate) fn rpc_kind(error: &ClientError) -> Option<&'static str> {
-    match error {
-        ClientError::Rpc(e) => e.kind.map(ErrorKind::as_str),
-        _ => None,
-    }
+/// Whether the server refused the request's project: not a checkout, no
+/// resolvable remote, or a remote off github.com.
+// #7521: typed kinds, so #9328's `remote_host_unsupported` is one of them.
+pub(crate) fn is_project_refusal(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::Rpc(failure) if matches!(
+            failure.kind,
+            Some(
+                ErrorKind::ProjectInvalid
+                    | ErrorKind::ProjectUnresolved
+                    | ErrorKind::RemoteHostUnsupported
+            )
+        )
+    )
 }
 
 /// The stored key for `key` under the optional `group` label.

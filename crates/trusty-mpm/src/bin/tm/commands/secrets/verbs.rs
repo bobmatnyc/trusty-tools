@@ -25,7 +25,7 @@ use trusty_secrets::store::parse_dotenv;
 use trusty_secrets::{BackendId, SecretKey, SecretValue};
 
 use super::Ctx;
-use super::session::{check_group, describe, entry_key, rpc_kind};
+use super::session::{check_group, describe, entry_key, is_project_refusal};
 
 /// Refusal for a third positional argument to `set`.
 const ARGV_REFUSED: &str =
@@ -268,12 +268,14 @@ pub(super) async fn copy(
 
 /// `doctor`: socket reachability, paths, and which backends this build opens.
 ///
-/// What: asks with the project; when the project has no scopes (no checkout,
-/// no remote) reports that and asks again without it. A socket that cannot
+/// What: asks with the project; when the server refuses the project (no
+/// checkout, no remote, or a remote off github.com) reports that and asks
+/// again without it. A socket that cannot
 /// be started or reached exits 1 as `unreachable`; a server refusal exits 1
 /// as `reachable` with the server's text; a selected backend that is
 /// unavailable exits 1 after the backend table.
 /// Test: `doctor_reports_socket_and_backends_without_values`,
+/// `doctor_reports_backends_when_the_remote_is_off_github`,
 /// `doctor_reports_a_refusing_server_as_reachable`,
 /// `doctor_fails_when_the_selected_backend_is_unavailable`,
 /// `every_verb_fails_without_a_value_when_the_socket_is_unreachable`.
@@ -281,7 +283,7 @@ pub(super) async fn doctor(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result
     let socket = ctx.client.socket();
     let mut answer = ctx.call_raw(DOCTOR, Value::Null).await?;
     if let Err(e) = &answer
-        && rpc_kind(e).is_some_and(|kind| kind.starts_with("project_"))
+        && is_project_refusal(e)
     {
         writeln!(out, "project: {}", describe(e, socket))?;
         answer = ctx.client.call(DOCTOR, Value::Null).await;

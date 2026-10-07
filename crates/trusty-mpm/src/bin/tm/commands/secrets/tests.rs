@@ -663,6 +663,45 @@ async fn doctor_reports_socket_and_backends_without_values() {
     assert!(bare.out.contains(": reachable"), "{}", bare.out);
 }
 
+/// #7521: a remote off github.com is a project refusal like any other
+/// (#9328's `remote_host_unsupported`), so doctor still reports the backends
+/// and exits 0.
+#[tokio::test]
+async fn doctor_reports_backends_when_the_remote_is_off_github() {
+    let h = harness().await;
+    let gitlab = h.tmp.path().join("gitlab");
+    std::fs::create_dir(&gitlab).expect("mkdir gitlab");
+    git(&gitlab, &["init", "-q"]);
+    git(
+        &gitlab,
+        &["remote", "add", "origin", "https://gitlab.com/acme/app.git"],
+    );
+    let outcome = run_in(&h.client, &gitlab, "", "", &["doctor"]).await;
+    assert_eq!(outcome.err, None, "{}", outcome.out);
+    assert!(
+        outcome
+            .out
+            .starts_with("project: tm secrets: secrets.doctor: "),
+        "{}",
+        outcome.out
+    );
+    assert!(outcome.out.contains("github.com"), "{}", outcome.out);
+    let socket = h.client.socket().display().to_string();
+    assert!(
+        outcome.out.contains(&format!("socket {socket}: reachable")),
+        "{}",
+        outcome.out
+    );
+    assert!(
+        outcome
+            .out
+            .contains("backend keychain: available [READ, WRITE"),
+        "{}",
+        outcome.out
+    );
+    outcome.assert_no_value();
+}
+
 /// #7521: a server that refuses `secrets.doctor` answered, so the socket is
 /// reachable; the refusal is the error.
 #[tokio::test]
