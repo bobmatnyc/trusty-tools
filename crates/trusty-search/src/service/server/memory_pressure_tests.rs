@@ -548,15 +548,39 @@ impl Drop for HighWaterPctEnvGuard {
 /// own internal sample — all index setup/sleeping happens BEFORE sampling,
 /// not between sampling and the call), make `target_freed_mb` a small,
 /// (comfortably-bounded) positive number — satisfiable by the cold index
-/// alone (1 200 files ⇒ 2 400 entries ⇒ `estimate_freed_mb` == 4, well over
-/// the 2 MB target with margin for any residual jitter), so the hot index
-/// (300 files ⇒ 600 entries, far too small to be needed) is spared,
-/// unvisited, and the sweep must report `EarlyStop`.
+/// alone (its `estimate_freed_mb` exceeds the 2 MB slack by 20 MB, see
+/// `COLD_FILES`), so the hot index (300 files ⇒ 600 entries, far too small to
+/// be needed) is spared, unvisited, and the sweep must report `EarlyStop`.
+///
+/// The asserted outcome depends on two facts only: the cold index's estimate
+/// covers the tick's target, and the cold index is older-idle than the hot
+/// one. Exemption misclassification on either side keeps the cold-first
+/// order, so it cannot flip the result.
 #[tokio::test]
 #[serial_test::serial]
 async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
+    // #9368: target_freed_mb == RSS_SLACK_MB at pct=100, nominally. The cold
+    // index's freed estimate must beat it by MARGIN_MB, so tens of MB of RSS
+    // drift between this test's sample and the tick's sample cannot force the
+    // desperation pass onto the hot index.
+    const RSS_SLACK_MB: u64 = 2;
+    const MARGIN_MB: u64 = 20;
+    // Each file yields 2 reclaimable entries (1 chunk + 1 BM25 doc).
+    const COLD_FILES: usize = ((RSS_SLACK_MB + MARGIN_MB) * 1024 * 1024
+        / ESTIMATED_BYTES_FREED_PER_RECLAIMED_ENTRY
+        / 2) as usize;
+    assert_eq!(
+        estimate_freed_mb(2 * COLD_FILES),
+        RSS_SLACK_MB + MARGIN_MB,
+        "precondition: the cold index's freed estimate must exceed the RSS slack by MARGIN_MB"
+    );
+
     let _mem_guard = MemGuardEnv::capture();
     let _pct_guard = HighWaterPctEnvGuard::set("100");
+    // #9368: no seam backdates an indexer's idle clock from this module, and
+    // `idle_duration` is capped at the indexer's age, so idleness must come
+    // from a real sleep. The sleep is 5x the 1 s floor (the smallest nonzero
+    // value the integer-seconds env var allows).
     let _exempt_guard = ExemptSecsEnvGuard::set("1");
     // SAFETY: mirrors `MemGuardEnv`'s own convention — keep the last-resort
     // restart tier OFF so it never fires here (irrelevant to this test).
@@ -567,15 +591,12 @@ async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
     let dir_cold = tempfile::tempdir().unwrap();
     let dir_hot = tempfile::tempdir().unwrap();
 
-    // 1 200 files ⇒ 2 400 entries ⇒ estimate_freed_mb(2400) == 4 (2400 * 2048
-    // == 4_915_200 bytes ⇒ floor 4 MB) — comfortably covers a target of 2 MB
-    // even with a few MB of RSS jitter either way.
     let cold = bare_corpus_handle("cold", &dir_cold.path().join("index.redb"));
-    index_n_files(&*cold.indexer.read().await, "cold", 1_200).await;
+    index_n_files(&*cold.indexer.read().await, "cold", COLD_FILES).await;
     state.registry.register(cold);
 
-    // Push "cold" past the 1s exemption floor before "hot" is even indexed.
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    // Push "cold" well past the 1s exemption floor before "hot" is indexed.
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     let hot = bare_corpus_handle("hot", &dir_hot.path().join("index.redb"));
     index_n_files(&*hot.indexer.read().await, "hot", 300).await;
@@ -596,9 +617,24 @@ async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
     // the SAME measure the tick itself will gate on keeps this test's
     // precondition (small deterministic `target_freed_mb`) valid on every
     // platform regardless of which measure is the default there.
+    //
+    // #9368: the tick calls `current_rss_mb()` before its own enforcement
+    // sample. On Linux that builds a `sysinfo::System` over every host
+    // process, and the heap it leaves behind lands in the tick's RssAnon
+    // reading. Make the same call first so this sample carries that residue.
+    let rss_before_presample = memguard::enforcement_rss_mb();
+    let _ = memguard::current_rss_mb();
     let rss = memguard::enforcement_rss_mb()
         .expect("sample this test process's own enforcement-measure RSS");
-    let limit = rss.saturating_sub(2).max(1); // target_freed_mb == 2 at pct=100
+    // target_freed_mb == RSS_SLACK_MB at pct=100.
+    let limit = rss.saturating_sub(RSS_SLACK_MB).max(1);
+    // #9368 diag: the enforcement measure is RssAnon on Linux, total on macOS.
+    eprintln!(
+        "#9368 diag: enforce_rss_mb before_presample={rss_before_presample:?} \
+         after_presample={rss} limit_mb={limit} target_freed_mb={} cold_estimate_mb={}",
+        rss.saturating_sub(limit),
+        estimate_freed_mb(2 * COLD_FILES)
+    );
     memguard::set_memory_limit_mb(Some(limit));
 
     run_memory_pressure_tick(&state).await;
