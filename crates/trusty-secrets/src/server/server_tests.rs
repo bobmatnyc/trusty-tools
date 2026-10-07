@@ -1610,3 +1610,7 @@ mod audit_tests;
 // #7519: the delete-across-backends tests share this module's fixture.
 #[path = "delete_tests.rs"]
 mod delete_tests;
+
+// #7524: the Keychain-to-file write posture tests share this module's fixture.
+#[path = "posture_tests.rs"]
+mod posture_tests;
