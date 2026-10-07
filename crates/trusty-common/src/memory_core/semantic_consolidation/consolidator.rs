@@ -79,7 +79,24 @@ impl SemanticConsolidator {
     /// Test: `consolidator_merges_cluster`, `consolidator_respects_call_budget`,
     /// `consolidator_parks_after_first_failed_batch`.
     pub async fn consolidate(&self, drawers: &[Drawer]) -> ConsolidationResult {
+        self.consolidate_reporting(drawers).await.0
+    }
+
+    /// [`Self::consolidate`], also reporting whether every batch was examined.
+    ///
+    /// Why (#9391): the dream cycle settles a palace only after a semantic pass
+    /// that covered it. A run that parked on a failed call, or stopped at the
+    /// call budget, left batches unexamined, so its empty result is no evidence
+    /// that the palace needs no consolidation.
+    /// What: the same run; the `bool` is `true` only when the loop reached its
+    /// end without breaking on the call budget or an inference error.
+    /// Test: `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`.
+    pub(crate) async fn consolidate_reporting(
+        &self,
+        drawers: &[Drawer],
+    ) -> (ConsolidationResult, bool) {
         let mut result = ConsolidationResult::default();
+        let mut complete = true;
         let mut calls_made = 0usize;
 
         for batch in drawers.chunks(self.config.max_batch_size) {
@@ -88,6 +105,7 @@ impl SemanticConsolidator {
                     budget = self.config.max_calls_per_cycle,
                     "semantic consolidation call budget exhausted"
                 );
+                complete = false;
                 break;
             }
 
@@ -125,6 +143,7 @@ impl SemanticConsolidator {
                             "semantic consolidation LLM call failed; parking until the next \
                              dream cycle"
                         );
+                        complete = false;
                         break;
                     }
                 }
@@ -133,6 +152,6 @@ impl SemanticConsolidator {
             apply_actions_to_result(actions, batch, &mut result);
         }
 
-        result
+        (result, complete)
     }
 }
