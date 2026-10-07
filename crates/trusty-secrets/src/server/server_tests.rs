@@ -121,8 +121,24 @@ impl Fixture {
     }
 
     async fn start_with(&self, backends: BackendFactory) -> Running {
+        self.start_state(self.state(backends)).await
+    }
+
+    /// The state [`Self::start_with`] serves.
+    ///
+    /// What: the fixture's machine config is also the account's own file
+    /// consent config, as in production when no flag or `$HOME` moves it.
+    // #7524 H1: never the real account home's config in a test.
+    fn state(&self, backends: BackendFactory) -> State {
+        let mut state = State::new(self.settings.clone(), backends);
+        state.file_consent_config = Some(self.settings.machine_config.clone());
+        state
+    }
+
+    /// Serve `state` on the fixture's socket.
+    async fn start_state(&self, state: State) -> Running {
         let (tx, rx) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(self.settings.clone(), backends, async move {
+        let task = tokio::spawn(router::serve_state(state, async move {
             let _ = rx.await;
         }));
         wait_serving(&self.settings.socket).await;
@@ -164,6 +180,17 @@ async fn call(socket: &Path, method: &str, params: Value) -> RpcResponse {
         .unwrap()
 }
 
+/// [`ServerSettings::from_args`] with a fixed account home that is never
+/// `$HOME` and holds no socket a test names.
+// #7524: no test reads the real password database; a host without a row for
+// the test uid would fail closed and read every socket as the default.
+fn parse_settings(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ServerSettings, SettingsError> {
+    ServerSettings::from_args_with(args, env, || Some(PathBuf::from("/account-home-7524")))
+}
+
 fn ok(response: RpcResponse) -> Value {
     assert!(response.error.is_none(), "{:?}", response.error);
     response.result.unwrap()
@@ -182,7 +209,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 29] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 30] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1112,7 +1139,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 29;
+    const ARMS: usize = 30;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1144,7 +1171,9 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::TrackedCliSettingRefused => 25,
             ErrorKind::CliNotInstalled => 26,
             ErrorKind::BackendLocked => 27,
-            ErrorKind::Internal => 28,
+            // #7524 H1: a write into `file` the machine config did not select.
+            ErrorKind::FileBackendNotSelected => 28,
+            ErrorKind::Internal => 29,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1518,12 +1547,12 @@ fn settings_flags_beat_env_beat_defaults() {
         IDLE_TIMEOUT_ENV => Some("7".to_string()),
         _ => None,
     };
-    let from_env = ServerSettings::from_args(args(&["serve"]), env).unwrap();
+    let from_env = parse_settings(args(&["serve"]), env).unwrap();
     assert_eq!(from_env.socket, PathBuf::from("/env/s.sock"));
     assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
     assert_eq!(from_env.idle_timeout, Duration::from_secs(7));
 
-    let flags = ServerSettings::from_args(
+    let flags = parse_settings(
         args(&[
             "serve",
             "--socket",
@@ -1552,7 +1581,7 @@ fn settings_flags_beat_env_beat_defaults() {
     );
 
     if let Some(home) = dirs::home_dir() {
-        let defaults = ServerSettings::from_args(args(&["serve"]), |_| None).unwrap();
+        let defaults = parse_settings(args(&["serve"]), |_| None).unwrap();
         assert_eq!(defaults.socket, home.join(SOCKET_SUBPATH));
         assert_eq!(defaults.idle_timeout, DEFAULT_IDLE_TIMEOUT);
     }
@@ -1578,7 +1607,7 @@ fn settings_idle_env_falls_back_on_garbage_and_zero() {
 #[test]
 fn settings_reject_unknown_and_incomplete_flags() {
     let parse = |v: &[&str]| {
-        ServerSettings::from_args(
+        parse_settings(
             v.iter()
                 .map(Into::into)
                 .collect::<Vec<std::ffi::OsString>>(),
@@ -1610,3 +1639,7 @@ mod audit_tests;
 // #7519: the delete-across-backends tests share this module's fixture.
 #[path = "delete_tests.rs"]
 mod delete_tests;
+
+// #7524: the Keychain-to-file write posture tests share this module's fixture.
+#[path = "posture_tests.rs"]
+mod posture_tests;

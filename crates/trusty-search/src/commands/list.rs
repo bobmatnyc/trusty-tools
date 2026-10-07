@@ -1,48 +1,59 @@
 //! Handler for `trusty-search list`.
 
-use super::daemon_utils::daemon_base_url;
 use anyhow::{bail, Result};
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
 
-/// Why: extracted so `main()` doesn't inline the GET `/indexes` plumbing.
-/// What: fetches the index list, prints it as plain text or JSON depending on
-/// the global `--json` flag. Returns `Err` when the daemon is unreachable;
-/// `main()` prints the friendly red-✗ line and exits 1 (issue #104).
-/// Test: `cargo run -- list` against a running daemon prints registered ids.
+/// Why: extracted so `main()` doesn't inline the index-list plumbing.
+/// What: fetches the index list over the daemon socket (#9214,
+/// `search.indexes.list`, the twin of `GET /indexes`), prints it as plain text
+/// or JSON depending on the global `--json` flag. Returns `Err` when the daemon
+/// is unreachable; `main()` prints the friendly red-✗ line and exits 1 (issue
+/// #104).
+/// Test: `list_reads_the_index_list_over_the_socket`.
 pub async fn handle_list(json: bool) -> Result<()> {
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
-    let url = format!("{}/indexes", base);
-    let list_client = trusty_common::server::daemon_http_client()?;
-    match list_client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value =
-                resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-            if json {
-                println!("{}", body);
-            } else {
-                println!("{}", "Registered indexes:".bold());
-                let empty: Vec<serde_json::Value> = Vec::new();
-                let arr = body
-                    .get("indexes")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty);
-                if arr.is_empty() {
-                    println!("  {}", "(none)".dimmed());
-                } else {
-                    for v in arr {
-                        if let Some(s) = v.as_str() {
-                            println!("  • {}", s);
-                        }
-                    }
+    // #9214: the socket, never the retiring HTTP listener.
+    let client = DaemonClient::resolve()?;
+    crate::commands::daemon_guard::ensure_daemon_up(&client).await?;
+    let body = fetch_index_list(&client).await?;
+    if json {
+        println!("{}", body);
+    } else {
+        println!("{}", "Registered indexes:".bold());
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let arr = body
+            .get("indexes")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        if arr.is_empty() {
+            println!("  {}", "(none)".dimmed());
+        } else {
+            for v in arr {
+                if let Some(s) = v.as_str() {
+                    println!("  • {}", s);
                 }
-                print_parked(&body);
             }
         }
-        Ok(resp) => bail!("daemon returned {}", resp.status()),
-        Err(e) => bail!("could not reach daemon at {}: {e}", base),
+        print_parked(&body);
     }
     Ok(())
+}
+
+/// The daemon's index list — the body `GET /indexes` answered.
+///
+/// # Errors
+///
+/// When the socket is unreachable, or the daemon refuses the call.
+pub(crate) async fn fetch_index_list(client: &DaemonClient) -> Result<serde_json::Value> {
+    match client
+        .call(METHOD_INDEXES_LIST, serde_json::json!({}))
+        .await
+    {
+        Ok(body) => Ok(body),
+        Err(e) if e.is_unreachable() => bail!("could not reach daemon: {e}"),
+        Err(e) => bail!("daemon returned {e}"),
+    }
 }
 
 /// Print the `parked` rows of a `GET /indexes` body (#8727).
@@ -68,5 +79,39 @@ pub(crate) fn print_parked(body: &serde_json::Value) {
         let gone = row.get("root_state").and_then(|v| v.as_str()) == Some("orphaned");
         let marker = if gone { "  (root missing)" } else { "" };
         println!("  • {id}  {}{}", root.dimmed(), marker.yellow());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::mock_socket::mock_daemon;
+
+    /// #9214: `list` reads `search.indexes.list` with empty params — the
+    /// `GET /indexes` default — and returns the daemon's body unchanged.
+    #[tokio::test]
+    async fn list_reads_the_index_list_over_the_socket() {
+        let daemon = mock_daemon(|method, params| {
+            assert_eq!(method, METHOD_INDEXES_LIST);
+            assert_eq!(params, serde_json::json!({}));
+            Ok(serde_json::json!({"indexes": ["a", "b"]}))
+        })
+        .await;
+        let body = fetch_index_list(&daemon.client).await.expect("listed");
+        assert_eq!(body["indexes"], serde_json::json!(["a", "b"]));
+    }
+
+    /// #9214: an absent socket fails closed, naming it, with no URL.
+    #[tokio::test]
+    async fn list_fails_closed_when_the_socket_is_absent() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let err = fetch_index_list(&DaemonClient::at(&socket))
+            .await
+            .expect_err("nothing serves the socket");
+        let text = err.to_string();
+        assert!(text.starts_with("could not reach daemon"), "{text}");
+        assert!(text.contains(&socket.display().to_string()), "{text}");
+        assert!(!text.contains("http://"), "{text}");
     }
 }

@@ -45,13 +45,13 @@ use crate::{
         optional_context::{
             ReviewOptions,
             ReviewOutcome,
-            assemble::{PrBody, apply_caller_context, refs_for_gate}, // #9188 D, #9192
+            assemble::{PrBody, apply_caller_context, refs_for_review}, // #9188 D, #9192, #9197
             ledger::ContextLedger,
             seams::{load_diff_via, pr_meta_via},
         },
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
         post::{FinalizeAction, decide_action},
-        prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
+        prompt::{ReviewPrMeta, build_review_prompt_with_sections}, // #9197
         runner_context::{gather_context, gather_external_context_md},
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
@@ -546,7 +546,8 @@ async fn run_pipeline(
     // #8654: one per-field cap, marked, before either prompt sees the text.
     // #9192: the requested PR body merges in here, ahead of the caller's text.
     let body = PrBody::of(is_local, meta_error.as_deref(), &pr_meta.body);
-    apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
+    // #9197: `applied` also carries the issue section for both prompts and the refs.
+    let applied = apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
@@ -566,7 +567,7 @@ async fn run_pipeline(
             external_context,
             coverage_contrib,
             degraded_reason,
-            body_in_refs: !options.request.include_pr_body,
+            applied,
         };
         return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
     }
@@ -574,7 +575,7 @@ async fn run_pipeline(
     // ── Step 6: build prompt and call LLM (UNIFIED PATH) ──────────────────
     // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
     let voice_config = build_voice_config(config);
-    let llm_req = build_review_prompt_with_coverage(
+    let llm_req = build_review_prompt_with_sections(
         &owner,
         &repo,
         &pr_meta,
@@ -584,6 +585,7 @@ async fn run_pipeline(
         &input.reviewer_model,
         &voice_config,
         config.coverage.enabled,
+        &applied.sections,
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
@@ -736,17 +738,8 @@ async fn run_pipeline(
         input.caller_context.pr_description.as_deref(),
         input.caller_context.pr_discussion.as_deref(),
     );
-    let caller = &input.caller_context;
-    let refs = refs_for_gate(
-        &pr_meta.title,
-        (!options.request.include_pr_body).then_some(pr_meta.body.as_str()), // #9192
-        &external_context,
-        [
-            caller.pr_description.as_deref(),
-            caller.pr_discussion.as_deref(),
-            caller.referenced_code.as_deref(),
-        ],
-    );
+    // #9197: `context` holds the capped caller fields; `applied` the issue section.
+    let refs = refs_for_review(&pr_meta, &external_context, &context, &applied);
     let inputs = GateInputs {
         filtered: &filtered,
         diff: &diff,

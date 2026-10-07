@@ -128,6 +128,9 @@ async fn server_delete_removes_a_key_held_by_two_backends() {
     let server = fx.start_with(factory).await;
     let project = vault("trusty/acme/web");
     set_value(&fx, "A").await;
+    // #7524 H1: on a Keychain build only a machine selection allows a copy
+    // into `file`; the delete below runs under `keychain` again.
+    select_backend(&fx, "file");
     let copied = ok(call(
         &fx.settings.socket,
         method::COPY,
@@ -139,6 +142,7 @@ async fn server_delete_removes_a_key_held_by_two_backends() {
     assert_eq!(fx.keychain.len(), 1);
     assert!(file.get(&project, &key("A")).unwrap().is_some());
 
+    select_backend(&fx, "keychain");
     let deleted = call(&fx.settings.socket, method::DELETE, target(&fx, "A")).await;
     assert_eq!(ok(deleted), json!({"removed": true}));
     assert!(fx.keychain.is_empty(), "the configured backend is cleared");
