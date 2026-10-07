@@ -861,7 +861,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project secrets and list key names: `set`, `list`, `doctor`.
+    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`.
     /// No verb prints a value.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
