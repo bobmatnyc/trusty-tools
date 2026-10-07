@@ -400,5 +400,8 @@ fn runner_grandchild_holding_a_pipe_is_killed_after_the_leader_exits() {
         "{err:?}"
     );
     let pid = shim.logged_pid();
-    assert!(gone_soon(pid), "grandchild {pid} outlived its reaped leader");
+    assert!(
+        gone_soon(pid),
+        "grandchild {pid} outlived its reaped leader"
+    );
 }
