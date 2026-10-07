@@ -71,6 +71,8 @@ impl SearchTransport {
     /// URL. The URL counts as explicit when `TRUSTY_SEARCH_URL` is set or when
     /// `search_url` is not the default `http://localhost:7878`. Logs the leg
     /// once per process.
+    /// Limitation: a `search_url` equal to the default counts as not explicit,
+    /// so pinning HTTP to the default address needs `TRUSTY_SEARCH_URL` set.
     /// Test: `socket_is_used_when_present`, `http_is_used_when_the_socket_is_absent`,
     /// `socket_overrides_a_config_url_that_is_not_explicit`,
     /// `explicit_socket_env_beats_explicit_url`.
@@ -103,9 +105,9 @@ impl SearchTransport {
         } else if url_explicit {
             Self::Http(http_url()) // #9214 phase C: delete
         } else {
-            match search_rpc::search_socket() {
-                Ok(path) if path.exists() => Self::Socket(path),
-                _ => Self::Http(http_url()), // #9214 phase C: delete
+            match default_socket() {
+                Some(path) => Self::Socket(path),
+                None => Self::Http(http_url()), // #9214 phase C: delete
             }
         };
         log_once(&chosen);
@@ -143,6 +145,32 @@ impl SearchTransport {
             Self::Http(url) => (TRUSTY_SEARCH_URL_ENV, url.clone()), // #9214 phase C: delete
         }
     }
+}
+
+/// Rule 3's socket: the default path, when its file exists.
+///
+/// #9214: a unit-test build never reads the operator's real path. Unless a test
+/// isolated the data dir with `TRUSTY_DATA_DIR_OVERRIDE`, it gets
+/// `hermetic_socket()`, a path that never exists, so no test dials or stats the
+/// live daemon's socket.
+/// Test: `unit_tests_never_resolve_the_real_default_socket`.
+fn default_socket() -> Option<PathBuf> {
+    #[cfg(test)]
+    if std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_none() {
+        return Some(hermetic_socket());
+    }
+    search_rpc::search_socket()
+        .ok()
+        .filter(|path| path.exists())
+}
+
+/// A per-process socket path under the temp dir that nothing ever binds.
+#[cfg(test)]
+pub(crate) fn hermetic_socket() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "trusty-review-no-search-{}.sock",
+        std::process::id()
+    ))
 }
 
 /// `TRUSTY_SEARCH_SOCKET`, when set and non-empty.

@@ -201,6 +201,41 @@ async fn dead_socket_file_does_not_fall_back_to_http() {
     );
 }
 
+/// A unit test that set nothing never reaches the operator's real socket.
+///
+/// Why: a test that dials the live daemon passes or fails on whether it is up,
+/// and loads it. Most tests load the default config and set no env at all.
+/// What: with every transport env var and the data-dir override cleared, both
+/// resolvers must land on a socket path that does not exist. Reaching the real
+/// path fails here: while that file exists it is `Socket(<existing path>)`, and
+/// where it does not (CI) rule 3 falls through to `Http`.
+/// Test: this test.
+#[serial_test::serial]
+#[test]
+fn unit_tests_never_resolve_the_real_default_socket() {
+    let _env = [
+        EnvGuard::unset(DATA_DIR_OVERRIDE),
+        EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
+    ];
+    for resolved in [
+        SearchTransport::resolve(&default_config()),
+        SearchTransport::resolve_advertised(),
+    ] {
+        match resolved {
+            SearchTransport::Socket(path) => {
+                assert!(
+                    !path.exists(),
+                    "a test resolved a live socket: {}",
+                    path.display()
+                );
+                assert_eq!(path, hermetic_socket());
+            }
+            other => panic!("expected the hermetic socket, got {other:?}"),
+        }
+    }
+}
+
 // ── Error mapping ────────────────────────────────────────────────────────────
 
 /// An `index_not_resident` refusal body, as the daemon's 503 carries it.

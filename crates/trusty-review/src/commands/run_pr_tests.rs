@@ -123,10 +123,16 @@ fn two_repos() -> Registry {
     ]))
 }
 
+/// A refused port: an explicit (non-default) URL, so the #9214 resolver picks
+/// HTTP here and never reads the operator's real trusty-search socket path.
+const DEAD_SEARCH_URL: &str = "http://127.0.0.1:9";
+
 /// A config with the `"main"` a CWD miss leaves behind, nothing pinned, and
 /// the Hosted default `require_search`.
 fn unpinned_config() -> ReviewConfig {
     let mut config = ReviewConfig::load(None);
+    // #9214: an explicit dead URL keeps resolution off the live default socket.
+    config.search_url = DEAD_SEARCH_URL.into();
     config.search_index = "main".into();
     config.search_index_explicit = false;
     config.context.require_search = None;
@@ -311,6 +317,8 @@ async fn reviewer_prompt(dir: &tempfile::TempDir, diff_text: &str, extra: &[&str
         dedup: None,
     };
     let mut config = ReviewConfig::load(None);
+    // #9214: an explicit dead URL keeps resolution off the live default socket.
+    config.search_url = DEAD_SEARCH_URL.into();
     config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.log_dir = dir.path().to_path_buf();
