@@ -102,8 +102,9 @@ mod tests {
         //          issue #537 added the `upgrade` MCP tool (→19);
         //          issue #1104 added `console_metrics` (→20);
         //          issue #1557 added the `typeahead` MCP tool (→21);
-        //          #9169 removed the uncalled `upgrade` tool (→20).
-        assert_eq!(svc.tools().len(), 20);
+        //          #9169 removed the uncalled `upgrade` tool (→20);
+        //          #7434 added the `add_root` multi-root tool (→21).
+        assert_eq!(svc.tools().len(), 21);
     }
 
     #[test]

@@ -573,7 +573,7 @@ pub(super) async fn prepare_batch_payload(ctx: &BatchCtx, batch: &[PathBuf]) -> 
     let mut changed_corpus_paths: Vec<String> = Vec::with_capacity(batch.len());
     let mut final_chunkless_paths: Vec<String> = Vec::new();
     for (path, content_res) in read_results {
-        let rel = to_corpus_relative_path(&ctx.root, &path);
+        let rel = to_corpus_relative_path(&ctx.root, &ctx.handle.additional_roots, &path);
         let content = match content_res {
             Ok(c) => c,
             Err(e) => {
@@ -683,7 +683,7 @@ pub(super) async fn emit_batch_error(
     use std::sync::atomic::Ordering;
     let files_in_batch: Vec<String> = to_index_paths
         .iter()
-        .map(|p| to_corpus_relative_path(&ctx.root, p))
+        .map(|p| to_corpus_relative_path(&ctx.root, &ctx.handle.additional_roots, p))
         .collect();
     // Issue #1428: a batch parse/embed/commit failure was previously surfaced
     // ONLY as an SSE `error` frame — nothing reached the daemon log, which is

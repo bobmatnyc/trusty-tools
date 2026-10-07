@@ -132,6 +132,9 @@ pub struct Candidate {
     /// Whether the registry keeps the corpus under the root (`colocated`).
     #[serde(skip)]
     pub colocated: bool,
+    /// #7434: the index's additional roots; a path under one resolves here.
+    #[serde(skip)]
+    pub additional_roots: Vec<PathBuf>,
 }
 
 impl Candidate {
@@ -214,10 +217,15 @@ pub fn gather_candidates(
         reindexed_unix: None,
         corpus_modified_unix: None,
         colocated,
+        additional_roots: Vec::new(),
     };
     let mut out: Vec<Candidate> = persisted
         .iter()
-        .map(|e| unprobed(&e.id, &e.root_path, e.repo_identity.clone(), e.colocated))
+        .map(|e| Candidate {
+            // #7434: a persisted row carries the whole root table.
+            additional_roots: e.additional_roots.clone(),
+            ..unprobed(&e.id, &e.root_path, e.repo_identity.clone(), e.colocated)
+        })
         .collect();
     for (id, root) in resident {
         if !persisted.iter().any(|e| e.id == *id) {
@@ -502,11 +510,23 @@ fn distinct_keys(list: &[Candidate]) -> Vec<String> {
 /// The registration whose root is the deepest ancestor of `path`. No
 /// filesystem call: `path` is already canonical (or normalised) and stored
 /// roots are canonical.
+///
+/// #7434: every root counts, primary and additional; a candidate's depth is
+/// its deepest root containing `path`, so the longest prefix still wins.
+/// Test: `a_path_under_an_additional_root_resolves_to_its_index`.
 fn owning_candidate<'a>(path: &Path, candidates: &'a [Candidate]) -> Option<&'a Candidate> {
     candidates
         .iter()
-        .filter(|c| path.starts_with(&c.root_path))
-        .max_by_key(|c| c.root_path.components().count())
+        .filter_map(|c| {
+            std::iter::once(&c.root_path)
+                .chain(c.additional_roots.iter())
+                .filter(|r| path.starts_with(r))
+                .map(|r| r.components().count())
+                .max()
+                .map(|depth| (c, depth))
+        })
+        .max_by_key(|(_, depth)| *depth)
+        .map(|(c, _)| c)
 }
 
 /// Resolve `.` and `..` without touching disk, for a path that cannot be

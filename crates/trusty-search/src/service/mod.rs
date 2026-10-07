@@ -78,6 +78,8 @@ pub mod warm_boot;
 pub(crate) mod test_isolation;
 pub mod watch_loop;
 pub mod watch_rescan;
+// #7434: per-root watch identity and state for a multi-root index.
+pub mod watch_roots;
 #[cfg(test)]
 pub(crate) mod watch_test_support;
 pub mod watcher;
@@ -98,6 +100,9 @@ mod exclude_hold_9059_tests;
 // #9230: every delete path stamps the corpus only when its rows left redb.
 #[cfg(test)]
 mod delete_stamp_9230_tests;
+// #7434: the same fail-closed delete and stamp, under an additional root.
+#[cfg(test)]
+mod delete_stamp_7434_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 
@@ -113,5 +118,6 @@ pub use daemon::{
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;
 pub use watch_loop::{spawn_watch_loop, WatcherTask};
+pub use watch_roots::{RootWatchReport, RootWatchState, WatchedRoot};
 pub use watcher::{FileWatcher, WatchEvent};
 pub use watcher_manager::WatcherManager;

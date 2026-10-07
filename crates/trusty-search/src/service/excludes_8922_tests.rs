@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::sops::sample_sops_yaml;
 use crate::core::CodeIndexer;
-use crate::service::index_admission::{self, apply_modified, Admission, WatchRoots};
+use crate::service::index_admission::{self, apply_modified, Admission};
 use crate::service::watch_rescan::reconcile_with_policy;
 use crate::service::write_admission::admits_pushed;
 use crate::service::IndexedFiles;
@@ -79,10 +79,7 @@ async fn only_kept_is_indexed(path_name: &str, indexer: &Arc<RwLock<CodeIndexer>
 #[tokio::test]
 async fn every_ingest_path_skips_a_file_the_walker_excludes() {
     let (_temp, root) = tree();
-    let roots = WatchRoots {
-        canonical: &root,
-        raw: &root,
-    };
+    let roots = &crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
     let rels = [KEPT, EXCLUDED, SOPS];
 
     // Walker: the excluded file is never walked.
@@ -118,8 +115,9 @@ async fn every_ingest_path_skips_a_file_the_walker_excludes() {
     let rescanned = handle("x8922-rescan", &root, true);
     reconcile_with_policy(
         &rescanned.id,
-        &root,
-        &root,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
         &rescanned.indexer,
         &IndexedFiles::new(),
         Some(&rescanned),
@@ -204,10 +202,7 @@ async fn rescan_drops_sops_files_and_files_the_policy_now_excludes() {
     let registry = IndexRegistry::new();
     let open = registry.register(handle("x8922-sweep", &root, false));
     let files = IndexedFiles::new();
-    let roots = WatchRoots {
-        canonical: &root,
-        raw: &root,
-    };
+    let roots = &crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
     for rel in [KEPT, EXCLUDED, SOPS] {
         apply_modified(
             &registry,
@@ -227,8 +222,9 @@ async fn rescan_drops_sops_files_and_files_the_policy_now_excludes() {
     narrowed.exclude_globs = vec!["**/secrets/**".into()];
     let stats = reconcile_with_policy(
         &open.id,
-        &root,
-        &root,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
         &open.indexer,
         &files,
         Some(&narrowed),
@@ -246,9 +242,17 @@ async fn open_rescan(
     root: &Path,
     files: &IndexedFiles,
 ) -> crate::service::watch_rescan::RescanStats {
-    reconcile_with_policy(&open.id, root, root, &open.indexer, files, Some(open))
-        .await
-        .unwrap()
+    reconcile_with_policy(
+        &open.id,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            root, root,
+        )],
+        &open.indexer,
+        files,
+        Some(open),
+    )
+    .await
+    .unwrap()
 }
 
 /// #8922: every purge arm drops the file's content hash with its chunks, so a
@@ -281,8 +285,9 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
             "sweep" => {
                 reconcile_with_policy(
                     &open.id,
-                    &root,
-                    &root,
+                    &[crate::service::watch_roots::WatchedRoot::from_pair(
+                        &root, &root,
+                    )],
                     &open.indexer,
                     &files,
                     Some(&narrowed),
@@ -367,8 +372,9 @@ async fn a_restored_invalid_glob_neither_purges_nor_hides() {
     // #9059: the index is held, so the rescan is refused and purges nothing.
     let outcome = reconcile_with_policy(
         &restored.id,
-        &root,
-        &root,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
         &restored.indexer,
         &files,
         Some(&restored),

@@ -207,6 +207,9 @@ pub async fn build_indexer_from_entry(
     // to load, so warm-boot / lazy-load can fold it into `hnsw_snapshot_ready`
     // instead of trusting bare file existence.
     indexer.hnsw_load_failed = hnsw_load_failed;
+    // #7434: every handle built from an entry resolves `@root<n>/…` chunk paths
+    // against the entry's own root table.
+    indexer.set_additional_roots(entry.additional_roots.clone());
     // Issue #313 / #2984 (Phase 0): propagate `skip_kg` onto the indexer
     // itself — not just the `IndexHandle` built later by the caller — so
     // `restore_corpus_for_entry` below (via `load_chunks_from_redb` /

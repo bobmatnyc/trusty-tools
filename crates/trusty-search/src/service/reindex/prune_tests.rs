@@ -31,7 +31,7 @@ fn to_corpus_relative_path_agrees_with_batch_loop() {
         .unwrap_or(path)
         .display()
         .to_string();
-    assert_eq!(to_corpus_relative_path(root, path), expected);
+    assert_eq!(to_corpus_relative_path(root, &[], path), expected);
 }
 
 /// Disk-existence guard: a file that IS present on disk but whose relative

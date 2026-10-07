@@ -265,10 +265,27 @@ fn allowlist_refusal_response(
 /// Test: `file_is_within_root_*` unit tests below; `file_is_within_root_symlinked_root`
 /// covers the symlink-alias case added for #541.
 pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
+    file_is_within_any_root(file, root, &[])
+}
+
+/// #7434: [`file_is_within_root`] asked of every root of a multi-root index.
+///
+/// Why: the #64 post-filter dropped every hit under an additional root,
+/// because its resolved absolute path does not start with the primary root.
+/// What: the same lexical check and `canonicalize` fallback, run over the
+/// primary root and each additional root; `additional` empty is the
+/// single-root predicate exactly. A path under no root is still refused.
+/// Test: `search_keeps_a_hit_under_an_additional_root`,
+/// `core::index_roots::tests::containment_is_any_of_n`.
+pub(super) fn file_is_within_any_root(
+    file: &str,
+    root: &std::path::Path,
+    additional: &[std::path::PathBuf],
+) -> bool {
     let p = std::path::Path::new(file);
     if p.is_absolute() {
         // Fast path: lexical prefix check — no syscalls.
-        if p.starts_with(root) {
+        if crate::core::index_roots::is_within_any(root, additional, p) {
             return true;
         }
         // Slow-path fallback for symlink / alias mismatches (issue #541): only
@@ -288,13 +305,17 @@ pub(super) fn file_is_within_root(file: &str, root: &std::path::Path) -> bool {
         // starts with that canonical root. We do NOT canonicalize the file path
         // itself because the file may have been deleted since indexing; we only
         // need the root to resolve correctly.
-        let root_owned = root.to_path_buf();
-        let canonical_root = tokio::task::block_in_place(|| std::fs::canonicalize(root_owned));
-        let canonical_root = match canonical_root {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        return p.starts_with(&canonical_root);
+        // #7434: once per root, stopping at the first hit.
+        let owned: Vec<std::path::PathBuf> = std::iter::once(root.to_path_buf())
+            .chain(additional.iter().cloned())
+            .collect();
+        return tokio::task::block_in_place(|| {
+            owned.into_iter().any(|r| {
+                std::fs::canonicalize(r)
+                    .map(|c| p.starts_with(&c))
+                    .unwrap_or(false)
+            })
+        });
     }
     // Relative path: must not climb out via `..`. We accept `.` and any
     // forward-only sequence of components. Empty paths are rejected
@@ -394,9 +415,14 @@ pub(crate) fn find_root_path_collision(
     candidate: &std::path::Path,
     exclude_id: Option<&IndexId>,
 ) -> Option<IndexId> {
+    // #7434: any-of-N — an index's additional roots are as claimed as its
+    // primary root, live or cold.
     handles
         .iter()
-        .find(|h| exclude_id != Some(&h.id) && identifies_same_root(&h.root_path, candidate))
+        .find(|h| {
+            exclude_id != Some(&h.id)
+                && identifies_any_same_root(&h.root_path, &h.additional_roots, candidate)
+        })
         .map(|h| h.id.clone())
         .or_else(|| {
             cold_entries.iter().find_map(|entry| {
@@ -404,9 +430,24 @@ pub(crate) fn find_root_path_collision(
                 if exclude_id == Some(&id) {
                     return None;
                 }
-                identifies_same_root(&entry.root_path, candidate).then_some(id)
+                identifies_any_same_root(&entry.root_path, &entry.additional_roots, candidate)
+                    .then_some(id)
             })
         })
+}
+
+/// #7434: `true` when `candidate` names the primary root or any additional
+/// root of one index — [`identifies_same_root`] over the whole root table.
+///
+/// Test: `collision_guard_sees_additional_roots`.
+pub(crate) fn identifies_any_same_root(
+    primary: &std::path::Path,
+    additional: &[std::path::PathBuf],
+    candidate: &std::path::Path,
+) -> bool {
+    std::iter::once(primary)
+        .chain(additional.iter().map(|p| p.as_path()))
+        .any(|r| identifies_same_root(r, candidate))
 }
 
 /// Decide whether `a` and `b` name the same on-disk root (issue #2519).

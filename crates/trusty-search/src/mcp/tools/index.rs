@@ -1,5 +1,6 @@
 //! Index management tool arms: `index_file`, `remove_file`, `list_indexes`,
-//! `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`.
+//! `create_index`, `delete_index`, `reindex`, `index_status`, `list_chunks`,
+//! `add_root` (#7434).
 //!
 //! Why: index lifecycle operations (register, populate, inspect, delete) form
 //! a cohesive group that changes together when the daemon's index API evolves.
@@ -19,8 +20,31 @@ use super::{
 use crate::service::rpc::reads::{METHOD_CHUNKS_LIST, METHOD_INDEXES_LIST, METHOD_INDEX_STATUS};
 use crate::service::rpc::writes::{
     METHOD_INDEX_CREATE, METHOD_INDEX_DELETE, METHOD_INDEX_FILE_PUT, METHOD_INDEX_FILE_REMOVE,
-    METHOD_INDEX_REINDEX,
+    METHOD_INDEX_REINDEX, METHOD_INDEX_ROOTS_ADD,
 };
+
+/// The `add_root` tool's descriptor (#7434), appended by `tool_descriptors`.
+///
+/// Why: kept beside its dispatch arm so the schema and the arm change
+/// together, and out of `descriptors.rs`, which sits near the line cap.
+pub(super) fn add_root_descriptor() -> Value {
+    serde_json::json!({
+        "name": "add_root",
+        "description": "Add one or more directory trees to an existing index, so one index covers several roots. Each root is validated like create_index's root_path and refused when another index already covers it or it nests with one of this index's roots. Answers the index's full root list and queues a background reindex; refused with reindex_already_running while one runs.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["index_id", "roots"],
+            "properties": {
+                "index_id": { "type": "string", "description": "The index to widen." },
+                "roots": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Absolute directory paths to add."
+                }
+            }
+        }
+    })
+}
 
 /// Resolve `index_id` for a MUTATING index-management tool, defaulting to the
 /// pinned index (#1373) when the caller omits it.
@@ -191,6 +215,20 @@ pub(super) async fn dispatch_index_tool(
             };
             let params = serde_json::json!({ "index_id": index_id, "delete_data": delete_data });
             Some(server.call(METHOD_INDEX_DELETE, params).await)
+        }
+        // #7434: the multi-root mutation, over the daemon socket (#9250).
+        "add_root" => {
+            let index_id = match required_index_id(server, args) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let Some(roots) = string_array(args, "roots") else {
+                return Some(Err(DispatchError::InvalidParams(
+                    "roots must be a non-empty array of absolute directory paths".into(),
+                )));
+            };
+            let params = serde_json::json!({ "index_id": index_id, "body": { "roots": roots } });
+            Some(server.call(METHOD_INDEX_ROOTS_ADD, params).await)
         }
         "reindex" => {
             let index_id = match required_index_id(server, args) {

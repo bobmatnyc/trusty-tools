@@ -43,6 +43,8 @@ mod index_config;
 mod index_resolve;
 mod indexes;
 mod indexes_relocate;
+// #7434: `POST /indexes/:id/roots` — the multi-root mutation.
+mod indexes_roots;
 // #6822: the scalar-precision backfill route.
 mod quantize_handlers;
 mod reindex_handlers;
@@ -96,6 +98,9 @@ mod tests_allowlist_gate_767;
 mod tests_quantize_6822;
 #[cfg(test)]
 mod tests_same_id_root_mismatch;
+// #7434: the add-roots route, create-time `roots`, and the root list on status.
+#[cfg(test)]
+mod tests_7434_roots;
 // #3049: DELETE must quiesce in-flight writers and report what it actually did.
 #[cfg(test)]
 mod tests_3049;
@@ -330,6 +335,8 @@ pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
 pub(crate) use indexes_relocate::{relocate_index_report, RelocateIndexRequest};
+// #7434: shared by the HTTP route and the `search.index.roots.add` socket method.
+pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 pub(crate) use reindex_handlers::reindex_report;
@@ -510,6 +517,12 @@ pub fn build_router_on(
         .route(
             "/indexes/{id}",
             delete(delete_index_handler).patch(relocate_index_handler),
+        )
+        // #7434: add a directory tree to an index. Free lane like relocate: it
+        // swaps a handle and QUEUES a walk rather than running one.
+        .route(
+            "/indexes/{id}/roots",
+            post(indexes_roots::add_index_roots_handler),
         )
         .route("/ui", get(|| async { Redirect::permanent("/ui/") }))
         .route("/ui/", get(ui_index_handler))

@@ -99,7 +99,7 @@ impl CodeIndexer {
     pub async fn all_chunks(&self) -> Vec<CodeChunk> {
         self.ensure_chunks_loaded().await;
         let chunks = self.chunks.read().await;
-        let root = self.root_path.clone();
+        let root = self.chunk_roots();
         chunks
             .values()
             .map(|raw| raw_to_code_chunk(raw, 0.0, "all", None, &root))
@@ -240,8 +240,8 @@ impl CodeIndexer {
         // The wait, the retry budget, and the refusal are shared with
         // `raw_chunks_snapshot` — see [`Self::ensure_corpus_view_is_current`].
         self.ensure_corpus_view_is_current().await?;
-        let root = self.root_path.clone();
-        let scope = PrefixScope::new(path_prefix, &root);
+        let root = self.chunk_roots();
+        let scope = PrefixScope::new(path_prefix, root.primary());
         let chunks = self.chunks.read().await;
         let mut ordered = scope.retain(chunks.values());
         let total = ordered.len();
@@ -301,7 +301,7 @@ impl CodeIndexer {
         after: Option<&str>,
         limit: usize,
     ) -> Result<(usize, Vec<CodeChunk>, Option<String>)> {
-        let root = self.root_path.clone();
+        let root = self.chunk_roots();
         // Durable path: indexed seek over redb, no full-corpus materialization.
         if let Some(corpus) = self.corpus.clone() {
             // #6043: the count and the rows must fail together. Reading the
@@ -413,8 +413,8 @@ impl CodeIndexer {
             return self.enumerate_chunks_after(after, limit).await;
         }
         self.ensure_corpus_view_is_current().await?;
-        let root = self.root_path.clone();
-        let scope = PrefixScope::new(path_prefix, &root);
+        let root = self.chunk_roots();
+        let scope = PrefixScope::new(path_prefix, root.primary());
         let chunks = self.chunks.read().await;
         let mut ordered = scope.retain(chunks.values());
         let total = ordered.len();
@@ -465,7 +465,7 @@ impl CodeIndexer {
                 score,
                 "vector",
                 snippet,
-                &self.root_path,
+                &self.chunk_roots(),
             ));
             if out.len() >= top_k {
                 break;
