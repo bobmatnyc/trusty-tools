@@ -5,8 +5,8 @@
 //! test changes any process-global environment. It keeps items as files
 //! (`items/<id>`: title, value, category), appends each call's argv to
 //! `calls.log`, its environment to `env.log`, a create's stdin to
-//! `stdin.log` and an edit's template to `template.log`, and fails one
-//! subcommand on demand. Every scripted failure first echoes the value it
+//! `stdin.log` and an edit's template to `template.log`, and fails or
+//! delays one subcommand on demand. Every scripted failure first echoes the value it
 //! holds — stdin to stderr for `create`, the template to stderr for
 //! `edit`, every stored value to stdout for `read` — the worst case for A2.
 //! Running through `/bin/sh` avoids `ETXTBSY` when another test thread
@@ -43,6 +43,7 @@ if [ -f "$L/headless" ] && [ "$OP_SERVICE_ACCOUNT_TOKEN" != "$(cat "$L/headless"
   exit 1
 fi
 if [ "$1" = read ]; then name=read; else name=$2; fi
+if [ -f "$L/delay.$name" ]; then sleep "$(cat "$L/delay.$name")"; fi
 if [ -f "$L/fail.$name" ]; then
   case "$name" in
     create) cat >&2 ;;
@@ -166,6 +167,12 @@ impl OpShim {
     /// echo what it holds, print `stderr`, and exit 1.
     pub(crate) fn fail(&self, op: &str, stderr: &str) {
         std::fs::write(self.path(&format!("fail.{op}")), stderr).unwrap();
+    }
+
+    /// Make subcommand `op` sleep `secs` seconds before it acts (#7524
+    /// P2-M1), standing in for a slow network or an unlock prompt.
+    pub(crate) fn delay(&self, op: &str, secs: u64) {
+        std::fs::write(self.path(&format!("delay.{op}")), secs.to_string()).unwrap();
     }
 
     /// Answer "not currently signed in" unless the child's

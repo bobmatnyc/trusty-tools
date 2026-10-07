@@ -18,6 +18,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use trusty_common::uds::server::{
@@ -26,6 +27,7 @@ use trusty_common::uds::server::{
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::audit::AuditSink;
+use super::deadline::request_deadline;
 use super::doctor;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
@@ -224,6 +226,8 @@ pub struct State {
     pub(crate) file_consent_config: Option<PathBuf>,
     /// What the binary read from its environment at start (#7519 P4).
     pub(crate) start: StartEnv,
+    /// Replaces every method's deadline; tests only (#7524 P2-M1).
+    pub(crate) deadline_override: Option<Duration>,
 }
 
 impl State {
@@ -244,7 +248,14 @@ impl State {
             // #7524 H1: resolved once; a lookup failure refuses `file` writes.
             file_consent_config: account_machine_config(),
             start: StartEnv::default(),
+            deadline_override: None,
         }
+    }
+
+    /// The whole-operation deadline for one request of `name`.
+    fn deadline_for(&self, name: &str) -> Duration {
+        self.deadline_override
+            .unwrap_or_else(|| request_deadline(name))
     }
 }
 
@@ -274,8 +285,11 @@ pub(crate) const METHODS: [(&str, MethodFn); 6] = [
 /// happens in the method body, which drops the serde message.
 /// What: each call runs its body on tokio's blocking pool; an `Err` becomes
 /// [`ErrorKind::to_rpc`] for that method, and a body that panics becomes
-/// [`ErrorKind::Internal`].
-/// Test: `server_error_text_is_fixed_per_method_and_kind`.
+/// [`ErrorKind::Internal`]. #7524 P2-M1: the request's deadline starts when
+/// the call arrives and is set on the body's thread, so every CLI call the
+/// body makes is bounded by it (`store::deadline`).
+/// Test: `server_error_text_is_fixed_per_method_and_kind`,
+/// `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`.
 pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
     METHODS
         .into_iter()
@@ -284,10 +298,14 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
             router.typed::<Value, Value, _, _>(name, move |params| {
                 let state = Arc::clone(&state);
                 async move {
-                    tokio::task::spawn_blocking(move || body(&state, params))
-                        .await
-                        .unwrap_or(Err(ErrorKind::Internal))
-                        .map_err(|kind| kind.to_rpc(name))
+                    // #7524 P2-M1: one deadline for the whole request.
+                    let deadline = Instant::now() + state.deadline_for(name);
+                    tokio::task::spawn_blocking(move || {
+                        crate::store::deadline::within(deadline, || body(&state, params))
+                    })
+                    .await
+                    .unwrap_or(Err(ErrorKind::Internal))
+                    .map_err(|kind| kind.to_rpc(name))
                 }
             })
         })

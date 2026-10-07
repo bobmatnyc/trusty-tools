@@ -323,4 +323,21 @@ pub enum SecretsError {
         /// Backend id, e.g. `onepassword`.
         backend: String,
     },
+
+    /// A CLI-backed backend call was refused, or stopped, because the
+    /// server request it served ran past its deadline.
+    // #7524 P2-M1: after `BackendNotEnabled`, so no discriminant moves. The
+    // text says a write may have landed: a CLI killed mid-write cannot say.
+    #[error(
+        "the {backend} backend did not finish before the request deadline for {key} in {vault}; \
+         its CLI was stopped, and a write it had started may have landed"
+    )]
+    DeadlineExceeded {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the call served, or `(none)`.
+        vault: String,
+        /// The key the call served, or `(none)`.
+        key: String,
+    },
 }

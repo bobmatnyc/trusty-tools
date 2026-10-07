@@ -112,11 +112,14 @@ pub enum ErrorKind {
     /// A CLI-backed backend the machine config has not enabled.
     // #7519: P1 carry-over (a); refused before any process is spawned.
     BackendNotEnabled = 30,
+    /// The request ran past the server's deadline for its method.
+    // #7524 P2-M1: its own kind, so a caller knows a write may have landed.
+    DeadlineExceeded = 31,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 31] = [
+    pub(crate) const ALL: [Self; 32] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -148,6 +151,7 @@ impl ErrorKind {
         Self::FileBackendNotSelected,
         Self::Internal,
         Self::BackendNotEnabled,
+        Self::DeadlineExceeded,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -190,6 +194,7 @@ impl ErrorKind {
             Self::BackendLocked => "backend_locked",
             Self::FileBackendNotSelected => "file_backend_not_selected",
             Self::BackendNotEnabled => "backend_not_enabled",
+            Self::DeadlineExceeded => "deadline_exceeded",
             Self::Internal => "internal",
         }
     }
@@ -257,6 +262,10 @@ impl ErrorKind {
             Self::BackendNotEnabled => {
                 "the secrets backend is not enabled on this machine; enable it in the machine config ~/.trusty-tools/trusty-common/config.yaml"
             }
+            // #7524 P2-M1: a CLI killed mid-write cannot say whether it landed.
+            Self::DeadlineExceeded => {
+                "the request ran past the server's deadline and was stopped; a backend write already under way may have landed, so check the backend before retrying"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -302,6 +311,8 @@ impl ErrorKind {
             Self::FileBackendNotSelected => -32077,
             // #7519: the next unused code after #7524's.
             Self::BackendNotEnabled => -32078,
+            // #7524 P2-M1: the next unused code.
+            Self::DeadlineExceeded => -32079,
         }
     }
 
@@ -349,6 +360,7 @@ impl From<SecretsError> for ErrorKind {
             // #7524 H1: a write into `file` the machine config did not select.
             SecretsError::FileBackendNotSelected => Self::FileBackendNotSelected,
             SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
+            SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.

@@ -941,6 +941,18 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.doctor` | Runs `detect_backends` (§7) | The detection table |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
 
+**Request deadline and client wait (#7524 P2-M1).** The server gives each
+request one whole-operation deadline, counted from its arrival: 120 s for
+`secrets.set`, `secrets.delete` and `secrets.copy`, which reach vendor CLIs,
+and 15 s for every other method. Every CLI call the request makes is bounded
+by the time left; none starts after the deadline, and one still running then
+is killed with its process group. A request that runs out answers
+`deadline_exceeded` (-32079), whose text says a backend write already under
+way may have landed; a `copy` instead lists each key it did not start in
+`failed`. The client waits the method's deadline plus 15 s, so a reply the
+server sends always arrives, and a client timeout is never followed by a
+silent commit.
+
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves
 in-process through the `store` feature, so its values never cross a socket.

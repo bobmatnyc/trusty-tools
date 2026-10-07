@@ -138,6 +138,13 @@ read. No method returns
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
 
+Each request has one deadline: 120 s for `set`, `delete` and `copy`, 15 s for
+the rest. A CLI call does not start after it, and one still running is
+killed; the request then fails with `deadline_exceeded`, whose text says a
+write already under way may have landed. A `copy` lists the keys it did not
+start in `failed`. `OnDemandSecrets` waits 15 s longer than the deadline, so it
+always receives the server's answer.
+
 `delete` removes the key from every backend this build can store values in
 (the Keychain on macOS, the file backend, and 1Password or Keeper when the
 machine config enables it), not only the configured one, so a value left behind by a backend

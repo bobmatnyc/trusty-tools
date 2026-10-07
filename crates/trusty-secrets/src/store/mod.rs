@@ -10,6 +10,9 @@
 //! Test: the `*_tests.rs` files beside this module.
 
 mod backend;
+// #7524 P2-M1: the per-request deadline the server sets and the runner reads.
+#[cfg(any(feature = "server", feature = "cli-backends"))]
+pub(crate) mod deadline;
 // #7519: the runner the CLI-backed backends share; Unix only, because it
 // kills the child's process group.
 #[cfg(all(unix, feature = "cli-backends"))]

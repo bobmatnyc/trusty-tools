@@ -73,7 +73,51 @@ fn client_at(tmp: &Path, socket: &Path) -> OnDemandSecrets {
     OnDemandSecrets::at(socket).with_program(tmp.join("no-such-trusty-secrets"))
 }
 
+/// A `keychain` double whose `set` sleeps before storing.
+///
+/// Why: #7524 P2-M1 — stands in for a vendor CLI write that outlasts the
+/// client's old 30 s wait; this crate builds trusty-secrets without
+/// `cli-backends`, so it has no `op` backend to slow down.
+#[derive(Debug)]
+struct SlowSet {
+    inner: Arc<MemoryBackend>,
+    delay: Duration,
+}
+
+impl SecretBackend for SlowSet {
+    fn id(&self) -> BackendId {
+        self.inner.id()
+    }
+    fn capabilities(&self) -> trusty_secrets::store::Capabilities {
+        self.inner.capabilities()
+    }
+    fn get(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<Option<trusty_secrets::SecretValue>, SecretsError> {
+        self.inner.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &trusty_secrets::SecretValue,
+    ) -> Result<(), SecretsError> {
+        std::thread::sleep(self.delay);
+        self.inner.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.inner.delete(vault, key)
+    }
+}
+
 async fn harness() -> Harness {
+    harness_slowed(Duration::ZERO).await
+}
+
+/// [`harness`], with every `keychain` write taking `set_delay` first.
+async fn harness_slowed(set_delay: Duration) -> Harness {
     let tmp = TempDir::new().expect("tempdir");
     let repo = tmp.path().join("repo");
     std::fs::create_dir(&repo).expect("mkdir repo");
@@ -105,16 +149,20 @@ async fn harness() -> Harness {
     let spare = Arc::new(MemoryBackend::new());
     let (kc, sp) = (Arc::clone(&keychain), Arc::clone(&spare));
     let backends: BackendFactory = Arc::new(move |id: &BackendId| {
-        let backend = match id.as_str() {
-            BackendId::KEYCHAIN => Arc::clone(&kc),
-            "spare" => Arc::clone(&sp),
+        let backend: Arc<dyn SecretBackend> = match id.as_str() {
+            BackendId::KEYCHAIN if !set_delay.is_zero() => Arc::new(SlowSet {
+                inner: Arc::clone(&kc),
+                delay: set_delay,
+            }),
+            BackendId::KEYCHAIN => Arc::clone(&kc) as Arc<dyn SecretBackend>,
+            "spare" => Arc::clone(&sp) as Arc<dyn SecretBackend>,
             _ => {
                 return Err(SecretsError::UnknownBackend {
                     backend: id.to_string(),
                 });
             }
         };
-        Ok(backend as Arc<dyn SecretBackend>)
+        Ok(backend)
     });
     let (tx, rx) = oneshot::channel::<()>();
     let socket = settings.socket.clone();
@@ -334,6 +382,28 @@ async fn set_reads_the_clipboard_and_confirms_head_and_length_only() {
     assert_eq!(
         second.out,
         format!("(updated) secret set API_KEY: {HEAD}… [27 chars]\n")
+    );
+}
+
+/// Why: #7524 P2-M1 — `tm secrets set` waited 30 s, so a backend write
+/// that took longer was reported as "did not cross the socket" and then
+/// committed. A write taking 31 s now reports its real outcome. Red while
+/// the trusty-secrets client waited 30 s.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_slower_than_the_old_client_wait_reports_the_real_outcome() {
+    let h = harness_slowed(Duration::from_secs(31)).await;
+    let started = Instant::now();
+    let outcome = run(&h, VALUE, &["set", "API_KEY"]).await;
+    assert!(started.elapsed() >= Duration::from_secs(31));
+    assert_eq!(outcome.err, None, "tm gave up before the server answered");
+    assert_eq!(
+        outcome.out,
+        format!("(new) secret set API_KEY: {HEAD}… [24 chars]\n")
+    );
+    assert_eq!(
+        stored(&h.keychain, PROJECT_VAULT, "API_KEY").as_deref(),
+        Some(VALUE)
     );
 }
 
