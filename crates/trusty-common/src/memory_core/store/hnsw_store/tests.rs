@@ -1812,6 +1812,119 @@ fn search_finds_drawers_the_graph_cannot_reach() {
     );
 }
 
+/// Origin ids whose layer-0 list names `id`: its in-edges.
+fn in_edges(index: &Hnsw<'static, f32, DistCosine>, id: u64) -> Vec<u64> {
+    index
+        .get_point_indexation()
+        .get_layer_iterator(0)
+        .filter(|p| {
+            p.get_neighborhood_id()[0]
+                .iter()
+                .any(|n| n.d_id as u64 == id)
+        })
+        .map(|p| p.get_origin_id() as u64)
+        .collect()
+}
+
+/// `count` unit vectors at cosine distance about `delta^2 / 2` from `centre`,
+/// along `+-` an orthonormal basis of `centre`'s complement, so each is nearer
+/// `centre` than `centre`'s existing neighbours are.
+fn around(centre: &[f32], delta: f32, count: usize) -> Vec<Vec<f32>> {
+    let dim = centre.len();
+    let mut basis: Vec<Vec<f32>> = Vec::new();
+    for axis in 0..dim {
+        let mut v = vec![0.0f32; dim];
+        v[axis] = 1.0;
+        for b in std::iter::once(centre).chain(basis.iter().map(Vec::as_slice)) {
+            let dot: f32 = v.iter().zip(b).map(|(x, y)| x * y).sum();
+            v.iter_mut().zip(b).for_each(|(x, y)| *x -= dot * y);
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-3 {
+            basis.push(v.into_iter().map(|x| x / norm).collect());
+        }
+    }
+    basis
+        .iter()
+        .flat_map(|b| [1.0f32, -1.0].map(|sign| (b, sign)))
+        .take(count)
+        .map(|(b, sign)| {
+            let raw: Vec<f32> = centre
+                .iter()
+                .zip(b)
+                .map(|(c, x)| c + sign * delta * x)
+                .collect();
+            let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+            raw.into_iter().map(|x| x / norm).collect()
+        })
+        .collect()
+}
+
+/// Why (#9174): an upsert adds a reverse edge to each neighbour it picks, and
+/// a full neighbour list evicts its farthest entry. A drawer whose only
+/// in-edge sat at the end of that list loses it, after the check that found
+/// the drawer reachable, and stayed unscanned until the next reopen.
+/// What: the `search_finds_drawers_the_graph_cannot_reach` palace, above the
+/// exhaustive threshold so the graph arm answers. Upserts unique drawers next
+/// to the clump and takes the first the graph alone reaches. Then upserts 30
+/// drawers around each of that drawer's in-neighbours, each nearer to it than
+/// anything it lists, so their reverse edges push the drawer out of every
+/// list. Asserts the graph alone no longer reaches the drawer (the
+/// precondition: the defect happened), and that the store, with no reopen,
+/// still finds it with its own vector.
+/// Test: this test itself is the verification.
+#[test]
+fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
+    let dim = 16;
+    let anchor = spread_vec(dim, 424_242);
+    let mut pool = vec![anchor.clone(); 1_000];
+    let far = (exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160 - pool.len()) as u64;
+    pool.extend((0..far).map(|i| far_from(&anchor, 700_000 + i)));
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
+    let graph_finds = |id: u64, v: &[f32]| {
+        let live = reopened.keys.get(&reopened.db).expect("keys").reverse.len();
+        let index = reopened.index.read();
+        graph_nearest(&index, v, &Default::default(), 10, live)
+            .iter()
+            .any(|(hit, _)| *hit == id)
+    };
+
+    let (uuid, id, probe) = (0..10u64)
+        .find_map(|j| {
+            let (uuid, v) = (format!("probe-{j}"), near_anchor(&anchor, 600_000 + j));
+            let id = reopened.upsert(&uuid, &v).expect("upsert probe");
+            graph_finds(id, &v).then_some((uuid, id, v))
+        })
+        .expect("the graph reaches an upserted probe");
+    let sources = in_edges(&reopened.index.read(), id);
+    assert!(
+        !sources.is_empty() && sources.iter().all(|s| *s as usize <= pool.len()),
+        "the probe's in-neighbours are seeded rows: {sources:?}"
+    );
+    for source in &sources {
+        for (j, v) in around(&pool[*source as usize - 1], 0.01, 30)
+            .iter()
+            .enumerate()
+        {
+            reopened
+                .upsert(&format!("near-{source}-{j}"), v)
+                .expect("upsert");
+        }
+    }
+
+    assert!(
+        !graph_finds(id, &probe),
+        "precondition: the upserts must leave {uuid} without an in-edge"
+    );
+    assert!(
+        hit_uuids(&reopened, &probe, 10).contains(&uuid),
+        "{uuid}, stranded by a later upsert, is missing from its own top 10 \
+         with no reopen"
+    );
+}
+
 /// Uuids of `store`'s top `k` hits for `query`, in rank order.
 fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
     let hits = store.search(query, k).expect("search");

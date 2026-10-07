@@ -9,7 +9,8 @@
 //! parallel replay), and times 300 queries three ways: `HnswStore::search`
 //! (whichever arm the threshold selects), the exact scan alone, and the graph
 //! arm alone (`graph_nearest` plus the stranded merge). Prints p50/p95 per
-//! row, and how many queries' top 10 differ between two opens. A no-op unless `TRUSTY_HNSW_LATENCY_PROFILE` is set; run it in release:
+//! row, and how many queries' top 10 differ between two opens. #9174: also
+//! times `upsert` and, alone, the evicted-point re-check it now runs. A no-op unless `TRUSTY_HNSW_LATENCY_PROFILE` is set; run it in release:
 //! `TRUSTY_HNSW_LATENCY_PROFILE=1 cargo test -p trusty-common --release --lib
 //! hnsw_latency_profile -- --nocapture`. `TRUSTY_HNSW_LATENCY_SIZES` overrides
 //! the size list (comma-separated row counts).
@@ -94,7 +95,8 @@ fn hnsw_latency_profile() {
     );
     println!(
         "rows | open ms | stranded groups | search p50/p95 us | exact p50/p95 us | \
-         graph p50/p95 us | top-10 differs between two opens"
+         graph p50/p95 us | top-10 differs between two opens | upsert p50/p95 us | \
+         re-check p50/p95 us"
     );
     for n in sizes {
         let pool: Vec<Vec<f32>> = (0..n as u64).map(clustered_vec).collect();
@@ -130,15 +132,38 @@ fn hnsw_latency_profile() {
             .iter()
             .filter(|q| top10(&store, q) != top10(&second, q))
             .count();
+        // #9174: the re-check's snapshot and diff, without an insert between.
+        let index = store.index.read();
+        let recheck = time_queries(&queries[..100], |q| {
+            let before = stranded::neighbourhoods_before_insert(&index, q);
+            std::hint::black_box(stranded::restrand_evicted(
+                &index,
+                before,
+                u64::MAX,
+                &store.stranded,
+            ));
+        });
+        drop(index);
+        let mut upserted = 0u64;
+        let upsert = time_queries(&queries[..100], |q| {
+            upserted += 1;
+            store
+                .upsert(&format!("profile-{upserted}"), q)
+                .expect("upsert");
+        });
         println!(
-            "{n} | {open_ms} | {} | {}/{} | {}/{} | {}/{} | {differ}/{QUERIES}",
+            "{n} | {open_ms} | {} | {}/{} | {}/{} | {}/{} | {differ}/{QUERIES} | {}/{} | {}/{}",
             store.stranded.read().len(),
             search.0,
             search.1,
             exact.0,
             exact.1,
             graph.0,
-            graph.1
+            graph.1,
+            upsert.0,
+            upsert.1,
+            recheck.0,
+            recheck.1
         );
     }
     println!("load_after=[{}]", load_average());
