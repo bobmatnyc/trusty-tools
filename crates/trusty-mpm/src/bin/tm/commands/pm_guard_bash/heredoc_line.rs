@@ -65,6 +65,10 @@ struct Word {
     assignment: bool,
     /// `false` when a `$`, a substitution or a glued close builds the word.
     literal: bool,
+    /// #9344: how many substitutions opened in assignment values hold the word.
+    depth: usize,
+    /// #9344: an assignment whose value substitution closed on the line.
+    closed: bool,
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -169,7 +173,9 @@ const GH_DATA_SUBCOMMANDS: &[&str] = &[
 /// Test: `injected_reader_lines_are_not_data_9344`,
 /// `commit_and_pr_body_shapes_stay_allowed_9344`.
 fn reader_keeps_trust(words: &[Word], at: usize) -> bool {
-    let bare = |w: &Word| matches!(w.raw.split_once('=').map(|(_, v)| v), Some("" | "$"));
+    // #9344: a value substitution closed before the reader is no bare `x=`.
+    let bare =
+        |w: &Word| !w.closed && matches!(w.raw.split_once('=').map(|(_, v)| v), Some("" | "$"));
     let prefix_ok = prefix(words, at).all(bare);
     let mut args = arguments(words, at);
     match words[at].text.as_str() {
@@ -222,11 +228,15 @@ fn git_subcommand(words: &[Word], at: usize) -> Option<&str> {
     None
 }
 
-/// The prefix assignments of program word `words[at]`, nearest first.
+/// The prefix assignments of program word `words[at]`, nearest first; #9344:
+/// the words of a value substitution deeper than `words[at]` are skipped, so
+/// `X=$(GIT_EXEC_PATH=… git` keeps git's own prefix.
 fn prefix(words: &[Word], at: usize) -> impl Iterator<Item = &Word> {
+    let depth = words[at].depth;
     words[..at]
         .iter()
         .rev()
+        .filter(move |w| w.depth <= depth)
         .take_while(|w| w.program && w.assignment)
 }
 
@@ -262,7 +272,12 @@ fn is_shell(word: &str) -> bool {
 /// when it holds a `$`, starts right after a `)` or a closing backtick, or
 /// runs into an opening backtick; a backtick opened in program position
 /// yields a non-literal program word of its own, since the substitution's
-/// output is then the program.
+/// output is then the program. #9344: the `)` or backtick that closes a
+/// substitution opened in a prefix assignment's value (`X=$(…) git`) puts
+/// the next word back in program position, marks that assignment closed,
+/// and records each word's value-substitution depth, so [`prefix`] reaches
+/// the assignment.
+/// Test: `injected_reader_lines_are_not_data_9344`.
 fn operator_words(line: &str) -> Vec<Word> {
     let mut words = Vec::new();
     let mut word = Vec::new();
@@ -272,7 +287,19 @@ fn operator_words(line: &str) -> Vec<Word> {
     // Whether the last byte closed a `)` or a backtick.
     let mut after_close = false;
     let mut in_tick = false;
-    let mut flush = |word: &mut Vec<u8>, program: &mut bool, glued: &mut bool| {
+    // #9344: per open `(`, and for the open backtick, the index of the
+    // prefix assignment whose value it opened, so its close restores program
+    // position and marks that assignment closed.
+    let mut parens: Vec<Option<usize>> = Vec::new();
+    let mut tick_value: Option<usize> = None;
+    let in_value = |word: &[u8], program: bool| {
+        program && strip_assignment(&String::from_utf8_lossy(word)).is_some()
+    };
+    let flush = |words: &mut Vec<Word>,
+                 word: &mut Vec<u8>,
+                 program: &mut bool,
+                 glued: &mut bool,
+                 depth: usize| {
         if word.is_empty() {
             return;
         }
@@ -287,6 +314,8 @@ fn operator_words(line: &str) -> Vec<Word> {
             text: base,
             program: *program,
             assignment: assignment.is_some(),
+            depth,
+            closed: false,
         });
         *glued = false;
         if assignment.is_none() {
@@ -294,10 +323,11 @@ fn operator_words(line: &str) -> Vec<Word> {
         }
     };
     for &byte in line.as_bytes() {
+        let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
         match byte {
             b'\'' | b'"' | b'\\' => {}
             b' ' | b'\t' | b'\n' | b'\r' => {
-                flush(&mut word, &mut program, &mut glued);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
                 after_close = false;
             }
             b'`' if !in_tick => {
@@ -305,19 +335,37 @@ fn operator_words(line: &str) -> Vec<Word> {
                 // `x=` takes the substitution as its value; any other word
                 // the backtick runs into is built by it.
                 let takes_value = strip_assignment(&String::from_utf8_lossy(&word)) == Some("");
+                let opens_value = in_value(&word, program);
                 glued |= !word.is_empty() && !takes_value;
                 if word.is_empty() && program && !after_close {
                     word.push(b'`');
                     glued = true;
                 }
-                flush(&mut word, &mut program, &mut glued);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
+                tick_value = opens_value.then(|| words.len() - 1);
                 program = true;
                 after_close = false;
             }
             _ if BREAKS.contains(&byte) => {
-                flush(&mut word, &mut program, &mut glued);
-                if byte == b'`' {
-                    in_tick = false;
+                let opens_value = byte == b'(' && in_value(&word, program);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
+                // #9344: `X=$(…) git`, `X=`…` git` — the close hands back
+                // program position and marks the assignment closed.
+                let closes = match byte {
+                    b'`' => {
+                        in_tick = false;
+                        tick_value.take()
+                    }
+                    b'(' => {
+                        parens.push(opens_value.then(|| words.len() - 1));
+                        None
+                    }
+                    b')' => parens.pop().flatten(),
+                    _ => None,
+                };
+                if let Some(at) = closes {
+                    words[at].closed = true;
+                    program = true;
                 }
                 after_close = matches!(byte, b')' | b'`');
                 if COMMAND_STARTS.contains(&byte) && byte != b'`' {
@@ -331,7 +379,8 @@ fn operator_words(line: &str) -> Vec<Word> {
             }
         }
     }
-    flush(&mut word, &mut program, &mut glued);
+    let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
+    flush(&mut words, &mut word, &mut program, &mut glued, depth);
     words
 }
 

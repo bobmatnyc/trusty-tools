@@ -245,7 +245,8 @@ fn classify_destructive_delete_in(
 }
 
 /// [`DeleteTarget::Root`] when a line of any here-document body in `command`
-/// is a destructive-root command, whatever program reads the body (#9344).
+/// is a destructive-root command, whatever program reads the body (#9344);
+/// [`DeleteTarget::Unresolved`] for a wrapper the resolver cannot measure.
 ///
 /// Why: a body read as data is never judged as a command, and a reader can
 /// run it after all — a `!`-alias, a gh extension, a `gpg.program` set in an
@@ -255,26 +256,30 @@ fn classify_destructive_delete_in(
 /// a target in the root class, judged from every directory in `cwds`. A verb
 /// anywhere else in a sentence, a backticked delete, an unresolvable target
 /// and a repository or worktree target do not count, so prose stays allowed.
+/// #9344 round 2: a segment whose program word the resolver cannot name and
+/// that names a delete verb is [`DeleteTarget::Unresolved`], as in
+/// [`classify_at_depth`].
 /// Test: `data_reader_tests::a_data_reader_body_holding_a_root_delete_is_denied_9344`,
 /// `data_reader_tests::commit_and_pr_body_shapes_stay_allowed_9344`.
 fn data_body_root_delete(command: &str, cwds: &[PathBuf], env: &PathEnv) -> Option<DeleteTarget> {
     let heredocs = HeredocBodies::scan(command);
-    let found = heredocs
+    heredocs
         .bodies()
         .iter()
         .flat_map(|body| command[body.span.0..body.span.1].lines())
         .flat_map(split_shell_segments_raw)
-        .any(|segment| {
+        .filter_map(|segment| {
             let trimmed = segment.trim();
             let argv = shlex::split(trimmed).unwrap_or_else(|| {
                 let words = trimmed.split_whitespace();
                 words.map(|w| w.replace(['\'', '"'], "")).collect()
             });
+            // #9344 round 2: an unresolvable wrapper fails closed.
             let Ok(word) = resolve_program_word(&argv) else {
-                return false;
+                return segment_mentions_a_delete_verb(trimmed).then_some(DeleteTarget::Unresolved);
             };
             let verb = argv.get(word.index).map_or("", |w| verb_name(w));
-            !word.lookup
+            let root = !word.lookup
                 && DELETE_VERBS.contains(&verb)
                 && delete_targets(verb, &argv[word.index + 1..])
                     .iter()
@@ -283,9 +288,10 @@ fn data_body_root_delete(command: &str, cwds: &[PathBuf], env: &PathEnv) -> Opti
                             let path = resolve_target_path(target, dir, env);
                             is_root_class(glob_parent(&path), env)
                         })
-                    })
-        });
-    found.then_some(DeleteTarget::Root)
+                    });
+            root.then_some(DeleteTarget::Root)
+        })
+        .max()
 }
 
 /// Programs that read a quoted here-document body on stdin as data (#7190).

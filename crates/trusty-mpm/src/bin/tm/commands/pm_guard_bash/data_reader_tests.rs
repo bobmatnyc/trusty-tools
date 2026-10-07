@@ -22,8 +22,20 @@ const PAYLOADS: &[&str] = &["cd ~; rm -rf .", "echo $(rm -rf ~)", "rm -rf ~"];
 /// Operator lines whose git or gh hands its stdin to a shell: a `!`-alias
 /// made by `-c`, `--config`, `--config-env` or a `GIT_CONFIG_*` prefix, an
 /// alias key on the line, and a subcommand no builtin names (an alias or an
-/// extension made earlier).
+/// extension made earlier). #9344 round 2: a prefix assignment whose value is
+/// a substitution closed on the line still leaves the next word a program,
+/// and stays that program's prefix.
 const INJECTED: &[&str] = &[
+    "X=$(true) git -c alias.x='!sh' x <<'O'",
+    "X=`true` git -c alias.x='!sh' x <<'O'",
+    "X=$(true) f <<'O'",
+    "X=`true` f <<'O'",
+    "X=$((1+2)) Y=$(echo a) f <<'O'",
+    "GIT_EXEC_PATH=$(echo /tmp/x) git commit -F - <<'O'",
+    "GIT_CONFIG_PARAMETERS=`printf x` git commit -F - <<'O'",
+    "X=$(true) git commit -F - <<'O'",
+    "X=$(true) tm x - <<'O'",
+    "X=$(GIT_EXEC_PATH=/tmp/x git commit -F - <<'O'",
     "git -c alias.x='!sh' x <<'O'",
     "git -c alias.x=\\!sh x<<'O'",
     "git -C /tmp -c alias.x='!sh' x <<'O'",
@@ -67,6 +79,7 @@ fn injected_reader_lines_are_not_data_9344() {
         "git -c alias.x='!sh' x <<'O'",
         "git --config-env=alias.x=SH x <<'O'",
         "GIT_CONFIG_COUNT=1 git x <<'O'",
+        "GIT_EXEC_PATH=$(echo /tmp/x) git commit -F - <<'O'",
     ] {
         assert!(line_runs_a_shell(line), "{line:?}");
     }
@@ -84,6 +97,9 @@ fn a_data_reader_body_holding_a_root_delete_is_denied_9344() {
         "cat > s.sh <<'EOF'\nrm -rf /\nEOF",
         "tee s.sh <<'EOF'\nrm -fr ~/\nEOF",
         "bash <<'O'\ncat > s.sh <<'E'\nrm -rf /\nE\nO",
+        // #9344 round 2: a wrapper the resolver cannot measure fails closed.
+        "cat > f <<'EOF'\nsudo --frobnicate rm -rf /\nEOF",
+        "cat > f <<'EOF'\ntimeout soon rm -rf /\nEOF",
     ] {
         assert!(
             floor(command).is_some_and(DeleteTarget::is_floor),
