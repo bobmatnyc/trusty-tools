@@ -1171,8 +1171,10 @@ fn parse_null_severity_derives_severity() {
 }
 
 /// #9310 item 4b: a double-encoded findings string that does not decode names
-/// one position, the outer one. Before, the reason also carried the inner
-/// position, counted within the decoded string.
+/// one position, the findings string's own place in the reply. Before, the
+/// inner error's position, counted inside the decoded string, was the one
+/// reported: serde_json reads a trailing ` at line L column C` out of a custom
+/// error message and keeps it as the error's position.
 #[test]
 fn double_encoded_findings_error_reports_one_position() {
     let inner = serde_json::json!([{ "title": "no body" }]).to_string();
@@ -1181,6 +1183,15 @@ fn double_encoded_findings_error_reports_one_position() {
     assert!(reason.contains(FINDINGS_DECODE_ERROR), "{reason}");
     assert!(reason.contains("missing field `body`"), "{reason}");
     assert_eq!(reason.matches(" at line ").count(), 1, "{reason}");
+    // The closing quote of the findings string, 1-based, in the reply.
+    let column = body
+        .find("\",\"verdict\"")
+        .expect("findings precede verdict")
+        + 1;
+    assert!(
+        reason.ends_with(&format!(" at line 1 column {column}")),
+        "{reason}"
+    );
 }
 
 /// #9310 item 4c: a pin of which serde data messages may reach the fail-safe
