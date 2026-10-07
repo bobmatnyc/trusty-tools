@@ -258,10 +258,12 @@ async fn read_all(fetcher: &dyn DocFetcher, paths: &[String], call: &DocsCall<'_
 /// What: one query (PR title plus changed-file stems) for
 /// `MAX_DOC_DISCOVERY_HITS` hits under the read timeout; each hit's path is
 /// made repository-relative (an absolute one through the index root from
-/// `list_indexes`). Any error or timeout returns no hits and a detail.
+/// `list_indexes`). Any error or timeout, of the search or of that root
+/// lookup, or an index missing from the list, returns no hits and a detail.
 /// Test: `search_down_is_unavailable_and_explicit_paths_still_read`,
 /// `search_hit_adds_candidate_and_text_comes_from_head`,
-/// `search_hit_absolute_path_is_made_repo_relative`.
+/// `search_hit_absolute_path_is_made_repo_relative`,
+/// `index_root_lookup_failure_marks_discovery_unavailable`.
 async fn discover(call: &DocsCall<'_>) -> (Vec<String>, Option<String>) {
     let limit = Duration::from_secs(DOC_READ_TIMEOUT_SECS);
     let stems: Vec<&str> = call
@@ -286,13 +288,17 @@ async fn discover(call: &DocsCall<'_>) -> (Vec<String>, Option<String>) {
         Ok(Err(e)) => return (Vec::new(), Some(format!("trusty-search failed: {e}"))),
         Ok(Ok(hits)) => hits,
     };
+    // #9193 amendment 7: without the root every absolute hit would be dropped
+    // silently, so a failed lookup is a discovery failure, not "no hits".
     let root = if hits.iter().any(|h| h.file.starts_with('/')) {
+        let fail = |detail: String| (Vec::new(), Some(detail));
         match timeout(limit, call.search.list_indexes()).await {
-            Ok(Ok(indexes)) => indexes
-                .into_iter()
-                .find(|i| i.id == call.index)
-                .and_then(|i| i.root_path),
-            _ => None,
+            Err(_) => return fail("index root lookup timed out".to_string()),
+            Ok(Err(e)) => return fail(format!("index root lookup failed: {e}")),
+            Ok(Ok(indexes)) => match indexes.into_iter().find(|i| i.id == call.index) {
+                Some(index) => index.root_path,
+                None => return fail(format!("index {} not in list_indexes", call.index)),
+            },
         }
     } else {
         None
