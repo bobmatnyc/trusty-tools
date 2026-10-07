@@ -146,6 +146,36 @@ fails and the key stays listed. On macOS this includes the Keychain when the
 project is configured for `file`, so a locked Keychain fails that delete closed:
 unlock the Keychain and retry.
 
+## Doctor
+
+`secrets.doctor` (and `tm secrets doctor`) reports the socket, the index, the
+machine config the selected backend comes from, the account's own machine
+config (the one file that can enable 1Password or Keeper), the selected
+backend and its posture, and one row per backend: `keychain`, `file`,
+`onepassword` and `keeper`, on every build. A row the server cannot open says
+why, as `reason` plus a `detail` with the fix:
+
+| `reason` | Meaning |
+|---|---|
+| `not_compiled` | This build does not link it: no Keychain off macOS, or no `cli-backends` feature. |
+| `not_enabled` | The account's own machine config does not enable it, or the account's home is unknown. |
+| `cli_not_installed` | Its CLI is missing, or `program` is not an executable file. |
+| `config_invalid` | The account's machine config or the backend's section is unreadable, does not parse, or is refused (a relative `program`, a Keeper `config_path` that is missing or not mode 0600). |
+| `tracked_setting_refused` | The project's tracked config sets something only the machine config may; every request in that project is refused. Shown on the selected row. |
+
+`available` means the server opens the backend now. Doctor runs no CLI, so
+it never knows whether 1Password or Keeper is unlocked. `headless` says only
+whether `OP_SERVICE_ACCOUNT_TOKEN` was set when the server started: yes or
+no, never the token, its length or a prefix. Keeper's device approval and
+persistent login are not detected; a headless Keeper call made before that
+human step fails as `backend_locked`. Doctor reads no secret, spawns no
+process and writes no audit record.
+
+`tools` lists secrets tools trusty-secrets has no backend for — `bw`,
+`vault`, `pass`, `gopass`, `doppler` and `infisical` — as installed or not,
+with the path found. The lookup searches only the absolute entries of the
+`PATH` the server started with, and runs nothing it finds.
+
 ## 1Password
 
 With the `cli-backends` feature (Unix), the `onepassword` backend keeps values
@@ -185,7 +215,8 @@ of whatever started the server. With no such `op`, calls fail with
   no token and no session, calls fail as locked. Nothing falls back to the
   Keychain or to files.
 - Enabling 1Password adds one `op item list` to every `delete`.
-- `doctor` lists the backend without running `op`.
+- `doctor` lists the backend without running `op`, and reports whether a
+  token was present at server start (see Doctor above).
 
 ```bash
 cargo install trusty-secrets --version <version> --features cli-backends --locked
@@ -214,7 +245,9 @@ There is no `PATH` search, and Commander's own config search is never used.
 - Headless use needs one human step first: log in with that config file,
   approve the device, and run `this-device register` and
   `this-device persistent-login on`. Until then, and after an idle timeout,
-  calls fail with `backend_locked`; the server never prompts.
+  calls fail with `backend_locked`; the server never prompts. `doctor` does
+  not detect device approval or persistent login: an available row says only
+  that the server opens the backend.
 - The trusty vault name is the Keeper folder path, for example
   `trusty/acme/web`. Create that folder first.
 - A key is a `login` record titled with the key. Its `password` field holds

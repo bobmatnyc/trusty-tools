@@ -7,8 +7,8 @@
 //! What: [`CliSpec`] (a backend's static facts), [`CliCommand`] (the
 //! blocking runner), [`Verdict`] and [`CliRun`] (what a run meant), and
 //! [`TemplateFile`] with [`sweep_stale_templates`] (a 0600 file for a CLI
-//! that reads input only from a path), and the program checks both
-//! backends share (`program.rs`). Behind the `cli-backends` feature,
+//! that reads input only from a path), and a re-export of the program checks
+//! both backends share (`store/program.rs`). Behind the `cli-backends` feature,
 //! Unix only. No backend-specific code lives here.
 //! Test: `runner_tests.rs` and `template_tests.rs` beside this file, and
 //! `tests/cli_backends_feature_closure.rs`.
@@ -20,7 +20,6 @@
 //! other.
 
 mod classify;
-mod program;
 mod runner;
 mod spec;
 mod template;
@@ -29,7 +28,8 @@ mod template;
 pub(crate) mod test_shim;
 
 pub use classify::Verdict;
-pub(crate) use program::{find_on_path, is_executable_file};
+// #7519 P4: the PATH search moved to `store::program`, which doctor uses on every build.
+pub(crate) use crate::store::program::{find_on_path, is_executable_file};
 pub use runner::{CliCommand, CliRun, OUTPUT_CAP};
 pub use spec::CliSpec;
 pub use template::{TMP_SUBDIR, TemplateFile, default_tmp_root, sweep_stale_templates};

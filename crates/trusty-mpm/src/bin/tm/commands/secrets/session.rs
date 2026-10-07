@@ -38,6 +38,9 @@ pub(crate) struct Ctx<'a> {
     pub(crate) clipboard: &'a dyn ValueSource,
     /// The `--value -` source.
     pub(crate) stdin: &'a dyn ValueSource,
+    /// Whether this is a CI run (`CI=true`); `doctor` judges headless
+    /// readiness only then (#7519 d4 Q2).
+    pub(crate) ci: bool,
 }
 
 impl Ctx<'_> {

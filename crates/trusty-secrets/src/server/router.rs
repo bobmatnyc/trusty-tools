@@ -26,6 +26,7 @@ use trusty_common::uds::server::{
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::audit::AuditSink;
+use super::doctor;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
@@ -82,7 +83,7 @@ pub fn backends_for(
 /// and `search_path` (the `PATH` the binary read at start), only when
 /// [`account_machine`] enables it; else [`SecretsError::BackendNotEnabled`].
 /// The file is read on each open, so a change is seen on the next request.
-/// `keychain` and `file` open through [`open_backend`].
+/// `keychain` and `file` open through [`open_local`].
 /// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
 /// `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
@@ -95,7 +96,7 @@ pub(crate) fn backends_with(
     let template_root = settings.template_root.clone();
     Arc::new(move |id: &BackendId| {
         if !cli_backends().contains(id) {
-            return open_backend(id);
+            return open_local(id, KEYCHAIN_COMPILED);
         }
         // #7519: ruling 74 — `settings.machine_config` is the spawner's to
         // choose, so only the account's own file enables a CLI backend or
@@ -116,6 +117,60 @@ pub(crate) fn backends_with(
             search_path.as_deref(),
         )
     })
+}
+
+/// [`open_backend`] for a backend that is not CLI-backed, refusing
+/// `keychain` on a build that links no Keychain (#7519 P4).
+///
+/// Why: A4 — off macOS `KeychainBackend` opens but fails every call, so
+/// doctor read a healthy Keychain row on a Linux host with no Keychain.
+/// What: `keychain` without `keychain_compiled` is
+/// [`SecretsError::UnknownBackend`], the error each of its calls returned;
+/// anything else is [`open_backend`].
+/// Test: `doctor_keychain_row_is_not_compiled_without_a_keychain`.
+pub(crate) fn open_local(
+    id: &BackendId,
+    keychain_compiled: bool,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    if id.as_str() == BackendId::KEYCHAIN && !keychain_compiled {
+        return Err(SecretsError::UnknownBackend {
+            backend: id.to_string(),
+        });
+    }
+    open_backend(id)
+}
+
+/// What the binary read from its own environment at start (#7519 P4).
+///
+/// Why: A10 — the binary takes the 1Password service-account token out of
+/// its environment before any thread starts and hands it to the factory;
+/// doctor may report only that it was there (owner ruling Q1).
+/// What: the token's presence, never its value, and the `PATH` doctor's
+/// tool detection searches (DOC-74 §7), so `Debug` carries no secret.
+/// Test: `doctor_reports_token_presence_and_never_the_token`,
+/// `doctor_detects_unsupported_tools_on_the_start_path_without_running_them`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StartEnv {
+    /// Whether `OP_SERVICE_ACCOUNT_TOKEN` was set and non-empty at start.
+    pub onepassword_token: bool,
+    /// The `PATH` the binary read at start; only its absolute entries are
+    /// searched.
+    pub search_path: Option<OsString>,
+}
+
+impl StartEnv {
+    /// This environment with the 1Password token's presence set.
+    pub fn with_onepassword_token(mut self, present: bool) -> Self {
+        self.onepassword_token = present;
+        self
+    }
+
+    /// This environment with the `PATH` read at start.
+    pub fn with_search_path(mut self, path: Option<OsString>) -> Self {
+        self.search_path = path;
+        self
+    }
 }
 
 /// The account's own machine config: [`MACHINE_CONFIG_SUBPATH`] under
@@ -166,6 +221,8 @@ pub struct State {
     // #7524 H1: from the password database, never `--machine-config` or
     // `$HOME`; a crate-private field so only tests can aim it elsewhere.
     pub(crate) file_consent_config: Option<PathBuf>,
+    /// What the binary read from its environment at start (#7519 P4).
+    pub(crate) start: StartEnv,
 }
 
 impl State {
@@ -185,6 +242,7 @@ impl State {
             keychain_compiled: KEYCHAIN_COMPILED,
             // #7524 H1: resolved once; a lookup failure refuses `file` writes.
             file_consent_config: account_machine_config(),
+            start: StartEnv::default(),
         }
     }
 }
@@ -205,7 +263,7 @@ pub(crate) const METHODS: [(&str, MethodFn); 6] = [
     (method::SET, methods::set),
     (method::DELETE, methods::delete),
     (method::COPY, methods::copy),
-    (methods::DOCTOR, methods::doctor),
+    (doctor::DOCTOR, doctor::doctor),
 ];
 
 /// The `secrets.*` router over `state`.
@@ -323,7 +381,23 @@ pub async fn serve(
     backends: BackendFactory,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
-    serve_state(State::new(settings, backends), shutdown).await
+    serve_with(settings, backends, StartEnv::default(), shutdown).await
+}
+
+/// [`serve`], reporting `start` in `secrets.doctor` (#7519 P4).
+///
+/// What: the binary's entry point; `start` is what it read from its own
+/// environment before the runtime started.
+/// Test: `binary_doctor_reports_token_presence_and_never_the_token`.
+pub async fn serve_with(
+    settings: ServerSettings,
+    backends: BackendFactory,
+    start: StartEnv,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<ServeExit, ServeError> {
+    let mut state = State::new(settings, backends);
+    state.start = start;
+    serve_state(state, shutdown).await
 }
 
 /// [`serve`] over a prepared [`State`].
