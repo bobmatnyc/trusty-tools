@@ -138,7 +138,7 @@ async fn detail_is_bounded_and_single_line() {
 #[tokio::test]
 async fn a_bearer_token_never_reaches_a_detail() {
     const ERR: &str = "401 Unauthorized; request had Authorization: Bearer s3cr3t-tok \
-                       and token=ghp_0123456789abcdefABCDEF0123456789abcd";
+                       and token=ghp_0123456789abcdefABCDEF0123456789";
     let run = with_sources(Run::new(report()), || {
         vec![scripted("confluence", true, Answer::Error(ERR))]
     });
