@@ -35,6 +35,25 @@ impl KnowledgeGraph {
         Ok(triples)
     }
 
+    /// The active `superseded_by` replacement of each drawer in `ids` (#9421).
+    ///
+    /// Why: recall demotes superseded drawers and asks about its whole result
+    /// window at once; the batch keeps that one read transaction off the
+    /// async runtime.
+    /// What: runs `KgStoreRedb::superseded_by_many` on the blocking pool. The
+    /// map holds `superseded -> replacement` for each id that has an active
+    /// edge to another drawer.
+    /// Test: `superseded_by_many_maps_only_active_drawer_edges`.
+    pub async fn superseded_by_many(
+        &self,
+        ids: Vec<Uuid>,
+    ) -> Result<std::collections::HashMap<Uuid, Uuid>> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || store.superseded_by_many(&ids))
+            .await
+            .context("superseded_by_many spawn_blocking join error")?
+    }
+
     /// List up to `limit` distinct subjects with at least one active triple.
     ///
     /// Why: KG Explorer UI browses subjects without knowing one upfront.
