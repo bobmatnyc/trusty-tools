@@ -419,10 +419,11 @@ impl Machine {
     }
 
     fn section(&self) -> CliSettings {
-        let mut section = CliSettings::default();
-        section.config_path = Some(self.config.clone());
-        section.program = Some(self.program.clone());
-        section
+        CliSettings {
+            config_path: Some(self.config.clone()),
+            program: Some(self.program.clone()),
+            ..CliSettings::default()
+        }
     }
 
     fn settings(
@@ -431,8 +432,10 @@ impl Machine {
     ) -> Result<KeeperSettings, SecretsError> {
         let mut section = self.section();
         edit(&mut section);
-        let mut machine = MachineSecretsConfig::default();
-        machine.keeper = Some(section);
+        let machine = MachineSecretsConfig {
+            keeper: Some(section),
+            ..MachineSecretsConfig::default()
+        };
         KeeperSettings::from_machine(&machine, &self.tmp.path().join("machine.yaml"))
     }
 }
