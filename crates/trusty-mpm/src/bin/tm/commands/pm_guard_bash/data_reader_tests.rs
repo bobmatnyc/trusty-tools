@@ -36,6 +36,11 @@ const INJECTED: &[&str] = &[
     "X=$(true) git commit -F - <<'O'",
     "X=$(true) tm x - <<'O'",
     "X=$(GIT_EXEC_PATH=/tmp/x git commit -F - <<'O'",
+    // #9344 round 3: a quoted or escaped `)` closes no substitution.
+    "X=$(echo ')' cat) f <<'O'",
+    "X=$(echo \")\" cat) . /dev/stdin <<'O'",
+    "X=$(echo \\) cat) perl <<'O'",
+    "X=$(echo ')' cat) gh x <<'O'",
     "git -c alias.x='!sh' x <<'O'",
     "git -c alias.x=\\!sh x<<'O'",
     "git -C /tmp -c alias.x='!sh' x <<'O'",
@@ -83,6 +88,24 @@ fn injected_reader_lines_are_not_data_9344() {
     ] {
         assert!(line_runs_a_shell(line), "{line:?}");
     }
+}
+
+/// #9344 round 3: a quote in a value substitution that never closes on the
+/// line leaves a reader line data; one that closes cleanly stays as before.
+#[test]
+fn unclosed_quoted_value_substitutions_stay_data_9344() {
+    for line in [
+        "cat > f <<'EOF'",
+        "msg=$(cat <<'EOF'",
+        "msg=\"$(cat <<'EOF'",
+        "git commit -m \"$(cat <<'EOF'",
+        "gh pr create --body-file - <<'EOF'",
+    ] {
+        assert!(line_reads_as_data(line), "{line:?}");
+    }
+    assert!(!line_reads_as_data(
+        "X=$(git rev-parse HEAD) git commit -F - <<'O'"
+    ));
 }
 
 /// #9344 rule 2: a data-reader body that holds a destructive-root command is

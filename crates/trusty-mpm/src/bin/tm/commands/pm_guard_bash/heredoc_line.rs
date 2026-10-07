@@ -69,6 +69,9 @@ struct Word {
     depth: usize,
     /// #9344: an assignment whose value substitution closed on the line.
     closed: bool,
+    /// #9344: a `closed` assignment whose value held a quote or `\`, so
+    /// the `)` or backtick read as its close may be quoted text.
+    quoted: bool,
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -104,18 +107,22 @@ pub(super) fn line_runs_a_shell(line: &str) -> bool {
 /// a `$` or built by a substitution, a program read from a substitution, any
 /// other name — is shell-run.
 /// #9344: and every git, gh or tm among them keeps its trust
-/// ([`reader_keeps_trust`]).
+/// ([`reader_keeps_trust`]), and no word is `quoted`: the shell may not have
+/// closed that substitution where the scan did.
 /// Test: `operator_lines_read_as_data_only_for_a_literal_reader_9180`,
 /// `injected_reader_lines_are_not_data_9344`.
 pub(super) fn line_reads_as_data(line: &str) -> bool {
     let words = operator_words(line);
-    words
-        .iter()
-        .enumerate()
-        .filter(|(_, word)| word.program && !word.assignment)
-        .all(|(at, word)| {
-            word.literal && DATA_READERS.contains(&&*word.text) && reader_keeps_trust(&words, at)
-        })
+    !words.iter().any(|word| word.quoted)
+        && words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| word.program && !word.assignment)
+            .all(|(at, word)| {
+                word.literal
+                    && DATA_READERS.contains(&&*word.text)
+                    && reader_keeps_trust(&words, at)
+            })
 }
 
 /// git global options whose value is the next word (#9344).
@@ -276,7 +283,8 @@ fn is_shell(word: &str) -> bool {
 /// substitution opened in a prefix assignment's value (`X=$(…) git`) puts
 /// the next word back in program position, marks that assignment closed,
 /// and records each word's value-substitution depth, so [`prefix`] reaches
-/// the assignment.
+/// the assignment. Quotes are not tracked, so a close after a quote or `\`
+/// inside the value marks the assignment `quoted`.
 /// Test: `injected_reader_lines_are_not_data_9344`.
 fn operator_words(line: &str) -> Vec<Word> {
     let mut words = Vec::new();
@@ -288,10 +296,12 @@ fn operator_words(line: &str) -> Vec<Word> {
     let mut after_close = false;
     let mut in_tick = false;
     // #9344: per open `(`, and for the open backtick, the index of the
-    // prefix assignment whose value it opened, so its close restores program
-    // position and marks that assignment closed.
-    let mut parens: Vec<Option<usize>> = Vec::new();
-    let mut tick_value: Option<usize> = None;
+    // prefix assignment whose value it opened and the `quotes` count then,
+    // so its close restores program position and marks that assignment
+    // closed, and `quoted` when a quote or `\` came between.
+    let mut parens: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut tick_value: Option<(usize, usize)> = None;
+    let mut quotes = 0usize;
     let in_value = |word: &[u8], program: bool| {
         program && strip_assignment(&String::from_utf8_lossy(word)).is_some()
     };
@@ -316,6 +326,7 @@ fn operator_words(line: &str) -> Vec<Word> {
             assignment: assignment.is_some(),
             depth,
             closed: false,
+            quoted: false,
         });
         *glued = false;
         if assignment.is_none() {
@@ -325,7 +336,7 @@ fn operator_words(line: &str) -> Vec<Word> {
     for &byte in line.as_bytes() {
         let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
         match byte {
-            b'\'' | b'"' | b'\\' => {}
+            b'\'' | b'"' | b'\\' => quotes += 1,
             b' ' | b'\t' | b'\n' | b'\r' => {
                 flush(&mut words, &mut word, &mut program, &mut glued, depth);
                 after_close = false;
@@ -342,7 +353,7 @@ fn operator_words(line: &str) -> Vec<Word> {
                     glued = true;
                 }
                 flush(&mut words, &mut word, &mut program, &mut glued, depth);
-                tick_value = opens_value.then(|| words.len() - 1);
+                tick_value = opens_value.then(|| (words.len() - 1, quotes));
                 program = true;
                 after_close = false;
             }
@@ -357,14 +368,16 @@ fn operator_words(line: &str) -> Vec<Word> {
                         tick_value.take()
                     }
                     b'(' => {
-                        parens.push(opens_value.then(|| words.len() - 1));
+                        parens.push(opens_value.then(|| (words.len() - 1, quotes)));
                         None
                     }
                     b')' => parens.pop().flatten(),
                     _ => None,
                 };
-                if let Some(at) = closes {
+                if let Some((at, seen)) = closes {
                     words[at].closed = true;
+                    // #9344: `X=$(echo ')' cat) f` — a quoted `)` closed it.
+                    words[at].quoted = quotes != seen;
                     program = true;
                 }
                 after_close = matches!(byte, b')' | b'`');
