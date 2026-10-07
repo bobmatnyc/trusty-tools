@@ -153,3 +153,46 @@ async fn pushed_write_the_filesystem_cannot_resolve_is_refused() {
         "an undecidable admission must never remove chunks"
     );
 }
+
+/// #7434 review (HIGH, #8922 bypass): a pushed `@root1/<rel>` was checked as
+/// `<primary>/@root1/<rel>`, a path that does not exist, so the ignore rules
+/// never ran and grep later read the real gitignored file under the
+/// additional root. It must be judged at its own root and refused `403`; an
+/// absolute push of it forgets the same `@root1/…` key's hash.
+/// Test: this test.
+#[tokio::test]
+async fn a_gitignored_push_under_an_additional_root_is_refused() {
+    let (_temp, mut handle) = fixture("wa-extra-ignored");
+    let extra_dir = tempfile::tempdir().unwrap();
+    let extra = extra_dir.path().canonicalize().unwrap();
+    std::fs::write(extra.join(".gitignore"), "ignored.rs\n").unwrap();
+    std::fs::write(extra.join("ignored.rs"), "fn x() {}\n").unwrap();
+    handle.additional_roots = vec![extra.clone()];
+    handle
+        .indexer
+        .write()
+        .await
+        .set_additional_roots(vec![extra.clone()]);
+
+    assert_eq!(
+        admits_pushed(&handle, "@root1/ignored.rs", 10),
+        Admission::Excluded
+    );
+    let indexer = handle.indexer.read().await;
+    let (status, body) = gate(&handle, &indexer, "@root1/ignored.rs", "fn x() {}\n")
+        .await
+        .expect_err("a gitignored push under an additional root is refused");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    let hashes = crate::service::reindex::hash::hashes_for(&handle.id);
+    hashes.insert(std::path::PathBuf::from("@root1/ignored.rs"), "h".into());
+    let absolute = extra.join("ignored.rs").display().to_string();
+    let (status, body) = gate(&handle, &indexer, &absolute, "fn x() {}\n")
+        .await
+        .expect_err("the absolute spelling is refused too");
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        !hashes.contains_key(std::path::Path::new("@root1/ignored.rs")),
+        "the purge forgets the stored @root1 key's hash"
+    );
+}

@@ -3,7 +3,7 @@
 //!
 //! Why: the move off HTTP is only proven if every tool reaches its `search.*`
 //! method and no failure text points at a URL. A per-tool table is the one
-//! place a twenty-first tool, or a tool still dialling HTTP, shows up.
+//! place a tool beyond the pinned count, or a tool still dialling HTTP, shows up.
 //! What: a recording mock socket daemon answers every method; each tool is
 //! dispatched once and the method sequence it produced is compared to the
 //! table. Failure tests drive an absent socket and a refusing daemon.
@@ -92,6 +92,12 @@ fn tool_table() -> Vec<(&'static str, Value, Vec<&'static str>)> {
             json!({ "index_id": "demo" }),
             vec!["search.index.reindex"],
         ),
+        // #7434: the multi-root mutation.
+        (
+            "add_root",
+            json!({ "index_id": "demo", "roots": ["/tmp/extra"] }),
+            vec!["search.index.roots.add"],
+        ),
         (
             "index_status",
             json!({ "index_id": "demo" }),
@@ -158,7 +164,7 @@ async fn every_tool_reaches_its_socket_method() {
     }
     assert_eq!(
         advertised.len(),
-        20,
+        21,
         "the tool count is part of the contract"
     );
 

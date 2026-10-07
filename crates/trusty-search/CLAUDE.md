@@ -303,6 +303,38 @@ from `git status` and `git clean -fd` but not from `git clean -fdx`. To move
 such an index out of the work tree, `DELETE /indexes/:id?delete_data=true`
 and register it again.
 
+- **`roots` (array, optional, #7434)**: additional absolute directories this
+  index also covers, beyond `root_path`. Each passes the same gates as
+  `root_path` plus the #2336/#4289 guards against every root of every other
+  index; one that nests with this index's own roots is refused
+  `409 index_root_overlap`. On an id that is already registered, a root the
+  index does not hold answers `409 roots_not_applied` — use the route below.
+
+##### `POST /indexes/:id/roots` (#7434)
+
+Add directory trees to a live index. Socket: `search.index.roots.add`
+(`{"index_id", "body": {"roots": [...]}}`); MCP: `add_root`.
+
+- **Request body**: `{ "roots": ["/abs/dir", ...] }` — append-only; slot `n`
+  of the table is the `@root<n>/` prefix of every stored path under it.
+- **Response 200**: `{ "id", "root_path", "roots": [primary, ...],
+  "added": [...], "reindex_queued", "stream_url" }`. A request naming only
+  roots the index already holds answers `added: []`, `reindex_queued: false`.
+  Otherwise the table is persisted to `indexes.toml`, the new roots are
+  watched, and a background reindex is queued.
+- **Response 409**: `reindex_already_running` (a reindex holds the index),
+  `index_busy` (a relocate, config catch-up or embed pass holds it),
+  `index_root_overlap`, or the #2336/#4289 collision bodies. Nothing changes.
+- **Response 500** `roots_not_persisted`: `indexes.toml` could not be written;
+  nothing was added.
+
+`GET /indexes/:id/status` reports `roots` (the full table, primary first),
+`missing_index_roots` (additional roots absent at the last walk) and
+`watcher.roots` (each root's watch: `watching`, `degraded` or `failed`, with
+`reason`). Search results and grep matches under an additional root resolve
+to that root; `remove-file` maps an absolute path under it to its
+`@root<n>/` key.
+
 ###### Off-box per-index delivery (issue #8135)
 
 `POST /indexes` also restores an index that was built on a different host and
@@ -1072,11 +1104,12 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **20 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
 |---|---|---|
+| `add_root` | `index_id`, `roots` | Add one or more directory trees to an existing index, so one index covers several roots. |
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |

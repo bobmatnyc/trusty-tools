@@ -128,6 +128,8 @@ pub const METHODS: &[&str] = &[
     // #6285 consumer move — the quantize backfill, the one CLI route with no
     // socket twin until the CLI moved onto the socket.
     writes::METHOD_INDEX_QUANTIZE,
+    // #7434 — the multi-root mutation.
+    writes::METHOD_INDEX_ROOTS_ADD,
     streams::METHOD_INDEX_FILE_EVENTS,
     // #6285 slice 5 — the streams. Registered in a SEPARATE router table from
     // the twenty-three above: a name is streaming or unary, never both, so

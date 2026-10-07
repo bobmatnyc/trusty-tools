@@ -326,12 +326,15 @@ pub(crate) fn build_compact_snippet(content: &str) -> String {
 /// as-is; otherwise `root_path.join(raw_file)` is returned.
 /// Test: `tests::resolve_chunk_file_relative_becomes_absolute` and
 ///       `tests::resolve_chunk_file_absolute_passthrough`.
+///
+/// #7434: production resolves through the root table in
+/// [`raw_to_code_chunk`]; this single-root spelling delegates to the same
+/// decoder and stays for the tests written against it.
+#[cfg(test)]
 pub(crate) fn resolve_chunk_file(raw_file: &str, root_path: &std::path::Path) -> String {
-    if std::path::Path::new(raw_file).is_absolute() {
-        raw_file.to_string()
-    } else {
-        root_path.join(raw_file).to_string_lossy().into_owned()
-    }
+    crate::core::index_roots::resolve_absolute(root_path, &[], raw_file)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Materialize a `RawChunk` into a `CodeChunk` with the given score, match
@@ -340,14 +343,15 @@ pub(crate) fn resolve_chunk_file(raw_file: &str, root_path: &std::path::Path) ->
 /// Why: four call sites used to inline the same 18-field struct literal.
 /// Consolidating removes ~60 lines of duplication.
 /// What: clones every metadata field and derives `chunk_depth` (clamped to
-/// u8). Resolves `raw.file` to absolute via [`resolve_chunk_file`].
+/// u8). Resolves `raw.file` to absolute through the root table (#7434).
 /// Test: covered indirectly by every search/materialization test.
 pub(crate) fn raw_to_code_chunk(
     raw: &RawChunk,
     score: f32,
     match_reason: &str,
     compact_snippet: Option<String>,
-    root_path: &std::path::Path,
+    // #7434: the whole root table, so an `@root<n>/…` path resolves to its root.
+    roots: &crate::core::index_roots::IndexRoots,
 ) -> CodeChunk {
     let chunk_depth: u8 = raw.chunk_depth.min(u8::MAX as usize) as u8;
     let path = if !std::path::Path::new(&raw.file).is_absolute() {
@@ -355,7 +359,10 @@ pub(crate) fn raw_to_code_chunk(
     } else {
         None
     };
-    let file = resolve_chunk_file(&raw.file, root_path);
+    let file = roots
+        .resolve_absolute(&raw.file)
+        .to_string_lossy()
+        .into_owned();
     CodeChunk {
         id: raw.id.clone(),
         file,

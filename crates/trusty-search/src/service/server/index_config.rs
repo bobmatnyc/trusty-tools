@@ -384,6 +384,8 @@ pub(crate) async fn patch_index_config_report(
         id: index_id.clone(),
         indexer: Arc::clone(&existing.indexer),
         root_path: existing.root_path.clone(),
+        // #7434: a config PATCH does not touch the root table.
+        additional_roots: existing.additional_roots.clone(),
         include_paths: existing.include_paths.clone(),
         exclude_globs,
         extensions,

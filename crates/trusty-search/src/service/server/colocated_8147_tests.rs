@@ -33,6 +33,7 @@ fn create_req(
     colocated: Option<bool>,
 ) -> super::router::CreateIndexRequest {
     super::router::CreateIndexRequest {
+        roots: None,
         id: id.to_string(),
         root_path,
         include_paths: None,

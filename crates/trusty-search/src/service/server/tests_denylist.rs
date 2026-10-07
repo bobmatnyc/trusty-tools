@@ -46,6 +46,7 @@ async fn validate_root_path_denylist_rejects_ssh() {
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "sensitive-ssh".into(),
             root_path: ssh_path,
             include_paths: None,
@@ -245,6 +246,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "scratch-default-denied".into(),
             root_path: tmp.path().to_path_buf(),
             include_paths: None,
@@ -314,6 +316,7 @@ async fn create_index_allows_sensitive_path_when_opted_in() {
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "scratch-explicitly-allowed".into(),
             root_path: tmp.path().to_path_buf(),
             include_paths: None,
