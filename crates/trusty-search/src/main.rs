@@ -563,10 +563,10 @@ enum Commands {
 
     /// Open the admin panel of the running daemon in the default browser
     ///
-    /// Reads `~/.trusty-search/http_addr` to discover the daemon, then opens
-    /// `http://<addr>/ui` in the default browser. Falls back to printing the
-    /// URL if the browser fails to launch. Errors clearly if no daemon is
-    /// running (no discovery file).
+    /// Starts the daemon if none runs, asks it over its socket which HTTP
+    /// address it bound, then opens `http://<addr>/ui` in the default browser.
+    /// Falls back to printing the URL if the browser fails to launch. Errors,
+    /// naming the socket, against a socket-only (`--no-http`) daemon.
     ///
     /// Examples:
     ///   trusty-search dashboard
@@ -884,12 +884,13 @@ enum Commands {
 
     /// Print the daemon's listening port (or address) to stdout.
     ///
-    /// Reads the address the running daemon persisted to its `http_addr`
-    /// discovery file. Useful for shell substitution:
+    /// Asks the running daemon over its socket which HTTP address it bound.
+    /// Useful for shell substitution:
     ///   curl http://127.0.0.1:$(trusty-search port)/health
     ///
-    /// Exits non-zero (with a message on stderr) when no daemon is running
-    /// or the address file is missing, so substitution fails cleanly.
+    /// Exits 1 (with a message on stderr) when no daemon answers on the
+    /// socket, or when the daemon serves no HTTP listener (`start --no-http`),
+    /// so substitution fails cleanly. Never starts a daemon.
     ///
     /// Examples:
     ///   trusty-search port               # bare port: 7879
@@ -1342,11 +1343,8 @@ async fn run() -> Result<()> {
 
         Commands::Monitor { target } => match target {
             MonitorTarget::Web => {
-                // Issue #3545: the shared, TRUSTY_DATA_DIR-aware resolver. #9214:
-                // it errors when no address is published, never guessing :7878.
-                let url = format!("{}/ui", commands::daemon_http::daemon_base_url()?);
-                println!("{url}");
-                open::that(&url).ok();
+                // #9214: the URL comes from the daemon's socket, never a default port.
+                commands::dashboard::handle_monitor_web().await?;
             }
             MonitorTarget::Tui => {
                 trusty_common::monitor::search_tui::run().await?;
@@ -1367,7 +1365,7 @@ async fn run() -> Result<()> {
             } else {
                 commands::port::PortFormat::Port
             };
-            commands::port::handle_port(format)?;
+            commands::port::handle_port(format).await?;
         }
 
         Commands::Completions { shell } => {
