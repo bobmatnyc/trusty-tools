@@ -256,3 +256,7 @@ pub fn idle_from_env(raw: Option<&str>) -> Duration {
         _ => DEFAULT_IDLE_TIMEOUT,
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;
