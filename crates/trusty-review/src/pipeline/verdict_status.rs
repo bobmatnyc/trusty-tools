@@ -8,7 +8,8 @@
 //! What: [`unparsed_status`] classes a reply that did not parse;
 //! [`withheld_outcome`] is the mapping, a pure function;
 //! [`apply_withheld_outcome`] applies it at the end of the gates;
-//! [`judged_verdict`] is the reviewer verdict the mapping reads.
+//! [`judged_verdict`] is the reviewer verdict the mapping reads;
+//! [`apply_grade_floor`] holds a D or F review at its floor (ruling 50).
 //! Test: `verdict_status_tests.rs`; end to end in
 //! `runner_verdict_status_tests.rs` and `runner_citation_gate_tests.rs`.
 
@@ -16,7 +17,7 @@ use crate::coverage::{CoverageVerdictContrib, apply_coverage_floor};
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus};
 use crate::pipeline::{
     grade::{derive_verdict, stricter_of},
-    letter_grade::{Grade, default_grade_for_verdict, verdict_for_grade},
+    letter_grade::{Grade, default_grade_for_verdict, grade_floor, verdict_for_grade},
 };
 
 /// The status of a reply the parser failed closed on (#9310).
@@ -63,6 +64,59 @@ pub(crate) fn judged_verdict(
         }
         None => model,
     }
+}
+
+/// The reviewer's verdict and grade floor, both read before grounding (#9310).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Judged {
+    /// What the withheld mapping reads ([`judged_verdict`]).
+    pub(crate) verdict: Verdict,
+    /// Owner ruling 50: the verdict no gate may relax the review below
+    /// (`letter_grade::grade_floor`); APPROVE when no grade floors it.
+    pub(crate) grade_floor: Verdict,
+}
+
+/// [`judged_verdict`] plus the grade floor, from the reviewer's own reply.
+///
+/// What: an UNKNOWN reply has no floor (APPROVE), so a parse failure stays
+/// UNKNOWN.
+/// Test: `judged_review_floors_only_a_d_or_f_grade`.
+pub(crate) fn judged_review(
+    model: Verdict,
+    grade: Option<&str>,
+    coverage: Option<&CoverageVerdictContrib>,
+) -> Judged {
+    // #9310 ruling 50: the floor reads the raw grade, never a reconciled one.
+    let floor = if model == Verdict::Unknown {
+        Verdict::Approve
+    } else {
+        grade_floor(grade)
+    };
+    Judged {
+        verdict: judged_verdict(model, grade, coverage),
+        grade_floor: floor,
+    }
+}
+
+/// Hold `result` at the reviewer's grade floor after every gate ran (#9310,
+/// owner ruling 50).
+///
+/// Why: the low-confidence override, the advisory ceiling, RULE 2, the wipe
+/// relax, the map-reduce aggregate and the verifier round can each relax a
+/// D-graded review below REQUEST_CHANGES or an F below BLOCK. One choke point
+/// after them all repairs every path.
+/// What: the stricter of the verdict and `floor`. UNKNOWN stays UNKNOWN
+/// (`stricter_of` ranks it last). A `suppressed_reject` review is left at
+/// REQUEST_CHANGES (owner answer Q1): its rejection rests only on withheld
+/// findings.
+/// Test: `apply_grade_floor_raises_a_relaxed_verdict`,
+/// `apply_grade_floor_keeps_a_suppressed_reject`,
+/// `f_with_one_confirmed_low_confidence_finding_reads_block`.
+pub(crate) fn apply_grade_floor(result: &mut ReviewResult, floor: &Verdict) {
+    if result.verdict_status == Some(VerdictStatus::SuppressedReject) {
+        return;
+    }
+    result.verdict = stricter_of(result.verdict.clone(), floor.clone());
 }
 
 /// The verdict and status a review takes once the gates withheld findings,

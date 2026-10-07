@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use super::{MapContext, run_map_stage};
+use super::{MapContext, run_map_stage, run_map_stage_graded};
 use crate::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 use crate::models::Verdict;
 use crate::pipeline::mapreduce::outcome::MapOutcome;
@@ -379,5 +379,45 @@ async fn map_chunk_grade_never_relaxes_a_verdict() {
     ];
     for (json, expected) in cases {
         assert_eq!(chunk_verdict(json).await, expected, "{json}");
+    }
+}
+
+/// #9310 ruling 50: each reviewed chunk carries the floor its raw grade sets
+/// (F → BLOCK, D → REQUEST_CHANGES, C- or none → APPROVE), and a skipped or
+/// oversized unit carries none. The F chunk's verdict is BLOCK too, so the
+/// floor is not the only record of it.
+#[tokio::test]
+async fn run_map_stage_graded_reports_each_chunk_floor() {
+    let cases = [
+        ("F", Verdict::Block),
+        ("D", Verdict::RequestChanges),
+        ("C-", Verdict::Approve),
+        ("none", Verdict::Approve),
+    ];
+    for (grade, floor) in cases {
+        let json = format!(
+            r#"{{"verdict":"APPROVE","grade":"{grade}","summary":"s","findings":[]}}"#
+        );
+        let llm: Arc<dyn LlmProvider> = Arc::new(RecordingLlm::with_response(&json));
+        let pm = pr_meta();
+        let context = ReviewContext::default();
+        let voice = VoiceConfig::default();
+        let c = ctx(&pm, &context, &voice);
+        let units = vec![
+            review_unit("src/reviewed.rs", "+fn t() {}"),
+            meta_unit("src/skipped.bin", "binary"),
+            oversized_unit("src/huge.rs", "+fn h() {}"),
+        ];
+        let graded = run_map_stage_graded(&units, &llm, &c, 4).await;
+        assert_eq!(graded.len(), 3, "grade {grade}");
+        for (outcome, chunk_floor) in &graded {
+            let want = if outcome.file() == "src/reviewed.rs" {
+                assert!(matches!(outcome, MapOutcome::Reviewed { .. }));
+                floor.clone()
+            } else {
+                Verdict::Approve
+            };
+            assert_eq!(*chunk_floor, want, "grade {grade}, {}", outcome.file());
+        }
     }
 }

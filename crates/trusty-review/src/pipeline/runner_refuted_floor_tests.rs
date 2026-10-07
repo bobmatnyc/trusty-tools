@@ -121,7 +121,12 @@ async fn review_file(file: &str, added_line: &str, findings_json: &str) -> Revie
 /// High-effort but in a category the grader never lets drive BLOCK
 /// (test-coverage and style are informational, #7036/#3474; a conformance
 /// divergence caps at REQUEST_CHANGES, #1359). A confirmed Medium completes the
-/// mixed set. None of them may hold BLOCK / F.
+/// mixed set. None of them may hold BLOCK on its own.
+///
+/// #9310 owner ruling 50: the reviewer graded the review F, and an F is a
+/// hard BLOCK floor that the verifier round may not relax, so the review now
+/// reads BLOCK / F (before: REQUEST_CHANGES / D). The survivors alone still
+/// settle REQUEST_CHANGES; only the grade holds BLOCK.
 ///
 /// Pre-fix every case returned BLOCK / F: a confirmed High-effort finding sent
 /// `rederive_verdict` down its "confirmed High" path, which re-used the
@@ -130,10 +135,10 @@ async fn review_file(file: &str, added_line: &str, findings_json: &str) -> Revie
 #[tokio::test]
 async fn run_review_refuted_sole_blocker_does_not_clamp_to_block() {
     // The confirmed 0.9-confidence Medium is real evidence and floors every case
-    // to REQUEST_CHANGES on its own. #9188 J: the withheld blocker no longer
-    // shapes the grade either; it is recomputed from the survivors alone (D).
+    // to REQUEST_CHANGES on its own. #9310 ruling 50: the reviewer's F floors
+    // the review at BLOCK, so the grade reconciles to F.
     for category in ["test-coverage", "style", "method-conformance"] {
-        let (want_verdict, want_grade) = (Verdict::RequestChanges, "D");
+        let (want_verdict, want_grade) = (Verdict::Block, "F");
         let confirmed = finding_json("gap", "the new branch has no test", "high", category);
         let medium = finding_json(
             "naming",
@@ -161,13 +166,21 @@ async fn run_review_refuted_sole_blocker_does_not_clamp_to_block() {
             "{category}: the confirmed finding must pass drives_block_floor"
         );
         assert_eq!(
+            crate::pipeline::citation_gate::verdict::settle_withheld(
+                Verdict::Block,
+                &result.findings
+            ),
+            Verdict::RequestChanges,
+            "{category}: the survivors alone settle REQUEST_CHANGES (#4044)"
+        );
+        assert_eq!(
             result.verdict, want_verdict,
-            "{category}: the refuted blocker must not hold the verdict (#4044)"
+            "{category}: the reviewer's F floors the review (#9310 ruling 50)"
         );
         assert_eq!(
             result.grade.as_deref(),
             Some(want_grade),
-            "{category}: the model's F rested on the refuted blocker (#4044)"
+            "{category}: the grade agrees with the floored verdict"
         );
     }
 }

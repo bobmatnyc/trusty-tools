@@ -25,8 +25,10 @@ use std::sync::Arc;
 use tracing::info;
 
 use crate::{
-    config::mapreduce::MapReduceConfig, llm::LlmProvider,
-    pipeline::diff_analyzer::models::FilteredDiff,
+    config::mapreduce::MapReduceConfig,
+    llm::LlmProvider,
+    models::Verdict,
+    pipeline::{diff_analyzer::models::FilteredDiff, grade::stricter_of},
 };
 
 pub mod map;
@@ -37,10 +39,12 @@ pub mod synthesis;
 pub mod unit;
 
 pub use map::{MapContext, run_map_stage};
+use map::run_map_stage_graded; // #9310 ruling 50
 pub use outcome::{MapOutcome, MapReduceStats, ReducedReview};
 pub use reduce::reduce;
 pub use splitter::split_into_units;
 pub use synthesis::synthesize_review;
+use synthesis::synthesize_review_graded; // #9310 ruling 50
 pub use unit::{MapUnit, MapUnitKind};
 
 /// Run the full map-reduce review: split → map (bounded fan-out) → reduce → synthesis.
@@ -76,14 +80,19 @@ pub async fn run_map_reduce(
 /// [`run_map_reduce`], also returning the strictest verdict a chunk reported
 /// before the pre-grade hygiene pass dropped all its findings and relaxed it
 /// to APPROVE; `None` when none was relaxed (#9188, Architect ruling option A).
+/// #9310 ruling 50: the third value is the review's grade floor: the raw
+/// synthesis grade's when synthesis answered (owner answer Q2), else the
+/// strictest chunk grade's, read before the wipe relaxes any chunk.
 /// Test: `mapreduce_phantom_missing_file_finding_does_not_block`,
-/// `mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff`.
+/// `mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff`,
+/// `mapreduce_wiped_f_chunk_beside_a_surviving_chunk_reads_block`,
+/// `synthesis_answering_ignores_the_chunk_floor`.
 pub(crate) async fn run_map_reduce_with_wiped(
     filtered: &FilteredDiff,
     llm: &Arc<dyn LlmProvider>,
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
-) -> (ReducedReview, Option<crate::models::Verdict>) {
+) -> (ReducedReview, Option<Verdict>, Verdict) {
     let units = split_into_units(filtered, config);
     info!(
         files = filtered.files.len(),
@@ -91,7 +100,12 @@ pub(crate) async fn run_map_reduce_with_wiped(
         concurrency = config.concurrency,
         "map-reduce: split diff into units"
     );
-    let mut outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
+    let graded = run_map_stage_graded(&units, llm, ctx, config.concurrency).await;
+    // #9310 ruling 50: the strictest chunk floor, before hygiene relaxes a chunk.
+    let chunk_floor = graded
+        .iter()
+        .fold(Verdict::Approve, |worst, (_, f)| stricter_of(worst, f.clone()));
+    let mut outcomes: Vec<MapOutcome> = graded.into_iter().map(|(o, _)| o).collect();
 
     // Sanitize + verify citation integrity BEFORE reduce derives the aggregate
     // verdict (#2881, #4042, #4044): a per-unit reviewer can self-negate a
@@ -103,7 +117,7 @@ pub(crate) async fn run_map_reduce_with_wiped(
     // #4044: every finding these passes drop is kept for the review record.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
     let mut withheld = Vec::new();
-    let mut wiped_model_verdict: Option<crate::models::Verdict> = None;
+    let mut wiped_model_verdict: Option<Verdict> = None;
     for outcome in &mut outcomes {
         if let MapOutcome::Reviewed {
             findings, verdict, ..
@@ -149,8 +163,8 @@ pub(crate) async fn run_map_reduce_with_wiped(
     let mut reduced = reduce(outcomes, config);
     withheld.append(&mut reduced.withheld_findings);
     reduced.withheld_findings = withheld;
-    (
-        synthesize_review(reduced, llm, ctx, config).await,
-        wiped_model_verdict,
-    )
+    let (reviewed, synthesis_floor) = synthesize_review_graded(reduced, llm, ctx, config).await;
+    // #9310 Q2: when synthesis answered, only its grade floors the review.
+    let floor = synthesis_floor.unwrap_or(chunk_floor);
+    (reviewed, wiped_model_verdict, floor)
 }

@@ -195,3 +195,67 @@ fn judged_verdict_applies_the_grade_floor() {
         );
     }
 }
+
+/// #9310 ruling 50: only a D or F grade floors; the floor reads the raw
+/// grade, UNKNOWN has none, and the mapping's verdict is `judged_verdict`'s.
+#[test]
+fn judged_review_floors_only_a_d_or_f_grade() {
+    let cases = [
+        (Verdict::Approve, Some("F"), Verdict::Block),
+        (Verdict::Approve, Some("D-"), Verdict::RequestChanges),
+        (Verdict::Approve, Some("C-"), Verdict::Approve),
+        (Verdict::Block, Some("A"), Verdict::Approve),
+        (Verdict::Approve, None, Verdict::Approve),
+        (Verdict::Unknown, Some("F"), Verdict::Approve),
+    ];
+    for (model, grade, floor) in cases {
+        let judged = judged_review(model.clone(), grade, None);
+        assert_eq!(judged.grade_floor, floor, "model {model}, grade {grade:?}");
+        assert_eq!(judged.verdict, judged_verdict(model, grade, None));
+    }
+}
+
+/// A result the gates settled at `verdict`, with `status`.
+fn settled(verdict: Verdict, status: Option<VerdictStatus>) -> ReviewResult {
+    let mut result = ReviewResult::new("o", "r", 1, "t", "u");
+    result.verdict = verdict;
+    result.verdict_status = status;
+    result
+}
+
+/// #9310 ruling 50: the floor raises a relaxed verdict and never lowers one;
+/// UNKNOWN stays UNKNOWN.
+#[test]
+fn apply_grade_floor_raises_a_relaxed_verdict() {
+    let cases = [
+        (Verdict::Approve, Verdict::Block, Verdict::Block),
+        (Verdict::RequestChanges, Verdict::Block, Verdict::Block),
+        (
+            Verdict::ApproveWithReservations,
+            Verdict::RequestChanges,
+            Verdict::RequestChanges,
+        ),
+        (Verdict::Block, Verdict::RequestChanges, Verdict::Block),
+        (Verdict::Approve, Verdict::Approve, Verdict::Approve),
+        (Verdict::Unknown, Verdict::Block, Verdict::Unknown),
+    ];
+    for (current, floor, expected) in cases {
+        let mut result = settled(current.clone(), Some(VerdictStatus::Parsed));
+        apply_grade_floor(&mut result, &floor);
+        assert_eq!(result.verdict, expected, "{current} floored at {floor}");
+        assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
+    }
+}
+
+/// #9310 owner answer Q1: a `suppressed_reject` review rests only on withheld
+/// findings, so an F leaves it at REQUEST_CHANGES.
+#[test]
+fn apply_grade_floor_keeps_a_suppressed_reject() {
+    let mut result = settled(
+        Verdict::RequestChanges,
+        Some(VerdictStatus::SuppressedReject),
+    );
+    apply_grade_floor(&mut result, &Verdict::Block);
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(result.verdict_status, Some(VerdictStatus::SuppressedReject));
+}
