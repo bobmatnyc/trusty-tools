@@ -1,0 +1,6 @@
+Added
+- `report_context` on the `review_pr` and `review_diff` MCP tools asks for the context-source ledger alone; a non-boolean is an invalid-params error, and the envelope then carries `context_sources` even when the list is empty (#9194).
+- The ledger lists every source when reporting is on, in a fixed order: `pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`, `search`, `analyze` and `external_sources`. A failed search query, analyze call or external source is `unavailable` with its reason; zero hits, no hotspots or smells in the changed files, or a source with no results is `absent`; a dependency the context gate degraded is `unavailable` with the gate's reason (#9194).
+- `SourceState::NotRequested` (`not_requested`) marks an input the request did not ask for (#9194).
+- `run --report-context` prints a line for each `absent` source as well as each `unavailable` or `truncated` one (#9194).
+- `AnalyzeClient::analysis_status`, a provided method, returns why analysis is unavailable; `run_output::ledger_value` builds the `context_sources` value, an `{"error": ...}` object if it cannot be serialised (#9194).
