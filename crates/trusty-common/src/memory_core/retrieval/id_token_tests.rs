@@ -270,3 +270,103 @@ async fn strong_matches_keep_similarity_order_above_the_cap() {
         "scores must be distinct and below 1.0: {scores:?}"
     );
 }
+
+/// Fourteen low-similarity drawers that share no word with the queries below.
+fn filler(count: usize, top: f32) -> Vec<(String, f32)> {
+    (0..count)
+        .map(|n| (format!("node {n} drains the cache"), top - n as f32 * 0.01))
+        .collect()
+}
+
+/// Why (#9279, Architect ruling 2026-10-07): "PR" held by one drawer passed
+/// the rarity gate, so a 0.30-similarity drawer earned +0.45 and cleared the
+/// 0.35 hook floor. A two-letter word with no digit is not an id.
+/// What: one of fifteen low-similarity drawers holds "PR"; it stays below
+/// `DEFAULT_RELEVANCE_FLOOR`.
+#[tokio::test]
+async fn a_rare_two_letter_word_stays_below_the_relevance_floor() {
+    use super::super::relevance::DEFAULT_RELEVANCE_FLOOR;
+
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "check the PR status";
+    let mut drawers = filler(14, 0.29);
+    drawers.push(("the PR template moved".into(), 0.30));
+    let refs: Vec<(&str, f32)> = drawers.iter().map(|(c, s)| (c.as_str(), *s)).collect();
+    let seeded = seed_rulings(&handle, query, &refs).await;
+    let pr = seeded[14];
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 20)
+        .await
+        .unwrap();
+    let score = l2
+        .iter()
+        .find(|r| r.drawer.id == pr)
+        .map(|r| r.score)
+        .unwrap_or_else(|| panic!("PR drawer missing: {l2:#?}"));
+    assert!(
+        score < DEFAULT_RELEVANCE_FLOOR,
+        "a rare two-letter word lifted {score} over the floor"
+    );
+}
+
+/// Why (#9279): requiring a digit must not cost the ids it was built for.
+/// What: `e1` and `v2`, each held by one of fifteen drawers at the lowest
+/// similarity, rank first and second.
+#[tokio::test]
+async fn rare_digit_ids_keep_the_boost() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "ship e1 and v2 builds";
+    let mut drawers = filler(13, 0.30);
+    drawers.push(("Ruling E1: hold dispatches".into(), 0.12));
+    drawers.push(("release v2 freezes".into(), 0.10));
+    let refs: Vec<(&str, f32)> = drawers.iter().map(|(c, s)| (c.as_str(), *s)).collect();
+    let seeded = seed_rulings(&handle, query, &refs).await;
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 15)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&l2)[..2],
+        [seeded[13], seeded[14]],
+        "e1 and v2 must rank first: {l2:#?}"
+    );
+}
+
+/// Why (#9279, Architect ruling 2026-10-07): a three-character id such as
+/// `k8s` earned the closet boost on main whether or not it was common. The
+/// rarity gate must not take that away.
+/// What: eight of nine drawers hold `k8s` below a 0.40 drawer that does not;
+/// the closet boost lifts the best `k8s` drawer to first.
+#[tokio::test]
+async fn a_common_three_char_id_keeps_the_closet_boost() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "k8s rollout plan";
+    let mut drawers: Vec<(String, f32)> =
+        vec![("deploys run from the release branch".into(), 0.40)];
+    drawers.extend((0..8).map(|n| {
+        (
+            format!("k8s node pool {n} drains first"),
+            0.30 - n as f32 * 0.01,
+        )
+    }));
+    let refs: Vec<(&str, f32)> = drawers.iter().map(|(c, s)| (c.as_str(), *s)).collect();
+    let seeded = seed_rulings(&handle, query, &refs).await;
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&l2).first(),
+        Some(&seeded[1]),
+        "the k8s closet boost must hold: {l2:#?}"
+    );
+}

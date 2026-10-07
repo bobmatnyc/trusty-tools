@@ -9,12 +9,15 @@
 //! What: [`query_id_tokens`] picks the id-shaped tokens out of a query,
 //! [`rare_id_tokens`] keeps those few candidates hold, and [`id_token_boost`]
 //! adds [`ID_TOKEN_BOOST`] to a candidate whose content holds a rare one as a
-//! whole token. A query with no rare id token gets no boost on any candidate,
-//! so its ranking is unchanged.
+//! whole token. An id has two or three characters and a digit, so a
+//! two-letter word such as `pm` or `pr` is never one. A query with no rare id
+//! token gets no boost on any candidate, so its ranking is unchanged.
 //! Test: `ruling_e1_ranks_its_drawer_first_in_l2_and_l3`,
 //! `a_query_without_an_id_token_keeps_its_order`,
 //! `a_common_short_word_keeps_similarity_order`,
-//! `a_common_short_word_stays_below_the_relevance_floor`, `id_token_shape`,
+//! `a_common_short_word_stays_below_the_relevance_floor`,
+//! `a_rare_two_letter_word_stays_below_the_relevance_floor`,
+//! `rare_digit_ids_keep_the_boost`, `id_token_shape`,
 //! `id_token_boost_matches_whole_normalized_tokens`,
 //! `an_id_most_candidates_hold_is_not_rare`.
 
@@ -31,18 +34,21 @@ pub(super) const ID_TOKEN_BOOST: f32 = 0.3;
 /// Longest token, in characters, that counts as an id.
 const MAX_ID_CHARS: usize = 3;
 
+/// Shortest token, in characters, that counts as an id.
+const MIN_ID_CHARS: usize = 2;
+
 /// Whether a normalized keyword is shaped like an id.
 ///
-/// What: two characters (`e1`, `v2`, `42`, `fe`), or three characters with a
-/// digit (`e12`, `q15`). A three-letter word such as `fix` or `bug` is not an
-/// id, so ordinary queries never earn the boost. Stop words are already gone,
-/// because callers pass `extract_keywords` output.
+/// Why (#9279, Architect ruling 2026-10-07): a two-letter word such as `pm`,
+/// `pr`, `ci` or `ui` is common in prompts. The rarity gate alone still
+/// boosted one when a single candidate held it, which lifted a weak drawer
+/// over the 0.35 hook floor. A digit is what marks an id.
+/// What: two or three characters with a digit (`e1`, `v2`, `42`, `f0`, `e12`,
+/// `k8s`). Stop words are already gone, because callers pass
+/// `extract_keywords` output.
 pub(super) fn is_id_token(token: &str) -> bool {
-    match token.chars().count() {
-        2 => true,
-        MAX_ID_CHARS => token.chars().any(char::is_numeric),
-        _ => false,
-    }
+    (MIN_ID_CHARS..=MAX_ID_CHARS).contains(&token.chars().count())
+        && token.chars().any(char::is_numeric)
 }
 
 /// The id-shaped tokens of a query's keyword list.
@@ -125,13 +131,15 @@ mod tests {
     use super::*;
 
     /// Why: the boost must fire on ids and never on ordinary short words.
-    /// What: two characters, or three with a digit, is an id; nothing else is.
+    /// What: two or three characters with a digit is an id; nothing else is.
     #[test]
     fn id_token_shape() {
-        for id in ["e1", "fe", "42", "v2", "e12", "q15"] {
+        for id in ["e1", "f0", "42", "v2", "e12", "q15", "k8s"] {
             assert!(is_id_token(id), "{id} is an id");
         }
-        for word in ["fix", "bug", "cap", "ruling", "x", "e123"] {
+        for word in [
+            "pm", "pr", "ci", "go", "ui", "fe", "fix", "bug", "ruling", "x", "7", "e123",
+        ] {
             assert!(!is_id_token(word), "{word} is not an id");
         }
     }
@@ -147,15 +155,15 @@ mod tests {
         assert_eq!(id_token_boost(&[], "ruling e1"), 0.0);
     }
 
-    /// Why (#9279 review): `pm` in most candidates is a word, not an id.
+    /// Why (#9279 review): an id most candidates hold names no one drawer.
     /// What: one holder of fifteen is rare; four of fifteen is not (limit 3).
     #[test]
     fn an_id_most_candidates_hold_is_not_rare() {
         let mut contents = vec!["ruling e1: hold"; 1];
-        contents.extend(["the PM files it"; 4]);
+        contents.extend(["ship v2 builds"; 4]);
         contents.extend(["ruling e2: other"; 10]);
         assert_eq!(max_holders(contents.len()), 3);
-        assert_eq!(rare_id_tokens(&["e1", "pm"], &contents), vec!["e1"]);
+        assert_eq!(rare_id_tokens(&["e1", "v2"], &contents), vec!["e1"]);
         assert_eq!(max_holders(4), MIN_HOLDERS);
     }
 }

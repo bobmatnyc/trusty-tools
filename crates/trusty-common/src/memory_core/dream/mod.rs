@@ -48,6 +48,6 @@ pub use dreamer::Dreamer;
 pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
 pub use helpers::extract_keywords;
 // #9279: recall's id-token match normalizes words the way closets do.
-pub(crate) use helpers::normalize_keyword;
+pub(crate) use helpers::{MIN_KEYWORD_CHARS, normalize_keyword};
 pub use kg_compact::{KgCompactReport, kg_compact_pass, kg_compact_pass_with_hook};
 pub use semantic::{RoomConsolidationStats, consolidate_scoped};

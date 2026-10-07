@@ -8,11 +8,13 @@
 //! scope, works out which query id tokens are rare among those drawers
 //! ([`rare_id_tokens`]), then scores each drawer with [`rank_score`]:
 //! similarity tilted by importance, plus the closet boost, plus the id boost.
-//! An id-shaped token that is common among the candidates counts for neither
-//! boost.
+//! A common id earns no id boost. A two-character token earns the closet boost
+//! only as a rare id; longer tokens keep the closet boost as before.
 //! Test: `ruling_e1_ranks_its_drawer_first_in_l2_and_l3`,
 //! `a_common_short_word_keeps_similarity_order`,
 //! `a_common_short_word_stays_below_the_relevance_floor`,
+//! `a_rare_two_letter_word_stays_below_the_relevance_floor`,
+//! `a_common_three_char_id_keeps_the_closet_boost`,
 //! `l2_returns_relevant_drawer`, `l2_rank_trace_emits_one_event_per_candidate`.
 
 use std::collections::HashSet;
@@ -25,6 +27,7 @@ use super::layers::{RANK_TRACE_TARGET, rank_score, uuid_prefix_eq};
 use super::scope::scope_admits;
 use super::types::RecallResult;
 use crate::memory_core::decay::DecayConfig;
+use crate::memory_core::dream::MIN_KEYWORD_CHARS;
 use crate::memory_core::palace::Drawer;
 use crate::memory_core::store::vector::VectorHit;
 
@@ -59,15 +62,17 @@ pub(super) fn score_candidates(
         })
         .collect();
 
-    // #9279: an id-shaped word most candidates hold ("pm", "pr") is common
-    // here, so it earns neither the id boost nor the closet boost.
+    // #9279: an id most candidates hold is common here and earns no id boost.
     let id_tokens = query_id_tokens(query_tokens);
     let contents: Vec<&str> = candidates.iter().map(|(_, d)| d.content()).collect();
     let rare = rare_id_tokens(&id_tokens, &contents);
+    // #9279: a token of three or more characters keeps the closet boost it had
+    // before (`k8s`, `ec2`, common or not); a two-character token, which the
+    // closets did not hold before, earns it only as a rare id.
     let closet_tokens: Vec<&str> = query_tokens
         .iter()
         .map(String::as_str)
-        .filter(|t| !id_tokens.contains(t) || rare.contains(t))
+        .filter(|t| t.chars().count() > MIN_KEYWORD_CHARS || rare.contains(t))
         .collect();
 
     candidates
