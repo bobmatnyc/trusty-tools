@@ -68,11 +68,12 @@ fn the_same_ruling_from_two_palaces_appears_once() {
     let already_in_project = "commits never land on local main";
     results.push(hit(already_in_project, &["standing-rule"], 0.7, 2));
     let outcomes = vec![
-        Ok(vec![hit(text, &["bob-ruling"], 0.6, 2)]),
+        Ok(vec![hit(text, &["bob-ruling"], 0.6, 2)].into()),
         Ok(vec![
             hit(text, &["bob-ruling"], 0.6, 2),
             hit(already_in_project, &["standing-rule"], 0.65, 2),
-        ]),
+        ]
+        .into()),
     ];
     let degraded = fold_rulings(&mut results, outcomes, "q", 9, None).degraded;
     assert!(degraded.is_empty());
@@ -94,7 +95,8 @@ fn rulings_contribute_at_most_a_third_of_top_k() {
         hit("r4", &["standing-rule"], 0.45, 2),
         hit("note", &["note"], 0.99, 2),
         hit("weak", &["ruling"], 0.10, 2),
-    ])];
+    ]
+    .into())];
     fold_rulings(&mut results, outcomes, "q", 6, Some(0.2));
     assert_eq!(contents(&results), ["project a", "project b", "r1", "r2"]);
     assert!(results[2..].iter().all(|r| r.layer == 1));
@@ -114,7 +116,7 @@ fn only_capped_rulings_that_answer_the_query_are_floored() {
     let off_topic = hit("commits never land on local main", &["ruling"], 0.60, 2);
     let past_cap = hit("issue titles name a symptom too", &["ruling"], 0.50, 2);
     let (on_id, past_id) = (on_topic.drawer.id, past_cap.drawer.id);
-    let outcomes = vec![Ok(vec![on_topic, off_topic, past_cap])];
+    let outcomes = vec![Ok(vec![on_topic, off_topic, past_cap].into())];
     let fold = fold_rulings(&mut results, outcomes, query, 6, None);
     assert_eq!(fold.floored, [on_id]);
     assert_eq!(results.len(), 4, "{:?}", contents(&results));

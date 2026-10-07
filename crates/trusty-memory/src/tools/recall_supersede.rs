@@ -9,13 +9,15 @@
 //! (trusty-common `share::supersede`). Recall now reads that edge.
 //! What: [`supersessions_for`] and [`supersessions_across`] fetch the edges for
 //! one result window in one KG read per palace, bounded by
-//! [`LOOKUP_BUDGET`]. A failed or late read logs a warning and demotes nothing,
-//! so recall still answers ([`fail_open`]). [`demote_superseded`] halves a
+//! [`LOOKUP_BUDGET`]. The rulings leg reads each rulings palace's own edges
+//! through [`supersessions_for_within`], inside the leg's time bound. A failed
+//! or late read logs a warning naming the palace and demotes nothing for that
+//! palace, so recall still answers ([`fail_open`]). [`demote_superseded`] halves a
 //! superseded drawer's score and, when its replacement is in the same list,
 //! keeps it strictly below the replacement. Nothing is deleted (D6).
 //! Test: `tools::recall_supersede_tests`; end to end in
-//! `tests/recall_supersession.rs` and the `superseded_by` groups of
-//! `tests/recall_eval.rs`.
+//! `tests/recall_supersession.rs` (rulings palaces included) and the
+//! `superseded_by` groups of `tests/recall_eval.rs`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -104,6 +106,20 @@ pub(crate) async fn supersessions_for(
     handle: &PalaceHandle,
     results: &[RecallResult],
 ) -> Supersessions {
+    supersessions_for_within(handle, results, LOOKUP_BUDGET).await
+}
+
+/// [`supersessions_for`] under a caller-chosen `budget`.
+///
+/// Why (#9421): the rulings leg reads its palace's edges inside the leg's own
+/// time bound, so it passes whatever is left of [`LOOKUP_BUDGET`] and that
+/// bound; a late read then costs the demotion, never the palace's rulings.
+/// Test: `a_superseded_ruling_from_a_rulings_palace_ranks_below_its_replacement`.
+pub(crate) async fn supersessions_for_within(
+    handle: &PalaceHandle,
+    results: &[RecallResult],
+    budget: Duration,
+) -> Supersessions {
     if results.is_empty() {
         return Supersessions::new();
     }
@@ -111,7 +127,7 @@ pub(crate) async fn supersessions_for(
     fail_open(
         handle.id.as_str(),
         handle.kg.superseded_by_many(ids),
-        LOOKUP_BUDGET,
+        budget,
     )
     .await
 }

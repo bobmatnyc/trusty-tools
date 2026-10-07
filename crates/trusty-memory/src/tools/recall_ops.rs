@@ -216,7 +216,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), &sup));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup));
     }
 
     let embedder = state.embedder().await?;
@@ -253,7 +253,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold, &sup))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold, sup))
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
@@ -289,7 +289,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), &sup));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup));
     }
 
     let embedder = state.embedder().await?;
@@ -313,7 +313,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let sup = supersessions_for(&handle, &results).await;
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold, &sup))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold, sup))
 }
 
 /// The caller's cut for a single-palace recall: count, floor and tag view.
@@ -339,15 +339,26 @@ impl RecallCut {
     /// Demote stale snapshots (#8246) and superseded drawers (#9421), lift
     /// answering rulings into reserved slots (#9143), apply the floor, cut to
     /// `top_k`, and serialize with any failed rulings palaces (#9143).
+    ///
+    /// `sup` holds the project palace's edges; the rulings palaces' own edges
+    /// arrive in `rulings.superseded` and join it here (#9421). A superseded
+    /// ruling keeps its demoted score rank but loses its reserved slot.
+    /// Test: `the_rulings_floor_never_lifts_a_superseded_ruling_above_its_replacement`,
+    /// `a_superseded_ruling_from_a_rulings_palace_ranks_below_its_replacement`.
     fn rank_and_serialize(
         &self,
         palace: &str,
         query: &str,
         mut results: Vec<RecallResult>,
-        rulings: RulingsFold,
-        sup: &Supersessions,
+        mut rulings: RulingsFold,
+        mut sup: Supersessions,
     ) -> Value {
-        demote_stale_snapshots(&mut results, chrono::Utc::now(), sup);
+        // #9421: a ruling superseded inside its rulings palace demotes too.
+        sup.extend(std::mem::take(&mut rulings.superseded));
+        // #9421: a superseded ruling is no longer the standing rule, so the
+        // floor never lifts it (it could land above its replacement).
+        rulings.floored.retain(|id| !sup.contains_key(id));
+        demote_stale_snapshots(&mut results, chrono::Utc::now(), &sup);
         // #9143 AC2: after the score sort, before the floor and the cut, so
         // the reserved slots sit inside `top_k`.
         apply_rulings_floor(&mut results, &rulings.floored, self.top_k);
@@ -493,3 +504,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         "palaces_skipped": palaces_skipped,
     }))
 }
+
+#[cfg(test)]
+#[path = "recall_ops_tests.rs"]
+mod recall_ops_tests;
