@@ -532,8 +532,21 @@ async fn search_hit_adds_candidate_and_text_comes_from_head() {
         [ADR, "docs/specs/found.md", "docs/specs/abs.md"]
     );
     let user = seen.reviewer_user();
-    assert!(user.contains("SPEC_HEAD_TEXT") && user.contains("ABS_HEAD_TEXT"));
-    assert!(!user.contains("SPEC_SNIPPET_STALE") && !user.contains("ABS_SNIPPET_STALE"));
+    // The related-code search shows the same fake hits' snippets elsewhere in
+    // the prompt; only the doc section must hold head text and no snippet.
+    let start = user
+        .find("## Referenced docs")
+        .expect("doc section rendered");
+    let rest = &user[start + 1..];
+    let docs = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+    assert!(
+        docs.contains("SPEC_HEAD_TEXT") && docs.contains("ABS_HEAD_TEXT"),
+        "{docs}"
+    );
+    assert!(
+        !docs.contains("SPEC_SNIPPET_STALE") && !docs.contains("ABS_SNIPPET_STALE"),
+        "{docs}"
+    );
 }
 
 /// #9193 amendment 5: a hit outside the doc allowlist, or outside the index
