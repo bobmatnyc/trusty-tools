@@ -32,11 +32,16 @@ Tracking: [#9073](https://github.com/bobmatnyc/trusty-tools/issues/9073).
   (`~/.trusty-tools/trusty-common/config.yaml`) names it. A tracked project
   config naming `backend: file` is refused with
   `SecretsError::TrackedBackendRefused`. A failing Keychain never falls back
-  to files. The server writes a value into `file` only with that machine
-  selection: a `set` or a `copy` into `file` without it is refused with
-  `SecretsError::FileBackendNotSelected` (wire kind
-  `file_backend_not_selected`), writes nothing, and leaves one audit denial.
-  Reading from `file` and deleting from it stay allowed.
+  to files. The server writes a value into `file` only when the user's own
+  machine config selects it: `.trusty-tools/trusty-common/config.yaml` under
+  the home directory the password database records for the server's user.
+  A config named with `serve --machine-config`, or found under a different
+  `$HOME`, does not count. A `set` or a `copy` into `file` without that
+  selection — or when that home cannot be looked up, or the file cannot be
+  read or parsed — is refused with `SecretsError::FileBackendNotSelected`
+  (wire kind `file_backend_not_selected`), opens no backend, writes nothing,
+  and leaves one audit denial. Reading from `file` and deleting from it stay
+  allowed.
 
 An explicitly configured `keychain` stays the Keychain on every host; off
 macOS it fails with `SecretsError::UnknownBackend`.
@@ -137,10 +142,11 @@ a value left behind by a backend switch or a `copy` is removed too. If any
 backend fails to delete, the call fails and the key stays listed.
 
 `copy` moves keys between two backends of the same project. On macOS its
-destination may be `file` only when the machine config sets
-`secrets.default_backend: file`; any process running as the same user can
-call the socket, so without that setting it could move Keychain values into
-plaintext files.
+destination may be `file` only when the user's own machine config, at its
+fixed location (see above), sets `secrets.default_backend: file`. Any process
+running as the same user can call the socket, and can start a server with
+its own `--machine-config` or `$HOME`, so without that rule it could move
+Keychain values into plaintext files.
 
 ## Audit trail
 

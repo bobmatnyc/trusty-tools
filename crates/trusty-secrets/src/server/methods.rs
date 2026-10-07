@@ -113,7 +113,8 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_malformed_set_never_echoes_its_value`,
 /// `audit_set_and_delete_write_one_record_per_call`,
-/// `server_set_writes_file_only_when_the_machine_config_selects_it`.
+/// `server_set_writes_file_only_when_the_machine_config_selects_it`,
+/// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Set, Recording::Once, |gate| {
         let (dir, rest) = split_project(params)?;
@@ -214,9 +215,9 @@ impl CopySelection {
 /// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a destination
 /// [`ProjectContext::open_for_write`] refuses (#7524 H1:
 /// [`ErrorKind::FileBackendNotSelected`] for `file` on a Keychain build the
-/// machine config did not opt in), and a source without `READ` or a
-/// destination without `WRITE` ([`ErrorKind::Unsupported`]), before any key
-/// moves. Each key is read from the source and written with
+/// account's own machine config did not opt in), and a source without
+/// `READ` or a destination without `WRITE` ([`ErrorKind::Unsupported`]),
+/// before any key moves. The `file` refusal comes before any backend opens. Each key is read from the source and written with
 /// [`SecretStore::set`] on the destination, which takes the index lock,
 /// upserts the row and, when the publish fails, deletes a new entry again.
 /// A key the source lacks, or any other per-key failure, lands in `failed`
@@ -233,7 +234,8 @@ impl CopySelection {
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
 /// `audit_copy_writes_one_record_per_key`,
-/// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`.
+/// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Copy, Recording::PerKey, |gate| {
         let (dir, rest) = split_project(params)?;

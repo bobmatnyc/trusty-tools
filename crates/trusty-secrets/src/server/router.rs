@@ -30,7 +30,8 @@ use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretsError};
-use crate::store::{KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend};
+use crate::store::config::MACHINE_CONFIG_SUBPATH;
+use crate::store::{KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, platform};
 
 /// Maps a configured backend id to an implementation.
 ///
@@ -48,8 +49,10 @@ pub fn default_backends() -> BackendFactory {
 ///
 /// What: the settings, the names-only index rooted at
 /// [`ServerSettings::index_root`], the backend factory, the audit log at
-/// [`ServerSettings::audit_log`] (#4567), and whether this server acts as a
-/// Keychain build (#7524). `Debug` shows settings and the index root only.
+/// [`ServerSettings::audit_log`] (#4567), whether this server acts as a
+/// Keychain build (#7524), and the account's own machine config, the one
+/// file that may consent to `file` writes there (#7524 H1). `Debug` shows
+/// settings and the index root only.
 // #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
 #[non_exhaustive]
 pub struct State {
@@ -64,10 +67,19 @@ pub struct State {
     /// Whether this build links a Keychain, for the `file` posture checks.
     // #7524: a field, not the constant, so tests can act as either build.
     pub(crate) keychain_compiled: bool,
+    /// The machine config whose `default_backend: file` consents to value
+    /// writes into `file` on a Keychain build; `None` refuses them.
+    // #7524 H1: from the password database, never `--machine-config` or
+    // `$HOME`; a crate-private field so only tests can aim it elsewhere.
+    pub(crate) file_consent_config: Option<PathBuf>,
 }
 
 impl State {
     /// State for `settings`, opening backends through `backends`.
+    ///
+    /// What: the file consent config is [`MACHINE_CONFIG_SUBPATH`] under
+    /// `platform::account_home_dir`; `None` when that home is unknown.
+    /// Test: `server_file_consent_defaults_to_the_account_home_config`.
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
         let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
@@ -77,6 +89,10 @@ impl State {
             backends,
             audit,
             keychain_compiled: KEYCHAIN_COMPILED,
+            // #7524 H1: resolved once; a lookup failure refuses `file` writes.
+            file_consent_config: platform::account_home_dir()
+                .ok()
+                .map(|home| home.join(MACHINE_CONFIG_SUBPATH)),
         }
     }
 }

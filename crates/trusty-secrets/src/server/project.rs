@@ -16,8 +16,9 @@
 //! #9326: likewise, on a Keychain build the project file may not select the
 //! `file` backend; only the machine config may. #4567: nor may it turn the
 //! credential audit off ([`ErrorKind::TrackedAuditRefused`]). #7524 H1: on a
-//! Keychain build no request writes a value into `file` unless the machine
-//! config selected it; `ProjectContext::open_for_write` is that one check.
+//! Keychain build no request writes a value into `file` unless the account's
+//! own machine config selected it; `ProjectContext::open_for_write` is that
+//! one check.
 //! Test: `server_scopes_round_trip_over_a_real_socket`,
 //! `server_project_without_a_remote_is_a_fixed_error`,
 //! `server_project_config_overrides_the_project_vault`,
@@ -25,7 +26,8 @@
 //! `server_tracked_vault_override_outside_the_owner_is_refused`,
 //! `server_non_github_remote_is_a_fixed_error`,
 //! `server_tracked_file_backend_is_refused_on_a_keychain_build`,
-//! `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`.
+//! `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+//! `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -137,21 +139,25 @@ impl ProjectContext {
     /// against same-user callers, so a request may not move values into the
     /// plaintext `file` backend on its own say. Every value write (`set`, and
     /// `copy`'s destination) opens its backend here, so one check covers all.
-    /// What: [`config::check_value_write_for`] with this request's machine
-    /// config and the server's build: on a Keychain build, `file` is
-    /// [`ErrorKind::FileBackendNotSelected`] unless the machine config's
-    /// `default_backend` is `file`, and nothing is opened. Then the factory
-    /// opens `id`.
+    /// What: [`config::check_value_write_for`] with the server's
+    /// `State::file_consent_config` — the account's own machine config, not
+    /// `--machine-config` or one under `$HOME` — and the server's build: on a
+    /// Keychain build, `file` is [`ErrorKind::FileBackendNotSelected`] unless
+    /// that file's `default_backend` is `file`, and nothing is opened. Then
+    /// the factory opens `id`.
     /// Test: `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+    /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+    /// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
     /// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
-    /// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`,
-    /// `server_set_writes_file_only_when_the_machine_config_selects_it`.
+    /// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
     pub(crate) fn open_for_write(
         &self,
         state: &State,
         id: &BackendId,
     ) -> Result<Arc<dyn SecretBackend>, ErrorKind> {
-        config::check_value_write_for(id, self.machine.as_ref(), self.keychain_compiled)?;
+        // #7524 H1: consent is the account's file, never the request's machine config.
+        let consent = state.file_consent_config.as_deref();
+        config::check_value_write_for(id, consent, self.keychain_compiled)?;
         Ok((state.backends)(id)?)
     }
 

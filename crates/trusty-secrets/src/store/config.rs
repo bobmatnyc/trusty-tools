@@ -207,35 +207,47 @@ pub(crate) fn check_project_backend_for(
     }
 }
 
-/// Refuse a value write into `file` on a Keychain build unless the untracked
-/// machine config selected `file`.
+/// Refuse a value write into `file` on a Keychain build unless the account's
+/// own machine config selected `file`.
 ///
 /// Why: #7524 H1, owner ruling item 74 — the Keychain ACL is a boundary
 /// against same-user callers. Without this, any same-uid process could ask
-/// the server to move Keychain values into 0600 plaintext files.
+/// the server to move Keychain values into 0600 plaintext files. Architect
+/// ruling: a config path the spawner chooses — `--machine-config`, or one
+/// under a redirected `$HOME` — is not that machine config.
 /// What: with `keychain_compiled`, a `target` of `file` passes only when
-/// `machine` has `default_backend: file`; otherwise it is
+/// `consent_config` is `Some` and loads (by [`load_machine_at`]) with
+/// `default_backend: file`. No path, a missing or unreadable file, a parse
+/// failure, no `secrets:` section, or another `default_backend` is
 /// [`SecretsError::FileBackendNotSelected`]. Every other target, and every
-/// target on a build without a Keychain, passes. Reads and deletes never
-/// call this.
-/// Test: `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+/// target on a build without a Keychain, passes without reading the file.
+/// Reads and deletes never call this.
+/// Test: `config_value_write_into_file_needs_the_consent_config`,
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+/// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
 /// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
 /// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
 // #7524: only the server writes values on a caller's behalf.
 #[cfg(feature = "server")]
 pub(crate) fn check_value_write_for(
     target: &BackendId,
-    machine: Option<&MachineSecretsConfig>,
+    consent_config: Option<&Path>,
     keychain_compiled: bool,
 ) -> Result<(), SecretsError> {
     let is_file = |id: &BackendId| id.as_str() == BackendId::FILE;
-    let machine_selected_file = machine
-        .and_then(|m| m.default_backend.as_ref())
-        .is_some_and(is_file);
-    if keychain_compiled && is_file(target) && !machine_selected_file {
-        return Err(SecretsError::FileBackendNotSelected);
+    if !keychain_compiled || !is_file(target) {
+        return Ok(());
     }
-    Ok(())
+    // #7524 H1: fail closed — any failure to read a `file` selection refuses.
+    let consented = consent_config
+        .and_then(|path| load_machine_at(path).ok().flatten())
+        .and_then(|machine| machine.default_backend)
+        .is_some_and(|id| is_file(&id));
+    if consented {
+        Ok(())
+    } else {
+        Err(SecretsError::FileBackendNotSelected)
+    }
 }
 
 /// The first CLI setting `project` sets, as the key the refusal names.
