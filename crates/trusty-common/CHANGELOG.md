@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.3] — 2026-10-07
+
+### Added
+
+- `Dreamer::with_after_cycle` installs a callback that runs after every dream cycle that claimed its palace: with `Some(DreamStats)` when the cycle completed, and with `None` when it failed. A failed cycle can still have persisted dedup merges. trusty-memory uses the callback to queue BM25 repair after a cycle that merged or consolidated drawers, or failed (#8246).
+- `bm25::effective_corpus_cap()` returns the BM25 corpus cap upserts enforce right now (the `TRUSTY_BM25_CORPUS_CAP` override, else the 50 000 default), so a consumer can report which cap truncated its corpus (#9235).
+
+### Fixed
+
+- The vector index keeps its list of unreachable drawers more current after each write. A write that pushed an existing drawer out of its only neighbour list left that drawer unreachable by graph search until the palace was reopened; on palaces above 24,576 drawers it was missing from recall in the meantime. Each write now re-tests the drawers it pushed out and scans any it stranded. A drawer stranded indirectly, because its only path into the graph ran through a pushed-out drawer, is still missed until the palace is reopened (#9174).
+- Recall keeps keywords of two characters, such as `e1`, `v2`, `f0` and the `42` of `#42`, in the closet index and the query. A drawer whose content holds a query id (two or three characters with a digit) gains 0.3 in L2 and L3, so "ruling e1" ranks the E1 ruling first. Before, tokens shorter than three bytes were dropped and the drawer ranked 12th. The boost applies only to a rare id: one held by at most max(2, candidates / 5) of the fetched candidates. A two-letter word without a digit, such as `pm` or `pr`, is not an id and earns no boost, so ordinary queries keep their order and a weak drawer stays below the hook relevance floor. Tokens of three or more characters keep the closet boost they had before. Deep recall (L3) fetches three times `top_k` vector candidates when the query names an id. `am`, `go`, `id`, `vs`, `hi`, `oh`, `ok`, `up`, `my`, `us` and `me` join the stop words (#9279).
+- L2 and L3 scores above 0.9 are compressed below 1.0 instead of clamped to 1.0, so strong matches keep their similarity order. Scores at or below 0.9 are unchanged (#9279).
+- Two opens of one palace rank every recall query identically up to 24,576 live drawers. The exact-scan threshold rises from 4,096 to 24,576, and the graph-arm sort, the stranded-point merge, and the L2 and L3 recall sorts all break ties by id, so tied drawers no longer change order between opens. Above 24,576 drawers the graph arm still answers, and its order is measured but not guaranteed (#9280).
+
 ## [0.54.2] — 2026-10-06
 
 ### Added
