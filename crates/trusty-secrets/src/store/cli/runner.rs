@@ -67,6 +67,8 @@ pub struct CliCommand {
     program: OsString,
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
+    /// Secrets refused in argv and the overlay besides the stdin value.
+    hidden: Vec<SecretValue>,
     timeout: Duration,
     vault: String,
     key: String,
@@ -93,6 +95,7 @@ impl CliCommand {
             program: OsString::from(spec.program),
             args: Vec::new(),
             envs: Vec::new(),
+            hidden: Vec::new(),
             timeout: spec.timeout,
             vault: NO_TARGET.to_string(),
             key: NO_TARGET.to_string(),
@@ -130,6 +133,18 @@ impl CliCommand {
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Refuse `secret` in argv and the overlay too, beside the stdin value.
+    ///
+    /// Why: #7519 P3 — Keeper's stdin is a batch command holding the value
+    /// encoded, so the value itself is not a substring of stdin and the
+    /// stdin check alone would not catch it in argv.
+    /// Test: `runner_refuses_a_hidden_secret_in_argv_before_spawn`.
+    #[must_use]
+    pub fn hide(mut self, secret: &SecretValue) -> Self {
+        self.hidden.push(secret.clone());
         self
     }
 
@@ -200,7 +215,12 @@ impl CliCommand {
             .collect();
         let value_leaks = stdin.is_some_and(|v| found_in(&argv, v) || found_in(&overlay, v));
         let token_leaks = overlay.iter().any(|token| found_in(&argv, token));
-        if value_leaks || token_leaks {
+        // #7519 P3: a value a backend encoded into stdin, checked raw.
+        let hidden_leaks = self.hidden.iter().any(|secret| {
+            let secret = secret.expose().as_bytes();
+            found_in(&argv, secret) || found_in(&overlay, secret)
+        });
+        if value_leaks || token_leaks || hidden_leaks {
             return Err(self.failure(REFUSED));
         }
         Ok(())

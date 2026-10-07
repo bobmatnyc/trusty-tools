@@ -133,6 +133,34 @@ fn runner_refuses_the_value_in_argv_before_spawn() {
     assert!(shim.logged_nothing());
 }
 
+/// Why: #7519 P3 — Keeper's stdin carries the value base64-encoded, so the
+/// raw value is not a substring of stdin; a value `hide` names is still
+/// refused in argv and the overlay before the spawn. Red without the
+/// `hidden_leaks` check in `refuse_leaks`.
+/// Test: itself.
+#[test]
+fn runner_refuses_a_hidden_secret_in_argv_before_spawn() {
+    let shim = Shim::new(RECORDER);
+    let hidden = SecretValue::new(CANARY);
+    let encoded = SecretValue::new("record-update password=$BASE64:c2stY2FuYXJ5\n");
+    let in_argv = shim.command().hide(&hidden).arg(format!("--x={CANARY}"));
+    let in_env = shim.command().hide(&hidden).env("TESTCLI_EXTRA", CANARY);
+    for command in [in_argv, in_env] {
+        let err = command.run_with_stdin(&encoded).unwrap_err();
+        assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+        assert!(!format!("{err} {err:?}").contains(CANARY));
+    }
+    assert!(shim.logged_nothing());
+    // The same command without the secret in argv runs.
+    let run = shim
+        .command()
+        .hide(&hidden)
+        .arg("--x=y")
+        .run_with_stdin(&encoded)
+        .unwrap();
+    assert_eq!(run.verdict, Verdict::Ok);
+}
+
 /// Why: #7519 A10 — an overlay token in argv would be readable through
 /// `ps`; it is refused before the spawn on both runners.
 /// Test: itself.

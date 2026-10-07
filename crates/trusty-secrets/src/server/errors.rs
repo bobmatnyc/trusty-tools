@@ -246,8 +246,9 @@ impl ErrorKind {
             Self::CliNotInstalled => {
                 "the secrets backend's command-line tool is not installed or not on PATH"
             }
+            // #7519 P3: ruling 6 — the wire text names Keeper's one-time step.
             Self::BackendLocked => {
-                "the secrets backend is locked or signed out; unlock or sign in to it and retry"
+                "the secrets backend is locked or signed out; unlock or sign in to it and retry (Keeper first needs a person to approve this device and turn on persistent login)"
             }
             Self::FileBackendNotSelected => {
                 "this build has a Keychain, so a value is written to the plaintext `file` backend only when the machine config selects it; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml to allow it"

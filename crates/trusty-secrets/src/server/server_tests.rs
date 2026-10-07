@@ -1732,6 +1732,11 @@ mod posture_tests;
 #[path = "onepassword_tests.rs"]
 mod onepassword_tests;
 
+// #7519 P3: the Keeper server-path tests share this module's fixture.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[path = "keeper_tests.rs"]
+mod keeper_tests;
+
 /// Why: #7519 — the template directory holds values, so like the audit log
 /// it follows only the `--index-dir` flag, never an environment variable.
 /// Test: itself.

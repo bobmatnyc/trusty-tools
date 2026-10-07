@@ -21,6 +21,9 @@ mod dotenv;
 #[cfg(unix)]
 pub(crate) mod file;
 mod index;
+// #7519 P3: the Keeper Commander backend; spawns `keeper` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod keeper;
 mod keychain;
 mod mask;
 #[cfg(any(test, feature = "test-support"))]

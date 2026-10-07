@@ -281,16 +281,20 @@ secrets:
     account: my.1password.com   # `op` account shorthand, passed to `op --account`
     program: /opt/homebrew/bin/op   # optional; absolute path to `op`
   keeper:
-    config_path: ~/.keeper/config.json   # KSM config, when not the CLI default
+    program: /usr/local/bin/keeper           # required; absolute path to Keeper Commander
+    config_path: /Users/me/.keeper/config.json   # required; Commander's config file, absolute, mode 0600
 ```
 
 These sections belong to the untracked machine config only (§6.1,
 [#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)). Neither
 section ever holds a token or password — only the shape needed to
 invoke the CLI (account name, config path). A service-account token
-(`OP_SERVICE_ACCOUNT_TOKEN`, headless Keeper KSM config) is read from the
-external tool's own documented environment/config location, never copied into
-trusty-tools' own config file (T-1).
+(`OP_SERVICE_ACCOUNT_TOKEN`) is read from the external tool's own documented
+environment/config location, never copied into trusty-tools' own config file
+(T-1). Keeper's credential is the persistent-login device token inside the
+Commander config file that `config_path` names; the file itself is never read
+by trusty-secrets, only checked to be a regular 0600 file the account owns
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519) P3, ruling 7).
 
 ### 6.3 Vault naming
 
@@ -405,7 +409,8 @@ third and fourth hand-rolled `Command::new`.
 // op read "op://<vault>/<item>/<field>"  →  one value, stdout only, never argv-visible on the value side
 // op item create -  (JSON item template, value inside, on stdin — #7519)
 // op item edit <id> --template <0600 file>  (template file removed after the call — #7519)
-// keeper get <record-uid> --format json   /   ksm secret get <uid> --format json
+// keeper --config <file> --batch-mode get --format json -- <record-uid>  (value on stdout — #7519 P3)
+// keeper --config <file> --batch-mode -  (stdin: one `record-add`/`record-update` line, value as $BASE64: — #7519 P3)
 ```
 
 **Delivery of the value out of the subprocess never touches argv.** `op read`
@@ -413,12 +418,45 @@ takes a reference in argv (not a secret), and returns the secret on stdout —
 safe. Writing a *new* value (`tm secrets add`) pipes the value to the CLI's
 stdin (`op item create -` with a JSON template on stdin; `op item edit <id>
 --template <0600 file>` for an existing item, per
-[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519) / Keeper
-Commander's `--from-file -`)
+[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519); for Keeper,
+Commander's batch mode reading commands from stdin, `keeper --batch-mode -`,
+with the value inside the command as `$BASE64:<text>`. Commander has no
+`--from-file -`; an earlier draft of this section cited one in error)
 rather than composing it into the argv this document's own `ExternalCliCommand`
 would otherwise render into a log line (see `GhCommand::argv_display`,
 `gh.rs:289`, which exists precisely so a command can be logged — the new
 commands must never call the equivalent for a value-carrying argument).
+
+**Keeper (#7519 P3, Architect rulings 2026-10-07 17:11Z) — shims only, and
+provisional.** No test has run against a real Keeper account; every ruling
+below is revisited when the first Keeper user exists, and the command output
+shapes and message phrases the backend reads are unconfirmed.
+
+- *CLI.* Keeper Commander (`keeper`) only. `ksm` is not used: its set command
+  takes the value in argv. `--password` is never passed.
+- *Write path.* One `record-add` or `record-update` line on stdin, the value as
+  `$BASE64:`. A 0600 batch file read with `run-batch` is the fallback should
+  the live check show stdin batch mode is unreliable; it is not built.
+- *Configuration.* `program` and `config_path` come only from the account's
+  own machine config (§6.1, ruling 74); both are absolute, and the config file
+  is a regular file with mode 0600 owned by the account. No `PATH` search, and
+  Commander's own config search (the working directory first) is never used.
+- *Layout.* One Keeper folder per trusty vault, at the vault's path (e.g.
+  `trusty/acme/web`), mirroring the 1Password vault-per-vault layout; one
+  `login` record per key, titled with the key, the value in `password`.
+- *Fail closed.* Anything other than a confirmed success is a failure. Every
+  write is read back and compared; every delete is checked by a new listing.
+  Exit 0 with text that is not the expected answer is a failure. A key or
+  folder is missing only when a successful listing does not show it — never
+  because of stderr text.
+- *Delete.* `rm` moves a record to Keeper's trash; that satisfies the delete
+  sweep, which includes Keeper wherever it includes 1Password.
+- *Headless limitation.* Commander works headless only after a person has
+  logged in once with that config file, approved the device, and turned on
+  persistent login (`this-device register`, `this-device persistent-login
+  on`). Until then, and after an idle timeout, every call is `backend_locked`,
+  and the error names that step. There is no service-account token for
+  Keeper.
 
 **Prerequisite (amended 2026-10-01).** A CLI runner that writes to the
 child's stdin must exist before any CLI-backed integration lands.
@@ -712,6 +750,9 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Resolved 2026-09-12** ([#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5643081215)):
    accept a service-account token from an environment variable for
    1Password and Keeper; with no token, fail closed with a clear error.
+   **Amended for Keeper by #7519 P3** (§8.2): Keeper has no token path;
+   headless use needs a prior human device approval and persistent login,
+   and without them every call fails closed as `backend_locked`.
 5. **Cross-project vault sharing.** §6.3's default vault name is per-repo. Is
    an explicit `secrets.vault:` override (already in §6.1's example) the only
    sanctioned way to share one vault across repos, or should a monorepo-style
