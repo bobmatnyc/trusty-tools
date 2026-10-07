@@ -64,7 +64,7 @@ mod provider_tests;
 // env-knob cases share the ONE `ENV_LOCK`.
 #[cfg(test)]
 mod batching_tests;
-// #9391: the per-call byte budget leaves every vector bit-identical.
+// #9391: the per-call byte budget changes no vector beyond main's rounding.
 #[cfg(test)]
 mod budget_identity_tests;
 
