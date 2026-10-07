@@ -265,6 +265,30 @@ fn finding_without_category_field_defaults_correctness() {
     assert_eq!(f.kind, "logic-error");
 }
 
+/// #9310 item 2.6: a finding serialized before `severity` existed still
+/// deserializes, with no severity; a stamped one round-trips its severity.
+#[test]
+fn finding_without_severity_key_still_deserializes() {
+    let json = r#"{
+        "file": "src/main.rs",
+        "kind": "logic-error",
+        "description": "off-by-one",
+        "suggestion": "use <=",
+        "confidence": 0.7,
+        "effort": "high"
+    }"#;
+    let mut f: Finding = serde_json::from_str(json).expect("pre-#9310 finding must deserialise");
+    assert_eq!(f.severity, None);
+    let value = serde_json::to_value(&f).expect("serialise");
+    assert!(value.get("severity").is_none(), "{value}");
+
+    f.severity = Some(Severity::Critical);
+    let value = serde_json::to_value(&f).expect("serialise");
+    assert_eq!(value["severity"], "critical");
+    let back: Finding = serde_json::from_value(value).expect("round-trip");
+    assert_eq!(back.severity, Some(Severity::Critical));
+}
+
 /// `InlineCommentOut` survives a serde round-trip (#1414).
 ///
 /// Why: the dry-run / MCP response serialises `ReviewResult.inline_comments`;

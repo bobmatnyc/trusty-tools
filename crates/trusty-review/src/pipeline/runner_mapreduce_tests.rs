@@ -1645,3 +1645,61 @@ async fn run_review_mapreduce_synthesis_on_wiped_f_chunk_is_suppressed_reject() 
         "{result:?}"
     );
 }
+
+// ── #9310 D2: the summary is a template on map-reduce too ────────────────────
+
+/// A chunk reply whose `summary` carries a sentinel, with two Medium
+/// findings: one on the tail file, one on `src/file0.rs`.
+const SENTINEL_CHUNK: &str = r#"{"verdict":"REQUEST_CHANGES","summary":"SENTINEL-9310-CHUNK-PROSE","findings":[{"title":"slow build","body":"`pub fn build(a: i32` recomputes the sum on every call.","severity":"medium","confidence":0.9,"file":"src/big.rs","line":1},{"title":"repeated call","body":"`compute_value(some_argument_here)` repeats the same call on every line.","severity":"medium","confidence":0.9,"file":"src/file0.rs","line":2}]}"#;
+
+/// Assert `result`'s body holds no sentinel prose and holds the verified
+/// summary, ahead of the map-reduce stats line.
+fn assert_template_body(result: &crate::models::ReviewResult) {
+    let body = &result.review_body;
+    assert!(!body.contains("SENTINEL-9310"), "{body}");
+    let summary = crate::pipeline::summary_template::verified_summary(result);
+    assert!(
+        body.contains(&format!("{summary}\n\nMap-reduce review:")),
+        "{body}"
+    );
+}
+
+/// #9310 item 1.1, map-reduce with synthesis: neither the chunk nor the
+/// synthesis summary reaches the body, and the synthesis prose naming the
+/// refuted finding cannot either (item 1.2).
+#[tokio::test]
+async fn mapreduce_summary_never_contains_model_prose() {
+    let synthesis = r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"SENTINEL-9310-SYNTHESIS-PROSE: the repeated call at src/file0.rs:2 wastes work."}"#;
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedReviewer {
+        marker: tail_signature,
+        chunk: SENTINEL_CHUNK,
+        synthesis,
+    });
+    let mut review_deps = deps(llm);
+    review_deps.verifier = Some(Arc::new(RefutingVerifier {
+        refute: "repeats the same call",
+    }));
+    let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
+    assert_eq!(result.findings.len(), 1, "{result:?}");
+    assert_eq!(result.withheld_findings.len(), 1, "{result:?}");
+    assert_template_body(&result);
+    for absent in ["repeated call", "src/file0.rs", "repeats the same call"] {
+        assert!(
+            !result.review_body.contains(absent),
+            "{absent}: {}",
+            result.review_body
+        );
+    }
+}
+
+/// #9310 item 1.1, map-reduce with synthesis not answering (the mechanical
+/// path): the chunk summaries never reach the body, which leads with the
+/// verified summary.
+#[tokio::test]
+async fn mapreduce_mechanical_summary_never_contains_model_prose() {
+    let result = run_scripted(SENTINEL_CHUNK, NO_SYNTHESIS).await;
+    assert!(!result.findings.is_empty(), "{result:?}");
+    assert_template_body(&result);
+}

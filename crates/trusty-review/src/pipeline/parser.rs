@@ -48,7 +48,7 @@
 use serde::{Deserialize, Deserializer, de};
 use tracing::{debug, warn};
 
-use crate::models::{Effort, Finding, FindingCategory, Verdict};
+use crate::models::{Effort, Finding, FindingCategory, Severity, Verdict};
 
 // ─── Wire types (JSON block deserialization) ──────────────────────────────────
 
@@ -116,10 +116,11 @@ impl<'de> de::Visitor<'de> for FindingsVisitor {
         }
         warn!("findings arrived double-encoded as a JSON string — decoding again (#4491)");
         // #9310: the inner error is described, never echoed, as it can quote the reply.
+        // Its cause only: the outer error carries the one position (#9310).
         serde_json::from_str(trimmed).map_err(|e| {
             E::custom(format!(
                 "{FINDINGS_DECODE_ERROR}: {}",
-                describe_block_error(&e)
+                describe_block_cause(&e)
             ))
         })
     }
@@ -147,7 +148,9 @@ where
 /// internal `Finding` type.
 /// What: mirrors the finding schema in the system prompt.  Only `body` is
 /// required; every other field defaults gracefully, and a blank `title` is
-/// derived from `body` in `convert_llm_finding` (#9310).  `category` is new in
+/// derived from `body` in `convert_llm_finding` (#9310).  `title` and
+/// `severity` are `Option` so an explicit JSON `null` parses as absent; serde's
+/// `default` covers only a missing key (#9310).  `category` is new in
 /// #1359 (back gate); it is `#[serde(default)]` (→ `Correctness`) so responses
 /// from models that do not emit it — and every pre-#1359 fixture — still parse.
 /// Test: covered transitively by `parse_json_block_happy_path` and
@@ -155,11 +158,13 @@ where
 #[derive(Debug, Deserialize)]
 struct LlmFinding {
     // #9310: Claude in tool-choice auto omits `title`; it is derived, never required.
+    // #9310: `Option`, so `"title": null` parses instead of failing the reply.
     #[serde(default)]
-    title: String,
+    title: Option<String>,
     body: String,
+    // #9310: `Option`, so `"severity": null` parses; it is then derived.
     #[serde(default)]
-    severity: String,
+    severity: Option<String>,
     #[serde(default)]
     confidence: f32,
     #[serde(default)]
@@ -452,7 +457,7 @@ fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
     let derived = block
         .findings
         .iter()
-        .filter(|f| f.title.trim().is_empty())
+        .filter(|f| f.title.as_deref().is_none_or(|t| t.trim().is_empty()))
         .count();
     if derived > 0 {
         warn!(
@@ -506,15 +511,30 @@ fn try_parse_json_block(body: &str) -> Option<Result<ParsedReview, serde_json::E
 /// Why: the fail-safe reason reaches `result.error` and the PR check, so it
 /// must name the cause — but serde messages for a wrong type or an unknown
 /// enum variant quote the offending value, which is reply content.
+/// What: [`describe_block_cause`], then the error's line and column.
+/// Test: `parse_block_without_verdict_fails_safe_naming_verdict`,
+/// `parse_error_reason_never_echoes_reply_content`,
+/// `double_encoded_findings_error_reports_one_position`.
+fn describe_block_error(e: &serde_json::Error) -> String {
+    format!("{}{}", describe_block_cause(e), error_location(e))
+}
+
+/// The ` at line L column C` suffix serde_json appends to a positioned error.
+fn error_location(e: &serde_json::Error) -> String {
+    format!(" at line {} column {}", e.line(), e.column())
+}
+
+/// The cause of a serde error with no position, safe to report (#9310).
+///
 /// What: keeps the message for syntax and EOF errors (fixed serde_json text)
 /// and for `missing field`/`duplicate field` errors (the name is a struct
 /// field, never input) and the double-encoded findings error (itself built
-/// here). Any other data error becomes a fixed phrase. Line and column are
-/// always appended.
-/// Test: `parse_block_without_verdict_fails_safe_naming_verdict`,
-/// `parse_error_reason_never_echoes_reply_content`.
-fn describe_block_error(e: &serde_json::Error) -> String {
-    let location = format!(" at line {} column {}", e.line(), e.column());
+/// here). Any other data error becomes a fixed phrase. The double-encoded
+/// findings error uses this form, so the reason names one position, the
+/// outer one (#9310).
+/// Test: `double_encoded_findings_error_reports_one_position`.
+fn describe_block_cause(e: &serde_json::Error) -> String {
+    let location = error_location(e);
     let full = e.to_string();
     let message = full.strip_suffix(location.as_str()).unwrap_or(&full);
     let message = match e.classify() {
@@ -524,7 +544,7 @@ fn describe_block_error(e: &serde_json::Error) -> String {
         }
         serde_json::error::Category::Io => "an I/O error",
     };
-    format!("{message}{location}")
+    message.to_string()
 }
 
 /// The part of a serde data-error message that names only schema, if any.
@@ -532,15 +552,18 @@ fn describe_block_error(e: &serde_json::Error) -> String {
 /// Why/What: a "missing field" or "duplicate field" message is cut after the
 /// quoted field name, which must be a plain identifier; a decode error raised by
 /// [`FindingsVisitor`] is kept whole, since its detail is already described.
-/// Anything else is `None` (#9310).
-/// Test: `parse_error_reason_never_echoes_reply_content`.
+/// Anything else, including a name with no closing backtick, is `None` (#9310).
+/// Test: `parse_error_reason_never_echoes_reply_content`,
+/// `safe_data_message_keeps_only_schema_names`,
+/// `safe_data_message_rejects_an_unterminated_field_name`.
 fn safe_data_message(message: &str) -> Option<&str> {
     if message.starts_with(FINDINGS_DECODE_ERROR) {
         return Some(message);
     }
     for prefix in ["missing field `", "duplicate field `"] {
         if let Some(rest) = message.strip_prefix(prefix) {
-            let name = rest.split('`').next()?;
+            // #9310: the closing backtick must exist, or the cut below overruns.
+            let (name, _) = rest.split_once('`')?;
             let is_ident =
                 !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             return is_ident.then(|| &message[..prefix.len() + name.len() + 1]);
@@ -609,18 +632,23 @@ fn cap_chars(text: &str) -> String {
 ///
 /// Why: `Finding::new` clamps confidence and normalises effort; the LLM may
 /// produce out-of-range values or unknown effort strings.
-/// What: maps severity → effort (high/critical → High; medium → Medium; else Low);
+/// What: maps severity → effort (high/critical → High; medium → Medium; else Low)
+/// and keeps the reviewer's severity on the finding (`None` when absent, null,
+/// blank or unknown; `finalize_review` stamps the final one, #9310);
 /// uses the `title` as the `kind` and `body` as `description`; preserves the
 /// finding `category` (#1359 — defaulting to `Correctness` when the model omits
 /// it) so the verdict floor can cap a `method-conformance` finding; carries
 /// `source_citation` (#1419) when the model provides it.
 /// Test: covered transitively by `parse_json_block_happy_path`,
 /// `parse_method_conformance_finding_category`, and
-/// `parse_finding_carries_source_citation`.
+/// `parse_finding_carries_source_citation`; `parse_finding_carries_reviewer_severity`,
+/// `parse_null_title_derives_title`, `parse_null_severity_derives_severity`.
 fn convert_llm_finding(f: LlmFinding) -> Finding {
-    let effort = match f.severity.to_lowercase().as_str() {
-        "high" | "critical" => Effort::High,
-        "medium" => Effort::Medium,
+    // #9310: the reviewer's severity is kept, not folded into effort and lost.
+    let severity = f.severity.as_deref().and_then(Severity::from_reviewer);
+    let effort = match severity {
+        Some(Severity::High | Severity::Critical) => Effort::High,
+        Some(Severity::Medium) => Effort::Medium,
         _ => Effort::Low,
     };
     let file = if f.file.is_empty() {
@@ -630,15 +658,15 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     };
     let category = f.category;
     let line = f.line;
-    // #9310: only a blank title is replaced; a non-empty one passes through as sent.
-    let title = if f.title.trim().is_empty() {
-        derive_title(&f.body)
-    } else {
-        f.title
+    // #9310: only a blank or null title is replaced; a non-empty one passes through as sent.
+    let title = match f.title {
+        Some(title) if !title.trim().is_empty() => title,
+        _ => derive_title(&f.body),
     };
     let mut finding = Finding::new(file, title, f.body, String::new(), f.confidence, effort)
         .with_category(category);
     finding.line = line;
+    finding.severity = severity; // #9310: the reviewer's value; stamped at finalize
     // Carry the failure consequence through for the inline comment (#1416).
     finding.consequence = f.consequence;
     // Carry the committable replacement code through for a GitHub suggestion

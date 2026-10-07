@@ -362,6 +362,8 @@ pub(crate) async fn finalize_review_at(
     result.unverified_count = count_unverified(&result.findings) + result.withheld_unverified_count;
     // #9188: the typed withheld counts, synced beside `findings_count`.
     crate::pipeline::withheld_contract::sync_withheld_counts(&mut result);
+    // #9310: the final severity, once, after every effort demotion.
+    crate::pipeline::severity::stamp_severities(&mut result);
 
     // #4044: the narrative summary was written BEFORE the verification round on
     // both paths, so it can still cite a finding the verifier refuted as a merge

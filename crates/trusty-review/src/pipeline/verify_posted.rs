@@ -250,7 +250,8 @@ pub(crate) struct GateInputs<'a> {
     /// #9188 D: the fetched context a `[jira:]`/`[gh:]`/`[confluence:]`
     /// citation must resolve in.
     pub(crate) refs: &'a str,
-    /// #9188 C: the model-written prose inside `review_body`.
+    /// #9188 C: the model-written prose inside `review_body`; #9310: replaced
+    /// by the verified summary, never posted.
     pub(crate) narrative: &'a str,
     /// The model's verdict when `relax_verdict_if_evidence_wiped` relaxed it
     /// before grading; `settle_no_survivors` decides from it (#9188, option A).
@@ -276,7 +277,9 @@ pub(crate) struct GateInputs<'a> {
 /// ruling, 2026-09-30); a blocking review is UNKNOWN, an approving one keeps
 /// its verdict (AQ-7t). #9188 then re-checks every
 /// survivor at the head (L), makes a blocking review with no survivor
-/// `Unknown` (A, J; an approving one keeps its verdict, AQ-7t), and keeps the model's prose only when it rests on survivors (C).
+/// `Unknown` (A, J; an approving one keeps its verdict, AQ-7t), and replaces
+/// the model's prose with the summary built from the survivors (C; #9310
+/// owner ruling D2, "Always template").
 /// #9310: then `verdict_status::apply_withheld_outcome` maps a withheld
 /// review from the reviewer's own verdict (`all_withheld` APPROVE,
 /// `suppressed_reject` REQUEST_CHANGES), and one headline counting
@@ -287,7 +290,7 @@ pub(crate) struct GateInputs<'a> {
 /// `run_review_disabled_verification_withholds_every_finding`,
 /// `run_review_mapreduce_verifies_findings_from_every_chunk`,
 /// `run_review_posts_a_confirmed_removal_finding_at_its_deletion_line`,
-/// `run_review_keeps_a_clean_review_byte_for_byte`,
+/// `run_review_writes_the_template_for_a_clean_review_byte_for_byte`,
 /// `run_review_all_withheld_request_changes_is_suppressed_reject`,
 /// `the_withheld_headline_counts_the_whole_array`.
 pub(crate) async fn gate_then_verify(
@@ -305,9 +308,7 @@ pub(crate) async fn gate_then_verify(
     contract::settle_no_survivors(result, inputs.wiped_model_verdict.as_ref()); // #9188 A, J
     // #9310: the withheld mapping, last, from the reviewer's own verdict.
     apply_withheld_outcome(result, &inputs.model_verdict, error_before);
-    if let Some(narrative) = narrative {
-        contract::restore_narrative(result, narrative, &index); // #9188 C
-    }
+    contract::write_summary(result, narrative); // #9188 C; #9310 D2: always the template
     contract::prepend_withheld_headline(result); // #9310: one total, from the array
 }
 

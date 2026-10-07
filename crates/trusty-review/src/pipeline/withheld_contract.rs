@@ -13,9 +13,9 @@
 //!    keeps its verdict (AQ-7t, Bob 2026-10-05);
 //!  - [`regrade_from_survivors`] recomputes a non-`Unknown` grade from the
 //!    survivors alone when anything was withheld (leak J);
-//!  - [`take_narrative`] / [`restore_narrative`] keep the model's prose only
-//!    when nothing was withheld and every location it cites is backed by a
-//!    survivor, and otherwise rebuild it from the survivors (leak C);
+//!  - [`take_narrative`] / [`write_summary`] replace the model's prose with
+//!    the summary built from the survivors, always (leak C; #9310 owner
+//!    ruling D2, "Always template");
 //!  - [`sync_withheld_counts`] fills the typed `withheld_count`,
 //!    `withheld_by_reason` and a missing `verdict_status` (leak K, #9310);
 //!  - [`withheld_headline`] is the one "N findings withheld" headline, its
@@ -27,24 +27,20 @@
 //! `runner_hallucination_corpus_tests.rs`.
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
-use regex::Regex;
 use tracing::warn;
 
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus, WithheldFinding};
 use crate::pipeline::{
     absence_claim::ABSENCE_REASON,
-    citation_check::{CITATION_REASON, CODE_CITATION_RE},
-    citation_gate::{
-        LineIndex, resolves_at_head,
-        verdict::{scrub_body, settle_withheld},
-    },
+    citation_check::CITATION_REASON,
+    citation_gate::{LineIndex, resolves_at_head, verdict::settle_withheld},
     diff_analyzer::models::FilteredDiff,
     finding_hygiene::SELF_NEGATED_REASON,
     grade::derive_verdict,
     letter_grade::{default_grade_for_verdict, reconcile_grade_with_verdict},
     mapreduce::reduce::{DUPLICATE_REASON, OVER_MAX_FINDINGS_REASON},
+    summary_template::verified_summary,
     verify_posted::{
         NO_VERIFIER_REASON, OVER_CAP_REASON, REFUTED_REASON, UNCONFIRMED_REASON, UNJUDGED_REASON,
         UNVERIFIABLE_REASON,
@@ -294,149 +290,51 @@ pub(crate) fn regrade_from_survivors(result: &mut ReviewResult) {
 /// Placeholder for the model's prose while the gates edit the body around it.
 const NARRATIVE_SLOT: &str = "\u{1}trusty-review:narrative\u{1}";
 
-/// The model's prose, lifted out of `review_body` while the gates run (#9188 C).
-pub(crate) struct Narrative {
-    text: String,
-    slotted: bool,
+/// Where the model's prose sat in `review_body` while the gates ran (#9188 C).
+pub(crate) enum Narrative {
+    /// Lifted out; [`NARRATIVE_SLOT`] holds its place.
+    Slotted,
+    /// Not found in the body, so the body cannot be shown to hold none.
+    Unlocated,
+    /// The reviewer wrote none.
+    Absent,
 }
 
 /// Lift `narrative` out of `result.review_body`, leaving a placeholder.
 ///
-/// What: `None` for an empty narrative. When the body does not contain the
-/// narrative, nothing is lifted and [`restore_narrative`] fails closed.
-pub(crate) fn take_narrative(result: &mut ReviewResult, narrative: &str) -> Option<Narrative> {
+/// What: [`Narrative::Absent`] for an empty narrative; when the body does not
+/// contain it, nothing is lifted and [`write_summary`] fails closed.
+pub(crate) fn take_narrative(result: &mut ReviewResult, narrative: &str) -> Narrative {
     if narrative.trim().is_empty() {
-        return None;
+        return Narrative::Absent;
     }
-    let slotted = result.review_body.contains(narrative);
-    if slotted {
-        result.review_body = result.review_body.replacen(narrative, NARRATIVE_SLOT, 1);
+    if !result.review_body.contains(narrative) {
+        return Narrative::Unlocated;
     }
-    Some(Narrative {
-        text: narrative.to_string(),
-        slotted,
-    })
+    result.review_body = result.review_body.replacen(narrative, NARRATIVE_SLOT, 1);
+    Narrative::Slotted
 }
 
-/// Put the model's prose back, or a summary rebuilt from survivors (#9188 C).
+/// Put the verified summary where the model's prose was (#9188 C, #9310).
 ///
 /// Why: the prose was written before any gate ran, so it can name a defect
-/// whose finding was withheld, or one no finding ever carried; `scrub_body`
-/// removed only literal `file:line` strings and JSON.
-/// What: keeps the prose (with its fenced findings JSON stripped, as before)
-/// when nothing but duplicates was withheld and every diff location it cites
-/// is backed by a survivor ([`narrative_is_backed`]); otherwise puts
-/// [`rebuilt_narrative`] in its place. When the prose could not be located in
-/// the body, a rebuild replaces the whole body (fail closed).
-/// Test: `a_withheld_defect_named_in_the_summary_never_reaches_the_body`,
-/// `a_clean_review_keeps_its_prose`.
-pub(crate) fn restore_narrative(
-    result: &mut ReviewResult,
-    narrative: Narrative,
-    index: &LineIndex,
-) {
-    let keep = narrative_is_backed(&narrative.text, result, index);
-    if keep {
-        if narrative.slotted {
-            let text = scrub_body(&narrative.text, &[]);
-            result.review_body = result.review_body.replacen(NARRATIVE_SLOT, &text, 1);
-        }
-        return;
-    }
-    let rebuilt = rebuilt_narrative(result);
-    result.review_body = if narrative.slotted {
-        result.review_body.replacen(NARRATIVE_SLOT, &rebuilt, 1)
-    } else {
-        rebuilt
+/// whose finding was withheld, or one no finding ever carried, in words no
+/// location check can catch. Owner ruling D2 ("Always template",
+/// 2026-10-06): the prose is never posted, backed or not.
+/// What: writes `summary_template::verified_summary(result)` into the slot.
+/// An unlocated narrative makes the summary the whole body (fail closed); an
+/// absent one puts it at the head of the body.
+/// Test: `every_narrative_shape_gets_the_verified_summary`,
+/// `a_withheld_defect_named_in_the_summary_never_reaches_the_body`,
+/// `a_clean_review_gets_the_template_not_its_prose`.
+pub(crate) fn write_summary(result: &mut ReviewResult, narrative: Narrative) {
+    let summary = verified_summary(result);
+    result.review_body = match narrative {
+        Narrative::Slotted => result.review_body.replacen(NARRATIVE_SLOT, &summary, 1),
+        Narrative::Unlocated => summary,
+        Narrative::Absent if result.review_body.trim().is_empty() => summary,
+        Narrative::Absent => format!("{summary}\n\n{}", result.review_body),
     };
-}
-
-/// A `path.ext:line` or `path.ext:start-end` location in prose.
-static LOCATION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+):L?(\d+)(?:-L?(\d+))?")
-        .expect("location regex is a valid literal")
-});
-
-/// Every location in `text`: its path and inclusive line span.
-fn locations(text: &str) -> impl Iterator<Item = (&str, u32, u32)> {
-    LOCATION_RE.captures_iter(text).filter_map(|caps| {
-        let path = caps.get(1)?.as_str();
-        let lo = caps.get(2)?.as_str().parse::<u32>().ok()?;
-        let hi = caps
-            .get(3)
-            .and_then(|m| m.as_str().parse::<u32>().ok())
-            .map_or(lo, |hi| hi.max(lo));
-        Some((path, lo, hi))
-    })
-}
-
-/// Whether the prose may stand: nothing withheld but duplicates, and every
-/// location it cites in a diff file overlaps a survivor's line or one of its
-/// `[code: …]` spans.
-///
-/// Why: #9188 C keeps the model's prose only when it names no unbacked
-/// defect; the critic's MEDIUM-1 showed the old match also read
-/// `127.0.0.1:8080`, `example.com:443` and paths outside the diff as
-/// citations, and a range `a.rs:42-45` as line 42 only.
-/// What: a location whose path `index` does not resolve to a diff file is not
-/// a citation; one that does is backed when a survivor in that file has its
-/// line, or a `[code: …]` locator span, overlapping the cited span.
-/// Test: `a_clean_review_keeps_prose_with_non_diff_locations`,
-/// `run_review_keeps_a_clean_review_byte_for_byte`.
-fn narrative_is_backed(text: &str, result: &ReviewResult, index: &LineIndex) -> bool {
-    if result
-        .withheld_findings
-        .iter()
-        .any(|w| w.reason != DUPLICATE_REASON)
-    {
-        return false;
-    }
-    let mut spans: Vec<(&str, u32, u32)> = Vec::new();
-    for f in &result.findings {
-        if let (Some(key), Some(line)) = (index.file_key(&f.file), f.line) {
-            spans.push((key, line, line));
-        }
-        for text in [f.description.as_str(), f.consequence.as_str()] {
-            let locators = CODE_CITATION_RE
-                .captures_iter(text)
-                .filter_map(|caps| caps.get(1));
-            for (path, lo, hi) in locators.flat_map(|m| locations(m.as_str())) {
-                if let Some(key) = index.file_key(path) {
-                    spans.push((key, lo, hi));
-                }
-            }
-        }
-    }
-    locations(text).all(|(path, lo, hi)| {
-        index.file_key(path).is_none_or(|key| {
-            spans
-                .iter()
-                .any(|&(file, a, b)| file == key && a <= hi && lo <= b)
-        })
-    })
-}
-
-/// The summary that replaces unbacked prose: the counts and the survivors.
-fn rebuilt_narrative(result: &ReviewResult) -> String {
-    let withheld = result.withheld_findings.len();
-    let mut out = if result.findings.is_empty() {
-        format!("No verified findings; {withheld} withheld.")
-    } else {
-        format!(
-            "{} verified findings; {withheld} withheld.",
-            result.findings.len()
-        )
-    };
-    out.push_str(if withheld > 0 {
-        " The reviewer's summary is not shown: it was written before its findings were checked (#9188)."
-    } else {
-        " The reviewer's summary is not shown: it cites code no verified finding backs (#9188)."
-    });
-    for f in &result.findings {
-        let line = f.line.map(|l| format!(":{l}")).unwrap_or_default();
-        out.push_str(&format!("\n- `{}{line}` — {}", f.file, f.kind));
-    }
-    out
 }
 
 /// Text the reviewer was shown beyond the diff, for context citations (#9188 D).

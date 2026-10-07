@@ -275,7 +275,8 @@ pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Opti
 /// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
 /// What: syncs `findings_count` to `findings.len()` (#1877), sets a missing
-/// `verdict_status` to `no_reviewer_output` (#9310), releases the
+/// `verdict_status` to `no_reviewer_output` (#9310), writes the verified
+/// summary as the body (#9310 D2), releases the
 /// in-progress dedup claim when `claim` is `Held` and the run could post (the
 /// only runs that claim, #9348; fail-safe on error), writes
 /// the dry-run log so the failure is inspectable, prints when requested, and
@@ -284,7 +285,8 @@ pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Opti
 /// `findings_count_matches_len_on_abort`,
 /// `failed_claim_abort_does_not_delete_another_processes_record`,
 /// `dry_run_abort_keeps_a_completed_record`,
-/// `no_reviewer_reply_reads_no_reviewer_output`.
+/// `no_reviewer_reply_reads_no_reviewer_output`,
+/// `a_truncated_reply_body_is_the_template`.
 pub(super) async fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -305,6 +307,8 @@ pub(super) async fn abort_dry(
         .verdict_status
         .get_or_insert(crate::models::VerdictStatus::NoReviewerOutput);
     crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
+    // #9310 D2: an abort's body is the template too, never a truncated reply.
+    result.review_body = crate::pipeline::summary_template::verified_summary(&result);
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
     // #9348: a run that cannot post never claimed, so its `Held` means nothing.

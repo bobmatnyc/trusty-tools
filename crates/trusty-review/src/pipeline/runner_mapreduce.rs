@@ -192,6 +192,7 @@ pub(super) async fn run_mapreduce_branch(
 
     // Narrative body: use the synthesis prose summary when available (#1663);
     // fall back to the deterministic stats string when synthesis is disabled.
+    // #9310 D2: `gate_then_verify` replaces the summary with the verified one.
     let stats_body = format!(
         "Map-reduce review: {} file(s) reviewed across {} unit(s), \
          {} skipped, {} failed; {} finding(s) surfaced.",
