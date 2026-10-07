@@ -79,7 +79,8 @@ pub enum MapOutcome {
     Reviewed {
         /// File path this outcome covers (for stats / grouping).
         file: String,
-        /// Per-chunk verdict parsed from the LLM response.
+        /// Per-chunk verdict parsed from the LLM response, tightened by the
+        /// verdict its grade implies (#9310).
         verdict: Verdict,
         /// Findings parsed from this chunk's review.
         findings: Vec<Finding>,
