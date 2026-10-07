@@ -178,12 +178,14 @@ impl HttpTraceSource {
     /// `trusty-audit`'s `grounding::daemons::search_base_url` resolves through
     /// [`trusty_common::daemon_guard::DaemonAddrLayout`] rather than a literal.
     /// What: #9214 — [`SearchTransport::resolve_advertised`] picks the socket
-    /// when one is present, else the `DaemonAddrLayout` HTTP address; then
+    /// when one is present (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an
+    /// isolated instance), else the `DaemonAddrLayout` HTTP address; then
     /// builds the shared proxy-free loopback client with [`TRACE_TIMEOUT`].
     /// `None` when the TLS backend will not initialise, which the caller
     /// reports as an unreachable daemon.
     /// Test: `trace_client_tests::the_shared_search_layout_is_the_one_being_resolved`,
-    /// `search_transport_tests::trace_entry_node_and_usages_go_over_the_socket`.
+    /// `search_transport_tests::trace_entry_node_and_usages_go_over_the_socket`,
+    /// `search_transport_tests::trusty_data_dir_isolates_the_default_socket`.
     #[must_use]
     pub fn resolved() -> Option<Self> {
         Self::with_transport(SearchTransport::resolve_advertised())
@@ -276,7 +278,14 @@ impl TraceSource for HttpTraceSource {
             let report = call_socket(socket, METHOD_CALL_CHAIN, params, TRACE_TIMEOUT)
                 .await
                 .map_err(|e| from_search_error(e, index_id, symbol))?;
-            let text = report.as_str().unwrap_or_default();
+            // #9214: a result we cannot read is an error, never a definite
+            // "symbol absent" — the HTTP leg's unparseable-body shape.
+            let Some(text) = report.as_str() else {
+                return Err(TraceError::Api {
+                    status: 200,
+                    body: "non-string call_chain result".to_string(),
+                });
+            };
             return parse_entry_node(text)
                 .ok_or_else(|| TraceError::SymbolAbsent(symbol.to_string()));
         }

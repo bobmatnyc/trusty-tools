@@ -36,12 +36,13 @@ fn short_tempdir() -> tempfile::TempDir {
         .expect("tempdir under /tmp")
 }
 
-/// Isolate the default socket path and clear both transport env vars.
-fn isolated(dir: &tempfile::TempDir) -> [EnvGuard; 3] {
+/// Isolate the default socket path and clear every other transport env var.
+fn isolated(dir: &tempfile::TempDir) -> [EnvGuard; 4] {
     [
         EnvGuard::set(DATA_DIR_OVERRIDE, &dir.path().to_string_lossy()),
         EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
         EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
+        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
     ]
 }
 
@@ -218,6 +219,7 @@ fn unit_tests_never_resolve_the_real_default_socket() {
         EnvGuard::unset(DATA_DIR_OVERRIDE),
         EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
         EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
+        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
     ];
     for resolved in [
         SearchTransport::resolve(&default_config()),
@@ -234,6 +236,34 @@ fn unit_tests_never_resolve_the_real_default_socket() {
             }
             other => panic!("expected the hermetic socket, got {other:?}"),
         }
+    }
+}
+
+/// `TRUSTY_DATA_DIR` isolates the default socket, as the daemon's own rule does.
+///
+/// Why: the daemon of an instance started with `TRUSTY_DATA_DIR` binds
+/// `<TRUSTY_DATA_DIR>/trusty-search.sock`; `search_rpc::search_socket()` ignores
+/// that var, so without the local rule an isolated run read the shared daemon.
+/// What: a fake "shared" daemon at `search_socket()`'s path (moved into a temp
+/// dir by `TRUSTY_DATA_DIR_OVERRIDE`) and the isolated instance's own socket;
+/// both resolvers must pick the isolated one.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn trusty_data_dir_isolates_the_default_socket() {
+    let shared_dir = short_tempdir();
+    let isolated_dir = short_tempdir();
+    let _env = isolated(&shared_dir);
+    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, &isolated_dir.path().to_string_lossy());
+    let shared = FakeSearchSocket::serve(&default_socket(), health_only);
+    let own = FakeSearchSocket::serve(&isolated_dir.path().join("trusty-search.sock"), health_only);
+
+    for resolved in [
+        SearchTransport::resolve(&default_config()),
+        SearchTransport::resolve_advertised(),
+    ] {
+        assert_ne!(resolved, SearchTransport::Socket(shared.path.clone()));
+        assert_eq!(resolved, SearchTransport::Socket(own.path.clone()));
     }
 }
 
@@ -370,6 +400,26 @@ async fn trace_entry_node_and_usages_go_over_the_socket() {
             json!({"index_id": "idx",
                    "body": {"text": "run", "top_k": 5, "path_prefix": "src/"}})
         )
+    );
+}
+
+/// A `call_chain` result that is not a string is an error, never a definite
+/// "symbol absent" (#9214 critic).
+#[cfg(feature = "report")]
+#[tokio::test]
+async fn a_non_string_call_chain_result_is_an_error() {
+    let dir = short_tempdir();
+    let fake = FakeSearchSocket::serve(&dir.path().join("s.sock"), |_, _| {
+        Ok(json!({"report": "## `run` [ENTRY]  src/lib.rs:7"}))
+    });
+    let source = HttpTraceSource::with_transport(SearchTransport::Socket(fake.path.clone()))
+        .expect("source builds");
+    assert_eq!(
+        source.entry_node("idx", "run").await,
+        Err(TraceError::Api {
+            status: 200,
+            body: "non-string call_chain result".to_string(),
+        })
     );
 }
 
