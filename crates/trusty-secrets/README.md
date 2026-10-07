@@ -92,6 +92,7 @@ digit or `_`.
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
+| `cli-backends` | no | The CLI runner (`store::cli`) and the 1Password backend (`store::onepassword`). Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
 A caller that only names keys can depend on `api` alone:
@@ -138,9 +139,57 @@ a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
 
 `delete` removes the key from every backend this build can store values in
-(the Keychain on macOS, and the file backend), not only the configured one, so
-a value left behind by a backend switch or a `copy` is removed too. If any
-backend fails to delete, the call fails and the key stays listed.
+(the Keychain on macOS, the file backend, and 1Password when the machine config
+enables it), not only the configured one, so a value left behind by a backend
+switch or a `copy` is removed too. If any backend fails to delete, the call
+fails and the key stays listed. On macOS this includes the Keychain when the
+project is configured for `file`, so a locked Keychain fails that delete closed:
+unlock the Keychain and retry.
+
+## 1Password
+
+With the `cli-backends` feature (Unix), the `onepassword` backend keeps values
+in 1Password through its CLI, `op`. Only the machine config can enable it:
+
+```yaml
+secrets:
+  default_backend: onepassword   # or keep another default and add the section
+  onepassword:
+    account: my.1password.com    # optional: `op --account`
+    config_path: /abs/op/config  # optional: `op --config`, an absolute path
+    program: /opt/homebrew/bin/op  # optional: `op` itself, an absolute path
+```
+
+`onepassword: {}` enables it with no settings. A project file may then select
+it with `secrets.backend: onepassword`. It may not set `account`,
+`config_path` or `program`.
+
+The backend runs `op` by absolute path only, found once when the backend
+opens. `program` names it as given: it must be an absolute path to an
+executable file. Without `program`, the backend takes the first executable
+`op` in an absolute directory on the server's `PATH`. Empty, `.` and other
+relative `PATH` entries are skipped, because they name the working directory
+of whatever started the server. With no such `op`, calls fail with
+`cli_not_installed`; install `op` in an absolute directory or set `program`.
+
+- The trusty vault name is the 1Password vault's name, for example
+  `trusty/acme/web`. Create that vault first.
+- A key is a Password item titled with the key. Its `password` field holds the
+  value. An item of another category with that title is never touched.
+- The value reaches `op` only on stdin for a new item, or in a 0600 template
+  file for an existing one. The file is removed after the call, and a crashed
+  server's leftover is removed at the next start.
+- Headless, set `OP_SERVICE_ACCOUNT_TOKEN` where the server starts. At start
+  the server removes it and every other `OP_*` variable, except `op signin`
+  sessions, from its own environment, and passes the token to `op` only. With
+  no token and no session, calls fail as locked. Nothing falls back to the
+  Keychain or to files.
+- Enabling 1Password adds one `op item list` to every `delete`.
+- `doctor` lists the backend without running `op`.
+
+```bash
+cargo install trusty-secrets --version <version> --features cli-backends --locked
+```
 
 `copy` moves keys between two backends of the same project. On macOS its
 destination may be `file` only when the user's own machine config, at its

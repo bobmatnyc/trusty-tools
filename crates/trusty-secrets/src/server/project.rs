@@ -161,6 +161,15 @@ impl ProjectContext {
         Ok((state.backends)(id)?)
     }
 
+    /// The machine config read by [`Self::resolve`], if the file exists.
+    ///
+    /// What: the untracked file `--machine-config` or `$HOME` names. #7519:
+    /// the server reads CLI-backend enablement from the account's own file
+    /// instead (`State::file_consent_config`).
+    pub fn machine_config(&self) -> Option<&MachineSecretsConfig> {
+        self.machine.as_ref()
+    }
+
     /// The §6.1 resolution for this project and the server's machine config.
     pub fn resolved_config(&self) -> ResolvedConfig {
         config::resolve(self.config.as_ref(), self.machine.as_ref())

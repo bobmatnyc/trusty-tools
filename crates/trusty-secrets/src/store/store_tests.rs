@@ -202,6 +202,81 @@ fn store_delete_across_keeps_the_row_when_any_backend_fails() {
     assert_eq!(rows.len(), 1, "the row stays while a value may remain");
 }
 
+/// A swept backend whose `delete` lets a second writer try a `set` first.
+///
+/// What: stands in for a concurrent `secrets.set` that lands while a delete
+/// is sweeping. The racer's index never waits for the lock, so it either
+/// writes at once or gets [`SecretsError::LockTimeout`]; `raced_in` records
+/// which.
+#[derive(Debug)]
+struct RacingBackend {
+    inner: MemoryBackend,
+    racer: SecretStore,
+    raced_in: std::sync::atomic::AtomicBool,
+}
+
+impl SecretBackend for RacingBackend {
+    fn id(&self) -> BackendId {
+        BackendId::new("racing").unwrap()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.inner.get(vault, key)
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, v: &SecretValue) -> Result<(), SecretsError> {
+        self.inner.set(vault, key, v)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        let raced = self
+            .racer
+            .set(vault, key, &SecretValue::new("sk-racer-7519"));
+        self.raced_in
+            .store(raced.is_ok(), std::sync::atomic::Ordering::SeqCst);
+        self.inner.delete(vault, key)
+    }
+}
+
+/// Why: #7519 P1 carry-over (b) — the sweep ran outside the index lock, so a
+/// `set` landing between the sweep and the row removal wrote a value whose
+/// row the delete then dropped: a stored credential `list` no longer shows.
+/// The sweep and the row removal must be one `index.update`.
+/// Red on the unfixed code: the racer's `set` lands, and the configured
+/// backend keeps a value with no index row.
+/// Test: itself.
+#[test]
+fn store_delete_across_holds_the_index_lock_through_the_sweep() {
+    let (tmp, configured, store) = fixture();
+    let racer_index =
+        NamesIndex::at(tmp.path().join("index")).with_lock_timeout(std::time::Duration::ZERO);
+    let racing = Arc::new(RacingBackend {
+        inner: MemoryBackend::new(),
+        racer: SecretStore::new(
+            Arc::clone(&configured) as Arc<dyn SecretBackend>,
+            racer_index,
+        ),
+        raced_in: std::sync::atomic::AtomicBool::new(false),
+    });
+    let others = [Arc::clone(&racing) as Arc<dyn SecretBackend>];
+    store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+
+    let deleted = store.delete_across(&project(), &key("API_KEY"), &others);
+    assert!(deleted.unwrap().removed);
+    assert!(
+        !racing.raced_in.load(std::sync::atomic::Ordering::SeqCst),
+        "a set landed between the sweep and the row removal"
+    );
+    let rows = store.list(&project()).unwrap().len();
+    assert_eq!(
+        (configured.len(), rows),
+        (0, 0),
+        "a backend holds a value no index row lists"
+    );
+}
+
 /// Why: #7519 — `delete` sweeps every backend this build can write, and
 /// none it cannot: off macOS every Keychain call fails closed, which would
 /// fail every delete.
@@ -380,7 +455,18 @@ fn store_open_backend_knows_keychain_and_file() {
         let file = open_backend(&BackendId::file()).unwrap();
         assert_eq!(file.id().as_str(), "file");
     }
-    let err = open_backend(&BackendId::new("onepassword").unwrap()).unwrap_err();
+    // #7519: with `cli-backends` it opens from the machine config under
+    // `$HOME`, which no test reads; `server_backends_for_opens_onepassword_only_when_enabled`
+    // covers that build.
+    #[cfg(not(all(unix, feature = "cli-backends")))]
+    {
+        let err = open_backend(&BackendId::onepassword()).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::UnknownBackend { .. }),
+            "{err:?}"
+        );
+    }
+    let err = open_backend(&BackendId::new("keeper").unwrap()).unwrap_err();
     assert!(
         matches!(err, SecretsError::UnknownBackend { .. }),
         "{err:?}"
@@ -409,6 +495,7 @@ fn store_keychain_failure_never_falls_through_to_file() {
             file_opened.set(true);
             Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
         },
+        || panic!("a Keychain id opened 1Password"),
     );
     assert!(
         !file_opened.get(),
@@ -419,6 +506,40 @@ fn store_keychain_failure_never_falls_through_to_file() {
         Err(other) => panic!("the Keychain error was replaced: {other:?}"),
         Ok(opened) => panic!("a failing Keychain still opened {:?}", opened.id()),
     }
+}
+
+/// Why: #7519 — a failing 1Password open surfaces as itself; it never
+/// reaches the Keychain or file opener, so a locked or disabled 1Password
+/// never moves values to another backend.
+/// Red when the `onepassword` arm falls to another opener or to
+/// `UnknownBackend`.
+/// Test: itself.
+#[test]
+fn store_onepassword_opens_only_through_its_own_opener() {
+    let other_opened = std::cell::Cell::new(false);
+    let result = backend::open_backend_from(
+        &BackendId::onepassword(),
+        || {
+            other_opened.set(true);
+            Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+        },
+        || {
+            other_opened.set(true);
+            Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+        },
+        || {
+            Err(SecretsError::BackendLocked {
+                backend: BackendId::ONEPASSWORD.to_string(),
+                hint: "unlock it",
+            })
+        },
+    );
+    assert!(!other_opened.get(), "1Password opened another backend");
+    assert!(
+        matches!(result, Err(SecretsError::BackendLocked { .. })),
+        "{:?}",
+        result.map(|b| b.id())
+    );
 }
 
 /// Why: #9326 AC3, owner ruling f5 — the Keychain is the default wherever
