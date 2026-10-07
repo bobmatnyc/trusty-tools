@@ -842,3 +842,22 @@ fn review_pr_schema_lists_the_optional_context_params() {
         json!(["owner", "repo", "pr"])
     );
 }
+
+/// #9197: both review tools list `issue_docs` as an optional array of
+/// `{id, body}` objects.
+#[test]
+fn both_review_tools_list_issue_docs() {
+    let tools = tool_descriptors();
+    for name in ["review_pr", "review_diff"] {
+        let tool = tools
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["name"] == name))
+            .expect(name);
+        let schema = &tool["inputSchema"]["properties"]["issue_docs"];
+        assert_eq!(schema["type"], "array", "{name}");
+        assert_eq!(schema["items"]["required"], json!(["id", "body"]), "{name}");
+        assert_eq!(schema["items"]["additionalProperties"], false, "{name}");
+        let required = tool["inputSchema"]["required"].as_array().expect(name);
+        assert!(!required.iter().any(|r| r == "issue_docs"), "{name}");
+    }
+}

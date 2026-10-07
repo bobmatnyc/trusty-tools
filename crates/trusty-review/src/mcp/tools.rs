@@ -29,8 +29,8 @@ use crate::{
     mcp::console_metrics,
     models::{ReviewResult, ReviewStatus},
     pipeline::{
-        DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
-        withheld_contract::withheld_by_reason,
+        DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
+        TriggerDecision, run_review_with, withheld_contract::withheld_by_reason,
     },
     service::{
         AppState,
@@ -131,7 +131,9 @@ pub fn tool_descriptors() -> Value {
                         "type": "string",
                         "description": "Referenced or related code the diff depends on, for \
                                        the reviewer (capped at 64,000 characters)."
-                    }
+                    },
+                    // #9197: caller issue docs, off by default.
+                    "issue_docs": context_args::issue_docs_schema()
                 }
             }
         },
@@ -160,7 +162,9 @@ pub fn tool_descriptors() -> Value {
                     "reviewer_model": {
                         "type": "string",
                         "description": "Override the reviewer model slug (same format as review_pr)."
-                    }
+                    },
+                    // #9197: caller issue docs, off by default.
+                    "issue_docs": context_args::issue_docs_schema()
                 }
             }
         },
@@ -239,11 +243,17 @@ pub(crate) mod context_args;
 /// What: writes the diff to a named temp file, then runs the pipeline with
 /// `DiffSource::LocalFile`; a non-empty `context` argument is the
 /// `CallerContext::pr_description` (#8654). The temp file is cleaned up when
-/// it is dropped (via `NamedTempFile`'s `Drop`).
+/// it is dropped (via `NamedTempFile`'s `Drop`). #9197: `issue_docs` is
+/// parsed first, and the review runs through `run_review_with` (Architect
+/// ruling Q2); with no `issue_docs` the envelope is `wrap_result`'s.
 /// Test: `call_tool_review_diff_returns_non_empty_verdict`,
-/// `review_diff_context_reaches_the_reviewer_prompt`.
+/// `review_diff_context_reaches_the_reviewer_prompt`,
+/// `review_diff_issue_docs_reach_the_reviewer_prompt`,
+/// `review_diff_without_issue_docs_reports_no_context_sources`.
 async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolError> {
     let diff = require_str(args, "diff")?;
+    // #9197: a malformed `issue_docs` is refused before any work.
+    let request = context_args::with_issue_docs(OptionalContextRequest::default(), args)?;
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")
@@ -284,9 +294,10 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     };
 
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");
-    let result = run_review(&state.config, input, deps).await;
+    let options = ReviewOptions::new(request); // #9197: ruling Q2
+    let outcome = run_review_with(&state.config, input, deps, options).await;
     // `tmp` is dropped here — temp file cleaned up automatically.
-    Ok(wrap_result(&result))
+    Ok(wrap_outcome(&outcome))
 }
 
 // ─── review_health ────────────────────────────────────────────────────────────

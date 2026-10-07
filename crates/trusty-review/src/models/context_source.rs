@@ -17,8 +17,10 @@ use serde::{Deserialize, Serialize};
 /// different caller action, so they are separate states.
 /// What: `Used` reached the reviewer whole; `Truncated` reached it cut at its
 /// cap with a visible marker; `Absent` had no text; `Unavailable` could not be
-/// read, with the reason in `detail`.
-/// Test: `context_sources_serialize_in_snake_case`.
+/// read, with the reason in `detail`; `Omitted` (items only, #9197) was left
+/// out whole, with the reason in `detail`.
+/// Test: `context_sources_serialize_in_snake_case`,
+/// `more_than_eight_docs_drop_the_tail_with_omitted_records`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
@@ -31,6 +33,9 @@ pub enum SourceState {
     Absent,
     /// Requested, but it could not be read; `detail` names why.
     Unavailable,
+    /// An item left out whole — over a count or size cap, or a duplicate;
+    /// `detail` names which (#9197).
+    Omitted,
 }
 
 /// One part of a source, such as one caller-context field.
@@ -47,6 +52,9 @@ pub struct ContextItemRecord {
     /// Characters cut by the cap.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub chars_omitted: usize,
+    /// Why the item was omitted or unavailable (#9197).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One requested context source and what happened to it.
@@ -86,6 +94,7 @@ impl ContextItemRecord {
             state,
             chars,
             chars_omitted,
+            detail: None,
         }
     }
 }

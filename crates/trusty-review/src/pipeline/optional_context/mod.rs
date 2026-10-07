@@ -14,9 +14,11 @@ use std::sync::Arc;
 use crate::models::{ContextSourceRecord, ReviewResult};
 
 pub(crate) mod assemble;
+pub(crate) mod issues;
 pub(crate) mod ledger;
 pub(crate) mod seams;
 
+pub use issues::{IssueDoc, IssueDocsError}; // #9197
 pub(crate) use seams::PrSource;
 
 /// The optional inputs a caller asked a review for (#9192).
@@ -28,10 +30,13 @@ pub(crate) use seams::PrSource;
 /// reviewer's PR description, ahead of any caller text. A local diff has no
 /// PR body; the ledger records it `unavailable` and the review runs.
 /// `caller_text` marks caller text that arrived through a new parameter (the
-/// MCP `review_pr` text params). `report_context` asks for the source ledger
-/// with no other new input.
+/// MCP `review_pr` text params). `issue_docs` (#9197) are caller issue docs
+/// for the reviewer only, `Some` whenever the caller sent the parameter, even
+/// an empty list. `report_context` asks for the source ledger with no other
+/// new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
-/// `requested_new_is_off_by_default_and_on_with_pr_body`.
+/// `requested_new_is_off_by_default_and_on_with_pr_body`,
+/// `issue_docs_turn_the_ledger_on`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OptionalContextRequest {
@@ -41,6 +46,8 @@ pub struct OptionalContextRequest {
     pub caller_text: bool,
     /// Report the source ledger even with no other new input.
     pub report_context: bool,
+    /// Caller issue docs for the reviewer (#9197); `None` when not sent.
+    pub issue_docs: Option<Vec<IssueDoc>>,
 }
 
 impl OptionalContextRequest {
@@ -65,15 +72,29 @@ impl OptionalContextRequest {
         self
     }
 
+    /// This request carrying the caller's issue docs (#9197).
+    ///
+    /// Why: Architect ruling 2026-10-06 04:47Z: issue docs enter through the
+    /// request, so no public review type gains a field.
+    /// What: sets `issue_docs`, which counts as a new input even when empty.
+    /// Test: `issue_docs_turn_the_ledger_on`.
+    #[must_use]
+    pub fn with_issue_docs(mut self, docs: Vec<IssueDoc>) -> Self {
+        self.issue_docs = Some(docs);
+        self
+    }
+
     /// Whether any new input is on.
     ///
     /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
     /// parameter counts. The legacy `run` text flags and a `# Context:`
     /// preamble never set `caller_text`, so they never count.
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
-    /// `stdin_context_and_pr_description_never_report`.
+    /// `stdin_context_and_pr_description_never_report`,
+    /// `issue_docs_turn_the_ledger_on`.
     pub fn requested_new(&self) -> bool {
-        self.include_pr_body || self.caller_text
+        // #9197: sending `issue_docs` is a new input.
+        self.include_pr_body || self.caller_text || self.issue_docs.is_some()
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request

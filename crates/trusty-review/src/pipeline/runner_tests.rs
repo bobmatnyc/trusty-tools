@@ -2822,3 +2822,7 @@ mod grade_floor;
 // #9348: a review that does not post leaves no in-progress dedup claim.
 #[path = "runner_dedup_claim_tests.rs"]
 mod dedup_claim;
+
+// #9197: caller `issue_docs` reach the reviewer, never the verifier.
+#[path = "runner_issue_docs_tests.rs"]
+mod issue_docs;
