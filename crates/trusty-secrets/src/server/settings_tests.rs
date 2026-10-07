@@ -156,3 +156,31 @@ fn settings_index_env_is_ignored_for_a_bare_relative_default_socket() {
     let parsed = ServerSettings::from_args(serve_args(Some(&relative), &[]), env).unwrap();
     assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
+
+/// Why: #7524 M3 delta review — the server's `create_dir_all` resolves a
+/// `..` that follows a missing directory, so `nx/../sub` reaches `sub`
+/// once `nx` exists. A lexical `..` over the missing `nx` judged it another
+/// directory.
+/// Red when a `..` among the missing names is applied lexically.
+/// Test: itself.
+#[test]
+fn settings_dotdot_over_a_missing_dir_is_the_default_socket() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(tmp.path().join("sub")).unwrap();
+    let socket = tmp.path().join("sub/s.sock");
+    let candidate = tmp.path().join("nx/../sub/s.sock");
+    assert!(super::same_socket(&candidate, &socket));
+}
+
+/// Why: #7524 M3 delta review — APFS folds `ſ` (U+017F) to `s`, which
+/// `to_lowercase` does not, so a missing name spelled with it could create
+/// the default directory under another identity.
+/// Red when a non-ASCII missing name is compared by `to_lowercase`.
+/// Test: itself.
+#[test]
+fn settings_non_ascii_missing_name_is_the_default_socket() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let socket = tmp.path().join("secrets/s.sock");
+    let candidate = tmp.path().join("\u{17f}ecrets/s.sock");
+    assert!(super::same_socket(&candidate, &socket));
+}
