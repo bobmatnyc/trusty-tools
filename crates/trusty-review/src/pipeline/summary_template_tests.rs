@@ -58,7 +58,10 @@ fn summary_is_byte_stable() {
     let forward = verified_summary(&result_with(mixed(), Vec::new()));
     let mut reversed = mixed();
     reversed.reverse();
-    assert_eq!(verified_summary(&result_with(reversed, Vec::new())), forward);
+    assert_eq!(
+        verified_summary(&result_with(reversed, Vec::new())),
+        forward
+    );
     assert_eq!(verified_summary(&result_with(mixed(), Vec::new())), forward);
 }
 
@@ -73,10 +76,7 @@ fn summary_counts_match_the_arrays() {
     let result = result_with(mixed(), withheld);
     let summary = verified_summary(&result);
     assert!(
-        summary.starts_with(&format!(
-            "Verified findings ({}),",
-            result.findings.len()
-        )),
+        summary.starts_with(&format!("Verified findings ({}),", result.findings.len())),
         "{summary}"
     );
     assert_eq!(summary.lines().count(), 1 + result.findings.len());
@@ -95,10 +95,22 @@ fn summary_counts_match_the_arrays() {
 /// description.
 #[test]
 fn summary_names_no_withheld_finding() {
-    let mut refuted = finding("src/zz_refuted.rs", 77, "phantom-bug", Effort::High, Severity::Critical);
+    let mut refuted = finding(
+        "src/zz_refuted.rs",
+        77,
+        "phantom-bug",
+        Effort::High,
+        Severity::Critical,
+    );
     refuted.description = "a refuted defect description".to_string();
     let result = result_with(
-        vec![finding("src/a.rs", 7, "leak", Effort::Medium, Severity::Medium)],
+        vec![finding(
+            "src/a.rs",
+            7,
+            "leak",
+            Effort::Medium,
+            Severity::Medium,
+        )],
         vec![refuted],
     );
     let summary = verified_summary(&result);
@@ -110,7 +122,15 @@ fn summary_names_no_withheld_finding() {
 /// #9310 item 1.5: with no survivor, each status reads its own sentence.
 #[test]
 fn summary_names_one_sentence_per_status() {
-    let withheld = || vec![finding("src/c.rs", 1, "phantom", Effort::Low, Severity::Low)];
+    let withheld = || {
+        vec![finding(
+            "src/c.rs",
+            1,
+            "phantom",
+            Effort::Low,
+            Severity::Low,
+        )]
+    };
     let mut sentences = Vec::new();
     for (status, withheld) in [
         (Some(VerdictStatus::ParseFailed), Vec::new()),

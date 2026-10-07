@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
-pub mod status;
 pub mod severity; // #9310
+pub mod status;
 pub mod verdict_status; // #9310
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use severity::Severity;

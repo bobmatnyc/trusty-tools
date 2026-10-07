@@ -285,7 +285,10 @@ fn every_narrative_shape_gets_the_verified_summary() {
 
     let unlocated = summarized("rendered elsewhere", "Not in the body.", survivor());
     let summary = crate::pipeline::summary_template::verified_summary(&unlocated);
-    assert_eq!(unlocated.review_body, summary, "fails closed to the summary");
+    assert_eq!(
+        unlocated.review_body, summary,
+        "fails closed to the summary"
+    );
 
     let absent = summarized("Map-reduce review: 1 file(s).", "", survivor());
     assert_eq!(

@@ -1190,7 +1190,10 @@ fn safe_data_message_keeps_only_schema_names() {
     for (message, want) in [
         ("missing field `body`", Some("missing field `body`")),
         ("duplicate field `title`", Some("duplicate field `title`")),
-        ("missing field `body` and more", Some("missing field `body`")),
+        (
+            "missing field `body` and more",
+            Some("missing field `body`"),
+        ),
         ("missing field `a b`", None),
         ("missing field ``", None),
         ("invalid type: string \"secret\", expected a boolean", None),

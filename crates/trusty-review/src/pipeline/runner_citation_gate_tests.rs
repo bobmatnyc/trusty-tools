@@ -649,7 +649,13 @@ async fn run_review_writes_the_template_for_a_clean_review_byte_for_byte() {
         "{}",
         result.review_body
     );
-    for absent in ["withheld", "```", "127.0.0.1", "example.com", "config/app.toml"] {
+    for absent in [
+        "withheld",
+        "```",
+        "127.0.0.1",
+        "example.com",
+        "config/app.toml",
+    ] {
         assert!(
             !result.review_body.contains(absent),
             "{absent}: {}",
@@ -696,9 +702,17 @@ async fn run_review_summary_never_contains_model_prose() {
     )
     .await;
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
-    assert!(!result.review_body.contains(SENTINEL), "{}", result.review_body);
+    assert!(
+        !result.review_body.contains(SENTINEL),
+        "{}",
+        result.review_body
+    );
     let summary = crate::pipeline::summary_template::verified_summary(&result);
-    assert!(result.review_body.contains(&summary), "{}", result.review_body);
+    assert!(
+        result.review_body.contains(&summary),
+        "{}",
+        result.review_body
+    );
 }
 
 /// Refutes every finding whose verifier section contains `refute`, and
@@ -765,11 +779,19 @@ async fn run_review_summary_omits_a_refuted_finding_named_only_in_prose() {
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
     assert_eq!(result.withheld_findings.len(), 1, "{:?}", result.findings);
     assert!(
-        result.review_body.starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
+        result
+            .review_body
+            .starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
         "{}",
         result.review_body
     );
-    for absent in ["dropped-error", "step_7", "value_7", ":7`", "drops the error"] {
+    for absent in [
+        "dropped-error",
+        "step_7",
+        "value_7",
+        ":7`",
+        "drops the error",
+    ] {
         assert!(
             !result.review_body.contains(absent),
             "{absent}: {}",
@@ -777,7 +799,9 @@ async fn run_review_summary_omits_a_refuted_finding_named_only_in_prose() {
         );
     }
     assert!(
-        result.review_body.contains("`src/billing.rs:30` — overflow"),
+        result
+            .review_body
+            .contains("`src/billing.rs:30` — overflow"),
         "{}",
         result.review_body
     );
@@ -840,7 +864,10 @@ async fn run_review_stamps_the_reviewer_severity_on_every_finding() {
     assert_eq!(severity_of("unchecked"), "medium", "{json}");
     for f in every {
         assert!(
-            matches!(f["severity"].as_str(), Some("low" | "medium" | "high" | "critical")),
+            matches!(
+                f["severity"].as_str(),
+                Some("low" | "medium" | "high" | "critical")
+            ),
             "{f}"
         );
     }

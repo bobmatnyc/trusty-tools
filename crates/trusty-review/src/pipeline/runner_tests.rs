@@ -656,9 +656,7 @@ async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
         result.review_body
     );
     assert!(
-        result
-            .review_body
-            .contains(&format!("Grade: {top_level} ")),
+        result.review_body.contains(&format!("Grade: {top_level} ")),
         "the footer carries the top-level grade: {}",
         result.review_body
     );
