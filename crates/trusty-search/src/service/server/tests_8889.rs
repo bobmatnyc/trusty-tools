@@ -103,6 +103,7 @@ fn assert_refused_as_running(
 /// entry — its SSE stream — is left in place.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_second_reindex_request_is_refused_while_the_first_runs() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("a.rs"), "pub fn alpha() -> u32 { 1 }\n").expect("fixture");
@@ -137,6 +138,7 @@ async fn a_second_reindex_request_is_refused_while_the_first_runs() {
 /// a third request is accepted within a bounded wait.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_failed_reindex_releases_the_index_for_the_next_request() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(dir.path().join("a.rs"), "pub fn alpha() -> u32 { 1 }\n").expect("fixture");

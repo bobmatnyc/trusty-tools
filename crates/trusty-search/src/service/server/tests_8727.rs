@@ -28,6 +28,7 @@ const STALE_ID: &str = "agent-gone-8727";
 /// #8727: the blocking registration is visible in both list shapes, and the
 /// refusal names its id, its root, and the command that clears it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_parked_registration_that_blocks_create_is_listed_and_named() {
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
@@ -87,6 +88,7 @@ async fn a_parked_registration_that_blocks_create_is_listed_and_named() {
 /// #8727: a `?repo_identity=` list — flat or `?details=true` — carries that
 /// repo's parked rows and no other repo's (DOC-37 narrows every format).
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_repo_scoped_list_carries_only_that_repos_parked_rows() {
     let canonical = |raw: &str| {
         trusty_common::repo_identity::RepoIdentity::parse(raw)

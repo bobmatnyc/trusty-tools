@@ -47,6 +47,7 @@ fn mock_embedder() -> Arc<dyn crate::core::embed::Embedder> {
 /// is the correct end state, not "everyone succeeds").
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::parallel]
 async fn concurrent_build_indexer_for_same_entry_never_panics() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -102,6 +103,7 @@ async fn concurrent_build_indexer_for_same_entry_never_panics() {
 /// this fix.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn single_clean_open_is_unchanged() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();

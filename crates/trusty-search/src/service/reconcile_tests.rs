@@ -78,6 +78,7 @@ fn reconcile_skip_excluded_path() {
 /// parse it with `chrono::DateTime::parse_from_rfc3339`, and assert field
 /// ranges. This is a regression guard for the FIX-1 reviewer finding.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stamp_handle_produces_valid_rfc3339_date() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -277,6 +278,7 @@ async fn changed_files_between_returns_none_for_unknown_sha() {
 /// `last_indexed_at` so the staleness signal clears after reconciliation.
 /// Test: build a minimal handle, call `stamp_handle`, assert both fields.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_stamps_head_sha_after_delta() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -467,6 +469,7 @@ async fn reconcile_up_to_date_index_is_noop() {
 /// assert `indexed_head_sha` is updated to the new HEAD and
 /// `last_indexed_at` is stamped.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_stale_index_stamps_new_sha() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -614,6 +617,7 @@ async fn reconcile_skips_a_serve_only_index() {
 /// does NOT suppress stamping when failed==0.
 /// Test: this test — `cargo test -p trusty-search -- apply_delta_total_failure`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn apply_delta_total_failure_does_not_stamp() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
@@ -835,6 +839,7 @@ fn mtime_walk_caps_at_threshold_plus_one() {
 /// `fell_back_to_full`, `stuck_retried`, and `up_to_date` all remain 0 and
 /// `skipped_no_data` becomes 1.
 #[tokio::test]
+#[serial_test::parallel]
 async fn mtime_reconcile_skips_never_indexed_non_git_index() {
     use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
     use crate::service::server::ReconcileSummary;
@@ -1437,6 +1442,7 @@ async fn never_stamped_git_repo_with_commits_full_reindexes_and_converges() {
 /// `last_indexed_unix`) rather than `fell_back_to_full`.
 /// Test: this test itself.
 #[tokio::test]
+#[serial_test::parallel]
 async fn genuinely_non_git_root_still_takes_the_mtime_path() {
     use crate::service::server::ReconcileSummary;
 

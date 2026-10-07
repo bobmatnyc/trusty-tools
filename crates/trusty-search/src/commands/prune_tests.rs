@@ -150,6 +150,7 @@ fn prune_dry_run_lists_but_does_not_delete() {
 ///       --apply --yes, reload, assert only the eligible one is removed.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_apply_deletes_only_eligible() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -231,6 +232,7 @@ fn prune_apply_skips_protected() {
 ///       cfg protecting `critical`, assert `old` is gone and `critical` survives.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn prune_apply_removes_eligible_preserves_protected() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -484,6 +486,7 @@ fn prune_max_idle_days_zero_is_rejected() {
 /// keeps the newcomer; a survivors republish erases it.
 /// Test: this test. Fails on the pre-fix commit, where `newcomer` is gone.
 #[test]
+#[serial_test::parallel]
 fn prune_apply_preserves_a_registration_made_after_its_snapshot() {
     let tmp = tempdir().unwrap();
     let toml = tmp.path().join("indexes.toml");
@@ -549,6 +552,7 @@ fn prune_apply_preserves_a_registration_made_after_its_snapshot() {
 /// Test: this test. On the pre-fix commit the prune takes no lock at all, so
 /// `stale` is already gone before the release.
 #[test]
+#[serial_test::parallel]
 fn prune_apply_blocks_on_the_cross_process_registry_lock() {
     use std::sync::mpsc;
     use std::time::Duration;

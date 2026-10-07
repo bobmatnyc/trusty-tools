@@ -86,6 +86,7 @@ fn ctx_for(handle: &Arc<IndexHandle>) -> BatchCtx {
 /// withheld hash was dropped, `a.rs` kept ALPHA's hash, and the revert to
 /// ALPHA was skipped, leaving BRAVO's half-landed chunk as the file's text.
 #[tokio::test]
+#[serial_test::parallel]
 async fn withheld_hash_overwrites_the_old_one_so_a_revert_reindexes() {
     assert_eq!(
         chunk_ast("a.rs", BRAVO).0.len(),
@@ -141,6 +142,7 @@ async fn withheld_hash_overwrites_the_old_one_so_a_revert_reindexes() {
 /// A two-chunk file with one chunk landed records no real hash. Fails
 /// against 889f555fc3, which recorded BRAVO's hash over half its chunks.
 #[tokio::test]
+#[serial_test::parallel]
 async fn partial_chunk_landing_withholds_the_hash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -182,6 +184,7 @@ fn over_ceiling_json() -> String {
 /// `huge.json` when the `final_chunkless` keep rule is removed from
 /// `withhold_chunkless_hashes`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn blank_and_too_large_files_keep_their_hash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -210,6 +213,7 @@ async fn blank_and_too_large_files_keep_their_hash() {
 /// the new content on the next reindex. Fails when a kept hash skips the
 /// file whatever its new content is.
 #[tokio::test]
+#[serial_test::parallel]
 async fn too_large_json_is_indexed_again_once_it_shrinks() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -254,6 +258,7 @@ async fn too_large_json_is_indexed_again_once_it_shrinks() {
 /// chunks, so its hash is withheld and the next reindex retries it. Fails
 /// against 00ef2cf9f4, which kept the blank file's hash over the stale chunk.
 #[tokio::test]
+#[serial_test::parallel]
 async fn failed_remove_withholds_a_blank_files_hash_until_a_retry() {
     let id = "failed-remove-blank-8976";
     let tmp = tempfile::tempdir().expect("tempdir");

@@ -83,6 +83,7 @@ pub(super) fn drop_test_query(
 /// count reaches the caller in `meta.dropped.unresolved_corpus`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;
@@ -170,6 +171,7 @@ async fn search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matchin
 /// caller.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_handler_meta_reports_rows_dropped_by_the_mode_and_docstring_filters() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;

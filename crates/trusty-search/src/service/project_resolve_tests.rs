@@ -605,6 +605,7 @@ async fn an_incremental_write_after_the_others_full_reindex_resolves_to_it() {
 /// 8fe9e93737: the purge arm never stamped, so it picks B.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_delete_only_reconcile_after_the_others_full_reindex_resolves_to_it() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (rows, a) = clone_a_older_than_b(tmp.path());

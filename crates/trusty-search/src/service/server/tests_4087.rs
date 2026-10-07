@@ -144,6 +144,7 @@ async fn corpus_failure_response_distinguishes_permanent_from_transient() {
 /// What: a healthy index answers 200 with a (possibly empty) result set.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn healthy_index_is_unaffected_by_the_corpus_failure_guard() {
     let (state, embedder) = build_state_with(&[("healthy", None)]);
     state.install_embedder(embedder).await;
@@ -218,6 +219,7 @@ async fn global_search_excludes_and_counts_corpus_failed_indexes() {
 /// fields are set together, then wires a corpus and asserts both clear together.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn corpus_open_failure_kind_tracks_the_flag() {
     use crate::core::corpus::CorpusStore;
     use crate::service::persistence::PersistedIndex;

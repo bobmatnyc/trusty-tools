@@ -150,6 +150,7 @@ async fn list_indexes_tree_format_shape() {
 /// way to expose it without breaking the bare flat format.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_includes_size_bytes() {
     use crate::core::{
         indexer::CodeIndexer,
@@ -212,6 +213,7 @@ async fn list_indexes_details_includes_size_bytes() {
 /// request, and asserts the returned `root_path` matches what was registered.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_includes_root_path() {
     use crate::core::{
         indexer::CodeIndexer,

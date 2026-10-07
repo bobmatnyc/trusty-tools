@@ -108,6 +108,7 @@ async fn last_used_map(
 /// newer, and asserts each reports its own maximum.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_includes_last_used_unix() {
     let (_roots, _data, state) = state_over(vec![
         ("indexed-later", Some(1_700_000_000), Some(1_800_000_000)),
@@ -137,6 +138,7 @@ async fn list_indexes_details_includes_last_used_unix() {
 /// from the JSON entirely (`skip_serializing_if`).
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_last_used_absent_when_never_used() {
     let (_roots, _data, state) = state_over(vec![("never-touched", None, None)]);
 
@@ -174,6 +176,7 @@ async fn list_indexes_details_last_used_absent_when_never_used() {
 /// fresh `SearchAppState` over that same file and asserts the value comes back.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn last_used_unix_survives_a_fresh_daemon_state() {
     use crate::core::{
         indexer::CodeIndexer,

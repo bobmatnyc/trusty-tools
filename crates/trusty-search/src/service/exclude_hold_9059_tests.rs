@@ -175,6 +175,7 @@ async fn run_arm(arm: &str) -> Result<(), String> {
 /// Fails against 953709df78, where the glob was skipped: every arm indexed or
 /// queued the secrets file.
 #[tokio::test]
+#[serial_test::parallel]
 async fn every_ingest_path_refuses_a_held_index() {
     let mut failures = Vec::new();
     for arm in [
@@ -201,6 +202,7 @@ async fn every_ingest_path_refuses_a_held_index() {
 /// it without a restart: the excluded path is then refused as excluded, and an
 /// admitted one is indexed. Fails against 953709df78, whose status read `ready`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it() {
     let (_temp, root) = tree();
     let id = "x9059-release";
@@ -270,6 +272,7 @@ async fn a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it() 
 /// indexed by the catch-up reindex the PATCH starts and reports; the secrets
 /// file stays out. Fails against 61dacee785, whose PATCH started no reindex.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_valid_patch_catches_up_what_the_hold_refused() {
     const MISSED: &str = "src/missed.rs";
     let (_temp, root) = tree();
@@ -325,6 +328,7 @@ async fn a_valid_patch_catches_up_what_the_hold_refused() {
 /// the claim. The releasing PATCH still succeeds, `catch_up_reindex` reports
 /// `started: false`, and its `reason` names the running claim's origin.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_release_with_a_running_reindex_reports_the_catch_up_refusal() {
     let (_temp, root) = tree();
     let id = "x9059-catch-up-refused";

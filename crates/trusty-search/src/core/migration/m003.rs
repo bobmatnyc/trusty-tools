@@ -180,6 +180,7 @@ mod tests {
     /// HNSW snapshot (BM25-only or never indexed), exercising the early-return
     /// guard on a missing file.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn test_m003_apply_no_store_is_ok() {
         let indexer = CodeIndexer::new("m003-test", "/tmp/m003-test-no-store");
         let handle = IndexHandle::bare(

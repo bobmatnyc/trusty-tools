@@ -85,6 +85,7 @@ async fn mock_state_async() -> Arc<SearchAppState> {
 /// itself must not load a persisted symbol graph when re-registering an id
 /// with `skip_kg: Some(true)`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_handler_honors_skip_kg_on_reregister() {
     let state = mock_state_async().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-2984-skip-kg-");

@@ -50,6 +50,7 @@ async fn state_with_index(id: &str, root: &Path) -> Arc<SearchAppState> {
 /// `200 queued: true`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_of_a_write_quarantined_index_is_refused_with_409() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::create_dir_all(dir.path().join(".trusty-search").join("index.redb"))
@@ -106,6 +107,7 @@ async fn reindex_of_a_write_quarantined_index_is_refused_with_409() {
 /// `200 queued: true` and a progress entry.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_of_a_healthy_index_is_still_queued() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state = state_with_index("healthy-8105", dir.path()).await;

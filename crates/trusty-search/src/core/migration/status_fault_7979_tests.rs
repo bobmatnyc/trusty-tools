@@ -72,6 +72,7 @@ fn state_with_index(id: &str) -> (Arc<SearchAppState>, Arc<IndexHandle>) {
 
 /// #7979 verbatim: the status body must name the failed migration.
 #[tokio::test]
+#[serial_test::parallel]
 async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
     let (state, handle) = state_with_index("migration-error-7979");
 
@@ -139,6 +140,7 @@ async fn failed_schema_chain_is_reported_as_migration_error_in_status() {
 /// status body.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault() {
     let (state, handle) = state_with_index("migration-keyed-7979");
     handle.indexer.read().await.record_migration_failure(
@@ -175,6 +177,7 @@ async fn a_no_op_schema_chain_does_not_clear_a_json_to_redb_fault() {
 
 /// Both stages outstanding at once are both reported.
 #[tokio::test]
+#[serial_test::parallel]
 async fn both_stages_are_reported_when_both_are_outstanding() {
     let (state, handle) = state_with_index("migration-both-7979");
     handle
@@ -211,6 +214,7 @@ async fn both_stages_are_reported_when_both_are_outstanding() {
 
 /// The record must not outlive the condition that produced it.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_succeeding_chain_clears_an_earlier_recorded_fault() {
     let (state, handle) = state_with_index("migration-clear-7979");
 

@@ -397,6 +397,7 @@ async fn a_gap_with_no_embedder_fails_the_stage_with_a_reason() {
 /// requires `Failed` naming the gap, never `Ready`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_deferred_pass_that_leaves_chunks_unembedded_is_not_ready() {
     let id = "vector-gap-8884-hidden-row";
     let dir = tempfile::tempdir().expect("tempdir");

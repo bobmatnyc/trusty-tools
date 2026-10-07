@@ -127,6 +127,7 @@ fn chunk(file: &str, id: &str) -> RawChunk {
 /// chunks are still present in the corpus afterward.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
     // #4213: run alone in a child process whose TRUSTY_DATA_DIR is set at
     // spawn — deterministic isolation, not `#[serial]` + a racy global.
@@ -348,6 +349,7 @@ async fn reindex_refuses_when_the_persisted_registry_cannot_be_read() {
 /// every chunk it did not see there.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
     if !isolate_in_child_process(
         "service::reindex::root_hijack_tests::\
@@ -375,6 +377,7 @@ async fn reindex_refuses_when_the_corpus_indexed_root_read_fails() {
 /// `META_KEY_INDEXED_ROOT` with the table's schema left intact.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_refuses_when_the_indexed_root_value_is_corrupt() {
     if !isolate_in_child_process(
         "service::reindex::root_hijack_tests::\
@@ -494,6 +497,7 @@ async fn assert_corpus_fault_refused(fx: &CorpusFaultFixture, fault: &str) {
 /// normally and the walk ran.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_accepts_root_move_that_matches_persisted_config() {
     // #4213: same deterministic child-process isolation as the hijack test —
     // it shares the identical `TRUSTY_DATA_DIR` dependency and race.
@@ -594,6 +598,7 @@ async fn reindex_accepts_root_move_that_matches_persisted_config() {
 /// `root_old`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_moves_a_stale_indexer_onto_the_trusted_new_root() {
     if !isolate_in_child_process(
         "service::reindex::root_hijack_tests::\

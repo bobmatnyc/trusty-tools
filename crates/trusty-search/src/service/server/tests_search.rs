@@ -187,6 +187,7 @@ fn file_is_within_root_outside_root_still_rejected_after_canonicalize() {
 /// the interval).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn last_queried_cache_rate_limits_disk_writes() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::{CodeIndexer, SearchStage};
@@ -273,6 +274,7 @@ async fn last_queried_cache_rate_limits_disk_writes() {
 /// `stale_index_root` field is present and boolean in the `meta` block.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_handler_meta_includes_stale_index_root_field() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::indexer::CodeIndexer;
@@ -512,6 +514,7 @@ fn reindex_root_override_syncs_indexer_root_path() {
 /// wire string `"Keyword"`. The value is the variant's `Debug` text, so a
 /// rename of the variant would change the wire silently without this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn search_handler_reports_a_bare_word_as_the_keyword_wire_string() {
     use crate::core::indexer::CodeIndexer;
     use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};

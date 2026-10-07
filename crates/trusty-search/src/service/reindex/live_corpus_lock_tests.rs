@@ -145,6 +145,7 @@ async fn a_missing_live_corpus_is_promotable() {
 /// terminal status to `finish_reindex`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_deferred_promotion_is_reported_in_status_and_is_not_complete() {
     use super::finish_teardown::resolve_corpus_swap;
     use super::{staging::StagingResolution, validate::ReindexOutcome};
