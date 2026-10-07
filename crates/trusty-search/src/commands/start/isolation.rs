@@ -157,10 +157,9 @@ impl Discovery {
     /// bind its HTTP listener.
     ///
     /// Why (#9214): `auto_discover_and_index` registers projects through
-    /// `daemon_utils::daemon_base_url`, which falls back to `127.0.0.1:7878` when no
-    /// `http_addr` file exists — so a socket-only daemon would register into
-    /// whatever holds that port, and refresh its own `http_addr` file to name
-    /// it. Withholding the scan is the refusal; the warm-boot colocated scan
+    /// HTTP; a socket-only daemon publishes no HTTP address, so the scan has
+    /// nothing to reach (`daemon_http::daemon_base_url` errors rather than
+    /// guessing `:7878`). Withholding the scan is the refusal; the warm-boot colocated scan
     /// runs in process and is unaffected, as is the flag forwarded to the child.
     /// What: records whether the listener exists; [`Self::runs_auto_discover`]
     /// then requires it.

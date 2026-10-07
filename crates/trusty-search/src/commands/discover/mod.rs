@@ -23,7 +23,7 @@
 mod http;
 mod marker;
 
-use super::daemon_utils::daemon_base_url;
+use super::daemon_http::daemon_base_url;
 use super::reindex_engine::register_index_with_daemon;
 use crate::config::GlobalConfig;
 use http::{fetch_known_index_ids, wait_for_daemon_ready};
@@ -75,7 +75,12 @@ pub async fn auto_discover_and_index() {
         return;
     }
 
-    let base = daemon_base_url();
+    // #9214: this task races the daemon's own startup, so wait for it to
+    // publish its HTTP address rather than guessing the default port.
+    let Some(base) = wait_for_published_base(Duration::from_secs(15)).await else {
+        tracing::warn!("auto-discover: the daemon published no HTTP address within 15s — skipping");
+        return;
+    };
     let client = match trusty_common::server::daemon_http_client() {
         Ok(c) => c,
         Err(e) => {
@@ -235,6 +240,25 @@ pub async fn auto_discover_and_index() {
             discovered,
             indexed
         );
+    }
+}
+
+/// Poll for the daemon's published HTTP base until `budget` elapses (#9214).
+///
+/// Why: `auto_discover_and_index` is spawned beside `run_daemon`, before the
+/// daemon writes `http_addr`. The resolver used to answer the default port
+/// then; it now errors, so the first read can come too early.
+/// What: [`daemon_base_url`] every 250 ms; `None` at the deadline.
+async fn wait_for_published_base(budget: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Ok(base) = daemon_base_url() {
+            return Some(base);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 

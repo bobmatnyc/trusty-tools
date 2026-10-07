@@ -12,7 +12,7 @@
 //! Test: covered by `tests::parse_value` and end-to-end via
 //! `cargo run -- config get` against a live daemon.
 
-use super::daemon_utils::daemon_base_url;
+use super::daemon_http::daemon_base_url;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Subcommand, ValueEnum};
 use colored::Colorize;
@@ -157,7 +157,7 @@ pub async fn handle_config(action: ConfigAction) -> Result<()> {
 
 /// `trusty-search config get` — print the daemon's current configuration.
 async fn handle_config_get(key: Option<ConfigKey>) -> Result<()> {
-    let base = daemon_base_url();
+    let base = daemon_base_url()?;
     let client = trusty_common::server::daemon_http_client()?;
     let url = format!("{base}/config");
     let resp = client
@@ -190,7 +190,7 @@ async fn handle_config_get(key: Option<ConfigKey>) -> Result<()> {
 /// configuration and print the post-update values.
 async fn handle_config_set(key: ConfigKey, raw_value: &str) -> Result<()> {
     let parsed = parse_value(raw_value)?;
-    let base = daemon_base_url();
+    let base = daemon_base_url()?;
     let client = trusty_common::server::daemon_http_client()?;
     let url = format!("{base}/config");
 
