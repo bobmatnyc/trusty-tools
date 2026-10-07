@@ -26,14 +26,15 @@ pub(crate) const RULING_RANK_FLOOR: usize = 2;
 
 /// Function words dropped before terms are compared.
 // #9279: two-letter terms are kept now, so the two-letter function words are
-// listed here instead of being dropped by length.
+// listed here instead of being dropped by length. Keep them in step with
+// `STOP_WORDS` in trusty-common's `memory_core/dream/helpers.rs`.
 const STOPWORDS: &[&str] = &[
     "about", "after", "all", "also", "and", "any", "are", "but", "can", "could", "did", "does",
     "for", "from", "had", "has", "have", "how", "into", "its", "may", "must", "not", "our",
     "should", "than", "that", "the", "their", "then", "there", "these", "they", "this", "was",
     "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
     "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it", "me", "my", "no", "of",
-    "ok", "on", "or", "so", "to", "up", "us", "we",
+    "ok", "on", "or", "so", "to", "up", "us", "we", "go", "id", "vs", "hi", "oh",
 ];
 
 /// The distinct content terms of `text`.

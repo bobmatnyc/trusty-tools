@@ -55,12 +55,25 @@ fn at_cosine(query: &[f32], seed: usize, cos: f32) -> Vec<f32> {
 /// What: every drawer has the same age and importance, so similarity and the
 /// boosts alone decide the order. Closets are rebuilt, as a write does live.
 async fn seed_rulings(handle: &PalaceHandle, query: &str, rulings: &[(&str, f32)]) -> Vec<Uuid> {
+    seed_with_ids(handle, query, rulings, &[]).await
+}
+
+/// As [`seed_rulings`], with drawer ids taken from `fixed` when it is not empty.
+async fn seed_with_ids(
+    handle: &PalaceHandle,
+    query: &str,
+    rulings: &[(&str, f32)],
+    fixed: &[Uuid],
+) -> Vec<Uuid> {
     let embedder = shared_embedder().await.unwrap();
     let q = embedder.embed_batch(&[query.to_string()]).await.unwrap()[0].clone();
     let created = chrono::Utc::now() - chrono::Duration::days(3_650);
     let mut ids = Vec::new();
     for (i, (content, cos)) in rulings.iter().enumerate() {
         let mut d = Drawer::new(Uuid::new_v4(), *content);
+        if let Some(id) = fixed.get(i) {
+            d.id = *id;
+        }
         d.created_at = created;
         handle
             .vector_store
@@ -158,4 +171,102 @@ async fn a_query_without_an_id_token_keeps_its_order() {
     // Similarity 0.40 plus the 0.15 closet boost; the 0.3 id boost would
     // push it far past this bound.
     assert!(top < 0.56, "no candidate may carry the id boost: {l2:#?}");
+}
+
+/// Why (#9279 review): `pm` is id-shaped but common. Boosting every drawer
+/// that mentions it reordered an ordinary question.
+/// What: six of eight drawers mention the PM and sit below two that do not;
+/// "what should the PM do" must return all eight in similarity order.
+#[tokio::test]
+async fn a_common_short_word_keeps_similarity_order() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "what should the PM do";
+    let mut drawers: Vec<(String, f32)> = vec![
+        ("deploys run from the release branch".into(), 0.40),
+        ("the cache key includes the toolchain".into(), 0.38),
+    ];
+    drawers.extend((0..6).map(|n| {
+        (
+            format!("the PM files ticket {n} for review"),
+            0.36 - n as f32 * 0.02,
+        )
+    }));
+    let refs: Vec<(&str, f32)> = drawers.iter().map(|(c, s)| (c.as_str(), *s)).collect();
+    let seeded = seed_rulings(&handle, query, &refs).await;
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(ids(&l2), seeded, "similarity order must hold: {l2:#?}");
+}
+
+/// Why (#9279 review): the prompt hook recalls with the whole prompt and
+/// injects hits at or above `DEFAULT_RELEVANCE_FLOOR`. A 0.05-similarity
+/// drawer that shares only "PR" with the prompt scored about 0.50 and was
+/// injected.
+/// What: "PR" is in every candidate, so the low drawer keeps its low score.
+#[tokio::test]
+async fn a_common_short_word_stays_below_the_relevance_floor() {
+    use super::super::relevance::DEFAULT_RELEVANCE_FLOOR;
+
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "check the PR status";
+    let mut drawers: Vec<(String, f32)> = (0..9)
+        .map(|n| (format!("PR {n} adds a cache layer"), 0.40 - n as f32 * 0.01))
+        .collect();
+    drawers.push(("the PR template moved".into(), 0.05));
+    let refs: Vec<(&str, f32)> = drawers.iter().map(|(c, s)| (c.as_str(), *s)).collect();
+    let seeded = seed_rulings(&handle, query, &refs).await;
+    let low = seeded[9];
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 20)
+        .await
+        .unwrap();
+    let score = l2
+        .iter()
+        .find(|r| r.drawer.id == low)
+        .map(|r| r.score)
+        .unwrap_or_else(|| panic!("low drawer missing: {l2:#?}"));
+    assert!(
+        score < DEFAULT_RELEVANCE_FLOOR,
+        "a shared common word lifted {score} over the floor"
+    );
+}
+
+/// Why (#9279 review): with boosts up to 0.45, a hard `min(1.0)` gave every
+/// strong match the same 1.0 and let the drawer id order them.
+/// What: three rulings at 0.99, 0.96 and 0.93 similarity, ids ascending in
+/// the opposite order, must rank by similarity with distinct scores below 1.0.
+#[tokio::test]
+async fn strong_matches_keep_similarity_order_above_the_cap() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+    let query = "ruling policy";
+    let mut fixed: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+    fixed.sort();
+    fixed.reverse();
+    let rulings = [
+        ("ruling alpha holds", 0.99),
+        ("ruling beta holds", 0.96),
+        ("ruling gamma holds", 0.93),
+    ];
+    let seeded = seed_with_ids(&handle, query, &rulings, &fixed).await;
+    let embedder = shared_embedder().await.unwrap();
+
+    let l2 = retrieve_l2(&handle, embedder.as_ref(), query, None, 3)
+        .await
+        .unwrap();
+    assert_eq!(ids(&l2), seeded, "similarity order must hold: {l2:#?}");
+    let scores: Vec<f32> = l2.iter().map(|r| r.score).collect();
+    assert!(
+        scores.windows(2).all(|w| w[0] > w[1]) && scores[0] < 1.0,
+        "scores must be distinct and below 1.0: {scores:?}"
+    );
 }

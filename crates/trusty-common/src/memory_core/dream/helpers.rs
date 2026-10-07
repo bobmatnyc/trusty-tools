@@ -18,14 +18,15 @@ use uuid::Uuid;
 
 /// Stop-word filter for closet keyword extraction.
 // #9279: two-letter tokens are now kept, so the common two-letter words that
-// were not already here ("ok", "up", "my", "us", "me") join the list.
+// were not already here join the list. Keep the two-letter words in step with
+// `STOPWORDS` in trusty-memory's `tools/recall_rulings_floor.rs`.
 pub(crate) const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "of", "in", "on", "at",
     "to", "for", "with", "and", "or", "but", "not", "no", "yes", "i", "you", "he", "she", "it",
     "we", "they", "this", "that", "these", "those", "as", "by", "from", "into", "over", "under",
     "if", "then", "than", "so", "do", "does", "did", "have", "has", "had", "will", "would",
     "shall", "should", "can", "could", "may", "might", "must", "about", "any", "all", "some",
-    "more", "most", "such", "ok", "up", "my", "us", "me",
+    "more", "most", "such", "ok", "up", "my", "us", "me", "am", "go", "id", "vs", "hi", "oh",
 ];
 
 /// Shortest keyword, in characters, that closets and recall keep (#9279).

@@ -39,12 +39,12 @@
 //! Cost of the choice: an expired drawer keeps its row and its vector slot
 //! until a sweep runs. That is storage, not correctness.
 
+use super::candidates::score_candidates;
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
-use super::id_tokens::{id_token_boost, query_id_tokens};
-use super::scope::{RecallScope, scope_admits};
+use super::id_tokens::query_id_tokens;
+use super::scope::RecallScope;
 use super::types::{CrossPalaceResult, RecallResult};
-use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
@@ -103,11 +103,35 @@ pub(super) const IMPORTANCE_TILT: f32 = 0.05;
 /// what "score" means.
 /// What: tilts `similarity` by at most [`IMPORTANCE_TILT`] according to
 /// `eff_importance`, adds `tag_boost` (the closet boost plus, since #9279, the
-/// id-token boost from `id_tokens`), and clamps to `1.0`.
-/// Test: `rank_score_keeps_importance_a_tiebreaker`.
+/// id-token boost from `id_tokens`), and caps the sum below `1.0` with
+/// [`soft_cap`].
+/// Test: `rank_score_keeps_importance_a_tiebreaker`,
+/// `strong_matches_keep_similarity_order_above_the_cap`.
 pub(super) fn rank_score(similarity: f32, eff_importance: f32, tag_boost: f32) -> f32 {
     let tilted = similarity * ((1.0 - IMPORTANCE_TILT) + IMPORTANCE_TILT * eff_importance);
-    (tilted + tag_boost).min(1.0)
+    soft_cap(tilted + tag_boost)
+}
+
+/// Score at or below which [`soft_cap`] leaves a score unchanged.
+const SCORE_KNEE: f32 = 0.9;
+
+/// Map a raw score into `[0, 1)` without merging strong matches.
+///
+/// Why (#9279 review): boosts reach 0.45, so a hard `min(1.0)` set every
+/// candidate above about 0.56 similarity to exactly 1.0. The id tiebreak, not
+/// similarity, then ordered the strongest matches, and the recall merge and
+/// BM25 fusion sorts re-sort on the reported score, so sorting before the
+/// clamp would not have survived.
+/// What: identity up to [`SCORE_KNEE`], so the 0.35 relevance floor and every
+/// score below 0.9 are unchanged; above it, `knee + span * (1 - e^(-(x - knee)
+/// / span))` with `span = 1 - knee`. That is continuous, strictly increasing,
+/// and below 1.0.
+fn soft_cap(raw: f32) -> f32 {
+    if raw <= SCORE_KNEE {
+        return raw;
+    }
+    let span = 1.0 - SCORE_KNEE;
+    SCORE_KNEE + span * (1.0 - (-(raw - SCORE_KNEE) / span).exp())
 }
 
 /// L2/L3 rank order: score descending, then drawer id ascending.
@@ -132,9 +156,9 @@ fn rank_order(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering {
 /// nothing logged it. Its own target keeps `RUST_LOG=trusty_common=debug` from
 /// drowning in one line per candidate per recall while still letting an operator
 /// ask for exactly this with `RUST_LOG=memory_recall_rank=debug`.
-/// What: the `target:` string on the `tracing::debug!` inside
-/// [`retrieve_l2_scoped`], emitted once per surviving candidate before the
-/// `top_k` truncation.
+/// What: the `target:` string on the `tracing::debug!` that
+/// `candidates::score_candidates` emits for layer 2, once per surviving
+/// candidate before the `top_k` truncation.
 /// Test: `l2_rank_trace_emits_one_event_per_candidate`.
 pub const RANK_TRACE_TARGET: &str = "memory_recall_rank";
 
@@ -332,77 +356,9 @@ pub async fn retrieve_l2_scoped(
     // every writer on this palace for its duration.
     let allowed = scope.allowed_room_ids(&handle.kg);
 
-    let drawers = handle.drawers.read();
-    let closets = handle.closets.read();
+    // #9279: one scorer for L2 and L3, so both apply the id-token rarity rule.
     let query_tokens: Vec<String> = extract_keywords(query);
-    // #9279: an id named in the query lifts the drawer that holds it.
-    let id_tokens = query_id_tokens(&query_tokens);
-    let now = chrono::Utc::now();
-    let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
-
-    for hit in hits {
-        let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {
-            // Vector hit refers to a drawer we no longer have metadata for;
-            // skip silently — this can happen during partial loads.
-            continue;
-        };
-
-        if !scope_admits(&allowed, drawer.room_id) {
-            continue;
-        }
-
-        // #4885: the vector index still holds an expired drawer's embedding
-        // until a sweep compacts it, so a semantic hit can land on a drawer
-        // whose TTL passed after this handle was opened. Drop it here.
-        if drawer.is_expired_at(now) {
-            continue;
-        }
-
-        let age_days = DecayConfig::age_days(drawer.created_at);
-        let boost = drawer.accumulated_boost(&handle.decay_config);
-        let eff_importance =
-            handle
-                .decay_config
-                .effective_importance(drawer.importance, age_days, boost);
-
-        // Closet tag boost: if any query token matches a closet keyword that
-        // contains this drawer, add a 0.15 bump (capped at 1.0) so topical
-        // hits outrank generic semantic neighbors.
-        let drawer_id = drawer.id;
-        let in_closet = query_tokens
-            .iter()
-            .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
-        let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
-        let id_boost = id_token_boost(&id_tokens, drawer.content());
-        // #4904: importance tilts the similarity score, it no longer multiplies
-        // it — see `IMPORTANCE_TILT`.
-        let final_score = rank_score(hit.score, eff_importance, tag_boost + id_boost);
-
-        // #4904: the three candidate explanations for a missed fact — absent
-        // from the candidate set, present but ranked below the cutoff, or never
-        // queried for — are indistinguishable from the outside, because the only
-        // observable is the truncated top-k. Emitting every candidate WITH its
-        // score components before `truncate` is what separates them.
-        tracing::debug!(
-            target: RANK_TRACE_TARGET,
-            drawer_id = %drawer.id,
-            similarity = hit.score,
-            importance = drawer.importance,
-            eff_importance,
-            tag_boost,
-            id_boost,
-            score = final_score,
-            "l2 candidate"
-        );
-
-        results.push(RecallResult {
-            drawer: drawer.clone(),
-            score: final_score,
-            layer: 2,
-        });
-    }
-    drop(closets);
-    drop(drawers);
+    let mut results = score_candidates(handle, &hits, &allowed, &query_tokens, 2);
 
     // #9280: id tiebreak, so tied drawers rank the same on every open.
     results.sort_by(rank_order);
@@ -421,8 +377,8 @@ pub async fn retrieve_l2_scoped(
 /// room back, which is the invisible-failure class ADR-0027 D4.4 rejects.
 /// What: Embeds the query, searches with `top_k` (over-fetched to `top_k * 3`
 /// when a room filter is active, since filtered-out hits would otherwise eat
-/// the budget, or when the query names an id, #9279), joins each hit to its drawer via UUID-prefix match, drops
-/// drawers outside the requested room, scores each candidate with
+/// the budget, or when the query names an id, #9279), joins each hit to its
+/// drawer via UUID-prefix match, drops drawers outside the requested room, scores each candidate with
 /// [`rank_score`], sorts by `rank_order`, and returns at most `top_k`
 /// `RecallResult`s.
 /// Test: Symmetric with `l2_returns_relevant_drawer`; same join logic.
@@ -485,47 +441,7 @@ pub async fn retrieve_l3_scoped(
     };
     let hits = handle.vector_store.search(&query_vec, fetch).await?;
 
-    let drawers = handle.drawers.read();
-    let closets = handle.closets.read();
-    let now = chrono::Utc::now();
-    let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
-    for hit in hits {
-        let Some(drawer) = drawers.iter().find(|d| uuid_prefix_eq(d.id, hit.drawer_id)) else {
-            continue;
-        };
-        if !scope_admits(&allowed, drawer.room_id) {
-            continue;
-        }
-        // #4885: same read-time expiry gate as L2 — a deep search must not be
-        // the one path that still serves a drawer past its TTL.
-        if drawer.is_expired_at(now) {
-            continue;
-        }
-        let age_days = DecayConfig::age_days(drawer.created_at);
-        let boost = drawer.accumulated_boost(&handle.decay_config);
-        let eff_importance =
-            handle
-                .decay_config
-                .effective_importance(drawer.importance, age_days, boost);
-
-        let drawer_id = drawer.id;
-        let in_closet = query_tokens
-            .iter()
-            .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
-        let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
-        let id_boost = id_token_boost(&id_tokens, drawer.content());
-        // #4904: shares the one `rank_score` L2 uses, so deep recall cannot be
-        // left ranking on the old importance-multiplier formula.
-        let final_score = rank_score(hit.score, eff_importance, tag_boost + id_boost);
-
-        results.push(RecallResult {
-            drawer: drawer.clone(),
-            score: final_score,
-            layer: 3,
-        });
-    }
-    drop(closets);
-    drop(drawers);
+    let mut results = score_candidates(handle, &hits, &allowed, &query_tokens, 3);
 
     // #9280: id tiebreak, so tied drawers rank the same on every open.
     results.sort_by(rank_order);

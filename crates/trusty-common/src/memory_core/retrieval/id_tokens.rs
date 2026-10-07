@@ -6,13 +6,17 @@
 //! ruling matches "ruling" and earns the same +0.15. In the live supervisor
 //! palace the E1 ruling scored 0.208 and ranked 12th under five other rulings
 //! at 0.234 to 0.298.
-//! What: [`query_id_tokens`] picks the id-shaped tokens out of a query, and
-//! [`id_token_boost`] adds [`ID_TOKEN_BOOST`] to a candidate whose content
-//! holds one of them as a whole token. A query with no id-shaped token gets no
-//! boost on any candidate, so its ranking is unchanged.
+//! What: [`query_id_tokens`] picks the id-shaped tokens out of a query,
+//! [`rare_id_tokens`] keeps those few candidates hold, and [`id_token_boost`]
+//! adds [`ID_TOKEN_BOOST`] to a candidate whose content holds a rare one as a
+//! whole token. A query with no rare id token gets no boost on any candidate,
+//! so its ranking is unchanged.
 //! Test: `ruling_e1_ranks_its_drawer_first_in_l2_and_l3`,
-//! `a_query_without_an_id_token_keeps_its_order`, `id_token_shape`,
-//! `id_token_boost_matches_whole_normalized_tokens`.
+//! `a_query_without_an_id_token_keeps_its_order`,
+//! `a_common_short_word_keeps_similarity_order`,
+//! `a_common_short_word_stays_below_the_relevance_floor`, `id_token_shape`,
+//! `id_token_boost_matches_whole_normalized_tokens`,
+//! `an_id_most_candidates_hold_is_not_rare`.
 
 use crate::memory_core::dream::normalize_keyword;
 
@@ -50,26 +54,70 @@ pub(super) fn query_id_tokens(query_tokens: &[String]) -> Vec<&str> {
         .collect()
 }
 
-/// [`ID_TOKEN_BOOST`] when `content` holds one of `id_tokens` as a whole
-/// token, else `0.0`.
+/// Fewest candidates allowed to hold a rare id, whatever the candidate count.
+const MIN_HOLDERS: usize = 2;
+
+/// A rare id is held by at most one candidate in this many.
+const HOLDER_SHARE: usize = 5;
+
+/// Most candidates that may hold an id token while it still counts as rare.
+///
+/// Why (#9279 review): a two-character word such as `pm`, `ci` or `pr` is
+/// id-shaped but common. Boosting it +0.3 reordered ordinary queries and lifted
+/// a 0.05-similarity drawer over the 0.35 hook relevance floor. A real id
+/// names one drawer or a few; a common word sits in many of the candidates.
+/// What: `max(2, candidates / 5)`. Fifteen candidates allow three holders, so
+/// the `e1` that one ruling holds stays rare, and the `pm` that most hold does
+/// not.
+pub(super) fn max_holders(candidates: usize) -> usize {
+    (candidates / HOLDER_SHARE).max(MIN_HOLDERS)
+}
+
+/// The query id tokens held by at most [`max_holders`] of `contents`.
+pub(super) fn rare_id_tokens<'a>(id_tokens: &[&'a str], contents: &[&str]) -> Vec<&'a str> {
+    let limit = max_holders(contents.len());
+    id_tokens
+        .iter()
+        .copied()
+        .filter(|id| {
+            let holders = contents
+                .iter()
+                .filter(|c| holds_any(c, &[*id]))
+                .take(limit + 1);
+            holders.count() <= limit
+        })
+        .collect()
+}
+
+/// Whether `content` holds one of `ids` as a whole token.
 ///
 /// What: normalizes each whitespace-delimited word the way the closet index
 /// does, so `#42`, `E1:` and `(v2)` match `42`, `e1` and `v2`. Reads the
 /// content, not the closet index, because closets start empty when a palace
 /// opens and fill only on the next write or dream cycle.
-pub(super) fn id_token_boost(id_tokens: &[&str], content: &str) -> f32 {
-    if id_tokens.is_empty() {
-        return 0.0;
+fn holds_any(content: &str, ids: &[&str]) -> bool {
+    if ids.is_empty() {
+        return false;
     }
-    let hit = content.split_whitespace().any(|raw| {
+    // Whitespace split only: `E1/E2` and `E1's` normalize to `e1e2` and `e1s`.
+    content.split_whitespace().any(|raw| {
         // Skip long words before allocating: no id is longer than three chars.
         if raw.chars().filter(|c| c.is_alphanumeric()).count() > MAX_ID_CHARS {
             return false;
         }
         let token = normalize_keyword(raw);
-        id_tokens.contains(&token.as_str())
-    });
-    if hit { ID_TOKEN_BOOST } else { 0.0 }
+        ids.contains(&token.as_str())
+    })
+}
+
+/// [`ID_TOKEN_BOOST`] when `content` holds one of `id_tokens`, else `0.0`.
+/// Callers pass only the rare tokens ([`rare_id_tokens`]).
+pub(super) fn id_token_boost(id_tokens: &[&str], content: &str) -> f32 {
+    if holds_any(content, id_tokens) {
+        ID_TOKEN_BOOST
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -97,5 +145,17 @@ mod tests {
         assert_eq!(id_token_boost(&["e1"], "Ruling E1: hold"), ID_TOKEN_BOOST);
         assert_eq!(id_token_boost(&["e1"], "ruling e12 and be1"), 0.0);
         assert_eq!(id_token_boost(&[], "ruling e1"), 0.0);
+    }
+
+    /// Why (#9279 review): `pm` in most candidates is a word, not an id.
+    /// What: one holder of fifteen is rare; four of fifteen is not (limit 3).
+    #[test]
+    fn an_id_most_candidates_hold_is_not_rare() {
+        let mut contents = vec!["ruling e1: hold"; 1];
+        contents.extend(["the PM files it"; 4]);
+        contents.extend(["ruling e2: other"; 10]);
+        assert_eq!(max_holders(contents.len()), 3);
+        assert_eq!(rare_id_tokens(&["e1", "pm"], &contents), vec!["e1"]);
+        assert_eq!(max_holders(4), MIN_HOLDERS);
     }
 }
