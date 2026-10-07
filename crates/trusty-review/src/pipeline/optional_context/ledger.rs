@@ -67,8 +67,9 @@ impl ContextLedger {
     /// `request` (amendment 1): asked for, it reads `unavailable`, "row not
     /// recorded"; not asked for, `not_requested` with the flag that is off.
     /// `caller_context` is always recorded when enabled. Rows end in
-    /// canonical order. A second call replaces rows by name (P5).
-    /// Test: `ledger_fills_not_requested_rows`,
+    /// canonical order. A second call replaces rows by name (P5). Every row
+    /// and item detail then passes through [`cap_detail`].
+    /// Test: `ledger_fills_not_requested_rows`, `finish_caps_every_row_and_item_detail`,
     /// `a_requested_row_that_was_not_recorded_is_unavailable`,
     /// `finish_does_not_duplicate_a_row`, `a_gate_fact_marks_its_row_unavailable`,
     /// `a_disabled_ledger_finishes_empty`.
@@ -113,6 +114,11 @@ impl ContextLedger {
                 .position(|c| *c == r.source)
                 .unwrap_or(CANONICAL.len())
         });
+        // #9194: one choke point, so no producer's detail skips `cap_detail`.
+        for row in &mut self.records {
+            capped(&mut row.detail);
+            row.items.iter_mut().for_each(|i| capped(&mut i.detail));
+        }
     }
 
     /// Replace the record of the same source, or append `record`.
@@ -126,6 +132,13 @@ impl ContextLedger {
     /// The records, in the order they were pushed.
     pub(crate) fn into_records(self) -> Vec<ContextSourceRecord> {
         self.records
+    }
+}
+
+/// `detail` passed through [`cap_detail`], when there is one.
+fn capped(detail: &mut Option<String>) {
+    if let Some(text) = detail {
+        *text = cap_detail(text);
     }
 }
 

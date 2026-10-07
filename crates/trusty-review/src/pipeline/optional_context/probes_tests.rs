@@ -39,3 +39,21 @@ fn cap_detail_redacts_credentials() {
     }
     assert_eq!(cap_detail("no hits for the query"), "no hits for the query");
 }
+
+/// #9194: `Authorization:Bearer <token>` with no space after the colon still
+/// hides the token.
+#[test]
+fn cap_detail_masks_bearer_without_a_space() {
+    let detail = cap_detail("401 with Authorization:Bearer abc.def sent");
+    assert!(!detail.contains("abc.def"), "token survived: {detail}");
+    assert_eq!(detail, "401 with Authorization:Bearer [redacted] sent");
+}
+
+/// #9194: the value of an `X-Api-Key:` header is hidden, even a short one
+/// with no digit that the credential-shape mask would keep.
+#[test]
+fn cap_detail_masks_an_x_api_key_value() {
+    let detail = cap_detail("403 with X-Api-Key: shortkey sent");
+    assert!(!detail.contains("shortkey"), "key survived: {detail}");
+    assert_eq!(detail, "403 with X-Api-Key: [redacted] sent");
+}

@@ -139,3 +139,38 @@ fn a_disabled_ledger_finishes_empty() {
     );
     assert!(ledger.into_records().is_empty());
 }
+
+/// #9194: `finish` passes every row and item detail through `cap_detail`,
+/// so a producer that skipped it (the `pr_body` fetch error, a docs
+/// `unavailable_row`) cannot leak a token into CLI or MCP output.
+#[test]
+fn finish_caps_every_row_and_item_detail() {
+    let leak = "PR metadata fetch failed: GET \
+                https://api.github.com/repos/o/r/pulls/7?access_token=s3cr3tvalue\nstatus 401";
+    let request = OptionalContextRequest::default()
+        .with_pr_body(true)
+        .with_spec_docs(true);
+    let mut ledger = ContextLedger::new(true);
+    ledger.push(ContextSourceRecord::new("pr_body", SourceState::Unavailable).with_detail(leak));
+    let mut docs =
+        ContextSourceRecord::new("spec_docs", SourceState::Unavailable).with_detail(leak);
+    docs.items = vec![
+        crate::models::ContextItemRecord::new("docs/a.md", SourceState::Unavailable, 0, 0)
+            .with_detail(leak),
+    ];
+    ledger.push(docs);
+    ledger.finish(&request, rows(), &GateFacts::default());
+    let records = ledger.into_records();
+    let pr_body = find(&records, "pr_body");
+    let spec_docs = find(&records, "spec_docs");
+    for detail in [
+        &pr_body.detail,
+        &spec_docs.detail,
+        &spec_docs.items[0].detail,
+    ] {
+        let detail = detail.as_deref().unwrap_or_default();
+        assert!(!detail.contains("s3cr3tvalue"), "token survived: {detail}");
+        assert!(detail.contains("access_token=[redacted]"), "{detail}");
+        assert!(!detail.contains('\n'), "{detail}");
+    }
+}

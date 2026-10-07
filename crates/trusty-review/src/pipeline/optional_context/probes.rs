@@ -219,21 +219,28 @@ fn worst(items: &[ContextItemRecord]) -> SourceState {
 /// Why: a detail carries transport and API error text, which can span lines,
 /// echo a response body, or hold a token.
 /// What: collapses every whitespace run to one space, replaces the value
-/// after `bearer`/`basic`/`authorization:`/`token:`/`password:` and of any
+/// after `bearer`/`basic` (also glued as `authorization:bearer`),
+/// `authorization:`/`token:`/`password:`/`x-api-key:` and of any
 /// `token=`/`key=`/`secret=`/`password=` pair with `[redacted]`, masks
 /// credential-shaped runs, then cuts to the cap with a trailing `…`.
 /// Test: `cap_detail_cuts_to_one_line_of_200_characters`,
-/// `cap_detail_redacts_credentials`, `a_bearer_token_never_reaches_a_detail`.
+/// `cap_detail_redacts_credentials`, `a_bearer_token_never_reaches_a_detail`,
+/// `cap_detail_masks_bearer_without_a_space`, `cap_detail_masks_an_x_api_key_value`.
 pub(crate) fn cap_detail(text: &str) -> String {
     let mut words: Vec<String> = Vec::new();
     let mut hide_next = false;
     for word in text.split_whitespace() {
         let lower = word.to_ascii_lowercase();
+        // #9194: `Authorization:Bearer` with no space reads as `Bearer`.
+        let scheme = lower
+            .split_once(':')
+            .is_some_and(|(_, rest)| matches!(rest, "bearer" | "basic"));
         let key = lower.trim_end_matches(':');
-        if matches!(
-            key,
-            "bearer" | "basic" | "authorization" | "token" | "password"
-        ) && (word.ends_with(':') || matches!(key, "bearer" | "basic"))
+        if scheme
+            || (matches!(
+                key,
+                "bearer" | "basic" | "authorization" | "token" | "password" | "x-api-key"
+            ) && (word.ends_with(':') || matches!(key, "bearer" | "basic")))
         {
             words.push(word.to_string());
             hide_next = true;
