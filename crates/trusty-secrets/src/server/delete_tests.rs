@@ -139,8 +139,8 @@ async fn server_delete_removes_a_key_held_by_two_backends() {
     assert_eq!(fx.keychain.len(), 1);
     assert!(file.get(&project, &key("A")).unwrap().is_some());
 
-    let deleted = ok(call(&fx.settings.socket, method::DELETE, target(&fx, "A")).await);
-    assert_eq!(deleted, json!({"removed": true}));
+    let deleted = call(&fx.settings.socket, method::DELETE, target(&fx, "A")).await;
+    assert_eq!(ok(deleted), json!({"removed": true}));
     assert!(fx.keychain.is_empty(), "the configured backend is cleared");
     assert!(
         file.get(&project, &key("A")).unwrap().is_none(),
@@ -177,5 +177,80 @@ async fn server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row()
     assert!(refused.inner.get(&project, &key("A")).unwrap().is_some());
     let keys = listed(&fx).await;
     assert_eq!(keys[0]["name"], "A", "the row stays while a value remains");
+    server.stop().await;
+}
+
+/// Why: #7519 — a key no backend holds is still answered `removed: false`,
+/// and the sweep leaves every other key alone.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_of_a_key_no_backend_holds_is_unchanged() {
+    let fx = fixture();
+    let (factory, file) = with_file_backend(&fx);
+    let server = fx.start_with(factory).await;
+    let project = vault("trusty/acme/web");
+    set_value(&fx, "KEEP").await;
+    file.set(&project, &key("KEEP"), &SecretValue::new(VALUE))
+        .unwrap();
+
+    let deleted = call(&fx.settings.socket, method::DELETE, target(&fx, "NONE")).await;
+    assert_eq!(ok(deleted), json!({"removed": false}));
+    assert_eq!(fx.keychain.len(), 1);
+    assert!(file.get(&project, &key("KEEP")).unwrap().is_some());
+    assert_eq!(listed(&fx).await[0]["name"], "KEEP");
+    server.stop().await;
+}
+
+/// Why: #7519 A7, #9328 R1–R3 — the scope check runs before any backend is
+/// opened, so an out-of-scope delete reaches neither the configured backend
+/// nor the ones the sweep would clear.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_out_of_scope_reaches_no_backend() {
+    let fx = fixture();
+    let (factory, file) = with_file_backend(&fx);
+    let other = vault("trusty/acme/other");
+    let value = SecretValue::new(VALUE);
+    fx.keychain.set(&other, &key("K"), &value).unwrap();
+    file.set(&other, &key("K"), &value).unwrap();
+    let server = fx.start_with(factory).await;
+
+    let response = call(
+        &fx.settings.socket,
+        method::DELETE,
+        json!({"project": fx.project(), "vault": "trusty/acme/other", "key": "K"}),
+    )
+    .await;
+    assert_eq!(
+        fixed_error(&response, method::DELETE),
+        ErrorKind::VaultOutOfScope
+    );
+    assert!(fx.keychain.get(&other, &key("K")).unwrap().is_some());
+    assert!(file.get(&other, &key("K")).unwrap().is_some());
+    server.stop().await;
+}
+
+/// Why: #7519, Fail-Open Check — a backend the sweep cannot open may still
+/// hold the value, so the delete fails before any backend is touched and
+/// the key stays listed. Only an unknown backend id is skipped.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_fails_closed_when_an_old_backend_cannot_open() {
+    let fx = fixture();
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        BackendId::FILE => Err(SecretsError::HomeUnavailable),
+        _ => base(id),
+    });
+    let server = fx.start_with(factory).await;
+    set_value(&fx, "A").await;
+
+    let deleted = call(&fx.settings.socket, method::DELETE, target(&fx, "A")).await;
+    assert_eq!(
+        fixed_error(&deleted, method::DELETE),
+        ErrorKind::HomeUnavailable
+    );
+    assert_eq!(fx.keychain.len(), 1, "nothing is deleted");
+    assert_eq!(listed(&fx).await[0]["name"], "A");
     server.stop().await;
 }
