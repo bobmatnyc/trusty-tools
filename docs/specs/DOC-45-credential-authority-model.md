@@ -685,7 +685,8 @@ records are JSON lines in
 `~/.trusty-tools/trusty-secrets/audit/audit.jsonl`. Only a server flag moves
 it: `--audit-log <path>`, or `--index-dir <dir>`, which puts it at
 `audit/audit.jsonl` in the index directory's parent. No environment variable
-moves it — not `TRUSTY_SECRETS_INDEX_DIR` either, which moves only the index —
+moves it — not `TRUSTY_SECRETS_INDEX_DIR` either, which moves only the index,
+and only for a server off the default socket (#7524) —
 because the on-demand client passes the caller's environment through and a
 tracked `.envrc` must not move the trail into a project tree. It is a 0600 file
 in a 0700 directory, created with

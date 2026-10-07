@@ -14,14 +14,21 @@
 //! caller's environment through, and a tracked `.envrc` or an agent's
 //! environment must not move the audit trail into a project tree (DOC-45
 //! C-7.12).
+//! #7524: for the same reason [`INDEX_DIR_ENV`] moves the index only for a
+//! server off the default socket. The first spawner's environment would
+//! otherwise move the names index for every client of the shared server; a
+//! test or sandbox on its own socket keeps the override, and `--index-dir`
+//! works on any socket.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
 //! `settings_idle_env_falls_back_on_garbage_and_zero`,
-//! `settings_reject_unknown_and_incomplete_flags`.
+//! `settings_reject_unknown_and_incomplete_flags`,
+//! `settings_index_env_is_ignored_on_the_default_socket`,
+//! `settings_index_override_survives_off_the_default_socket`.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::SecretsError;
@@ -34,7 +41,8 @@ pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
 /// Overrides the socket path.
 pub const SOCKET_ENV: &str = "TRUSTY_SECRETS_SOCKET";
 
-/// Overrides the names-only index directory.
+/// Overrides the names-only index directory, but only for a server whose
+/// socket is not the default one (#7524).
 pub const INDEX_DIR_ENV: &str = "TRUSTY_SECRETS_INDEX_DIR";
 
 /// The credential access audit log under `$HOME` (#4567, DOC-45 C-7.9).
@@ -151,14 +159,18 @@ impl ServerSettings {
     /// is actually needed. The audit log is `--audit-log`, else
     /// [`audit_log_beside`] an index named by the `--index-dir` flag, else
     /// [`AUDIT_LOG_SUBPATH`] under `$HOME` — also when the index comes from
-    /// [`INDEX_DIR_ENV`]. No environment variable moves it.
+    /// [`INDEX_DIR_ENV`]. No environment variable moves it. #7524:
+    /// [`INDEX_DIR_ENV`] is read only when the socket is not the default
+    /// socket (`is_default_socket`); on it, the index is the `--index-dir`
+    /// flag or the default.
     ///
     /// # Errors
     ///
     /// [`SettingsError`] for a malformed command line or an unknown `$HOME`.
     ///
     /// Test: `settings_flags_beat_env_beat_defaults`,
-    /// `settings_reject_unknown_and_incomplete_flags`.
+    /// `settings_reject_unknown_and_incomplete_flags`,
+    /// `settings_index_env_is_ignored_on_the_default_socket`.
     pub fn from_args(
         args: impl IntoIterator<Item = OsString>,
         env: impl Fn(&str) -> Option<String>,
@@ -205,9 +217,15 @@ impl ServerSettings {
             (None, Some(index_flag)) => audit_log_beside(index_flag),
             (None, None) => under_home(AUDIT_LOG_SUBPATH)?,
         };
-        let index_root = pick(index_root, INDEX_DIR_ENV, INDEX_SUBDIR)?;
+        let socket = pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?;
+        let index_root = match index_root {
+            Some(path) => path,
+            // #7524: a caller's environment never moves the shared server's index.
+            None if is_default_socket(&socket) => under_home(INDEX_SUBDIR)?,
+            None => pick(None, INDEX_DIR_ENV, INDEX_SUBDIR)?,
+        };
         Ok(Self {
-            socket: pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?,
+            socket,
             machine_config: match machine_config {
                 Some(path) => path,
                 None => under_home(MACHINE_CONFIG_SUBPATH)?,
@@ -233,6 +251,45 @@ pub fn audit_log_beside(index_root: &Path) -> PathBuf {
         .unwrap_or(index_root)
         .join("audit")
         .join("audit.jsonl")
+}
+
+/// Whether `socket` is the shared default socket under `$HOME`.
+///
+/// Why: #7524 M3 — [`INDEX_DIR_ENV`] must not reach the server every client
+/// shares, so another spelling of the default path counts as the default.
+/// What: `true` when `$HOME` is unknown (fail closed), when `socket` equals
+/// the default after lexical normalisation (`.`, `..`, repeated `/`), or
+/// when both share a file name and their parent directories canonicalise
+/// to one path (a symlinked directory). A lexical `..` match counts even if
+/// a symlink would resolve it elsewhere; that only ignores the variable.
+/// Test: `settings_index_env_is_ignored_on_the_default_socket`,
+/// `settings_socket_alias_through_a_symlinked_dir_is_the_same_socket`.
+pub(crate) fn is_default_socket(socket: &Path) -> bool {
+    dirs::home_dir().is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH)))
+}
+
+/// Whether `a` and `b` name one socket; see [`is_default_socket`].
+pub(crate) fn same_socket(a: &Path, b: &Path) -> bool {
+    if lexical(a) == lexical(b) {
+        return true;
+    }
+    let parent = |p: &Path| p.parent().and_then(|dir| dir.canonicalize().ok());
+    a.file_name() == b.file_name() && parent(a).is_some_and(|dir| parent(b) == Some(dir))
+}
+
+/// `path` with `.` dropped and each `..` removing the component before it.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.

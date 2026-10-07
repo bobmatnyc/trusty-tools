@@ -71,3 +71,26 @@ fn settings_index_override_survives_off_the_default_socket() {
     let parsed = ServerSettings::from_args(args, env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/flag/index"));
 }
+
+/// Why: #7524 M3 — a socket path through a symlinked directory names the
+/// same socket, so it must not unlock [`INDEX_DIR_ENV`] for the shared
+/// server; a different file, or a directory that does not exist, is not it.
+/// Test: itself.
+#[test]
+fn settings_socket_alias_through_a_symlinked_dir_is_the_same_socket() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let socket = real.join("secrets.sock");
+    assert!(super::same_socket(&link.join("secrets.sock"), &socket));
+    assert!(super::same_socket(&real.join("x/../secrets.sock"), &socket));
+    assert!(!super::same_socket(&link.join("other.sock"), &socket));
+    assert!(!super::same_socket(
+        &tmp.path().join("secrets.sock"),
+        &socket
+    ));
+    let absent = tmp.path().join("absent/secrets.sock");
+    assert!(!super::same_socket(&absent, &socket));
+}
