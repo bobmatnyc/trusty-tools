@@ -27,6 +27,15 @@ use std::time::Duration;
 
 use super::helpers::now_secs;
 
+/// A callback run after each dream cycle that ran, with the palace and stats.
+///
+/// Why (#8246): a cycle rewrites drawer text (dedup merges) and adds drawers
+/// (semantic consolidation), but indexes this crate does not own — trusty-
+/// memory's BM25 lane — learn of it only if the cycle says so.
+/// What: `Arc<dyn Fn(&PalaceId, &DreamStats)>`, installed with
+/// [`Dreamer::with_after_cycle`].
+pub type AfterCycle = Arc<dyn Fn(&PalaceId, &DreamStats) + Send + Sync>;
+
 /// Background memory consolidator.
 ///
 /// Why: We need a small, testable unit that owns the idle clock and the
@@ -50,6 +59,8 @@ pub struct Dreamer {
     /// config forever. Only cleared by constructing a fresh `Dreamer` (i.e.
     /// a config reload), matching "disabled until the config is fixed".
     pub(super) semantic_consolidation_disabled: AtomicBool,
+    /// #8246: run after every cycle that ran; see [`AfterCycle`].
+    pub(super) after_cycle: Option<AfterCycle>,
 }
 
 impl Dreamer {
@@ -66,6 +77,7 @@ impl Dreamer {
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: None,
             semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
         }
     }
 
@@ -85,7 +97,19 @@ impl Dreamer {
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: Some(consolidator),
             semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
         }
+    }
+
+    /// This dreamer, calling `hook` after every cycle that runs.
+    ///
+    /// Why (#8246): see [`AfterCycle`].
+    /// What: replaces any earlier hook. A cycle skipped because another holds
+    /// the palace, or one that fails, does not call it.
+    /// Test: `the_after_cycle_hook_sees_every_cycle_that_ran`.
+    pub fn with_after_cycle(mut self, hook: AfterCycle) -> Self {
+        self.after_cycle = Some(hook);
+        self
     }
 
     /// Record activity (call from recall / remember paths).
@@ -362,6 +386,10 @@ impl Dreamer {
             }
         }
 
+        // #8246: tell the indexes this crate does not own what the cycle did.
+        if let Some(hook) = &self.after_cycle {
+            hook(&handle.id, &stats);
+        }
         Ok(stats)
     }
 }

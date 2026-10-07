@@ -182,6 +182,70 @@ fn missing_docs_answers_by_identity_not_count() {
     );
 }
 
+/// Why (#8246): the index holds a document for every id the caller asks about,
+/// so `missing_docs` reports full coverage — and one of those documents carries
+/// the text the drawer had BEFORE it was edited. That gap is the defect: the
+/// backfill read "present" as "current" and never re-indexed the edit.
+/// What: seeds two documents, edits one caller-side, and asserts only the edited
+/// id and the never-seen id come back. The never-seen id is the fail-open
+/// direction — an id the index cannot speak for is reported, not assumed fresh.
+/// Test: this test itself.
+#[test]
+fn outdated_docs_reports_absent_and_edited_documents() {
+    let dir = tempdir();
+    let mut idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
+    idx.index_doc("kept", "the runbook as first written");
+    idx.index_doc("edited", "the runbook as first written too");
+
+    let asked = vec![
+        (
+            "kept".to_string(),
+            "the runbook as first written".to_string(),
+        ),
+        (
+            "edited".to_string(),
+            "rewritten in place, same id".to_string(),
+        ),
+        (
+            "never-seen".to_string(),
+            "a drawer the index never got".to_string(),
+        ),
+    ];
+
+    let ids: Vec<String> = asked.iter().map(|(id, _)| id.clone()).collect();
+    assert!(
+        idx.missing_docs(&ids) == vec!["never-seen".to_string()],
+        "precondition: presence alone calls the edited drawer covered"
+    );
+    assert_eq!(
+        idx.outdated_docs(&asked),
+        vec!["edited".to_string(), "never-seen".to_string()],
+        "an id held at different text is as outdated as one not held at all"
+    );
+}
+
+/// Why: the 300-second repair sweep re-runs the backfill, so a content check
+/// that reports drift over an unchanged corpus turns every sweep into a full
+/// re-index of every palace.
+/// Test: this test itself.
+#[test]
+fn outdated_docs_is_silent_when_every_document_is_current() {
+    let dir = tempdir();
+    let mut idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
+    idx.index_doc("a", "alpha");
+    idx.index_doc("b", "beta");
+
+    let asked = vec![
+        ("a".to_string(), "alpha".to_string()),
+        ("b".to_string(), "beta".to_string()),
+    ];
+    assert!(idx.outdated_docs(&asked).is_empty(), "no drift, no work");
+    assert!(
+        idx.outdated_docs(&[]).is_empty(),
+        "an empty request is trivially current"
+    );
+}
+
 /// Why: a corrupt snapshot must not stop recall from coming up — the lexical
 /// lane degrades, the vector lane does not.
 /// Test: this test itself.
@@ -191,6 +255,12 @@ fn load_recovers_from_a_corrupt_snapshot() {
     std::fs::write(dir.path().join(SNAPSHOT_FILENAME), b"not valid json").unwrap();
     let idx = PalaceBm25Index::load_or_create(dir.path()).unwrap();
     assert_eq!(idx.doc_count(), 0);
+
+    // #8246, fail-open: a quarantined snapshot leaves an index that can speak
+    // for nothing, and every drawer must therefore read as outdated — the
+    // backfill re-indexes them rather than trusting an empty corpus.
+    let asked = vec![("drawer-a".to_string(), "the quick brown fox".to_string())];
+    assert_eq!(idx.outdated_docs(&asked), vec!["drawer-a".to_string()]);
 }
 
 /// Why (#5909): starting empty on a corrupt snapshot is only survivable while

@@ -28,6 +28,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use trusty_common::memory_core::dream::{AfterCycle, DreamStats};
+use trusty_common::memory_core::palace::PalaceId;
+
 use crate::AppState;
 
 /// Default interval between repair passes.
@@ -103,6 +106,33 @@ pub fn mark_dirty(state: &AppState, palace: &str) {
             "bm25: palace queued for coverage repair"
         );
     }
+}
+
+/// Dream-cycle hook that queues a palace for repair when the cycle rewrote or
+/// added drawer text (#8246).
+///
+/// Why: a dream dedup merge appends the loser's text to the survivor under the
+/// survivor's id, and semantic consolidation adds canonical drawers. Both run
+/// in trusty-common, which never touches the BM25 lane, so the lexical lane kept
+/// the pre-merge text until a restart. Owner ruling 2026-09-17 (#8246 slice B):
+/// mark the palace dirty and accept up to one repair interval of staleness.
+/// What: `None` when the lane is off, so nothing is queued that no sweep drains.
+/// Otherwise a hook that inserts the palace into the dirty set when
+/// `stats.merged` or `stats.semantically_consolidated` is non-zero. The repair
+/// pass's content-aware probe then re-feeds the changed drawers.
+/// Test: `a_dream_merge_is_re_indexed_by_the_next_repair_pass`,
+/// `the_dream_hook_queues_only_cycles_that_changed_text`.
+pub fn dream_repair_hook(state: &AppState) -> Option<AfterCycle> {
+    state.bm25.as_ref()?;
+    let dirty = Arc::clone(&state.bm25_dirty);
+    Some(Arc::new(move |palace: &PalaceId, stats: &DreamStats| {
+        // #8246: only a cycle that rewrote or added text can stale the lane.
+        if (stats.merged > 0 || stats.semantically_consolidated > 0)
+            && dirty.insert(palace.as_str().to_string())
+        {
+            tracing::debug!(palace = %palace, "bm25: dream changed drawer text; queued for repair");
+        }
+    }))
 }
 
 /// Palaces currently queued for repair. Observability and tests.
