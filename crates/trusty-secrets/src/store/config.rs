@@ -57,6 +57,11 @@ pub struct MachineSecretsConfig {
     /// the `onepassword` backend on this machine (#7519).
     #[serde(default)]
     pub onepassword: Option<CliSettings>,
+    /// DOC-74 §6.2's Keeper section. Present, even as `{}`, it enables the
+    /// `keeper` backend on this machine (#7519 P3); it opens only when the
+    /// section also pins `program` and `config_path`.
+    #[serde(default)]
+    pub keeper: Option<CliSettings>,
 }
 
 impl MachineSecretsConfig {
@@ -68,10 +73,12 @@ impl MachineSecretsConfig {
     /// file may enable one.
     /// What: `default_backend` names `id`, or `id`'s own section is present.
     /// A built-in backend (`keychain`, `file`) is never "enabled" here.
-    /// Test: `onepassword_open_requires_machine_enablement`.
+    /// Test: `onepassword_open_requires_machine_enablement`,
+    /// `keeper_open_requires_machine_enablement`.
     pub fn enables(&self, id: &BackendId) -> bool {
         let section = match id.as_str() {
             BackendId::ONEPASSWORD => self.onepassword.is_some(),
+            BackendId::KEEPER => self.keeper.is_some(),
             _ => return false,
         };
         section || self.default_backend.as_ref() == Some(id)

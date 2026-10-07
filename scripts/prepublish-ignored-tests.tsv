@@ -36,6 +36,8 @@ trusty-memory	transport::methods::health_tests::health_endpoint_returns_ok	loads
 trusty-memory	transport::methods::health_tests::health_endpoint_includes_resource_fields	loads the default ONNX embedder in-process; no daemon
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_on_fresh_install_is_ok	loads the default ONNX embedder; fresh-install path a published daemon runs at first start
 trusty-memory	transport::methods::health_tests::health_endpoint_round_trip_with_palace_is_ok	loads the default ONNX embedder; palace-backed round trip
+trusty-memory	recall_eval_holds_the_recorded_baseline	the real all-MiniLM-L6-v2 model; the #9281 recall release gate, temp palace, no daemon
+trusty-memory	recall_eval_goes_red_with_demotion_or_retirement_off	the real all-MiniLM-L6-v2 model; proves the #9281 gate goes red on a revert, temp palace, no daemon
 trusty-common	memory_core::retrieval::tests::cold_restart_recalls_beyond_l1_snapshot	the real ONNX embedder in its own process (the shared embedder is process-global)
 trusty-common	memory_core::retrieval::tests::recall_ranks_by_similarity_over_importance	the real ONNX embedder in its own process (the shared embedder is process-global)
 trusty-common	memory_core::retrieval::timeout_tests::tests::timeout_fires_on_embedder_init_with_tiny_limit	its own process: sets an env var and fills the process-global embedder cell; no model, no network
@@ -50,11 +52,12 @@ trusty-search	migration_e2e::migration_e2e_empty_corpus_advances_to_current	load
 trusty-search	typeahead::typeahead_blended_mode_returns_results_tagged_by_source	loads the default ONNX embedder in-process; indexes a fixture, no daemon
 trusty-search	hnsw_recall_9414::recall_holds_on_a_150k_clustered_index_after_reload	CPU only: builds a 150K-vector HNSW index and brute-forces 200 queries (~20 s debug, #9414); no model, no daemon
 
-# THE UNSELECTED REMAINDER. 142 ignored tests are enumerable in this workspace
-# on the Linux runner; the 26 rows above run, and 116 do not. A macOS checkout
-# enumerates one more (trusty-mpm's macOS-only
-# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
-# local `--list-only` run there reads 127 against this Linux baseline. The gate
+# THE UNSELECTED REMAINDER. 144 ignored tests are enumerable in this workspace
+# on the Linux runner; the 28 rows above run, and 116 do not. A macOS checkout
+# enumerates two more (trusty-mpm's macOS-only
+# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper` and
+# `core::process::tests::claude_pid_resolves_from_inside_its_own_pane`), so a
+# local `--list-only` run there reads 118 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
