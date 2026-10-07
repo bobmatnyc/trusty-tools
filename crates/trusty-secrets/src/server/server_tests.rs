@@ -1694,7 +1694,10 @@ fn settings_template_root_follows_the_index_flag_only() {
     if let Some(home) = dirs::home_dir() {
         let flagged = ServerSettings::from_args(args(&["serve", "--index-dir", "/f/index"]), env);
         assert_eq!(flagged.unwrap().template_root, PathBuf::from("/f/tmp"));
-        let from_env = ServerSettings::from_args(args(&["serve"]), env).unwrap();
+        // #7524: the environment moves the index only off the default socket.
+        let from_env =
+            ServerSettings::from_args(args(&["serve", "--socket", "/s/secrets.sock"]), env)
+                .unwrap();
         assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
         let default = settings::template_root_beside(&home.join(crate::store::INDEX_SUBDIR));
         assert_eq!(from_env.template_root, default);
