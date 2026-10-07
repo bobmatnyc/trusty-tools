@@ -292,12 +292,12 @@ fn pair_ids(handle: &PalaceHandle) -> Vec<uuid::Uuid> {
     handle.drawers.read().iter().map(|d| d.id).collect()
 }
 
+/// Which redb ops [`stall_redb_ops`] stalls.
+type StallWhen = Arc<dyn Fn(&BatchWriteOp) -> bool + Send + Sync>;
+
 /// Make every redb `op` matched by `stalls` outlive a 100 ms transaction
 /// budget, so that write fails; `None` clears both hooks.
-fn stall_redb_ops(
-    handle: &PalaceHandle,
-    stalls: Option<Arc<dyn Fn(&BatchWriteOp) -> bool + Send + Sync>>,
-) {
+fn stall_redb_ops(handle: &PalaceHandle, stalls: Option<StallWhen>) {
     let store = handle.kg.redb_store();
     let hooks = store.test_hooks();
     match stalls {
