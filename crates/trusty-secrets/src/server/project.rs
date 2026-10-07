@@ -14,7 +14,8 @@
 //! file is tracked, so its `vault` may only pick a vault under the remote's
 //! owner; a wider override comes only from the untracked machine config.
 //! #9326: likewise, on a Keychain build the project file may not select the
-//! `file` backend; only the machine config may.
+//! `file` backend; only the machine config may. #4567: nor may it turn the
+//! credential audit off ([`ErrorKind::TrackedAuditRefused`]).
 //! Test: `server_scopes_round_trip_over_a_real_socket`,
 //! `server_project_without_a_remote_is_a_fixed_error`,
 //! `server_project_config_overrides_the_project_vault`,
@@ -76,6 +77,8 @@ impl ProjectContext {
         let config = config::load_project_at(&config_path)?;
         // #9326: on a Keychain build only the machine config may pick `file`.
         config::check_project_backend(config.as_ref(), &config_path)?;
+        // #4567: likewise only the machine config may turn the audit off.
+        super::gate::check_tracked_audit(config.as_ref())?;
         let machine = config::load_machine_at(&state.settings.machine_config)?;
         // #9328: the tracked `vault` is checked against the remote's owner;
         // only the machine config may pick a vault outside it.

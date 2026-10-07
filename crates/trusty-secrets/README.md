@@ -108,13 +108,48 @@ call. It exits after 60 seconds with no answered request and removes its
 socket. No launchd job runs it.
 
 ```
-trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--idle-timeout-secs N]
+trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--audit-log P] [--idle-timeout-secs N]
 ```
 
 The environment variables `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR`
-and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values. No method returns
+and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values. Only flags move the
+audit log: `--audit-log`, or `--index-dir`, which puts it beside the index. No
+environment variable moves it, including `TRUSTY_SECRETS_INDEX_DIR`. No method returns
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
+
+## Audit trail
+
+The server records each credential access in
+`~/.trusty-tools/trusty-secrets/audit/audit.jsonl`, one JSON line per record
+(DOC-45 §9). Every record has `"stream": "credential_access"`.
+
+| Method | Records |
+|---|---|
+| `set`, `delete` | One per call, allowed or denied |
+| `copy` | One per key, plus one denial for a refusal before any key moves |
+| `list` | One per denied call only |
+| `scopes`, `doctor` | None |
+
+A record holds `ts`, `stream`, `method`, `decision` (`allow` or `deny`),
+`reason` (the error kind, such as `vault_out_of_scope`), `vault`, `key`,
+`backend`, `project_root` and `caller_pid`. It never holds a value or any text
+the caller sent.
+
+The log is a 0600 file in a 0700 directory. The server refuses it if it is a
+symlink, has a wider mode, or belongs to another user. Each record is synced
+before the reply. When the log reaches 8 MiB it is renamed to `audit.jsonl.1`
+the next time it is opened.
+
+The server opens the log before an allowed `set`, `delete` or `copy` touches
+a backend. If the log cannot be opened, the call fails with `audit_unavailable`
+and changes nothing. If the record cannot be written after the backend call
+succeeded, the change stands and the call still fails with
+`audit_unavailable`, so no success is reported without its record; `copy` stops
+before its next key. A refusal is still answered with its own error. To turn the audit off on one machine, set `secrets.audit: false` in
+the machine config `~/.trusty-tools/trusty-common/config.yaml`. A project's
+tracked `.trusty-tools/trusty-secrets.yaml` cannot do this: `audit: false`
+there is refused with `tracked_audit_refused`.
 
 ## Library example
 
