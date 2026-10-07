@@ -115,11 +115,14 @@ pub enum ErrorKind {
     /// The request ran past the server's deadline for its method.
     // #7524 P2-M1: its own kind, so a caller knows a write may have landed.
     DeadlineExceeded = 31,
+    /// A delete found no 1Password vault visible to this identity.
+    // #7524 P2-M3 fix round: its own kind, so the wire text names the escapes.
+    VaultNotVisible = 32,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 32] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -152,6 +155,7 @@ impl ErrorKind {
         Self::Internal,
         Self::BackendNotEnabled,
         Self::DeadlineExceeded,
+        Self::VaultNotVisible,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -195,6 +199,7 @@ impl ErrorKind {
             Self::FileBackendNotSelected => "file_backend_not_selected",
             Self::BackendNotEnabled => "backend_not_enabled",
             Self::DeadlineExceeded => "deadline_exceeded",
+            Self::VaultNotVisible => "vault_not_visible",
             Self::Internal => "internal",
         }
     }
@@ -266,6 +271,11 @@ impl ErrorKind {
             Self::DeadlineExceeded => {
                 "the request ran past the server's deadline and was stopped; a backend write already under way may have landed, so check the backend before retrying"
             }
+            // #7524 P2-M3 fix round: both ways out of a delete that would
+            // otherwise fail on every call.
+            Self::VaultNotVisible => {
+                "1Password shows no vault with this name to this identity, so the key may still be held there and its index row was kept; create the vault in 1Password, or stop enabling 1Password by removing the `secrets.onepassword` section (and any `secrets.default_backend: onepassword`) from the machine config ~/.trusty-tools/trusty-common/config.yaml"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -313,6 +323,8 @@ impl ErrorKind {
             Self::BackendNotEnabled => -32078,
             // #7524 P2-M1: the next unused code.
             Self::DeadlineExceeded => -32079,
+            // #7524 P2-M3 fix round: the next unused code.
+            Self::VaultNotVisible => -32080,
         }
     }
 
@@ -361,6 +373,7 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::FileBackendNotSelected => Self::FileBackendNotSelected,
             SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
             SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
+            SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.

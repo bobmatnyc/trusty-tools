@@ -22,9 +22,11 @@
 //!   that is removed on drop (owner ruling 2026-10-07). Never
 //!   delete-then-create or create-then-archive. Two rows are an error.
 //! - `delete`: `op item delete <id> --vault <v>` for each row; no row is
-//!   `Ok(false)`. No vault is an error, never a miss (#7524 P2-M3): the
-//!   item may sit in a vault this identity cannot see, so the delete sweep
-//!   must keep the index row.
+//!   `Ok(false)`. No vault is [`SecretsError::VaultNotVisible`], never a
+//!   miss (#7524 P2-M3): the item may sit in a vault this identity cannot
+//!   see, so the delete sweep must keep the index row. The index records no
+//!   holding backend, so this also refuses a key that was never in
+//!   1Password; the error names the escapes (DOC-74 §8.2).
 //! - `list_names` is not implemented: listing goes through the names-only
 //!   index, so the capabilities are `READ | WRITE` only (A6).
 //!
@@ -91,8 +93,6 @@ const AMBIGUOUS: &str = "more than one 1Password item has this key's title; none
 const FOREIGN: &str =
     "a 1Password item with this key's title is not a Password item; it was left alone";
 const NO_VAULT: &str = "this account has no 1Password vault with this name; create it first";
-const NO_VAULT_ON_DELETE: &str = "1Password shows no vault with this name to this identity, which \
-     may only be unable to see it; the key was not confirmed deleted";
 const VANISHED: &str = "the 1Password item was removed while it was being updated";
 
 /// The 1Password backend.
@@ -308,7 +308,15 @@ impl SecretBackend for OnePasswordBackend {
         let rows = match self.lookup(vault, key)? {
             // #7524 P2-M3: "isn't a vault" is also what `op` says for a vault
             // this identity cannot see; a miss here let the sweep drop the row.
-            Lookup::NoVault => return Err(self.failed(vault, key, NO_VAULT_ON_DELETE)),
+            // Fix round: the error names both escapes (create the vault, or
+            // stop enabling 1Password); the index records no holding backend.
+            Lookup::NoVault => {
+                return Err(SecretsError::VaultNotVisible {
+                    backend: BackendId::ONEPASSWORD.to_string(),
+                    vault: vault.to_string(),
+                    key: key.to_string(),
+                });
+            }
             Lookup::Rows(rows) => rows,
         };
         let mut removed = false;

@@ -141,9 +141,12 @@ and sends a request.
 Each request has one deadline: 120 s for `set`, `delete` and `copy`, 15 s for
 the rest. A CLI call does not start after it, and one still running is
 killed; the request then fails with `deadline_exceeded`, whose text says a
-write already under way may have landed. A `copy` lists the keys it did not
-start in `failed`. `OnDemandSecrets` waits 15 s longer than the deadline, so it
-always receives the server's answer.
+write already under way may have landed. A `copy` lists in `failed` the keys
+it did not start and any key whose write the deadline cut short, which may
+have landed. `OnDemandSecrets` waits 15 s longer than the deadline, so for a
+CLI-backed call (1Password, Keeper) it always receives the server's answer. A
+Keychain or file call is not bounded by the deadline: one blocked on a
+Keychain unlock prompt can still outlast the client's wait.
 
 `delete` removes the key from every backend this build can store values in
 (the Keychain on macOS, the file backend, and 1Password or Keeper when the
@@ -225,8 +228,13 @@ fail with `cli_not_installed`; install `op` in one of those directories or set
   Keychain or to files.
 - Enabling 1Password adds one `op item list` to every `delete`. When `op`
   answers that the vault "isn't a vault", which it also says for a vault the
-  current identity cannot see, the `delete` fails and the key's index row
-  stays; a `get` treats the same answer as a miss.
+  current identity cannot see, the `delete` fails with `vault_not_visible`
+  and the key's index row stays; a `get` treats the same answer as a miss.
+  The index does not record which backend holds a key, so this also refuses
+  deletes of Keychain or `file` keys while 1Password is enabled and the
+  project has no 1Password vault. The error names the two ways out: create
+  the vault in 1Password, or remove the `secrets.onepassword` section (and
+  any `secrets.default_backend: onepassword`) from the machine config.
 - `doctor` lists the backend without running `op`, and reports whether a
   token was present at server start (see Doctor above).
 

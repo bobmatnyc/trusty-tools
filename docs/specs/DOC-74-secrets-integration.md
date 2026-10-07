@@ -482,9 +482,24 @@ commands must never call the equivalent for a value-carrying argument).
   answers "isn't a vault" both for a vault the account lacks and for one the
   current identity cannot see, so that answer never proves a key absent.
 - *Missing vault.* For `get` it is a miss (`Ok(None)`); for `set` it is an
-  error naming the vault. For `delete` it is an error, never a miss, so the
-  delete sweep keeps the key's index row (#7524 P2-M3, Architect Decision B).
-  A missing item in a listed vault stays a miss for every operation.
+  error naming the vault. For `delete` it is `vault_not_visible` (-32080),
+  never a miss, so the delete sweep keeps the key's index row (#7524 P2-M3,
+  Architect Decision B). A missing item in a listed vault stays a miss for
+  every operation.
+- *Stuck delete (#7524 P2-M3, Architect ruling 2026-10-07 23:54Z).* The
+  names-only index does not record which backend holds a key, so a delete
+  sweeps 1Password whenever the machine config enables it. A project that
+  keeps its keys in the Keychain or `file` usually has no 1Password vault of
+  its name, so every delete of its keys clears the local backend, keeps the
+  index row and fails with `vault_not_visible`. Its text names the two ways
+  out: create the vault in 1Password, or stop enabling 1Password by removing
+  the `secrets.onepassword` section (and any `secrets.default_backend:
+  onepassword`) from the machine config
+  `~/.trusty-tools/trusty-common/config.yaml`. A later delete then succeeds.
+- *Copy past the deadline.* A `copy` into 1Password lists in `failed` both
+  the keys it did not start and a key whose `op` write the request deadline
+  cut short (§15.2). That write may have landed, so check the vault before
+  retrying a failed key.
 
 **Keeper (#7519 P3, Architect rulings 2026-10-07 17:11Z) — shims only, and
 provisional.** No test has run against a real Keeper account; every ruling
@@ -948,10 +963,13 @@ and 15 s for every other method. Every CLI call the request makes is bounded
 by the time left; none starts after the deadline, and one still running then
 is killed with its process group. A request that runs out answers
 `deadline_exceeded` (-32079), whose text says a backend write already under
-way may have landed; a `copy` instead lists each key it did not start in
-`failed`. The client waits the method's deadline plus 15 s, so a reply the
-server sends always arrives, and a client timeout is never followed by a
-silent commit.
+way may have landed; a `copy` instead lists in `failed` each key it did not
+start and each key whose write the deadline cut short (§8.2). The client
+waits the method's deadline plus 15 s. For CLI-backed calls (1Password,
+Keeper) that means the server's reply always arrives, and a client timeout
+is never followed by a silent commit. A Keychain or file backend call is not
+bounded by the deadline: one that blocks, for example on a Keychain unlock
+prompt, can still outlast the client's wait and commit after it.
 
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves

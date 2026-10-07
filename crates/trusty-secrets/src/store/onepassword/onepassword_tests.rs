@@ -182,7 +182,10 @@ fn onepassword_missing_is_none_and_failures_are_errors() {
     assert!(fx.backend.get(&v, &k).unwrap().is_none(), "no such vault");
     // #7524 P2-M3: on delete, "isn't a vault" is an error, never a miss.
     let err = fx.backend.delete(&v, &k).unwrap_err();
-    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(
+        matches!(err, SecretsError::VaultNotVisible { .. }),
+        "{err:?}"
+    );
     let err = fx.backend.set(&v, &k, &value()).unwrap_err();
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 
@@ -253,7 +256,7 @@ fn onepassword_delete_keeps_the_index_row_when_op_shows_no_vault() {
 
     let err = store.delete_across(&v, &k, &others).unwrap_err();
     assert!(
-        matches!(&err, SecretsError::Backend { backend, .. } if backend == "onepassword"),
+        matches!(&err, SecretsError::VaultNotVisible { backend, .. } if backend == "onepassword"),
         "{err:?}"
     );
     assert!(!shown(&err).contains(VALUE), "{}", shown(&err));

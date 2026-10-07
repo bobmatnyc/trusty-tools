@@ -682,3 +682,44 @@ async fn server_copy_past_its_deadline_starts_no_further_key() {
     assert!(shim.items().is_empty(), "a copy landed after the reply");
     server.stop().await;
 }
+
+/// Why: #7524 P2-M3 fix round, Architect ruling 23:54Z — with 1Password
+/// enabled but a project on the Keychain, the 1Password vault usually does
+/// not exist, `op` answers "isn't a vault", and ruling B refuses every
+/// delete. The index records no holding backend, so the refusal stands; its
+/// wire error must name both ways out: create the vault, or stop enabling
+/// 1Password in the machine config. The row stays. Red while the refusal
+/// was a bare `backend_failed`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_refused_for_a_hidden_vault_names_both_escapes() {
+    let fx = fixture();
+    machine(&fx, ENABLED);
+    let shim = OpShim::new();
+    shim.fail(
+        "list",
+        "[ERROR] \"trusty/acme/web\" isn't a vault in this account.",
+    );
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    ok(set(&fx, "A").await);
+
+    let response = delete(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::DELETE),
+        ErrorKind::VaultNotVisible
+    );
+    let text = wire(&response);
+    assert!(text.contains("create the vault in 1Password"), "{text}");
+    assert!(text.contains("`secrets.onepassword` section"), "{text}");
+    assert!(
+        text.contains("~/.trusty-tools/trusty-common/config.yaml"),
+        "{text}"
+    );
+    assert!(!text.contains(VALUE));
+    assert_eq!(
+        listed(&fx).await[0]["name"],
+        json!("A"),
+        "the row was dropped"
+    );
+    server.stop().await;
+}

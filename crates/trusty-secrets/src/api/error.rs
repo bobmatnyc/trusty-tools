@@ -340,4 +340,26 @@ pub enum SecretsError {
         /// The key the call served, or `(none)`.
         key: String,
     },
+
+    /// A delete found no vault of this name in a CLI backend that cannot
+    /// tell a missing vault from one this identity cannot see, so the key
+    /// may still be held there and its index row was kept.
+    // #7524 P2-M3 fix round: after `DeadlineExceeded`, so no discriminant
+    // moves. The index records no holding backend, so a key that was never
+    // in 1Password is refused too until one of the two escapes is taken.
+    #[error(
+        "the {backend} backend shows no vault {vault} to this identity, so {key} may still \
+         be held there and its index row was kept; create the vault {vault} in 1Password, \
+         or stop enabling 1Password by removing the `secrets.onepassword` section (and any \
+         `secrets.default_backend: onepassword`) from the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml"
+    )]
+    VaultNotVisible {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the delete named.
+        vault: String,
+        /// The key the delete named.
+        key: String,
+    },
 }
