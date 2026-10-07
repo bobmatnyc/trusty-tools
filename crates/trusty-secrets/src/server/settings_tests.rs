@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::{INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings};
+use super::{INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError};
 use crate::store::INDEX_SUBDIR;
 
 /// An environment that sets only [`INDEX_DIR_ENV`], to `value`.
@@ -24,6 +24,17 @@ fn serve_args(socket: Option<&Path>, extra: &[&str]) -> Vec<OsString> {
     }
     args.extend(extra.iter().map(OsString::from));
     args
+}
+
+/// [`ServerSettings::from_args`] with a fixed account home that is never
+/// `$HOME` and holds no socket a test names.
+// #7524: no test reads the real password database; a host without a row for
+// the test uid would fail closed and read every socket as the default.
+fn parse_settings(
+    args: impl IntoIterator<Item = OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ServerSettings, SettingsError> {
+    ServerSettings::from_args_with(args, env, || Some(PathBuf::from("/account-home-7524")))
 }
 
 /// Why: #7524 M3 — the on-demand client passes the caller's environment to
@@ -47,7 +58,7 @@ fn settings_index_env_is_ignored_on_the_default_socket() {
     ];
     let sockets = std::iter::once(None).chain(spellings.iter().map(|s| Some(s.as_path())));
     for socket in sockets {
-        let parsed = ServerSettings::from_args(serve_args(socket, &[]), env).unwrap();
+        let parsed = parse_settings(serve_args(socket, &[]), env).unwrap();
         assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR), "{socket:?}");
     }
 }
@@ -60,7 +71,7 @@ fn settings_index_env_is_ignored_on_the_default_socket() {
 fn settings_index_override_survives_off_the_default_socket() {
     let env = index_env("/env/index");
     let sandbox = Path::new("/sandbox-7524/s.sock");
-    let parsed = ServerSettings::from_args(serve_args(Some(sandbox), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(sandbox), &[]), env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/env/index"));
 
     let Some(home) = dirs::home_dir() else {
@@ -68,7 +79,7 @@ fn settings_index_override_survives_off_the_default_socket() {
     };
     let default_socket = home.join(SOCKET_SUBPATH);
     let args = serve_args(Some(&default_socket), &["--index-dir", "/flag/index"]);
-    let parsed = ServerSettings::from_args(args, env).unwrap();
+    let parsed = parse_settings(args, env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/flag/index"));
 }
 
@@ -122,7 +133,7 @@ fn settings_index_env_is_ignored_for_a_case_variant_default_socket() {
     };
     let variant = home.join(".trusty-tools/trusty-secrets/SECRETS.SOCK");
     let env = index_env("/repo/checkout/index");
-    let parsed = ServerSettings::from_args(serve_args(Some(&variant), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(&variant), &[]), env).unwrap();
     assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
 
@@ -153,7 +164,7 @@ fn settings_index_env_is_ignored_for_a_bare_relative_default_socket() {
     relative.push(below_root);
     relative.push(SOCKET_SUBPATH);
     let env = index_env("/repo/checkout/index");
-    let parsed = ServerSettings::from_args(serve_args(Some(&relative), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(&relative), &[]), env).unwrap();
     assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
 

@@ -180,6 +180,17 @@ async fn call(socket: &Path, method: &str, params: Value) -> RpcResponse {
         .unwrap()
 }
 
+/// [`ServerSettings::from_args`] with a fixed account home that is never
+/// `$HOME` and holds no socket a test names.
+// #7524: no test reads the real password database; a host without a row for
+// the test uid would fail closed and read every socket as the default.
+fn parse_settings(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ServerSettings, SettingsError> {
+    ServerSettings::from_args_with(args, env, || Some(PathBuf::from("/account-home-7524")))
+}
+
 fn ok(response: RpcResponse) -> Value {
     assert!(response.error.is_none(), "{:?}", response.error);
     response.result.unwrap()
@@ -1536,12 +1547,12 @@ fn settings_flags_beat_env_beat_defaults() {
         IDLE_TIMEOUT_ENV => Some("7".to_string()),
         _ => None,
     };
-    let from_env = ServerSettings::from_args(args(&["serve"]), env).unwrap();
+    let from_env = parse_settings(args(&["serve"]), env).unwrap();
     assert_eq!(from_env.socket, PathBuf::from("/env/s.sock"));
     assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
     assert_eq!(from_env.idle_timeout, Duration::from_secs(7));
 
-    let flags = ServerSettings::from_args(
+    let flags = parse_settings(
         args(&[
             "serve",
             "--socket",
@@ -1570,7 +1581,7 @@ fn settings_flags_beat_env_beat_defaults() {
     );
 
     if let Some(home) = dirs::home_dir() {
-        let defaults = ServerSettings::from_args(args(&["serve"]), |_| None).unwrap();
+        let defaults = parse_settings(args(&["serve"]), |_| None).unwrap();
         assert_eq!(defaults.socket, home.join(SOCKET_SUBPATH));
         assert_eq!(defaults.idle_timeout, DEFAULT_IDLE_TIMEOUT);
     }
@@ -1596,7 +1607,7 @@ fn settings_idle_env_falls_back_on_garbage_and_zero() {
 #[test]
 fn settings_reject_unknown_and_incomplete_flags() {
     let parse = |v: &[&str]| {
-        ServerSettings::from_args(
+        parse_settings(
             v.iter()
                 .map(Into::into)
                 .collect::<Vec<std::ffi::OsString>>(),

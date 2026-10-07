@@ -376,18 +376,28 @@ async fn server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selec
 /// Why: #7524 H1 — every other test aims the consent seam at a temp dir, so
 /// this one pins the production default: the password database's home for
 /// this uid joined with the machine-config subpath, whatever
-/// `settings.machine_config` says. It reads no file.
+/// `settings.machine_config` says. It reads no file. A host with no
+/// password entry for the test uid (a stock container) takes the
+/// fail-closed branch: no consent config, so `file` writes are refused.
 /// Test: itself.
 #[test]
 fn server_file_consent_defaults_to_the_account_home_config() {
     let fx = fixture();
-    let home = platform::account_home_dir().unwrap();
-    assert!(home.is_absolute(), "{}", home.display());
     let state = State::new(fx.settings.clone(), fx.backends());
-    assert_eq!(
-        state.file_consent_config,
-        Some(home.join(MACHINE_CONFIG_SUBPATH))
-    );
+    // #7524: `State::new` has no home seam, so this test pins both outcomes.
+    match platform::account_home_dir() {
+        Ok(home) => {
+            assert!(home.is_absolute(), "{}", home.display());
+            assert_eq!(
+                state.file_consent_config,
+                Some(home.join(MACHINE_CONFIG_SUBPATH))
+            );
+        }
+        Err(err) => {
+            assert!(matches!(err, SecretsError::HomeUnavailable), "{err:?}");
+            assert_eq!(state.file_consent_config, None);
+        }
+    }
     assert_ne!(
         state.file_consent_config.as_deref(),
         Some(fx.settings.machine_config.as_path())
