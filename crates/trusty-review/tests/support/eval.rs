@@ -154,7 +154,17 @@ pub fn score(entry: &Entry, diff: &str, result: &ReviewResult) -> DiffScore {
     let unresolved: Vec<Unresolved> = result
         .findings
         .iter()
-        .filter(|f| !oracle::resolves(&f.file, f.line, &f.description, &lines, removal))
+        .filter(|f| {
+            // #9193: no docs are supplied, so a `[doc:]` citation never resolves.
+            !oracle::resolves(
+                &f.file,
+                f.line,
+                &f.description,
+                &lines,
+                removal,
+                &oracle::Docs::default(),
+            )
+        })
         .map(|f| Unresolved {
             title: f.kind.clone(),
             file: f.file.clone(),

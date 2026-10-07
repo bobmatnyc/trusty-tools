@@ -2826,3 +2826,7 @@ mod dedup_claim;
 // #9197: caller `issue_docs` reach the reviewer, never the verifier.
 #[path = "runner_issue_docs_tests.rs"]
 mod issue_docs;
+
+// #9193: spec/ADR/SLD docs and CLAUDE.md read at the PR head SHA.
+#[path = "runner_spec_docs_tests.rs"]
+mod spec_docs;

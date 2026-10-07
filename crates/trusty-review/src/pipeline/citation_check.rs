@@ -84,11 +84,14 @@ pub const CITATION_REASON: &str = "#4042 citation";
 /// (`assets/prompts/system_prompt_stock.md`) must stay in step — a form the
 /// prompt permits but this regex omits is scanned as an ungrounded quote.
 /// #4999: the `apex:` form was dropped when APEX retrieval was removed.
+/// #9193: `[doc: path@sha — "excerpt"]`, taught only in the opt-in docs
+/// section note; the line gate resolves it in the doc corpus or withholds.
 /// Test: `extract_spans_skips_prompt_mandated_citation_grammar`,
-/// `extract_spans_skips_confluence_citation_form`.
+/// `extract_spans_skips_confluence_citation_form`,
+/// `doc_citation_is_not_scanned_as_a_generic_quote`.
 pub(crate) static BRACKET_CITATION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // #5022: `confluence:` is a form code-intelligence emits.
-    Regex::new(r"(?i)\[(?:code|jira|gh|confluence):[^\]]*\]")
+    // #5022: `confluence:` is a form code-intelligence emits; #9193: `doc:`.
+    Regex::new(r"(?i)\[(?:code|jira|gh|confluence|doc):[^\]]*\]")
         .expect("bracket-citation regex is a valid literal")
 });
 

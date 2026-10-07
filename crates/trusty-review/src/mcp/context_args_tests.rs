@@ -126,3 +126,21 @@ fn jira_shaped_issue_doc_id_is_invalid_params() {
         other => panic!("expected InvalidParams, got {other:?}"),
     }
 }
+
+/// #9193: `spec_docs` and `claude_md` set their own flag, each turns the
+/// ledger on, and `false` or `null` asks for nothing.
+#[test]
+fn doc_flags_turn_the_ledger_on() {
+    let spec = parse_review_pr_context(&json!({"spec_docs": true})).expect("parses");
+    assert!(spec.request.spec_docs && !spec.request.claude_md);
+    assert!(spec.request.requested_new() && spec.request.ledger_enabled());
+    let md = parse_review_pr_context(&json!({"claude_md": true})).expect("parses");
+    assert!(md.request.claude_md && !md.request.spec_docs && md.request.requested_new());
+    for off in [json!(false), json!(null)] {
+        let parsed =
+            parse_review_pr_context(&json!({"spec_docs": off, "claude_md": off})).expect("parses");
+        assert!(!parsed.request.requested_new());
+    }
+    let err = parse_review_pr_context(&json!({"claude_md": "true"})).expect_err("strict");
+    assert!(matches!(err, ToolError::InvalidParams(ref m) if m.contains("'claude_md'")));
+}

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use super::GateError;
+use super::{DocCorpus, GateError};
 use crate::pipeline::citation_check::{hunk_max_line, normalize, normalize_path, resolve_path_key};
 use crate::pipeline::diff_analyzer::models::{FileDisposition, FilteredDiff, FilteredHunk};
 
@@ -114,6 +114,8 @@ enum FileLines {
 pub struct LineIndex {
     files: HashMap<String, FileLines>,
     refs: String,
+    /// #9193: doc text a `[doc:]` citation may quote; empty unless supplied.
+    docs: DocCorpus,
 }
 
 impl LineIndex {
@@ -154,7 +156,21 @@ impl LineIndex {
         Self {
             files,
             refs: String::new(),
+            docs: DocCorpus::default(),
         }
+    }
+
+    /// #9193: the doc text read at the PR head that `[doc:]` citations may
+    /// quote; without it every `[doc:]` citation fails closed.
+    #[must_use]
+    pub(crate) fn with_docs(mut self, docs: &DocCorpus) -> Self {
+        self.docs = docs.clone();
+        self
+    }
+
+    /// The doc corpus `[doc:]` citations resolve in (#9193).
+    pub(super) fn docs(&self) -> &DocCorpus {
+        &self.docs
     }
 
     /// #9188 D: the context text the reviewer was shown beyond the diff (PR

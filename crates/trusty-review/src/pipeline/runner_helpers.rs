@@ -127,6 +127,23 @@ pub(super) fn apply_grade_and_floor(
     (floor_verdict, floor_grade, original_llm_grade)
 }
 
+/// Whether a PR's head is in a different repository than its base (#9193).
+///
+/// Why: a fork head's commit may not be readable from the base repository, so
+/// a doc read that 404s there is `unavailable`, not `absent`.
+/// What: each label is `owner:branch`; the head is a fork unless both labels
+/// are present and name the same owner. GitHub logins are case-insensitive,
+/// so owners that differ only in case are the same owner. A missing or
+/// colon-free label cannot prove the same repository, so it counts as a fork.
+/// Test: `head_is_fork_compares_label_owners`.
+pub(crate) fn head_is_fork(head_label: Option<&str>, base_label: Option<&str>) -> bool {
+    let owner = |label: Option<&str>| label?.split_once(':').map(|(o, _)| o.to_lowercase());
+    match (owner(head_label), owner(base_label)) {
+        (Some(head), Some(base)) => head != base,
+        _ => true,
+    }
+}
+
 /// Fetch PR metadata and return `(ReviewPrMeta, head_sha)`.
 ///
 /// Why: centralises the GitHub API call and head-SHA surfacing so the runner
@@ -139,13 +156,22 @@ pub(super) async fn fetch_github_pr_meta(
     repo: &str,
     pr: u64,
     run_mode: RunMode,
-) -> Result<(ReviewPrMeta, String), GithubError> {
+) -> Result<
+    (
+        ReviewPrMeta,
+        crate::pipeline::optional_context::seams::PrHead,
+    ),
+    GithubError,
+> {
     let client = GithubClient::new()?;
     let token = AuthStrategy::select(run_mode, None)
         .resolve_token(&client, config, owner)
         .await?;
     let meta = fetch_pr_metadata(&client, owner, repo, pr, &token).await?;
-    let head_sha = meta.head.sha.clone();
+    let head = crate::pipeline::optional_context::seams::PrHead {
+        sha: meta.head.sha.clone(),
+        fork: head_is_fork(meta.head.label.as_deref(), meta.base.label.as_deref()), // #9193
+    };
     Ok((
         ReviewPrMeta {
             title: meta.title,
@@ -155,7 +181,7 @@ pub(super) async fn fetch_github_pr_meta(
             author: meta.user.login,
             url: meta.html_url,
         },
-        head_sha,
+        head,
     ))
 }
 

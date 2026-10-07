@@ -16,6 +16,7 @@ use crate::{
     models::{ContextItemRecord, ContextSourceRecord, SourceState},
     pipeline::{
         caller_preamble::cap_caller_context,
+        citation_gate::DocCorpus,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::CallerContext,
         withheld_contract::refs_corpus,
@@ -31,14 +32,34 @@ use super::{OptionalContextRequest, issues::issue_section, ledger::ContextLedger
 /// line budget, so one value carries both B1's corpus switch and B2a's text.
 /// What: `body_in_refs` is false when `include_pr_body` put the capped body
 /// into `pr_description`; `sections` is the rendered `## Linked issues`
-/// section, empty when no issue doc reached the reviewer.
-/// Test: `off_is_byte_identical_unified`, `supplied_issue_doc_reaches_the_reviewer_prompt`.
+/// section, empty when no issue doc reached the reviewer. #9193:
+/// `doc_sections` holds the docs and CLAUDE.md sections, for the prompt only
+/// (never the flat refs corpus); `docs` is their citable text.
+/// Test: `off_is_byte_identical_unified`, `supplied_issue_doc_reaches_the_reviewer_prompt`,
+/// `doc_text_is_not_in_the_flat_refs_corpus`.
 #[derive(Debug, Clone)]
 pub(crate) struct AppliedContext {
     /// Whether the raw PR body belongs in the refs corpus (#9192).
     pub(crate) body_in_refs: bool,
     /// The rendered issue section the reviewer sees (#9197).
     pub(crate) sections: String,
+    /// The rendered docs and CLAUDE.md sections (#9193); prompt only.
+    pub(crate) doc_sections: String,
+    /// The doc text a `[doc:]` citation may quote (#9193).
+    pub(crate) docs: DocCorpus,
+}
+
+impl AppliedContext {
+    /// Every extra section the reviewer prompt carries: issues, then docs.
+    ///
+    /// Test: `spec_docs_on_with_zero_docs_leaves_prompt_byte_identical`.
+    pub(crate) fn prompt_sections(&self) -> String {
+        match (self.sections.is_empty(), self.doc_sections.is_empty()) {
+            (_, true) => self.sections.clone(),
+            (true, false) => self.doc_sections.clone(),
+            (false, false) => format!("{}\n\n{}", self.sections, self.doc_sections),
+        }
+    }
 }
 
 /// The heading caller text gets when it follows a merged PR body.
@@ -99,6 +120,8 @@ pub(crate) fn apply_caller_context(
         body_in_refs: !request.include_pr_body,
         // #9197: caller issue docs, capped and fenced; never in the verifier's rationale.
         sections: issue_section(request.issue_docs.as_deref(), ledger),
+        doc_sections: String::new(), // #9193: filled by `docs::apply_docs`
+        docs: DocCorpus::default(),
     }
 }
 

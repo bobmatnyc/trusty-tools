@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::*;
 use crate::integrations::github::GithubError;
 use crate::integrations::search_client::IndexStatusResponse;
-use crate::pipeline::optional_context::{PrSource, assemble::refs_for_gate};
+use crate::pipeline::optional_context::{PrSource, assemble::refs_for_gate, seams::PrHead};
 use crate::pipeline::prompt::ReviewPrMeta;
 
 /// The fixture PR body. `#42` and the excerpt are only here, so a citation of
@@ -37,6 +37,8 @@ pub(super) struct FakePrSource {
     pub(super) body: String,
     pub(super) diff: String,
     pub(super) fail_meta: bool,
+    /// #9193: the head the metadata read reports.
+    pub(super) head: PrHead,
     pub(super) meta_calls: AtomicUsize,
     pub(super) diff_calls: AtomicUsize,
 }
@@ -47,6 +49,10 @@ impl FakePrSource {
             body: body.to_string(),
             diff: diff.to_string(),
             fail_meta: false,
+            head: PrHead {
+                sha: HEAD_SHA.to_string(),
+                fork: false,
+            },
             meta_calls: AtomicUsize::new(0),
             diff_calls: AtomicUsize::new(0),
         }
@@ -62,7 +68,7 @@ impl PrSource for FakePrSource {
         repo: &str,
         pr: u64,
         _run_mode: RunMode,
-    ) -> Result<(ReviewPrMeta, String), GithubError> {
+    ) -> Result<(ReviewPrMeta, PrHead), GithubError> {
         self.meta_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_meta {
             return Err(GithubError::Transport(
@@ -75,7 +81,7 @@ impl PrSource for FakePrSource {
             author: "octocat".to_string(),
             url: format!("https://github.com/{owner}/{repo}/pull/{pr}"),
         };
-        Ok((meta, HEAD_SHA.to_string()))
+        Ok((meta, self.head.clone()))
     }
 
     async fn diff(&self, _: &str, _: &str, _: u64, _: &str) -> Result<String, GithubError> {

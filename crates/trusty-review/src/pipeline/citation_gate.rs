@@ -24,7 +24,8 @@
 //!    from the file (#9188 B), a quote found only on removed lines in a finding
 //!    not about a removal (#9188 F), an ambiguous anchor, no file, a line past
 //!    the file's last diffed line, a `[jira:]`/`[gh:]`/`[confluence:]` citation
-//!    not in the fetched context (#9188 D), or any error reading the file or a
+//!    not in the fetched context (#9188 D), a `[doc:]` citation not in the doc
+//!    text read at the head (#9193), or any error reading the file or a
 //!    locator.
 //!
 //! It makes no LLM call. It runs once per review, BEFORE the verifier (#8904),
@@ -54,6 +55,10 @@ use index::Occ;
 
 #[path = "citation_gate_verdict.rs"]
 pub(crate) mod verdict;
+
+#[path = "citation_gate_docs.rs"]
+pub(crate) mod docs; // #9193
+pub(crate) use docs::DocCorpus;
 
 /// Why the gate could not read a citation; every variant drops the finding.
 #[derive(Debug, thiserror::Error)]
@@ -315,6 +320,10 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
                 fragment: Some(missing.clone()),
             }));
         }
+    }
+    // #9193: a `[doc:]` citation resolves in the doc text read at the head.
+    if let Some((reason, fragment)) = docs::check_doc_citations(f, index.docs()) {
+        return Ok(Outcome::Drop(DropCause { reason, fragment }));
     }
     // #8905 row 7: rewrite the matched byte range, whatever its whitespace.
     let rewrote = !edits.is_empty();

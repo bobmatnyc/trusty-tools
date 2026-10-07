@@ -10,6 +10,8 @@
 //! `InvalidParams`. Any non-blank text param, or `include_pr_body: true`,
 //! turns the source ledger on (plan §3.1). #9197: `issue_docs`, on both
 //! `review_pr` and `review_diff`, is parsed strictly by [`parse_issue_docs`].
+//! #9193: the booleans `spec_docs` and `claude_md`, on both tools, are read
+//! strictly by [`with_doc_flags`].
 //! Test: `review_pr_accepts_the_three_text_params`,
 //! `review_pr_ignores_a_mistyped_text_param_with_a_warning`,
 //! `review_pr_rejects_a_mistyped_include_pr_body`,
@@ -32,6 +34,12 @@ pub(crate) const INCLUDE_PR_BODY: &str = "include_pr_body";
 
 /// The caller issue-docs parameter, on both review tools (#9197).
 pub(crate) const ISSUE_DOCS: &str = "issue_docs";
+
+/// Read ADR/spec/SLD docs at the PR head, on both review tools (#9193).
+pub(crate) const SPEC_DOCS: &str = "spec_docs";
+
+/// Read CLAUDE.md conventions at the PR head, on both review tools (#9193).
+pub(crate) const CLAUDE_MD: &str = "claude_md";
 
 /// `review_pr`'s parsed optional context.
 #[derive(Debug, Default)]
@@ -91,7 +99,71 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
         .with_pr_body(include)
         .with_caller_text(caller_text);
     parsed.request = with_issue_docs(parsed.request, args)?; // #9197
+    parsed.request = with_doc_flags(parsed.request, args)?; // #9193
     Ok(parsed)
+}
+
+/// `request` with the `spec_docs` and `claude_md` flags (#9193).
+///
+/// Why: both are new booleans with no legacy callers, so a wrong type is
+/// refused, as `include_pr_body` is; `review_pr` and `review_diff` share it.
+/// What: absent or `null` is off; `true`/`false` set the flag.
+///
+/// # Errors
+///
+/// [`ToolError::InvalidParams`] naming the parameter and the type it got.
+///
+/// Test: `mistyped_spec_docs_is_invalid_params`, `doc_flags_turn_the_ledger_on`.
+pub(crate) fn with_doc_flags(
+    request: OptionalContextRequest,
+    args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    let flag = |name: &str| match args.get(name) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(on)) => Ok(*on),
+        Some(other) => Err(ToolError::InvalidParams(format!(
+            "'{name}' must be a boolean, got {}",
+            type_name(other)
+        ))),
+    };
+    Ok(request
+        .with_spec_docs(flag(SPEC_DOCS)?)
+        .with_claude_md(flag(CLAUDE_MD)?))
+}
+
+/// The `spec_docs` and `claude_md` JSON Schemas both review tools list (#9193).
+///
+/// Test: `review_pr_schema_lists_spec_docs_and_claude_md`.
+pub(crate) fn doc_flag_schemas() -> [(&'static str, Value); 2] {
+    let note = "Read at the PR head SHA through the GitHub Contents API, for the reviewer \
+                only (the verifier never sees them); shown as data, and a \
+                [doc: path@sha — \"excerpt\"] citation resolves only against text the \
+                reviewer saw. Default false. review_diff has no head SHA, so it reports the \
+                source unavailable. The response then carries a context_sources ledger.";
+    [
+        (
+            SPEC_DOCS,
+            serde_json::json!({
+                "type": "boolean",
+                "description": format!(
+                    "Read the ADR, spec and SLD docs (docs/adr, docs/specs, docs/design, \
+                     docs/prd, docs/architecture, docs/reference, crates/*/docs) the PR body \
+                     names, plus trusty-search hits: at most 6 docs, 16,000 characters each \
+                     and 48,000 in total, each cut with a visible marker. {note}"
+                )
+            }),
+        ),
+        (
+            CLAUDE_MD,
+            serde_json::json!({
+                "type": "boolean",
+                "description": format!(
+                    "Read the root CLAUDE.md and up to 3 nested ones found by trusty-search, \
+                     16,000 characters in total. {note}"
+                )
+            }),
+        ),
+    ]
 }
 
 /// `request` carrying the `issue_docs` parameter, when sent (#9197).

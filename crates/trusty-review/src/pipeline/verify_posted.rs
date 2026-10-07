@@ -28,7 +28,9 @@ use crate::{
     llm::LlmProvider,
     models::{Finding, ReviewResult, Verdict, VerifyOutcome, WithheldFinding},
     pipeline::{
-        citation_gate::{LineIndex, gate_posted_findings_with_index, verdict as withhold},
+        citation_gate::{
+            DocCorpus, LineIndex, gate_posted_findings_with_index, verdict as withhold,
+        },
         diff_analyzer::models::FilteredDiff,
         verdict_status::{Judged, apply_grade_floor, apply_withheld_outcome},
         verify::{VerifierReach, apply_outcome, maybe_verify, rederive_verdict},
@@ -250,6 +252,8 @@ pub(crate) struct GateInputs<'a> {
     /// #9188 D: the fetched context a `[jira:]`/`[gh:]`/`[confluence:]`
     /// citation must resolve in.
     pub(crate) refs: &'a str,
+    /// #9193: doc text read at the head that a `[doc:]` citation must quote.
+    pub(crate) docs: &'a DocCorpus,
     /// #9188 C: the model-written prose inside `review_body`; #9310: replaced
     /// by the verified summary, never posted.
     pub(crate) narrative: &'a str,
@@ -304,7 +308,9 @@ pub(crate) async fn gate_then_verify(
 ) {
     let error_before = result.error.clone(); // #9310: restored if the mapping replaces UNKNOWN
     let narrative = contract::take_narrative(result, inputs.narrative);
-    let index = LineIndex::from_filtered(inputs.filtered).with_refs(inputs.refs);
+    let index = LineIndex::from_filtered(inputs.filtered)
+        .with_refs(inputs.refs)
+        .with_docs(inputs.docs); // #9193: the gate and the re-check (L) both read it
     gate_posted_findings_with_index(result, &index); // #8905 runs first.
     verify_survivors(config, verifier, result, inputs).await;
     contract::withhold_unresolved(result, &index); // #9188 L

@@ -181,6 +181,15 @@ pub fn tool_descriptors() -> Value {
     ]);
     // Append the console_metrics descriptor so the console poller discovers it.
     if let Some(arr) = tools.as_array_mut() {
+        // #9193: `spec_docs` and `claude_md` on both review tools.
+        let review = |t: &Value| t["name"] == "review_pr" || t["name"] == "review_diff";
+        for tool in arr.iter_mut().filter(|t| review(t)) {
+            if let Some(props) = tool.pointer_mut("/inputSchema/properties") {
+                for (name, schema) in context_args::doc_flag_schemas() {
+                    props[name] = schema;
+                }
+            }
+        }
         arr.push(console_metrics::descriptor());
     }
     tools
@@ -254,6 +263,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let diff = require_str(args, "diff")?;
     // #9197: a malformed `issue_docs` is refused before any work.
     let request = context_args::with_issue_docs(OptionalContextRequest::default(), args)?;
+    // #9193: accepted, and reported `unavailable`: a raw diff has no head SHA.
+    let request = context_args::with_doc_flags(request, args)?;
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")

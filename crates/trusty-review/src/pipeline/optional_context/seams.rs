@@ -20,11 +20,26 @@ use crate::{
     },
 };
 
+/// The PR's head commit, as the metadata read reported it (#9193).
+///
+/// Why: docs are read at the head SHA, and a fork's head may not be readable
+/// from the base repository, so a 404 there is not proof a path is absent.
+/// What: `sha` is empty when unknown; `fork` is true unless the head and base
+/// labels name the same owner.
+/// Test: `fork_head_sha_unresolvable_is_unavailable_not_absent`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PrHead {
+    /// The head commit SHA.
+    pub(crate) sha: String,
+    /// The head is in a different repository than the base.
+    pub(crate) fork: bool,
+}
+
 /// Where the runner reads a GitHub PR's metadata and diff (#9192).
 ///
 /// Why: a test double for the two GitHub reads; production never sets one.
-/// What: `meta` returns the PR metadata and head SHA; `diff` returns the
-/// unified diff text.
+/// What: `meta` returns the PR metadata and head (#9193: with its fork
+/// flag); `diff` returns the unified diff text.
 /// Test: `off_is_byte_identical_unified`.
 #[async_trait]
 pub(crate) trait PrSource: Send + Sync {
@@ -36,7 +51,7 @@ pub(crate) trait PrSource: Send + Sync {
         repo: &str,
         pr: u64,
         run_mode: RunMode,
-    ) -> Result<(ReviewPrMeta, String), GithubError>;
+    ) -> Result<(ReviewPrMeta, PrHead), GithubError>;
 
     /// The PR's unified diff.
     async fn diff(
@@ -56,7 +71,7 @@ pub(crate) async fn pr_meta_via(
     repo: &str,
     pr: u64,
     run_mode: RunMode,
-) -> Result<(ReviewPrMeta, String), GithubError> {
+) -> Result<(ReviewPrMeta, PrHead), GithubError> {
     match source {
         Some(src) => src.meta(config, owner, repo, pr, run_mode).await,
         None => fetch_github_pr_meta(config, owner, repo, pr, run_mode).await,

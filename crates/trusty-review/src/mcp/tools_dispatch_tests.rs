@@ -846,3 +846,51 @@ async fn review_diff_rejects_malformed_issue_docs_before_reviewing() {
         "no review ran"
     );
 }
+
+/// #9193 (Architect ruling Q3): `review_diff` accepts `spec_docs` and
+/// `claude_md`, reads nothing (a raw diff has no head SHA), reports both
+/// sources `unavailable`, and the review runs.
+#[serial_test::serial]
+#[tokio::test]
+async fn review_diff_spec_docs_reports_unavailable_no_head_sha() {
+    let (state, llm, _pin) = capturing_state();
+    let args = json!({"diff": ISSUE_DIFF, "spec_docs": true, "claude_md": true});
+    let result = call_tool("review_diff", &args, &state)
+        .await
+        .expect("a valid review_diff call is not a protocol error");
+    assert_eq!(result["isError"], json!(false), "{result}");
+    let prompts = llm.0.lock().map(|p| p.clone()).unwrap_or_default();
+    assert!(!prompts.is_empty(), "the reviewer must be called");
+    let rows = result["context_sources"].as_array().expect("ledger");
+    for source in ["spec_docs", "claude_md"] {
+        let row = rows.iter().find(|r| r["source"] == source).expect(source);
+        assert_eq!(row["state"], "unavailable", "{result}");
+        assert!(
+            row["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("no PR head SHA")),
+            "{row}"
+        );
+    }
+}
+
+/// #9193: a non-boolean `spec_docs` or `claude_md` is `InvalidParams`,
+/// raised before any review runs.
+#[serial_test::serial]
+#[tokio::test]
+async fn mistyped_spec_docs_is_invalid_params() {
+    let (state, llm, _pin) = capturing_state();
+    for args in [
+        json!({"diff": ISSUE_DIFF, "spec_docs": "yes"}),
+        json!({"diff": ISSUE_DIFF, "claude_md": 1}),
+    ] {
+        let err = call_tool("review_diff", &args, &state)
+            .await
+            .expect_err("a mistyped flag is refused");
+        assert!(
+            matches!(err, ToolError::InvalidParams(ref m) if m.contains("must be a boolean")),
+            "{err:?}"
+        );
+    }
+    assert!(llm.0.lock().map(|p| p.is_empty()).unwrap_or(false));
+}

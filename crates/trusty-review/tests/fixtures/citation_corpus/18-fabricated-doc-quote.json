@@ -1,0 +1,22 @@
+{
+  "leak": "D",
+  "about": "#9193: a real code quote rests on a [doc:] excerpt the ADR read at the PR head does not hold. Before [doc:] existed the real code quote kept the finding and the fabricated doc quote was never checked.",
+  "diff_file": "billing.diff",
+  "pr_body": "Adds an invoice total. Implements docs/adr/0001-totals.md.",
+  "docs": {
+    "docs/adr/0001-totals.md": "# Totals\n\nInvoice totals must use checked_add so a sum never wraps.\n"
+  },
+  "reviewer": {
+    "prose": "Overflow risk.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "overflow-regression", "body": "`amounts.iter().sum::<u64>()` reintroduces the overflow [doc: docs/adr/0001-totals.md@0123456 — \"Invoice totals may wrap when the sum overflows\"].", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["overflow-regression"],
+  "forbidden_in_body": [],
+  "expect_survivors": 0,
+  "expect_verdict": "REQUEST_CHANGES"
+}

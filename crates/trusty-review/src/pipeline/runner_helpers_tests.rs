@@ -122,3 +122,16 @@ async fn resolve_diff_token_cli_mode_resolves_from_config_token() {
         other => panic!("expected a resolved Github source, got {other:?}"),
     }
 }
+
+/// #9193: a head is a fork unless both labels name the same owner, compared
+/// case-insensitively; a missing label cannot prove the same repository.
+#[test]
+fn head_is_fork_compares_label_owners() {
+    assert!(!head_is_fork(Some("acme:feat/x"), Some("acme:main")));
+    assert!(head_is_fork(Some("forker:feat/x"), Some("acme:main")));
+    assert!(!head_is_fork(Some("ACME:feat/x"), Some("acme:main")));
+    assert!(head_is_fork(None, Some("acme:main")));
+    assert!(head_is_fork(Some("acme:feat/x"), None));
+    assert!(head_is_fork(None, None));
+    assert!(head_is_fork(Some("acme"), Some("acme:main")));
+}
