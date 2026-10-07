@@ -120,8 +120,8 @@ async fn kg_supersession_latency_profile() {
     let dir = tempdir().expect("tempdir");
     let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).expect("open kg");
     let ids: Vec<Uuid> = (0..PROFILE_DRAWERS).map(|_| Uuid::new_v4()).collect();
-    // Four triples per drawer, about the live trusty-tools palace's density
-    // (93k active triples); one drawer in 50 superseded by the next one.
+    // Three triples per drawer, plus one drawer in 50 superseded by the next
+    // one: 60,400 active triples at 20k drawers.
     let mut rows = Vec::with_capacity(PROFILE_DRAWERS * 4);
     for (n, id) in ids.iter().enumerate() {
         let s = format!("drawer:{id}");
