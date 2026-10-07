@@ -1,8 +1,9 @@
 Fixed
 - On the map-reduce path the reviewer's grade now counts toward the verdict.
   A synthesis APPROVE graded D reads REQUEST_CHANGES and one graded F reads
-  BLOCK, unless a confirmed low-confidence finding relaxes it (tracked), with
-  the grade kept; before, it read APPROVE and its grade was raised into the
+  BLOCK, unless a confirmed low-confidence finding relaxes it; a follow-up
+  #9310 PR makes a D or F grade a hard floor that no override relaxes. The
+  grade is kept; before, it read APPROVE and its grade was raised into the
   APPROVE band. The grade only tightens the verdict: an APPROVE graded B+
   beside Medium findings stays APPROVE (#9310).
 - With synthesis off or not answering, a chunk reply of APPROVE graded D or F
