@@ -225,13 +225,30 @@ use crate::pipeline::letter_grade::{Grade, reconcile_grade_with_verdict, verdict
 /// NOT cross-reference the cited identifier against the actual diff/context
 /// (that would require plumbing the diff/context into `derive_verdict`, a much
 /// larger change); flagged as a residual gap for follow-up validation.
-/// What: matches any of — a `path:line` reference (e.g. `src/handler.ts:42`), a
-/// ticket key (e.g. `IMPL-2026-05-009`, `TICKET-123`), a bare GitHub reference
-/// (`#123`), or a spec-section mark (e.g. `PRD § 4.2`).
+/// What: matches only when the WHOLE (trimmed) string is one citation, or a
+/// `,`/`;`-separated list of them (#9310: an identifier inside prose, `#0`, or
+/// a bare `§1` no longer qualifies), with one optional trailing `.`. A
+/// citation is an optional case-insensitive `code:`, `jira:` or `gh:` prefix;
+/// one identifier — a `path:line[:col][-line]` reference with line ≥ 1 (e.g.
+/// `src/handler.ts:42`, `app/[id]/+page.svelte:4:7`, optionally backticked), a
+/// ticket key or SLD spec id (e.g. `IMPL-2026-05-009`, `SPEC-CONFORMANCE-03~draft`),
+/// a GitHub reference `[owner/repo]#N` with N ≥ 1, or a named spec section
+/// (e.g. `PRD § 4.2`); then an optional `WP-n` or `§ n.n` tail. Whether the
+/// identifier exists is not checked.
 /// Test: `pr84_junk_citation_does_not_reopen_block`,
-/// `high_finding_with_source_citation_still_blocks`.
+/// `pr84_prose_with_embedded_ref_does_not_reopen_block`,
+/// `well_formed_citations_still_block_through_both_entry_points`.
 static CITATION_GRAMMAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\w./-]+\.[A-Za-z0-9]+:\d+|\b[A-Z][A-Z0-9]+-\d+\b|#\d+|§\s*\d")
+    // #9310: anchored; one citation is prefix? identifier tail?.
+    let one = concat!(
+        r"(?:(?i:code|jira|gh):\s*)?",
+        r"(?:`?[\w./@+()\[\]~-]+\.[A-Za-z0-9]+:[1-9]\d*(?::\d+)?(?:-[1-9]\d*)?`?",
+        r"|[A-Z][A-Z0-9]+(?:-[A-Z0-9]+)*-\d+(?:~\w+)?",
+        r"|(?:[\w.-]+/[\w.-]+)?#[1-9]\d*",
+        r"|[A-Za-z][\w./-]*\s*§\s*\d+(?:\.\d+)*)",
+        r"(?:\s+(?:WP-\d+|§\s*\d+(?:\.\d+)*))?",
+    );
+    Regex::new(&format!(r"^{one}(?:\s*[,;]\s*{one})*\.?$"))
         .expect("citation grammar regex is a valid literal")
 });
 
