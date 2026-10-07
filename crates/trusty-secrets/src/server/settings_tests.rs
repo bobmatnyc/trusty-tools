@@ -223,3 +223,19 @@ fn settings_index_env_is_ignored_on_the_account_default_socket_under_another_hom
     let parsed = ServerSettings::from_args_with(args, env, account_home).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
 }
+
+/// Why: #7524 H1 Route 2 — when the password database has no entry for this
+/// uid, the guard cannot tell the real default socket from another, so it
+/// fails closed: every socket counts as the default and [`INDEX_DIR_ENV`] is
+/// ignored, even for a socket in neither home's default directory.
+/// Red when a failed account-home lookup reads as "not the default socket".
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_on_any_socket_when_the_account_home_is_unknown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sandbox = tmp.path().join("sandbox/s.sock");
+    let env = index_env("/repo/checkout/index");
+    let args = serve_args(Some(&sandbox), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, || None).unwrap();
+    assert_ne!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+}
