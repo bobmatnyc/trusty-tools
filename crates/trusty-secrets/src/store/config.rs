@@ -221,6 +221,8 @@ pub(crate) fn check_project_backend_for(
 /// Test: `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
 /// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
 /// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
+// #7524: only the server writes values on a caller's behalf.
+#[cfg(feature = "server")]
 pub(crate) fn check_value_write_for(
     target: &BackendId,
     machine: Option<&MachineSecretsConfig>,
