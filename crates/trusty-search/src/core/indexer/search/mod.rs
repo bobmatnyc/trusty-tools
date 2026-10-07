@@ -23,6 +23,8 @@ pub(crate) mod path_filter;
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
 #[cfg(test)]
+mod tests_docstring_9404;
+#[cfg(test)]
 mod tests_keyword_9027;
 
 use std::collections::{HashMap, HashSet};
@@ -456,10 +458,11 @@ impl CodeIndexer {
         let all = exact::promote_candidates(all, &exact_ids);
 
         // 5) Materialise the top-k IDs into `CodeChunk`s.
-        let mut dropped = SearchDrops::default();
         // #2203: every drop below is counted so the caller can tell a short
         // result set from a small one.
-        let (mut result, unresolved) = self
+        // #9404: `Code` mode's docstring filter runs inside materialisation,
+        // before the `top_k` cut, so deeper candidates backfill the page.
+        let (mut result, mut dropped) = self
             .materialize_search_results(
                 all,
                 &hnsw_results,
@@ -467,9 +470,9 @@ impl CodeIndexer {
                 &kg_ids,
                 branch_set.as_ref(),
                 query,
+                matches!(effective_mode, super::SearchMode::Code),
             )
             .await?;
-        dropped.unresolved_corpus = unresolved;
 
         // 6) Mode-based hard file-type filter + archive downrank.
         self.apply_archive_downrank(
@@ -527,7 +530,7 @@ impl CodeIndexer {
     /// `archive::classify` per chunk, multiplies score by the penalty, stamps
     /// `archive_reason`. When `exclude_archived` is `true`, chunks with
     /// strong archive signals are dropped. Re-sorts by score desc. Each of the
-    /// three `retain`s below records how many rows it deleted into `dropped`,
+    /// two `retain`s below records how many rows it deleted into `dropped`,
     /// which the caller publishes as `meta.dropped` (#2203) — the filters
     /// are deliberate, but a caller could not previously tell a filtered result
     /// set from a small one.
@@ -553,12 +556,7 @@ impl CodeIndexer {
         // intent keeps the existing hard filter (no regression for real code
         // queries such as `Usage`/`BugDebt`/explicit `Definition`).
         let soft_downrank_unknown = intent.is_balanced() && matches!(mode, super::SearchMode::Code);
-        if matches!(mode, super::SearchMode::Code) {
-            use crate::core::chunker::ChunkType;
-            let before = results.len();
-            results.retain(|chunk| !matches!(chunk.chunk_type, ChunkType::Docstring));
-            dropped.docstring_filtered = before - results.len();
-        }
+        // #9404: the docstring filter moved into `materialize_search_results`.
         if !soft_downrank_unknown {
             let before = results.len();
             results.retain(|chunk| docs_penalty::is_allowed_for_mode(&chunk.file, mode));

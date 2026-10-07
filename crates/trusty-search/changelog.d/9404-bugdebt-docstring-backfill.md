@@ -1,0 +1,2 @@
+Fixed
+- A `Code`-mode search (a `BugDebt` query such as one containing "error") no longer returns an empty page when its `top_k` best candidates are all docstring chunks. The docstring filter now runs while the page is filled, so matching code deeper in the candidate set takes the freed slots; `meta.dropped.docstring_filtered` counts the docstrings skipped while a slot was open. When every candidate is a docstring, the docstrings are returned instead of `results: []`, and `docstring_filtered` reads `0` (#9404).
