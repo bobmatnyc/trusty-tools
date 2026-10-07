@@ -106,14 +106,17 @@ fn stamp_severities_covers_withheld_findings_and_is_idempotent() {
 
 /// #9310 item 2.5: severity never moves a verdict or a grade. The same
 /// findings with their severities scrambled derive the same verdict and grade.
+/// No finding has High effort, so a floor that read a `critical` severity as
+/// High would move these below-BLOCK verdicts.
 #[test]
 fn severity_never_changes_the_verdict() {
     let base = vec![
-        finding(Effort::High, true, false),
-        finding(Effort::Medium, false, false),
+        finding(Effort::Medium, true, false),
         finding(Effort::Medium, false, true),
+        finding(Effort::Low, true, false),
         finding(Effort::Low, false, false),
     ];
+    assert_ne!(derive_verdict(Verdict::Approve, &base), Verdict::Block);
     let grade: Grade = "B".parse().expect("grade");
     let want_graded = derive_verdict_with_grade(Verdict::Approve, grade, &base);
     let want_plain = derive_verdict(Verdict::Approve, &base);
