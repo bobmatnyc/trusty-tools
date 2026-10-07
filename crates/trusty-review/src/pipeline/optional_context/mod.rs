@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use crate::integrations::context::contents_at_ref::DocFetcher;
+use crate::integrations::context::{ContextSource, contents_at_ref::DocFetcher};
 use crate::models::{ContextSourceRecord, ReviewResult};
 
 pub(crate) mod assemble;
@@ -20,6 +20,7 @@ pub(crate) mod docs; // #9193
 pub(crate) mod docs_render; // #9193
 pub(crate) mod issues;
 pub(crate) mod ledger;
+pub(crate) mod probes; // #9194
 pub(crate) mod seams;
 
 pub use issues::{IssueDoc, IssueDocsError}; // #9197
@@ -150,7 +151,12 @@ pub struct ReviewOptions {
     pub(crate) pr_source: Option<Arc<dyn PrSource>>,
     /// Test seam for the Contents API doc reads (#9193).
     pub(crate) doc_fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Test seam for the external context sources (#9194).
+    pub(crate) external_sources: Option<ExternalSources>,
 }
+
+/// Builds the external context sources a review gathers from (#9194 seam).
+pub(crate) type ExternalSources = Arc<dyn Fn() -> Vec<Box<dyn ContextSource>> + Send + Sync>;
 
 impl ReviewOptions {
     /// Options carrying `request` and the production PR reads.
@@ -159,6 +165,7 @@ impl ReviewOptions {
             request,
             pr_source: None,
             doc_fetcher: None,
+            external_sources: None,
         }
     }
 }

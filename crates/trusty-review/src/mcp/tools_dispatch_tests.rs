@@ -805,13 +805,18 @@ async fn review_diff_issue_docs_reach_the_reviewer_prompt() {
     let reviewer = prompts.first().expect("the reviewer must be called");
     assert!(reviewer.contains("### Issue #77 — Totals"), "{reviewer}");
     assert!(reviewer.contains("ISSUE_CANARY_9197"), "{reviewer}");
-    // The caller row (no `context`) comes first, then the issues row.
+    // The caller row (no `context`), then the issues row; #9194: after the
+    // `pr_body` row, which reads `not_requested`.
     assert_eq!(
-        result["context_sources"][0]["source"], "caller_context",
+        result["context_sources"][0]["state"], "not_requested",
         "{result}"
     );
-    assert_eq!(result["context_sources"][1]["source"], "issues", "{result}");
-    assert_eq!(result["context_sources"][1]["state"], "used", "{result}");
+    assert_eq!(
+        result["context_sources"][1]["source"], "caller_context",
+        "{result}"
+    );
+    assert_eq!(result["context_sources"][2]["source"], "issues", "{result}");
+    assert_eq!(result["context_sources"][2]["state"], "used", "{result}");
 }
 
 /// #9197 (Architect ruling Q2): `review_diff` runs through `run_review_with`;
@@ -894,3 +899,7 @@ async fn mistyped_spec_docs_is_invalid_params() {
     }
     assert!(llm.0.lock().map(|p| p.is_empty()).unwrap_or(false));
 }
+
+// #9194: `report_context`, the tool schemas and the envelope.
+#[path = "tools_report_context_tests.rs"]
+mod report_context;

@@ -2830,3 +2830,11 @@ mod issue_docs;
 // #9193: spec/ADR/SLD docs and CLAUDE.md read at the PR head SHA.
 #[path = "runner_spec_docs_tests.rs"]
 mod spec_docs;
+
+// #9194: the context-source ledger reports every input.
+#[path = "runner_context_report_tests.rs"]
+mod context_report;
+
+// #9194: the `external_sources` row and its per-source items.
+#[path = "runner_external_report_tests.rs"]
+mod external_report;

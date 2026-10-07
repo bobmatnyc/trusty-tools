@@ -84,6 +84,14 @@ pub const FINDING_SIMILARITY_THRESHOLD: f32 = 0.60;
 /// claim attempt.
 pub const DEDUP_STALE_SECS: u64 = 7200; // 2 hours.
 
+/// The owner every non-GitHub diff source reviews under (#9194).
+///
+/// Why: `post::finalize_review` never posts for this owner, and a source that
+/// queries GitHub by owner must not query it for a local diff.
+/// What: the `subject_of` sentinel; a real GitHub org named `local` is
+/// assumed not to exist (Architect ruling Q7).
+pub(crate) const LOCAL_OWNER: &str = "local";
+
 /// Maximum length of the full diff text (characters) fed to the LLM.
 ///
 /// Why: the reviewer default when this cap was set (Bedrock Claude Sonnet 4.6)

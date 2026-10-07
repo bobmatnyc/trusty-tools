@@ -794,8 +794,9 @@ async fn review_health_reports_the_dry_run_the_review_path_executes() {
     );
 }
 
-/// #9192: the envelope carries `context_sources` only when the outcome has
-/// records, and never changes the `ReviewResult` text it wraps.
+/// #9192: the envelope carries `context_sources` only when reporting was
+/// asked for (#9194 amendment 3: then even an empty list), and never changes
+/// the `ReviewResult` text it wraps.
 #[test]
 fn wrap_outcome_adds_context_sources_only_when_present() {
     use crate::models::{ContextSourceRecord, SourceState};
@@ -806,16 +807,20 @@ fn wrap_outcome_adds_context_sources_only_when_present() {
         result: result.clone(),
         context_sources: Vec::new(),
     };
-    let off = super::wrap_outcome(&outcome);
+    let off = super::wrap_outcome(&outcome, false);
     assert_eq!(
         off,
         wrap_result(&result),
-        "no records: the envelope is unchanged"
+        "not reported: the envelope is unchanged"
     );
     assert!(off.get("context_sources").is_none());
+    assert_eq!(
+        super::wrap_outcome(&outcome, true)["context_sources"],
+        json!([])
+    );
 
     outcome.context_sources = vec![ContextSourceRecord::new("pr_body", SourceState::Absent)];
-    let on = super::wrap_outcome(&outcome);
+    let on = super::wrap_outcome(&outcome, true);
     assert_eq!(
         on["context_sources"],
         json!([{"source": "pr_body", "state": "absent"}])

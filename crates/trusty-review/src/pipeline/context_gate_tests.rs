@@ -767,3 +767,7 @@ async fn degraded_reason_prefers_health_error_detail() {
         other => panic!("expected Degraded, got {other:?}"),
     }
 }
+
+// #9194: which dependency the gate found wanting, for the source ledger.
+#[path = "context_gate_facts_tests.rs"]
+mod facts;

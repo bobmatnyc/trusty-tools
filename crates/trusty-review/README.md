@@ -227,9 +227,29 @@ empty result.
 With `--include-pr-body`, `--issue-docs-file`, `--spec-docs`, `--claude-md` or
 `--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
-one line per source that was `unavailable` or `truncated`. Without either flag,
-`--json` prints the review object alone, exactly as before. The text flags and
-a `# Context:` stdin preamble never turn the ledger on by themselves.
+one line per source that was `absent`, `unavailable` or `truncated`. Without
+any of them, `--json` prints the review object alone, exactly as before. The
+text flags and a `# Context:` stdin preamble never turn the ledger on by
+themselves.
+
+The ledger lists every source, in this order (#9194): `pr_body`,
+`caller_context`, `issues`, `spec_docs`, `claude_md`, `search`, `analyze` and
+`external_sources`. Each row is `used`, `truncated`, `absent` (asked for, and
+there was nothing: no hits, no hotspots or smells in the changed files, a
+source with no results), `unavailable` (could not be read; `detail` says why,
+one line of at most 200 characters with credentials redacted) or
+`not_requested` (an input the request did not ask for, or no external source
+configured). `analyze` has `hotspots` and `smells` items and
+`external_sources` one item per enabled source; a row takes its worst item. A
+dependency the context gate degraded reads `unavailable` with the gate's
+reason. A review skipped before its context was gathered lists no rows. The
+ledger never changes the review: verdict, grade, findings and prompts are the
+same with it on or off.
+
+With the ledger off, a failed search query, analyze call or external source is
+logged as a warning and nothing else: the default output stays byte-identical,
+so the ledger is where such a failure shows. `github_issues` makes no GitHub
+call for a local diff, which has no repository.
 
 A repeat review of the same head with different context flags is skipped as a
 duplicate when a dedup store is wired. Push a new head, or clear the claim.
@@ -300,12 +320,18 @@ Optional PR context (#9192), all off by default:
 | `issue_docs` | array | Issues the change addresses (#9197), `[{id, title?, body, url?}]`; also on `review_diff`. Same caps and rules as `run --issue-docs-file`. A malformed value is an invalid-params error. |
 | `spec_docs` | boolean | Read the ADR, spec and SLD docs the PR body names, plus trusty-search hits, at the PR head SHA (#9193); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same caps and `[doc:]` rules as `run --spec-docs`. A non-boolean is an invalid-params error. |
 | `claude_md` | boolean | Read the root `CLAUDE.md` and up to 3 nested ones at the PR head SHA (#9193); also on `review_diff`, as above. Same caps as `run --claude-md`. A non-boolean is an invalid-params error. |
+| `report_context` | boolean | Report the context-source ledger with no other new input (#9194); also on `review_diff`. `null` and `false` are off. A non-boolean is an invalid-params error. |
 
-A mistyped text param is ignored with a warning. When any of the seven is
-sent, the response envelope carries `context_sources`: one record per source
-(`pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`) with state `used`, `truncated`,
-`absent` or `unavailable`, and per-item rows (`omitted` names a doc left out
-whole). The `ReviewResult` text inside the envelope is unchanged.
+A mistyped text param is ignored with a warning. When any of the eight is
+sent, the response envelope carries `context_sources`: every source in the
+order `run --report-context` lists them (`pr_body`, `caller_context`, `issues`,
+`spec_docs`, `claude_md`, `search`, `analyze`, `external_sources`), each
+`used`, `truncated`, `absent`, `unavailable` or `not_requested`, with
+per-item rows (`omitted` names a doc left out whole). A review skipped before
+its context was gathered carries `"context_sources": []`. Without any of them
+there is no such key, and with the ledger off a failed source is only logged
+(see `run` above). The `ReviewResult` text inside the envelope, `isError`,
+`mcp_status` and the status values are unchanged.
 
 Returns a `ReviewResult` JSON object with:
 - `grade` (A+ | A | A- | B+ | B | B- | C+ | C | C- | D+ | D | D- | F) — letter grade
