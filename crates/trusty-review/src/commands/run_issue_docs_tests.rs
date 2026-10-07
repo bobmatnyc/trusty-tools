@@ -52,7 +52,10 @@ fn issue_docs_file_over_256_kib_is_refused() {
     std::fs::write(&file, format!(r#"[{{"id": "1", "body": "{body}"}}]"#)).expect("write");
     let err = run_request_with_issue_docs(&args_with_file(&file)).expect_err("over the cap");
     let msg = format!("{err:#}");
-    assert!(msg.contains("--issue-docs-file") && msg.contains("big.json"), "{msg}");
+    assert!(
+        msg.contains("--issue-docs-file") && msg.contains("big.json"),
+        "{msg}"
+    );
     assert!(msg.contains("cap"), "{msg}");
 }
 
@@ -144,7 +147,12 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     let args = RunArgs::try_parse_from(argv).expect("parse");
     let request = run_request_with_issue_docs(&args).expect("readable docs");
     let caller = caller_context_from_args(&args).expect("no text flags");
-    let input = run_input(&args, DiffSource::LocalFile { path: diff }, "m".into(), caller);
+    let input = run_input(
+        &args,
+        DiffSource::LocalFile { path: diff },
+        "m".into(),
+        caller,
+    );
 
     let key = trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
     let _pin = SocketPin(std::env::var_os(key));
@@ -170,6 +178,10 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     assert!(reviewer.contains("### Issue #5 — (no title)"), "{reviewer}");
     assert!(reviewer.contains("CANARY_9197_RUN"), "{reviewer}");
     // The ledger is on: the caller row (no text flags) and then the issues row.
-    let names: Vec<&str> = outcome.context_sources.iter().map(|r| r.source.as_str()).collect();
+    let names: Vec<&str> = outcome
+        .context_sources
+        .iter()
+        .map(|r| r.source.as_str())
+        .collect();
     assert_eq!(names, ["caller_context", "issues"]);
 }

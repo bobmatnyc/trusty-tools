@@ -122,8 +122,14 @@ pub(super) async fn run_mapreduce_branch(
     );
     // #9310 ruling 50: `grade_floor` is the synthesis or worst-chunk floor (Q2).
     let (mut reduced, wiped_model_verdict, grade_floor): (ReducedReview, _, _) =
-        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config, &run.applied.sections)
-            .await;
+        run_map_reduce_with_wiped(
+            &run.filtered,
+            &deps.llm,
+            &ctx,
+            mr_config,
+            &run.applied.sections,
+        )
+        .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -462,7 +468,12 @@ async fn fold_reduced_into_result(
     );
     // #9188 D: context citations resolve in what the reviewer was shown.
     // #9197: plus the issue section every chunk prompt carried.
-    let refs = refs_for_review(&run.pr_meta, &run.external_context, &run.context, &run.applied);
+    let refs = refs_for_review(
+        &run.pr_meta,
+        &run.external_context,
+        &run.context,
+        &run.applied,
+    );
     let inputs = GateInputs {
         filtered: &run.filtered,
         diff: &run.raw_diff,

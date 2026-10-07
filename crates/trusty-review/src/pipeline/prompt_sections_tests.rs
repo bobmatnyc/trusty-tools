@@ -80,8 +80,8 @@ fn an_empty_extra_section_renders_nothing() {
 fn an_extra_section_sits_between_caller_text_and_retrieved_context() {
     let msg = user("## Linked issues\n\nISSUE_TEXT_9197");
     let referenced = msg.find("## Referenced Code").expect("referenced code");
-    let issues = msg.find("## Linked issues\n\nISSUE_TEXT_9197\n\n## Related code").expect(
-        "the section, one blank line, then the retrieved context",
-    );
+    let issues = msg
+        .find("## Linked issues\n\nISSUE_TEXT_9197\n\n## Related code")
+        .expect("the section, one blank line, then the retrieved context");
     assert!(referenced < issues);
 }

@@ -78,7 +78,12 @@ fn with_docs(docs: Vec<IssueDoc>) -> ReviewOptions {
 }
 
 /// Run the fixture PR over `diff` with a reviewer citing `cite`.
-async fn run(diff: &str, caller: CallerContext, mut options: ReviewOptions, cite: &str) -> Observed {
+async fn run(
+    diff: &str,
+    caller: CallerContext,
+    mut options: ReviewOptions,
+    cite: &str,
+) -> Observed {
     let missing = std::env::temp_dir().join(format!(
         "trusty-review-9197-no-search-{}.sock",
         std::process::id()
@@ -115,7 +120,13 @@ fn reviewer_user(seen: &Observed) -> String {
 #[tokio::test]
 async fn supplied_issue_doc_reaches_the_reviewer_prompt() {
     let options = with_docs(vec![issue("#77", ISSUE_BODY)]);
-    let seen = run(&billing_diff(), legacy_caller(), options, &citation("#77", EXCERPT)).await;
+    let seen = run(
+        &billing_diff(),
+        legacy_caller(),
+        options,
+        &citation("#77", EXCERPT),
+    )
+    .await;
     let user = reviewer_user(&seen);
     let at = |needle: &str| {
         user.find(needle)
@@ -133,7 +144,13 @@ async fn supplied_issue_doc_reaches_the_reviewer_prompt() {
 #[tokio::test]
 async fn issue_doc_never_reaches_the_verifier_request() {
     let options = with_docs(vec![issue("#77", ISSUE_BODY)]);
-    let seen = run(&billing_diff(), legacy_caller(), options, &citation("#77", EXCERPT)).await;
+    let seen = run(
+        &billing_diff(),
+        legacy_caller(),
+        options,
+        &citation("#77", EXCERPT),
+    )
+    .await;
     let verifier = seen.verifier.requests();
     assert!(!verifier.is_empty(), "the finding must reach the verifier");
     for (system, user) in &verifier {
@@ -155,7 +172,13 @@ async fn a_gh_citation_to_a_supplied_issue_resolves() {
     let result = &seen.outcome.result;
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
 
-    let seen = run(&billing_diff(), CallerContext::default(), ReviewOptions::default(), &cite).await;
+    let seen = run(
+        &billing_diff(),
+        CallerContext::default(),
+        ReviewOptions::default(),
+        &cite,
+    )
+    .await;
     let result = &seen.outcome.result;
     assert!(result.findings.is_empty(), "no doc, nothing to cite");
     assert!(!result.withheld_findings.is_empty());
@@ -167,7 +190,13 @@ async fn a_gh_citation_to_a_supplied_issue_resolves() {
 #[tokio::test]
 async fn a_gh_citation_to_an_unsupplied_issue_is_withheld() {
     let options = with_docs(vec![issue("#77", ISSUE_BODY)]);
-    let seen = run(&billing_diff(), CallerContext::default(), options, &citation("#78", EXCERPT)).await;
+    let seen = run(
+        &billing_diff(),
+        CallerContext::default(),
+        options,
+        &citation("#78", EXCERPT),
+    )
+    .await;
     let result = &seen.outcome.result;
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(!result.withheld_findings.is_empty());
@@ -178,7 +207,13 @@ async fn a_gh_citation_to_an_unsupplied_issue_is_withheld() {
 #[tokio::test]
 async fn a_gh_id_matches_only_as_a_whole_token_in_issue_docs() {
     let options = with_docs(vec![issue("#9192", ISSUE_BODY)]);
-    let seen = run(&billing_diff(), CallerContext::default(), options, &citation("#919", EXCERPT)).await;
+    let seen = run(
+        &billing_diff(),
+        CallerContext::default(),
+        options,
+        &citation("#919", EXCERPT),
+    )
+    .await;
     assert!(seen.outcome.result.findings.is_empty());
     assert!(!seen.outcome.result.withheld_findings.is_empty());
 }
@@ -196,7 +231,13 @@ async fn a_cut_off_issue_excerpt_is_withheld() {
     body.push_str(&"y".repeat(20_000 - body.len()));
     for (excerpt, survives) in [(tail, false), (head, true)] {
         let options = with_docs(vec![issue("#77", &body)]);
-        let seen = run(&billing_diff(), CallerContext::default(), options, &citation("#77", excerpt)).await;
+        let seen = run(
+            &billing_diff(),
+            CallerContext::default(),
+            options,
+            &citation("#77", excerpt),
+        )
+        .await;
         assert_eq!(
             seen.outcome.result.findings.len(),
             usize::from(survives),
@@ -212,9 +253,18 @@ async fn a_cut_off_issue_excerpt_is_withheld() {
 #[tokio::test]
 async fn mapreduce_chunk_prompts_carry_the_issue_block() {
     let options = with_docs(vec![issue("#77", ISSUE_BODY)]);
-    let seen = run(&mapreduce_diff(), CallerContext::default(), options, &citation("#77", EXCERPT)).await;
+    let seen = run(
+        &mapreduce_diff(),
+        CallerContext::default(),
+        options,
+        &citation("#77", EXCERPT),
+    )
+    .await;
     let result = &seen.outcome.result;
-    assert!(result.review_body.contains("Map-reduce review:"), "map-reduce path");
+    assert!(
+        result.review_body.contains("Map-reduce review:"),
+        "map-reduce path"
+    );
     let chunks: Vec<String> = seen
         .reviewer
         .requests()
@@ -224,7 +274,10 @@ async fn mapreduce_chunk_prompts_carry_the_issue_block() {
         .collect();
     assert!(chunks.len() > 1, "several chunk prompts: {}", chunks.len());
     for chunk in &chunks {
-        assert!(chunk.contains("ISSUE_SENTINEL_9197"), "chunk without the issue:\n{chunk}");
+        assert!(
+            chunk.contains("ISSUE_SENTINEL_9197"),
+            "chunk without the issue:\n{chunk}"
+        );
     }
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
 }
@@ -234,7 +287,13 @@ async fn mapreduce_chunk_prompts_carry_the_issue_block() {
 #[tokio::test]
 async fn ledger_records_the_issues_row_after_the_caller_row() {
     let options = with_docs(vec![issue("77", ISSUE_BODY)]);
-    let seen = run(&billing_diff(), legacy_caller(), options, &citation("#77", EXCERPT)).await;
+    let seen = run(
+        &billing_diff(),
+        legacy_caller(),
+        options,
+        &citation("#77", EXCERPT),
+    )
+    .await;
     let sources = &seen.outcome.context_sources;
     let names: Vec<&str> = sources.iter().map(|r| r.source.as_str()).collect();
     assert_eq!(names, ["caller_context", "issues"]);

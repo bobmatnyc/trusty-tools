@@ -280,12 +280,10 @@ fn omitted(doc: &IssueDoc, chars: usize, reason: String) -> ContextItemRecord {
 /// The `issues` row: `absent` when no doc reached the reviewer, `truncated`
 /// when any doc was cut or left out, `used` otherwise.
 fn issues_row(items: Vec<ContextItemRecord>) -> ContextSourceRecord {
-    let reached = |i: &ContextItemRecord| {
-        matches!(i.state, SourceState::Used | SourceState::Truncated)
-    };
-    let lost = |i: &ContextItemRecord| {
-        matches!(i.state, SourceState::Truncated | SourceState::Omitted)
-    };
+    let reached =
+        |i: &ContextItemRecord| matches!(i.state, SourceState::Used | SourceState::Truncated);
+    let lost =
+        |i: &ContextItemRecord| matches!(i.state, SourceState::Truncated | SourceState::Omitted);
     let state = if !items.iter().any(reached) {
         SourceState::Absent
     } else if items.iter().any(lost) {

@@ -806,7 +806,10 @@ async fn review_diff_issue_docs_reach_the_reviewer_prompt() {
     assert!(reviewer.contains("### Issue #77 — Totals"), "{reviewer}");
     assert!(reviewer.contains("ISSUE_CANARY_9197"), "{reviewer}");
     // The caller row (no `context`) comes first, then the issues row.
-    assert_eq!(result["context_sources"][0]["source"], "caller_context", "{result}");
+    assert_eq!(
+        result["context_sources"][0]["source"], "caller_context",
+        "{result}"
+    );
     assert_eq!(result["context_sources"][1]["source"], "issues", "{result}");
     assert_eq!(result["context_sources"][1]["state"], "used", "{result}");
 }
@@ -838,5 +841,8 @@ async fn review_diff_rejects_malformed_issue_docs_before_reviewing() {
         matches!(&err, ToolError::InvalidParams(m) if m.contains("'id'")),
         "{err:?}"
     );
-    assert!(llm.0.lock().map(|p| p.is_empty()).unwrap_or(false), "no review ran");
+    assert!(
+        llm.0.lock().map(|p| p.is_empty()).unwrap_or(false),
+        "no review ran"
+    );
 }
