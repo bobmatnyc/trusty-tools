@@ -190,7 +190,7 @@ fn tied_hits_in_reverse_id_order(now: DateTime<Utc>) -> Vec<RecallResult> {
     let mut hits: Vec<RecallResult> = (0..6)
         .map(|_| hit(drawer("tie", &["kg"], Duration::zero(), now), 0.5))
         .collect();
-    hits.sort_by(|a, b| b.drawer.id.cmp(&a.drawer.id));
+    hits.sort_by_key(|a| std::cmp::Reverse(a.drawer.id));
     hits
 }
 
