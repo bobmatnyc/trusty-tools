@@ -194,7 +194,31 @@ impl NamesIndex {
     ///
     /// Test: `store_delete_removes_entry_and_row`.
     pub fn remove(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.update(vault, |file| Ok(file.keys.remove(key.as_str()).is_some()))
+        self.remove_with(vault, key, || Ok(false))
+            .map(|(_, had_row)| had_row)
+    }
+
+    /// [`NamesIndex::remove`], running `sweep` under the index lock first.
+    ///
+    /// Why: #7519 — a delete's backend sweep ran outside the lock, so a
+    /// `set` landing between the sweep and the row removal stored a value
+    /// whose row the delete then dropped.
+    /// What: takes the lock and re-reads the index (a corrupt file or a lock
+    /// timeout fails here, before `sweep` runs), calls `sweep`, and only on
+    /// its success drops the row and publishes. A `sweep` error leaves the
+    /// row in place. Returns `(sweep's result, whether a row existed)`.
+    /// Test: `store_delete_across_holds_the_index_lock_through_the_sweep`,
+    /// `store_delete_across_keeps_the_row_when_any_backend_fails`.
+    pub(crate) fn remove_with(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        sweep: impl FnOnce() -> Result<bool, SecretsError>,
+    ) -> Result<(bool, bool), SecretsError> {
+        self.update(vault, |file| {
+            let swept = sweep()?;
+            Ok((swept, file.keys.remove(key.as_str()).is_some()))
+        })
     }
 
     /// Set the "agents may use" flag on an indexed key.
