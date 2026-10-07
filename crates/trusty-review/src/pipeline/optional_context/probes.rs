@@ -219,38 +219,41 @@ fn worst(items: &[ContextItemRecord]) -> SourceState {
 /// Why: a detail carries transport and API error text, which can span lines,
 /// echo a response body, or hold a token.
 /// What: collapses every whitespace run to one space, replaces the value
-/// after `bearer`/`basic` (also glued as `authorization:bearer`),
-/// `authorization:`/`token:`/`password:`/`x-api-key:` and of any
-/// `token=`/`key=`/`secret=`/`password=` pair with `[redacted]`, masks
-/// credential-shaped runs, then cuts to the cap with a trailing `…`.
+/// after a `bearer`/`basic` scheme (also glued as `authorization:bearer`,
+/// `authorization=bearer` or JSON-quoted), the value of an
+/// `authorization`/`token`/`password`/`x-api-key` header (spaced or glued to
+/// its colon), a URL userinfo password and any `token=`/`key=`/`secret=`/
+/// `password=` pair with `[redacted]`, masks credential-shaped runs, then
+/// cuts to the cap with a trailing `…`.
 /// Test: `cap_detail_cuts_to_one_line_of_200_characters`,
 /// `cap_detail_redacts_credentials`, `a_bearer_token_never_reaches_a_detail`,
-/// `cap_detail_masks_bearer_without_a_space`, `cap_detail_masks_an_x_api_key_value`.
+/// `cap_detail_masks_bearer_without_a_space`, `cap_detail_masks_an_x_api_key_value`,
+/// `cap_detail_masks_a_url_userinfo_password`,
+/// `cap_detail_masks_a_header_value_glued_to_its_colon`,
+/// `cap_detail_masks_a_json_quoted_authorization_header`,
+/// `cap_detail_masks_an_equals_joined_bearer_scheme`.
 pub(crate) fn cap_detail(text: &str) -> String {
     let mut words: Vec<String> = Vec::new();
     let mut hide_next = false;
     for word in text.split_whitespace() {
-        let lower = word.to_ascii_lowercase();
-        // #9194: `Authorization:Bearer` with no space reads as `Bearer`.
-        let scheme = lower
-            .split_once(':')
-            .is_some_and(|(_, rest)| matches!(rest, "bearer" | "basic"));
-        let key = lower.trim_end_matches(':');
-        if scheme
-            || (matches!(
-                key,
-                "bearer" | "basic" | "authorization" | "token" | "password" | "x-api-key"
-            ) && (word.ends_with(':') || matches!(key, "bearer" | "basic")))
-        {
-            words.push(word.to_string());
-            hide_next = true;
-            continue;
+        match credential_word(&word.to_ascii_lowercase()) {
+            Some(Hide::Next) => {
+                words.push(word.to_string());
+                hide_next = true;
+                continue;
+            }
+            Some(Hide::After(keep)) => {
+                words.push(format!("{}[redacted]", &word[..keep]));
+                hide_next = false;
+                continue;
+            }
+            None => {}
         }
         if std::mem::take(&mut hide_next) {
             words.push("[redacted]".to_string());
             continue;
         }
-        words.push(redact_pairs(word));
+        words.push(redact_pairs(&redact_userinfo(word)));
     }
     let line = crate::pipeline::reply_shape::mask_credential_shapes(&words.join(" "));
     if line.chars().count() <= MAX_DETAIL_CHARS {
@@ -259,6 +262,63 @@ pub(crate) fn cap_detail(text: &str) -> String {
     let mut cut: String = line.chars().take(MAX_DETAIL_CHARS - 1).collect();
     cut.push('…');
     cut
+}
+
+/// What a credential word hides: the next word, or its own tail.
+enum Hide {
+    /// The value is the next word (`Bearer`, `Authorization:`).
+    Next,
+    /// Keep this many leading bytes, redact the rest (`Token:abc`).
+    After(usize),
+}
+
+/// How `lower` (one lowercased word) introduces a credential, if it does.
+///
+/// #9194: the name and scheme are compared with surrounding punctuation
+/// stripped, so `"Authorization":"Bearer` and `authorization=bearer` match.
+fn credential_word(lower: &str) -> Option<Hide> {
+    const SCHEMES: [&str; 2] = ["bearer", "basic"];
+    const HEADERS: [&str; 4] = ["authorization", "token", "password", "x-api-key"];
+    if SCHEMES.contains(&bare(lower)) {
+        return Some(Hide::Next);
+    }
+    let (head, rest) = lower.split_once([':', '='])?;
+    let value = bare(rest);
+    if SCHEMES.contains(&value) {
+        return Some(Hide::Next);
+    }
+    // `key=value` pairs are left to `redact_pairs`, which keeps `&` siblings.
+    if !lower[head.len()..].starts_with(':') || !HEADERS.contains(&bare(head)) {
+        return None;
+    }
+    Some(if value.is_empty() {
+        Hide::Next
+    } else {
+        Hide::After(head.len() + 1)
+    })
+}
+
+/// `s` without leading or trailing punctuation (`-` kept, for `x-api-key`).
+fn bare(s: &str) -> &str {
+    s.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+}
+
+/// `word` with the password of a `scheme://user:password@host` URL replaced
+/// by `[redacted]`; the user, host and path are kept (#9194).
+fn redact_userinfo(word: &str) -> String {
+    let Some(start) = word.find("://").map(|i| i + 3) else {
+        return word.to_string();
+    };
+    let end = word[start..]
+        .find(['/', '?', '#'])
+        .map_or(word.len(), |i| start + i);
+    let Some(at) = word[start..end].rfind('@').map(|i| start + i) else {
+        return word.to_string();
+    };
+    let Some(colon) = word[start..at].find(':').map(|i| start + i) else {
+        return word.to_string();
+    };
+    format!("{}[redacted]{}", &word[..=colon], &word[at..])
 }
 
 /// `word` with the value of every `key=value` pair whose key names a
