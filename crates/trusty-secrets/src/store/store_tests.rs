@@ -202,6 +202,81 @@ fn store_delete_across_keeps_the_row_when_any_backend_fails() {
     assert_eq!(rows.len(), 1, "the row stays while a value may remain");
 }
 
+/// A swept backend whose `delete` lets a second writer try a `set` first.
+///
+/// What: stands in for a concurrent `secrets.set` that lands while a delete
+/// is sweeping. The racer's index never waits for the lock, so it either
+/// writes at once or gets [`SecretsError::LockTimeout`]; `raced_in` records
+/// which.
+#[derive(Debug)]
+struct RacingBackend {
+    inner: MemoryBackend,
+    racer: SecretStore,
+    raced_in: std::sync::atomic::AtomicBool,
+}
+
+impl SecretBackend for RacingBackend {
+    fn id(&self) -> BackendId {
+        BackendId::new("racing").unwrap()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.inner.get(vault, key)
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, v: &SecretValue) -> Result<(), SecretsError> {
+        self.inner.set(vault, key, v)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        let raced = self
+            .racer
+            .set(vault, key, &SecretValue::new("sk-racer-7519"));
+        self.raced_in
+            .store(raced.is_ok(), std::sync::atomic::Ordering::SeqCst);
+        self.inner.delete(vault, key)
+    }
+}
+
+/// Why: #7519 P1 carry-over (b) — the sweep ran outside the index lock, so a
+/// `set` landing between the sweep and the row removal wrote a value whose
+/// row the delete then dropped: a stored credential `list` no longer shows.
+/// The sweep and the row removal must be one `index.update`.
+/// Red on the unfixed code: the racer's `set` lands, and the configured
+/// backend keeps a value with no index row.
+/// Test: itself.
+#[test]
+fn store_delete_across_holds_the_index_lock_through_the_sweep() {
+    let (tmp, configured, store) = fixture();
+    let racer_index =
+        NamesIndex::at(tmp.path().join("index")).with_lock_timeout(std::time::Duration::ZERO);
+    let racing = Arc::new(RacingBackend {
+        inner: MemoryBackend::new(),
+        racer: SecretStore::new(
+            Arc::clone(&configured) as Arc<dyn SecretBackend>,
+            racer_index,
+        ),
+        raced_in: std::sync::atomic::AtomicBool::new(false),
+    });
+    let others = [Arc::clone(&racing) as Arc<dyn SecretBackend>];
+    store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+
+    let deleted = store.delete_across(&project(), &key("API_KEY"), &others);
+    assert!(deleted.unwrap().removed);
+    assert!(
+        !racing.raced_in.load(std::sync::atomic::Ordering::SeqCst),
+        "a set landed between the sweep and the row removal"
+    );
+    let rows = store.list(&project()).unwrap().len();
+    assert_eq!(
+        (configured.len(), rows),
+        (0, 0),
+        "a backend holds a value no index row lists"
+    );
+}
+
 /// Why: #7519 — `delete` sweeps every backend this build can write, and
 /// none it cannot: off macOS every Keychain call fails closed, which would
 /// fail every delete.
