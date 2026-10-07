@@ -11,12 +11,13 @@
 //! Test: `dry_run_leaves_no_in_progress_claim`,
 //! `dry_run_never_claims_over_another_holder`,
 //! `dry_run_abort_keeps_a_completed_record`, `failed_post_releases_its_claim`,
+//! `connect_failure_releases_its_claim`,
 //! `live_run_on_a_completed_head_is_still_skipped`.
 
 use super::optional_context_off::{BODY, FakePrSource, HEAD_SHA, billing_diff, hermetic_config};
 use super::*;
 use crate::pipeline::optional_context::OptionalContextRequest;
-use crate::pipeline::post::{PostContext, finalize_review};
+use crate::pipeline::post::{PostContext, finalize_review, finalize_review_at};
 use crate::store::{ClaimOutcome, DedupStore};
 
 const OWNER: &str = "acme";
@@ -200,6 +201,56 @@ async fn failed_post_releases_its_claim() {
         next_claim(&store).await,
         ClaimOutcome::Claimed,
         "a post that never left must not block the retry"
+    );
+}
+
+/// REGRESSION (#9348), arm (b): a live post whose connection is refused
+/// reached no one, so it releases the claim — the offline or off-VPN case.
+/// What: the head is claimed as `claim_slot` would; `finalize_review_at`
+/// posts with a CLI token to a closed local port; a retry's claim succeeds.
+/// No network is used.
+/// Test: this test. Fails when a connect failure counts as sent: the retry's
+/// claim is then `InProgressElsewhere`.
+#[tokio::test]
+async fn connect_failure_releases_its_claim() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let api = format!("http://{}", listener.local_addr().expect("addr"));
+    drop(listener); // the port is now closed
+    let (store, dir) = fresh_store();
+    assert_eq!(next_claim(&store).await, ClaimOutcome::Claimed);
+    let mut config = hermetic_config();
+    config.dry_run = false;
+    config.log_dir = dir.path().to_path_buf();
+    config.github_token = "fixture-token".to_string();
+
+    let mut result = ReviewResult::new(OWNER, REPO, PR, "t", "u");
+    result.head_sha = HEAD_SHA.to_string();
+    let out = finalize_review_at(
+        &api,
+        result,
+        &config,
+        TriggerDecision::ForceLive,
+        true,
+        false,
+        false,
+        PostContext {
+            owner: OWNER,
+            repo: REPO,
+            pr: PR,
+            head_sha: HEAD_SHA,
+            run_mode: RunMode::Cli,
+            dedup: Some(&store),
+        },
+    )
+    .await;
+
+    assert!(!out.posted && out.dry_run, "the post failed");
+    let error = out.error.expect("a failed post explains itself");
+    assert!(error.starts_with("post failed"), "{error}");
+    assert_eq!(
+        next_claim(&store).await,
+        ClaimOutcome::Claimed,
+        "a refused connection must not block the retry"
     );
 }
 

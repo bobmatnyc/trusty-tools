@@ -29,7 +29,10 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::ReviewConfig,
-    integrations::github::{AuthStrategy, GithubClient, GithubError, RunMode, post_pr_review},
+    integrations::github::{
+        AuthStrategy, GithubClient, GithubError, RunMode,
+        posting::{GITHUB_API, ReviewPostError, post_pr_review_at},
+    },
     models::{Finding, ReviewResult},
     pipeline::{
         output::{print_review_result, write_review_log},
@@ -309,8 +312,38 @@ pub struct PostContext<'a> {
 /// Test: `decide_action_*` cover the branch; the live post is `#[ignore]`;
 /// `findings_count_matches_len_on_completed_review`,
 /// `finalize_review_does_not_post_without_a_head_sha`,
-/// `failed_post_releases_its_claim`.
+/// `failed_post_releases_its_claim`, `connect_failure_releases_its_claim`.
 pub async fn finalize_review(
+    result: ReviewResult,
+    config: &ReviewConfig,
+    trigger: TriggerDecision,
+    allow_posting: bool,
+    write_log: bool,
+    print_result: bool,
+    post_ctx: PostContext<'_>,
+) -> ReviewResult {
+    finalize_review_at(
+        GITHUB_API,
+        result,
+        config,
+        trigger,
+        allow_posting,
+        write_log,
+        print_result,
+        post_ctx,
+    )
+    .await
+}
+
+/// [`finalize_review`] posting to the GitHub API root `api` (#9348).
+///
+/// Why: a test aims `api` at a closed local port to drive a connect failure
+/// through the whole finalise path with no network.
+/// What: the body of [`finalize_review`]; production passes `GITHUB_API`.
+/// Test: `connect_failure_releases_its_claim`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_review_at(
+    api: &str,
     mut result: ReviewResult,
     config: &ReviewConfig,
     trigger: TriggerDecision,
@@ -383,7 +416,7 @@ pub async fn finalize_review(
 
     match action {
         FinalizeAction::Post => {
-            match post_live(&mut result, config, &post_ctx).await {
+            match post_live(api, &mut result, config, &post_ctx).await {
                 Ok(()) => {
                     result.posted = true;
                     result.dry_run = false;
@@ -450,14 +483,26 @@ pub async fn finalize_review(
 /// only when no comment can exist — releasing after a comment landed lets the
 /// retry post a second one (#5113).
 /// What: `NotSent` failed before the POST left (client build, token
-/// resolution); `Sent` failed on or after it.
+/// resolution) or in its connect phase (DNS, refused, connect timeout);
+/// `Sent` failed after the request may have reached GitHub.
 /// Test: `post_failure_releases_only_when_no_comment_can_exist`.
 #[derive(Debug)]
 enum PostFailure {
-    /// The review POST was never sent.
+    /// No request reached GitHub.
     NotSent(GithubError),
     /// The review POST was sent; GitHub may or may not have created it.
     Sent(GithubError),
+}
+
+impl From<ReviewPostError> for PostFailure {
+    // #9348: a connect-phase failure reached no one, so it is `NotSent`.
+    fn from(failure: ReviewPostError) -> Self {
+        if failure.sent {
+            Self::Sent(failure.error)
+        } else {
+            Self::NotSent(failure.error)
+        }
+    }
 }
 
 impl PostFailure {
@@ -475,8 +520,8 @@ impl PostFailure {
     /// What: `NotSent` → false. A 4xx answer → false: GitHub rejected the
     /// request (bad token, unknown PR, invalid inline line) and the review
     /// endpoint creates nothing on a rejection. Anything else → true: a 5xx
-    /// can follow a write that committed, a transport error after `send` can
-    /// be a timeout on a request GitHub processed, and a body-read or parse
+    /// can follow a write that committed, a transport error once connected
+    /// can be a timeout on a request GitHub processed, and a body-read or parse
     /// failure follows a 2xx that created the review.
     /// Test: `post_failure_releases_only_when_no_comment_can_exist`.
     fn may_have_landed(&self) -> bool {
@@ -522,8 +567,10 @@ async fn release_after_failed_post(failure: &PostFailure, ctx: &PostContext<'_>)
 /// owner, and POSTs the review comment; on success copies the posted-review
 /// HTML URL into the result. A failure says whether the POST was sent (#9348).
 /// Test: network-bound; covered by `#[ignore]` integration tests;
-/// `failed_post_releases_its_claim` covers the not-sent failure.
+/// `failed_post_releases_its_claim` and `connect_failure_releases_its_claim`
+/// cover the not-sent failures.
 async fn post_live(
+    api: &str,
     result: &mut ReviewResult,
     config: &ReviewConfig,
     ctx: &PostContext<'_>,
@@ -534,9 +581,9 @@ async fn post_live(
         .resolve_token(&client, config, ctx.owner)
         .await
         .map_err(PostFailure::NotSent)?;
-    let posted = post_pr_review(&client, ctx.owner, ctx.repo, ctx.pr, &token, result)
+    let posted = post_pr_review_at(api, &client, ctx.owner, ctx.repo, ctx.pr, &token, result)
         .await
-        .map_err(PostFailure::Sent)?;
+        .map_err(PostFailure::from)?;
     if !posted.html_url.is_empty() {
         // Stash the posted-review URL on the result for the log / future updates.
         info!(review_url = %posted.html_url, "posted review URL");
@@ -640,7 +687,18 @@ mod tests {
             body: String::new(),
         };
         let transport = || GithubError::Transport("timed out".to_string());
+        // #9348: what `post_pr_review_at` reports for a refused connection.
+        let refused = ReviewPostError {
+            error: GithubError::Transport("connection refused".to_string()),
+            sent: false,
+        };
+        let timed_out = ReviewPostError {
+            error: transport(),
+            sent: true,
+        };
         let cases = [
+            (PostFailure::from(refused), false),
+            (PostFailure::from(timed_out), true),
             (PostFailure::NotSent(GithubError::MissingToken), false),
             (PostFailure::NotSent(transport()), false),
             (PostFailure::Sent(api(401)), false),
