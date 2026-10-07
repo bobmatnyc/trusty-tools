@@ -2,7 +2,7 @@
 
 **Status:** Draft (requirements only; no runtime implementation authorized)
 **Spec ID:** `SPEC-MEMSYNC-REQ-01~draft` … `SPEC-MEMSYNC-REQ-15~draft` (DOC-79)
-**Subsystem:** `trusty-memory` (sync connector, dream worker, local ingest boundary); `trusty-common` (`memory_core` record model and dream passes, shared with in-flight runtime work); remote memory-store API (location decided by [ADR-0067](../adr/0067-remote-memory-store-api-spec-location.md))
+**Subsystem:** `trusty-memory` (sync connector, dream worker, local ingest boundary); `trusty-common` (`memory_core` record model and dream passes, shared with in-flight runtime work); remote memory-store API (location decided by [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md))
 **Owner:** Bob Matsuoka (rulings); runtime owner assigned by the Architect (implementation)
 **Last-updated:** 2026-10-04 (r2: review findings, owner decisions on OQ-1 to OQ-4, dream worker scope)
 **Builds on:** [`docs/reference/shared-memory-identity.md`](../reference/shared-memory-identity.md) (content-hash identity, [#5902](https://github.com/bobmatnyc/trusty-tools/issues/5902)); the closed vision issue [#1683](https://github.com/bobmatnyc/trusty-tools/issues/1683) (closed not-planned 2026-09-03)
@@ -186,7 +186,7 @@ This is the one list of work-item fields. DOC-80 §5 refers to it and does not r
 
 | ID | Level | Requirement | Source |
 |---|---|---|---|
-| R-PROC-1 | MUST | The connector runs as a separate OS process, supervised by the trusty-memory daemon, and is not reduced to an in-process async task. | Bob 22:29Z ("do not silently reduce it to an in-process async task"); Bob decision 2026-10-04 (OQ-1); [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) |
+| R-PROC-1 | MUST | The connector runs as a separate OS process, supervised by the trusty-memory daemon, and is not reduced to an in-process async task. | Bob 22:29Z ("do not silently reduce it to an in-process async task"); Bob decision 2026-10-04 (OQ-1); [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) |
 | R-PROC-2 | MUST | The daemon supervises each child's lifecycle with one model: restart after an exit the daemon did not request, exponential backoff, a give-up state after a bounded number of restarts, health in status, and exit of the child when the daemon dies. | Codex (proposal), adopted; Bob decision 2026-10-04 (dream scope) |
 | R-PROC-3 | MUST | A slow or unreachable endpoint, or a stopped or crashing connector, delays freshness only. It never blocks local recall or freezes the daemon. | Bob 22:29Z |
 | R-PROC-4 | MUST | Last successful sync and pending change counts are tracked per project and per endpoint, and exposed through status metadata, not through a new recall interface. | Bob 22:29Z |

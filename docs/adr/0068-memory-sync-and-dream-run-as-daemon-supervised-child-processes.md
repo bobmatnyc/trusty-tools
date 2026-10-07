@@ -1,4 +1,4 @@
-# 0066. trusty-memory runs the sync connector and the dream cycle as daemon-supervised child processes
+# 0068. trusty-memory runs the sync connector and the dream cycle as daemon-supervised child processes
 
 - **Status:** Proposed
 - **Date:** 2026-10-04

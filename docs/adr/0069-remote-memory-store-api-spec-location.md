@@ -1,4 +1,4 @@
-# 0067. The remote memory-store API spec lives in docs/specs, with wire types in a small dedicated crate
+# 0069. The remote memory-store API spec lives in docs/specs, with wire types in a small dedicated crate
 
 - **Status:** Proposed
 - **Date:** 2026-10-04
@@ -38,4 +38,4 @@ Vetted against prior ADRs on 2026-10-04:
 
 - **ADR-0032 (console is the only HTTP surface):** Consistent — the API is served by remote endpoints, not by a local trusty service.
 - **ADR-0065 (trusty-events wire contract in `trusty-common::control_bus`):** Consistent — same pattern of a wire contract in a library crate that producers and consumers share, rather than in one daemon.
-- **ADR-0068 (reference implementation repository):** Extends — this ADR places the contract; ADR-0068 places the deployable implementation.
+- **ADR-0070 (reference implementation repository):** Extends — this ADR places the contract; ADR-0070 places the deployable implementation.

@@ -26,11 +26,11 @@ spec_refs:
 
 **Status:** Draft (design proposal; no runtime implementation authorized)
 **Spec ID:** `SPEC-MEMSYNC-01~draft` … `SPEC-MEMSYNC-11~draft` (DOC-80)
-**Subsystem:** `trusty-memory` (sync connector and dream worker child processes, daemon RPCs, status); `trusty-common` (`memory_core` record model and dream passes, changed only through the Architect); remote memory-store API (see [ADR-0067](../adr/0067-remote-memory-store-api-spec-location.md)); reference endpoint (see [ADR-0068](../adr/0068-memory-store-reference-implementation-repository.md))
+**Subsystem:** `trusty-memory` (sync connector and dream worker child processes, daemon RPCs, status); `trusty-common` (`memory_core` record model and dream passes, changed only through the Architect); remote memory-store API (see [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md)); reference endpoint (see [ADR-0070](../adr/0070-memory-store-reference-implementation-repository.md))
 **Owner:** Bob Matsuoka (rulings); runtime owner assigned by the Architect (implementation)
 **Last-updated:** 2026-10-04 (r2: review findings, owner decisions on OQ-1 to OQ-4, dream worker)
 **Requirements:** [DOC-79](./DOC-79-memory-sync-requirements.md). Requirement IDs (`R-…`) and conformance cases (`C-…`) below refer to it.
-**Decisions:** [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md), [ADR-0067](../adr/0067-remote-memory-store-api-spec-location.md), [ADR-0068](../adr/0068-memory-store-reference-implementation-repository.md), all Proposed.
+**Decisions:** [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md), [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md), [ADR-0070](../adr/0070-memory-store-reference-implementation-repository.md), all Proposed.
 **DOC-N claim:** see DOC-79's header.
 
 Marking rule: **VERIFIED** means the cited `path:line` was read at `origin/main` e3ff4c7358 on 2026-10-04. **PROPOSED** means design, not code. Planned files and modules are written without backticks because they do not exist.
@@ -156,7 +156,7 @@ All of this section is PROPOSED.
 
 ### 3.1 One supervision model for both children
 
-Decision: [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) (OQ-1 decided 2026-10-04).
+Decision: [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) (OQ-1 decided 2026-10-04).
 
 - **Binary.** Each child is a hidden subcommand of the existing `trusty-memory` binary (proposed `sync-connector` and `dream-worker`). No new binary, so ADR-0043's cargo-bin policy is unchanged.
 - **Spawn.** Only the daemon that holds the maintenance lease spawns children: the connector when at least one project has a sync binding, the dream worker unless `TRUSTY_DREAM_DISABLED` is set. A daemon that loses or never holds the lease spawns neither. Each child also takes a lock file in its state directory, so one data root has at most one of each.
@@ -194,13 +194,13 @@ Decision: [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-
 
 | Piece | Home | Status | Notes |
 |---|---|---|---|
-| Connector and dream worker subcommands, child supervisor, sync and dream RPCs, status | `trusty-memory` crate | PROPOSED, per Bob 22:29Z and 2026-10-04 | [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) |
+| Connector and dream worker subcommands, child supervisor, sync and dream RPCs, status | `trusty-memory` crate | PROPOSED, per Bob 22:29Z and 2026-10-04 | [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) |
 | Record fields for decision state, canonical refs, claim kind, expression, memory id and provenance | `trusty-common` `memory_core` | PROPOSED; typed drawer fields (OQ-4 decided), added after M2 | Requested through the Architect (§11) |
 | Dream passes split into decide (worker) and apply (daemon) | `trusty-common` `memory_core::dream` | PROPOSED | After the [#9172](https://github.com/bobmatnyc/trusty-tools/issues/9172) and [#9173](https://github.com/bobmatnyc/trusty-tools/issues/9173) fixes; Architect assigns |
-| Normative API text | `docs/specs/` (this DOC, later its own DOC when stable) | PROPOSED | [ADR-0067](../adr/0067-remote-memory-store-api-spec-location.md) |
-| Wire types and machine-readable schema (OpenAPI 3.x, JSON Schema) | A small new library crate in trusty-tools (working name trusty-memory-sync-api), not `trusty-mpm` | PROPOSED; Bob suggested `trusty-mpm` as an option | [ADR-0067](../adr/0067-remote-memory-store-api-spec-location.md) compares both |
+| Normative API text | `docs/specs/` (this DOC, later its own DOC when stable) | PROPOSED | [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md) |
+| Wire types and machine-readable schema (OpenAPI 3.x, JSON Schema) | A small new library crate in trusty-tools (working name trusty-memory-sync-api), not `trusty-mpm` | PROPOSED; Bob suggested `trusty-mpm` as an option | [ADR-0069](../adr/0069-remote-memory-store-api-spec-location.md) compares both |
 | Conformance suite and in-process fake endpoint (multi-instance) | trusty-tools, beside the wire-types crate | PROPOSED | Lets CI run without another repository |
-| Deployable reference endpoint | Separate repository, created later and only on Bob's GO | PROPOSED, per Bob's suggestion | [ADR-0068](../adr/0068-memory-store-reference-implementation-repository.md) |
+| Deployable reference endpoint | Separate repository, created later and only on Bob's GO | PROPOSED, per Bob's suggestion | [ADR-0070](../adr/0070-memory-store-reference-implementation-repository.md) |
 | Freshness and child-health display | `trusty-console` reads the new status through `crates/trusty-console/src/memory_uds` | PROPOSED, later stage | Display only |
 | Harness integration (who shares, session attribution) | `trusty-mpm` | PROPOSED, later stage | Supplies principal and session ids to the connector configuration; holds no memory data |
 
@@ -422,7 +422,7 @@ Adapters are optional, project-scoped, and never a recall path. Detail, schemas 
 
 ## 10. Dream worker {#SPEC-MEMSYNC-11~draft}
 
-All PROPOSED. Requirements: DOC-79 §13 (R-DREAM-1 to R-DREAM-11). Decision: [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) (Bob, 2026-10-04 scope addition). Today's code path: §2.8. Runtime work is sequenced after the fixes for [#9172](https://github.com/bobmatnyc/trusty-tools/issues/9172) and [#9173](https://github.com/bobmatnyc/trusty-tools/issues/9173), which edit the same `dream/` modules; the Architect assigns it.
+All PROPOSED. Requirements: DOC-79 §13 (R-DREAM-1 to R-DREAM-11). Decision: [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) (Bob, 2026-10-04 scope addition). Today's code path: §2.8. Runtime work is sequenced after the fixes for [#9172](https://github.com/bobmatnyc/trusty-tools/issues/9172) and [#9173](https://github.com/bobmatnyc/trusty-tools/issues/9173), which edit the same `dream/` modules; the Architect assigns it.
 
 ### 10.1 Split: the worker decides, the daemon applies
 
@@ -516,7 +516,7 @@ PROPOSED. The suite runs DOC-79 §14's cases C-01 to C-69.
 
 ### 13.1 Decided (Bob, 2026-10-04)
 
-1. **OQ-1 Process placement — decided: (a) a child process supervised by the daemon.** Bob's ruling said "operationally analogous to the dream cycle" and "do not silently reduce it to an in-process async task"; the analogy holds for lifecycle. The same day Bob widened the scope: the dream cycle also moves into a daemon-supervised child, under the same supervision model (§3.1, §10, [ADR-0066](../adr/0066-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md)).
+1. **OQ-1 Process placement — decided: (a) a child process supervised by the daemon.** Bob's ruling said "operationally analogous to the dream cycle" and "do not silently reduce it to an in-process async task"; the analogy holds for lifecycle. The same day Bob widened the scope: the dream cycle also moves into a daemon-supervised child, under the same supervision model (§3.1, §10, [ADR-0068](../adr/0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md)).
 2. **OQ-2 Shared project identity — decided: (a) a project UUID committed in the pin file, plus per-provider bindings.** `github:repo:<id>` is an authorization binding, not the identity. Safeguard added from review r1: the pin file supplies only a candidate; sync requires an explicit local bind, and the endpoint's repository binding must match the checkout's remote (§5.6, R-PROJ-6, C-27).
 3. **OQ-3 ADR-0051 fields — decided: (b) keep sync identity out of `palace.json`**, in the sync binding and the envelope only. ADR-0051 is amended afterwards to add the project UUID, so `palace.json` gains one coherent identity change (R-PROJ-7).
 4. **OQ-4 Decision state and canonical links locally — decided: (a) typed drawer fields in `trusty-common`**, added after M2. Routed through the Architect (§11).
@@ -540,12 +540,12 @@ PROPOSED. Each stage starts only on Bob's GO through the Architect. Rungs refer 
 
 | Stage | Content | Exit criterion | Depends on |
 |---|---|---|---|
-| 0 Docs | DOC-79, DOC-80, ADR-0066 to ADR-0068; Bob answers §13.2. | ADRs accepted or amended; OQ-5 to OQ-12 answered. | — |
+| 0 Docs | DOC-79, DOC-80, ADR-0068 to ADR-0070; Bob answers §13.2. | ADRs accepted or amended; OQ-5 to OQ-12 answered. | — |
 | 1 Local prerequisites | Typed drawer fields (OQ-4), project UUID and bind (OQ-2), outbox in the drawer transaction including user forgets, suppression markers, tombstones, secret gate on the share path, recall baseline measurement. | Rung 4 gates on `trusty-common` and its direct dependents; baseline numbers recorded. | Architect sequencing (§11); M2 merged |
 | 2 Connector skeleton, one machine | Child supervisor, connector subcommand, spawn secret, sync RPCs, status keys, wire-types crate, multi-instance fake endpoint. | C-02 to C-04, C-11, C-12 (two fake instances), C-17, C-18, C-23, C-25, C-26, C-28 (connector), C-30 (sync methods), C-31 to C-34, C-51 to C-56, C-58 (connector), C-59. Rung 5 (process lifecycle). | Stage 1; M1 and f0 reclaim guard |
 | D Dream worker | Dream decide/apply split, dream RPCs, worker subcommand on the Stage 2 supervisor, removal of the in-process dream path. | C-28 (worker), C-30 (dream methods), C-58 (worker), C-60, C-61, C-62, C-65 to C-68; C-63 and C-64 once Stage 2's import marking exists. Rung 5. | Stage 2 supervisor; fixes for [#9172](https://github.com/bobmatnyc/trusty-tools/issues/9172) and [#9173](https://github.com/bobmatnyc/trusty-tools/issues/9173) merged |
 | 3 Two users, two machines | Full sync suite on the fake endpoint and two sandboxed daemons; Addendum E evals. | C-01, C-05 to C-10, C-13, C-15 (two fake instances), C-16, C-22, C-24, C-27, C-29, C-35 to C-38, C-41 to C-45, C-57; recall stays within baseline. | Stage 2; [#9174](https://github.com/bobmatnyc/trusty-tools/issues/9174); recall-path request (§11) |
-| 4 Auth and reference endpoint | Endpoint token exchange, GitHub App option, access lease, revocation events and reconciliation; reference endpoint repository if ADR-0068 is accepted. | C-14, C-19 to C-21, C-39, C-46 to C-50, C-69 against the reference endpoint. | Bob's GO on repository creation and app registration; OQ-5, OQ-6 |
+| 4 Auth and reference endpoint | Endpoint token exchange, GitHub App option, access lease, revocation events and reconciliation; reference endpoint repository if ADR-0070 is accepted. | C-14, C-19 to C-21, C-39, C-46 to C-50, C-69 against the reference endpoint. | Bob's GO on repository creation and app registration; OQ-5, OQ-6 |
 | 5 Mesh | Several real endpoints per project, endpoint migration, resharing policy. | C-12 and C-15 pass again with two real endpoints. | Stage 4 |
 | 6 Adapters and workloads | Vendor adapters (§9), cloud workload identity. | C-40; per-adapter conformance subset. | Stage 5 |
 
@@ -557,7 +557,7 @@ Drafted for the Architect to relay. Nothing below is filed; numbers are placehol
 
 | # | Proposed issue | Crate | Rung | Stage | Owner path |
 |---|---|---|---|---|---|
-| E1 | Decide §13.2 open questions; move ADR-0066 to ADR-0068 out of Proposed; amend ADR-0051 per OQ-3 | docs | 1 | 0 | Bob via Architect |
+| E1 | Decide §13.2 open questions; move ADR-0068 to ADR-0070 out of Proposed; amend ADR-0051 per OQ-3 | docs | 1 | 0 | Bob via Architect |
 | E2 | Portable project UUID in the pin file, bindings, explicit bind with repository check | `trusty-common`, `trusty-memory` | 4 | 1 | Architect assigns; sequencing required, not committed |
 | E3 | Typed drawer fields: decision state, canonical refs, claim kind, expression, memory id, provenance roles | `trusty-common` | 4 | 1 | Architect assigns; sequencing required, not committed |
 | E4 | Per-palace sync outbox in the drawer transaction, user forgets as delete events, suppression markers, reconciliation scan | `trusty-common`, `trusty-memory` | 5 | 1 | Architect assigns; sequencing required, not committed |

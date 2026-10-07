@@ -1,4 +1,4 @@
-# 0068. The deployable memory-store reference implementation lives in a separate repository; the conformance fake stays in trusty-tools
+# 0070. The deployable memory-store reference implementation lives in a separate repository; the conformance fake stays in trusty-tools
 
 - **Status:** Proposed
 - **Date:** 2026-10-04
@@ -9,7 +9,7 @@
 
 ## Context
 
-The API (ADR-0067) needs at least one deployable endpoint to prove it. Backend examples in the brainstorming note (DynamoDB on AWS, Vercel, Neon, Upstash) are examples, not selections. The closed vision issue [#1683](https://github.com/bobmatnyc/trusty-tools/issues/1683) proposed an in-repo server crate; it was closed as not planned on 2026-09-03.
+The API (ADR-0069) needs at least one deployable endpoint to prove it. Backend examples in the brainstorming note (DynamoDB on AWS, Vercel, Neon, Upstash) are examples, not selections. The closed vision issue [#1683](https://github.com/bobmatnyc/trusty-tools/issues/1683) proposed an in-repo server crate; it was closed as not planned on 2026-09-03.
 
 ADR-0032 says no trusty-* service owns an HTTP daemon in this workspace; a hosted memory endpoint is an HTTP service by nature.
 
@@ -37,4 +37,4 @@ Vetted against prior ADRs on 2026-10-04:
 
 - **ADR-0032 (console is the only HTTP surface):** Consistent — the hosted endpoint lives outside the workspace.
 - **ADR-0022 (separate per-store repositories for knowledge trees):** Consistent — same pattern of keeping store content and deployment outside the monorepo.
-- **ADR-0067 (API spec location):** Extends — the contract stays in trusty-tools; only the deployable implementation leaves.
+- **ADR-0069 (API spec location):** Extends — the contract stays in trusty-tools; only the deployable implementation leaves.
