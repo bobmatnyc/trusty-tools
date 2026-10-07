@@ -1,15 +1,18 @@
-//! Where a CLI-backed backend finds its program (#7519).
+//! Where a CLI-backed backend, and doctor's tool detection, find a program
+//! (#7519).
 //!
 //! Why: a bare program name resolves through the `PATH` of whichever
 //! process spawned the server, and a relative or empty `PATH` entry names
 //! the working directory, where a planted CLI would receive values. Both
 //! CLI backends judge a candidate program by the same bar, so the bar lives
-//! here once (moved from the 1Password backend in P3).
+//! here once (moved from the 1Password backend in P3, and out of `cli` in
+//! P4 so doctor's DOC-74 §7 detection uses it on every Unix build).
 //! What: [`find_on_path`] searches only the absolute entries of a `PATH`
 //! value the caller hands in; [`is_executable_file`] is the bar both a
 //! machine `program` pin and a `PATH` candidate pass.
 //! Test: `onepassword_path_search_skips_relative_empty_and_dot_entries`,
-//! `keeper_program_must_be_an_absolute_executable_machine_pin`.
+//! `keeper_program_must_be_an_absolute_executable_machine_pin`,
+//! `doctor_detects_unsupported_tools_on_the_start_path_without_running_them`.
 
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;

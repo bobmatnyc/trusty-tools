@@ -7,7 +7,7 @@
 //! `secrets.scopes` then `secrets.list` per scope; `remove` calls
 //! `secrets.scopes` then `secrets.delete`; `import` parses the file with
 //! `parse_dotenv`, then one `secrets.set` per entry; `copy` calls
-//! `secrets.copy`; `doctor` calls `secrets.doctor`. Every line written names
+//! `secrets.copy`; `doctor` lives in `doctor.rs`. Every line written names
 //! keys, scopes, backends or paths. `set` alone prints part of a value: the
 //! server's `mask_secret` confirmation.
 //! Test: `tests.rs` beside this file.
@@ -20,12 +20,11 @@ use serde_json::{Value, json};
 use trusty_secrets::api::methods::{
     CopyResponse, DeleteResponse, ListResponse, ScopesResponse, SetOutcome, SetResponse, method,
 };
-use trusty_secrets::server::{ClientError, DOCTOR, DoctorResponse};
 use trusty_secrets::store::parse_dotenv;
 use trusty_secrets::{BackendId, SecretKey, SecretValue};
 
 use super::Ctx;
-use super::session::{check_group, describe, entry_key, is_project_refusal};
+use super::session::{check_group, entry_key};
 
 /// Refusal for a third positional argument to `set`.
 const ARGV_REFUSED: &str =
@@ -261,68 +260,6 @@ pub(super) async fn copy(
         bail!(
             "tm secrets copy: {failed} key(s) not copied (absent from {from}, or refused by {to}): {}",
             names(&response.failed)
-        );
-    }
-    Ok(())
-}
-
-/// `doctor`: socket reachability, paths, and which backends this build opens.
-///
-/// What: asks with the project; when the server refuses the project (no
-/// checkout, no remote, or a remote off github.com) reports that and asks
-/// again without it. A socket that cannot
-/// be started or reached exits 1 as `unreachable`; a server refusal exits 1
-/// as `reachable` with the server's text; a selected backend that is
-/// unavailable exits 1 after the backend table.
-/// Test: `doctor_reports_socket_and_backends_without_values`,
-/// `doctor_reports_backends_when_the_remote_is_off_github`,
-/// `doctor_reports_a_refusing_server_as_reachable`,
-/// `doctor_fails_when_the_selected_backend_is_unavailable`,
-/// `every_verb_fails_without_a_value_when_the_socket_is_unreachable`.
-pub(super) async fn doctor(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
-    let socket = ctx.client.socket();
-    let mut answer = ctx.call_raw(DOCTOR, Value::Null).await?;
-    if let Err(e) = &answer
-        && is_project_refusal(e)
-    {
-        writeln!(out, "project: {}", describe(e, socket))?;
-        answer = ctx.client.call(DOCTOR, Value::Null).await;
-    }
-    let report = match answer {
-        Ok(report) => report,
-        Err(e) => {
-            // #7521: only a server that answered can send an `Rpc` refusal.
-            let state = match e {
-                ClientError::Rpc(_) => "reachable",
-                _ => "unreachable",
-            };
-            writeln!(out, "socket {}: {state}", socket.display())?;
-            bail!(describe(&e, socket));
-        }
-    };
-    let report: DoctorResponse = serde_json::from_value(report)
-        .map_err(|_| anyhow!("tm secrets doctor: the answer did not decode"))?;
-    writeln!(out, "socket {}: reachable", report.socket.display())?;
-    writeln!(out, "index: {}", report.index_root.display())?;
-    writeln!(out, "machine config: {}", report.machine_config.display())?;
-    if let Some(root) = &report.project_root {
-        writeln!(out, "project: {}", root.display())?;
-    }
-    writeln!(out, "selected backend: {}", report.selected_backend)?;
-    let mut selected_ok = false;
-    for backend in &report.backends {
-        let state = if backend.available {
-            format!("available [{}]", backend.capabilities.join(", "))
-        } else {
-            "unavailable".to_owned()
-        };
-        writeln!(out, "backend {}: {state}", backend.id)?;
-        selected_ok |= backend.available && backend.id == report.selected_backend;
-    }
-    if !selected_ok {
-        bail!(
-            "tm secrets doctor: the selected backend `{}` is unavailable",
-            report.selected_backend
         );
     }
     Ok(())

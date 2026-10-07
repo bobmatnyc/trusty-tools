@@ -14,7 +14,8 @@
 //! #7519: on a `cli-backends` build, so is every `OP_*` variable but an
 //! `op signin` session; the service-account token is kept for the 1Password
 //! backend's overlay. `PATH` is read once at start too, and the 1Password
-//! backend searches its absolute entries for `op` at each open.
+//! backend searches its absolute entries for `op` at each open. #7519 P4:
+//! `secrets.doctor` reports whether the token was present, never the token.
 //! Test: `tests/on_demand_server.rs`.
 
 use std::process::ExitCode;
@@ -81,7 +82,7 @@ async fn run(
     onepassword_token: Option<trusty_secrets::api::SecretValue>,
     search_path: Option<std::ffi::OsString>,
 ) -> ExitCode {
-    use trusty_secrets::server::{ServerSettings, backends_for, serve};
+    use trusty_secrets::server::{ServerSettings, StartEnv, backends_for, serve_with};
 
     let settings = match ServerSettings::from_args(std::env::args_os().skip(1), |name| {
         std::env::var(name).ok()
@@ -99,11 +100,15 @@ async fn run(
         socket.display(),
         idle.as_secs()
     );
+    // #7519 P4: presence only; the token itself goes to the factory below.
+    let start = StartEnv::default()
+        .with_onepassword_token(onepassword_token.is_some())
+        .with_search_path(search_path.clone());
     // #7519: CLI backends read the account's own machine config (ruling
     // 74) and the template directory these settings name, and take the
     // token and `PATH` captured at start.
     let backends = backends_for(&settings, onepassword_token, search_path);
-    match serve(settings, backends, trusty_common::shutdown_signal()).await {
+    match serve_with(settings, backends, start, trusty_common::shutdown_signal()).await {
         Ok(exit) => {
             eprintln!("trusty-secrets: {exit:?}; exiting");
             ExitCode::SUCCESS

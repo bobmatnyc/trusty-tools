@@ -23,6 +23,8 @@ use std::io::Write;
 use crate::cli::SecretsAction;
 
 #[cfg(unix)]
+mod doctor;
+#[cfg(unix)]
 mod session;
 #[cfg(unix)]
 mod value;
@@ -51,6 +53,7 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
         project: &project,
         clipboard: &SystemClipboard,
         stdin: &StdinSource,
+        ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
     dispatch(&ctx, action, &mut std::io::stdout()).await
 }
@@ -97,7 +100,7 @@ pub(crate) async fn dispatch(
             let keys: Vec<&str> = keys.iter().map(|k| k.text()).collect();
             verbs::copy(ctx, &from, &to, &keys, out).await
         }
-        SecretsAction::Doctor => verbs::doctor(ctx, out).await,
+        SecretsAction::Doctor => doctor::doctor(ctx, out).await,
     }
 }
 

@@ -603,30 +603,40 @@ async fn server_doctor_reports_backends_and_paths_only() {
     assert_eq!(bare.index_root, fx.settings.index_root);
     assert_eq!(bare.project_config, None);
     assert_eq!(bare.selected_backend, BackendId::keychain());
-    let mut expected = vec![
-        BackendStatus {
-            id: BackendId::keychain(),
-            available: true,
-            capabilities: vec!["READ".to_string(), "WRITE".to_string()],
-        },
-        // #9326: listed beside the Keychain; this fixture maps no `file`.
-        BackendStatus {
-            id: BackendId::file(),
-            available: false,
-            capabilities: Vec::new(),
-        },
-    ];
-    // #7519: every CLI backend this build links is listed; none is mapped.
-    expected.extend(
-        crate::store::cli_backends()
-            .into_iter()
-            .map(|id| BackendStatus {
-                id,
-                available: false,
-                capabilities: Vec::new(),
-            }),
+    // #7519 P4: every row names why it is unavailable; the CLI-backed rows
+    // are listed on every build.
+    let cli = if crate::store::cli_backends().is_empty() {
+        Unavailable::NotCompiled
+    } else {
+        Unavailable::NotEnabled
+    };
+    let rows: Vec<_> = bare
+        .backends
+        .iter()
+        .map(|b| {
+            (
+                b.id.as_str(),
+                b.available,
+                b.capabilities.join(","),
+                b.reason,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("keychain", true, "READ,WRITE".to_string(), None),
+            // #9326: listed beside the Keychain; this fixture maps no `file`.
+            ("file", false, String::new(), Some(Unavailable::NotCompiled)),
+            ("onepassword", false, String::new(), Some(cli)),
+            ("keeper", false, String::new(), Some(cli)),
+        ]
     );
-    assert_eq!(bare.backends, expected);
+    assert!(
+        bare.backends
+            .iter()
+            .all(|b| b.available == b.detail.is_none())
+    );
     assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(
@@ -1722,6 +1732,10 @@ mod audit_tests;
 // #7519: the delete-across-backends tests share this module's fixture.
 #[path = "delete_tests.rs"]
 mod delete_tests;
+
+// #7519 P4: the doctor reason, readiness and wire tests share this fixture.
+#[path = "doctor_tests.rs"]
+mod doctor_tests;
 
 // #7524: the Keychain-to-file write posture tests share this module's fixture.
 #[path = "posture_tests.rs"]

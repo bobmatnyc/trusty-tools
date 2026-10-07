@@ -86,7 +86,7 @@ impl ProjectContext {
         config::check_project_backend_for(config.as_ref(), &config_path, state.keychain_compiled)?;
         // #4567: likewise only the machine config may turn the audit off.
         super::gate::check_tracked_audit(config.as_ref())?;
-        let machine = config::load_machine_at(&state.settings.machine_config)?;
+        let machine = selecting_machine(state)?;
         // #9328: the tracked `vault` is checked against the remote's owner;
         // only the machine config may pick a vault outside it.
         let tracked = config.as_ref().and_then(|c| c.vault.clone());
@@ -173,6 +173,60 @@ impl ProjectContext {
     /// The §6.1 resolution for this project and the server's machine config.
     pub fn resolved_config(&self) -> ResolvedConfig {
         config::resolve(self.config.as_ref(), self.machine.as_ref())
+    }
+}
+
+/// The machine config a request selects its backend from (DOC-74 §6.1).
+///
+/// Why: #7519 P4 — doctor's `selected` and every request's backend must
+/// come from one source, so both read it here.
+/// What: [`ServerSettings::machine_config`](super::ServerSettings), the
+/// file `--machine-config` or `$HOME` names; a missing file is `None`, one
+/// that does not parse fails closed. CLI-backend enablement and `file`
+/// consent come from the account's own file instead (ruling 74, #7524 H1).
+/// Test: `doctor_selected_is_the_backend_a_write_uses_when_the_configs_differ`.
+pub(crate) fn selecting_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKind> {
+    Ok(config::load_machine_at(&state.settings.machine_config)?)
+}
+
+/// A project whose tracked config every request refuses (#7519 P4).
+///
+/// Why: doctor reports such a project instead of failing, so the operator
+/// sees which backend it selects and the refusal's fix.
+/// What: the checkout root, the backend the tracked config and the
+/// selecting machine config resolve to, and the refusal's text, which names
+/// the file and the key, never a value.
+/// Test: `doctor_reports_a_refused_tracked_setting_on_the_selected_row`.
+pub(crate) struct RefusedProject {
+    pub(crate) root: PathBuf,
+    pub(crate) backend: BackendId,
+    pub(crate) detail: String,
+}
+
+impl RefusedProject {
+    /// Re-read the project at `dir` that [`ProjectContext::resolve`] refused
+    /// with the tracked-config `kind`.
+    ///
+    /// What: the backend and vault refusals give their own error's text;
+    /// the audit refusal, which has none, gives `kind`'s fixed text.
+    pub(crate) fn resolve(state: &State, dir: &Path, kind: ErrorKind) -> Result<Self, ErrorKind> {
+        let root = checkout_root(dir).ok_or(ErrorKind::ProjectUnresolved)?;
+        let path = root.join(PROJECT_CONFIG_SUBPATH);
+        let project = config::load_project_at(&path)?;
+        let detail = match config::check_project_backend_for(
+            project.as_ref(),
+            &path,
+            state.keychain_compiled,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(()) => kind.text().to_string(),
+        };
+        let machine = selecting_machine(state)?;
+        Ok(Self {
+            backend: config::resolve(project.as_ref(), machine.as_ref()).backend,
+            root,
+            detail,
+        })
     }
 }
 

@@ -32,6 +32,10 @@ mod memory;
 #[cfg(all(unix, feature = "cli-backends"))]
 pub mod onepassword;
 pub(crate) mod platform;
+// #7519 P4: the absolute-PATH program lookup; the CLI backends and doctor's
+// tool detection share it, so it is not behind `cli-backends` alone.
+#[cfg(all(unix, any(feature = "server", feature = "cli-backends")))]
+pub(crate) mod program;
 pub mod resolve;
 mod scope;
 mod secret_store;

@@ -311,7 +311,36 @@ project file's `secrets.vault` shares a vault only among one owner's repos
 
 ## 7. Backend Detection (`detect_backends`)
 
-**API** (trusty-common):
+> **Amended 2026-10-07 (#7519 P4).** No `detect_backends` was built in
+> trusty-common, and none will be: owner ruling 2026-10-07, "Secrets should
+> have no common dependencies." Detection lives in the `secrets.doctor`
+> method of the trusty-secrets server (`crates/trusty-secrets/src/server/doctor.rs`),
+> and `tm secrets doctor` renders its reply. The API sketch below is the
+> original design; what ships is:
+>
+> - One row per backend (`keychain`, `file`, `onepassword`, `keeper`, on every
+>   build) with `available`, and, when unavailable, a typed `reason`
+>   (`not_compiled`, `not_enabled`, `cli_not_installed`, `config_invalid`,
+>   `tracked_setting_refused`) and a `detail` naming the fix. The fields are
+>   additive (`#[serde(default)]`), so an older client decodes a newer reply.
+> - `available` means the server opens the backend now. Opening reads no
+>   secret and spawns nothing, so doctor never runs `op` or `keeper` (A9) and
+>   never knows whether either is unlocked. The `KeyringStore` probe in the
+>   table below is not used: off macOS the build links no Keychain and the
+>   row is `not_compiled`.
+> - CLI-backend enablement is read from the account's own machine config
+>   (ruling 74); the selected backend from the machine config every request
+>   reads. Both paths are reported.
+> - Headless readiness is one yes/no: whether `OP_SERVICE_ACCOUNT_TOKEN` was
+>   set when the server started (§13 Q4). Keeper device approval and
+>   persistent login are not detected (#7519 P3 ruling 6).
+> - The unsupported tools in the table below (`bw`, `vault`, `pass`,
+>   `gopass`, `doppler`, `infisical`) are reported as `tools`: installed or
+>   not, and where, from the absolute entries of the `PATH` the server read
+>   at start. Nothing is run, so nothing can prompt or unlock. `ksm` and the
+>   Running/Configured columns are not probed.
+
+**API** (trusty-common, original design, not built):
 
 ```rust
 pub enum ToolStatus {
@@ -555,7 +584,10 @@ tm secrets copy --from <backend> --to <backend> [KEY...]
                                                # for the ACTIVE project; reads each value in-process and writes it to the destination
                                                # backend without ever printing it — the owner's "copy vars between stores" requirement
                                                # a key not copied (absent from the source, refused by the destination) is named; exits non-zero
-tm secrets doctor                              # runs detect_backends (§7), renders the table, flags a configured-but-unreachable backend
+tm secrets doctor                              # calls secrets.doctor (§7), renders the table with each unavailable backend's reason and fix
+                                               # exits non-zero when the selected backend is unavailable; when the server refused the
+                                               # project (the machine default's report is still printed); and, under CI=true (or CI=1),
+                                               # when the selected backend is 1Password with no OP_SERVICE_ACCOUNT_TOKEN at server start
 tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
                                                # resolves each named KEY from the active vault and injects the VALUE into the child's
                                                # environment (--env) or stdin (--stdin) only — never into <command...>'s own argv, never
@@ -762,6 +794,13 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Amended for Keeper by #7519 P3** (§8.2): Keeper has no token path;
    headless use needs a prior human device approval and persistent login,
    and without them every call fails closed as `backend_locked`.
+   **Doctor exit status, owner ruling 2026-10-07 (#7519 P4, d4):** under
+   `CI=true`, `tm secrets doctor` exits non-zero when the selected backend is
+   1Password and `OP_SERVICE_ACCOUNT_TOKEN` was not set when the secrets
+   server started. Keeper and the Keychain are not judged, because doctor
+   cannot detect device approval or an unlocked Keychain without a spawn.
+   A project the server refuses (no checkout, no remote, a remote off
+   github.com) also exits non-zero, after the machine default's report.
 5. **Cross-project vault sharing.** §6.3's default vault name is per-repo. Is
    an explicit `secrets.vault:` override (already in §6.1's example) the only
    sanctioned way to share one vault across repos, or should a monorepo-style
