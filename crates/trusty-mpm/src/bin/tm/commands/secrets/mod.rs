@@ -53,6 +53,7 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
         project: &project,
         clipboard: &SystemClipboard,
         stdin: &StdinSource,
+        ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
     dispatch(&ctx, action, &mut std::io::stdout()).await
 }

@@ -187,6 +187,18 @@ async fn run_in(
     stdin: &'static str,
     args: &[&str],
 ) -> Outcome {
+    run_ci(client, project, clipboard, stdin, false, args).await
+}
+
+/// [`run_in`], as a CI run (`CI=true`) when `ci` is set.
+async fn run_ci(
+    client: &OnDemandSecrets,
+    project: &Path,
+    clipboard: &'static str,
+    stdin: &'static str,
+    ci: bool,
+    args: &[&str],
+) -> Outcome {
     let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
     let Some(Command::Secrets { action }) = Cli::try_parse_from(argv).expect("parse").command
     else {
@@ -205,6 +217,7 @@ async fn run_in(
         project,
         clipboard: &Fixed(clipboard),
         stdin: &Fixed(stdin),
+        ci,
     };
     let mut out = Vec::new();
     let result = dispatch(&ctx, action, &mut out).await;
@@ -230,6 +243,7 @@ async fn seed_owner(h: &Harness, key: &str, value: &str) {
         project: &h.repo,
         clipboard: &Fixed(""),
         stdin: &Fixed(""),
+        ci: false,
     };
     let params = serde_json::json!({ "vault": OWNER_VAULT, "key": key, "value": value });
     let _: serde_json::Value = ctx
@@ -664,11 +678,12 @@ async fn doctor_reports_socket_and_backends_without_values() {
     );
     assert!(!outcome.out.contains(HEAD));
 
-    // Outside a checkout: the project is reported, the socket still answers.
+    // Outside a checkout: the project is reported, the socket still answers,
+    // and the machine default's report exits non-zero (#7519 d4 Q4).
     let outside = h.tmp.path().join("plain");
     std::fs::create_dir(&outside).expect("mkdir");
     let bare = run_in(&h.client, &outside, "", "", &["doctor"]).await;
-    assert_eq!(bare.err, None);
+    assert!(bare.err().contains(PROJECT_NOT_JUDGED), "{}", bare.err());
     assert!(
         bare.out
             .starts_with("project: tm secrets: secrets.doctor: "),
@@ -678,9 +693,14 @@ async fn doctor_reports_socket_and_backends_without_values() {
     assert!(bare.out.contains(": reachable"), "{}", bare.out);
 }
 
+/// The error a doctor run ends with when the server refused the project.
+const PROJECT_NOT_JUDGED: &str = "the project was refused, so the report above is the machine \
+     default's";
+
 /// #7521: a remote off github.com is a project refusal like any other
-/// (#9328's `remote_host_unsupported`), so doctor still reports the backends
-/// and exits 0.
+/// (#9328's `remote_host_unsupported`), so doctor still reports the backends.
+/// #7519 d4 Q4 (owner ruling): it keeps the `project:` line and the
+/// machine default's report, and exits non-zero. Red while it exited 0.
 #[tokio::test]
 async fn doctor_reports_backends_when_the_remote_is_off_github() {
     let h = harness().await;
@@ -692,7 +712,11 @@ async fn doctor_reports_backends_when_the_remote_is_off_github() {
         &["remote", "add", "origin", "https://gitlab.com/acme/app.git"],
     );
     let outcome = run_in(&h.client, &gitlab, "", "", &["doctor"]).await;
-    assert_eq!(outcome.err, None, "{}", outcome.out);
+    assert!(
+        outcome.err().contains(PROJECT_NOT_JUDGED),
+        "{}",
+        outcome.err()
+    );
     assert!(
         outcome
             .out
@@ -840,6 +864,58 @@ async fn doctor_renders_reasons_posture_and_headless_readiness() {
         ),
         "{text}"
     );
+}
+
+/// A doctor report selecting `selected`, with 1Password available and the
+/// token's presence at server start `token`.
+fn ci_report(selected: &str, token: bool) -> trusty_secrets::server::DoctorResponse {
+    serde_json::from_value(serde_json::json!({
+        "socket": "/s", "index_root": "/i", "machine_config": "/m",
+        "project_root": null, "project_config": null, "selected_backend": selected,
+        "backends": [
+            {"id": "keychain", "available": true, "capabilities": ["READ", "WRITE"]},
+            {"id": "onepassword", "available": true, "capabilities": ["READ", "WRITE"]},
+        ],
+        "headless": {"onepassword_token": token},
+    }))
+    .expect("decode")
+}
+
+/// #7519 d4 Q2 (owner ruling): under `CI=true`, doctor exits non-zero when
+/// the selected 1Password has no service-account token at server start.
+/// Without CI, or with a token, or with another backend selected, it passes
+/// as before. Red while CI was not read.
+#[tokio::test]
+async fn doctor_under_ci_fails_when_onepassword_has_no_headless_credential() {
+    use doctor::{Judged, is_ci, verdict};
+    let err = verdict(&ci_report("onepassword", false), Judged::Project, true)
+        .expect_err("CI with no token must fail");
+    assert!(
+        err.to_string().contains("OP_SERVICE_ACCOUNT_TOKEN"),
+        "{err}"
+    );
+    for (selected, token, ci) in [
+        ("onepassword", false, false),
+        ("onepassword", true, true),
+        ("keychain", false, true),
+    ] {
+        verdict(&ci_report(selected, token), Judged::Project, ci)
+            .unwrap_or_else(|e| panic!("{selected} token={token} ci={ci}: {e}"));
+    }
+    for (value, ci) in [
+        (Some("true"), true),
+        (Some("TRUE"), true),
+        (Some("1"), true),
+        (Some("false"), false),
+        (Some(""), false),
+        (None, false),
+    ] {
+        assert_eq!(is_ci(value), ci, "{value:?}");
+    }
+    // A CI run on the Keychain still passes end to end.
+    let h = harness().await;
+    let outcome = run_ci(&h.client, &h.repo, "", "", true, &["doctor"]).await;
+    assert_eq!(outcome.err, None, "{}", outcome.out);
 }
 
 #[tokio::test]

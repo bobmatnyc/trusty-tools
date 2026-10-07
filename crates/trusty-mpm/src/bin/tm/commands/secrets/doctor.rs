@@ -22,33 +22,54 @@ use super::session::{describe, is_project_refusal};
 /// opens, with the reason for each one it does not.
 ///
 /// What: asks with the project; when the server refuses the project (no
-/// checkout, no remote, or a remote off github.com) reports that and asks
-/// again without it. A socket that cannot be started or reached exits 1 as
+/// checkout, no remote, or a remote off github.com) reports that, asks
+/// again without it, writes the machine default's report, and exits 1
+/// (#7519 d4 Q4). A socket that cannot be started or reached exits 1 as
 /// `unreachable`; a server refusal exits 1 as `reachable` with the server's
-/// text; a selected backend that is unavailable exits 1 after the table.
+/// text; a selected backend that is unavailable exits 1 after the table;
+/// under `CI=true`, so does a selected 1Password with no service-account
+/// token at server start (#7519 d4 Q2).
 /// Test: `doctor_reports_socket_and_backends_without_values`,
 /// `doctor_reports_backends_when_the_remote_is_off_github`,
 /// `doctor_reports_a_refusing_server_as_reachable`,
 /// `doctor_fails_when_the_selected_backend_is_unavailable`,
 /// `doctor_renders_reasons_posture_and_headless_readiness`,
+/// `doctor_under_ci_fails_when_onepassword_has_no_headless_credential`,
 /// `every_verb_fails_without_a_value_when_the_socket_is_unreachable`.
 pub(super) async fn doctor(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<()> {
-    let report = ask(ctx, out).await?;
+    let (report, project) = ask(ctx, out).await?;
     render(&report, out)?;
-    verdict(&report)
+    verdict(&report, project, ctx.ci)
+}
+
+/// Whether doctor judged the project the caller is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Judged {
+    /// The report covers the project, or no project was asked about.
+    Project,
+    /// The server refused the project; the report is the machine default's.
+    MachineDefault,
+}
+
+/// Whether a `CI` value marks a CI run: `true` or `1`, in any case.
+pub(super) fn is_ci(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.eq_ignore_ascii_case("true") || v == "1")
 }
 
 /// The doctor report, asked with the project and, when the server refuses
 /// the project, again without it.
 ///
-/// What: the refusal is written as a `project:` line before the retry.
-async fn ask(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<DoctorResponse> {
+/// What: the refusal is written as a `project:` line before the retry, and
+/// the report comes back as [`Judged::MachineDefault`].
+async fn ask(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<(DoctorResponse, Judged)> {
     let socket = ctx.client.socket();
+    let mut judged = Judged::Project;
     let mut answer = ctx.call_raw(DOCTOR, Value::Null).await?;
     if let Err(e) = &answer
         && is_project_refusal(e)
     {
         writeln!(out, "project: {}", describe(e, socket))?;
+        judged = Judged::MachineDefault;
         answer = ctx.client.call(DOCTOR, Value::Null).await;
     }
     let report = match answer {
@@ -63,8 +84,9 @@ async fn ask(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<DoctorRespons
             bail!(describe(&e, socket));
         }
     };
-    serde_json::from_value(report)
-        .map_err(|_| anyhow!("tm secrets doctor: the answer did not decode"))
+    let report = serde_json::from_value(report)
+        .map_err(|_| anyhow!("tm secrets doctor: the answer did not decode"))?;
+    Ok((report, judged))
 }
 
 /// Write the report: paths, the selection and its posture, one line per
@@ -153,8 +175,21 @@ fn row_text(backend: &BackendStatus, onepassword_token: Option<bool>) -> String 
     text
 }
 
-/// The exit status: an error when the selected backend is unavailable.
-fn verdict(report: &DoctorResponse) -> anyhow::Result<()> {
+/// The exit status, judged after the report is written.
+///
+/// What, in order, each an error:
+/// 1. the selected backend is unavailable;
+/// 2. #7519 d4 Q4 (owner ruling 2026-10-07): the server refused the
+///    project, so the report is the machine default's, not the project's;
+/// 3. #7519 d4 Q2 (owner ruling 2026-10-07): a CI run (`ci`) whose selected
+///    backend is 1Password with no service-account token at server start,
+///    or a server too old to say. Keeper's device approval and the Keychain
+///    are not judged: doctor cannot detect either without a spawn.
+///
+/// Test: `doctor_fails_when_the_selected_backend_is_unavailable`,
+/// `doctor_reports_backends_when_the_remote_is_off_github`,
+/// `doctor_under_ci_fails_when_onepassword_has_no_headless_credential`.
+pub(super) fn verdict(report: &DoctorResponse, judged: Judged, ci: bool) -> anyhow::Result<()> {
     let selected = report
         .backends
         .iter()
@@ -163,6 +198,19 @@ fn verdict(report: &DoctorResponse) -> anyhow::Result<()> {
         bail!(
             "tm secrets doctor: the selected backend `{}` is unavailable",
             report.selected_backend
+        );
+    }
+    if judged == Judged::MachineDefault {
+        bail!(
+            "tm secrets doctor: the project was refused, so the report above is the machine \
+             default's; fix the `project:` line above"
+        );
+    }
+    let token = report.headless.is_some_and(|h| h.onepassword_token);
+    if ci && report.selected_backend == BackendId::onepassword() && !token {
+        bail!(
+            "tm secrets doctor: CI=true and the selected backend `onepassword` has no headless \
+             credential: OP_SERVICE_ACCOUNT_TOKEN was not set where the secrets server started"
         );
     }
     Ok(())

@@ -585,6 +585,9 @@ tm secrets copy --from <backend> --to <backend> [KEY...]
                                                # backend without ever printing it — the owner's "copy vars between stores" requirement
                                                # a key not copied (absent from the source, refused by the destination) is named; exits non-zero
 tm secrets doctor                              # calls secrets.doctor (§7), renders the table with each unavailable backend's reason and fix
+                                               # exits non-zero when the selected backend is unavailable; when the server refused the
+                                               # project (the machine default's report is still printed); and, under CI=true (or CI=1),
+                                               # when the selected backend is 1Password with no OP_SERVICE_ACCOUNT_TOKEN at server start
 tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
                                                # resolves each named KEY from the active vault and injects the VALUE into the child's
                                                # environment (--env) or stdin (--stdin) only — never into <command...>'s own argv, never
@@ -791,6 +794,13 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Amended for Keeper by #7519 P3** (§8.2): Keeper has no token path;
    headless use needs a prior human device approval and persistent login,
    and without them every call fails closed as `backend_locked`.
+   **Doctor exit status, owner ruling 2026-10-07 (#7519 P4, d4):** under
+   `CI=true`, `tm secrets doctor` exits non-zero when the selected backend is
+   1Password and `OP_SERVICE_ACCOUNT_TOKEN` was not set when the secrets
+   server started. Keeper and the Keychain are not judged, because doctor
+   cannot detect device approval or an unlocked Keychain without a spawn.
+   A project the server refuses (no checkout, no remote, a remote off
+   github.com) also exits non-zero, after the machine default's report.
 5. **Cross-project vault sharing.** §6.3's default vault name is per-repo. Is
    an explicit `secrets.vault:` override (already in §6.1's example) the only
    sanctioned way to share one vault across repos, or should a monorepo-style
