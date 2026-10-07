@@ -14,14 +14,23 @@
 //! caller's environment through, and a tracked `.envrc` or an agent's
 //! environment must not move the audit trail into a project tree (DOC-45
 //! C-7.12).
+//! #7524: for the same reason [`INDEX_DIR_ENV`] moves the index only for a
+//! server whose socket is outside the default socket's directory. The first
+//! spawner's environment would otherwise move the names index for every
+//! client of the shared server; a test or sandbox in its own directory keeps
+//! the override, and `--index-dir` works on any socket.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
 //! `settings_idle_env_falls_back_on_garbage_and_zero`,
-//! `settings_reject_unknown_and_incomplete_flags`.
+//! `settings_reject_unknown_and_incomplete_flags`,
+//! `settings_index_env_is_ignored_on_the_default_socket`,
+//! `settings_index_override_survives_off_the_default_socket`,
+//! `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::SecretsError;
@@ -34,7 +43,8 @@ pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
 /// Overrides the socket path.
 pub const SOCKET_ENV: &str = "TRUSTY_SECRETS_SOCKET";
 
-/// Overrides the names-only index directory.
+/// Overrides the names-only index directory, but only for a server whose
+/// socket is outside the default socket's directory (#7524).
 pub const INDEX_DIR_ENV: &str = "TRUSTY_SECRETS_INDEX_DIR";
 
 /// The credential access audit log under `$HOME` (#4567, DOC-45 C-7.9).
@@ -151,14 +161,18 @@ impl ServerSettings {
     /// is actually needed. The audit log is `--audit-log`, else
     /// [`audit_log_beside`] an index named by the `--index-dir` flag, else
     /// [`AUDIT_LOG_SUBPATH`] under `$HOME` — also when the index comes from
-    /// [`INDEX_DIR_ENV`]. No environment variable moves it.
+    /// [`INDEX_DIR_ENV`]. No environment variable moves it. #7524:
+    /// [`INDEX_DIR_ENV`] is read only when the socket is outside the default
+    /// socket's directory (`is_default_socket`); inside it, the index is the
+    /// `--index-dir` flag or the default.
     ///
     /// # Errors
     ///
     /// [`SettingsError`] for a malformed command line or an unknown `$HOME`.
     ///
     /// Test: `settings_flags_beat_env_beat_defaults`,
-    /// `settings_reject_unknown_and_incomplete_flags`.
+    /// `settings_reject_unknown_and_incomplete_flags`,
+    /// `settings_index_env_is_ignored_on_the_default_socket`.
     pub fn from_args(
         args: impl IntoIterator<Item = OsString>,
         env: impl Fn(&str) -> Option<String>,
@@ -205,9 +219,15 @@ impl ServerSettings {
             (None, Some(index_flag)) => audit_log_beside(index_flag),
             (None, None) => under_home(AUDIT_LOG_SUBPATH)?,
         };
-        let index_root = pick(index_root, INDEX_DIR_ENV, INDEX_SUBDIR)?;
+        let socket = pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?;
+        let index_root = match index_root {
+            Some(path) => path,
+            // #7524: a caller's environment never moves the shared server's index.
+            None if is_default_socket(&socket) => under_home(INDEX_SUBDIR)?,
+            None => pick(None, INDEX_DIR_ENV, INDEX_SUBDIR)?,
+        };
         Ok(Self {
-            socket: pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?,
+            socket,
             machine_config: match machine_config {
                 Some(path) => path,
                 None => under_home(MACHINE_CONFIG_SUBPATH)?,
@@ -235,6 +255,82 @@ pub fn audit_log_beside(index_root: &Path) -> PathBuf {
         .join("audit.jsonl")
 }
 
+/// Whether `socket` is the shared default socket under `$HOME`.
+///
+/// Why: #7524 M3 — [`INDEX_DIR_ENV`] must not reach the server every client
+/// shares. A case-insensitive filesystem serves `SECRETS.SOCK` to a client
+/// dialling `secrets.sock`, so the decision rests on the directory alone.
+/// What: `true` when `$HOME` is unknown (fail closed), or when `socket` sits
+/// in the default socket's directory by [`same_socket`], whatever its file
+/// name.
+/// Test: `settings_index_env_is_ignored_on_the_default_socket`,
+/// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
+pub(crate) fn is_default_socket(socket: &Path) -> bool {
+    dirs::home_dir().is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH)))
+}
+
+/// Whether sockets `a` and `b` sit in one directory; file names are ignored.
+///
+/// What: compares the [`dir_identity`] of each parent. A parent that cannot
+/// be resolved counts as a match, failing closed like an unknown `$HOME`.
+/// Test: `settings_socket_alias_through_a_symlinked_dir_is_the_same_socket`,
+/// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+/// `settings_dotdot_over_a_missing_dir_is_the_default_socket`,
+/// `settings_non_ascii_missing_name_is_the_default_socket`.
+pub(crate) fn same_socket(a: &Path, b: &Path) -> bool {
+    match (dir_identity(a), dir_identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// A directory as the device and inode of its deepest existing ancestor,
+/// plus the ASCII-lowercased names below it that do not exist yet.
+type DirIdentity = ((u64, u64), Vec<String>);
+
+/// The [`DirIdentity`] of `socket`'s parent directory.
+///
+/// What: an empty parent (a bare relative name) is `.`. The kernel resolves
+/// the existing part, so case, `.`, `..`, `//` and symlinks reach one inode.
+/// Missing names are compared ASCII-lowercased, because the server creates
+/// them and a case-insensitive filesystem would fold them. `None` (the
+/// default socket, failing closed) for no parent, a `stat` that fails other
+/// than by absence, or a missing part that is `..` or a name that is not
+/// ASCII — `create_dir_all` resolves the one and the filesystem may fold
+/// the other in ways this comparison does not model (#7524).
+fn dir_identity(socket: &Path) -> Option<DirIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = socket.parent()?;
+    let parts: Vec<Component<'_>> = parent.components().collect();
+    for exists in (usize::from(parent.has_root())..=parts.len()).rev() {
+        let mut prefix: PathBuf = parts[..exists].iter().collect();
+        if prefix.as_os_str().is_empty() {
+            prefix.push(".");
+        }
+        match std::fs::metadata(&prefix) {
+            Ok(meta) => {
+                let mut missing = Vec::new();
+                for part in &parts[exists..] {
+                    match part {
+                        Component::ParentDir => return None,
+                        Component::Normal(name) => {
+                            let name = name.to_str().filter(|n| n.is_ascii())?;
+                            missing.push(name.to_ascii_lowercase());
+                        }
+                        _ => {}
+                    }
+                }
+                return Some(((meta.dev(), meta.ino()), missing));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.
 fn parse_idle_flag(value: &OsString) -> Result<Duration, SettingsError> {
     match value.to_str().map(str::trim).map(str::parse::<u64>) {
@@ -256,3 +352,7 @@ pub fn idle_from_env(raw: Option<&str>) -> Duration {
         _ => DEFAULT_IDLE_TIMEOUT,
     }
 }
+
+#[cfg(test)]
+#[path = "settings_tests.rs"]
+mod tests;

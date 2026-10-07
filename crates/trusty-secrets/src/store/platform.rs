@@ -8,14 +8,15 @@
 //! crate has no trusty-common dependency.
 //! What: a private-directory creator (0700), an atomic private-file writer
 //! (0600, temp + rename), a bounded cross-process exclusive lock on a `.lock`
-//! sidecar, the home directory, and the `origin` remote URL of a checkout.
+//! sidecar, a size- and type-checked config reader (#7524), the home
+//! directory, and the `origin` remote URL of a checkout.
 //! Test: `index_files_are_0600_in_a_0700_directory`,
 //! `index_write_publishes_by_rename`, `index_concurrent_writers_never_lose_a_name`,
 //! `index_lock_timeout_fails_closed`, `scope_derive_reads_the_origin_remote`.
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -78,6 +79,83 @@ pub(crate) fn create_private_dir(dir: &Path) -> Result<(), SecretsError> {
     {
         std::fs::create_dir_all(dir).map_err(io_err(dir))
     }
+}
+
+/// What [`read_config`] does with a symbolic link at the path itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Symlinks {
+    /// Open the target: the untracked machine config may be a dotfile link.
+    Follow,
+    /// Refuse the link: a tracked file whose target a cloned repo chooses.
+    Refuse,
+}
+
+/// Read a config file of at most `max` bytes; `Ok(None)` when it is absent.
+///
+/// Why: #7524 M2 — the project config is tracked, so a cloned repository
+/// picks what sits at its path. A symlink to `/dev/zero` or a FIFO kept
+/// `read_to_string` reading or blocked for good on a server thread.
+/// What: opens `O_NONBLOCK`, plus `O_NOFOLLOW` for [`Symlinks::Refuse`], and
+/// judges the open descriptor before reading a byte: a symlink, anything but
+/// a regular file, or a size over `max` is [`SecretsError::Config`] with
+/// fixed text naming the path. The read takes at most `max + 1` bytes, so a
+/// file that grows after the check is refused too. Bytes that are not UTF-8
+/// are refused and dropped unread.
+/// Test: `config_symlink_to_dev_zero_is_refused_promptly`,
+/// `config_fifo_is_refused_without_blocking`,
+/// `config_non_regular_and_linked_files_are_refused`,
+/// `config_oversized_file_is_refused_and_a_normal_one_loads`.
+pub(crate) fn read_config(
+    path: &Path,
+    max: u64,
+    symlinks: Symlinks,
+) -> Result<Option<String>, SecretsError> {
+    let refused = |reason: String| SecretsError::Config {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let too_large = || refused(format!("the file is larger than {max} bytes"));
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nofollow = match symlinks {
+            Symlinks::Follow => 0,
+            Symlinks::Refuse => libc::O_NOFOLLOW,
+        };
+        // #7524: O_NONBLOCK so opening a FIFO returns instead of waiting.
+        options.custom_flags(libc::O_NONBLOCK | nofollow);
+    }
+    #[cfg(not(unix))]
+    let _ = symlinks;
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(e) if symlinks == Symlinks::Refuse && e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(refused("the file is a symbolic link".to_string()));
+        }
+        Err(source) => return Err(io_err(path)(source)),
+    };
+    let meta = file.metadata().map_err(io_err(path))?;
+    if !meta.file_type().is_file() {
+        return Err(refused("the file is not a regular file".to_string()));
+    }
+    if meta.len() > max {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io_err(path))?;
+    if bytes.len() as u64 > max {
+        return Err(too_large());
+    }
+    // #7524: a `FromUtf8Error` carries the bytes; it is dropped unread.
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| refused("the file is not valid UTF-8".to_string()))
 }
 
 /// Open a new file for writing, owner-only from creation on Unix.

@@ -270,6 +270,149 @@ fn config_absent_section_is_none() {
     assert_eq!(project.vault.unwrap().as_str(), "trusty/acme/shared");
 }
 
+/// The size bound #7524 promises: 64 KiB.
+const CONFIG_LIMIT: usize = 64 * 1024;
+
+/// Run `load` on a thread; abort the test process if it has not returned
+/// within two seconds.
+///
+/// Why: #7524 M2 — the pre-fix loader blocks forever on a FIFO and reads
+/// `/dev/zero` without bound. A panic would leave that thread allocating
+/// while the rest of the test binary runs, so a timeout aborts instead.
+#[cfg(unix)]
+fn within_deadline<T: Send + 'static>(load: impl FnOnce() -> T + Send + 'static) -> T {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(load());
+    });
+    match rx.recv_timeout(DEADLINE) {
+        Ok(value) => value,
+        Err(RecvTimeoutError::Disconnected) => panic!("the config load panicked"),
+        Err(RecvTimeoutError::Timeout) => {
+            eprintln!("config load still running after {DEADLINE:?}; aborting");
+            std::process::abort();
+        }
+    }
+}
+
+/// Assert `err` is the fixed-text config refusal for `path`.
+fn assert_config_refusal(err: &SecretsError, path: &Path) {
+    match err {
+        SecretsError::Config { path: refused, .. } => assert_eq!(refused, path, "{err}"),
+        other => panic!(
+            "expected a Config refusal for {}: {other:?}",
+            path.display()
+        ),
+    }
+}
+
+/// Why: #7524 M2 — a cloned repository can track its project config as a
+/// symlink to `/dev/zero`, and the loader read it forever on a server
+/// thread. The machine loader gets the same type check.
+/// Red when either load does not return a refusal within the deadline.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn config_symlink_to_dev_zero_is_refused_promptly() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("trusty-secrets.yaml");
+    std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+    let probe = path.clone();
+    let err = within_deadline(move || load_project_at(&probe)).unwrap_err();
+    assert_config_refusal(&err, &path);
+    let probe = path.clone();
+    let err = within_deadline(move || load_machine_at(&probe)).unwrap_err();
+    assert_config_refusal(&err, &path);
+}
+
+/// Why: #7524 M2 — opening a FIFO for reading blocks until a writer appears,
+/// which pinned a blocking-pool thread and kept the connection open.
+/// Red when the load does not return a refusal within the deadline.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn config_fifo_is_refused_without_blocking() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("trusty-secrets.yaml");
+    let made = Command::new("mkfifo").arg(&path).status().unwrap();
+    assert!(made.success(), "mkfifo failed: {made:?}");
+    let probe = path.clone();
+    let err = within_deadline(move || load_project_at(&probe)).unwrap_err();
+    assert_config_refusal(&err, &path);
+}
+
+/// Why: #7524 M2 — only a regular file is a project config. A directory is
+/// refused as a config, not reported as an I/O failure, and a symlink is
+/// refused even when it points at a regular file in the same checkout. The
+/// untracked machine config may still be a symlink (a dotfile link).
+/// Red when a directory reads as `Io` or a linked project config loads.
+/// Test: itself.
+#[cfg(unix)]
+#[test]
+fn config_non_regular_and_linked_files_are_refused() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().join("dir.yaml");
+    std::fs::create_dir(&dir).unwrap();
+    assert_config_refusal(&load_project_at(&dir).unwrap_err(), &dir);
+
+    let target = write(tmp.path(), "real.yaml", "secrets:\n  backend: keychain\n");
+    let link = tmp.path().join("trusty-secrets.yaml");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let err = load_project_at(&link).unwrap_err();
+    assert_config_refusal(&err, &link);
+    assert!(!err.to_string().contains("keychain"), "{err}");
+
+    let machine = load_machine_at(&link).unwrap().unwrap();
+    assert_eq!(machine.default_backend, None);
+}
+
+/// Why: #7524 M2 — a config over the size bound is refused before it is
+/// read, and a file at the bound, like any real config, still loads.
+/// Red when the oversized file loads.
+/// Test: itself.
+#[test]
+fn config_oversized_file_is_refused_and_a_normal_one_loads() {
+    let tmp = TempDir::new().unwrap();
+    let header = "secrets:\n  backend: keychain\n";
+    let normal = write(tmp.path(), "normal.yaml", header);
+    let loaded = load_project_at(&normal).unwrap().unwrap();
+    assert_eq!(loaded.backend.unwrap().as_str(), "keychain");
+
+    let at_limit = format!("{header}#{}", "x".repeat(CONFIG_LIMIT - header.len() - 1));
+    assert_eq!(at_limit.len(), CONFIG_LIMIT);
+    assert_eq!(super::config::MAX_CONFIG_BYTES, CONFIG_LIMIT as u64);
+    let path = write(tmp.path(), "at-limit.yaml", &at_limit);
+    let loaded = load_project_at(&path).unwrap().unwrap();
+    assert_eq!(loaded.backend.unwrap().as_str(), "keychain");
+
+    let over = write(tmp.path(), "over.yaml", &format!("{at_limit}x"));
+    assert_config_refusal(&load_project_at(&over).unwrap_err(), &over);
+    assert_config_refusal(&load_machine_at(&over).unwrap_err(), &over);
+}
+
+/// Why: #7524 M2 — a project config that is not UTF-8 is a config refusal,
+/// not an I/O error, and the refusal never carries the file's bytes.
+/// Test: itself.
+#[test]
+fn config_non_utf8_file_is_refused_without_echoing_its_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("trusty-secrets.yaml");
+    let marker = "ghp_marker7524";
+    let mut body = format!("secrets:\n  backend: keychain\n  token: {marker}").into_bytes();
+    body.push(0xff);
+    body.push(b'\n');
+    std::fs::write(&path, &body).unwrap();
+    let err = load_project_at(&path).unwrap_err();
+    assert_config_refusal(&err, &path);
+    for shown in [err.to_string(), format!("{err:?}")] {
+        for leaked in [marker, "keychain", "\u{fffd}", "\u{ff}", "\\xff", "\\u{ff}"] {
+            assert!(!shown.contains(leaked), "{leaked:?} in {shown}");
+        }
+    }
+}
+
 /// Why: the owner and repository come from the remote URL; every common form
 /// must parse, and a failure must never echo the URL, which can carry a token.
 /// Test: itself.

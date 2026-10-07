@@ -5,8 +5,9 @@
 //! socket and exits. No launchd job runs it.
 //! What: parses `serve [--socket P] [--index-dir P] [--machine-config P]
 //! [--audit-log P] [--idle-timeout-secs N]` (env: `TRUSTY_SECRETS_SOCKET`,
-//! `TRUSTY_SECRETS_INDEX_DIR`, `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`; the audit
-//! log has no environment override), serves
+//! `TRUSTY_SECRETS_INDEX_DIR` off the default socket only (#7524),
+//! `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS`; the audit log has no environment
+//! override), serves
 //! with the real backends, and exits 0 on idle or SIGTERM/SIGINT. A refused
 //! bind — a live instance already serving — exits 1 without touching it.
 //! The git redirect variables are removed from its environment at start.
