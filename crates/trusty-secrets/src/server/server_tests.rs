@@ -1574,3 +1574,7 @@ fn settings_reject_unknown_and_incomplete_flags() {
 // #4567: the audit-trail tests share this module's fixture.
 #[path = "audit_tests.rs"]
 mod audit_tests;
+
+// #7519: the delete-across-backends tests share this module's fixture.
+#[path = "delete_tests.rs"]
+mod delete_tests;

@@ -5,6 +5,7 @@
 //! stored. This type is that order, and the place reference resolution runs.
 //! What: `set`/`list`/`delete`/`set_agents_may_use` for one vault, plus
 //! `locate`/`read` for `secret://` references against a [`ScopeSet`].
+//! `delete_across` also clears backends other than the configured one (#7519).
 //! A `set` writes the backend inside the index lock, after the index read, so
 //! a corrupt or locked index fails before any value is stored and an index
 //! row never claims a value the backend refused.
@@ -150,11 +151,11 @@ impl SecretStore {
         self.index.list(vault)
     }
 
-    /// Remove `key` from `vault` (`secrets.delete`).
+    /// Remove `key` from `vault` in this store's backend and the index.
     ///
-    /// What: deletes from the backend, then drops the index row. A refused
-    /// backend delete leaves the row, so `list` never under-reports.
-    /// `removed` is true when either held the key.
+    /// What: [`Self::delete_across`] with no other backend. The server's
+    /// `secrets.delete` uses `delete_across`, so a value left in another
+    /// backend is cleared too (#7519).
     /// Test: `store_delete_removes_entry_and_row`,
     /// `store_backend_errors_are_never_downgraded`.
     pub fn delete(
@@ -162,8 +163,43 @@ impl SecretStore {
         vault: &VaultName,
         key: &SecretKey,
     ) -> Result<DeleteResponse, SecretsError> {
+        self.delete_across(vault, key, &[])
+    }
+
+    /// Remove `key` from `vault` in this store's backend, in each of
+    /// `others`, and in the index (`secrets.delete`).
+    ///
+    /// Why: #7519 A5 — after a backend switch, or a `copy`, a value can sit
+    /// in a backend other than the configured one. A delete that clears only
+    /// the configured backend leaves that credential behind.
+    /// What: refuses a configured backend without `WRITE`. Deletes from the
+    /// configured backend, then from each of `others`, and keeps going after
+    /// a failure so every backend that can be cleared is. If any backend
+    /// failed, the first error is returned and the index row is kept, so
+    /// `list` still shows a key a backend may hold. Otherwise the row is
+    /// dropped. `removed` is true when any backend or the index held the key.
+    /// Test: `store_delete_across_removes_the_key_from_every_backend`,
+    /// `store_delete_across_keeps_the_row_when_any_backend_fails`.
+    pub fn delete_across(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        others: &[Arc<dyn SecretBackend>],
+    ) -> Result<DeleteResponse, SecretsError> {
         self.require(Capabilities::WRITE, "delete")?;
-        let existed = self.backend.delete(vault, key)?;
+        let mut existed = false;
+        let mut failure: Option<SecretsError> = None;
+        for backend in std::iter::once(&self.backend).chain(others) {
+            match backend.delete(vault, key) {
+                Ok(held) => existed |= held,
+                // #7519: a failed delete may leave a value; never a miss.
+                Err(e) if failure.is_none() => failure = Some(e),
+                Err(_) => {}
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
         let had_row = self.index.remove(vault, key)?;
         Ok(DeleteResponse {
             removed: existed || had_row,

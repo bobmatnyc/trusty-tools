@@ -173,7 +173,7 @@ impl DeleteRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct DeleteResponse {
-    /// Whether the backend or the index held the key.
+    /// Whether any backend or the index held the key.
     pub removed: bool,
 }
 

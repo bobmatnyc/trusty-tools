@@ -5,8 +5,9 @@
 //! flags let [`super::SecretStore`] refuse an operation a backend cannot do —
 //! reading back a sync target, for example — before calling it.
 //! What: [`Capabilities`], [`SecretBackend`], [`open_backend`], which maps
-//! a configured [`BackendId`] to an implementation, and [`default_backend`],
-//! the backend used when no config names one.
+//! a configured [`BackendId`] to an implementation, [`default_backend`],
+//! the backend used when no config names one, and [`local_backends`], every
+//! backend a `delete` must clear.
 //! Test: `store_capabilities_gate_operations`, `store_open_backend_knows_keychain_and_file`,
 //! `store_keychain_failure_never_falls_through_to_file`.
 
@@ -141,6 +142,31 @@ pub(crate) fn default_backend_for(keychain_compiled: bool) -> BackendId {
         // #9326: ruling f5 — files only where no Keychain is compiled in.
         BackendId::file()
     }
+}
+
+/// Every backend this build can have stored a value in (#7519).
+///
+/// Why: A5 — `delete` must clear every backend that may hold a key, not
+/// only the configured one. A backend this build does not link holds
+/// nothing it wrote, and off macOS every Keychain call fails closed, so
+/// including it would fail every delete there.
+/// What: `keychain` on a build with a Keychain backend, then `file` on Unix.
+/// Decided at build time, like [`default_backend`], never by probing.
+/// Test: `store_local_backends_follow_the_build`.
+pub fn local_backends() -> Vec<BackendId> {
+    local_backends_for(KEYCHAIN_COMPILED)
+}
+
+/// [`local_backends`] for a build that does or does not link a Keychain.
+pub(crate) fn local_backends_for(keychain_compiled: bool) -> Vec<BackendId> {
+    let mut ids = Vec::with_capacity(2);
+    if keychain_compiled {
+        ids.push(BackendId::keychain());
+    }
+    if cfg!(unix) {
+        ids.push(BackendId::file());
+    }
+    ids
 }
 
 /// The implementation for a configured backend id.

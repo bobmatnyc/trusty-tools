@@ -16,6 +16,7 @@
 //! Test: `server_tests.rs` and `audit_tests.rs` beside this module.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -29,8 +30,8 @@ use super::router::State;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
-use crate::api::{BackendId, SecretKey};
-use crate::store::{Capabilities, SecretStore};
+use crate::api::{BackendId, SecretKey, SecretsError};
+use crate::store::{Capabilities, SecretBackend, SecretStore, local_backends};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -126,10 +127,15 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     })
 }
 
-/// `secrets.delete`: remove one key from the backend and the index.
+/// `secrets.delete`: remove one key from every backend and the index.
 ///
-/// What: #4567 — audited like [`set`].
+/// What: the scope check runs before any backend is opened. The key is
+/// then deleted from the configured backend and from [`other_backends`]
+/// through [`SecretStore::delete_across`] (#7519). #4567 — audited like
+/// [`set`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
 /// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Delete, Recording::Once, |gate| {
@@ -140,9 +146,40 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
+        // #7519: a backend switch or a copy leaves values in other backends.
+        let others = other_backends(state, &project.resolved_config().backend)?;
         gate.admit()?;
-        to_json(&store.delete(&request.vault, &request.key)?)
+        let response = store.delete_across(&request.vault, &request.key, &others)?;
+        to_json(&response)
     })
+}
+
+/// Every backend but `configured` that may hold a key (#7519).
+///
+/// Why: A5 — a delete must clear the backend a key was set under before a
+/// switch, not only the one configured now.
+/// What: [`local_backends`] minus `configured`, each opened through the
+/// factory. A factory that answers [`SecretsError::UnknownBackend`] has no
+/// such backend, so it holds nothing and is skipped. Any other open failure
+/// is returned: that backend may still hold a value.
+/// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_fails_closed_when_an_old_backend_cannot_open`.
+fn other_backends(
+    state: &State,
+    configured: &BackendId,
+) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
+    let mut others = Vec::new();
+    for id in local_backends() {
+        if id == *configured {
+            continue;
+        }
+        match (state.backends)(&id) {
+            Ok(backend) => others.push(backend),
+            Err(SecretsError::UnknownBackend { .. }) => {}
+            Err(e) => return Err(ErrorKind::from(e)),
+        }
+    }
+    Ok(others)
 }
 
 /// Which keys a `copy` moves: every indexed key, or the ones named.

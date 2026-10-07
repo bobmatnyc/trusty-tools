@@ -145,6 +145,84 @@ fn store_delete_removes_entry_and_row() {
     assert!(!store.delete(&project(), &key("DROP")).unwrap().removed);
 }
 
+/// Why: #7519 A5 — a key in a backend other than the configured one is
+/// removed too; a key no backend holds is still `removed: false`.
+/// Test: itself.
+#[test]
+fn store_delete_across_removes_the_key_from_every_backend() {
+    let (_tmp, configured, store) = fixture();
+    let old = Arc::new(MemoryBackend::new());
+    let others = [Arc::clone(&old) as Arc<dyn SecretBackend>];
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("BOTH"), &value).unwrap();
+    old.set(&project(), &key("BOTH"), &value).unwrap();
+    old.set(&project(), &key("ONLY_OLD"), &value).unwrap();
+
+    let both = store.delete_across(&project(), &key("BOTH"), &others);
+    assert!(both.unwrap().removed);
+    let only_old = store.delete_across(&project(), &key("ONLY_OLD"), &others);
+    assert!(
+        only_old.unwrap().removed,
+        "a value only the old backend held"
+    );
+    assert!(configured.is_empty() && old.is_empty());
+    assert!(store.list(&project()).unwrap().is_empty());
+    let none = store.delete_across(&project(), &key("NONE"), &others);
+    assert!(!none.unwrap().removed);
+}
+
+/// Why: #7519, Fail-Open Check — a backend that fails to delete may still
+/// hold the value, so the call is an error and the index row stays. The
+/// other backends are still cleared, and the error carries no value.
+/// Red when a failed delete is skipped or ends the loop early.
+/// Test: itself.
+#[test]
+fn store_delete_across_keeps_the_row_when_any_backend_fails() {
+    let (_tmp, configured, store) = fixture();
+    let later = Arc::new(MemoryBackend::new());
+    let others = [
+        Arc::new(FailingBackend) as Arc<dyn SecretBackend>,
+        Arc::clone(&later) as Arc<dyn SecretBackend>,
+    ];
+    let value = SecretValue::new(FAKE_VALUE);
+    store.set(&project(), &key("API_KEY"), &value).unwrap();
+    later.set(&project(), &key("API_KEY"), &value).unwrap();
+
+    let err = store
+        .delete_across(&project(), &key("API_KEY"), &others)
+        .unwrap_err();
+    assert!(
+        matches!(&err, SecretsError::Backend { backend, .. } if backend == "failing"),
+        "{err:?}"
+    );
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains(FAKE_VALUE), "{shown}");
+    assert!(configured.is_empty() && later.is_empty());
+    let rows = store.list(&project()).unwrap();
+    assert_eq!(rows.len(), 1, "the row stays while a value may remain");
+}
+
+/// Why: #7519 — `delete` sweeps every backend this build can write, and
+/// none it cannot: off macOS every Keychain call fails closed, which would
+/// fail every delete.
+/// Test: itself.
+#[test]
+fn store_local_backends_follow_the_build() {
+    let file: Vec<BackendId> = if cfg!(unix) {
+        vec![BackendId::file()]
+    } else {
+        Vec::new()
+    };
+    let mut with_keychain = vec![BackendId::keychain()];
+    with_keychain.extend(file.iter().cloned());
+    assert_eq!(backend::local_backends_for(true), with_keychain);
+    assert_eq!(backend::local_backends_for(false), file);
+    assert_eq!(
+        local_backends(),
+        backend::local_backends_for(backend::KEYCHAIN_COMPILED)
+    );
+}
+
 /// Why: DOC-74 §15.3 — a project key wins over an owner key with the same
 /// name; explicit references read only the vault they name.
 /// Test: itself.
