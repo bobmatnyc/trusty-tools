@@ -35,6 +35,7 @@ mod mcp_stdio_e2e_5264;
 mod mcp_structured_503_5350;
 mod migration_e2e;
 mod no_auto_discover_env;
+mod port_dashboard_no_http_9214;
 mod registry_isolation;
 mod reindex_quantize_env_conflict_8737;
 mod residency_cold_park;

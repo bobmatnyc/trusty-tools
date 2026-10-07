@@ -963,7 +963,6 @@ crates/trusty-search/src/commands/discover/mod.rs	detects_trusty_tools_dir
 crates/trusty-search/src/commands/discover/mod.rs	root_path_exists_before_reindex
 crates/trusty-search/src/commands/discover/mod.rs	skips_when_no_markers
 crates/trusty-search/src/commands/index.rs	filters_from_index_config_translates_languages
-crates/trusty-search/src/commands/port.rs	handle_port_missing_daemon_test
 crates/trusty-search/src/commands/query.rs	test_query_routing
 crates/trusty-search/src/core/corpus/corpus_ops.rs	prune_deleted_files_removes_hashes
 crates/trusty-search/src/core/indexer/archive.rs	test_stale_signal_fires_for_old_files
