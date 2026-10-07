@@ -10,15 +10,21 @@
 //! counts hallucinations: survivors labelled false or that `oracle::resolves`
 //! cannot resolve at the head, forbidden prose in the body, and a review with
 //! no survivor whose verdict blocks or whose grade a withheld finding shaped.
+//! #9193: a case with `docs` runs as a GitHub PR with `spec_docs` on, its
+//! docs served at the head SHA by a fake `DocFetcher`.
 //! It also checks each case's survivor count and verdict (`expect_verdict`;
 //! AQ-7t, Bob 2026-10-05: an all-withheld APPROVE / APPROVE* keeps it).
 //! Test: `hallucination_count_is_zero`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
+use super::optional_context_off::{FakePrSource, HEAD_SHA, github_input, hermetic_config};
+use super::spec_docs::FakeFetcher;
 use super::*;
+use crate::pipeline::optional_context::OptionalContextRequest;
 
 // The resolver is shared with `tests/model_eval.rs`, so it lives under `tests/`.
 #[path = "../../tests/support/oracle.rs"]
@@ -34,6 +40,12 @@ struct Case {
     diff_file: Option<String>,
     #[serde(default)]
     pr_description: Option<String>,
+    /// #9193: the PR body of a case with `docs`.
+    #[serde(default)]
+    pr_body: String,
+    /// #9193: doc text at the head SHA, by repository path.
+    #[serde(default)]
+    docs: HashMap<String, String>,
     reviewer: serde_json::Value,
     verifier: String,
     hallucinated: Vec<String>,
@@ -119,6 +131,9 @@ async fn run_case(case: &Case, diff: &str) -> ReviewResult {
     let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier {
         judgment: judgment(&case.verifier),
     });
+    if !case.docs.is_empty() {
+        return run_pr_case(case, diff, llm, verifier).await;
+    }
     run_review(
         &default_config(),
         input,
@@ -127,16 +142,45 @@ async fn run_case(case: &Case, diff: &str) -> ReviewResult {
     .await
 }
 
+/// #9193: a case with `docs`, as a GitHub PR whose docs are read at the head.
+async fn run_pr_case(
+    case: &Case,
+    diff: &str,
+    llm: FakeLlm,
+    verifier: Arc<dyn LlmProvider>,
+) -> ReviewResult {
+    let files: Vec<_> = case
+        .docs
+        .iter()
+        .map(|(p, t)| (p.as_str(), Ok(Some(t.clone()))))
+        .collect();
+    let mut options = ReviewOptions::new(OptionalContextRequest::default().with_spec_docs(true));
+    options.pr_source = Some(Arc::new(FakePrSource::new(&case.pr_body, diff)));
+    options.doc_fetcher = Some(FakeFetcher::with(&files));
+    let caller = CallerContext {
+        pr_description: case.pr_description.clone(),
+        ..CallerContext::default()
+    };
+    let deps = ready_deps(Arc::new(llm), Some(verifier));
+    run_review_with(&hermetic_config(), github_input(caller), deps, options)
+        .await
+        .result
+}
+
 /// Hallucinations in one reviewed case.
 fn hallucinations(case: &Case, diff: &str, result: &ReviewResult) -> usize {
     let lines = oracle::diff_lines(diff);
+    let docs = oracle::Docs {
+        head: HEAD_SHA.to_string(),
+        text: case.docs.clone(),
+    };
     let survivors = result
         .findings
         .iter()
         .filter(|f| {
             let removal = case.removals.contains(&f.kind);
             case.hallucinated.contains(&f.kind)
-                || !oracle::resolves(&f.file, f.line, &f.description, &lines, removal)
+                || !oracle::resolves(&f.file, f.line, &f.description, &lines, removal, &docs)
         })
         .count();
     let prose = case

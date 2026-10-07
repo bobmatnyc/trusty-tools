@@ -206,6 +206,20 @@ pub struct RunArgs {
     /// `--include-pr-body`.
     #[arg(long, value_name = "PATH")]
     pub issue_docs_file: Option<std::path::PathBuf>,
+
+    /// Read the ADR, spec and SLD docs the PR body names (plus trusty-search
+    /// hits) at the PR head SHA, for the reviewer only (#9193): at most 6
+    /// docs, 16,000 characters each and 48,000 in total, cut with a visible
+    /// marker. A local diff has no head SHA; the source is reported
+    /// unavailable and the review runs. Reports context sources.
+    #[arg(long)]
+    pub spec_docs: bool,
+
+    /// Read the root CLAUDE.md and up to 3 nested ones at the PR head SHA,
+    /// 16,000 characters in total, for the reviewer only (#9193). Reports
+    /// context sources.
+    #[arg(long)]
+    pub claude_md: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -379,12 +393,16 @@ pub async fn cmd_run(
 /// for the ledger alone; the PR-context text flags are
 /// legacy and turn the ledger on only beside one of those two (ruling
 /// 2026-10-06 03:42Z).
-/// What: the request with `include_pr_body` and `report_context` from the flags.
-/// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`.
+/// What: the request with `include_pr_body`, `report_context` and (#9193)
+/// `spec_docs` and `claude_md` from the flags.
+/// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`,
+/// `run_flags_set_the_request`.
 pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
     OptionalContextRequest::default()
         .with_pr_body(args.include_pr_body)
         .with_report_context(args.report_context)
+        .with_spec_docs(args.spec_docs)
+        .with_claude_md(args.claude_md)
 }
 
 /// [`run_request`] plus the docs `--issue-docs-file` names (#9197).
@@ -987,6 +1005,20 @@ mod tests {
             "--include-pr-body must default to false"
         );
         assert!(!run_request(&args).ledger_enabled());
+    }
+
+    /// #9193: `--spec-docs` and `--claude-md` default off and set their own
+    /// flag in the request, each a new input.
+    #[test]
+    fn run_flags_set_the_request() {
+        let none = run_request(&RunArgs::try_parse_from(["run"]).expect("parse"));
+        assert!(!none.spec_docs && !none.claude_md && !none.requested_new());
+        let args = RunArgs::try_parse_from(["run", "--spec-docs"]).expect("parse");
+        let request = run_request(&args);
+        assert!(request.spec_docs && !request.claude_md && request.requested_new());
+        let args = RunArgs::try_parse_from(["run", "--claude-md"]).expect("parse");
+        let request = run_request(&args);
+        assert!(request.claude_md && !request.spec_docs && request.requested_new());
     }
 
     /// #9192: `--report-context` turns the ledger on with no other new input,

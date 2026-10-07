@@ -127,20 +127,26 @@ impl ExternalFetch for GithubContentsFetch {
             .await
             .map_err(|e| GithubError::Transport(format!("JSON parse error: {e}")))?;
 
-        // The API returns base64 with embedded newlines — strip all whitespace first.
-        let stripped: String = parsed
-            .content
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(stripped.as_bytes())
-            .map_err(|e| GithubError::Transport(format!("base64 decode error: {e}")))?;
-        let text = String::from_utf8(decoded)
-            .map_err(|e| GithubError::Transport(format!("UTF-8 decode error: {e}")))?;
-
-        Ok(Some(text))
+        decode_base64_content(&parsed.content)
+            .map(Some)
+            .map_err(GithubError::Transport)
     }
+}
+
+/// Decode a Contents API `content` field to UTF-8 text (#1419; shared with
+/// #9193's `contents_at_ref`).
+///
+/// What: the API wraps base64 with newlines, so whitespace is stripped first.
+///
+/// # Errors
+///
+/// A message naming the base64 or UTF-8 decode failure.
+pub(crate) fn decode_base64_content(content: &str) -> Result<String, String> {
+    let stripped: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(stripped.as_bytes())
+        .map_err(|e| format!("base64 decode error: {e}"))?;
+    String::from_utf8(decoded).map_err(|e| format!("UTF-8 decode error: {e}"))
 }
 
 // ─── ExternalRepoSpecLookup ───────────────────────────────────────────────────

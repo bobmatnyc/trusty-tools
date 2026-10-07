@@ -139,13 +139,26 @@ pub(super) async fn fetch_github_pr_meta(
     repo: &str,
     pr: u64,
     run_mode: RunMode,
-) -> Result<(ReviewPrMeta, String), GithubError> {
+) -> Result<
+    (
+        ReviewPrMeta,
+        crate::pipeline::optional_context::seams::PrHead,
+    ),
+    GithubError,
+> {
     let client = GithubClient::new()?;
     let token = AuthStrategy::select(run_mode, None)
         .resolve_token(&client, config, owner)
         .await?;
     let meta = fetch_pr_metadata(&client, owner, repo, pr, &token).await?;
-    let head_sha = meta.head.sha.clone();
+    // #9193: a head label naming another owner, or none, is a fork head.
+    let label_owner =
+        |l: &Option<String>| l.as_deref()?.split_once(':').map(|(o, _)| o.to_lowercase());
+    let head = crate::pipeline::optional_context::seams::PrHead {
+        sha: meta.head.sha.clone(),
+        fork: label_owner(&meta.head.label)
+            .is_none_or(|o| Some(o) != label_owner(&meta.base.label)),
+    };
     Ok((
         ReviewPrMeta {
             title: meta.title,
@@ -155,7 +168,7 @@ pub(super) async fn fetch_github_pr_meta(
             author: meta.user.login,
             url: meta.html_url,
         },
-        head_sha,
+        head,
     ))
 }
 

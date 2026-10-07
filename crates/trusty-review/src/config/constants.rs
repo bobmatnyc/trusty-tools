@@ -149,6 +149,26 @@ pub const MAX_ISSUE_DOC_LINE_CHARS: usize = 512;
 /// Largest `--issue-docs-file` `run` reads: 256 KiB (#9197).
 pub const MAX_ISSUE_DOCS_FILE_BYTES: u64 = 256 * 1024;
 
+/// Maximum characters of one ADR/spec/SLD doc the reviewer sees (#9193).
+///
+/// Why: Architect ruling Q6: the issue-doc caps, applied per doc read at the
+/// PR head. A cut is marked and recorded `truncated`.
+pub const MAX_SPEC_DOC_CHARS: usize = 16_000;
+/// Maximum docs one review renders under `## Referenced docs` (#9193).
+pub const MAX_SPEC_DOCS: usize = 6;
+/// Maximum kept characters across every rendered doc (#9193); the first doc
+/// past it is omitted whole, with every doc after it.
+pub const MAX_SPEC_SECTION_CHARS: usize = 48_000;
+/// Maximum Contents API reads for `spec_docs` in one review (#9193).
+pub const MAX_SPEC_DOC_FETCHES: usize = 12;
+/// Maximum characters of the CLAUDE.md section, and of one CLAUDE.md (#9193).
+pub const MAX_CLAUDE_MD_CHARS: usize = 16_000;
+/// Maximum Contents API reads for `claude_md`: the root and three nested files.
+pub const MAX_CLAUDE_MD_FETCHES: usize = 4;
+/// Search hits one doc-discovery query asks trusty-search for (#9193).
+pub const MAX_DOC_DISCOVERY_HITS: u32 = 8;
+/// Seconds one doc read or the discovery search may take (#9193).
+pub const DOC_READ_TIMEOUT_SECS: u64 = 10;
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
 
