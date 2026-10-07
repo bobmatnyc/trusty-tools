@@ -7,7 +7,7 @@
 //! into per-file `index_single_file` calls (or indexes a single file directly).
 //! Test: covered indirectly by the `add` command integration tests.
 
-use crate::commands::daemon_utils::daemon_base_url;
+use crate::commands::daemon_http::daemon_base_url;
 use anyhow::Result;
 use colored::Colorize;
 
@@ -49,7 +49,7 @@ pub async fn index_single_file(
 /// source file under a directory path.
 /// Test: covered indirectly by the `add` command integration tests.
 pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
-    let base = daemon_base_url();
+    let base = daemon_base_url()?;
     let client = trusty_common::server::daemon_http_client()?;
 
     if path.is_dir() {

@@ -77,3 +77,52 @@ fn include_pr_body_marks_the_request() {
         assert!(!parsed.request.requested_new());
     }
 }
+
+/// #9197: `issue_docs` parses into the request with normalised ids, and
+/// sending it counts as a new input; `null` is absent.
+#[test]
+fn review_pr_parses_issue_docs_into_the_request() {
+    let args = json!({
+        "owner": "o", "repo": "r", "pr": 1,
+        "issue_docs": [{"id": "42", "title": "T", "body": "b"}],
+    });
+    let parsed = parse_review_pr_context(&args).expect("parses");
+    let docs = parsed.request.issue_docs.as_deref().expect("docs");
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0].id, "#42");
+    assert!(parsed.request.requested_new());
+    assert_eq!(
+        parse_issue_docs(&json!({"issue_docs": null})).expect("null"),
+        None
+    );
+}
+
+/// #9197 (Ruling B): a wrong `issue_docs` shape is `InvalidParams` naming
+/// the parameter, never ignored.
+#[test]
+fn issue_docs_mistyped_is_invalid_params() {
+    for bad in [
+        json!("x"),
+        json!([{"id": "1"}]),
+        json!({"id": "1", "body": "b"}),
+        json!([1]),
+    ] {
+        let args = json!({"owner": "o", "repo": "r", "pr": 1, "issue_docs": bad.clone()});
+        match parse_review_pr_context(&args) {
+            Err(ToolError::InvalidParams(msg)) => {
+                assert!(msg.starts_with("issue_docs:"), "{bad}: {msg}");
+            }
+            other => panic!("{bad}: expected InvalidParams, got {other:?}"),
+        }
+    }
+}
+
+/// #9197: GitHub issue numbers only in v1; a JIRA-shaped id is refused.
+#[test]
+fn jira_shaped_issue_doc_id_is_invalid_params() {
+    let args = json!({"issue_docs": [{"id": "PROJ-12", "body": "b"}]});
+    match parse_issue_docs(&args) {
+        Err(ToolError::InvalidParams(msg)) => assert!(msg.contains("'id'"), "{msg}"),
+        other => panic!("expected InvalidParams, got {other:?}"),
+    }
+}

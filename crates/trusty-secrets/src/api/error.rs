@@ -253,6 +253,19 @@ pub enum SecretsError {
         path: PathBuf,
     },
 
+    /// A value write into the `file` backend on a build with a Keychain,
+    /// where the untracked machine config does not select `file`. Raised
+    /// before the `file` backend is opened.
+    // #7524 H1: owner ruling item 74 — the Keychain ACL is a boundary against
+    // same-user callers, so moving a value to plaintext needs machine consent.
+    #[error(
+        "this build has a Keychain, so a value is written to the plaintext `file` \
+         backend only when the machine config selects it; set \
+         `secrets.default_backend: file` in the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml to allow it"
+    )]
+    FileBackendNotSelected,
+
     /// A tracked project config set a vendor CLI's `account` or
     /// `config_path`, which only the untracked machine config may. Raised
     /// before any backend is opened, on every build.

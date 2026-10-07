@@ -33,12 +33,33 @@ use super::{session_record_kind::SessionRecordKind, state::DaemonState};
 #[derive(Clone)]
 pub struct StateBackend {
     state: Arc<DaemonState>,
+    /// #7522: the trusty-secrets client `secrets_get_ref` dials; `None` is
+    /// the process-wide default socket.
+    #[cfg(unix)]
+    secrets: Option<Arc<trusty_secrets::server::OnDemandSecrets>>,
 }
 
 impl StateBackend {
     /// Build a backend over shared daemon state.
     pub fn new(state: Arc<DaemonState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            #[cfg(unix)]
+            secrets: None,
+        }
+    }
+
+    /// Dial `client` instead of the default trusty-secrets socket (#7522).
+    ///
+    /// Test: `secrets_get_ref_reports_a_project_key_without_its_value`.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn with_secrets_client(
+        mut self,
+        client: Arc<trusty_secrets::server::OnDemandSecrets>,
+    ) -> Self {
+        self.secrets = Some(client);
+        self
     }
 }
 
@@ -519,6 +540,28 @@ impl OrchestratorBackend for StateBackend {
         group_by: Option<&str>,
     ) -> Result<Value, String> {
         crate::daemon::mcp_disk::disk_survey(&self.state, project, budget_seconds, group_by).await
+    }
+
+    /// Back `secrets_get_ref` (#7522) — see [`crate::secrets_client::get_ref`].
+    #[cfg(unix)]
+    async fn secrets_get_ref(&self, project: &str, key: &str) -> Result<Value, String> {
+        use crate::secrets_client::{default_client, get_ref};
+        let client = match &self.secrets {
+            Some(client) => client.as_ref(),
+            // `default_client` fails only when `$HOME` is unknown.
+            None => default_client()
+                .map_err(|_| "secrets_get_ref: the home directory is unavailable".to_owned())?,
+        };
+        let answer = get_ref(client, std::path::Path::new(project), key)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_value(answer).map_err(|_| "secrets_get_ref: encode failed".to_owned())
+    }
+
+    /// Back `secrets_get_ref` (#7522): the trusty-secrets client is Unix-only.
+    #[cfg(not(unix))]
+    async fn secrets_get_ref(&self, _project: &str, _key: &str) -> Result<Value, String> {
+        Err("secrets_get_ref: the secrets socket needs a Unix platform".to_owned())
     }
 
     async fn config_read(&self) -> Result<Value, String> {

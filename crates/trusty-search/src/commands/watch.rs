@@ -1,10 +1,10 @@
 //! Handler for `trusty-search watch`.
 
-use super::daemon_utils::daemon_base_url;
 use super::index_resolve::{print_index_header, resolve_index};
 use crate::detect::detect_project;
 use anyhow::Result;
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Why: issue #1621 wired the `FileWatcher` directly into the daemon — every
 /// registered (allowlisted) index is watched automatically and saves are
@@ -24,7 +24,8 @@ pub async fn handle_watch(
 ) -> Result<()> {
     let (index_id, warned) = resolve_index(explicit_index)?;
     print_index_header(&index_id, warned);
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&daemon_base_url()).await?;
+    // #9214: the socket, never the retiring HTTP listener.
+    crate::commands::daemon_guard::ensure_daemon_up(&DaemonClient::resolve()?).await?;
     // #6550: detection can refuse the resolved root, so this is a `match`, not
     // an infallible `unwrap_or_else`.
     let watch_path = match path {

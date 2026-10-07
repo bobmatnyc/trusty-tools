@@ -27,15 +27,16 @@
 //! `settings_index_env_is_ignored_on_the_default_socket`,
 //! `settings_index_override_survives_off_the_default_socket`,
 //! `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
-//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
+//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+//! `settings_index_env_is_ignored_on_the_account_default_socket_under_another_home`.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::SecretsError;
-use crate::store::INDEX_SUBDIR;
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
+use crate::store::{INDEX_SUBDIR, platform};
 
 /// Socket path under `$HOME` (owner ruling 31).
 pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
@@ -177,6 +178,16 @@ impl ServerSettings {
         args: impl IntoIterator<Item = OsString>,
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, SettingsError> {
+        Self::from_args_with(args, env, || platform::account_home_dir().ok())
+    }
+
+    /// [`Self::from_args`] with the password-database home lookup injected.
+    // #7524: tests stand a temp dir in for that home; none sets `$HOME`.
+    pub(crate) fn from_args_with(
+        args: impl IntoIterator<Item = OsString>,
+        env: impl Fn(&str) -> Option<String>,
+        account_home: impl Fn() -> Option<PathBuf>,
+    ) -> Result<Self, SettingsError> {
         let mut args = args.into_iter();
         if args.next().as_deref() != Some(SERVE_SUBCOMMAND.as_ref()) {
             return Err(SettingsError::Usage);
@@ -223,7 +234,9 @@ impl ServerSettings {
         let index_root = match index_root {
             Some(path) => path,
             // #7524: a caller's environment never moves the shared server's index.
-            None if is_default_socket(&socket) => under_home(INDEX_SUBDIR)?,
+            None if is_default_socket(&socket, account_home().as_deref()) => {
+                under_home(INDEX_SUBDIR)?
+            }
             None => pick(None, INDEX_DIR_ENV, INDEX_SUBDIR)?,
         };
         Ok(Self {
@@ -255,19 +268,27 @@ pub fn audit_log_beside(index_root: &Path) -> PathBuf {
         .join("audit.jsonl")
 }
 
-/// Whether `socket` is the shared default socket under `$HOME`.
+/// Whether `socket` is the shared default socket, under `$HOME` or under
+/// `account_home`, the password database's home for this uid.
 ///
 /// Why: #7524 M3 — [`INDEX_DIR_ENV`] must not reach the server every client
 /// shares. A case-insensitive filesystem serves `SECRETS.SOCK` to a client
 /// dialling `secrets.sock`, so the decision rests on the directory alone.
-/// What: `true` when `$HOME` is unknown (fail closed), or when `socket` sits
-/// in the default socket's directory by [`same_socket`], whatever its file
-/// name.
+/// #7524 H1 Route 2: `$HOME` is the spawner's to set, so a redirected
+/// `$HOME` must not make the real default socket look like another one.
+/// What: `true` when either home is unknown (`None` for `account_home` means
+/// the lookup failed; fail closed), or when `socket` sits in either home's
+/// default socket directory by [`same_socket`], whatever its file name.
 /// Test: `settings_index_env_is_ignored_on_the_default_socket`,
 /// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
-/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
-pub(crate) fn is_default_socket(socket: &Path) -> bool {
-    dirs::home_dir().is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH)))
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+/// `settings_index_env_is_ignored_on_the_account_default_socket_under_another_home`.
+pub(crate) fn is_default_socket(socket: &Path, account_home: Option<&Path>) -> bool {
+    let env_home = dirs::home_dir();
+    // #7524: `$HOME` first, as before; the account's home catches a redirect.
+    [env_home.as_deref(), account_home]
+        .into_iter()
+        .any(|home| home.is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH))))
 }
 
 /// Whether sockets `a` and `b` sit in one directory; file names are ignored.

@@ -11,7 +11,7 @@
 //! Test: `a_root_owned_by_another_index_is_reported_not_bailed` and the rest of
 //! `super::tests`; the happy path is covered indirectly by `handle_index`.
 
-use crate::commands::daemon_utils::daemon_base_url;
+use crate::commands::daemon_http::daemon_base_url;
 use anyhow::Result;
 
 /// Register an index with the daemon (idempotent).
@@ -155,7 +155,10 @@ pub async fn register_index_reporting_collision(
     project_path: &std::path::Path,
     filters: &RegisterFilters,
 ) -> Result<RegisterOutcome> {
-    let base = daemon_base_url();
+    // #9214: no published address is the same outcome as a refused connect.
+    let Ok(base) = daemon_base_url() else {
+        return Ok(RegisterOutcome::Unreachable);
+    };
     let client = trusty_common::server::daemon_http_client()?;
     let create_url = format!("{}/indexes", base);
     let mut create_body = serde_json::json!({
@@ -247,7 +250,7 @@ pub async fn register_index_reporting_collision(
 /// What: GETs `/indexes/:id/status` and parses `chunk_count`.
 /// Test: covered indirectly by `run_reindex_force_opts`.
 pub async fn fetch_chunk_count(index_id: &str) -> Option<u64> {
-    let base = daemon_base_url();
+    let base = daemon_base_url().ok()?;
     let url = format!("{}/indexes/{}/status", base, index_id);
     let client = trusty_common::server::daemon_http_client().ok()?;
     let resp = client.get(&url).send().await.ok()?;
