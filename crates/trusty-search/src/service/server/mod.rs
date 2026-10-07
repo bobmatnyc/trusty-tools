@@ -245,7 +245,7 @@ pub use reindex_handlers::ReindexRequest;
 pub use router::{CreateIndexRequest, IndexFileRequest, RemoveFileRequest};
 pub use routing::SearchSimilarRequest;
 pub use search_global::GlobalSearchRequest;
-pub use state::{DaemonEvent, ReconcileSummary, SearchAppState, WarmBootSummary};
+pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, WarmBootSummary};
 
 use axum::{
     response::Redirect,

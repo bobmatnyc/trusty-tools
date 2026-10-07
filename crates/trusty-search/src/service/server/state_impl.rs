@@ -79,6 +79,7 @@ impl SearchAppState {
             embedder_ready_tx: Arc::new(ready_tx),
             embedder_error: Arc::new(RwLock::new(None)),
             daemon_port: None,
+            transport: Default::default(),
             openrouter_enabled: !openrouter_api_key.is_empty(),
             started_at: Instant::now(),
             local_model: LocalModelConfig::default(),
@@ -326,6 +327,13 @@ impl SearchAppState {
     /// the UI handler to inject `window.__DAEMON_PORT__`.
     pub fn with_daemon_port(mut self, port: u16) -> Self {
         self.daemon_port = Some(port);
+        self
+    }
+
+    /// Builder-style: record the listeners the daemon bound, for
+    /// `search.health`'s `transport` (#9030).
+    pub fn with_transport(mut self, transport: super::state::DaemonTransport) -> Self {
+        self.transport = transport;
         self
     }
 

@@ -354,6 +354,98 @@ async fn run_daemon_isolated_instance_never_pollutes_shared_discovery() {
     );
 }
 
+/// #9030: `search.health` over the socket and `GET /health` over HTTP both
+/// report the transport `run_daemon` actually bound.
+///
+/// Why: the console's search dashboard reads `health.transport` to show the
+/// live transport instead of a hardcoded port. A value the daemon did not bind
+/// would mislead it as badly as the hardcoded one did.
+/// What: runs a real isolated `run_daemon` (same isolation as
+/// `run_daemon_isolated_instance_never_pollutes_shared_discovery`), reads the
+/// bound HTTP address from its `http_addr` file, then asks each transport for
+/// its health body. Both must carry `socket_path` equal to the resolved socket
+/// path and `http_addr` equal to the published address.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_health_reports_the_transport_it_bound() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+
+    let override_tmp = tempfile::tempdir().unwrap();
+    let data_dir_tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
+    }
+    let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let shutdown_tx = state.shutdown_tx.clone();
+    let handle = tokio::spawn(run_daemon(state, 0));
+
+    // `http_addr` is written after both binds, so its presence means both
+    // listeners are up.
+    let addr_file = data_dir_tmp.path().join("http_addr");
+    let mut http_addr = None;
+    for _ in 0..250 {
+        if let Ok(s) = std::fs::read_to_string(&addr_file) {
+            if !s.trim().is_empty() {
+                http_addr = Some(s.trim().to_string());
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut over_socket = None;
+    let mut over_http = None;
+    if let Some(addr) = &http_addr {
+        let frame: Result<serde_json::Value, _> = trusty_common::uds::send_framed_request(
+            &socket_path,
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": socket::METHOD_HEALTH }),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        over_socket = frame.ok().map(|f| f["result"]["transport"].clone());
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/health"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        if let Ok(resp) = resp {
+            over_http = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .map(|b| b["transport"].clone());
+        }
+    }
+
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+    }
+
+    let http_addr = http_addr.expect("the isolated daemon must publish its http_addr");
+    let expected = serde_json::json!({
+        "socket_path": socket_path.to_string_lossy(),
+        "http_addr": http_addr,
+    });
+    assert_eq!(
+        over_socket,
+        Some(expected.clone()),
+        "search.health over the socket must report the bound transport"
+    );
+    assert_eq!(
+        over_http,
+        Some(expected),
+        "GET /health must report the bound transport"
+    );
+}
+
 /// The Fail-Open Check, driven through `run_daemon()` itself (#6285).
 ///
 /// Why: `socket_tests::bind_refuses_a_socket_another_process_is_serving` proves
