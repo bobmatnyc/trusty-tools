@@ -758,8 +758,11 @@ async fn doctor_fails_when_the_selected_backend_is_unavailable() {
         "{}",
         outcome.out
     );
+    // #7519 P4: the row names why; this build links no CLI backend.
     assert!(
-        outcome.out.ends_with("backend onepassword: unavailable\n"),
+        outcome
+            .out
+            .contains("backend onepassword: unavailable (not_compiled): "),
         "{}",
         outcome.out
     );
@@ -770,6 +773,61 @@ async fn doctor_fails_when_the_selected_backend_is_unavailable() {
         "{}",
         outcome.err()
     );
+}
+
+/// #7519 P4: the table names each unavailable row's reason and fix, the
+/// selected backend's posture, and 1Password headless readiness; an
+/// available 1Password row with no token never reads as plain "available".
+#[tokio::test]
+async fn doctor_renders_reasons_posture_and_headless_readiness() {
+    let h = harness().await;
+    let outcome = run(&h, "", &["doctor"]).await;
+    assert_eq!(outcome.err, None, "{}", outcome.out);
+    for line in [
+        "posture: keychain\n",
+        "backend file: unavailable (not_compiled): ",
+        "backend keeper: unavailable (not_compiled): ",
+        "headless: 1Password service-account token at server start: no\n",
+    ] {
+        assert!(outcome.out.contains(line), "{line:?} in\n{}", outcome.out);
+    }
+
+    let report = |token: bool| -> trusty_secrets::server::DoctorResponse {
+        serde_json::from_value(serde_json::json!({
+            "socket": "/s", "index_root": "/i", "machine_config": "/m",
+            "account_config": "/home/u/.trusty-tools/trusty-common/config.yaml",
+            "project_root": null, "project_config": null,
+            "selected_backend": "onepassword", "posture": "other",
+            "backends": [
+                {"id": "file", "available": true, "capabilities": ["READ"]},
+                {"id": "onepassword", "available": true, "capabilities": ["READ", "WRITE"]},
+                {"id": "keeper", "available": false, "capabilities": [],
+                 "reason": "cli_not_installed", "detail": "`keeper` is not installed"},
+            ],
+            "headless": {"onepassword_token": token},
+        }))
+        .expect("decode")
+    };
+    let mut out = Vec::new();
+    doctor::render(&report(false), &mut out).expect("render");
+    let text = String::from_utf8(out).expect("utf-8");
+    assert!(text.contains("account machine config: /home/u/"), "{text}");
+    assert!(
+        text.contains("backend onepassword: available [READ, WRITE]; no service-account token"),
+        "{text}"
+    );
+    assert!(
+        text.contains("backend keeper: unavailable (cli_not_installed): `keeper` is not installed"),
+        "{text}"
+    );
+    let mut out = Vec::new();
+    doctor::render(&report(true), &mut out).expect("render");
+    let text = String::from_utf8(out).expect("utf-8");
+    assert!(
+        text.contains("backend onepassword: available [READ, WRITE]\n"),
+        "{text}"
+    );
+    assert!(text.ends_with("token at server start: yes\n"), "{text}");
 }
 
 #[tokio::test]

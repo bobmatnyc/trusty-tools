@@ -10,7 +10,8 @@
 //! - [`settings`] — socket, index and config paths, and the idle window.
 //! - `router` — bind, uid-checked serve loop, unlink on exit.
 //! - [`project`] — a request's project directory to scopes and a backend.
-//! - `methods` — the six method bodies. None returns a secret value.
+//! - `methods` and `doctor` — the six method bodies. None returns a secret
+//!   value.
 //! - [`audit`] and `gate` — the credential access audit trail (#4567):
 //!   one record per `set`/`delete` call, per `copy` key, per denied `list`.
 //! - [`errors`] — the fixed error text every failure is reported with.
@@ -28,6 +29,7 @@
 
 pub mod audit;
 pub mod client;
+mod doctor;
 pub mod errors;
 mod gate;
 mod methods;
@@ -37,11 +39,15 @@ pub mod settings;
 
 pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use doctor::{
+    BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
+};
 pub use errors::ErrorKind;
-pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD, StoragePosture};
+pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{
-    BackendFactory, ServeError, ServeExit, State, backends_for, default_backends, serve,
+    BackendFactory, ServeError, ServeExit, StartEnv, State, backends_for, default_backends, serve,
+    serve_with,
 };
 pub use settings::{
     AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,

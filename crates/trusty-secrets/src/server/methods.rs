@@ -9,7 +9,8 @@
 //! optional for `doctor`) beside the S1 request fields, e.g.
 //! `{"project": "/repo", "vault": "trusty/o/r", "key": "K", "value": "…"}`.
 //! No function returns a value: `set` returns S1's masked confirmation,
-//! `list` names and metadata, `copy` names, `doctor` ids and paths.
+//! `list` names and metadata, `copy` names. `doctor` lives in `doctor.rs`
+//! (#7519 P4).
 //! #4567: `set`, `delete`, `copy` and `list` run under [`audited`], which
 //! records them on the credential access audit trail; `scopes` and `doctor`
 //! read no credential and leave no record.
@@ -18,8 +19,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::audit::AuditMethod;
@@ -32,10 +33,7 @@ use crate::api::methods::{
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
-use crate::store::{Capabilities, SecretBackend, SecretStore, cli_backends, swept_backends};
-
-/// `secrets.doctor` — not among S1's method names.
-pub const DOCTOR: &str = "secrets.doctor";
+use crate::store::{Capabilities, SecretBackend, SecretStore, swept_backends};
 
 /// The params field naming the project directory.
 pub const PROJECT_FIELD: &str = "project";
@@ -65,7 +63,7 @@ fn decode<T: DeserializeOwned>(fields: Map<String, Value>) -> Result<T, ErrorKin
     serde_json::from_value(Value::Object(fields)).map_err(|_| ErrorKind::InvalidParams)
 }
 
-fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
+pub(crate) fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
     serde_json::to_value(response).map_err(|_| ErrorKind::Internal)
 }
 
@@ -326,156 +324,4 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         }
         to_json(&response)
     })
-}
-
-/// `secrets.doctor` params: an optional project.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DoctorRequest {
-    #[serde(default)]
-    project: Option<PathBuf>,
-}
-
-/// One backend's row in the doctor table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct BackendStatus {
-    /// The backend id.
-    pub id: BackendId,
-    /// Whether this build can open it.
-    pub available: bool,
-    /// Its capability flags, by name.
-    pub capabilities: Vec<String>,
-}
-
-/// How the selected backend keeps values at rest (#9326).
-///
-/// Why: owner ruling f5 — the 0600 file backend is a degraded posture, and
-/// doctor must say so whether config chose it or the host has no Keychain.
-/// What: decided from the selected backend id alone. An unknown wire value
-/// decodes as [`StoragePosture::Other`].
-/// Test: `server_doctor_reports_the_file_posture`,
-/// `server_unknown_posture_decodes_as_other`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StoragePosture {
-    /// The OS Keychain holds values.
-    Keychain,
-    /// Values are plaintext 0600 files in 0700 directories: degraded.
-    FileDegraded,
-    /// Another backend; its row in [`DoctorResponse::backends`] describes it.
-    /// Also what an older client decodes a posture it does not know as.
-    // #9326: `serde(other)`, so a variant added later never fails a decode.
-    #[serde(other)]
-    Other,
-}
-
-impl StoragePosture {
-    /// The posture of backend `id`.
-    pub fn of(id: &BackendId) -> Self {
-        match id.as_str() {
-            BackendId::KEYCHAIN => Self::Keychain,
-            BackendId::FILE => Self::FileDegraded,
-            _ => Self::Other,
-        }
-    }
-}
-
-/// `secrets.doctor` response: backend availability and paths only.
-// #9073: §7 `detect_backends` grows the doctor table, so callers read it only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct DoctorResponse {
-    /// The socket this server answers on.
-    pub socket: PathBuf,
-    /// The names-only index directory.
-    pub index_root: PathBuf,
-    /// The machine config file.
-    pub machine_config: PathBuf,
-    /// The project's checkout root, when a project was named.
-    pub project_root: Option<PathBuf>,
-    /// The project config file, when a project was named.
-    pub project_config: Option<PathBuf>,
-    /// The backend the §6.1 precedence selects.
-    pub selected_backend: BackendId,
-    /// Every backend this build knows, plus the selected one.
-    pub backends: Vec<BackendStatus>,
-    /// The selected backend's at-rest posture. `None` only when decoding an
-    /// answer from a server older than #9326.
-    #[serde(default)]
-    pub posture: Option<StoragePosture>,
-}
-
-/// `secrets.doctor`: which backends this build can open, and where it looks.
-///
-/// What: S2 has no `detect_backends` yet (§7 lands with the CLI-backed
-/// integrations), so "available" means "this build opens it". Opening a
-/// backend reads no secret and spawns no CLI, so 1Password's row never runs
-/// `op read` (#7519 A9); it is available when the build links it and the
-/// machine config enables it. Reports paths, ids and the selected backend's
-/// [`StoragePosture`] only.
-/// Test: `server_doctor_reports_backends_and_paths_only`,
-/// `server_doctor_reports_the_file_posture`,
-/// `server_doctor_lists_onepassword_without_spawning`.
-pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let request: DoctorRequest = match params {
-        Value::Null => DoctorRequest::default(),
-        other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
-    };
-    let project = request
-        .project
-        .as_deref()
-        .map(|dir| ProjectContext::resolve(state, dir))
-        .transpose()?;
-    let selected = match &project {
-        Some(project) => project.resolved_config().backend,
-        None => {
-            let machine = crate::store::config::load_machine_at(&state.settings.machine_config)?;
-            crate::store::config::resolve(None, machine.as_ref()).backend
-        }
-    };
-    // #9326: the file backend is listed beside the Keychain.
-    let mut ids = vec![BackendId::keychain(), BackendId::file()];
-    // #7519: A9 — every CLI backend this build links.
-    ids.extend(cli_backends());
-    if !ids.contains(&selected) {
-        ids.push(selected.clone());
-    }
-    let backends = ids
-        .into_iter()
-        .map(|id| {
-            let opened = (state.backends)(&id).ok();
-            BackendStatus {
-                available: opened.is_some(),
-                capabilities: opened
-                    .map(|b| capability_names(b.capabilities()))
-                    .unwrap_or_default(),
-                id,
-            }
-        })
-        .collect();
-    to_json(&DoctorResponse {
-        socket: state.settings.socket.clone(),
-        index_root: state.settings.index_root.clone(),
-        machine_config: state.settings.machine_config.clone(),
-        project_root: project.as_ref().map(|p| p.root().to_path_buf()),
-        project_config: project.as_ref().map(ProjectContext::config_path),
-        posture: Some(StoragePosture::of(&selected)),
-        selected_backend: selected,
-        backends,
-    })
-}
-
-fn capability_names(caps: Capabilities) -> Vec<String> {
-    [
-        (Capabilities::READ, "READ"),
-        (Capabilities::WRITE, "WRITE"),
-        (Capabilities::LIST_NAMES, "LIST_NAMES"),
-        (Capabilities::SYNC_TARGET, "SYNC_TARGET"),
-    ]
-    .into_iter()
-    .filter(|(flag, _)| caps.contains(*flag))
-    .map(|(_, name)| name.to_string())
-    .collect()
 }
