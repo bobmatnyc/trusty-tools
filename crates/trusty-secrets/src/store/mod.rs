@@ -30,6 +30,8 @@ pub mod resolve;
 mod scope;
 mod secret_store;
 
+// #7524: only the server's `State` reads it; unused without `server`.
+#[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;
 pub use backend::{Capabilities, SecretBackend, default_backend, local_backends, open_backend};
 pub use dotenv::parse_dotenv;
