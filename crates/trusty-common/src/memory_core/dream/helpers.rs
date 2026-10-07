@@ -17,32 +17,51 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// Stop-word filter for closet keyword extraction.
+// #9279: two-letter tokens are now kept, so the common two-letter words that
+// were not already here ("ok", "up", "my", "us", "me") join the list.
 pub(crate) const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "of", "in", "on", "at",
     "to", "for", "with", "and", "or", "but", "not", "no", "yes", "i", "you", "he", "she", "it",
     "we", "they", "this", "that", "these", "those", "as", "by", "from", "into", "over", "under",
     "if", "then", "than", "so", "do", "does", "did", "have", "has", "had", "will", "would",
     "shall", "should", "can", "could", "may", "might", "must", "about", "any", "all", "some",
-    "more", "most", "such",
+    "more", "most", "such", "ok", "up", "my", "us", "me",
 ];
+
+/// Shortest keyword, in characters, that closets and recall keep (#9279).
+///
+/// Why: ids such as `e1`, `v2`, `#42` and `fe` are two characters long. A
+/// three-byte floor dropped every one of them, so a query naming an id could
+/// never match the drawer that holds it.
+pub(crate) const MIN_KEYWORD_CHARS: usize = 2;
+
+/// Normalize one whitespace-delimited word into a keyword token.
+///
+/// What: keeps alphanumeric characters only, lowercased, so `#42` becomes
+/// `42` and `E1:` becomes `e1`. Shared by [`extract_keywords`] and the recall
+/// id-token match, so both sides compare the same form.
+pub(crate) fn normalize_keyword(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
 
 /// Extract keyword tokens from a drawer's content.
 ///
 /// Why: Closets are a lightweight pre-computed index; we want stable, deduped
 /// keyword tokens so the dream cycle's index is reproducible.
-/// What: Lowercases, strips non-alphanumeric chars, drops stop-words and
-/// tokens shorter than 3 chars, and dedups within a single drawer.
-/// Test: Indirectly via `closet_refresh_builds_index`.
+/// What: Normalizes each word with [`normalize_keyword`], drops stop-words and
+/// tokens shorter than [`MIN_KEYWORD_CHARS`] characters, and dedups within a
+/// single drawer.
+/// Test: `extract_keywords_keeps_short_id_tokens`, `closet_refresh_builds_index`.
 pub fn extract_keywords(content: &str) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for raw in content.split_whitespace() {
-        let token: String = raw
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(|c| c.to_lowercase())
-            .collect();
-        if token.len() < 3 {
+        let token = normalize_keyword(raw);
+        // #9279: count characters, not bytes, and keep two-character ids.
+        if token.chars().count() < MIN_KEYWORD_CHARS {
             continue;
         }
         if STOP_WORDS.iter().any(|s| *s == token) {

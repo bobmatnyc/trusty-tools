@@ -17,6 +17,8 @@ mod deferred_embed;
 mod embed_repair;
 mod embedder;
 mod handle;
+// #9279: exact short-id token boost for L2/L3.
+mod id_tokens;
 mod layers;
 pub(crate) mod open_sweep;
 // #5037: the minimum-score gate `layers` never had — `truncate(top_k)` was its

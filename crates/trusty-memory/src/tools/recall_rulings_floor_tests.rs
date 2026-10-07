@@ -50,10 +50,12 @@ fn answering_needs_half_the_query_terms_and_at_least_two() {
         ),
         ("how do basalt columns form when lava cools", ruling, false),
         // Function words alone share nothing.
+        ("what should they do", "they should do what it must", false),
+        // #9279: a two-letter code is a term, not a function word.
         (
             "what should the PM do",
             "the PM should do what it must",
-            false,
+            true,
         ),
         ("", ruling, false),
         ("?? !!", ruling, false),
@@ -67,6 +69,22 @@ fn answering_needs_half_the_query_terms_and_at_least_two() {
             "query {query:?} against {content:?}"
         );
     }
+}
+
+/// Why (#9279): with `e1` dropped, "ruling e1" was a one-term query, so every
+/// ruling that says "ruling" answered it and took a floor slot.
+/// What: the id term separates the E1 ruling from another ruling.
+#[test]
+fn a_short_id_term_separates_two_rulings() {
+    let query = "ruling e1";
+    assert!(ruling_answers_query(
+        query,
+        "Ruling E1: hold new builder dispatches"
+    ));
+    assert!(!ruling_answers_query(
+        query,
+        "Ruling F0: the PM files no fix round"
+    ));
 }
 
 /// Why (#9143 AC2): the live check ranked an answering ruling 30th under

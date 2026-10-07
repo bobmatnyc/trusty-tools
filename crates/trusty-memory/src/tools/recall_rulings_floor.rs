@@ -25,21 +25,26 @@ use uuid::Uuid;
 pub(crate) const RULING_RANK_FLOOR: usize = 2;
 
 /// Function words dropped before terms are compared.
+// #9279: two-letter terms are kept now, so the two-letter function words are
+// listed here instead of being dropped by length.
 const STOPWORDS: &[&str] = &[
     "about", "after", "all", "also", "and", "any", "are", "but", "can", "could", "did", "does",
     "for", "from", "had", "has", "have", "how", "into", "its", "may", "must", "not", "our",
     "should", "than", "that", "the", "their", "then", "there", "these", "they", "this", "was",
     "were", "what", "when", "where", "which", "who", "why", "will", "with", "would", "you", "your",
+    "am", "an", "as", "at", "be", "by", "do", "he", "if", "in", "is", "it", "me", "my", "no", "of",
+    "ok", "on", "or", "so", "to", "up", "us", "we",
 ];
 
 /// The distinct content terms of `text`.
 ///
-/// What: lowercase alphanumeric runs of three or more bytes, minus
+/// What: lowercase alphanumeric runs of two or more characters, minus
 /// [`STOPWORDS`], with one trailing plural `s` removed from words longer than
 /// three bytes (`titles` and `title` are one term; `class` keeps its `ss`).
 fn content_terms(text: &str) -> HashSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3)
+        // #9279: keep two-character ids such as `e1`, `f0` and `fe`.
+        .filter(|w| w.chars().count() >= 2)
         .map(str::to_lowercase)
         .filter(|w| !STOPWORDS.contains(&w.as_str()))
         .map(|w| match w.strip_suffix('s') {
@@ -59,7 +64,8 @@ fn content_terms(text: &str) -> HashSet<String> {
 /// What: true when the query has content terms and the ruling's content holds
 /// at least half of them, and at least two (one, for a one-term query). Tags
 /// are not counted: every ruling carries `ruling` or `standing-rule`.
-/// Test: `answering_needs_half_the_query_terms_and_at_least_two`.
+/// Test: `answering_needs_half_the_query_terms_and_at_least_two`,
+/// `a_short_id_term_separates_two_rulings`.
 pub(crate) fn ruling_answers_query(query: &str, content: &str) -> bool {
     let asked = content_terms(query);
     if asked.is_empty() {

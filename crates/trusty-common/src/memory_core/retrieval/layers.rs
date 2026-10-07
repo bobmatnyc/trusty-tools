@@ -41,6 +41,7 @@
 
 use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
+use super::id_tokens::{id_token_boost, query_id_tokens};
 use super::scope::{RecallScope, scope_admits};
 use super::types::{CrossPalaceResult, RecallResult};
 use crate::memory_core::decay::DecayConfig;
@@ -101,7 +102,8 @@ pub(super) const IMPORTANCE_TILT: f32 = 0.05;
 /// in #3274. One function is also the only place a reader has to look to see
 /// what "score" means.
 /// What: tilts `similarity` by at most [`IMPORTANCE_TILT`] according to
-/// `eff_importance`, adds the closet `tag_boost`, and clamps to `1.0`.
+/// `eff_importance`, adds `tag_boost` (the closet boost plus, since #9279, the
+/// id-token boost from `id_tokens`), and clamps to `1.0`.
 /// Test: `rank_score_keeps_importance_a_tiebreaker`.
 pub(super) fn rank_score(similarity: f32, eff_importance: f32, tag_boost: f32) -> f32 {
     let tilted = similarity * ((1.0 - IMPORTANCE_TILT) + IMPORTANCE_TILT * eff_importance);
@@ -333,6 +335,8 @@ pub async fn retrieve_l2_scoped(
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
     let query_tokens: Vec<String> = extract_keywords(query);
+    // #9279: an id named in the query lifts the drawer that holds it.
+    let id_tokens = query_id_tokens(&query_tokens);
     let now = chrono::Utc::now();
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
 
@@ -369,9 +373,10 @@ pub async fn retrieve_l2_scoped(
             .iter()
             .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
         let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
+        let id_boost = id_token_boost(&id_tokens, drawer.content());
         // #4904: importance tilts the similarity score, it no longer multiplies
         // it — see `IMPORTANCE_TILT`.
-        let final_score = rank_score(hit.score, eff_importance, tag_boost);
+        let final_score = rank_score(hit.score, eff_importance, tag_boost + id_boost);
 
         // #4904: the three candidate explanations for a missed fact — absent
         // from the candidate set, present but ranked below the cutoff, or never
@@ -385,6 +390,7 @@ pub async fn retrieve_l2_scoped(
             importance = drawer.importance,
             eff_importance,
             tag_boost,
+            id_boost,
             score = final_score,
             "l2 candidate"
         );
@@ -477,6 +483,8 @@ pub async fn retrieve_l3_scoped(
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
     let query_tokens: Vec<String> = extract_keywords(query);
+    // #9279: an id named in the query lifts the drawer that holds it.
+    let id_tokens = query_id_tokens(&query_tokens);
     let now = chrono::Utc::now();
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
     for hit in hits {
@@ -503,9 +511,10 @@ pub async fn retrieve_l3_scoped(
             .iter()
             .any(|tok| closets.get(tok).is_some_and(|ids| ids.contains(&drawer_id)));
         let tag_boost = if in_closet { 0.15_f32 } else { 0.0 };
+        let id_boost = id_token_boost(&id_tokens, drawer.content());
         // #4904: shares the one `rank_score` L2 uses, so deep recall cannot be
         // left ranking on the old importance-multiplier formula.
-        let final_score = rank_score(hit.score, eff_importance, tag_boost);
+        let final_score = rank_score(hit.score, eff_importance, tag_boost + id_boost);
 
         results.push(RecallResult {
             drawer: drawer.clone(),

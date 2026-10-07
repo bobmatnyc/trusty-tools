@@ -2734,3 +2734,7 @@ async fn compact_vector_orphans_still_reclaims_true_orphans() {
 // #9280: L2/L3 id tiebreak.
 #[path = "rank_tie_tests.rs"]
 mod rank_tie_tests;
+
+// #9279: short id tokens in keywords and recall.
+#[path = "id_token_tests.rs"]
+mod id_token_tests;
