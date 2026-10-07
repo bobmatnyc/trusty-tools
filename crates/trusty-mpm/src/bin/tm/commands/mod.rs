@@ -221,6 +221,8 @@ pub(crate) mod repair_savings_ledger;
 // `sessions.json` so a wedged store no longer needs a human editing JSON.
 pub(crate) mod repair_session_store;
 pub(crate) mod run_target;
+// #7521: `tm secrets` — a client of the trusty-secrets on-demand socket.
+pub(crate) mod secrets;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
