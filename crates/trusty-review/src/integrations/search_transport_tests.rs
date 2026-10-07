@@ -28,12 +28,19 @@ use crate::report::investigate::trace_client::{HttpTraceSource, TraceError, Trac
 
 const DATA_DIR_OVERRIDE: &str = "TRUSTY_DATA_DIR_OVERRIDE";
 
-/// A temp dir short enough for a Unix socket path on macOS (104 bytes).
+/// A 0700 temp dir short enough for a Unix socket path on macOS (104 bytes).
+///
+/// 0700 because the client refuses a socket in any wider directory; a dead
+/// socket must fail on the dial, not on that check.
 fn short_tempdir() -> tempfile::TempDir {
-    tempfile::Builder::new()
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::Builder::new()
         .prefix("b5")
         .tempdir_in("/tmp")
-        .expect("tempdir under /tmp")
+        .expect("tempdir under /tmp");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("narrow the tempdir to 0700");
+    dir
 }
 
 /// Isolate the default socket path and clear both transport env vars.

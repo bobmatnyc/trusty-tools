@@ -33,7 +33,12 @@ impl FakeSearchSocket {
         reply: impl Fn(&str, &Value) -> Reply + Send + Sync + 'static,
     ) -> Self {
         if let Some(parent) = path.parent() {
+            use std::os::unix::fs::PermissionsExt as _;
             std::fs::create_dir_all(parent).expect("create the socket's parent");
+            // The client refuses a socket whose directory is not 0700, as the
+            // daemon's hardened bind leaves it.
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .expect("narrow the socket's parent to 0700");
         }
         let listener = UnixListener::bind(path).expect("bind the fake search socket");
         let calls = Arc::new(Mutex::new(Vec::new()));
