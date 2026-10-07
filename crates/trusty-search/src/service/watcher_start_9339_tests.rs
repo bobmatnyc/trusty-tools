@@ -321,7 +321,7 @@ async fn a_stuck_start_does_not_stall_a_current_thread_runtime() {
     let fallback = release.clone();
     std::thread::spawn(move || {
         std::thread::sleep(OUTER);
-        drop(fallback);
+        let _ = fallback.send(());
     });
 
     let ticked = Arc::new(AtomicBool::new(false));
