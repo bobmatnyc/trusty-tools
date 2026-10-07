@@ -125,6 +125,7 @@ fn abandon(state: &AtomicU8, label: &str, bound: Duration) {
     );
 }
 
+// #9339: `pub(crate)` so the watcher-start tests reuse `WarnCapture`.
 #[cfg(test)]
 #[path = "watcher_teardown_9315_tests.rs"]
-mod tests;
+pub(crate) mod tests;
