@@ -136,3 +136,45 @@ fn template_sweep_removes_stale_dirs_and_leaves_the_rest() {
         "{err:?}"
     );
 }
+
+/// Why: #7519 — one entry the sweep cannot remove must not leave the stale
+/// directories after it on disk; the failure is still reported.
+/// What: the bad entries' `template.json` is a directory, which
+/// `remove_file` refuses for root too. A bad entry is made first and last,
+/// so the sweep meets one before the stale ones under creation-order and
+/// reverse-order directory listings alike.
+/// Test: itself.
+#[test]
+fn template_sweep_goes_past_a_bad_entry_and_reports_it() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("tmp");
+    drop(TemplateFile::create(&root, &SecretValue::new("x")).unwrap());
+    let dead = dead_pid();
+    let bad = |n: u32| {
+        let dir = root.join(format!("tpl.{dead}.{n}.0"));
+        std::fs::create_dir_all(dir.join("template.json")).unwrap();
+        std::fs::write(dir.join("template.json").join("inner"), CANARY).unwrap();
+        dir
+    };
+    let first_bad = bad(0);
+    let stale: Vec<PathBuf> = (1..=6)
+        .map(|n| {
+            let dir = root.join(format!("tpl.{dead}.{n}.0"));
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("template.json"), CANARY).unwrap();
+            dir
+        })
+        .collect();
+    let last_bad = bad(7);
+
+    let err = sweep_stale_templates(&root).unwrap_err();
+    match &err {
+        SecretsError::Io { path, .. } => assert!(path.ends_with("template.json"), "{path:?}"),
+        other => panic!("expected Io, got {other:?}"),
+    }
+    assert!(!format!("{err} {err:?}").contains(CANARY));
+    for dir in &stale {
+        assert!(!dir.exists(), "{} survived the bad entry", dir.display());
+    }
+    assert!(first_bad.is_dir() && last_bad.is_dir());
+}

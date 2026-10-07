@@ -40,10 +40,12 @@ pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV,
 pub use errors::ErrorKind;
 pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD, StoragePosture};
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
-pub use router::{BackendFactory, ServeError, ServeExit, State, default_backends, serve};
+pub use router::{
+    BackendFactory, ServeError, ServeExit, State, backends_for, default_backends, serve,
+};
 pub use settings::{
     AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,
-    INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError,
+    INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError, template_root_beside,
 };
 
 #[cfg(test)]

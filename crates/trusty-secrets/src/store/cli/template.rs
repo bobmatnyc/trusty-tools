@@ -13,7 +13,8 @@
 //! process is gone, without following a symlink.
 //! Test: `template_file_is_0600_in_a_0700_dir_and_removed_on_drop`,
 //! `template_file_is_removed_when_its_scope_panics`,
-//! `template_sweep_removes_stale_dirs_and_leaves_the_rest`.
+//! `template_sweep_removes_stale_dirs_and_leaves_the_rest`,
+//! `template_sweep_goes_past_a_bad_entry_and_reports_it`.
 
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
@@ -115,9 +116,12 @@ impl Drop for TemplateFile {
 /// real directories (never a symlink) named `tpl.<pid>.…` whose pid is not
 /// live, as the file backend judges a temp file's writer, are touched:
 /// their `template.json` entry is unlinked, never followed, then the
-/// directory is removed. One holding anything else is left alone. Returns
+/// directory is removed. One holding anything else is left alone. An entry
+/// that fails does not stop the sweep: every other entry is still visited,
+/// and the first failure is returned after the last one. Otherwise returns
 /// how many directories were removed.
-/// Test: `template_sweep_removes_stale_dirs_and_leaves_the_rest`.
+/// Test: `template_sweep_removes_stale_dirs_and_leaves_the_rest`,
+/// `template_sweep_goes_past_a_bad_entry_and_reports_it`.
 pub fn sweep_stale_templates(root: &Path) -> Result<usize, SecretsError> {
     let meta = match fs::symlink_metadata(root) {
         Ok(meta) => meta,
@@ -126,34 +130,53 @@ pub fn sweep_stale_templates(root: &Path) -> Result<usize, SecretsError> {
     };
     file::judge(root, &meta, Kind::Dir)?;
     let mut removed = 0;
+    let mut first_err = None;
     for entry in fs::read_dir(root).map_err(io_err(root))? {
-        let entry = entry.map_err(io_err(root))?;
-        let name = entry.file_name();
-        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(DIR_PREFIX)) else {
-            continue;
-        };
-        // #7519: `DirEntry::file_type` does not follow a symlink.
-        if !entry.file_type().map_err(io_err(root))?.is_dir() || file::writer_alive(rest) {
-            continue;
-        }
-        let dir = entry.path();
-        let template = dir.join(FILE_NAME);
-        match fs::remove_file(&template) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(io_err(&template)(source)),
-        }
-        match fs::remove_dir(&dir) {
-            Ok(()) => removed += 1,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(source) => return Err(io_err(&dir)(source)),
+        // #7519: a bad entry is reported after the loop, never ends it — a
+        // later stale directory may still hold a value.
+        match entry
+            .map_err(io_err(root))
+            .and_then(|e| sweep_entry(root, &e))
+        {
+            Ok(true) => removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
         }
     }
-    Ok(removed)
+    first_err.map_or(Ok(removed), Err)
+}
+
+/// Remove one stale guard directory; `Ok(true)` when it was removed.
+fn sweep_entry(root: &Path, entry: &fs::DirEntry) -> Result<bool, SecretsError> {
+    let name = entry.file_name();
+    let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(DIR_PREFIX)) else {
+        return Ok(false);
+    };
+    // #7519: `DirEntry::file_type` does not follow a symlink.
+    if !entry.file_type().map_err(io_err(root))?.is_dir() || file::writer_alive(rest) {
+        return Ok(false);
+    }
+    let dir = entry.path();
+    let template = dir.join(FILE_NAME);
+    match fs::remove_file(&template) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io_err(&template)(source)),
+    }
+    match fs::remove_dir(&dir) {
+        Ok(()) => Ok(true),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(source) => Err(io_err(&dir)(source)),
+    }
 }
 
 /// `tpl.<pid>.<nanos>.<seq>`: the pid lets the sweep judge liveness.

@@ -266,14 +266,14 @@ pub enum SecretsError {
     )]
     FileBackendNotSelected,
 
-    /// A tracked project config set a vendor CLI's `account` or
-    /// `config_path`, which only the untracked machine config may. Raised
+    /// A tracked project config set a vendor CLI's `account`, `config_path`
+    /// or `program`, which only the untracked machine config may. Raised
     /// before any backend is opened, on every build.
     // #7519: owner ruling 2026-10-07; names the key, never its value.
     #[error(
         "secrets config {path} is tracked and may not set `{key}`: a repository could \
-         point the CLI at an account or config directory of its choosing; remove it \
-         and set it in the machine config instead"
+         point the CLI at an account, config directory or program of its choosing; \
+         remove it and set it in the machine config instead"
     )]
     TrackedCliSettingRefused {
         /// The tracked project config file.
@@ -306,4 +306,20 @@ pub enum SecretsError {
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,
+
+    /// A CLI-backed backend the untracked machine config has not enabled.
+    /// Raised before any process is spawned.
+    // #7519: after `HomeUnavailable`, so no published discriminant moves
+    // (0.1.2 accepted-break declaration). P1 carry-over (a) — the delete
+    // sweep reaches every enabled CLI backend, so a backend opens only when
+    // enabled; no value lands outside the sweep.
+    #[error(
+        "the {backend} backend is not enabled on this machine; add a `secrets.{backend}:` \
+         section, or `secrets.default_backend: {backend}`, to the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml"
+    )]
+    BackendNotEnabled {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+    },
 }
