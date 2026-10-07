@@ -123,6 +123,45 @@ fn two_repos() -> Registry {
     ]))
 }
 
+/// A refused port: an explicit (non-default) URL, so the #9214 resolver picks
+/// HTTP here and never reads the operator's real trusty-search socket path.
+const DEAD_SEARCH_URL: &str = "http://127.0.0.1:9";
+
+/// Pins `TRUSTY_SEARCH_SOCKET` to a path nothing binds for one test (#9214).
+///
+/// Why: rule 1 of the transport resolver reads it before the URL, so an
+/// exported value would still reach a live daemon past `DEAD_SEARCH_URL`.
+/// What: sets the var on construction and restores the old value on drop.
+/// Only for `#[serial_test::serial]` tests: the environment is process-global.
+struct MissingSearchSocket(Option<std::ffi::OsString>);
+
+impl MissingSearchSocket {
+    fn pin() -> Self {
+        let key = trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+        let old = std::env::var_os(key);
+        let missing = std::env::temp_dir().join(format!(
+            "trusty-review-bin-no-search-{}.sock",
+            std::process::id()
+        ));
+        // SAFETY: callers are serial tests.
+        unsafe { std::env::set_var(key, missing) };
+        Self(old)
+    }
+}
+
+impl Drop for MissingSearchSocket {
+    fn drop(&mut self) {
+        let key = trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+        // SAFETY: callers are serial tests.
+        unsafe {
+            match self.0.take() {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// A config with the `"main"` a CWD miss leaves behind, nothing pinned, and
 /// the Hosted default `require_search`.
 fn unpinned_config() -> ReviewConfig {
@@ -233,6 +272,7 @@ const DIFF: &str = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/
 /// The canary in a `--pr-description-file` reaches the reviewer prompt
 /// through the `ReviewInput` `cmd_run` builds — before #8654 `run` always
 /// passed `CallerContext::default()`.
+#[serial_test::serial]
 #[tokio::test]
 async fn pr_description_flag_reaches_the_reviewer_prompt() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -248,6 +288,7 @@ async fn pr_description_flag_reaches_the_reviewer_prompt() {
 
 /// A PR description past the per-field cap reaches the prompt cut, with a
 /// visible truncation marker; text past the cap never does (#8654).
+#[serial_test::serial]
 #[tokio::test]
 async fn oversized_pr_description_is_truncated_visibly_in_the_prompt() {
     use trusty_review::config::constants::MAX_CALLER_CONTEXT_CHARS;
@@ -268,6 +309,7 @@ async fn oversized_pr_description_is_truncated_visibly_in_the_prompt() {
 /// A local diff carrying a `# Context:` preamble — the shape
 /// code-intelligence's subprocess adapter sends — reaches the reviewer as the
 /// PR description. Before #8654 the parser discarded it as unattributable.
+#[serial_test::serial]
 #[tokio::test]
 async fn context_preamble_on_a_local_diff_reaches_the_reviewer_prompt() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -310,7 +352,11 @@ async fn reviewer_prompt(dir: &tempfile::TempDir, diff_text: &str, extra: &[&str
         analyze: None,
         dedup: None,
     };
+    // #9214: `run_review` resolves a transport for its context gate; keep it
+    // off the live daemon whatever the shell exports.
+    let _pin = MissingSearchSocket::pin();
     let mut config = ReviewConfig::load(None);
+    config.search_url = DEAD_SEARCH_URL.into();
     config.context.require_search = Some(false);
     config.context.require_analyze = false;
     config.log_dir = dir.path().to_path_buf();
