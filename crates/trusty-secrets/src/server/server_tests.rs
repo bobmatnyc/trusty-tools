@@ -1250,6 +1250,26 @@ fn client_rpc_failure_reads_every_kind_from_the_wire() {
     assert_eq!(transport.to_string(), "io detail");
 }
 
+/// Why: #7519 — a client branches on the wire code of a refused CLI
+/// backend, so `backend_not_enabled` keeps -32078 (-32077 is #7524's); the
+/// uniqueness check alone would let it move to any unused code.
+/// Test: itself.
+#[test]
+fn server_backend_not_enabled_is_wire_code_32078() {
+    let kind = ErrorKind::from(SecretsError::BackendNotEnabled {
+        backend: SENTINEL.into(),
+    });
+    assert_eq!(kind, ErrorKind::BackendNotEnabled);
+    assert_eq!(kind.code(), -32078);
+    assert_eq!(kind.as_str(), "backend_not_enabled");
+    let failure = RpcFailure::from_wire(kind.to_rpc(method::SET));
+    assert_eq!(
+        (failure.code, failure.kind),
+        (-32078, Some(ErrorKind::BackendNotEnabled))
+    );
+    assert!(!failure.message.contains(SENTINEL), "{}", failure.message);
+}
+
 /// Why: a key left in the backend with no index row needs reconciling, so it
 /// must not read as success, `NotFound`, or a plain backend failure, and its
 /// key, vault and causes must stay off the wire (#9065).
