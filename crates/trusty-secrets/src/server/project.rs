@@ -161,6 +161,14 @@ impl ProjectContext {
         Ok((state.backends)(id)?)
     }
 
+    /// The machine config read by [`Self::resolve`], if the file exists.
+    ///
+    /// What: the untracked file whose CLI sections enable a CLI backend,
+    /// and so the delete sweep's reach (#7519).
+    pub fn machine_config(&self) -> Option<&MachineSecretsConfig> {
+        self.machine.as_ref()
+    }
+
     /// The §6.1 resolution for this project and the server's machine config.
     pub fn resolved_config(&self) -> ResolvedConfig {
         config::resolve(self.config.as_ref(), self.machine.as_ref())

@@ -455,7 +455,18 @@ fn store_open_backend_knows_keychain_and_file() {
         let file = open_backend(&BackendId::file()).unwrap();
         assert_eq!(file.id().as_str(), "file");
     }
-    let err = open_backend(&BackendId::new("onepassword").unwrap()).unwrap_err();
+    // #7519: with `cli-backends` it opens from the machine config under
+    // `$HOME`, which no test reads; `server_backends_for_opens_onepassword_only_when_enabled`
+    // covers that build.
+    #[cfg(not(all(unix, feature = "cli-backends")))]
+    {
+        let err = open_backend(&BackendId::onepassword()).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::UnknownBackend { .. }),
+            "{err:?}"
+        );
+    }
+    let err = open_backend(&BackendId::new("keeper").unwrap()).unwrap_err();
     assert!(
         matches!(err, SecretsError::UnknownBackend { .. }),
         "{err:?}"
@@ -484,6 +495,7 @@ fn store_keychain_failure_never_falls_through_to_file() {
             file_opened.set(true);
             Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
         },
+        || panic!("a Keychain id opened 1Password"),
     );
     assert!(
         !file_opened.get(),
@@ -494,6 +506,40 @@ fn store_keychain_failure_never_falls_through_to_file() {
         Err(other) => panic!("the Keychain error was replaced: {other:?}"),
         Ok(opened) => panic!("a failing Keychain still opened {:?}", opened.id()),
     }
+}
+
+/// Why: #7519 — a failing 1Password open surfaces as itself; it never
+/// reaches the Keychain or file opener, so a locked or disabled 1Password
+/// never moves values to another backend.
+/// Red when the `onepassword` arm falls to another opener or to
+/// `UnknownBackend`.
+/// Test: itself.
+#[test]
+fn store_onepassword_opens_only_through_its_own_opener() {
+    let other_opened = std::cell::Cell::new(false);
+    let result = backend::open_backend_from(
+        &BackendId::onepassword(),
+        || {
+            other_opened.set(true);
+            Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+        },
+        || {
+            other_opened.set(true);
+            Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+        },
+        || {
+            Err(SecretsError::BackendLocked {
+                backend: BackendId::ONEPASSWORD.to_string(),
+                hint: "unlock it",
+            })
+        },
+    );
+    assert!(!other_opened.get(), "1Password opened another backend");
+    assert!(
+        matches!(result, Err(SecretsError::BackendLocked { .. })),
+        "{:?}",
+        result.map(|b| b.id())
+    );
 }
 
 /// Why: #9326 AC3, owner ruling f5 — the Keychain is the default wherever

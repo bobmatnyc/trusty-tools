@@ -29,9 +29,11 @@ use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
-use crate::api::{BackendId, SecretsError};
+use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
-use crate::store::{KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, platform};
+use crate::store::{
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, open_backend_at, platform,
+};
 
 /// Maps a configured backend id to an implementation.
 ///
@@ -40,9 +42,35 @@ use crate::store::{KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, p
 pub type BackendFactory =
     Arc<dyn Fn(&BackendId) -> Result<Arc<dyn SecretBackend>, SecretsError> + Send + Sync>;
 
-/// The production factory: S1's [`open_backend`].
+/// S1's [`open_backend`]: CLI backends read the machine config under
+/// `$HOME` and get no token overlay. The binary uses [`backends_for`].
 pub fn default_backends() -> BackendFactory {
     Arc::new(open_backend)
+}
+
+/// The production factory for a server with `settings` (#7519).
+///
+/// Why: a CLI backend must read the machine config the server was told to
+/// use, write its template files where the startup sweep looks, and get the
+/// service-account token the binary took out of its own environment.
+/// What: [`open_backend_at`] with [`ServerSettings::machine_config`],
+/// [`ServerSettings::template_root`] and `onepassword_token`. The machine
+/// config is read on each open, so a change is seen on the next request.
+/// Test: `server_backends_for_opens_onepassword_only_when_enabled`.
+pub fn backends_for(
+    settings: &ServerSettings,
+    onepassword_token: Option<SecretValue>,
+) -> BackendFactory {
+    let machine_config = settings.machine_config.clone();
+    let template_root = settings.template_root.clone();
+    Arc::new(move |id: &BackendId| {
+        open_backend_at(
+            id,
+            &machine_config,
+            &template_root,
+            onepassword_token.clone(),
+        )
+    })
 }
 
 /// What every handler shares.
@@ -202,7 +230,11 @@ pub enum ServeError {
 /// Bind the socket and serve until idle or `shutdown`, then unlink it.
 ///
 /// Why: see the module docs.
-/// What: `prepare_socket_dir` on the socket's parent, then
+/// What: first, on a `cli-backends` build, sweeps template files a crashed
+/// server left under [`ServerSettings::template_root`] (#7519); a sweep
+/// failure is reported on stderr and serving goes on, because the next
+/// template write refuses the same directory. Then `prepare_socket_dir` on
+/// the socket's parent, then
 /// `bind_singleton_hardened`, which takes over only a socket the kernel
 /// proves nobody serves and refuses a live one, so a second instance never
 /// clobbers the first. Serves with an [`IdleTracker`] of
@@ -216,7 +248,8 @@ pub enum ServeError {
 ///
 /// Test: `server_exits_when_idle_and_removes_its_socket`,
 /// `server_second_instance_is_refused_and_the_first_keeps_serving`,
-/// `server_bind_failure_is_reported_and_the_occupant_kept`.
+/// `server_bind_failure_is_reported_and_the_occupant_kept`,
+/// `server_startup_sweeps_stale_template_dirs`.
 pub async fn serve(
     settings: ServerSettings,
     backends: BackendFactory,
@@ -231,6 +264,10 @@ pub(crate) async fn serve_state(
     state: State,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
+    // #7519: owner ruling — a crash skips the template guard's drop, so the
+    // leftover is removed here, before any request can write a new one.
+    #[cfg(all(unix, feature = "cli-backends"))]
+    sweep_templates(&state.settings.template_root);
     let socket = state.settings.socket.clone();
     let dir = socket.parent().ok_or_else(|| ServeError::NoParent {
         path: socket.clone(),
@@ -258,6 +295,23 @@ pub(crate) async fn serve_state(
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))
+}
+
+/// Remove stale template directories under `root`, reporting on stderr.
+///
+/// What: [`crate::store::cli::sweep_stale_templates`]; the report names the
+/// directory and a count, or the error, which names a path, never content.
+#[cfg(all(unix, feature = "cli-backends"))]
+fn sweep_templates(root: &Path) {
+    match crate::store::cli::sweep_stale_templates(root) {
+        Ok(0) => {}
+        Ok(removed) => eprintln!(
+            "trusty-secrets: removed {removed} stale template director{} under {}",
+            if removed == 1 { "y" } else { "ies" },
+            root.display()
+        ),
+        Err(e) => eprintln!("trusty-secrets: template sweep skipped: {e}"),
+    }
 }
 
 /// Unlink the socket file; already gone is fine.

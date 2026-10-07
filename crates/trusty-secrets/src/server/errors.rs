@@ -102,13 +102,16 @@ pub enum ErrorKind {
     /// config's selection.
     // #7524 H1: owner ruling item 74.
     FileBackendNotSelected,
+    /// A CLI-backed backend the machine config has not enabled.
+    // #7519: P1 carry-over (a); refused before any process is spawned.
+    BackendNotEnabled,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 30] = [
+    pub(crate) const ALL: [Self; 31] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -138,6 +141,7 @@ impl ErrorKind {
         Self::CliNotInstalled,
         Self::BackendLocked,
         Self::FileBackendNotSelected,
+        Self::BackendNotEnabled,
         Self::Internal,
     ];
 
@@ -180,6 +184,7 @@ impl ErrorKind {
             Self::CliNotInstalled => "cli_not_installed",
             Self::BackendLocked => "backend_locked",
             Self::FileBackendNotSelected => "file_backend_not_selected",
+            Self::BackendNotEnabled => "backend_not_enabled",
             Self::Internal => "internal",
         }
     }
@@ -242,6 +247,9 @@ impl ErrorKind {
             Self::FileBackendNotSelected => {
                 "this build has a Keychain, so a value is written to the plaintext `file` backend only when the machine config selects it; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml to allow it"
             }
+            Self::BackendNotEnabled => {
+                "the secrets backend is not enabled on this machine; enable it in the machine config ~/.trusty-tools/trusty-common/config.yaml"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -285,6 +293,8 @@ impl ErrorKind {
             Self::BackendLocked => -32076,
             // #7524: the next unused code.
             Self::FileBackendNotSelected => -32077,
+            // #7519: the next unused code after #7524's.
+            Self::BackendNotEnabled => -32078,
         }
     }
 
@@ -331,6 +341,7 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::BackendLocked { .. } => Self::BackendLocked,
             // #7524 H1: a write into `file` the machine config did not select.
             SecretsError::FileBackendNotSelected => Self::FileBackendNotSelected,
+            SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.

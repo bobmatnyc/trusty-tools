@@ -1,0 +1,329 @@
+//! The 1Password backend through the server (#7519 P2): the delete sweep,
+//! scope refusals before any spawn, doctor, the token, the enablement
+//! gate, and the startup template sweep.
+//!
+//! A child of `server_tests`, so it shares that module's fixture: every path
+//! is under a `TempDir` and `keychain` is an in-memory double. `onepassword`
+//! is a backend over [`OpShim`], a fake `op` run by absolute path; no test
+//! runs the real `op` or changes the process environment.
+//!
+//! Test: itself.
+
+use super::*;
+use crate::store::Capabilities;
+use crate::store::onepassword::OnePasswordBackend;
+use crate::store::onepassword::shim::OpShim;
+
+const TOKEN: &str = "ops_token_canary_7519_server_0123456789";
+
+/// A machine config that keeps the Keychain and enables 1Password.
+const ENABLED: &str = "secrets:\n  default_backend: keychain\n  onepassword: {}\n";
+
+/// A machine config that selects 1Password, which also enables it.
+const SELECTED: &str = "secrets:\n  default_backend: onepassword\n";
+
+/// Replace the machine config; the server rereads it per request.
+fn machine(fx: &Fixture, yaml: &str) {
+    std::fs::write(&fx.settings.machine_config, yaml).unwrap();
+}
+
+/// A factory for `fx` that maps `onepassword` to a backend over `shim`.
+fn with_onepassword(fx: &Fixture, shim: &OpShim, token: Option<&str>) -> BackendFactory {
+    let mut settings = shim.settings(&fx.settings.template_root);
+    settings.token = token.map(SecretValue::new);
+    let backend: Arc<dyn SecretBackend> = Arc::new(OnePasswordBackend::new(settings));
+    let base = fx.backends();
+    Arc::new(move |id: &BackendId| match id.as_str() {
+        BackendId::ONEPASSWORD => Ok(Arc::clone(&backend)),
+        _ => base(id),
+    })
+}
+
+/// `{"project", "vault": "trusty/acme/web", "key"}` for `fx`.
+fn target(fx: &Fixture, name: &str) -> Value {
+    json!({"project": fx.project(), "vault": "trusty/acme/web", "key": name})
+}
+
+async fn set(fx: &Fixture, name: &str) -> RpcResponse {
+    let mut params = target(fx, name);
+    params["value"] = json!(VALUE);
+    call(&fx.settings.socket, method::SET, params).await
+}
+
+async fn delete(fx: &Fixture, name: &str) -> RpcResponse {
+    call(&fx.settings.socket, method::DELETE, target(fx, name)).await
+}
+
+async fn listed(fx: &Fixture) -> Value {
+    let list = ok(call(
+        &fx.settings.socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await);
+    list["keys"].clone()
+}
+
+/// Why: #7519 P1 carry-over (a) — a key `copy` placed in 1Password is
+/// removed from it by a delete, though the project is configured for the
+/// Keychain. Red before the sweep reached past `local_backends()`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_sweeps_onepassword_when_the_machine_enables_it() {
+    let fx = fixture();
+    machine(&fx, ENABLED);
+    let shim = OpShim::new();
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    ok(set(&fx, "A").await);
+    let copied = ok(call(
+        &fx.settings.socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain",
+               "to_backend": "onepassword", "keys": ["A"]}),
+    )
+    .await);
+    assert_eq!(copied, json!({"copied": ["A"], "failed": []}));
+    let items = shim.items();
+    assert_eq!((items.len(), items[0].2.as_str()), (1, VALUE));
+
+    let deleted = delete(&fx, "A").await;
+    assert!(!wire(&deleted).contains(VALUE));
+    assert_eq!(ok(deleted), json!({"removed": true}));
+    assert!(shim.items().is_empty(), "1Password still holds the key");
+    assert!(fx.keychain.is_empty());
+    assert_eq!(listed(&fx).await, json!([]));
+    server.stop().await;
+}
+
+/// Why: the sweep's cost — one `op` listing per delete — is paid only on a
+/// machine that enables 1Password; elsewhere a delete never runs `op`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_skips_onepassword_when_the_machine_does_not_enable_it() {
+    let fx = fixture();
+    let shim = OpShim::new();
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    ok(set(&fx, "A").await);
+    assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
+    assert!(!shim.spawned(), "a delete ran `op` on a machine without it");
+    server.stop().await;
+}
+
+/// Why: #7519 A7, #9328 R1–R3 — every scope refusal happens before the
+/// 1Password backend runs: an out-of-scope vault (R1), a tracked override
+/// outside the owner (R2), and a non-github.com remote (R3) leave the shim's
+/// call log empty.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_scope_refusals_spawn_no_onepassword_process() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    let socket = &fx.settings.socket;
+
+    let other = json!({"project": fx.project(), "vault": "trusty/acme/other", "key": "K"});
+    let mut set_other = other.clone();
+    set_other["value"] = json!(VALUE);
+    for (name, params) in [(method::SET, set_other), (method::DELETE, other)] {
+        let response = call(socket, name, params).await;
+        assert_eq!(fixed_error(&response, name), ErrorKind::VaultOutOfScope);
+    }
+
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "secrets:\n  vault: trusty/victim/prod-repo\n").unwrap();
+    let response = set(&fx, "K").await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::VaultOutOfScope
+    );
+    std::fs::remove_file(&config).unwrap();
+
+    let evil = fx.tmp.path().join("evil");
+    std::fs::create_dir(&evil).unwrap();
+    git(&evil, &["init", "-q"]);
+    git(
+        &evil,
+        &["remote", "add", "origin", "git@gitlab.com:acme/web.git"],
+    );
+    let params = json!({"project": evil.display().to_string(), "vault": "trusty/acme/web",
+                        "key": "K", "value": VALUE});
+    let response = call(socket, method::SET, params).await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::RemoteHostUnsupported
+    );
+    assert!(
+        !shim.spawned(),
+        "a refused request ran `op`:\n{}",
+        shim.calls()
+    );
+    server.stop().await;
+}
+
+/// Why: #7519 A9 — doctor lists 1Password, and finding it available never
+/// runs `op`, let alone `op read`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_doctor_lists_onepassword_without_spawning() {
+    let fx = fixture();
+    machine(&fx, ENABLED);
+    let shim = OpShim::new();
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    for params in [Value::Null, json!({"project": fx.project()})] {
+        let doctor: DoctorResponse =
+            serde_json::from_value(ok(call(&fx.settings.socket, DOCTOR, params).await)).unwrap();
+        let row = doctor
+            .backends
+            .iter()
+            .find(|b| b.id == BackendId::onepassword())
+            .expect("a 1Password row");
+        assert!(row.available);
+        assert_eq!(row.capabilities, ["READ", "WRITE"]);
+    }
+    assert!(!shim.spawned(), "doctor ran `op`:\n{}", shim.calls());
+    server.stop().await;
+}
+
+/// Why: #7519 A10 — the service-account token reaches `op` through the
+/// environment overlay and nowhere else: not argv, not a response, not the
+/// audit log, including when a call fails.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_onepassword_token_never_reaches_the_wire_or_audit() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    shim.headless(TOKEN);
+    let server = fx
+        .start_with(with_onepassword(&fx, &shim, Some(TOKEN)))
+        .await;
+    let mut responses = vec![set(&fx, "A").await, delete(&fx, "A").await];
+    assert!(responses.iter().all(|r| r.error.is_none()), "{responses:?}");
+    shim.fail(
+        "list",
+        "[ERROR] dial tcp: lookup my.1password.com: no such host",
+    );
+    let failed = set(&fx, "B").await;
+    assert_eq!(fixed_error(&failed, method::SET), ErrorKind::BackendFailed);
+    responses.push(failed);
+    for response in &responses {
+        let text = wire(response);
+        assert!(!text.contains(TOKEN) && !text.contains(VALUE), "{text}");
+    }
+    let audit = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+    assert!(!audit.is_empty(), "the calls left no audit records");
+    assert!(!audit.contains(TOKEN) && !audit.contains(VALUE), "{audit}");
+    assert!(
+        fx.keychain.is_empty(),
+        "the value fell back to the Keychain"
+    );
+    let overlay = format!(
+        "{}={TOKEN}",
+        crate::store::onepassword::SERVICE_ACCOUNT_TOKEN_ENV
+    );
+    assert!(shim.env_log().contains(&overlay));
+    assert!(!shim.calls().contains(TOKEN));
+    server.stop().await;
+}
+
+/// Why: #7519 A4 — signed out and headless with no token, a set through a
+/// 1Password project is a locked error: no prompt, nothing written to the
+/// Keychain or the index instead.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_onepassword_locked_never_falls_back() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    shim.headless(TOKEN);
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    let response = set(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::BackendLocked
+    );
+    let response = delete(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::DELETE),
+        ErrorKind::BackendLocked
+    );
+    assert!(fx.keychain.is_empty());
+    assert_eq!(listed(&fx).await, json!([]));
+    server.stop().await;
+}
+
+/// Why: #7519 P1 carry-over (a) — the production factory opens 1Password
+/// only when the machine config enables it, so a tracked `backend:
+/// onepassword` alone cannot aim the server at an account, and nothing is
+/// written where the delete sweep does not reach. Opening spawns nothing.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_backends_for_opens_onepassword_only_when_enabled() {
+    let fx = fixture();
+    let factory = backends_for(&fx.settings, Some(SecretValue::new(TOKEN)));
+    let err = factory(&BackendId::onepassword()).unwrap_err();
+    assert!(
+        matches!(err, SecretsError::BackendNotEnabled { .. }),
+        "{err:?}"
+    );
+
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "secrets:\n  backend: onepassword\n").unwrap();
+    let server = fx.start_with(backends_for(&fx.settings, None)).await;
+    let response = set(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::BackendNotEnabled
+    );
+    server.stop().await;
+
+    machine(&fx, ENABLED);
+    let opened = factory(&BackendId::onepassword()).unwrap();
+    assert_eq!(opened.id(), BackendId::onepassword());
+    assert_eq!(
+        opened.capabilities(),
+        Capabilities::READ | Capabilities::WRITE
+    );
+    assert!(!format!("{opened:?}").contains(TOKEN));
+}
+
+/// Why: #7519 owner ruling — a crash skips the template guard's drop and
+/// leaves a value on disk; server startup removes a dead process's
+/// template directory and leaves a live one's alone.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_startup_sweeps_stale_template_dirs() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let root = fx.settings.template_root.clone();
+    let private = |dir: &Path| {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    private(root.as_path());
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let stale = root.join(format!("tpl.{dead}.1.0"));
+    let live = root.join(format!("tpl.{}.2.0", std::process::id()));
+    for dir in [&stale, &live] {
+        private(dir.as_path());
+        std::fs::write(dir.join("template.json"), VALUE).unwrap();
+    }
+    let server = fx.start().await;
+    assert!(
+        !stale.exists(),
+        "a dead process's template survived startup"
+    );
+    assert!(
+        live.join("template.json").exists(),
+        "a live template was removed"
+    );
+    server.stop().await;
+}

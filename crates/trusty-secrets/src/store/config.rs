@@ -53,9 +53,30 @@ pub struct MachineSecretsConfig {
     // #4567: DOC-45 C-7.10 — only this untracked file may suppress the audit.
     #[serde(default)]
     pub audit: Option<bool>,
+    /// DOC-74 §6.2's 1Password section. Present, even as `{}`, it enables
+    /// the `onepassword` backend on this machine (#7519).
+    #[serde(default)]
+    pub onepassword: Option<CliSettings>,
 }
 
 impl MachineSecretsConfig {
+    /// Whether this machine enables the CLI-backed backend `id`.
+    ///
+    /// Why: #7519 P1 carry-over (a) — a delete sweeps every enabled CLI
+    /// backend, and a CLI backend opens only when enabled, so no value is
+    /// ever written where the sweep cannot reach it. Only this untracked
+    /// file may enable one.
+    /// What: `default_backend` names `id`, or `id`'s own section is present.
+    /// A built-in backend (`keychain`, `file`) is never "enabled" here.
+    /// Test: `onepassword_open_requires_machine_enablement`.
+    pub fn enables(&self, id: &BackendId) -> bool {
+        let section = match id.as_str() {
+            BackendId::ONEPASSWORD => self.onepassword.is_some(),
+            _ => return false,
+        };
+        section || self.default_backend.as_ref() == Some(id)
+    }
+
     /// The `project_vaults` entry for `<owner>/<repo>`, if any.
     ///
     /// What: keys compare ASCII case-insensitively, as owner and repository

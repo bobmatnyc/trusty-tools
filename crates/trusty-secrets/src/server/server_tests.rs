@@ -66,6 +66,8 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         // #4567: the audit log stays in the temp dir too.
         audit_log: tmp.path().join("audit").join("audit.jsonl"),
         audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+        // #7519: template files and the startup sweep stay in the temp dir.
+        template_root: tmp.path().join("tmp"),
     };
     // #9326: the build default is `file` where no Keychain is compiled; pin
     // `keychain` (the in-memory double here) so every host runs one path.
@@ -209,7 +211,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 30] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 31] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -601,22 +603,30 @@ async fn server_doctor_reports_backends_and_paths_only() {
     assert_eq!(bare.index_root, fx.settings.index_root);
     assert_eq!(bare.project_config, None);
     assert_eq!(bare.selected_backend, BackendId::keychain());
-    assert_eq!(
-        bare.backends,
-        [
-            BackendStatus {
-                id: BackendId::keychain(),
-                available: true,
-                capabilities: vec!["READ".to_string(), "WRITE".to_string()],
-            },
-            // #9326: listed beside the Keychain; this fixture maps no `file`.
-            BackendStatus {
-                id: BackendId::file(),
+    let mut expected = vec![
+        BackendStatus {
+            id: BackendId::keychain(),
+            available: true,
+            capabilities: vec!["READ".to_string(), "WRITE".to_string()],
+        },
+        // #9326: listed beside the Keychain; this fixture maps no `file`.
+        BackendStatus {
+            id: BackendId::file(),
+            available: false,
+            capabilities: Vec::new(),
+        },
+    ];
+    // #7519: every CLI backend this build links is listed; none is mapped.
+    expected.extend(
+        crate::store::cli_backends()
+            .into_iter()
+            .map(|id| BackendStatus {
+                id,
                 available: false,
                 capabilities: Vec::new(),
-            },
-        ]
+            }),
     );
+    assert_eq!(bare.backends, expected);
     assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(
@@ -1139,7 +1149,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 30;
+    const ARMS: usize = 31;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1173,7 +1183,8 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::BackendLocked => 27,
             // #7524 H1: a write into `file` the machine config did not select.
             ErrorKind::FileBackendNotSelected => 28,
-            ErrorKind::Internal => 29,
+            ErrorKind::BackendNotEnabled => 29,
+            ErrorKind::Internal => 30,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1643,3 +1654,38 @@ mod delete_tests;
 // #7524: the Keychain-to-file write posture tests share this module's fixture.
 #[path = "posture_tests.rs"]
 mod posture_tests;
+
+// #7519: the 1Password server-path tests share this module's fixture.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[path = "onepassword_tests.rs"]
+mod onepassword_tests;
+
+/// Why: #7519 — the template directory holds values, so like the audit log
+/// it follows only the `--index-dir` flag, never an environment variable.
+/// Test: itself.
+#[test]
+fn settings_template_root_follows_the_index_flag_only() {
+    let args = |v: &[&str]| {
+        v.iter()
+            .map(Into::into)
+            .collect::<Vec<std::ffi::OsString>>()
+    };
+    let env = |name: &str| (name == INDEX_DIR_ENV).then(|| "/env/index".to_string());
+    if let Some(home) = dirs::home_dir() {
+        let flagged = ServerSettings::from_args(args(&["serve", "--index-dir", "/f/index"]), env);
+        assert_eq!(flagged.unwrap().template_root, PathBuf::from("/f/tmp"));
+        let from_env = ServerSettings::from_args(args(&["serve"]), env).unwrap();
+        assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
+        let default = settings::template_root_beside(&home.join(crate::store::INDEX_SUBDIR));
+        assert_eq!(from_env.template_root, default);
+        #[cfg(all(unix, feature = "cli-backends"))]
+        assert_eq!(default, home.join(crate::store::cli::TMP_SUBDIR));
+    }
+    let built = ServerSettings::new(
+        "/s".into(),
+        "/x/index".into(),
+        "/m".into(),
+        DEFAULT_IDLE_TIMEOUT,
+    );
+    assert_eq!(built.template_root, PathBuf::from("/x/tmp"));
+}

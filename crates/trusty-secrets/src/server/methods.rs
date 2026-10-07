@@ -31,7 +31,8 @@ use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
-use crate::store::{Capabilities, SecretBackend, SecretStore, local_backends};
+use crate::store::config::MachineSecretsConfig;
+use crate::store::{Capabilities, SecretBackend, SecretStore, cli_backends, swept_backends};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -152,7 +153,11 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         project.require_in_scope(&request.vault)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
         // #7519: a backend switch or a copy leaves values in other backends.
-        let others = other_backends(state, &project.resolved_config().backend)?;
+        let others = other_backends(
+            state,
+            &project.resolved_config().backend,
+            project.machine_config(),
+        )?;
         gate.admit()?;
         let response = store.delete_across(&request.vault, &request.key, &others)?;
         to_json(&response)
@@ -163,18 +168,22 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
 ///
 /// Why: A5 — a delete must clear the backend a key was set under before a
 /// switch, not only the one configured now.
-/// What: [`local_backends`] minus `configured`, each opened through the
-/// factory. A factory that answers [`SecretsError::UnknownBackend`] has no
-/// such backend, so it holds nothing and is skipped. Any other open failure
-/// is returned: that backend may still hold a value.
+/// What: [`swept_backends`] for the machine config — the local backends,
+/// plus each CLI backend it enables (#7519 P1 carry-over (a)) — minus
+/// `configured`, each opened through the factory. A factory that answers
+/// [`SecretsError::UnknownBackend`] has no such backend, so it holds
+/// nothing and is skipped. Any other open failure is returned: that backend
+/// may still hold a value.
 /// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
-/// `server_delete_fails_closed_when_an_old_backend_cannot_open`.
+/// `server_delete_fails_closed_when_an_old_backend_cannot_open`,
+/// `server_delete_sweeps_onepassword_when_the_machine_enables_it`.
 fn other_backends(
     state: &State,
     configured: &BackendId,
+    machine: Option<&MachineSecretsConfig>,
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
-    for id in local_backends() {
+    for id in swept_backends(machine) {
         if id == *configured {
             continue;
         }
@@ -380,10 +389,13 @@ pub struct DoctorResponse {
 ///
 /// What: S2 has no `detect_backends` yet (§7 lands with the CLI-backed
 /// integrations), so "available" means "this build opens it". Opening a
-/// backend reads no secret. Reports paths, ids and the selected backend's
+/// backend reads no secret and spawns no CLI, so 1Password's row never runs
+/// `op read` (#7519 A9); it is available when the build links it and the
+/// machine config enables it. Reports paths, ids and the selected backend's
 /// [`StoragePosture`] only.
 /// Test: `server_doctor_reports_backends_and_paths_only`,
-/// `server_doctor_reports_the_file_posture`.
+/// `server_doctor_reports_the_file_posture`,
+/// `server_doctor_lists_onepassword_without_spawning`.
 pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
@@ -403,6 +415,8 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     };
     // #9326: the file backend is listed beside the Keychain.
     let mut ids = vec![BackendId::keychain(), BackendId::file()];
+    // #7519: A9 — every CLI backend this build links.
+    ids.extend(cli_backends());
     if !ids.contains(&selected) {
         ids.push(selected.clone());
     }
