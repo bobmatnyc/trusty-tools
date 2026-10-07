@@ -34,11 +34,11 @@ use super::{
     ContextSection, ContextSnippet, ContextSource, ContextSourceError, RetrievalMode,
     ReviewSubject, SNIPPET_BODY_CHARS, TransportErr, truncate_on_char_boundary,
 };
-use crate::config::ReviewConfig;
+use crate::config::{ReviewConfig, constants::LOCAL_OWNER};
 use crate::integrations::github::{AuthStrategy, GithubClient, RunMode};
 
 /// Source identifier used in logs, config keys, and error messages.
-const SOURCE_NAME: &str = "github_issues";
+pub(crate) const SOURCE_NAME: &str = "github_issues";
 
 /// Max issues to embed in the section.
 const MAX_RESULTS: u32 = 5;
@@ -405,11 +405,14 @@ impl GithubIssuesSource {
     /// long.
     /// What: returns `repo:{owner}/{repo} is:issue <keywords>` truncated to at
     /// most 256 chars at a word boundary.  `None` when there is no keyword signal
-    /// or no owner/repo (local-diff mode).
+    /// or no owner/repo, or the owner is [`LOCAL_OWNER`]: a local diff names
+    /// no repository, and the search GitHub answered with a 422 was a wasted
+    /// call (#9194, owner comment 2026-10-07; Architect ruling Q7).
     /// Test: `query_builds_search`, `query_capped_at_256_chars`,
-    /// `query_capped_at_word_boundary`, `query_short_unchanged`.
+    /// `query_capped_at_word_boundary`, `query_short_unchanged`,
+    /// `github_issues_makes_no_search_call_for_the_local_owner`.
     fn build_query(subject: &ReviewSubject) -> Option<String> {
-        if subject.owner.is_empty() || subject.repo.is_empty() {
+        if subject.owner.is_empty() || subject.repo.is_empty() || subject.owner == LOCAL_OWNER {
             return None;
         }
         let keywords = subject.keyword_query(MAX_QUERY_IDENTIFIERS);

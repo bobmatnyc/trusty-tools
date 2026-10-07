@@ -73,6 +73,11 @@ impl AnalyzeClient for NullAnalyzeClient {
         false
     }
 
+    /// Never ready; the caller-supplied reason says why (#9194).
+    async fn analysis_status(&self, _index_id: &str) -> Result<(), AnalyzeClientError> {
+        Err(AnalyzeClientError::Unavailable(self.reason.clone()))
+    }
+
     async fn complexity_hotspots(
         &self,
         _index_id: &str,
@@ -110,6 +115,17 @@ mod tests {
             !client.has_analysis("any-index").await,
             "has_analysis must always be false so gather_context skips analyze entirely"
         );
+    }
+
+    /// #9194: the readiness reason reaches the context-source ledger.
+    #[tokio::test]
+    async fn null_analyze_client_analysis_status_carries_its_reason() {
+        let client = NullAnalyzeClient::new("no index for --source-root /tmp/x");
+        let err = client
+            .analysis_status("main")
+            .await
+            .expect_err("never ready");
+        assert!(err.to_string().contains("--source-root /tmp/x"), "{err}");
     }
 
     #[tokio::test]

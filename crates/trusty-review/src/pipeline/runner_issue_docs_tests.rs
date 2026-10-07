@@ -296,8 +296,10 @@ async fn ledger_records_the_issues_row_after_the_caller_row() {
     .await;
     let sources = &seen.outcome.context_sources;
     let names: Vec<&str> = sources.iter().map(|r| r.source.as_str()).collect();
-    assert_eq!(names, ["caller_context", "issues"]);
-    let issues = &sources[1];
+    // #9194: every row is listed; `issues` still follows the caller row.
+    let at = |name: &str| names.iter().position(|n| *n == name);
+    assert!(at("caller_context") < at("issues"), "{names:?}");
+    let issues = &sources[at("issues").expect("an issues row")];
     assert_eq!(issues.state, SourceState::Used);
     assert_eq!(issues.chars, ISSUE_BODY.chars().count());
     assert_eq!(issues.items.len(), 1);

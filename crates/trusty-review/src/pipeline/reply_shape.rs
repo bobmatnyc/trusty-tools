@@ -60,8 +60,9 @@ fn is_credential_char(c: char) -> bool {
 /// What: a run of [`is_credential_char`] characters at least
 /// [`MASK_MIN_CHARS`] long holding both a letter and a digit. A plain
 /// identifier or path with no digit is kept, so the snippet stays readable.
-/// Test: `describe_reply_masks_credential_shaped_tokens`.
-fn mask_credential_shapes(text: &str) -> String {
+/// #9194: ledger details (`probes::cap_detail`) are masked with it too.
+/// Test: `describe_reply_masks_credential_shaped_tokens`, `cap_detail_redacts_credentials`.
+pub(crate) fn mask_credential_shapes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut run = String::new();
     for c in text.chars() {

@@ -160,8 +160,9 @@ where
     };
 
     info!(owner, repo, pr, reviewer_model, index = %config.search_index, "mcp: review_pr");
+    let reported = context.request.ledger_enabled(); // #9194 amendment 3
     let outcome = run(config, input, deps, ReviewOptions::new(context.request)).await;
-    Ok(wrap_outcome(&outcome))
+    Ok(wrap_outcome(&outcome, reported))
 }
 
 // #8649: per-call search-index resolution for `review_pr`.

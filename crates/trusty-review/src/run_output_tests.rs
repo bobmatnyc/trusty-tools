@@ -201,3 +201,46 @@ fn run_failure_reason_prefers_the_recorded_error() {
         "trusty-search unreachable at /tmp/search.sock"
     );
 }
+
+/// A value whose serialisation always fails (#9194).
+struct Unserialisable;
+
+impl serde::Serialize for Unserialisable {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom("fixture refuses"))
+    }
+}
+
+/// #9194 P3 (amendment 4): a ledger that cannot be serialised is an
+/// `{"error": ...}` object naming the failure, never `null`.
+#[test]
+fn ledger_value_reports_a_serialisation_failure() {
+    assert_eq!(
+        super::ledger_value(&Unserialisable),
+        serde_json::json!({ "error": "failed to serialise context_sources: fixture refuses" })
+    );
+    let rows = [crate::models::ContextSourceRecord::new(
+        "search",
+        crate::models::SourceState::Absent,
+    )];
+    assert_eq!(
+        super::ledger_value(&rows[..]),
+        serde_json::json!([{ "source": "search", "state": "absent" }])
+    );
+}
+
+/// #9194 amendment 4: `run --json` and the MCP envelope both build their
+/// `context_sources` through `ledger_value`.
+#[test]
+fn cli_and_mcp_paths_call_ledger_value() {
+    for (path, source) in [
+        ("commands/run.rs", include_str!("commands/run.rs")),
+        ("mcp/tools.rs", include_str!("mcp/tools.rs")),
+    ] {
+        let calls = source
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .any(|l| l.contains("ledger_value("));
+        assert!(calls, "{path} must build context_sources with ledger_value");
+    }
+}

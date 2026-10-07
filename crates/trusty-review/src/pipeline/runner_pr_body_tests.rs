@@ -263,13 +263,7 @@ async fn context_sources_absent_unless_requested() {
 #[tokio::test]
 async fn a_new_input_turns_the_ledger_on() {
     let seen = observe_on(BODY, legacy_caller()).await;
-    let sources: Vec<&str> = seen
-        .outcome
-        .context_sources
-        .iter()
-        .map(|r| r.source.as_str())
-        .collect();
-    assert_eq!(sources, ["pr_body", "caller_context"]);
+    assert_eq!(sources_of(&seen), ["pr_body", "caller_context"]);
     let caller = row(&seen, "caller_context");
     assert_eq!(caller.state, SourceState::Used);
     let ids: Vec<&str> = caller.items.iter().map(|i| i.id.as_str()).collect();
@@ -299,7 +293,7 @@ async fn stdin_context_and_pr_description_never_report() {
 }
 
 /// #9192: `report_context` alone keeps a ledger: a `caller_context` row and
-/// no `pr_body` row, with the prompts unchanged.
+/// (#9194) `pr_body` `not_requested`, with the prompts unchanged.
 #[tokio::test]
 async fn report_context_alone_turns_the_ledger_on() {
     let request = OptionalContextRequest::default().with_report_context(true);
@@ -309,13 +303,9 @@ async fn report_context_alone_turns_the_ledger_on() {
         ReviewOptions::new(request),
     )
     .await;
-    let sources: Vec<&str> = seen
-        .outcome
-        .context_sources
-        .iter()
-        .map(|r| r.source.as_str())
-        .collect();
-    assert_eq!(sources, ["caller_context"]);
+    assert_eq!(sources_of(&seen), ["caller_context"]);
+    assert_eq!(row(&seen, "pr_body").state, SourceState::NotRequested);
+    assert_eq!(seen.outcome.context_sources.len(), 8, "every row (#9194)");
 }
 
 /// Run `review_pr`'s parsed `args` through the fixture pipeline.
@@ -326,10 +316,21 @@ async fn observe_mcp(args: serde_json::Value) -> Observed {
     observe(source, parsed.caller, ReviewOptions::new(parsed.request)).await
 }
 
+/// The caller-input rows the request asked for, in order. #9194: the ledger
+/// also lists `not_requested` inputs and the search, analyze and external
+/// rows; these tests are about the caller inputs.
 fn sources_of(seen: &Observed) -> Vec<&str> {
+    const INPUTS: [&str; 5] = [
+        "pr_body",
+        "caller_context",
+        "issues",
+        "spec_docs",
+        "claude_md",
+    ];
     seen.outcome
         .context_sources
         .iter()
+        .filter(|r| INPUTS.contains(&r.source.as_str()) && r.state != SourceState::NotRequested)
         .map(|r| r.source.as_str())
         .collect()
 }

@@ -222,12 +222,13 @@ fn item(
 }
 
 /// Rank of an item state for the row: higher is worse (amendment 7).
-fn rank(state: SourceState) -> u8 {
+/// #9194: every state named, so a new one cannot rank by accident.
+pub(crate) fn rank(state: SourceState) -> u8 {
     match state {
         SourceState::Unavailable => 3,
         SourceState::Truncated | SourceState::Omitted => 2,
         SourceState::Used => 1,
-        _ => 0,
+        SourceState::Absent | SourceState::NotRequested => 0,
     }
 }
 

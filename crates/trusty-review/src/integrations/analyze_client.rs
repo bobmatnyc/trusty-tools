@@ -172,6 +172,25 @@ pub trait AnalyzeClient: Send + Sync {
     /// Test: `subprocess_client_has_analysis_returns_false_on_error`.
     async fn has_analysis(&self, index_id: &str) -> bool;
 
+    /// [`Self::has_analysis`] with the reason when the answer is no (#9194).
+    ///
+    /// Why: the context-source ledger reports why analysis was unavailable,
+    /// and a bare `bool` drops the transport error.
+    /// What: `Ok(())` when analysis is available; otherwise an error naming
+    /// why. The default asks `has_analysis` once, so a client that overrides
+    /// nothing makes the same calls as before.
+    /// Test: `analysis_status_default_names_the_index`,
+    /// `facts_name_analyze_when_it_is_down`.
+    async fn analysis_status(&self, index_id: &str) -> Result<(), AnalyzeClientError> {
+        if self.has_analysis(index_id).await {
+            Ok(())
+        } else {
+            Err(AnalyzeClientError::Unavailable(format!(
+                "no analysis for index `{index_id}`"
+            )))
+        }
+    }
+
     /// Fetch complexity hotspots for an index.
     ///
     /// Why: provides the pipeline with a ranked list of complex files/functions

@@ -23,6 +23,7 @@ use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, resolve_diff_token,
+    subject_of,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
@@ -36,7 +37,7 @@ use crate::{
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
         caller_preamble::consume_context_preamble,
-        context_gate::{GateOutcome, degraded_banner, preflight_context},
+        context_gate::{GateOutcome, degraded_banner, preflight_context_detailed},
         diff::{
             DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers,
             truncate_diff,
@@ -48,6 +49,7 @@ use crate::{
             assemble::{PrBody, apply_caller_context, refs_for_review}, // #9188 D, #9192, #9197
             docs::{DocsCall, apply_docs},                              // #9193
             ledger::ContextLedger,
+            probes::ContextRows, // #9194
             seams::{PrHead, load_diff_via, pr_meta_via},
         },
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
@@ -237,30 +239,8 @@ async fn run_pipeline(
     ledger: &mut ContextLedger,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
-    // `LocalFile`, `GitRange`, and `Stdin` are all treated identically here:
-    // owner="local" is the sentinel `post::finalize_review` checks (via
-    // `is_github = owner != "local"`) to force `FinalizeAction::LogOnly` — so
-    // every non-GitHub source automatically inherits the "never post" / #2993
-    // dry-run guarantee without a separate posting check.
-    let (owner, repo, pr_number, is_local) = match &input.diff_source {
-        DiffSource::Github {
-            owner, repo, pr, ..
-        } => (owner.clone(), repo.clone(), *pr, false),
-        DiffSource::LocalFile { path } => {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
-            ("local".to_string(), stem.to_string(), 0_u64, true)
-        }
-        DiffSource::GitRange { base, head, .. } => {
-            let head_label = head.as_deref().unwrap_or("HEAD");
-            (
-                "local".to_string(),
-                format!("{base}...{head_label}"),
-                0_u64,
-                true,
-            )
-        }
-        DiffSource::Stdin => ("local".to_string(), "stdin".to_string(), 0_u64, true),
-    };
+    // A non-GitHub source gets owner `LOCAL_OWNER`, the never-post sentinel.
+    let (owner, repo, pr_number, is_local) = subject_of(&input.diff_source);
 
     let pr_url = if !is_local {
         format!("https://github.com/{owner}/{repo}/pull/{pr_number}")
@@ -472,27 +452,28 @@ async fn run_pipeline(
     // unreachable, SKIP the review loudly (no LLM call, no post) instead of
     // producing a context-free, false-confidence verdict.  An operator who
     // explicitly opted a dependency out gets a DEGRADED, non-authoritative run.
-    let degraded_reason: Option<String> =
-        match preflight_context(config, &deps, input.surface).await {
-            GateOutcome::Proceed => None,
-            GateOutcome::Skip(reason) => {
-                warn!("required-context gate: skipping review — {reason}");
-                // Search-unreachable semantics fix: every producer of
-                // ReviewStatus::Skipped is a genuine infra fault, never a policy
-                // skip — `mark_infra_skip` sets the loudness flag with it so the
-                // MCP layer never has to guess from `status` alone. #6687 added
-                // the second producer, at the context-gathering step below.
-                result.mark_infra_skip(reason);
-                // Return WITHOUT finalize_review so a skipped review is never posted.
-                // Release any dedup claim so a retry (once the dep recovers) can re-run.
-                return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
-            }
-            GateOutcome::Degraded(reason) => {
-                warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
-                result.status = ReviewStatus::Degraded;
-                Some(reason)
-            }
-        };
+    // #9194: `facts` names the dependency a Degraded outcome is about.
+    let (gate, facts) = preflight_context_detailed(config, &deps, input.surface).await;
+    let degraded_reason: Option<String> = match gate {
+        GateOutcome::Proceed => None,
+        GateOutcome::Skip(reason) => {
+            warn!("required-context gate: skipping review — {reason}");
+            // Search-unreachable semantics fix: every producer of
+            // ReviewStatus::Skipped is a genuine infra fault, never a policy
+            // skip — `mark_infra_skip` sets the loudness flag with it so the
+            // MCP layer never has to guess from `status` alone. #6687 added
+            // the second producer, at the context-gathering step below.
+            result.mark_infra_skip(reason);
+            // Return WITHOUT finalize_review so a skipped review is never posted.
+            // Release any dedup claim so a retry (once the dep recovers) can re-run.
+            return abort_dry(result, config, &input, &deps, DedupClaim::Held).await;
+        }
+        GateOutcome::Degraded(reason) => {
+            warn!("required-context gate: proceeding DEGRADED (non-authoritative) — {reason}");
+            result.status = ReviewStatus::Degraded;
+            Some(reason)
+        }
+    };
 
     // ── Step 5: gather context in parallel (search/analyze + external) ──
     // All sources are FAIL-OPEN: errors contribute nothing, never block the review
@@ -500,10 +481,11 @@ async fn run_pipeline(
     // #4999: APEX retrieval was dropped by owner ruling (0/69 citations).
     let title = &pr_meta.title;
     let body = &pr_meta.body;
-    let (context_result, external_context) = tokio::join!(
+    let (context_result, (external_context, external)) = tokio::join!(
         gather_context(config, &deps, &identifiers, &changed_files, title, body),
         gather_external_context_md(
             config,
+            options.external_sources.as_ref(), // #9194: test seam
             &owner,
             &repo,
             &identifiers,
@@ -520,8 +502,8 @@ async fn run_pipeline(
     // the index does not exist — so there is no partial context to proceed
     // with, and a verdict produced here would have seen none of the project.
     // Same treatment as a required-dependency outage: no LLM call, no post.
-    let mut context = match context_result {
-        Ok(c) => c,
+    let (mut context, search, analyze) = match context_result {
+        Ok(found) => found,
         Err(e) => {
             warn!("required-context gate: skipping review — {e}");
             result.mark_infra_skip(e.to_string());
@@ -554,6 +536,13 @@ async fn run_pipeline(
     // #9193: ADR/spec/SLD docs and CLAUDE.md read at the head SHA, when asked for.
     let docs = DocsCall::new(config, &deps, options, &diff_source, &pr_meta, &filtered);
     apply_docs(&mut applied, docs.at(&head), ledger).await;
+    // #9194: every row, once, before either review path (unified, map-reduce).
+    let rows = ContextRows {
+        search,
+        analyze,
+        external,
+    };
+    ledger.finish(&options.request, rows, &facts);
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();

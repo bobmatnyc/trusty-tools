@@ -434,6 +434,48 @@ async fn review_pr_passes_the_parsed_context_to_the_review() {
     assert_eq!(envelope["context_sources"][0]["source"], "pr_body");
 }
 
+/// #9194 AC1: `report_context: true` reaches the review's request, and the
+/// envelope carries `context_sources` even when the list is empty
+/// (amendment 3), with no row fabricated.
+#[tokio::test]
+#[serial_test::serial]
+async fn review_pr_report_context_turns_the_ledger_on() {
+    use crate::pipeline::OptionalContextRequest;
+
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "cli") };
+    let mut state = state_with(Some(two_repo_registry()), true);
+    state.config.github_token = "test-token-9194".into();
+    let seen: Arc<Mutex<Option<OptionalContextRequest>>> = Arc::default();
+    let sink = Arc::clone(&seen);
+    let args =
+        json!({"owner": "bobmatnyc", "repo": "trusty-tools", "pr": 7, "report_context": true});
+    let envelope = review_pr_with(&args, &state, move |_config, _input, _deps, options| {
+        if let Ok(mut slot) = sink.lock() {
+            *slot = Some(options.request);
+        }
+        async move {
+            crate::pipeline::ReviewOutcome {
+                result: ReviewResult::new("o", "r", 7, "PR #7", ""),
+                context_sources: Vec::new(),
+            }
+        }
+    })
+    .await;
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+
+    let envelope = envelope.expect("a boolean report_context is valid");
+    let request = seen
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .expect("review ran");
+    assert!(request.report_context && request.ledger_enabled());
+    assert!(!request.requested_new(), "report_context is no new input");
+    assert_eq!(envelope["context_sources"], json!([]), "{envelope}");
+}
+
 /// #9192: a mistyped `include_pr_body` is a protocol error, before any review.
 #[tokio::test]
 async fn review_pr_rejects_a_mistyped_include_pr_body_before_reviewing() {

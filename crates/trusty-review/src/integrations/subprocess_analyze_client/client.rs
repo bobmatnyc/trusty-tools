@@ -437,13 +437,29 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// `subprocess_client_not_serving_search_has_no_analysis`,
     /// `subprocess_client_has_no_analysis_for_an_unknown_index`.
     async fn has_analysis(&self, index_id: &str) -> bool {
-        match self.health().await {
-            Ok(h) => h.search_reachable && self.search_index_exists(index_id).await,
-            Err(e) => {
-                tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
-                false
-            }
+        self.analysis_status(index_id).await.is_ok()
+    }
+
+    /// [`Self::has_analysis`] with its reason (#9194): the health error, a
+    /// search daemon that is not serving, or an index it does not know.
+    ///
+    /// Test: `subprocess_client_analysis_status_carries_the_health_error`,
+    /// `subprocess_client_analysis_status_names_an_unknown_index`.
+    async fn analysis_status(&self, index_id: &str) -> Result<(), AnalyzeClientError> {
+        let h = self.health().await.inspect_err(|e| {
+            tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
+        })?;
+        if !h.search_reachable {
+            return Err(AnalyzeClientError::Unavailable(
+                "trusty-search is not serving".to_string(),
+            ));
         }
+        if !self.search_index_exists(index_id).await {
+            return Err(AnalyzeClientError::Unavailable(format!(
+                "no analysis for index `{index_id}`"
+            )));
+        }
+        Ok(())
     }
 
     /// Returns empty hotspots for the subprocess model.

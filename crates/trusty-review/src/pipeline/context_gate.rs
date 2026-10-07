@@ -12,7 +12,8 @@
 //!
 //! What: `preflight_context` probes `SearchClient::health` (is the daemon up),
 //! `SearchClient::index_status` (can the index under review answer, #6686), and
-//! `AnalyzeClient::has_analysis` concurrently, then folds the two `require_*`
+//! `AnalyzeClient::analysis_status` (#9194: `has_analysis` with its reason)
+//! concurrently, then folds the two `require_*`
 //! flags into a single `GateOutcome`: `Proceed`, `Skip(reason)`, or
 //! `Degraded(reason)`.
 //! The gate lives here (not inline in the runner) so every subject goes through
@@ -48,6 +49,23 @@ pub enum GateOutcome {
     /// proceed with a DEGRADED, explicitly non-authoritative review.  The string
     /// names what context is missing.
     Degraded(String),
+}
+
+/// Which dependency the gate found wanting, and why (#9194).
+///
+/// Why: a `Degraded(reason)` is one string; the context-source ledger needs
+/// to know whether search, analyze, or both were the cause.
+/// What: `search` and `analyze` each hold the reason that dependency is
+/// unavailable or degraded, `None` when the gate found nothing wrong with it
+/// or never probed it.
+/// Test: `facts_name_search_when_the_daemon_is_down`,
+/// `facts_are_empty_when_the_gate_proceeds`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GateFacts {
+    /// Why trusty-search is unavailable or degraded for this review.
+    pub(crate) search: Option<String>,
+    /// Why trusty-analyze is unavailable for this review.
+    pub(crate) analyze: Option<String>,
 }
 
 /// Probe the required context dependencies and decide whether to proceed.
@@ -119,11 +137,36 @@ pub async fn preflight_context(
     deps: &ReviewDeps,
     surface: InvocationSurface,
 ) -> GateOutcome {
+    preflight_context_detailed(config, deps, surface).await.0
+}
+
+/// [`preflight_context`] plus the [`GateFacts`] behind its outcome (#9194).
+///
+/// Why: the context-source ledger marks a dependency the gate degraded
+/// `unavailable` with the gate's reason (Architect ruling Q5), so it needs
+/// to know which dependency that was.
+/// What: the gate's body. Every outcome is `preflight_context`'s; `facts`
+/// carries the search reason on the search-down, empty-index and per-index
+/// branches, and the analyze reason (with the probe's own error, via
+/// `AnalyzeClient::analysis_status`) when analysis is unavailable. On the
+/// search-down and empty-index early returns `facts.analyze` stays `None`,
+/// so the ledger derives the analyze row itself (amendment 6). The probes
+/// are the same calls, one each.
+/// Test: `facts_name_search_when_the_daemon_is_down`,
+/// `facts_name_the_index_reason_when_degraded`, `facts_name_analyze_when_it_is_down`,
+/// `facts_carry_the_analyze_transport_error`, `facts_are_empty_when_the_gate_proceeds`,
+/// `preflight_context_and_detailed_return_the_same_outcome`.
+pub(crate) async fn preflight_context_detailed(
+    config: &ReviewConfig,
+    deps: &ReviewDeps,
+    surface: InvocationSurface,
+) -> (GateOutcome, GateFacts) {
     // #9214: name the leg actually used — `socket <path>` or the HTTP URL.
     let search_at =
         crate::integrations::search_transport::SearchTransport::resolve(config).describe();
     let index = &config.search_index;
     let require_search = config.context.effective_require_search(surface);
+    let mut facts = GateFacts::default(); // #9194
 
     // Probe the dependencies concurrently — context retrieval is latency
     // sensitive and these are independent network calls.
@@ -133,12 +176,13 @@ pub async fn preflight_context(
     let index_fut = async { deps.search.index_status(index).await };
     let analyze_fut = async {
         match deps.analyze.as_ref() {
-            Some(a) => a.has_analysis(index).await,
+            // #9194: the same single probe, keeping the reason it said no.
+            Some(a) => a.analysis_status(index).await.map_err(|e| e.to_string()),
             // No analyze client wired in at all — treat as "no analysis".
-            None => false,
+            None => Err("trusty-analyze unavailable: analyze client absent".to_string()),
         }
     };
-    let (search_health, index_status, analyze_ready) =
+    let (search_health, index_status, analyze_status) =
         tokio::join!(search_fut, index_fut, analyze_fut);
 
     // Captures the health probe's own error text (e.g. a `NullSearchClient`'s
@@ -180,12 +224,13 @@ pub async fn preflight_context(
     // ── trusty-search gate (checked first: it is the more fundamental dep) ──
     if !search_ok {
         if require_search {
-            return GateOutcome::Skip(format!(
+            let skip = GateOutcome::Skip(format!(
                 "trusty-search unreachable at {search_at} — start it (`trusty-search start`); \
                  refusing to review without code context (set \
                  TRUSTY_REVIEW_REQUIRE_SEARCH=false or [context] require_search=false to opt \
                  into a degraded, non-authoritative review)"
             ));
+            return (skip, facts);
         }
         info!(
             surface = ?surface,
@@ -199,7 +244,8 @@ pub async fn preflight_context(
                 "trusty-search unavailable at {search_at}; review produced WITHOUT code context"
             ),
         };
-        return GateOutcome::Degraded(reason);
+        facts.search = Some(reason.clone()); // #9194 amendment 6: analyze stays None
+        return (GateOutcome::Degraded(reason), facts);
     }
 
     // #8411: no index covers this checkout (`resolve_index` found none). Probing
@@ -210,9 +256,11 @@ pub async fn preflight_context(
              from the diff alone, WITHOUT code context or static analysis"
         );
         if require_search {
-            return GateOutcome::Skip(format!("{reason}; search is required on this surface"));
+            let skip = GateOutcome::Skip(format!("{reason}; search is required on this surface"));
+            return (skip, facts);
         }
-        return GateOutcome::Degraded(reason);
+        facts.search = Some(reason.clone()); // #9194 amendment 6: analyze stays None
+        return (GateOutcome::Degraded(reason), facts);
     }
 
     // ── per-index gate (#6686, #6687) ──────────────────────────────────────
@@ -247,7 +295,7 @@ pub async fn preflight_context(
         // say which index was missing.
         Err(e) if e.is_unknown_index() => {
             warn!(index = %index, "trusty-search has no index `{index}` — skipping review");
-            return GateOutcome::Skip(format!(
+            let skip = GateOutcome::Skip(format!(
                 "trusty-search at {search_at} has no index `{index}` — refusing to review with \
                  no code context. Every search against it returns `404 unknown index`, so the \
                  review would see none of the project. Index this checkout \
@@ -257,6 +305,7 @@ pub async fn preflight_context(
                  TRUSTY_REVIEW_REQUIRE_SEARCH=false degrades a daemon outage, not a missing \
                  index."
             ));
+            return (skip, facts);
         }
         Err(e) => {
             warn!(index = %index, "index status probe failed: {e}");
@@ -266,9 +315,14 @@ pub async fn preflight_context(
             ));
         }
     }
+    // #9194: the index reason, in the words the review would be labelled with.
+    facts.search = search_degraded_reason
+        .as_ref()
+        .map(|reason| format!("trusty-search at {search_at}: {reason}"));
 
     // ── trusty-analyze gate ────────────────────────────────────────────────
-    if !analyze_ready {
+    if let Err(detail) = analyze_status {
+        facts.analyze = Some(detail); // #9194: the probe error names the client
         if config.context.require_analyze {
             // #4440: the old text told every operator to `trusty-analyze serve`.
             // That advice is irrelevant in the DEFAULT subprocess mode used by
@@ -281,7 +335,7 @@ pub async fn preflight_context(
             // trusty-review path on this gate contacts an analyze daemon at all,
             // and the one path that still does — `report --analyze` — dials a
             // socket whose path it prints for itself.
-            return GateOutcome::Skip(format!(
+            let skip = GateOutcome::Skip(format!(
                 "trusty-analyze static-analysis context is unavailable for index `{index}` — \
                  refusing to review without it. No analyze daemon is used: to fix this, start \
                  trusty-search at {search_at} and confirm it is SERVING (a `degraded` warm \
@@ -290,25 +344,27 @@ pub async fn preflight_context(
                  TRUSTY_REVIEW_REQUIRE_ANALYZE=false or [context] require_analyze=false to opt \
                  into a degraded, non-authoritative review.)"
             ));
+            return (skip, facts);
         }
         info!(
             "trusty-analyze unavailable but require_analyze=false — proceeding DEGRADED (non-authoritative)"
         );
-        return GateOutcome::Degraded(
+        let degraded = GateOutcome::Degraded(
             "trusty-analyze unavailable; review produced WITHOUT static-analysis context"
                 .to_string(),
         );
+        return (degraded, facts);
     }
 
     // ── the index under review is serving-but-degraded (#4086, #6686) ──────
     // Checked last so a hard analyze outage still wins the reason slot. Search
     // answered and supplied context, so this is not a skip — but the gap must
     // reach the reader of the review, not just the daemon's own log.
-    if let Some(reason) = search_degraded_reason {
-        return GateOutcome::Degraded(format!("trusty-search at {search_at}: {reason}"));
+    if let Some(reason) = facts.search.clone() {
+        return (GateOutcome::Degraded(reason), facts);
     }
 
-    GateOutcome::Proceed
+    (GateOutcome::Proceed, facts)
 }
 
 /// Prominent banner prepended to a degraded review body so the verdict is never

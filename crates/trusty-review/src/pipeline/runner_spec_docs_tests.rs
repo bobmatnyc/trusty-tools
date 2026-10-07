@@ -414,11 +414,12 @@ async fn claude_md_alone_fetches_only_claude_md() {
     let user = seen.reviewer_user();
     assert!(user.contains("## Repository conventions (CLAUDE.md)"));
     assert!(user.contains("CONVENTION_SENTINEL") && !user.contains("ADR_SENTINEL_9193"));
+    // #9194: the unrequested kind is listed, `not_requested`.
     assert!(
         seen.outcome
             .context_sources
             .iter()
-            .all(|r| r.source != "spec_docs")
+            .all(|r| r.source != "spec_docs" || r.state == SourceState::NotRequested)
     );
 }
 
@@ -433,11 +434,12 @@ async fn spec_docs_alone_never_fetches_claude_md() {
     let seen = run(Setup::new(spec_docs(), fetcher.clone())).await;
     assert_eq!(fetcher.paths(), [ADR]);
     assert!(!seen.reviewer_user().contains("CONVENTION_SENTINEL"));
+    // #9194: the unrequested kind is listed, `not_requested`.
     assert!(
         seen.outcome
             .context_sources
             .iter()
-            .all(|r| r.source != "claude_md")
+            .all(|r| r.source != "claude_md" || r.state == SourceState::NotRequested)
     );
 }
 

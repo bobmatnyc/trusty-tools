@@ -11,7 +11,8 @@
 //! turns the source ledger on (plan §3.1). #9197: `issue_docs`, on both
 //! `review_pr` and `review_diff`, is parsed strictly by [`parse_issue_docs`].
 //! #9193: the booleans `spec_docs` and `claude_md`, on both tools, are read
-//! strictly by [`with_doc_flags`].
+//! strictly by [`with_doc_flags`]. #9194: the boolean `report_context`, on
+//! both tools, is read strictly by [`with_report_context_flag`].
 //! Test: `review_pr_accepts_the_three_text_params`,
 //! `review_pr_ignores_a_mistyped_text_param_with_a_warning`,
 //! `review_pr_rejects_a_mistyped_include_pr_body`,
@@ -40,6 +41,51 @@ pub(crate) const SPEC_DOCS: &str = "spec_docs";
 
 /// Read CLAUDE.md conventions at the PR head, on both review tools (#9193).
 pub(crate) const CLAUDE_MD: &str = "claude_md";
+
+/// Ask for the context-source ledger alone, on both review tools (#9194).
+pub(crate) const REPORT_CONTEXT: &str = "report_context";
+
+/// `request` with the `report_context` flag (#9194).
+///
+/// Why: AC1: reporting is opt-in through `report_context`; a new boolean
+/// with no legacy callers, so a wrong type is refused, as `spec_docs` is.
+/// What: absent or `null` is off; `true`/`false` set the flag.
+///
+/// # Errors
+///
+/// [`ToolError::InvalidParams`] naming the parameter and the type it got.
+///
+/// Test: `report_context_mistyped_is_invalid_params`,
+/// `review_diff_report_context_turns_the_ledger_on`,
+/// `review_pr_report_context_turns_the_ledger_on`.
+pub(crate) fn with_report_context_flag(
+    request: OptionalContextRequest,
+    args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    match args.get(REPORT_CONTEXT) {
+        None | Some(Value::Null) => Ok(request),
+        Some(Value::Bool(on)) => Ok(request.with_report_context(*on)),
+        Some(other) => Err(ToolError::InvalidParams(format!(
+            "'{REPORT_CONTEXT}' must be a boolean, got {}",
+            type_name(other)
+        ))),
+    }
+}
+
+/// The `report_context` JSON Schema both review tools list (#9194).
+///
+/// Test: `both_review_tools_list_report_context`.
+pub(crate) fn report_context_schema() -> Value {
+    serde_json::json!({
+        "type": "boolean",
+        "description": "Report every context source in a context_sources ledger beside the \
+                        review: pr_body, caller_context, issues, spec_docs, claude_md, search, \
+                        analyze and external_sources, each used, truncated, absent (asked for, \
+                        nothing there), unavailable (could not be read, with the reason), or \
+                        not_requested. Default false; any other new input turns it on too. \
+                        The review itself is unchanged."
+    })
+}
 
 /// `review_pr`'s parsed optional context.
 #[derive(Debug, Default)]
@@ -100,6 +146,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
         .with_caller_text(caller_text);
     parsed.request = with_issue_docs(parsed.request, args)?; // #9197
     parsed.request = with_doc_flags(parsed.request, args)?; // #9193
+    parsed.request = with_report_context_flag(parsed.request, args)?; // #9194
     Ok(parsed)
 }
 
