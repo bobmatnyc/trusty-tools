@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use trusty_agents_common::agent_content::{
@@ -158,19 +158,17 @@ where
     F: FnOnce(&Path) -> Result<Option<UpdateOutcome>, CacheError>,
 {
     static FAILURES: LazyLock<FailureMemo> = LazyLock::new(|| FailureMemo::new(RETRY_AFTER));
-    resolve_or_fetch_with(cache, dev, fetch, &FAILURES, Instant::now())
+    resolve_or_fetch_with(cache, dev, fetch, &FAILURES, Instant::now)
 }
 
-/// The body of [`resolve_or_fetch_in`], with the memo and the time injected.
+/// The body of [`resolve_or_fetch_in`], with the memo and the clock injected.
 ///
 /// What: resolves under `dev`. Only a `NotInstalled` answer may fetch (any
 /// other error, including an unreadable lock, is returned untouched). A fetch
 /// for this cache that failed within the memo's window is not retried: the
 /// answer is `FetchFailed` naming that failure. The memo never serves
-/// content — a bundle installed meanwhile resolves first. Otherwise `fetch`
-/// runs off the tokio worker ([`off_worker`]); `Ok(None)` means another writer
-/// pinned first. After a successful fetch, content is resolved again, so what
-/// is served is what the resolver verified against the new lock.
+/// content — a bundle installed meanwhile resolves first. Otherwise, off the
+/// tokio worker ([`off_worker`]), [`fetch_serialized`] runs the fetch.
 /// Test: `a_failed_fetch_is_not_retried_within_the_window`,
 /// `a_fetch_inside_a_runtime_leaves_the_worker_free`.
 pub(crate) fn resolve_or_fetch_with<F>(
@@ -178,7 +176,7 @@ pub(crate) fn resolve_or_fetch_with<F>(
     dev: DevOverride,
     fetch: F,
     memo: &FailureMemo,
-    now: Instant,
+    now: impl Fn() -> Instant,
 ) -> Result<ResolvedContent, AgentContentError>
 where
     F: FnOnce(&Path) -> Result<Option<UpdateOutcome>, CacheError>,
@@ -188,15 +186,41 @@ where
         other => return other,
     }
     // #9396: a dead network is not re-hit by every composition.
-    if let Some(reason) = memo.recent(cache, now) {
-        return Err(AgentContentError::FetchFailed {
-            reason: format!(
-                "{reason} (a fetch under {} s ago failed, so tm did not retry yet)",
-                memo.window.as_secs()
-            ),
-        });
+    memo.refuse_recent(cache, now())?;
+    off_worker(|| fetch_serialized(cache, dev, fetch, memo, &now))
+}
+
+/// Runs one first-use fetch per cache at a time.
+///
+/// Why: callers that queued behind a failing fetch each ran their own full
+/// fetch during an outage (#9396).
+/// What: holds the cache's gate from [`FailureMemo::gate`], then resolves and
+/// reads the memo again, so a caller that waited serves what the fetch
+/// before it installed, or that fetch's failure. Otherwise `fetch` runs;
+/// `Ok(None)` means another writer pinned first. A failure is recorded at
+/// `now()` read after the fetch returned. After a success, content is
+/// resolved again, so what is served is what the resolver verified against
+/// the new lock.
+/// Test: `a_slow_failed_fetch_is_memoized_from_when_it_failed`,
+/// `callers_queued_behind_a_failing_fetch_do_not_fetch_again`.
+fn fetch_serialized<F>(
+    cache: &Path,
+    dev: DevOverride,
+    fetch: F,
+    memo: &FailureMemo,
+    now: &impl Fn() -> Instant,
+) -> Result<ResolvedContent, AgentContentError>
+where
+    F: FnOnce(&Path) -> Result<Option<UpdateOutcome>, CacheError>,
+{
+    let gate = memo.gate(cache);
+    let _held = gate.lock().unwrap_or_else(PoisonError::into_inner);
+    match resolve_content_in(cache, dev.clone()) {
+        Err(AgentContentError::NotInstalled { .. }) => {}
+        other => return other,
     }
-    match off_worker(|| fetch(cache)) {
+    memo.refuse_recent(cache, now())?;
+    match fetch(cache) {
         Ok(Some(outcome)) => tracing::info!(
             tag = %outcome.tag,
             sha256 = %outcome.sha256,
@@ -207,7 +231,8 @@ where
         Ok(None) => tracing::debug!("another writer pinned the content release first"),
         Err(e) => {
             let reason = e.to_string();
-            memo.record(cache, now, &reason);
+            // #9396: the window starts when the fetch failed, not when it began.
+            memo.record(cache, now(), &reason);
             return Err(AgentContentError::FetchFailed { reason });
         }
     }
@@ -238,14 +263,17 @@ fn off_worker<T>(work: impl FnOnce() -> T) -> T {
 ///
 /// Why: with no content, every composition retries the fetch, and each
 /// retry against a dead network blocks for the full HTTP timeout.
-/// What: `record` stores the failure and when it happened; `recent` returns
-/// it while it is younger than `window`; `clear` drops it after a success.
-/// It only suppresses a retry; it holds no content.
-/// Test: `a_failed_fetch_is_not_retried_within_the_window`.
+/// What: `record` stores the failure and when it happened; `refuse_recent`
+/// answers it while it is younger than `window`; `clear` drops it after a
+/// success; `gate` is the per-cache lock that serializes fetches. It only
+/// suppresses a retry; it holds no content.
+/// Test: `a_failed_fetch_is_not_retried_within_the_window`,
+/// `callers_queued_behind_a_failing_fetch_do_not_fetch_again`.
 #[derive(Debug)]
 pub(crate) struct FailureMemo {
     window: Duration,
     failures: Mutex<HashMap<PathBuf, (Instant, String)>>,
+    gates: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
 impl FailureMemo {
@@ -254,15 +282,32 @@ impl FailureMemo {
         Self {
             window,
             failures: Mutex::new(HashMap::new()),
+            gates: Mutex::new(HashMap::new()),
         }
     }
 
-    fn recent(&self, cache: &Path, now: Instant) -> Option<String> {
-        let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        failures
+    /// The lock one fetch into `cache` holds while it runs.
+    fn gate(&self, cache: &Path) -> Arc<Mutex<()>> {
+        let mut gates = self.gates.lock().unwrap_or_else(PoisonError::into_inner);
+        gates.entry(cache.to_path_buf()).or_default().clone()
+    }
+
+    /// `FetchFailed` naming the failure recorded for `cache`, while it is
+    /// younger than the window at `now`.
+    fn refuse_recent(&self, cache: &Path, now: Instant) -> Result<(), AgentContentError> {
+        let failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
+        match failures
             .get(cache)
             .filter(|(at, _)| now.saturating_duration_since(*at) < self.window)
-            .map(|(_, reason)| reason.clone())
+        {
+            Some((_, reason)) => Err(AgentContentError::FetchFailed {
+                reason: format!(
+                    "{reason} (a fetch under {} s ago failed, so tm did not retry yet)",
+                    self.window.as_secs()
+                ),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn record(&self, cache: &Path, now: Instant, reason: &str) {

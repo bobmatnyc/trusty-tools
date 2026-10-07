@@ -14,7 +14,7 @@
 //! `github_source_reports_an_unreachable_host`.
 
 use std::io::Read;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use trusty_common::content::TAG_PREFIX;
@@ -102,7 +102,7 @@ pub struct GithubReleases {
     client: reqwest::blocking::Client,
     download_base: String,
     api_base: String,
-    token: Option<String>,
+    token: Option<(String, TokenOrigin)>,
 }
 
 impl std::fmt::Debug for GithubReleases {
@@ -117,12 +117,27 @@ impl std::fmt::Debug for GithubReleases {
 
 /// The GitHub token: `GITHUB_TOKEN`, else `GH_TOKEN` (the order
 /// `trusty-installer` reads), else `gh auth token` (#9396).
-fn github_token() -> Option<String> {
+fn github_token() -> Option<(String, TokenOrigin)> {
     github_token_with(|name| std::env::var(name).ok(), run_gh_auth_token)
+}
+
+/// Where the API token came from, which decides what a 401 does (#9396).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenOrigin {
+    /// Passed to [`GithubReleases::with_token`]; a 401 is an error.
+    Given,
+    /// The named environment variable; a 401 is an error naming it.
+    Var(&'static str),
+    /// `gh auth token`; a 401 is retried once unauthenticated.
+    Gh,
 }
 
 /// How long `gh auth token` may run before it is killed (#9396).
 const GH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The argv after `gh`: the token for github.com only, never the host
+/// `GH_HOST` or the active login names (#9396).
+pub(crate) const GH_AUTH_TOKEN_ARGS: [&str; 4] = ["auth", "token", "--hostname", "github.com"];
 
 /// What `gh auth token` printed, and whether it exited 0.
 #[derive(Debug)]
@@ -140,14 +155,20 @@ pub(crate) struct GhOutput {
 /// What: [`github_token_from`] first; only when it finds none, `gh` runs. A
 /// `gh` that is missing, fails, times out or prints nothing leaves the source
 /// unauthenticated, never an error. Neither the token nor `gh`'s output is
-/// logged.
+/// logged. The token comes back with its [`TokenOrigin`].
 /// Test: `the_token_falls_back_to_gh_auth_token`.
 pub(crate) fn github_token_with(
     var: impl Fn(&str) -> Option<String>,
     gh: impl FnOnce() -> std::io::Result<GhOutput>,
-) -> Option<String> {
-    github_token_from(var).or_else(|| match gh() {
-        Ok(out) if out.success => String::from_utf8(out.stdout).ok().and_then(normalize_token),
+) -> Option<(String, TokenOrigin)> {
+    if let Some((name, token)) = github_token_from(var) {
+        return Some((token, TokenOrigin::Var(name)));
+    }
+    match gh() {
+        Ok(out) if out.success => String::from_utf8(out.stdout)
+            .ok()
+            .and_then(normalize_token)
+            .map(|token| (token, TokenOrigin::Gh)),
         Ok(_) => {
             tracing::debug!("`gh auth token` exited non-zero; reading GitHub unauthenticated");
             None
@@ -156,32 +177,32 @@ pub(crate) fn github_token_with(
             tracing::debug!(kind = ?e.kind(), "`gh auth token` did not run; reading GitHub unauthenticated");
             None
         }
-    })
+    }
 }
 
-/// Runs `gh auth token`, killing it after [`GH_TIMEOUT`].
-fn run_gh_auth_token() -> std::io::Result<GhOutput> {
-    let mut child = std::process::Command::new("gh")
-        .args(["auth", "token"])
+/// The `gh auth token` command, not yet spawned.
+///
+/// Why: with `GH_HOST` set, or gh logged in only to an enterprise host, a
+/// bare `gh auth token` prints that host's token, which would then go to
+/// api.github.com as a bearer token (#9396).
+/// What: [`GH_AUTH_TOKEN_ARGS`] (`--hostname github.com`) with `GH_HOST`
+/// removed; stdin and stderr null, stdout piped.
+/// Test: `gh_auth_token_asks_for_the_github_com_token_only`.
+pub(crate) fn gh_auth_token_command() -> std::process::Command {
+    let mut command = trusty_common::gh::GhCommand::new(GH_AUTH_TOKEN_ARGS)
+        .env_remove("GH_HOST")
+        .to_std_command();
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let deadline = Instant::now() + GH_TIMEOUT;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "`gh auth token` did not finish",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
+        .stderr(Stdio::null());
+    command
+}
+
+/// Runs [`gh_auth_token_command`], killing it after [`GH_TIMEOUT`].
+fn run_gh_auth_token() -> std::io::Result<GhOutput> {
+    let mut child = gh_auth_token_command().spawn()?;
+    let status = wait_bounded(&mut child, GH_TIMEOUT)?;
     let mut stdout = Vec::new();
     if let Some(out) = child.stdout.take() {
         out.take(4096).read_to_end(&mut stdout)?;
@@ -190,6 +211,60 @@ fn run_gh_auth_token() -> std::io::Result<GhOutput> {
         success: status.success(),
         stdout,
     })
+}
+
+/// The parts of a child process [`wait_bounded`] drives; tests fake it.
+pub(crate) trait Reap {
+    /// [`std::process::Child::try_wait`].
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>>;
+    /// [`std::process::Child::kill`].
+    fn kill(&mut self) -> std::io::Result<()>;
+    /// [`std::process::Child::wait`].
+    fn wait(&mut self) -> std::io::Result<ExitStatus>;
+}
+
+impl Reap for std::process::Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        std::process::Child::kill(self)
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        std::process::Child::wait(self)
+    }
+}
+
+/// Waits up to `timeout` for `child` to exit.
+///
+/// Why: a child that is never waited on is left behind as a zombie (#9396).
+/// What: polls `try_wait` every 20 ms. An exit status is returned. A timeout
+/// or a `try_wait` error kills and reaps the child, then returns the error.
+/// Test: `every_exit_but_a_status_kills_and_reaps_the_child`.
+pub(crate) fn wait_bounded(
+    child: &mut impl Reap,
+    timeout: Duration,
+) -> std::io::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    let failure = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() >= deadline => {
+                break std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "`gh auth token` did not finish",
+                );
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => break e,
+        }
+    };
+    // #9396: reap on every path that has no exit status yet.
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(failure)
 }
 
 /// The reason for a 403 or 429 answer (#9396).
@@ -235,15 +310,29 @@ fn normalize_token(token: String) -> Option<String> {
 }
 
 /// The first set (non-blank, trimmed) of `GITHUB_TOKEN` and `GH_TOKEN` as
-/// `var` reads them.
+/// `var` reads them, with the variable's name (#9396).
 /// #9036: an empty or whitespace-only `GITHUB_TOKEN` falls through to
 /// `GH_TOKEN`; a blank `GH_TOKEN` is unset.
 /// Test: `an_empty_github_token_falls_through_to_gh_token`.
-pub(super) fn github_token_from(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+pub(super) fn github_token_from(
+    var: impl Fn(&str) -> Option<String>,
+) -> Option<(&'static str, String)> {
     [trusty_common::env_vars::ENV_GITHUB_TOKEN, "GH_TOKEN"]
         .into_iter()
-        .filter_map(var)
-        .find_map(normalize_token)
+        .find_map(|name| var(name).and_then(normalize_token).map(|t| (name, t)))
+}
+
+/// The reason for a 401 to a token tm will not drop (#9396).
+fn refused_token_reason(origin: TokenOrigin) -> String {
+    match origin {
+        TokenOrigin::Var(name) => format!(
+            "HTTP 401 Unauthorized: GitHub refused the token in `{name}`, which is revoked or \
+             expired; replace it, or unset `{name}` to read GitHub unauthenticated"
+        ),
+        TokenOrigin::Given | TokenOrigin::Gh => "HTTP 401 Unauthorized: GitHub refused the \
+                                                 configured token, which is revoked or expired"
+            .to_owned(),
+    }
 }
 
 impl GithubReleases {
@@ -254,7 +343,7 @@ impl GithubReleases {
             &format!("https://github.com/{CONTENT_REPO}/releases/download"),
             &format!("https://api.github.com/repos/{CONTENT_REPO}"),
         )?
-        .with_token(github_token()))
+        .with_token_from(github_token()))
     }
 
     /// A source reading from other base URLs, unauthenticated; tests point it
@@ -280,27 +369,67 @@ impl GithubReleases {
 
     /// The same source sending `token` on API calls; `None`, an empty or a
     /// whitespace-only token stays unauthenticated (#9036).
-    pub fn with_token(mut self, token: Option<String>) -> Self {
-        self.token = token.and_then(normalize_token);
+    pub fn with_token(self, token: Option<String>) -> Self {
+        self.with_token_from(token.map(|t| (t, TokenOrigin::Given)))
+    }
+
+    /// [`GithubReleases::with_token`] with the token's origin, which decides
+    /// whether a 401 is retried unauthenticated (#9396).
+    pub fn with_token_from(mut self, token: Option<(String, TokenOrigin)>) -> Self {
+        self.token = token.and_then(|(t, origin)| normalize_token(t).map(|t| (t, origin)));
         self
     }
 
-    /// `auth` adds the bearer token (API calls only, never asset downloads).
-    fn get(&self, url: &str, max_bytes: u64, auth: bool) -> Result<Option<Vec<u8>>, FetchError> {
+    /// Sends a GET, with the bearer token when `auth` and a token is set.
+    fn send(&self, url: &str, auth: bool) -> Result<reqwest::blocking::Response, FetchError> {
         let fail = |reason: String| FetchError {
             url: url.to_owned(),
             reason,
             status: None,
         };
         let mut request = self.client.get(url);
-        if let (true, Some(token)) = (auth, &self.token) {
+        if let (true, Some((token, _))) = (auth, &self.token) {
             // #9036: the reason never carries the token or the header value.
             let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
                 .map_err(|_| fail("the GitHub token is not a valid header value".to_owned()))?;
             value.set_sensitive(true);
             request = request.header(reqwest::header::AUTHORIZATION, value);
         }
-        let response = request.send().map_err(|e| fail(e.to_string()))?;
+        request.send().map_err(|e| fail(e.to_string()))
+    }
+
+    /// A GET read through a size cap; `auth` adds the bearer token (API calls
+    /// only, never asset downloads).
+    ///
+    /// Why: a token `gh` stored can be revoked or expire, and a public read
+    /// must not fail on it; a token the operator exported must not be
+    /// dropped without a word (#9396).
+    /// What: a 404 is `Ok(None)`. A 401 to a `gh` token is retried once
+    /// unauthenticated; a 401 to any other token is an error naming where it
+    /// came from. A 403/429 names the rate limit.
+    /// Test: `a_401_to_a_gh_token_is_retried_unauthenticated`,
+    /// `a_401_to_an_env_token_is_an_error_naming_the_variable`.
+    fn get(&self, url: &str, max_bytes: u64, auth: bool) -> Result<Option<Vec<u8>>, FetchError> {
+        let fail = |reason: String| FetchError {
+            url: url.to_owned(),
+            reason,
+            status: None,
+        };
+        let mut response = self.send(url, auth)?;
+        if let (true, reqwest::StatusCode::UNAUTHORIZED, Some((_, origin))) =
+            (auth, response.status(), &self.token)
+        {
+            if *origin != TokenOrigin::Gh {
+                return Err(FetchError {
+                    status: Some(401),
+                    ..fail(refused_token_reason(*origin))
+                });
+            }
+            tracing::warn!(
+                "GitHub refused the `gh auth token` token (HTTP 401); reading unauthenticated"
+            );
+            response = self.send(url, false)?;
+        }
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);

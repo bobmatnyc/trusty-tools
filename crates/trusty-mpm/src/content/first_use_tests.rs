@@ -228,7 +228,7 @@ fn a_failed_fetch_is_not_retried_within_the_window() {
         calls.fetch_add(1, Ordering::SeqCst);
         unreachable_fetch(c)
     };
-    let first = resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, t0)
+    let first = resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, || t0)
         .expect_err("unreachable");
     assert!(
         first.to_string().contains("network is unreachable"),
@@ -241,7 +241,7 @@ fn a_failed_fetch_is_not_retried_within_the_window() {
             panic!("retried inside the window")
         },
         &memo,
-        t0 + Duration::from_secs(30),
+        || t0 + Duration::from_secs(30),
     )
     .expect_err("still not installed");
     assert!(again.is_not_installed(), "{again:?}");
@@ -251,7 +251,7 @@ fn a_failed_fetch_is_not_retried_within_the_window() {
     assert!(msg.contains("tm content update"), "{msg}");
 
     let later = t0 + Duration::from_secs(61);
-    resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, later)
+    resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, || later)
         .expect_err("still unreachable");
     assert_eq!(calls.load(Ordering::SeqCst), 2, "retried after the window");
 
@@ -263,10 +263,69 @@ fn a_failed_fetch_is_not_retried_within_the_window() {
         DevOverride::Off,
         |_: &Path| -> Result<Option<UpdateOutcome>, CacheError> { panic!("a lock is present") },
         &memo,
-        later,
+        || later,
     )
     .expect("the installed bundle serves inside the window");
     assert_eq!(installed_tag(&content), A);
+}
+
+/// #9396: a fetch that takes 120 s to fail is memoized from when it failed,
+/// so a composition 10 s after the failure does not fetch again.
+#[test]
+fn a_slow_failed_fetch_is_memoized_from_when_it_failed() {
+    use crate::content::first_use::{FailureMemo, resolve_or_fetch_with};
+    let memo = FailureMemo::new(Duration::from_secs(60));
+    let cache = tempfile::tempdir().unwrap();
+    let t0 = std::time::Instant::now();
+    let clock = Mutex::new(t0);
+    let now = || *clock.lock().unwrap();
+    let slow = |c: &Path| {
+        *clock.lock().unwrap() += Duration::from_secs(120);
+        unreachable_fetch(c)
+    };
+    resolve_or_fetch_with(cache.path(), DevOverride::Off, slow, &memo, now)
+        .expect_err("unreachable");
+    *clock.lock().unwrap() = t0 + Duration::from_secs(130);
+    let never = |_: &Path| -> Result<Option<UpdateOutcome>, CacheError> {
+        panic!("fetched again 10 s after a failure")
+    };
+    let again = resolve_or_fetch_with(cache.path(), DevOverride::Off, never, &memo, now)
+        .expect_err("memoized");
+    assert!(again.to_string().contains("did not retry"), "{again}");
+}
+
+/// #9396: callers that queue behind a failing fetch read its failure from
+/// the memo, so an outage costs one fetch, not one per caller.
+#[test]
+fn callers_queued_behind_a_failing_fetch_do_not_fetch_again() {
+    use crate::content::first_use::{FailureMemo, resolve_or_fetch_with};
+    const CALLERS: usize = 8;
+    let memo = FailureMemo::new(Duration::from_secs(60));
+    let cache = tempfile::tempdir().unwrap();
+    let fetches = AtomicUsize::new(0);
+    let start = std::sync::Barrier::new(CALLERS);
+    let failing = |c: &Path| {
+        fetches.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        unreachable_fetch(c)
+    };
+    std::thread::scope(|s| {
+        for _ in 0..CALLERS {
+            s.spawn(|| {
+                start.wait();
+                let err = resolve_or_fetch_with(
+                    cache.path(),
+                    DevOverride::Off,
+                    failing,
+                    &memo,
+                    std::time::Instant::now,
+                )
+                .expect_err("unreachable");
+                assert!(err.to_string().contains("network is unreachable"), "{err}");
+            });
+        }
+    });
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "one fetch per outage");
 }
 
 /// #9396: a fetch run from a task on a one-worker runtime hands the worker

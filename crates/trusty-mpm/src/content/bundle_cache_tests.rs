@@ -774,7 +774,7 @@ fn an_empty_github_token_falls_through_to_gh_token() {
             other => panic!("unexpected variable {other}"),
         });
         assert_eq!(
-            got.as_deref(),
+            got.as_ref().map(|(_, token)| token.as_str()),
             want,
             "GITHUB_TOKEN={github_token:?} GH_TOKEN={gh_token:?}"
         );
