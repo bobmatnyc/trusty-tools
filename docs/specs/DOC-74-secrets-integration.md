@@ -141,7 +141,7 @@ namespace (§9.3, `SessionSecretCache`).
 **T-2. The LLM never sees a value, only a reference.** A config row, a tool
 schema, and a chat transcript may all hold `secret://<project>/<KEY>` freely —
 it is exactly as non-secret as `CredentialRef` is today (`handle.rs`, DOC-45
-§4). The MCP tool this document adds (`secrets_get_ref`, §10.3) returns
+§4). The MCP tool this document adds (`secrets_get_ref`, §10.2) returns
 references and metadata (last-import time, backend, whether a value is
 present) — **never** a value — mirroring DOC-64's "never displays a secret
 value" rule for the panel.
@@ -575,6 +575,17 @@ happens only in Rust code that builds a subprocess env map or an HTTP client
 (§9.5), never through a tool call whose `ToolResult` an LLM turn could echo.
 Amended 2026-10-01: the value-returning `secrets.resolve` UDS method (§15.8
 tier 3) has no MCP tool and no console route.
+
+**`secrets_get_ref` as built (#7522).** Arguments: `project`, an absolute
+path to the checkout, and `key`, a key name or a `secret://` reference.
+The tool calls `secrets.scopes`, then `secrets.list` on each candidate vault
+(project first, then owner, per §15.3), then `secrets.doctor`. Its answer
+is `{reference, key, present, scope, vault, backend, imported_at}`.
+`backend` is the backend the project's config selects, because the
+names-only index records no per-key backend. `imported_at` is the index
+row's `updated_at`. The tool drops the row's length and its "agents may
+use" flag. An unknown key is `present: false`, not an error. Nothing calls
+the socket at session start. `secrets_list` is not built yet.
 
 ### 10.3 Where session state lives
 

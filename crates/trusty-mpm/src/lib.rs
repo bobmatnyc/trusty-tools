@@ -266,6 +266,16 @@ pub mod slack;
 /// Test: `secret_source_tests.rs`.
 pub mod secret_source;
 
+/// tm's client seam for the trusty-secrets on-demand socket (#7522).
+///
+/// Why: ruling 34 — the `tm secrets` CLI and the `secrets_get_ref` MCP tool
+/// are both clients of that socket; this holds what they share.
+/// What: the params fold, the fixed error text, and the tool's [`secrets_client::get_ref`].
+/// Test: `secrets_client::tests`.
+// #7522: trusty-secrets' `server` module (its client) is Unix-only.
+#[cfg(unix)]
+pub mod secrets_client;
+
 // ── Test-only support ────────────────────────────────────────────────────────
 
 /// Hermetic test temp-directory helper (#3382).
