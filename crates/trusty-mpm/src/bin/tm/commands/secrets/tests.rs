@@ -3,8 +3,8 @@
 //! No test touches the OS Keychain, the real clipboard, or `~/.trusty-tools`:
 //! the server serves a socket in a `TempDir` over two `MemoryBackend`s,
 //! `keychain` and `spare` (the `copy` destination), its index and machine
-//! config sit in the same
-//! `TempDir`, every value source is a fixed string, and the client's spawn
+//! config sit in the same `TempDir`, the machine config selects `keychain`
+//! on every OS, every value source is a fixed string, and the client's spawn
 //! program is a path that does not exist, so no real `trusty-secrets` runs.
 //! Every run captures stdout, the error's `Display` and `Debug`, and TRACE
 //! tracing, and [`Outcome::assert_no_value`] checks all four.
@@ -35,6 +35,8 @@ const SHORT: &str = "Q7xZ-9wK";
 const PROJECT_VAULT: &str = "trusty/acme/web";
 /// The owner vault of the same remote.
 const OWNER_VAULT: &str = "trusty/acme";
+/// The harness machine config: selects the memory `keychain` on every OS.
+const PINNED_MACHINE_CONFIG: &str = "secrets:\n  default_backend: keychain\n";
 
 /// A value source that returns one fixed text.
 struct Fixed(&'static str);
@@ -85,6 +87,19 @@ async fn harness() -> Harness {
         tmp.path().join("index"),
         tmp.path().join("machine.yaml"),
         Duration::from_secs(60),
+    );
+    // #7521: with no machine config the server picks the build's default
+    // backend — `keychain` on macOS, `file` elsewhere (#9326) — and this
+    // factory serves no `file`. Pin `keychain`, the memory backend, so every
+    // OS selects it.
+    std::fs::write(&settings.machine_config, PINNED_MACHINE_CONFIG).expect("write machine.yaml");
+    let pinned = trusty_secrets::store::config::load_machine_at(&settings.machine_config)
+        .expect("load machine.yaml")
+        .and_then(|m| m.default_backend);
+    assert_eq!(
+        pinned,
+        Some(BackendId::keychain()),
+        "the harness must pin the memory `keychain` backend on every OS"
     );
     let keychain = Arc::new(MemoryBackend::new());
     let spare = Arc::new(MemoryBackend::new());
