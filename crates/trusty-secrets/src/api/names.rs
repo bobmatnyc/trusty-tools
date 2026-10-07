@@ -284,6 +284,14 @@ impl BackendId {
         Self(Self::ONEPASSWORD.to_string())
     }
 
+    /// The Keeper Commander backend (#7519 P3), compiled under `cli-backends`.
+    pub const KEEPER: &'static str = "keeper";
+
+    /// The `keeper` backend id.
+    pub fn keeper() -> Self {
+        Self(Self::KEEPER.to_string())
+    }
+
     /// The `keychain` backend id.
     pub fn keychain() -> Self {
         Self(Self::KEYCHAIN.to_string())

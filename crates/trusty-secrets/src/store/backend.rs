@@ -174,15 +174,18 @@ pub(crate) fn local_backends_for(keychain_compiled: bool) -> Vec<BackendId> {
     ids
 }
 
-/// Whether this build links the 1Password backend (#7519).
-pub(crate) const ONEPASSWORD_COMPILED: bool = cfg!(all(unix, feature = "cli-backends"));
+/// Whether this build links the 1Password and Keeper backends (#7519).
+pub(crate) const CLI_BACKENDS_COMPILED: bool = cfg!(all(unix, feature = "cli-backends"));
 
 /// Every CLI-backed backend this build links, in a fixed order (#7519).
 ///
-/// Test: `server_doctor_lists_onepassword_without_spawning`.
+/// What: `onepassword`, then `keeper` (#7519 P3), so the delete sweep
+/// reaches Keeper wherever it reaches 1Password.
+/// Test: `server_doctor_lists_onepassword_without_spawning`,
+/// `server_doctor_lists_keeper_without_spawning`.
 pub fn cli_backends() -> Vec<BackendId> {
-    if ONEPASSWORD_COMPILED {
-        vec![BackendId::onepassword()]
+    if CLI_BACKENDS_COMPILED {
+        vec![BackendId::onepassword(), BackendId::keeper()]
     } else {
         Vec::new()
     }
@@ -191,7 +194,7 @@ pub fn cli_backends() -> Vec<BackendId> {
 /// Every backend a `delete` must clear on this machine (#7519).
 ///
 /// Why: P1 carry-over (a) — after a `copy` or a backend switch, 1Password
-/// can hold a key the configured backend does not. A CLI backend opens only
+/// or Keeper can hold a key the configured backend does not. A CLI backend opens only
 /// when the machine config enables it, so the enabled set is every CLI
 /// backend that can hold a value this server wrote.
 /// What: [`local_backends`], then each of [`cli_backends`] that `machine`
@@ -199,7 +202,8 @@ pub fn cli_backends() -> Vec<BackendId> {
 /// local backends only. Costs one CLI listing per enabled CLI backend on
 /// every delete, plus one CLI delete per item it holds.
 /// Test: `server_delete_sweeps_onepassword_when_the_machine_enables_it`,
-/// `server_delete_skips_onepassword_when_the_machine_does_not_enable_it`.
+/// `server_delete_skips_onepassword_when_the_machine_does_not_enable_it`,
+/// `server_delete_sweeps_keeper_when_the_machine_enables_it`.
 pub fn swept_backends(machine: Option<&MachineSecretsConfig>) -> Vec<BackendId> {
     let mut ids = local_backends();
     ids.extend(
@@ -220,11 +224,18 @@ pub fn swept_backends(machine: Option<&MachineSecretsConfig>) -> Vec<BackendId> 
 /// `onepassword` → [`open_backend_at`] with the machine config and template
 /// directory under `$HOME`, which resolves `$HOME` for that id only, no
 /// token overlay — an in-process caller's `op` inherits its environment —
-/// and that caller's `PATH`, read at this open, to find `op`;
+/// and that caller's `PATH`, read at this open, to find `op`; `keeper` →
+/// [`open_backend_at`]'s Keeper arm with the machine config under `$HOME`;
 /// anything else → [`SecretsError::UnknownBackend`].
 /// Test: `store_open_backend_knows_keychain_and_file`.
 pub fn open_backend(id: &BackendId) -> Result<Arc<dyn SecretBackend>, SecretsError> {
-    open_backend_from(id, open_keychain, open_file, open_onepassword_at_home)
+    open_backend_from(
+        id,
+        open_keychain,
+        open_file,
+        open_onepassword_at_home,
+        open_keeper_at_home,
+    )
 }
 
 /// [`open_backend`], with a CLI backend's machine config, template
@@ -237,11 +248,14 @@ pub fn open_backend(id: &BackendId) -> Result<Arc<dyn SecretBackend>, SecretsErr
 /// `machine_config` and opens only when [`MachineSecretsConfig::enables`]
 /// says it is enabled, else [`SecretsError::BackendNotEnabled`]; it then
 /// finds `op` in the absolute entries of `search_path` unless the machine
-/// config pins `program`, else [`SecretsError::CliNotInstalled`]. A build
-/// without `cli-backends` answers [`SecretsError::UnknownBackend`]. Opening
-/// spawns nothing.
+/// config pins `program`, else [`SecretsError::CliNotInstalled`]. `keeper`
+/// reads the same `machine_config` the same way and takes its program and
+/// Commander config file from it (#7519 P3). A build without
+/// `cli-backends` answers [`SecretsError::UnknownBackend`] for both.
+/// Opening spawns nothing.
 /// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
-/// `onepassword_open_requires_machine_enablement`.
+/// `onepassword_open_requires_machine_enablement`,
+/// `server_backends_for_opens_keeper_only_when_enabled`.
 pub fn open_backend_at(
     id: &BackendId,
     machine_config: &Path,
@@ -249,14 +263,20 @@ pub fn open_backend_at(
     onepassword_token: Option<SecretValue>,
     search_path: Option<&OsStr>,
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
-    open_backend_from(id, open_keychain, open_file, || {
-        open_onepassword(
-            machine_config,
-            template_root,
-            onepassword_token,
-            search_path,
-        )
-    })
+    open_backend_from(
+        id,
+        open_keychain,
+        open_file,
+        || {
+            open_onepassword(
+                machine_config,
+                template_root,
+                onepassword_token,
+                search_path,
+            )
+        },
+        || open_keeper(machine_config),
+    )
 }
 
 /// [`open_backend`] with each opener injected.
@@ -264,15 +284,18 @@ pub fn open_backend_at(
 /// Why: #9326 — a Keychain failure must surface as itself and never fall
 /// through to the file backend. Injecting the openers lets a test hand in a
 /// failing Keychain and prove the file opener is never called. #7519: the
-/// same holds for 1Password, whose failure never reaches another opener.
+/// same holds for 1Password and Keeper, whose failures never reach another
+/// opener.
 /// What: each id calls only its own opener and returns its result as-is.
 /// Test: `store_keychain_failure_never_falls_through_to_file`,
-/// `store_onepassword_opens_only_through_its_own_opener`.
+/// `store_onepassword_opens_only_through_its_own_opener`,
+/// `store_keeper_opens_only_through_its_own_opener`.
 pub(crate) fn open_backend_from(
     id: &BackendId,
     keychain: impl FnOnce() -> Result<Arc<dyn SecretBackend>, SecretsError>,
     file: impl FnOnce() -> Result<Arc<dyn SecretBackend>, SecretsError>,
     onepassword: impl FnOnce() -> Result<Arc<dyn SecretBackend>, SecretsError>,
+    keeper: impl FnOnce() -> Result<Arc<dyn SecretBackend>, SecretsError>,
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     match id.as_str() {
         // #9326: never `keychain().or_else(|_| file())` — no silent downgrade.
@@ -280,6 +303,8 @@ pub(crate) fn open_backend_from(
         BackendId::FILE => file(),
         // #7519: no fallback either; a locked 1Password is an error.
         BackendId::ONEPASSWORD => onepassword(),
+        // #7519 P3: likewise for Keeper.
+        BackendId::KEEPER => keeper(),
         _ => Err(SecretsError::UnknownBackend {
             backend: id.to_string(),
         }),
@@ -333,6 +358,34 @@ fn open_onepassword(
 fn open_onepassword_at_home() -> Result<Arc<dyn SecretBackend>, SecretsError> {
     Err(SecretsError::UnknownBackend {
         backend: BackendId::ONEPASSWORD.to_string(),
+    })
+}
+
+/// The Keeper backend, when this machine enables it (#7519 P3).
+#[cfg(all(unix, feature = "cli-backends"))]
+fn open_keeper(machine_config: &Path) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    super::keeper::open(machine_config)
+}
+
+/// [`open_keeper`] with the machine config under `$HOME`, resolved only
+/// when `keeper` is the id opened.
+#[cfg(all(unix, feature = "cli-backends"))]
+fn open_keeper_at_home() -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    let home = super::platform::home_dir()?;
+    open_keeper(&home.join(super::config::MACHINE_CONFIG_SUBPATH))
+}
+
+/// No Keeper backend without `cli-backends`.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn open_keeper(_machine_config: &Path) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    open_keeper_at_home()
+}
+
+/// No Keeper backend without `cli-backends`.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn open_keeper_at_home() -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    Err(SecretsError::UnknownBackend {
+        backend: BackendId::KEEPER.to_string(),
     })
 }
 

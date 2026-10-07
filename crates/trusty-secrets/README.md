@@ -92,7 +92,7 @@ digit or `_`.
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
-| `cli-backends` | no | The CLI runner (`store::cli`) and the 1Password backend (`store::onepassword`). Unix only. Implies `store`. |
+| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`) and the Keeper backend (`store::keeper`). Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
 A caller that only names keys can depend on `api` alone:
@@ -139,8 +139,8 @@ a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
 
 `delete` removes the key from every backend this build can store values in
-(the Keychain on macOS, the file backend, and 1Password when the machine config
-enables it), not only the configured one, so a value left behind by a backend
+(the Keychain on macOS, the file backend, and 1Password or Keeper when the
+machine config enables it), not only the configured one, so a value left behind by a backend
 switch or a `copy` is removed too. If any backend fails to delete, the call
 fails and the key stays listed. On macOS this includes the Keychain when the
 project is configured for `file`, so a locked Keychain fails that delete closed:
@@ -190,6 +190,43 @@ of whatever started the server. With no such `op`, calls fail with
 ```bash
 cargo install trusty-secrets --version <version> --features cli-backends --locked
 ```
+
+## Keeper
+
+Shims only, provisional: no test has run against a real Keeper account, so
+the command output shapes and messages below are not yet confirmed
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)).
+
+With the `cli-backends` feature (Unix), the `keeper` backend keeps values in
+Keeper through Keeper Commander, `keeper`. Only the machine config can enable
+it, and both settings are required:
+
+```yaml
+secrets:
+  keeper:
+    program: /usr/local/bin/keeper            # `keeper`, an absolute path
+    config_path: /Users/me/.keeper/config.json  # Commander's config, absolute, mode 0600
+```
+
+There is no `PATH` search, and Commander's own config search is never used.
+`account` is refused: the account is the one the config file logs in to.
+
+- Headless use needs one human step first: log in with that config file,
+  approve the device, and run `this-device register` and
+  `this-device persistent-login on`. Until then, and after an idle timeout,
+  calls fail with `backend_locked`; the server never prompts.
+- The trusty vault name is the Keeper folder path, for example
+  `trusty/acme/web`. Create that folder first.
+- A key is a `login` record titled with the key. Its `password` field holds
+  the value. A record of another type with that title is never touched.
+- The value reaches `keeper` only on stdin, as `$BASE64:` inside a
+  `record-add` or `record-update` batch line (`keeper --batch-mode -`). It is
+  never in argv or the environment.
+- Every write is read back, and every delete is checked with a new listing;
+  anything else fails. `rm` moves a record to Keeper's trash, which counts as
+  deleted.
+- A key is reported missing only when a listing succeeded and did not show it.
+- Enabling Keeper adds a folder listing and a check listing to every `delete`.
 
 `copy` moves keys between two backends of the same project. On macOS its
 destination may be `file` only when the user's own machine config, at its

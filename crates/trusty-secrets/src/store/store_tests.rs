@@ -458,15 +458,16 @@ fn store_open_backend_knows_keychain_and_file() {
     // #7519: with `cli-backends` it opens from the machine config under
     // `$HOME`, which no test reads; `server_backends_for_opens_onepassword_only_when_enabled`
     // covers that build.
+    // #7519 P3: Keeper likewise.
     #[cfg(not(all(unix, feature = "cli-backends")))]
-    {
-        let err = open_backend(&BackendId::onepassword()).unwrap_err();
+    for id in [BackendId::onepassword(), BackendId::keeper()] {
+        let err = open_backend(&id).unwrap_err();
         assert!(
             matches!(err, SecretsError::UnknownBackend { .. }),
             "{err:?}"
         );
     }
-    let err = open_backend(&BackendId::new("keeper").unwrap()).unwrap_err();
+    let err = open_backend(&BackendId::new("bitwarden").unwrap()).unwrap_err();
     assert!(
         matches!(err, SecretsError::UnknownBackend { .. }),
         "{err:?}"
@@ -496,6 +497,7 @@ fn store_keychain_failure_never_falls_through_to_file() {
             Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
         },
         || panic!("a Keychain id opened 1Password"),
+        || panic!("a Keychain id opened Keeper"),
     );
     assert!(
         !file_opened.get(),
@@ -533,10 +535,36 @@ fn store_onepassword_opens_only_through_its_own_opener() {
                 hint: "unlock it",
             })
         },
+        || panic!("a 1Password id opened Keeper"),
     );
     assert!(!other_opened.get(), "1Password opened another backend");
     assert!(
         matches!(result, Err(SecretsError::BackendLocked { .. })),
+        "{:?}",
+        result.map(|b| b.id())
+    );
+}
+
+/// Why: #7519 P3 — a failing Keeper open surfaces as itself; it never
+/// reaches another opener, so a locked or disabled Keeper never moves
+/// values to another backend. Red when the `keeper` arm falls to another
+/// opener or to `UnknownBackend`.
+/// Test: itself.
+#[test]
+fn store_keeper_opens_only_through_its_own_opener() {
+    let other_opened = std::cell::Cell::new(false);
+    let other = || {
+        other_opened.set(true);
+        Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+    };
+    let result = backend::open_backend_from(&BackendId::keeper(), other, other, other, || {
+        Err(SecretsError::BackendNotEnabled {
+            backend: BackendId::KEEPER.to_string(),
+        })
+    });
+    assert!(!other_opened.get(), "Keeper opened another backend");
+    assert!(
+        matches!(result, Err(SecretsError::BackendNotEnabled { .. })),
         "{:?}",
         result.map(|b| b.id())
     );
