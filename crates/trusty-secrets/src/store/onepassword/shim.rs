@@ -11,9 +11,16 @@
 //! `edit`, every stored value to stdout for `read` — the worst case for A2.
 //! Running through `/bin/sh` avoids `ETXTBSY` when another test thread
 //! forks while the script is open for writing.
+//!
+//! #7519: a test that needs `op` found by path — on a `PATH` value or as a
+//! machine `program` pin — uses [`OpShim::install_in`], or [`plant_op`]
+//! for an `op` that must never run. Both go through [`install_op`], which
+//! waits out `ETXTBSY` before returning.
 //! Test: the tests that build one.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -128,6 +135,14 @@ impl OpShim {
         settings
     }
 
+    /// This shim as an executable `dir/op`, for a test that finds `op` by path.
+    pub(crate) fn install_in(&self, dir: &Path) -> PathBuf {
+        install_op(
+            dir,
+            &format!("exec /bin/sh '{}' \"$@\"", self.script.display()),
+        )
+    }
+
     /// A backend over this shim, with templates under `template_root`.
     pub(crate) fn backend(&self, template_root: &Path) -> OnePasswordBackend {
         OnePasswordBackend::new(self.settings(template_root))
@@ -200,4 +215,61 @@ impl OpShim {
         items.sort();
         items
     }
+}
+
+/// The argument an [`install_op`] script exits 0 on before its body runs.
+const PROBE: &str = "__probe7519__";
+
+/// Write `dir/op`, a 0755 `/bin/sh` script running `body`, and return its
+/// path.
+///
+/// Why: a thread that forks while the file is open for writing keeps that
+/// descriptor until it execs, and an `exec` of the file meanwhile fails with
+/// `ETXTBSY`.
+/// What: after the write, runs the script with [`PROBE`] until `exec` no
+/// longer fails busy. The descriptor is closed by then, so no later fork
+/// can inherit it, and no later spawn of the script fails busy.
+pub(crate) fn install_op(dir: &Path, body: &str) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("op");
+    let script = format!("#!/bin/sh\n[ \"$1\" = {PROBE} ] && exit 0\n{body}\n");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..500 {
+        match Command::new(&path).arg(PROBE).status() {
+            Ok(status) => {
+                assert!(status.success(), "{}: {status}", path.display());
+                return path;
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("{}: {e}", path.display()),
+        }
+    }
+    panic!("{} stayed busy", path.display());
+}
+
+/// A planted `dir/op` that creates `marker` if it ever runs.
+pub(crate) fn plant_op(dir: &Path, marker: &Path) -> PathBuf {
+    install_op(dir, &format!(": > '{}'\nexit 0", marker.display()))
+}
+
+/// `dir`, absolute, as a path relative to this process's working directory.
+///
+/// What: one `..` per component of the canonical working directory, then
+/// `dir` without its leading `/`. Tests read the working directory and
+/// never change it. Asserts that the result reaches `dir`.
+pub(crate) fn relative_to_cwd(dir: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let mut relative = PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(dir.strip_prefix("/").unwrap());
+    assert!(
+        relative.is_relative() && cwd.join(&relative).is_dir(),
+        "{relative:?}"
+    );
+    relative
 }

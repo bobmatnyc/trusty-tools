@@ -15,7 +15,7 @@ use super::{
     markers, open, token_from,
 };
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
-use crate::store::config::{CliSettings, MachineSecretsConfig};
+use crate::store::config::{CliSettings, MachineSecretsConfig, load_machine_at};
 use crate::store::{Capabilities, NamesIndex, SecretBackend, SecretStore};
 
 const VALUE: &str = "sk-op-canary-7519-0123456789abcdef";
@@ -438,6 +438,62 @@ fn onepassword_machine_settings_reach_argv() {
         .unwrap_err();
         assert!(matches!(err, SecretsError::Config { .. }), "{err:?}");
         assert!(!err.to_string().contains("--evil"), "{err}");
+    }
+}
+
+/// Why: #7519 — the untracked machine config may pin `op` by absolute
+/// path, and the pin runs as given, with no `PATH` search. A relative pin
+/// is refused with fixed text that never echoes it; a pin that is not an
+/// executable file is `CliNotInstalled`. Red when `program` is ignored or
+/// a relative pin is accepted.
+/// Test: itself.
+#[test]
+fn onepassword_machine_program_pin_is_used_and_must_be_absolute() {
+    let shim = OpShim::new();
+    let tmp = TempDir::new().unwrap();
+    let pinned = shim.install_in(&tmp.path().join("pinned"));
+    let path = tmp.path().join("machine.yaml");
+    let settings_for = |program: &str| {
+        let yaml = format!("secrets:\n  onepassword:\n    program: '{program}'\n");
+        std::fs::write(&path, yaml).unwrap();
+        let machine = load_machine_at(&path).unwrap().unwrap();
+        OnePasswordSettings::from_machine(&machine, &path, tmp.path().join("tmp"), None)
+    };
+
+    let settings = settings_for(&pinned.display().to_string()).unwrap();
+    assert_eq!(settings.program, pinned.clone().into_os_string());
+    assert!(settings.leading_args.is_empty());
+    let backend = OnePasswordBackend::new(settings);
+    assert!(backend.get(&vault(), &key("A")).unwrap().is_none());
+    assert!(
+        shim.calls()
+            .starts_with("item list --vault trusty/acme/web --format json"),
+        "the pin did not run: {}",
+        shim.calls()
+    );
+
+    let err = settings_for("bin/op-SENTINEL-7519").unwrap_err();
+    match &err {
+        SecretsError::Config { path: p, reason } => {
+            assert_eq!(p, &path);
+            assert_eq!(
+                reason,
+                "`secrets.onepassword.program` must be an absolute path"
+            );
+        }
+        other => panic!("expected Config, got {other:?}"),
+    }
+    assert!(!shown(&err).contains("SENTINEL"), "{}", shown(&err));
+
+    let not_executable = tmp.path().join("plain-op");
+    std::fs::write(&not_executable, "#!/bin/sh\n").unwrap();
+    for program in [tmp.path().join("missing").join("op"), not_executable] {
+        let err = settings_for(&program.display().to_string()).unwrap_err();
+        assert!(
+            matches!(&err, SecretsError::CliNotInstalled { hint, .. }
+                if hint.contains("secrets.onepassword.program")),
+            "{err:?}"
+        );
     }
 }
 

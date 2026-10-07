@@ -12,7 +12,7 @@
 use super::*;
 use crate::store::Capabilities;
 use crate::store::onepassword::OnePasswordBackend;
-use crate::store::onepassword::shim::OpShim;
+use crate::store::onepassword::shim::{OpShim, plant_op};
 
 const TOKEN: &str = "ops_token_canary_7519_server_0123456789";
 
@@ -251,6 +251,41 @@ async fn server_onepassword_locked_never_falls_back() {
     );
     assert!(fx.keychain.is_empty());
     assert_eq!(listed(&fx).await, json!([]));
+    server.stop().await;
+}
+
+/// Why: #7519 — a tracked project file may not choose the program the
+/// server runs as `op`. `onepassword.program` there is
+/// `TrackedCliSettingRefused` before any backend runs: the shim and the
+/// planted program never run, and the reply never echoes the path.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_onepassword_program_is_refused_before_any_spawn() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    let marker = fx.tmp.path().join("planted-ran");
+    let planted = plant_op(&fx.tmp.path().join("planted"), &marker);
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let yaml = format!(
+        "secrets:\n  backend: onepassword\n  onepassword:\n    program: '{}'\n",
+        planted.display()
+    );
+    std::fs::write(&config, yaml).unwrap();
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    let response = set(&fx, "A").await;
+    let text = wire(&response);
+    assert!(
+        !text.contains(&planted.display().to_string()) && !text.contains(VALUE),
+        "{text}"
+    );
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::TrackedCliSettingRefused
+    );
+    assert!(!shim.spawned(), "a refused request ran `op`");
+    assert!(!marker.exists(), "the planted program ran");
     server.stop().await;
 }
 
