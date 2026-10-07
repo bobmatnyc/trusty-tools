@@ -60,7 +60,6 @@ pub enum GateOutcome {
 /// or never probed it.
 /// Test: `facts_name_search_when_the_daemon_is_down`,
 /// `facts_are_empty_when_the_gate_proceeds`.
-#[allow(dead_code)] // #9194: the runner reads it from the next commit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GateFacts {
     /// Why trusty-search is unavailable or degraded for this review.
@@ -180,7 +179,7 @@ pub(crate) async fn preflight_context_detailed(
             // #9194: the same single probe, keeping the reason it said no.
             Some(a) => a.analysis_status(index).await.map_err(|e| e.to_string()),
             // No analyze client wired in at all — treat as "no analysis".
-            None => Err("analyze client absent".to_string()),
+            None => Err("trusty-analyze unavailable: analyze client absent".to_string()),
         }
     };
     let (search_health, index_status, analyze_status) =
@@ -323,7 +322,7 @@ pub(crate) async fn preflight_context_detailed(
 
     // ── trusty-analyze gate ────────────────────────────────────────────────
     if let Err(detail) = analyze_status {
-        facts.analyze = Some(format!("trusty-analyze unavailable: {detail}")); // #9194
+        facts.analyze = Some(detail); // #9194: the probe error names the client
         if config.context.require_analyze {
             // #4440: the old text told every operator to `trusty-analyze serve`.
             // That advice is irrelevant in the DEFAULT subprocess mode used by

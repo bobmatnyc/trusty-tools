@@ -177,7 +177,7 @@ async fn gather_external_context_still_fails_open_for_the_prompt() {
 
 /// A GitHub search transport that counts its calls.
 #[derive(Default)]
-struct CountingSearch(Arc<AtomicUsize>);
+pub(crate) struct CountingSearch(pub(crate) Arc<AtomicUsize>);
 
 #[async_trait]
 impl IssueSearchTransport for CountingSearch {
@@ -187,7 +187,8 @@ impl IssueSearchTransport for CountingSearch {
     }
 }
 
-struct Token;
+/// A token resolver that always has a token.
+pub(crate) struct Token;
 
 #[async_trait]
 impl IssueTokenResolver for Token {

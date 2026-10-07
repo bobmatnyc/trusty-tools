@@ -100,6 +100,13 @@ impl ContextItemRecord {
             detail: None,
         }
     }
+
+    /// This row with `detail`; an empty one is none (#9194).
+    #[must_use]
+    pub(crate) fn with_detail(mut self, detail: &str) -> Self {
+        self.detail = (!detail.is_empty()).then(|| detail.to_string());
+        self
+    }
 }
 
 impl ContextSourceRecord {
@@ -113,6 +120,13 @@ impl ContextSourceRecord {
             detail: None,
             items: Vec::new(),
         }
+    }
+
+    /// This record with `detail`; an empty one is none (#9194).
+    #[must_use]
+    pub(crate) fn with_detail(mut self, detail: &str) -> Self {
+        self.detail = (!detail.is_empty()).then(|| detail.to_string());
+        self
     }
 }
 

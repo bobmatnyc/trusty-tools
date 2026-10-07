@@ -53,7 +53,6 @@ const PER_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `unavailable`), the rendered characters it contributed, and the raw
 /// reason for an `absent` or `unavailable` state.
 /// Test: `failed_external_source_is_unavailable_with_its_error`.
-#[allow(dead_code)] // #9194: the runner reads it from the next commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceOutcome {
     /// `ContextSource::name()`.
@@ -79,7 +78,6 @@ impl SourceOutcome {
 }
 
 /// A gather's sections plus one [`SourceOutcome`] per enabled source (#9194).
-#[allow(dead_code)] // #9194: the runner reads `outcomes` from the next commit.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExternalGather {
     /// The non-empty sections, in source order.

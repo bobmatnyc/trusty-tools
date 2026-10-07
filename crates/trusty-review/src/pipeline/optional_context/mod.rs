@@ -152,7 +152,6 @@ pub struct ReviewOptions {
     /// Test seam for the Contents API doc reads (#9193).
     pub(crate) doc_fetcher: Option<Arc<dyn DocFetcher>>,
     /// Test seam for the external context sources (#9194).
-    #[allow(dead_code)] // #9194: stub; the runner reads it from a later commit.
     pub(crate) external_sources: Option<ExternalSources>,
 }
 

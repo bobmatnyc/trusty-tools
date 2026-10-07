@@ -177,11 +177,13 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     let reviewer = prompts.first().expect("the reviewer must be called");
     assert!(reviewer.contains("### Issue #5 — (no title)"), "{reviewer}");
     assert!(reviewer.contains("CANARY_9197_RUN"), "{reviewer}");
-    // The ledger is on: the caller row (no text flags) and then the issues row.
+    // The ledger is on: the caller row (no text flags), then the issues row;
+    // #9194: then every other row, the inputs not asked for `not_requested`.
     let names: Vec<&str> = outcome
         .context_sources
         .iter()
         .map(|r| r.source.as_str())
         .collect();
-    assert_eq!(names, ["caller_context", "issues"]);
+    assert_eq!(&names[1..3], ["caller_context", "issues"], "{names:?}");
+    assert_eq!(names.len(), 8, "{names:?}");
 }
