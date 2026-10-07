@@ -188,6 +188,8 @@ pub fn tool_descriptors() -> Value {
                 for (name, schema) in context_args::doc_flag_schemas() {
                     props[name] = schema;
                 }
+                // #9194: the context-source ledger, opt-in.
+                props[context_args::REPORT_CONTEXT] = context_args::report_context_schema();
             }
         }
         arr.push(console_metrics::descriptor());
@@ -306,10 +308,11 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     };
 
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");
+    let reported = request.ledger_enabled(); // #9194 amendment 3
     let options = ReviewOptions::new(request); // #9197: ruling Q2
     let outcome = run_review_with(&state.config, input, deps, options).await;
     // `tmp` is dropped here — temp file cleaned up automatically.
-    Ok(wrap_outcome(&outcome))
+    Ok(wrap_outcome(&outcome, reported))
 }
 
 // ─── review_health ────────────────────────────────────────────────────────────
@@ -638,15 +641,19 @@ fn wrap_result(result: &ReviewResult) -> Value {
 ///
 /// Why: #9192 keeps `ReviewResult` unchanged, so the ledger of optional
 /// context sources is reported on the envelope, beside `withheld`.
-/// What: adds `context_sources` (an array of records) when the outcome has
-/// any; a review that asked for no new input carries no such key.
-/// Test: `wrap_outcome_adds_context_sources_only_when_present`.
-fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome) -> Value {
+/// What: adds `context_sources` (an array of records) when `reported`, the
+/// request's `ledger_enabled()`: #9194 amendment 3, even when the list is
+/// empty (a review skipped before its context was gathered), with no row
+/// fabricated. A review that asked for nothing carries no such key. The
+/// value comes from `run_output::ledger_value`, so a serialisation failure
+/// is an `{"error": ...}` object, never `null`.
+/// Test: `wrap_outcome_adds_context_sources_only_when_present`,
+/// `envelope_status_is_error_and_mcp_status_unchanged_by_the_ledger`,
+/// `report_context_null_and_false_keep_the_envelope_plain`.
+fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome, reported: bool) -> Value {
     let mut envelope = wrap_result(&outcome.result);
-    if !outcome.context_sources.is_empty()
-        && let Some(obj) = envelope.as_object_mut()
-    {
-        let sources = serde_json::to_value(&outcome.context_sources).unwrap_or(Value::Null);
+    if reported && let Some(obj) = envelope.as_object_mut() {
+        let sources = crate::run_output::ledger_value(&outcome.context_sources);
         obj.insert("context_sources".to_string(), sources);
     }
     envelope

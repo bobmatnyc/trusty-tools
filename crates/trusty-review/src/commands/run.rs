@@ -39,7 +39,7 @@ use trusty_review::{
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
         run_review_with,
     },
-    run_output::{run_failure_reason, run_is_failure, run_json_payload},
+    run_output::{ledger_value, run_failure_reason, run_is_failure, run_json_payload},
     store::{DedupNeed, open_dedup_for},
 };
 
@@ -189,11 +189,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub include_pr_body: bool,
 
-    /// Report which optional context sources the review used (#9192). With
+    /// Report every context source the review had (#9192, #9194): pr_body,
+    /// caller_context, issues, spec_docs, claude_md, search, analyze and
+    /// external_sources, each used, truncated, absent (asked for, nothing
+    /// there), unavailable (could not be read) or not_requested. With
     /// `--json` the output becomes `{"result": <review>, "context_sources":
-    /// [...]}`; otherwise one line is printed per source that was unavailable
-    /// or truncated. `--include-pr-body` does the same. Without either flag
-    /// `--json` prints the review object alone, as before.
+    /// [...]}`; otherwise one line is printed per source that was absent,
+    /// unavailable or truncated. Any new input flag does the same. Without
+    /// one `--json` prints the review object alone, as before, and a failed
+    /// search or external source is only logged.
     #[arg(long)]
     pub report_context: bool,
 
@@ -449,21 +453,24 @@ pub(crate) fn run_json_value(
     let Some(sources) = ledger else {
         return payload;
     };
-    let sources = serde_json::to_value(sources).unwrap_or_else(
-        |e| serde_json::json!({ "error": format!("failed to serialise context_sources: {e}") }),
-    );
+    let sources = ledger_value(sources); // #9194: the MCP envelope's form too
     let mut wrapped = serde_json::Map::new();
     wrapped.insert("result".to_string(), payload);
     wrapped.insert("context_sources".to_string(), sources);
     serde_json::Value::Object(wrapped)
 }
 
-/// One line per ledger row a reader must act on: `unavailable` or `truncated`.
+/// One line per ledger row a reader must act on: `unavailable`, `truncated`
+/// or (#9194) `absent`.
 ///
 /// Why: a human `run --include-pr-body` that could not read the body said
-/// nothing (critic MEDIUM, #9192).
-/// What: names the source and the reason, or the characters cut.
-/// Test: `ledger_notes_name_unavailable_and_truncated_rows`.
+/// nothing (critic MEDIUM, #9192); #9194 AC3: a source that returned nothing
+/// is what separates a context-starved APPROVE from a fully-informed one.
+/// What: names the source and the reason, or the characters cut. `used` and
+/// `not_requested` rows print nothing.
+/// Test: `ledger_notes_name_unavailable_and_truncated_rows`,
+/// `run_human_output_names_absent_unavailable_and_truncated_rows`,
+/// `ledger_notes_skip_used_and_not_requested_rows`.
 pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
     sources
         .iter()
@@ -472,6 +479,11 @@ pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
                 "context source {}: unavailable — {}",
                 row.source,
                 row.detail.as_deref().unwrap_or("no detail")
+            )),
+            SourceState::Absent => Some(format!(
+                "context source {}: absent — {}",
+                row.source,
+                row.detail.as_deref().unwrap_or("no text")
             )),
             SourceState::Truncated => Some(format!(
                 "context source {}: truncated — {} characters omitted",
@@ -1069,7 +1081,7 @@ mod tests {
     }
 
     /// #9192: the human output names an unavailable or truncated source, and
-    /// says nothing about a used or absent one.
+    /// says nothing about a used one (#9194: an absent one is named too).
     #[test]
     fn ledger_notes_name_unavailable_and_truncated_rows() {
         let mut down = ContextSourceRecord::new("pr_body", SourceState::Unavailable);

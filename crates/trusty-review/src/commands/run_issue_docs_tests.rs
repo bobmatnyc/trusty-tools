@@ -187,3 +187,7 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     assert_eq!(&names[1..3], ["caller_context", "issues"], "{names:?}");
     assert_eq!(names.len(), 8, "{names:?}");
 }
+
+// #9194: `--report-context`, reusing this module's LLM capture and socket pin.
+#[path = "run_report_context_tests.rs"]
+mod report_context;

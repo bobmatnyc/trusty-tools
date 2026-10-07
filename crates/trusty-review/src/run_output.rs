@@ -55,10 +55,18 @@ pub fn run_json_payload(result: &ReviewResult) -> Value {
 
 /// The `context_sources` value `run --json` and the MCP envelope carry (#9194).
 ///
-/// Test: `ledger_value_reports_a_serialisation_failure`.
+/// Why: the MCP envelope put `null` in `context_sources` when serialisation
+/// failed, so a caller could not tell "no ledger" from "the ledger broke";
+/// one function keeps the CLI and MCP forms the same (amendment 4).
+/// What: the serialised `sources`, or `{"error": "failed to serialise
+/// context_sources: <e>"}`, never `null`. Generic so a test can feed a type
+/// whose `Serialize` fails.
+/// Test: `ledger_value_reports_a_serialisation_failure`,
+/// `cli_and_mcp_paths_call_ledger_value`.
 pub fn ledger_value<T: Serialize + ?Sized>(sources: &T) -> Value {
-    // #9194: stub; a later commit makes a failure an `{"error": ..}` object.
-    serde_json::to_value(sources).unwrap_or(Value::Null)
+    serde_json::to_value(sources).unwrap_or_else(
+        |e| serde_json::json!({ "error": format!("failed to serialise context_sources: {e}") }),
+    )
 }
 
 /// Whether this review must exit the process non-zero.

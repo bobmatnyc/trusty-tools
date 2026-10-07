@@ -1,0 +1,170 @@
+[
+  {
+    "description": "Review a GitHub pull request. Fetches the PR diff, retrieves code context from trusty-search, and returns a structured verdict (APPROVE / APPROVE* / REQUEST_CHANGES / BLOCK / UNKNOWN) with actionable findings.  Requires GITHUB_TOKEN and AWS Bedrock credentials (or OPENROUTER_API_KEY for OpenRouter provider). Dry-run by default (PR_INTELLIGENCE_DRY_RUN=true — no GitHub comments posted).  Reviews against the trusty-search index registered for owner/repo; with none registered the tool returns an error naming the repo and index id.  If trusty-search is unreachable the review runs DEGRADED on the diff alone, unless search is required (TRUSTY_REVIEW_REQUIRE_SEARCH=true).",
+    "inputSchema": {
+      "properties": {
+        "claude_md": {
+          "description": "Read the root CLAUDE.md and up to 3 nested ones found by trusty-search, 16,000 characters in total. Read at the PR head SHA through the GitHub Contents API, for the reviewer only (the verifier never sees them); shown as data, and a [doc: path@sha — \"excerpt\"] citation resolves only against text the reviewer saw. Default false. review_diff has no head SHA, so it reports the source unavailable. The response then carries a context_sources ledger.",
+          "type": "boolean"
+        },
+        "include_pr_body": {
+          "description": "Merge the fetched PR body into the reviewer's PR description (capped at 64,000 characters, with a visible marker), ahead of any pr_description. Default false. The response then carries a context_sources ledger.",
+          "type": "boolean"
+        },
+        "issue_docs": {
+          "description": "Issues this change addresses, for the reviewer only (the verifier never sees them). Each id is a GitHub issue number (\"#42\" or \"42\"). Each body is capped at 16,000 characters with a visible marker; at most 8 docs and 48,000 body characters in total are shown, and a doc past either limit is left out whole. The text is shown as data, and a [gh: #N — \"excerpt\"] citation resolves only against text the reviewer saw. The response then carries a context_sources ledger.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "description": "The issue text",
+                "type": "string"
+              },
+              "id": {
+                "description": "GitHub issue number, \"#42\" or \"42\"",
+                "type": "string"
+              },
+              "title": {
+                "description": "One line, at most 512 characters",
+                "type": "string"
+              },
+              "url": {
+                "description": "An http:// or https:// link, no whitespace, at most 512 characters",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "body"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "description": "GitHub organisation or user that owns the repository",
+          "type": "string"
+        },
+        "pr": {
+          "description": "Pull request number",
+          "type": "integer"
+        },
+        "pr_description": {
+          "description": "PR description for the reviewer and the verifier (capped at 64,000 characters).",
+          "type": "string"
+        },
+        "pr_discussion": {
+          "description": "PR discussion (review and issue comments) for the reviewer and the verifier (capped at 64,000 characters).",
+          "type": "string"
+        },
+        "referenced_code": {
+          "description": "Referenced or related code the diff depends on, for the reviewer (capped at 64,000 characters).",
+          "type": "string"
+        },
+        "repo": {
+          "description": "GitHub repository name",
+          "type": "string"
+        },
+        "reviewer_model": {
+          "description": "Override the reviewer model slug. Use a `bedrock/<id>` prefix to force AWS Bedrock, `openrouter/<id>` for OpenRouter. Default: us.anthropic.claude-sonnet-5-5 on Bedrock.",
+          "examples": [
+            "bedrock/us.anthropic.claude-sonnet-4-6",
+            "bedrock/us.anthropic.claude-haiku-4-5",
+            "openrouter/openai/gpt-5.4-mini-20260317"
+          ],
+          "type": "string"
+        },
+        "spec_docs": {
+          "description": "Read the ADR, spec and SLD docs (docs/adr, docs/specs, docs/design, docs/prd, docs/architecture, docs/reference, crates/*/docs) the PR body names, plus trusty-search hits: at most 6 docs, 16,000 characters each and 48,000 in total, each cut with a visible marker. Read at the PR head SHA through the GitHub Contents API, for the reviewer only (the verifier never sees them); shown as data, and a [doc: path@sha — \"excerpt\"] citation resolves only against text the reviewer saw. Default false. review_diff has no head SHA, so it reports the source unavailable. The response then carries a context_sources ledger.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "owner",
+        "repo",
+        "pr"
+      ],
+      "type": "object"
+    },
+    "name": "review_pr"
+  },
+  {
+    "description": "Review a raw unified diff string without fetching from GitHub. Useful for reviewing local changes, staged diffs, or patches. No GitHub credentials required. Requires AWS Bedrock credentials (or OPENROUTER_API_KEY). trusty-search is used for code-context retrieval when available.",
+    "inputSchema": {
+      "properties": {
+        "claude_md": {
+          "description": "Read the root CLAUDE.md and up to 3 nested ones found by trusty-search, 16,000 characters in total. Read at the PR head SHA through the GitHub Contents API, for the reviewer only (the verifier never sees them); shown as data, and a [doc: path@sha — \"excerpt\"] citation resolves only against text the reviewer saw. Default false. review_diff has no head SHA, so it reports the source unavailable. The response then carries a context_sources ledger.",
+          "type": "boolean"
+        },
+        "context": {
+          "description": "Optional human-readable context — e.g. PR title/description, ticket number, or a note about what changed and why. Passed to the reviewer (and the verifier) as the PR description.",
+          "type": "string"
+        },
+        "diff": {
+          "description": "Unified diff string (output of `git diff` or similar)",
+          "type": "string"
+        },
+        "issue_docs": {
+          "description": "Issues this change addresses, for the reviewer only (the verifier never sees them). Each id is a GitHub issue number (\"#42\" or \"42\"). Each body is capped at 16,000 characters with a visible marker; at most 8 docs and 48,000 body characters in total are shown, and a doc past either limit is left out whole. The text is shown as data, and a [gh: #N — \"excerpt\"] citation resolves only against text the reviewer saw. The response then carries a context_sources ledger.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "description": "The issue text",
+                "type": "string"
+              },
+              "id": {
+                "description": "GitHub issue number, \"#42\" or \"42\"",
+                "type": "string"
+              },
+              "title": {
+                "description": "One line, at most 512 characters",
+                "type": "string"
+              },
+              "url": {
+                "description": "An http:// or https:// link, no whitespace, at most 512 characters",
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "body"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "reviewer_model": {
+          "description": "Override the reviewer model slug (same format as review_pr).",
+          "type": "string"
+        },
+        "spec_docs": {
+          "description": "Read the ADR, spec and SLD docs (docs/adr, docs/specs, docs/design, docs/prd, docs/architecture, docs/reference, crates/*/docs) the PR body names, plus trusty-search hits: at most 6 docs, 16,000 characters each and 48,000 in total, each cut with a visible marker. Read at the PR head SHA through the GitHub Contents API, for the reviewer only (the verifier never sees them); shown as data, and a [doc: path@sha — \"excerpt\"] citation resolves only against text the reviewer saw. Default false. review_diff has no head SHA, so it reports the source unavailable. The response then carries a context_sources ledger.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "diff"
+      ],
+      "type": "object"
+    },
+    "name": "review_diff"
+  },
+  {
+    "description": "Probe trusty-review service liveness and configuration. Returns the current configuration (dry_run mode, reviewer model) and dependency reachability. Safe to call without any credentials.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "review_health"
+  },
+  {
+    "description": "Return health and operational metrics for trusty-console polling. No arguments required. Returns a ConsoleMetricsReport JSON envelope with service_id='trusty-review', version, status (ok/degraded/error), and a metrics object containing reviewer_model, dry_run, inference status, search_reachable, and analyze_reachable.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "console_metrics"
+  }
+]

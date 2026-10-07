@@ -899,3 +899,7 @@ async fn mistyped_spec_docs_is_invalid_params() {
     }
     assert!(llm.0.lock().map(|p| p.is_empty()).unwrap_or(false));
 }
+
+// #9194: `report_context`, the tool schemas and the envelope.
+#[path = "tools_report_context_tests.rs"]
+mod report_context;
