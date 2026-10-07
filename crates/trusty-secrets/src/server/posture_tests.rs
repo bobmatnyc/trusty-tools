@@ -15,9 +15,17 @@ const FILE_NOT_SELECTED: &str = "file_backend_not_selected";
 /// Start a server for `fx` that acts as a build with (`keychain: true`) or
 /// without a Keychain backend.
 async fn start_on_build(fx: &Fixture, backends: BackendFactory, keychain: bool) -> Running {
-    // #7524: the pre-fix server has no build seam; every build allows the copy.
-    let _ = keychain;
-    fx.start_with(backends).await
+    let mut state = State::new(fx.settings.clone(), backends);
+    state.keychain_compiled = keychain;
+    let (tx, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(router::serve_state(state, async move {
+        let _ = rx.await;
+    }));
+    wait_serving(&fx.settings.socket).await;
+    Running {
+        task,
+        shutdown: Some(tx),
+    }
 }
 
 /// Point the machine config at `backend`; the server rereads it per request.

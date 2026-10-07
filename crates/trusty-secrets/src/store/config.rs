@@ -207,6 +207,35 @@ pub(crate) fn check_project_backend_for(
     }
 }
 
+/// Refuse a value write into `file` on a Keychain build unless the untracked
+/// machine config selected `file`.
+///
+/// Why: #7524 H1, owner ruling item 74 — the Keychain ACL is a boundary
+/// against same-user callers. Without this, any same-uid process could ask
+/// the server to move Keychain values into 0600 plaintext files.
+/// What: with `keychain_compiled`, a `target` of `file` passes only when
+/// `machine` has `default_backend: file`; otherwise it is
+/// [`SecretsError::FileBackendNotSelected`]. Every other target, and every
+/// target on a build without a Keychain, passes. Reads and deletes never
+/// call this.
+/// Test: `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+/// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
+/// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
+pub(crate) fn check_value_write_for(
+    target: &BackendId,
+    machine: Option<&MachineSecretsConfig>,
+    keychain_compiled: bool,
+) -> Result<(), SecretsError> {
+    let is_file = |id: &BackendId| id.as_str() == BackendId::FILE;
+    let machine_selected_file = machine
+        .and_then(|m| m.default_backend.as_ref())
+        .is_some_and(is_file);
+    if keychain_compiled && is_file(target) && !machine_selected_file {
+        return Err(SecretsError::FileBackendNotSelected);
+    }
+    Ok(())
+}
+
 /// The first CLI setting `project` sets, as the key the refusal names.
 fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
     let flags = |s: Option<&CliSettings>| {

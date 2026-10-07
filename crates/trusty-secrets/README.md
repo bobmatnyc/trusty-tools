@@ -32,7 +32,11 @@ Tracking: [#9073](https://github.com/bobmatnyc/trusty-tools/issues/9073).
   (`~/.trusty-tools/trusty-common/config.yaml`) names it. A tracked project
   config naming `backend: file` is refused with
   `SecretsError::TrackedBackendRefused`. A failing Keychain never falls back
-  to files.
+  to files. The server writes a value into `file` only with that machine
+  selection: a `set` or a `copy` into `file` without it is refused with
+  `SecretsError::FileBackendNotSelected` (wire kind
+  `file_backend_not_selected`), writes nothing, and leaves one audit denial.
+  Reading from `file` and deleting from it stay allowed.
 
 An explicitly configured `keychain` stays the Keychain on every host; off
 macOS it fails with `SecretsError::UnknownBackend`.
@@ -131,6 +135,12 @@ and sends a request.
 (the Keychain on macOS, and the file backend), not only the configured one, so
 a value left behind by a backend switch or a `copy` is removed too. If any
 backend fails to delete, the call fails and the key stays listed.
+
+`copy` moves keys between two backends of the same project. On macOS its
+destination may be `file` only when the machine config sets
+`secrets.default_backend: file`; any process running as the same user can
+call the socket, so without that setting it could move Keychain values into
+plaintext files.
 
 ## Audit trail
 

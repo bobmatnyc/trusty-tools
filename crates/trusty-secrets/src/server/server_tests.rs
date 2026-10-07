@@ -182,7 +182,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 29] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 30] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1112,7 +1112,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 29;
+    const ARMS: usize = 30;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1144,7 +1144,9 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::TrackedCliSettingRefused => 25,
             ErrorKind::CliNotInstalled => 26,
             ErrorKind::BackendLocked => 27,
-            ErrorKind::Internal => 28,
+            // #7524 H1: a write into `file` the machine config did not select.
+            ErrorKind::FileBackendNotSelected => 28,
+            ErrorKind::Internal => 29,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
