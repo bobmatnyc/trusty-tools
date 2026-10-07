@@ -274,3 +274,78 @@ fn apply_grade_floor_lifts_a_suppressed_reject_with_survivors() {
     assert_eq!(result.verdict, Verdict::Block);
     assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
 }
+
+/// A withheld copy of `finding` with `reason`.
+fn withheld(finding: Finding, reason: &str) -> WithheldFinding {
+    WithheldFinding {
+        finding,
+        reason: reason.to_string(),
+        missing_fragment: None,
+    }
+}
+
+/// #9310 owner ruling on item 76 ("Widen exemption"): when the verifier
+/// refuted every blocker, the F is withdrawn and the floor gives at most
+/// REQUEST_CHANGES. A blocker another gate withheld, a surviving blocker, or a
+/// refuted finding that is not a blocker leaves the F floor at BLOCK, and a D
+/// floor is never touched.
+#[test]
+fn apply_grade_floor_caps_an_f_whose_blockers_the_verifier_refuted() {
+    use crate::pipeline::verify_posted::REFUTED_REASON;
+    let blocker = || finding(Effort::High, true);
+    let survivor = || finding(Effort::Low, false);
+    let cases = [
+        // The #4044 shape: the sole blocker refuted, a non-blocker survives.
+        (
+            vec![survivor()],
+            vec![withheld(blocker(), REFUTED_REASON)],
+            Verdict::Block,
+            Verdict::RequestChanges,
+        ),
+        // Withheld by the line gate, not refuted: the F stands.
+        (
+            vec![survivor()],
+            vec![withheld(blocker(), "citation unverifiable")],
+            Verdict::Block,
+            Verdict::Block,
+        ),
+        // Not sole: a confirmed blocker survives beside the refuted one.
+        (
+            vec![blocker()],
+            vec![withheld(blocker(), REFUTED_REASON)],
+            Verdict::Block,
+            Verdict::Block,
+        ),
+        // Not sole: a second blocker was withheld by another gate.
+        (
+            vec![survivor()],
+            vec![
+                withheld(blocker(), REFUTED_REASON),
+                withheld(blocker(), "citation unverifiable"),
+            ],
+            Verdict::Block,
+            Verdict::Block,
+        ),
+        // The refuted finding was no blocker, so it withdraws nothing.
+        (
+            vec![survivor()],
+            vec![withheld(finding(Effort::Medium, true), REFUTED_REASON)],
+            Verdict::Block,
+            Verdict::Block,
+        ),
+        // A D floor is not an F: the exemption leaves it alone.
+        (
+            vec![survivor()],
+            vec![withheld(blocker(), REFUTED_REASON)],
+            Verdict::RequestChanges,
+            Verdict::RequestChanges,
+        ),
+    ];
+    for (i, (findings, withheld_findings, floor, expected)) in cases.into_iter().enumerate() {
+        let mut result = settled(Verdict::Approve, Some(VerdictStatus::Parsed));
+        result.findings = findings;
+        result.withheld_findings = withheld_findings;
+        apply_grade_floor(&mut result, &floor);
+        assert_eq!(result.verdict, expected, "case {i}");
+    }
+}

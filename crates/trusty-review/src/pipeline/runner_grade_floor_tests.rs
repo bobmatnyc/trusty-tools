@@ -269,3 +269,29 @@ async fn f_with_a_withheld_blocker_and_a_surviving_finding_reads_block() {
     assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
     assert_eq!(result.grade.as_deref(), Some("F"));
 }
+
+/// #9310 owner ruling on item 76: the refuted-blocker exemption keys on
+/// verifier refutation only. A BLOCK graded F whose diff-provable High
+/// blocker is withheld by a citation gate (its quoted code is not in the
+/// diff), beside a confirmed Low finding that survives, still reads BLOCK. A
+/// withhold that is not a refutation does not withdraw the F.
+#[tokio::test]
+async fn f_with_a_gate_withheld_provable_blocker_and_a_survivor_reads_block() {
+    let mut blocker = finding("`flush_all()` loses the total.", "high", 0.9, "correctness");
+    blocker["code_provable"] = serde_json::json!(true);
+    let low = "`amounts.iter().sum::<u64>()` could use a named binding.";
+    let result = review(
+        "BLOCK",
+        "F",
+        serde_json::json!([blocker, finding(low, "low", 0.9, "correctness")]),
+    )
+    .await;
+    assert_one_confirmed(&result);
+    assert_eq!(result.withheld_findings.len(), 1, "{result:?}");
+    assert_ne!(
+        result.withheld_findings[0].reason,
+        crate::pipeline::verify_posted::REFUTED_REASON
+    );
+    assert_eq!(result.verdict, Verdict::Block, "{result:?}");
+    assert_eq!(result.grade.as_deref(), Some("F"));
+}

@@ -16,8 +16,9 @@
 use crate::coverage::{CoverageVerdictContrib, apply_coverage_floor};
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus};
 use crate::pipeline::{
-    grade::{derive_verdict, stricter_of},
+    grade::{derive_verdict, floors_verdict_to_block, stricter_of},
     letter_grade::{Grade, default_grade_for_verdict, grade_floor, verdict_for_grade},
+    verify_posted::REFUTED_REASON,
 };
 
 /// The status of a reply the parser failed closed on (#9310).
@@ -109,8 +110,13 @@ pub(crate) fn judged_review(
 /// (`stricter_of` ranks it last). A `suppressed_reject` review with no
 /// surviving finding is left at REQUEST_CHANGES (owner answer Q1). When the
 /// floor raises the verdict, the status becomes `parsed`, so a withheld label
-/// never names a verdict the review no longer has.
+/// never names a verdict the review no longer has. When the verifier refuted
+/// every blocker (owner ruling on item 76, `verifier_withdrew_every_blocker`)
+/// the F is withdrawn and the floor gives at most REQUEST_CHANGES.
 /// Test: `apply_grade_floor_raises_a_relaxed_verdict`,
+/// `apply_grade_floor_caps_an_f_whose_blockers_the_verifier_refuted`,
+/// `run_review_refuted_sole_blocker_does_not_clamp_to_block`,
+/// `f_with_a_gate_withheld_provable_blocker_and_a_survivor_reads_block`,
 /// `apply_grade_floor_keeps_a_suppressed_reject`,
 /// `apply_grade_floor_lifts_a_suppressed_reject_with_survivors`,
 /// `f_with_one_confirmed_low_confidence_finding_reads_block`,
@@ -121,11 +127,44 @@ pub(crate) fn apply_grade_floor(result: &mut ReviewResult, floor: &Verdict) {
     {
         return;
     }
-    let floored = stricter_of(result.verdict.clone(), floor.clone());
+    // #9310 item 76 ("Widen exemption"): a verifier-refuted sole blocker withdraws the F.
+    let floor = if *floor == Verdict::Block && verifier_withdrew_every_blocker(result) {
+        Verdict::RequestChanges
+    } else {
+        floor.clone()
+    };
+    let floored = stricter_of(result.verdict.clone(), floor);
     if floored != result.verdict {
         result.verdict = floored;
         result.verdict_status = Some(VerdictStatus::Parsed); // #9310: the label follows the verdict
     }
+}
+
+/// Whether the verifier refuted every blocker the review had (#9310, owner
+/// ruling on item 76: "Widen exemption").
+///
+/// Why: an F that rested on a blocker the verifier refuted is withdrawn with
+/// it, so the #4044 refuted-sole-blocker reviews keep REQUEST_CHANGES. A
+/// blocker the citation or line gate withheld was never judged false, so it
+/// does not withdraw the F.
+/// What: a blocker is a finding `grade::floors_verdict_to_block` accepts, the
+/// category-aware predicate #4044 added for floors outside `derive_verdict`.
+/// True when at least one withheld blocker carries `REFUTED_REASON` and no
+/// other blocker remains: none among the survivors, none withheld for another
+/// reason.
+/// Test: `apply_grade_floor_caps_an_f_whose_blockers_the_verifier_refuted`.
+fn verifier_withdrew_every_blocker(result: &ReviewResult) -> bool {
+    let refuted = |reason: &str| reason == REFUTED_REASON;
+    let refuted_blocker = result
+        .withheld_findings
+        .iter()
+        .any(|w| refuted(w.reason.as_str()) && floors_verdict_to_block(&w.finding));
+    let other_blocker = result.findings.iter().any(floors_verdict_to_block)
+        || result
+            .withheld_findings
+            .iter()
+            .any(|w| !refuted(w.reason.as_str()) && floors_verdict_to_block(&w.finding));
+    refuted_blocker && !other_blocker
 }
 
 /// The verdict and status a review takes once the gates withheld findings,
