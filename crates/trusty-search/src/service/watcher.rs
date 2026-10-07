@@ -175,8 +175,7 @@ impl FileWatcher {
     /// Begin watching `root_path` recursively, within a time bound.
     ///
     /// Why: `FSEventStreamStart` can block forever when fseventsd does not
-    /// answer; the caller runs on a tokio worker and must get control back
-    /// (#9339).
+    /// answer; the caller must get control back (#9339).
     /// What: each debounced event is mapped into a [`WatchEvent`] and pushed
     /// to `tx`; a dropped receiver makes the send a no-op. The start itself
     /// runs through `start_bounded` with `WATCHER_START_BOUND` (5 s): one that
