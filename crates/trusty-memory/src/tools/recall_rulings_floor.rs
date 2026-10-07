@@ -63,9 +63,10 @@ fn content_terms(text: &str) -> HashSet<String> {
 /// threshold, because the fused score's scale depends on the embedder and on
 /// whether a BM25 lane ran, and the AC2 ruling scored below every project hit.
 /// What: true when the query has content terms and the ruling's content holds
-/// at least half of them, and at least two (one, for a one-term query). Tags
-/// are not counted: every ruling carries `ruling` or `standing-rule`.
-/// Test: `answering_needs_half_the_query_terms_and_at_least_two`,
+/// at least half of them, and at least three (every term, for a query of three
+/// or fewer). Tags are not counted: every ruling carries `ruling` or
+/// `standing-rule`.
+/// Test: `answering_needs_every_term_up_to_three_and_half_beyond`,
 /// `a_short_id_term_separates_two_rulings`.
 pub(crate) fn ruling_answers_query(query: &str, content: &str) -> bool {
     let asked = content_terms(query);
@@ -74,7 +75,8 @@ pub(crate) fn ruling_answers_query(query: &str, content: &str) -> bool {
     }
     let held = content_terms(content);
     let shared = asked.iter().filter(|t| held.contains(*t)).count();
-    shared >= asked.len().min(2) && shared * 2 >= asked.len()
+    // #9143: two incidental matches lifted an unrelated ruling on a 3-term query.
+    shared >= asked.len().min(3) && shared * 2 >= asked.len()
 }
 
 /// Lift the answering rulings in `floored` into reserved slots of `top_k`.

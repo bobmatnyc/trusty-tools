@@ -1,6 +1,6 @@
 # ADR Index — All Decisions
 
-**Last updated:** 2026-09-14 | **Format version:** 1.1
+**Last updated:** 2026-10-04 | **Format version:** 1.1
 
 This index is the complete, concise vetting surface for workspace ADRs. The ADR
 files remain authoritative for full context, decision text, and consequences.
@@ -78,6 +78,9 @@ Crate-specific ADRs have independent sequences and indexes under
 | [0065](0065-trusty-events-process-placement.md) | Run the trusty-events bus as its own supervised daemon | Accepted | `trusty-events` runs as its own launchd-supervised daemon on a socket named after the bus, with the wire contract in `trusty-common::control_bus`; no producer depends on it, superseding DOC-73 §4.1's console-hosted placement. | Workspace |
 | [0066](0066-trusty-memory-1x-compatibility-contract.md) | trusty-memory 1.x compatibility contract | Accepted | trusty-memory 1.x freezes four surfaces (MCP tools, CLI, palace format, `trusty_memory::engine` API) as additive-only, with a one-minor deprecation and removal only in 2.0; the daemon socket stays out of contract and gains a `protocol_version`. | `trusty-memory`, `trusty-common` |
 | [0067](0067-versioned-palace-format-with-n-minus-1-migration.md) | Versioned palace format with N-1 migration | Accepted | Each palace carries one format version (authoritative in `kg.redb`, mirrored in `palace.json`); a newer palace is refused untouched, N-1 auto-migrates behind a verified backup, and the recreate-empty `*.v2-incompatible` path is retired for primary files. | `trusty-memory` |
+| [0068](0068-memory-sync-and-dream-run-as-daemon-supervised-child-processes.md) | trusty-memory runs the sync connector and the dream cycle as daemon-supervised child processes | Proposed | The sync connector and the dream worker are hidden `trusty-memory` subcommands spawned by the lease-holding daemon under one supervision model (restart, backoff, give-up, parent death); each reaches the store only through authenticated daemon RPCs that apply changes atomically, and neither serves recall. | `trusty-memory` |
+| [0069](0069-remote-memory-store-api-spec-location.md) | Remote memory-store API spec location | Proposed | The normative API text lives in `docs/specs/` and the wire types and machine-readable schema in a small dedicated crate; trusty-mpm (the owner's suggested home) consumes it rather than holding it. | Workspace |
+| [0070](0070-memory-store-reference-implementation-repository.md) | Reference memory-store implementation in a separate repository | Proposed | A deployable reference endpoint lives in a separate repository, created only on owner GO at DOC-80 Stage 4; trusty-tools keeps an in-process fake endpoint and the conformance suite. | Workspace |
 
 ## Notes
 

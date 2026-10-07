@@ -1405,6 +1405,7 @@ Additional internal caps (not env-tunable):
 
 ```bash
 trusty-search start                                  # start HTTP daemon (background)
+trusty-search start --no-http                        # socket-only daemon (see below)
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]  # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml for multi-index repos
@@ -1419,6 +1420,29 @@ trusty-search serve [--http <addr>]                  # MCP stdio (default) or HT
 trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
+
+### Socket-only daemon (`--no-http`, #9214)
+
+`trusty-search start --no-http`, or `TRUSTY_SEARCH_NO_HTTP=1` in the daemon's
+environment, serves every socket method and binds no TCP port. It is off by
+default; ADR-0032 flips it once the in-tree clients use the socket. With it set
+the daemon:
+
+- writes no `daemon.port` or `http_addr` file, and removes any an earlier run
+  of the same data dir left;
+- registers no address in the shared discovery registry;
+- reports `transport.http_addr: null` from `search.health`;
+- still runs every background ticker, and `trusty-search stop` still finds it
+  through the lockfile pid;
+- skips auto-discovery and logs why, because auto-discovery registers
+  projects over HTTP.
+
+The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
+`/upgrade`, `/metrics`, `/api/chat/providers`. The CLI subcommands
+still resolve the daemon over HTTP; against a `--no-http` daemon they fall back
+to `127.0.0.1:7878`, so use them only once they move to the socket.
+`--no-http` on `trusty-search serve` is a different, older flag and is still a
+no-op there.
 
 ## Crate Layout
 

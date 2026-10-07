@@ -20,7 +20,7 @@
 #   ANTHROPIC*, GITHUB* or SLACK* name. KNOBS (pass through only when the
 #   caller exported them): TRUSTY_WARMBOOT_MAX_INDEXES, TRUSTY_MAX_RESIDENT_INDEXES,
 #   TRUSTY_REDB_CACHE_MB, TRUSTY_EMBEDDING_CACHE, TRUSTY_EMBED_INFLIGHT, RUST_LOG,
-#   TRUSTY_EMBEDDERD_BIN.
+#   TRUSTY_EMBEDDERD_BIN, TRUSTY_SEARCH_NO_HTTP (#9214: socket only, no port file).
 #   Auto-discovery: `--no-auto-discover` is passed unless `--auto-discover` is
 #   given, which omits it so a live check of #8176 can see the daemon's own
 #   default on an explicit data dir. It does NOT pass the daemon's
@@ -97,7 +97,7 @@ set -euo pipefail
 
 # Passed through from the caller only when exported — tuning knobs, never a credential.
 KNOBS="TRUSTY_WARMBOOT_MAX_INDEXES TRUSTY_MAX_RESIDENT_INDEXES TRUSTY_REDB_CACHE_MB \
-TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN"
+TRUSTY_EMBEDDING_CACHE TRUSTY_EMBED_INFLIGHT RUST_LOG TRUSTY_EMBEDDERD_BIN TRUSTY_SEARCH_NO_HTTP"
 SANDBOX_PATH="/usr/bin:/bin"
 LIVE_PORT=7878
 # The daemon walks forward up to 64 ports from the requested one.

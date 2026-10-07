@@ -14,6 +14,7 @@
 //!
 //! Test: this *is* the test file.
 
+use trusty_memory::bm25_backfill::{backfill_palace, BackfillStatus, PalaceDocs};
 use trusty_memory::bm25_index::SNAPSHOT_FILENAME;
 use trusty_memory::bm25_lane::Bm25Lane;
 
@@ -119,6 +120,90 @@ async fn a_daemon_era_snapshot_is_served_without_migration() {
         .await
         .expect("coverage probe");
     assert!(cov.missing.is_empty(), "got {cov:?}");
+
+    lane.shutdown().await;
+}
+
+/// Why (#8246): making coverage content-aware must not turn a pre-existing
+/// snapshot into a migration. A daemon-era snapshot records no freshness
+/// revision — the retired daemon had no concept of one — and the rule this
+/// change adopts is that an unknown revision means "re-index", which is exactly
+/// the rule that could have demanded a full rebuild before a palace served
+/// anything. It does not, because the snapshot's own `text` IS the revision:
+/// the corpus is searchable the moment it loads, and only the entries the
+/// palace has actually edited make the sweep do anything at all.
+/// What: plants a daemon-era snapshot holding two drawers, searches it before
+/// any backfill runs, then backfills with one drawer's text changed in place.
+/// Asserts the run happened (the skip did not fire), the new text is findable
+/// and the old text no longer matches.
+/// Test: this test itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_daemon_era_snapshot_without_revisions_serves_then_upgrades() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let bm25_dir = root.join("legacy2").join("bm25");
+    std::fs::create_dir_all(&bm25_dir).expect("create legacy bm25 dir");
+    std::fs::write(
+        bm25_dir.join(SNAPSHOT_FILENAME),
+        br#"[{"doc_id":"stable","text":"quarterly rollout checklist"},
+            {"doc_id":"edited","text":"zqxjoldbody staging runbook"}]"#,
+    )
+    .expect("plant legacy snapshot");
+
+    let lane = Bm25Lane::with_limits(root.clone(), 3, None);
+
+    // Searchable IMMEDIATELY — no migration, no mandatory rebuild first.
+    let before = lane
+        .search("legacy2", "zqxjoldbody", 5)
+        .await
+        .expect("search the legacy corpus");
+    assert_eq!(
+        before.len(),
+        1,
+        "a revision-less snapshot must serve as-is: {before:?}"
+    );
+
+    // The palace has since edited `edited` in place; `stable` is untouched.
+    let docs = vec![
+        (
+            "stable".to_string(),
+            "quarterly rollout checklist".to_string(),
+        ),
+        (
+            "edited".to_string(),
+            "zqxjnewbody staging runbook".to_string(),
+        ),
+    ];
+    let report = backfill_palace(&lane, "legacy2", PalaceDocs::from_pairs(docs), false).await;
+    assert_eq!(
+        report.status,
+        BackfillStatus::Completed,
+        "the edit must defeat the already-indexed skip: {report:?}"
+    );
+    assert_eq!(report.indexed, 2, "the run must have fed the corpus");
+    assert!(report.fully_indexed(), "{report:?}");
+
+    let new_text = lane
+        .search("legacy2", "zqxjnewbody", 5)
+        .await
+        .expect("search the upgraded corpus");
+    assert_eq!(
+        new_text
+            .iter()
+            .map(|h| h.doc_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["edited"],
+        "the upgraded snapshot must answer for the NEW text: {new_text:?}"
+    );
+    let old_text = lane
+        .search("legacy2", "zqxjoldbody", 5)
+        .await
+        .expect("search for the superseded text");
+    assert!(
+        old_text.is_empty(),
+        "the superseded text must stop matching: {old_text:?}"
+    );
 
     lane.shutdown().await;
 }

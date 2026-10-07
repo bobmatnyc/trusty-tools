@@ -44,7 +44,7 @@ pub use concurrency::{
 };
 pub use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
-pub use dreamer::Dreamer;
+pub use dreamer::{AfterCycle, Dreamer};
 pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
 pub use helpers::extract_keywords;
 // #9279: recall's id-token match normalizes words the way closets do.

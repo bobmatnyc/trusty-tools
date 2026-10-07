@@ -1,0 +1,3 @@
+Added
+- `cli-backends` feature: `store::cli`, a blocking runner for CLI-backed backends that sends a value only on stdin, refuses a command line carrying the value or an overlay token, keeps all child output out of errors, classifies stderr into missing, locked or other, kills the child's process group on timeout, and caps each stream at 1 MiB; plus a 0600 `TemplateFile` guard and a startup sweep for its leftovers ([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519))
+- `SecretsError::CliNotInstalled` and `SecretsError::BackendLocked`, with wire kinds `cli_not_installed` and `backend_locked` ([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519))

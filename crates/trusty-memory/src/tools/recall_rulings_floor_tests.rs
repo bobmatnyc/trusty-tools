@@ -30,10 +30,10 @@ fn rank(results: &[RecallResult], id: Uuid) -> Option<usize> {
 /// Why: the floor overrides score order, so the condition that arms it must
 /// separate a ruling about the question from one that is not.
 /// What: a table of (query, ruling content, answers?). Plurals fold, case and
-/// punctuation are ignored, function words never count, a one-term query
-/// needs its one term, and a longer query needs half its terms and two.
+/// punctuation are ignored, function words never count, a query of up to
+/// three terms needs every term, and a longer one needs half and three.
 #[test]
-fn answering_needs_half_the_query_terms_and_at_least_two() {
+fn answering_needs_every_term_up_to_three_and_half_beyond() {
     let q15 = "Q15 standing rule: issue titles name the symptom, not the presumed cause";
     let ruling =
         "Standing rule Q15 (owner): name the symptom in issue titles, never the presumed cause";
@@ -61,6 +61,17 @@ fn answering_needs_half_the_query_terms_and_at_least_two() {
         ("?? !!", ruling, false),
         // Two terms, one shared: half, but not two.
         ("issue backlog", "issue titles name the symptom", false),
+        // #9143 live run: ruling 260360ec shares "live" (from "live-check")
+        // and "version" (from a `--version` flag), 2 of 3 terms, by accident.
+        (
+            "live prod version",
+            "Ruling: after each merge, live-check the installed binary with \
+             `trusty-memory --version 1.7.9` before closing the issue.",
+            false,
+        ),
+        // Four terms need three shared, not two.
+        ("issue titles backlog triage", ruling, false),
+        ("issue titles symptom triage", ruling, true),
     ];
     for (query, content, expected) in cases {
         assert_eq!(

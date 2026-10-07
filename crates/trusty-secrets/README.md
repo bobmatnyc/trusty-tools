@@ -112,11 +112,25 @@ trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--audit-
 ```
 
 The environment variables `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR`
-and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values. Only flags move the
-audit log: `--audit-log`, or `--index-dir`, which puts it beside the index. No
-environment variable moves it, including `TRUSTY_SECRETS_INDEX_DIR`. No method returns
+and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values, with one limit:
+`TRUSTY_SECRETS_INDEX_DIR` is read only by a server whose socket is not the
+default one. A client passes its environment to the server it starts, and that
+server answers every client of the default socket, so one caller's environment
+must not move the names index for all of them. A test or sandbox on its own
+socket keeps the variable, and `--index-dir` works on any socket. Only flags
+move the audit log: `--audit-log`, or `--index-dir`, which puts it beside the
+index. No environment variable moves it, including `TRUSTY_SECRETS_INDEX_DIR`.
+
+The project config `.trusty-tools/trusty-secrets.yaml` must be a regular file
+of at most 64 KiB, and not a symlink. Anything else is refused before it is
+read. No method returns
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
+
+`delete` removes the key from every backend this build can store values in
+(the Keychain on macOS, and the file backend), not only the configured one, so
+a value left behind by a backend switch or a `copy` is removed too. If any
+backend fails to delete, the call fails and the key stays listed.
 
 ## Audit trail
 

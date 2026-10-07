@@ -161,6 +161,19 @@ async fn review_diff_payload(
     findings: serde_json::Value,
     judgment: &'static str,
 ) -> ReviewResult {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier { judgment });
+    review_with_verifier(diff, prose, verdict, grade, findings, verifier).await
+}
+
+/// [`review_diff_payload`] with any `verifier`.
+async fn review_with_verifier(
+    diff: &str,
+    prose: &str,
+    verdict: &str,
+    grade: &str,
+    findings: serde_json::Value,
+    verifier: Arc<dyn LlmProvider>,
+) -> ReviewResult {
     let (source, _tmp) = local_diff_source(diff);
     let payload = serde_json::json!({
         "verdict": verdict,
@@ -184,7 +197,6 @@ async fn review_diff_payload(
         caller_context: CallerContext::default(),
         surface: InvocationSurface::default(),
     };
-    let verifier: Arc<dyn LlmProvider> = Arc::new(FakeVerifier { judgment });
     run_review(
         &default_config(),
         input,
@@ -231,9 +243,11 @@ async fn a_withheld_defect_named_in_the_summary_never_reaches_the_body() {
     );
 }
 
-/// #9188 C: a clean review whose prose rests on its verified finding keeps it.
+/// #9188 C, #9310 D2 ("Always template"): a clean review whose prose rests
+/// on its verified finding posts the verified summary, not the prose. Before
+/// D2 this test asserted the prose was kept (`a_clean_review_keeps_its_prose`).
 #[tokio::test]
-async fn a_clean_review_keeps_its_prose() {
+async fn a_clean_review_gets_the_template_not_its_prose() {
     let finding = billing_finding(
         "overflow",
         "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
@@ -250,9 +264,14 @@ async fn a_clean_review_keeps_its_prose() {
     .await;
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
     assert!(
-        result
-            .review_body
-            .contains("Overflow risk at src/billing.rs:30"),
+        !result.review_body.contains("Overflow risk"),
+        "{}",
+        result.review_body
+    );
+    assert!(
+        result.review_body.starts_with(
+            "Verified findings (1), highest severity first:\n- **medium** `src/billing.rs:30` — overflow\n"
+        ),
         "{}",
         result.review_body
     );
@@ -597,10 +616,13 @@ async fn run_review_body_carries_no_dropped_citation() {
 /// start is not the survivor's line (MEDIUM-1 on #9188).
 const CLEAN_PROSE: &str = "Overflow risk at src/billing.rs:29-31 on large invoices. The billing daemon binds 127.0.0.1:8080, calls example.com:443, and is configured in config/app.toml:12.";
 
-/// #9188 compatibility: a review with nothing withheld keeps the model's
-/// prose and findings byte for byte through the real pipeline.
+/// #9188 compatibility, #9310 D2: a review with nothing withheld keeps its
+/// findings byte for byte through the real pipeline, and its body is the
+/// verified summary, then the footer: no prose, no fenced payload. Before D2
+/// this test asserted the prose and fence were kept
+/// (`run_review_keeps_a_clean_review_byte_for_byte`).
 #[tokio::test]
-async fn run_review_keeps_a_clean_review_byte_for_byte() {
+async fn run_review_writes_the_template_for_a_clean_review_byte_for_byte() {
     let body = "`amounts.iter().sum::<u64>()` can overflow on large invoices.";
     let finding = billing_finding("overflow", body, "medium", SUM_LINE);
     let result = review_payload(
@@ -616,19 +638,30 @@ async fn run_review_keeps_a_clean_review_byte_for_byte() {
         "{:?}",
         result.withheld_findings
     );
-    // The model's prose verbatim, then its fenced payload (findings array
-    // stripped, #8905 row 5), as before #9188; no rebuilt summary.
-    let body_prefix = format!("{CLEAN_PROSE}\n\n```json\n");
+    // #9310 D2: the summary is a function of the result alone, then the footer.
+    let summary = crate::pipeline::summary_template::verified_summary(&result);
+    assert_eq!(
+        summary,
+        "Verified findings (1), highest severity first:\n- **medium** `src/billing.rs:30` — overflow"
+    );
     assert!(
-        result.review_body.starts_with(&body_prefix),
+        result.review_body.starts_with(&format!("{summary}\n---\n")),
         "{}",
         result.review_body
     );
-    assert!(
-        !result.review_body.contains("withheld"),
-        "{}",
-        result.review_body
-    );
+    for absent in [
+        "withheld",
+        "```",
+        "127.0.0.1",
+        "example.com",
+        "config/app.toml",
+    ] {
+        assert!(
+            !result.review_body.contains(absent),
+            "{absent}: {}",
+            result.review_body
+        );
+    }
     assert_eq!(result.findings.len(), 1);
     let f = &result.findings[0];
     assert_eq!(
@@ -641,4 +674,201 @@ async fn run_review_keeps_a_clean_review_byte_for_byte() {
         ("src/billing.rs", Some(SUM_LINE), "overflow", body)
     );
     assert_eq!(f.citation_correction, None);
+}
+
+// ── #9310: the summary is a template; severity is stamped ────────────────────
+
+/// A token that appears only in model-written prose.
+const SENTINEL: &str = "SENTINEL-9310-MODEL-PROSE";
+
+/// #9310 item 1.1, unified path: the reviewer's prose and `summary` carry a
+/// sentinel that never reaches `review_body`, and the body holds the summary
+/// [`verified_summary`] builds from the returned result.
+#[tokio::test]
+async fn run_review_summary_never_contains_model_prose() {
+    let finding = billing_finding(
+        "overflow",
+        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
+        "medium",
+        SUM_LINE,
+    );
+    let prose = format!("{SENTINEL}: overflow risk at src/billing.rs:30.");
+    let result = review_payload(
+        &prose,
+        "REQUEST_CHANGES",
+        "C",
+        serde_json::json!([finding]),
+        "CONFIRMED",
+    )
+    .await;
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert!(
+        !result.review_body.contains(SENTINEL),
+        "{}",
+        result.review_body
+    );
+    let summary = crate::pipeline::summary_template::verified_summary(&result);
+    assert!(
+        result.review_body.contains(&summary),
+        "{}",
+        result.review_body
+    );
+}
+
+/// Refutes every finding whose verifier section contains `refute`, and
+/// confirms the rest.
+struct SelectiveVerifier {
+    refute: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for SelectiveVerifier {
+    fn name(&self) -> &str {
+        "selective-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let text = crate::pipeline::verify_batch::test_support::answer(&req, |section| {
+            if section.contains(self.refute) {
+                "REFUTED"
+            } else {
+                "CONFIRMED"
+            }
+            .to_string()
+        });
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// #9310 item 1.2: a refuted finding the reviewer's prose names reaches the
+/// body by no route: not by line, kind or description. The survivor is named.
+#[tokio::test]
+async fn run_review_summary_omits_a_refuted_finding_named_only_in_prose() {
+    let survivor = billing_finding(
+        "overflow",
+        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
+        "medium",
+        SUM_LINE,
+    );
+    let refuted = billing_finding(
+        "dropped-error",
+        "`let value_7 = step_7(input);` drops the error it returns.",
+        "high",
+        7,
+    );
+    let prose = "The step_7 call drops the error it returns, and the total can overflow.";
+    let verifier: Arc<dyn LlmProvider> = Arc::new(SelectiveVerifier {
+        refute: "drops the error",
+    });
+    let result = review_with_verifier(
+        &billing_diff(),
+        prose,
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([survivor, refuted]),
+        verifier,
+    )
+    .await;
+    assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
+    assert_eq!(result.withheld_findings.len(), 1, "{:?}", result.findings);
+    assert!(
+        result
+            .review_body
+            .starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
+        "{}",
+        result.review_body
+    );
+    for absent in [
+        "dropped-error",
+        "step_7",
+        "value_7",
+        ":7`",
+        "drops the error",
+    ] {
+        assert!(
+            !result.review_body.contains(absent),
+            "{absent}: {}",
+            result.review_body
+        );
+    }
+    assert!(
+        result
+            .review_body
+            .contains("`src/billing.rs:30` — overflow"),
+        "{}",
+        result.review_body
+    );
+}
+
+/// #9310 items 2.1, 2.2 and 2.4, end to end: a reviewer's `critical` is
+/// carried on a surviving finding; a `"severity": null` finding the gate
+/// withholds is stamped (derived `low`); a `critical` finding that admits it
+/// cannot be checked is demoted to Medium effort and stamped `medium`. Deriving
+/// severity from effort alone reads `high` for the first.
+#[tokio::test]
+async fn run_review_stamps_the_reviewer_severity_on_every_finding() {
+    let mut critical = billing_finding(
+        "overflow",
+        "`amounts.iter().sum::<u64>()` can overflow on large invoices.",
+        "critical",
+        SUM_LINE,
+    );
+    critical["code_provable"] = serde_json::json!(true);
+    let mut null_severity = billing_finding("absent-quote", "`flush_all()` is slow.", "low", 2);
+    null_severity["severity"] = serde_json::Value::Null;
+    let mut demoted = billing_finding(
+        "unchecked",
+        "`let value_5 = step_5(input);` may panic; this cannot be confirmed from the diff alone.",
+        "critical",
+        5,
+    );
+    demoted["code_provable"] = serde_json::json!(true);
+    let result = review_payload(
+        "Three notes.",
+        "REQUEST_CHANGES",
+        "D",
+        serde_json::json!([critical, null_severity, demoted]),
+        "CONFIRMED",
+    )
+    .await;
+    let json = run_json(&result).2;
+    let every: Vec<&serde_json::Value> = json["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(
+            json["withheld_findings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|w| &w["finding"]),
+        )
+        .collect();
+    assert_eq!(every.len(), 3, "{json}");
+    let severity_of = |kind: &str| {
+        every
+            .iter()
+            .find(|f| f["kind"] == kind)
+            .map(|f| f["severity"].clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(severity_of("overflow"), "critical", "{json}");
+    assert_eq!(severity_of("absent-quote"), "low", "{json}");
+    assert_eq!(severity_of("unchecked"), "medium", "{json}");
+    for f in every {
+        assert!(
+            matches!(
+                f["severity"].as_str(),
+                Some("low" | "medium" | "high" | "critical")
+            ),
+            "{f}"
+        );
+    }
 }
