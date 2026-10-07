@@ -8,6 +8,8 @@
 //! Test: included as `#[cfg(test)] mod tests` from `trace_client.rs`.
 
 use super::*;
+// #9214: the HTTP leg's layout now resolves inside `search_transport`.
+use trusty_common::daemon_guard::DaemonAddrLayout;
 
 /// Verbatim from `GET /indexes/trusty-tools-2c24d89f/call_chain?entry_point=
 /// SHRINK_GUARD_RATIO_DIVISOR` on 2026-08-22 — the report the RED finding at

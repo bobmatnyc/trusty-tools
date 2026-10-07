@@ -29,10 +29,10 @@
 use std::path::Path;
 
 use tracing::warn;
-use trusty_common::daemon_guard::DaemonAddrLayout;
 
 use crate::config::index_resolver::{best_matching_index, canonical_source_root};
 use crate::integrations::search_client::{HttpSearchClient, IndexInfo, SearchClient};
+use crate::integrations::search_transport::SearchTransport;
 
 /// Derive the trusty-search/analyze index id for a local checkout path.
 ///
@@ -206,17 +206,31 @@ fn index_at_root(indexes: &[IndexInfo], repo_path: &Path) -> Option<String> {
 /// degrades exactly as it did before #6677.
 /// Test: `index_registry_tests.rs::an_unreachable_daemon_reads_an_empty_registry`.
 pub async fn fetch_registered_indexes(base_url: &str) -> Vec<IndexInfo> {
-    let client = match HttpSearchClient::new(base_url) {
+    // #9214: an explicit URL stays the HTTP leg.
+    let url = base_url.trim_end_matches('/').to_string();
+    fetch_registered_indexes_via(SearchTransport::Http(url)).await // #9214 phase C: delete
+}
+
+/// [`fetch_registered_indexes`] over an already-resolved transport (#9214).
+///
+/// Why: the socket leg needs the same fail-open read; this is the additive
+/// twin, so `fetch_registered_indexes(&str)` keeps its signature.
+/// What: the registry, or an empty list when the client will not build or the
+/// daemon does not answer on either leg.
+/// Test: `search_transport_tests::fetch_registered_indexes_over_the_socket_is_fail_open`.
+pub async fn fetch_registered_indexes_via(transport: SearchTransport) -> Vec<IndexInfo> {
+    let target = transport.describe();
+    let client = match HttpSearchClient::with_transport(transport) {
         Ok(c) => c,
         Err(e) => {
-            warn!(base_url, error = %e, "report index resolution: no trusty-search client");
+            warn!(target, error = %e, "report index resolution: no trusty-search client");
             return Vec::new();
         }
     };
     match client.list_indexes().await {
         Ok(indexes) => indexes,
         Err(e) => {
-            warn!(base_url, error = %e, "report index resolution: index list unavailable");
+            warn!(target, error = %e, "report index resolution: index list unavailable");
             Vec::new()
         }
     }
@@ -226,11 +240,15 @@ pub async fn fetch_registered_indexes(base_url: &str) -> Vec<IndexInfo> {
 ///
 /// Why: a hard-coded `127.0.0.1:7878` misses an auto-ported daemon and every
 /// `TRUSTY_DATA_DIR`-isolated one — the same resolution `HttpTraceSource` makes.
+/// What: #9214 — [`SearchTransport::resolve_advertised`]: the socket when one
+/// is present (`<TRUSTY_DATA_DIR>/trusty-search.sock` for an isolated
+/// instance), else the `DaemonAddrLayout` HTTP address.
 /// Test: the read is `an_unreachable_daemon_reads_an_empty_registry`; the
-/// address resolution is `DaemonAddrLayout`'s, covered by
-/// `the_shared_search_layout_is_the_one_being_resolved`.
+/// HTTP address resolution is `DaemonAddrLayout`'s, covered by
+/// `the_shared_search_layout_is_the_one_being_resolved`; the isolated socket
+/// by `trusty_data_dir_isolates_the_default_socket`.
 pub async fn registered_indexes() -> Vec<IndexInfo> {
-    fetch_registered_indexes(&DaemonAddrLayout::TRUSTY_SEARCH.resolve_base_url()).await
+    fetch_registered_indexes_via(SearchTransport::resolve_advertised()).await
 }
 
 #[cfg(test)]

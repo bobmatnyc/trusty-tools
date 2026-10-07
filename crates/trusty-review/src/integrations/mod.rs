@@ -11,7 +11,9 @@
 //!     closes #628).
 //!   - `index_status` — per-index `GET /indexes/{id}/status` wire types; the
 //!     probe the required-context gate decides on since #6686.
-//!   - `search_client` — HTTP client over trusty-search `:7878` (REQUIRED).
+//!   - `search_client` — client over trusty-search (REQUIRED).
+//!   - `search_transport` — picks the socket or HTTP leg to trusty-search
+//!     (#9214).
 //!   - `null_search_client` — no-op `SearchClient` used by the `--source-root`
 //!     diff-only fallback when no registered index matches (#2994).
 //!   - `analyze_client` — HTTP client over trusty-analyze `:7879` (OPTIONAL).
@@ -37,6 +39,7 @@ pub mod index_status;
 pub mod null_analyze_client;
 pub mod null_search_client;
 pub mod search_client;
+pub mod search_transport;
 pub mod subprocess_analyze_client;
 
 // #6287: no `HttpAnalyzeClient` — ADR-0032 moved trusty-analyze onto a Unix
@@ -64,4 +67,5 @@ pub use search_client::{
     EmbedderState, HealthResponse, HttpSearchClient, IndexInfo, SearchClient, SearchClientError,
     SearchRequest, SearchResponse, SearchResult,
 };
+pub use search_transport::SearchTransport;
 pub use subprocess_analyze_client::SubprocessAnalyzeClient;

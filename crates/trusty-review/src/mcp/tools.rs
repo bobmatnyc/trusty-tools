@@ -77,7 +77,7 @@ pub fn tool_descriptors() -> Value {
                            comments posted).  Reviews against the trusty-search index \
                            registered for owner/repo; with none registered the tool \
                            returns an error naming the repo and index id.  If \
-                           trusty-search on :7878 is unreachable the review runs \
+                           trusty-search is unreachable the review runs \
                            DEGRADED on the diff alone, unless search is required \
                            (TRUSTY_REVIEW_REQUIRE_SEARCH=true).",
             "inputSchema": {
@@ -141,7 +141,7 @@ pub fn tool_descriptors() -> Value {
                            Useful for reviewing local changes, staged diffs, or patches. \
                            No GitHub credentials required. \
                            Requires AWS Bedrock credentials (or OPENROUTER_API_KEY). \
-                           trusty-search on :7878 is used for code-context retrieval when available.",
+                           trusty-search is used for code-context retrieval when available.",
             "inputSchema": {
                 "type": "object",
                 "required": ["diff"],

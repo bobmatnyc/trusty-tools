@@ -17,12 +17,14 @@
 //! Test: this file (only compiled with the default `report` feature).
 #![cfg(feature = "report")]
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 
+use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+use trusty_review::integrations::SearchTransport;
 use trusty_review::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 use trusty_review::report::investigate::{apply_investigation, merge_investigation_prose};
 use trusty_review::report::provenance::{INFERRED_TAG, MEASURED_TAG};
@@ -85,8 +87,50 @@ fn fixture() -> tempfile::TempDir {
     tmp
 }
 
+/// #9214: pin `TRUSTY_SEARCH_SOCKET` to a path nothing binds, once per process.
+///
+/// Why: the trace pass resolves trusty-search through
+/// `SearchTransport::resolve_advertised`; unpinned, it would dial the
+/// operator's live daemon from this test binary.
+/// What: sets the env var on first call and returns the path. Every test here
+/// is `#[serial_test::serial]`, so no thread reads the environment meanwhile.
+fn isolate_search() -> PathBuf {
+    static SOCKET: OnceLock<PathBuf> = OnceLock::new();
+    SOCKET
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join(format!(
+                "trusty-review-it-no-search-{}.sock",
+                std::process::id()
+            ));
+            // SAFETY: every test in this file is serial (see above).
+            unsafe { std::env::set_var(TRUSTY_SEARCH_SOCKET_ENV, &path) };
+            path
+        })
+        .clone()
+}
+
+/// #9214: the trace pass in this binary never resolves the live socket.
+///
+/// Why/What: unpinned, `resolve_advertised` lands on the real default socket
+/// (or HTTP where it is absent); pinned, it must be the missing path.
+/// Test: this test.
+#[serial_test::serial]
+#[test]
+fn the_trace_pass_never_resolves_the_live_search_socket() {
+    let pinned = isolate_search();
+    match SearchTransport::resolve_advertised() {
+        SearchTransport::Socket(path) => {
+            assert_eq!(path, pinned);
+            assert!(!path.exists(), "nothing may bind {}", path.display());
+        }
+        other => panic!("expected the pinned missing socket, got {other:?}"),
+    }
+}
+
+#[serial_test::serial]
 #[tokio::test]
 async fn investigation_renders_verified_and_rejects_unverifiable() {
+    isolate_search();
     let fx = fixture();
     let repo_path = fx.path().to_string_lossy().replace('\\', "/");
     let toml = format!(
@@ -254,8 +298,10 @@ fn multi_batch_fixture() -> tempfile::TempDir {
 /// silently reporting fewer findings, and (4) the synthesis-prompt coverage
 /// digest carries the same named gap.
 /// Test: this test itself.
+#[serial_test::serial]
 #[tokio::test]
 async fn investigation_survives_one_truncated_batch_and_names_it() {
+    isolate_search();
     let fx = multi_batch_fixture();
     let repo_path = fx.path().to_string_lossy().replace('\\', "/");
     let toml = format!(
@@ -326,8 +372,10 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     );
 }
 
+#[serial_test::serial]
 #[tokio::test]
 async fn investigation_returns_none_for_remote_only() {
+    isolate_search();
     let toml = "[report]\ntitle = \"Remote DD\"\n\n[[repositories]]\nname = \"R\"\nremote = \"acme/repo\"\n";
     let manifest = parse_manifest(toml, Path::new("m.toml")).expect("manifest");
     let model = ReportModel::build(&manifest, Path::new("m.toml"), "report-technical-dd", None)

@@ -119,7 +119,9 @@ pub async fn preflight_context(
     deps: &ReviewDeps,
     surface: InvocationSurface,
 ) -> GateOutcome {
-    let search_url = &config.search_url;
+    // #9214: name the leg actually used — `socket <path>` or the HTTP URL.
+    let search_at =
+        crate::integrations::search_transport::SearchTransport::resolve(config).describe();
     let index = &config.search_index;
     let require_search = config.context.effective_require_search(surface);
 
@@ -179,7 +181,7 @@ pub async fn preflight_context(
     if !search_ok {
         if require_search {
             return GateOutcome::Skip(format!(
-                "trusty-search unreachable at {search_url} — start it (`trusty-search start`); \
+                "trusty-search unreachable at {search_at} — start it (`trusty-search start`); \
                  refusing to review without code context (set \
                  TRUSTY_REVIEW_REQUIRE_SEARCH=false or [context] require_search=false to opt \
                  into a degraded, non-authoritative review)"
@@ -192,9 +194,9 @@ pub async fn preflight_context(
              (non-authoritative)"
         );
         let reason = match search_error_detail {
-            Some(detail) => format!("trusty-search unavailable at {search_url} — {detail}"),
+            Some(detail) => format!("trusty-search unavailable at {search_at} — {detail}"),
             None => format!(
-                "trusty-search unavailable at {search_url}; review produced WITHOUT code context"
+                "trusty-search unavailable at {search_at}; review produced WITHOUT code context"
             ),
         };
         return GateOutcome::Degraded(reason);
@@ -204,7 +206,7 @@ pub async fn preflight_context(
     // "" would 404 and skip; review the diff alone, labelled, unless required.
     if index.is_empty() {
         let reason = format!(
-            "no trusty-search index at {search_url} covers this checkout — review produced \
+            "no trusty-search index at {search_at} covers this checkout — review produced \
              from the diff alone, WITHOUT code context or static analysis"
         );
         if require_search {
@@ -246,7 +248,7 @@ pub async fn preflight_context(
         Err(e) if e.is_unknown_index() => {
             warn!(index = %index, "trusty-search has no index `{index}` — skipping review");
             return GateOutcome::Skip(format!(
-                "trusty-search at {search_url} has no index `{index}` — refusing to review with \
+                "trusty-search at {search_at} has no index `{index}` — refusing to review with \
                  no code context. Every search against it returns `404 unknown index`, so the \
                  review would see none of the project. Index this checkout \
                  (`trusty-search index <repo-root>`) or point the review at an existing index \
@@ -282,7 +284,7 @@ pub async fn preflight_context(
             return GateOutcome::Skip(format!(
                 "trusty-analyze static-analysis context is unavailable for index `{index}` — \
                  refusing to review without it. No analyze daemon is used: to fix this, start \
-                 trusty-search at {search_url} and confirm it is SERVING (a `degraded` warm \
+                 trusty-search at {search_at} and confirm it is SERVING (a `degraded` warm \
                  boot still counts as serving), then put a runnable `trusty-analyze` binary on \
                  PATH (override with TRUSTY_ANALYZE_BIN). (Set \
                  TRUSTY_REVIEW_REQUIRE_ANALYZE=false or [context] require_analyze=false to opt \
@@ -303,7 +305,7 @@ pub async fn preflight_context(
     // answered and supplied context, so this is not a skip — but the gap must
     // reach the reader of the review, not just the daemon's own log.
     if let Some(reason) = search_degraded_reason {
-        return GateOutcome::Degraded(format!("trusty-search at {search_url}: {reason}"));
+        return GateOutcome::Degraded(format!("trusty-search at {search_at}: {reason}"));
     }
 
     GateOutcome::Proceed
