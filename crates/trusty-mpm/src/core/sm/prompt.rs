@@ -190,7 +190,8 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// `missing_content_fails_the_prompt`, and the robustness tests.
 pub fn resolve_sm_prompt(dir: &Path) -> Result<String, AgentContentError> {
     // #9012: BASE_SM is never overridable, so the SM files must resolve.
-    let content = content_source::framework_content()?;
+    // #9396: the SM prompt reads what is installed; it never fetches.
+    let content = content_source::framework_content_local(None)?;
     resolve_sm_prompt_with(dir, &content, content_source::harness_doc)
 }
 
@@ -248,7 +249,7 @@ pub fn resolve_sm_prompt_default() -> Result<String, AgentContentError> {
     match sm_override_dir() {
         Some(dir) => resolve_sm_prompt(&dir),
         None => Ok(assemble_sm_prompt(
-            &content_source::framework_content()?,
+            &content_source::framework_content_local(None)?,
             &content_source::harness_doc()?,
         )),
     }

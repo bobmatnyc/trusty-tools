@@ -343,7 +343,8 @@ pub(crate) fn rederive_from_compiled_prompt(
     let Some((_, harness_root)) = session_and_root(compiled_prompt) else {
         return false;
     };
-    let content = match crate::core::content_source::framework_content_for(&harness_root) {
+    // #9396: re-deriving a row is read-only; it never fetches.
+    let content = match crate::core::content_source::framework_content_local(Some(&harness_root)) {
         Ok(content) => content,
         Err(err) => {
             tracing::debug!(%err, "no instructional content; not re-deriving the savings row");

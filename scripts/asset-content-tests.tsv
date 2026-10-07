@@ -39,6 +39,7 @@ trusty-code	test:paths_import_mpm_catalog_e2e	*	reads checkout_content, AgentRos
 trusty-common	lib	content::tests	14 reads: find_dev_checkout, DEV_CLASS_SOURCES, literal 'content/skills' (#8378)	content-resolver
 trusty-mpm	bin:tm	commands::fleet::tests	runtime: reads the Architect skills and CLAUDE.md template through commands::fleet::seed::FILES (#8436)
 trusty-mpm	bin:tm	commands::install::tests::install_without_the_bundled_docs_fails_naming_the_doc	reads install::test_content_ref into a docs-less checkout (#9012)
+trusty-mpm	bin:tm	commands::install::tests::install_with_a_failed_first_use_fetch_fails_closed	reads AgentRoster::load after a failed first-use fetch (#9396)
 trusty-mpm	bin:tm	commands::pm_guard_dispatch::tests	reads r (install::test_roster_ref) — the dispatch classifier's roster (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_dispatch_type::tests	reads r (install::test_roster_ref) (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_worktree_grant::tests	reads r (install::test_roster_ref) (#9011)
@@ -58,12 +59,14 @@ trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_build_performance_
 trusty-mpm	bin:tm	tests_behavior_rust_build_performance::rust_delivery_workflow_lands_in_deployed_dot_claude_skills	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	bin:tm	tests_behavior_skill_tiers	reads test_roster (#9011)
 trusty-mpm	lib	client::catalog::sm_tools::tests::sm_tools_md_matches_catalog_render	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
+trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_managed_workspace_resolves_the_cache_once_a_bundle_lands	reads AgentRoster::load over a stale trusty-tools clone (#9396)
 trusty-mpm	lib	core::agent_skill_codeploy::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::agent_source::tests	reads test_support::repo_roster
 trusty-mpm	lib	core::bundle::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::bundled_pm_package::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::claude_md_sections::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	core::claude_md_writer::tests	reads test_support::rc — the package tiers decide what may be written (#9012)
+trusty-mpm	lib	core::content_source::content_source_launch_tests::the_launch_roster_comes_from_the_launch_content	reads test_support::rc and literal 'content/agents' — the launch roster (#9396)
 trusty-mpm	lib	core::content_source::tests	reads test_support::repo_roster (#9011)
 trusty-mpm	lib	core::delegation_authority::tests::every_bundled_non_base_agent_reaches_the_roster	reads test_support::repo_agents_dir
 trusty-mpm	lib	core::deploy_validate::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
