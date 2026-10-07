@@ -126,19 +126,23 @@ pub(super) fn already_running_message(
 /// `data_dir_flag_wins_over_an_inherited_env_value` and
 /// `an_explicit_data_dir_never_auto_discovers_on_any_start` pin the two
 /// resolvers; `handle_start_reads_the_plan_at_every_scan_site` pins the
-/// wiring.
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_start(
-    port: u16,
-    foreground: bool,
-    device: &str,
-    data_dir: Option<&std::path::Path>,
-    verbose: bool,
-    no_auto_discover: bool,
-    auto_discover: bool,
-    fanout_concurrency: Option<usize>,
-    serial: bool,
-) -> Result<()> {
+/// wiring. #9214: `no_http` runs the daemon on its RPC socket alone, is
+/// forwarded to the background child, and withholds auto-discovery
+/// (`auto_discover_needs_the_http_listener`).
+pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
+    let super::StartArgs {
+        port,
+        foreground,
+        device,
+        data_dir,
+        no_auto_discover,
+        auto_discover,
+        fanout_concurrency,
+        serial,
+        no_http,
+    } = args;
+    let device = device.as_str();
+    let data_dir = data_dir.as_deref();
     // Apply the data-dir override as early as possible so every per-instance
     // path — the lockfile, the port file, `indexes.toml` and the RPC socket —
     // derives from it. #8149: an explicit `--data-dir` now wins over an
@@ -157,6 +161,10 @@ pub async fn handle_start(
         no_auto_discover,
         auto_discover,
     )?;
+    // #9214: auto-discover registers over HTTP; without the listener it must
+    // not run, or `daemon_utils::daemon_base_url` falls back to 127.0.0.1:7878.
+    // The skip is logged after tracing is up, at the spawn site below.
+    let discovery = discovery.with_http_listener(!no_http);
     if let Some(dir) = resolved_data_dir.as_deref() {
         // Create the directory now so the child daemon can acquire its
         // lockfile immediately on first start.
@@ -173,7 +181,7 @@ pub async fn handle_start(
         tracing::info!("data-dir override: {}", dir.display());
     }
 
-    if !discovery.runs_auto_discover() && !no_auto_discover {
+    if !discovery.runs_auto_discover() && !no_auto_discover && !discovery.withheld_for_no_http() {
         tracing::info!(
             "auto-discover: disabled for an explicit data dir (#8176); \
              pass --auto-discover to scan anyway"
@@ -224,6 +232,10 @@ pub async fn handle_start(
         }
         if let Some(n) = fanout_concurrency {
             cmd.arg("--fanout-concurrency").arg(n.to_string());
+        }
+        // #9214: the detached child is the daemon; it must not bind HTTP.
+        if no_http {
+            cmd.arg("--no-http");
         }
         // Issue #1182: pass --data-dir explicitly so the CLI flag wins even
         // when TRUSTY_DATA_DIR was already set in the parent environment.
@@ -507,11 +519,9 @@ pub async fn handle_start(
                 // default and the `--auto-discover` opt-in.
                 if discovery.runs_auto_discover() {
                     tokio::spawn(crate::commands::discover::auto_discover_and_index());
-                } else {
-                    tracing::info!(
-                        "auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, \
-                         or an explicit data dir without --auto-discover)"
-                    );
+                } else if let Some(reason) = discovery.skip_reason() {
+                    // #9214: names --no-http when that is what withheld the scan.
+                    tracing::info!("{reason}");
                 }
             }
             Ok(Ok(Err(e))) => {
@@ -579,7 +589,13 @@ pub async fn handle_start(
     // `crates/trusty-embedderd/src/stdio_server.rs:57-60`): when this process
     // dies, the OS closes its end of the sidecar's stdin pipe, `read_line`
     // returns `Ok(0)`, and the sidecar exits cleanly on its own.
-    match crate::service::run_daemon(state, port).await {
+    // #9214: `--no-http` / `TRUSTY_SEARCH_NO_HTTP` serves the socket only.
+    let http = if no_http {
+        crate::service::HttpListener::Off
+    } else {
+        crate::service::HttpListener::Bind(port)
+    };
+    match crate::service::run_daemon_with(state, http).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
             // Issue #126: a launchd-spawned `start` that finds a daemon

@@ -564,6 +564,13 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo clippy -p trusty-common --all-targets --features codex-config -- -D warnings
 
+      # #7519: no crate enables trusty-secrets' `cli-backends`, so the
+      # `--workspace` run above never compiles `store::cli`. This step lints
+      # it; `affected-test` runs its tests.
+      - name: cargo clippy -p trusty-secrets --features cli-backends -- -D warnings
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy -p trusty-secrets --all-targets --features cli-backends -- -D warnings
+
   # --------------------------------------------------------------------------
   # rustdoc-links: broken intra-doc links, on the PR that writes them (#5973).
   #
@@ -1650,6 +1657,13 @@ jobs:
       - name: cargo test -p trusty-mpm --features sm-memory,manager-memory
         if: contains(format(' {0} ', matrix.crates), ' trusty-mpm ')
         run: cargo test -p trusty-mpm --features sm-memory,manager-memory --no-fail-fast
+
+      # #7519: a default `cargo test -p trusty-secrets` leaves `cli-backends`
+      # off, so the CLI runner and template tests run only in this step. The
+      # `clippy` job lints the same feature set.
+      - name: cargo test -p trusty-secrets --features cli-backends
+        if: contains(format(' {0} ', matrix.crates), ' trusty-secrets ')
+        run: cargo test -p trusty-secrets --features cli-backends --no-fail-fast
 
   # The single context for this suite. "Must equal success" polarity, as in
   # `test` above, so a failed or skipped plan fails closed.

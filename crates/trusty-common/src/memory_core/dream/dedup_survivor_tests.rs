@@ -571,3 +571,81 @@ async fn a_second_dream_cycle_on_a_dreaming_palace_loses_no_text() {
         );
     }
 }
+
+/// Why (#8246): dedup persists each merge as it goes, so a cycle that fails
+/// after one has still rewritten a survivor's text. trusty-memory's BM25 lane
+/// learns of that only through the after-cycle hook, which fired on `Ok` alone.
+/// What: two drawers that both store `older`'s query vector, so `older` finds
+/// `newer` at score 1.0 and the pass merges them. The merge seam then fails the
+/// pass. The cycle returns `Err`, a live drawer holds both texts, and the hook
+/// was called once, with `None`.
+#[tokio::test]
+async fn a_cycle_that_fails_after_a_merge_still_calls_the_hook() {
+    use super::cycle::merge_seam;
+    use super::{DreamConfig, DreamStats, Dreamer};
+
+    let (older, newer) = (
+        "The rollback runbook lists every database snapshot step in order",
+        "Feature flags gate the staged rollout across every region we serve",
+    );
+    let dir = tempdir().unwrap();
+    let palace = palace_in(&dir, "dream-fails-after-merge");
+    let handle = open(&palace);
+    let spec = |content, age_days| Spec {
+        content,
+        importance: 0.5,
+        age_days,
+        tags: &[],
+        fact_key: None,
+    };
+    let query = mock_vector(older).await;
+    put_with_vector(&handle, &spec(older, 1), query.clone()).await;
+    put_with_vector(&handle, &spec(newer, 0), query).await;
+    merge_seam::FAIL_AFTER_MERGE
+        .lock()
+        .unwrap()
+        .insert(palace.id.as_str().to_string());
+
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.9,
+        recall_benchmark_enabled: false,
+        compact: false,
+        semantic: crate::memory_core::semantic_consolidation::SemanticConsolidationConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..DreamConfig::default()
+    })
+    .with_after_cycle(Arc::new(
+        move |id: &PalaceId, stats: Option<&DreamStats>| {
+            sink.lock().unwrap().push((id.clone(), stats.cloned()))
+        },
+    ));
+    let outcome = dreamer.dream_cycle(&handle).await;
+    merge_seam::FAIL_AFTER_MERGE
+        .lock()
+        .unwrap()
+        .remove(palace.id.as_str());
+
+    assert!(
+        outcome.is_err(),
+        "precondition: the injected failure ends the cycle: {outcome:?}"
+    );
+    let live: Vec<String> = handle
+        .drawers
+        .read()
+        .iter()
+        .map(|d| d.content().to_string())
+        .collect();
+    assert!(
+        live.iter().any(|c| c.contains(older) && c.contains(newer)),
+        "precondition: the merge persisted before the failure: {live:?}"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(palace.id.clone(), None)],
+        "#8246: a cycle that failed after a merge must still call the hook"
+    );
+}

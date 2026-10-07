@@ -4,7 +4,7 @@
 //! stored in the review log.  Keeping them in a dedicated module ensures
 //! a single authoritative definition and prevents type drift between the
 //! pipeline, the LLM provider layer, and the store.
-//! What: exposes `Verdict`, `Effort`, `VerifyOutcome`, `Finding`
+//! What: exposes `Verdict`, `Effort`, `Severity`, `VerifyOutcome`, `Finding`
 //! (FixSuggestion), and `ReviewResult` — all serde-serialisable.
 //! Test: `verdict_serde_roundtrip`, `review_result_serde_roundtrip`,
 //! `finding_confidence_clamping`, and `finding_source_citation_roundtrip`
@@ -16,9 +16,11 @@ use serde::{Deserialize, Serialize};
 
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
+pub mod severity; // #9310
 pub mod status;
 pub mod verdict_status; // #9310
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
+pub use severity::Severity;
 pub use status::ReviewStatus;
 pub use verdict_status::VerdictStatus;
 
@@ -421,6 +423,14 @@ pub struct Finding {
     pub confidence: f32,
     /// Estimated remediation effort.
     pub effort: Effort,
+    /// How serious the finding is (#9310).
+    ///
+    /// The reviewer's own value until `finalize_review` stamps the final one,
+    /// which never exceeds what the final `effort` allows; a missing reviewer
+    /// value is derived from `effort`. `None` only on a record written before
+    /// #9310, which still deserializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
     /// Which axis this finding speaks to (correctness vs. method-conformance).
     ///
     /// Why: the back gate (#1359) caps `MethodConformance` findings at
@@ -540,6 +550,7 @@ impl Finding {
             suggested_replacement: None,
             confidence: confidence.clamp(0.0, 1.0),
             effort,
+            severity: None, // #9310: stamped at `finalize_review`
             category: FindingCategory::Correctness,
             source_citation: None,
             code_provable: false,

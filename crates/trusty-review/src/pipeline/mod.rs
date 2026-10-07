@@ -94,6 +94,9 @@ pub mod voice_config;
 pub mod withheld_contract;
 // #9310: the withheld-verdict mapping and the unparsed-reply status.
 pub(crate) mod verdict_status;
+// #9310: the reported finding severity, and the summary built from survivors.
+pub(crate) mod severity;
+pub(crate) mod summary_template;
 // Why: coverage data loading extracted from runner.rs to keep that file under
 // the 500-line cap (#610) after adding coverage-gating pipeline (#1014).
 pub mod runner_coverage;

@@ -25,9 +25,7 @@ fn parse_flag(args: &[&str]) -> Result<bool, String> {
         .map_err(|e| e.to_string())?
         .command
     {
-        Commands::Start {
-            no_auto_discover, ..
-        } => Ok(no_auto_discover),
+        Commands::Start { args } => Ok(args.no_auto_discover),
         _ => panic!("expected Commands::Start"),
     }
 }
@@ -81,4 +79,30 @@ fn value_form_accepts_documented_spellings() {
 #[test]
 fn value_form_rejects_garbage() {
     assert!(parse_flag(&["trusty-search", "start", "--no-auto-discover=ture"]).is_err());
+}
+
+/// Why (#9214): `TRUSTY_SEARCH_NO_HTTP=1` is how a launchd unit or the sandbox
+/// script turns the HTTP listener off, and it flows through the same
+/// `value_parser` as the value form below. A bare `bool` would reject `1`.
+/// What: the bare flag, the documented spellings, absence, and a typo.
+/// Test: this function.
+#[test]
+fn no_http_flag_spellings_parse() {
+    let parse = |args: &[&str]| -> Result<bool, String> {
+        match Cli::try_parse_from(args)
+            .map_err(|e| e.to_string())?
+            .command
+        {
+            Commands::Start { args } => Ok(args.no_http),
+            _ => panic!("expected Commands::Start"),
+        }
+    };
+    assert_eq!(parse(&["trusty-search", "start"]), Ok(false));
+    assert_eq!(parse(&["trusty-search", "start", "--no-http"]), Ok(true));
+    for spelling in ["1", "true", "yes", "on"] {
+        let arg = format!("--no-http={spelling}");
+        assert_eq!(parse(&["trusty-search", "start", &arg]), Ok(true), "{arg}");
+    }
+    assert_eq!(parse(&["trusty-search", "start", "--no-http=0"]), Ok(false));
+    assert!(parse(&["trusty-search", "start", "--no-http=ture"]).is_err());
 }
