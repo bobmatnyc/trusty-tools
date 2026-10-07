@@ -28,6 +28,8 @@ use crate::core::file_events::FileEventKind;
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::watch_rescan::RescanFollowUp;
+// #7434: which root a watch covers, and its slot in the index's root table.
+use crate::service::watch_roots::WatchedRoot;
 use crate::service::watcher::{FileWatcher, WatchEvent};
 use crate::service::watcher_teardown::{
     drop_bounded_async, drop_bounded_blocking, WatcherGuard, WATCHER_TEARDOWN_BOUND,
@@ -141,8 +143,12 @@ pub fn spawn_watch_loop(
     // only producer — it is the one place that sees a change at all.
     file_events: crate::core::file_events::SharedFileEventFeed,
 ) -> Result<WatcherTask> {
-    spawn_watch_loop_with_registry(
-        root_path,
+    // #7434: a single-root index is the one-entry case of the multi-root form.
+    let watched = WatchedRoot::new(root_path, None);
+    let table = vec![watched.clone()];
+    spawn_watch_loop_for_root(
+        watched,
+        table,
         index_id,
         indexer,
         indexed_files,
@@ -151,9 +157,21 @@ pub fn spawn_watch_loop(
     )
 }
 
-/// Live registry lookup keeps watcher policy current after Settings updates (#7379).
-pub(crate) fn spawn_watch_loop_with_registry(
-    root_path: &Path,
+/// Start watching ONE root of a possibly multi-root index (#7434).
+///
+/// Why: a single `root_path` gave no way to say "this watch covers slot 2, so
+/// its events are `@root2/…` chunks"; the manager calls this once per root.
+/// What: the pre-#7434 loop with two changes: (a) event paths are keyed
+/// through `watched`'s slot, and (b) a dropped-event rescan reconciles `table`
+/// — every root of the index — because its deletion sweep walks the shared
+/// `IndexedFiles`, and a pass that knew only this root would evict every other
+/// root's files. `registry`, when present, is the live #7379 policy lookup.
+/// Test: `every_index_root_is_watched`,
+/// `a_stuck_root_start_does_not_block_the_other_roots`,
+/// `rescan_covers_every_root`.
+pub(crate) fn spawn_watch_loop_for_root(
+    watched: WatchedRoot,
+    table: Vec<WatchedRoot>,
     index_id: crate::core::registry::IndexId,
     indexer: Arc<RwLock<CodeIndexer>>,
     indexed_files: IndexedFiles,
@@ -166,7 +184,9 @@ pub(crate) fn spawn_watch_loop_with_registry(
     // the two callers to one outstanding timer (#7396). See
     // `watch_rescan::RescanGate`.
     let rescan_gate = crate::service::watch_rescan::RescanGate::new(tx.clone());
-    let watcher = FileWatcher::start(root_path.to_path_buf(), tx)?;
+    // #9339: `FileWatcher::start` is bounded per root path (`start_bounded`).
+    let root_path = watched.raw().to_path_buf();
+    let watcher = FileWatcher::start(root_path.clone(), tx)?;
 
     // Canonicalize the root exactly as the reindex walker does (issue #402).
     // `std::fs::canonicalize` resolves symlinks so that the macOS `/var` →
@@ -179,9 +199,7 @@ pub(crate) fn spawn_watch_loop_with_registry(
     // `watcher_relative_path` can strip against both canonical and raw forms
     // (the file is gone, so canonicalize of the event path fails and we must
     // try both root variants to avoid an absolute-path mismatch).
-    let raw_root = root_path.to_path_buf();
-    let canonical_root =
-        std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+    // #7434: both spellings now live in `watched`.
     let index_label = index_id.to_string();
 
     let join = tokio::spawn(async move {
@@ -207,10 +225,10 @@ pub(crate) fn spawn_watch_loop_with_registry(
                     // #7396: the registry lookup lives inside the pass. An
                     // absent handle is a FAILED pass, not a reason to discard
                     // the batch — see `watch_rescan::reconcile_registered`.
+                    // #7434: `table` is every root — see the doc comment above.
                     let outcome = crate::service::watch_rescan::reconcile_registered(
                         &index_id,
-                        &canonical_root,
-                        &raw_root,
+                        &table,
                         &indexer,
                         &indexed_files,
                         registry.as_ref(),
@@ -277,23 +295,13 @@ pub(crate) fn spawn_watch_loop_with_registry(
                     // #6524: record before applying — the feed reports what the
                     // watcher SAW, so a change whose apply then fails still
                     // shows up rather than vanishing with the error.
-                    record_file_event(
-                        &file_events,
-                        FileEventKind::Modified,
-                        &canonical_root,
-                        &raw_root,
-                        &path,
-                    )
-                    .await;
+                    record_file_event(&file_events, FileEventKind::Modified, &watched, &path).await;
                     if let Some(registry) = &registry {
                         crate::service::index_admission::apply_modified(
                             registry,
                             &index_id,
                             &path,
-                            crate::service::index_admission::WatchRoots {
-                                canonical: &canonical_root,
-                                raw: &raw_root,
-                            },
+                            &watched,
                             &indexer,
                             &indexed_files,
                             // #7396: an admission the filesystem could not
@@ -304,11 +312,10 @@ pub(crate) fn spawn_watch_loop_with_registry(
                         )
                         .await;
                     } else {
-                        handle_modified(
+                        handle_modified_in_root(
                             &path,
                             &index_id,
-                            &canonical_root,
-                            &raw_root,
+                            &watched,
                             &indexer,
                             &indexed_files,
                         )
@@ -317,23 +324,9 @@ pub(crate) fn spawn_watch_loop_with_registry(
                 }
                 WatchEvent::Removed(path) => {
                     // #6524: same key `handle_removed` looks the file up by.
-                    record_file_event(
-                        &file_events,
-                        FileEventKind::Removed,
-                        &canonical_root,
-                        &raw_root,
-                        &path,
-                    )
-                    .await;
-                    handle_removed(
-                        &path,
-                        &index_id,
-                        &canonical_root,
-                        &raw_root,
-                        &indexer,
-                        &indexed_files,
-                    )
-                    .await;
+                    record_file_event(&file_events, FileEventKind::Removed, &watched, &path).await;
+                    handle_removed_in_root(&path, &index_id, &watched, &indexer, &indexed_files)
+                        .await;
                 }
             }
         }
@@ -367,15 +360,12 @@ pub const RESCAN_FEED_PATH: &str = ".";
 async fn record_file_event(
     feed: &crate::core::file_events::FileEventFeed,
     kind: FileEventKind,
-    canonical_root: &Path,
-    raw_root: &Path,
+    // #7434: the watch's root, so an additional root's row carries the same
+    // `@root<n>/…` key its chunks do.
+    watched: &WatchedRoot,
     event_path: &Path,
 ) {
-    feed.record(
-        kind,
-        watcher_relative_path(canonical_root, raw_root, event_path),
-    )
-    .await;
+    feed.record(kind, watched.corpus_path(event_path)).await;
 }
 
 /// Normalize an absolute watcher event path to a repo-root-relative string,
@@ -461,6 +451,27 @@ pub async fn handle_modified(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) {
+    // #7434: a bare root pair is the PRIMARY root, which is what this meant.
+    let watched = WatchedRoot::from_pair(canonical_root, raw_root);
+    handle_modified_in_root(path, index_id, &watched, indexer, indexed_files).await;
+}
+
+/// [`handle_modified`] for one root of a multi-root index (#7434).
+///
+/// Why: the corpus key is the one thing that differs between a save under
+/// the primary root and one under an additional root, and it decides which
+/// chunks are replaced.
+/// What: the pre-#7434 body keyed by `watched.corpus_path(path)`; for the
+/// primary root that is byte-identical to `watcher_relative_path`.
+/// Test: `modified_file_under_additional_root_updates_its_root_relative_chunks`.
+#[doc(hidden)]
+pub async fn handle_modified_in_root(
+    path: &Path,
+    index_id: &crate::core::registry::IndexId,
+    watched: &WatchedRoot,
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    indexed_files: &IndexedFiles,
+) {
     // Skip directories — the watcher fires on parent mtime updates too.
     if path.is_dir() {
         return;
@@ -526,7 +537,8 @@ pub async fn handle_modified(
     // This also ensures a subsequent Removed event — which computes the same
     // relative key — finds the entry even when `notify` delivers a different
     // symlink form for the delete event.
-    let path_str = watcher_relative_path(canonical_root, raw_root, path);
+    // #7434: keyed through the watch's own root (`@root<n>/…` off the primary).
+    let path_str = watched.corpus_path(path);
 
     // #3049 round 4: acquired BEFORE the stale-chunk removal below, not just
     // before `index_file`. `remove_chunk_ids_committed` deletes from redb
@@ -646,10 +658,31 @@ pub async fn handle_removed(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) {
+    // #7434: see `handle_modified`'s wrapper.
+    let watched = WatchedRoot::from_pair(canonical_root, raw_root);
+    handle_removed_in_root(path, index_id, &watched, indexer, indexed_files).await;
+}
+
+/// [`handle_removed`] for one root of a multi-root index (#7434).
+///
+/// Why: the delete must find the file under the SAME key
+/// [`handle_modified_in_root`] recorded, or it misses (a phantom file keeps
+/// answering) or hits a same-named primary-root file.
+/// What: the pre-#7434 body keyed by `watched.corpus_path(path)`; the #9230
+/// fail-closed delete and its stamp apply unchanged to every root's key.
+/// Test: `a_failed_delete_under_an_additional_root_withholds_its_stamp`.
+#[doc(hidden)]
+pub async fn handle_removed_in_root(
+    path: &Path,
+    index_id: &crate::core::registry::IndexId,
+    watched: &WatchedRoot,
+    indexer: &Arc<RwLock<CodeIndexer>>,
+    indexed_files: &IndexedFiles,
+) {
     // Compute the same relative key that handle_modified stored so the
     // lookup succeeds even when notify delivers a different symlink form
     // for the delete event (e.g. /var vs /private/var on macOS).
-    let rel_key = watcher_relative_path(canonical_root, raw_root, path);
+    let rel_key = watched.corpus_path(path);
     let Some(ids) = indexed_files
         .take(&std::path::PathBuf::from(&rel_key))
         .await

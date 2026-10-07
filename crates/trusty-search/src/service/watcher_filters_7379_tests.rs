@@ -20,7 +20,7 @@ use tokio::sync::RwLock;
 
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::core::CodeIndexer;
-use crate::service::index_admission::{apply_modified, WatchRoots};
+use crate::service::index_admission::apply_modified;
 use crate::service::network_fs::MountKind;
 use crate::service::watch_rescan::{reconcile_registered, RescanGate};
 use crate::service::watch_test_support::{await_watch_condition, await_watch_condition_within};
@@ -190,10 +190,7 @@ async fn an_event_without_a_readable_policy_indexes_nothing_and_requests_a_resca
         &registry,
         &id,
         &root.join(ADMITTED),
-        WatchRoots {
-            canonical: &root,
-            raw: &root,
-        },
+        &crate::service::watch_roots::WatchedRoot::from_pair(&root, &root),
         &indexer,
         &files,
         Some(&gate),
@@ -227,9 +224,17 @@ async fn dropped_event_rescan_applies_the_live_registry_policy() {
     registry.register(filtered_handle(&id, &indexer, &root, &["md"]));
     let files = IndexedFiles::new();
 
-    reconcile_registered(&id, &root, &root, &indexer, &files, Some(&registry))
-        .await
-        .expect("first rescan pass");
+    reconcile_registered(
+        &id,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
+        &indexer,
+        &files,
+        Some(&registry),
+    )
+    .await
+    .expect("first rescan pass");
     assert!(
         has_chunks(&indexer, ADMITTED).await,
         "the rescan must index the admitted note"
@@ -247,9 +252,17 @@ async fn dropped_event_rescan_applies_the_live_registry_policy() {
     let mut widened = filtered_handle(&id, &indexer, &root, &["toml"]);
     widened.include_paths = Vec::new();
     registry.register(widened);
-    reconcile_registered(&id, &root, &root, &indexer, &files, Some(&registry))
-        .await
-        .expect("second rescan pass");
+    reconcile_registered(
+        &id,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
+        &indexer,
+        &files,
+        Some(&registry),
+    )
+    .await
+    .expect("second rescan pass");
     assert!(
         has_chunks(&indexer, "registry.toml").await,
         "the second pass must apply the replaced policy, not a snapshot"

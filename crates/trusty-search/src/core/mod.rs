@@ -14,6 +14,8 @@ pub mod entity;
 pub mod extract;
 pub mod file_events;
 pub mod git;
+// #7434: the multi-root index root table and its corpus-path encoding.
+pub mod index_roots;
 pub mod indexer;
 pub mod memguard;
 mod memguard_enforce;

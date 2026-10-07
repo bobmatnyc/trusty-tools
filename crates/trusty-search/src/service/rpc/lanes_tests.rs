@@ -175,6 +175,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::json!({ "index_id": INDEX, "body": { "root_path": "/nonexistent/l2" } }),
         ),
+        // #7434: free lane, like relocate.
+        (
+            writes::METHOD_INDEX_ROOTS_ADD,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "body": { "roots": ["/nonexistent/l3"] } }),
+        ),
         (
             writes::METHOD_INDEX_FILE_PUT,
             Lane::Bulk,

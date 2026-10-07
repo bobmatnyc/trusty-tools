@@ -17,6 +17,7 @@
 //! | `search.index.create` | `POST /indexes` | free |
 //! | `search.index.delete` | `DELETE /indexes/{id}` | free |
 //! | `search.index.relocate` | `PATCH /indexes/{id}` | free |
+//! | `search.index.roots.add` | `POST /indexes/{id}/roots` | free |
 //! | `search.index.file.put` | `POST /indexes/{id}/index-file` | bulk |
 //! | `search.index.file.remove` | `POST /indexes/{id}/remove-file` | bulk |
 //! | `search.index.reindex` | `POST /indexes/{id}/reindex` | bulk |
@@ -84,8 +85,8 @@ use serde::Deserialize;
 use trusty_common::uds::server::{RpcError, RpcRouter};
 
 use crate::service::server::{
-    CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest, QuantizeRequest,
-    ReindexRequest, RelocateIndexRequest, RemoveFileRequest, SearchAppState,
+    AddRootsRequest, CreateIndexRequest, DeleteIndexParams, IndexFileRequest, IngestGraphRequest,
+    QuantizeRequest, ReindexRequest, RelocateIndexRequest, RemoveFileRequest, SearchAppState,
 };
 
 use super::as_http_body;
@@ -120,6 +121,9 @@ pub const METHOD_INDEX_RESUME_EMBEDDING: &str = "search.index.resume_embedding";
 /// that had no socket twin.
 pub const METHOD_INDEX_QUANTIZE: &str = "search.index.quantize";
 
+/// `POST /indexes/{id}/roots` — add directory trees to an index (#7434).
+pub const METHOD_INDEX_ROOTS_ADD: &str = "search.index.roots.add";
+
 /// Every method this slice registers, in registration order.
 ///
 /// Why: same contract as `reads::METHODS` and `queries::METHODS` —
@@ -142,6 +146,8 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_RESUME_EMBEDDING,
     // #6285 consumer move — the quantize backfill.
     METHOD_INDEX_QUANTIZE,
+    // #7434 — the multi-root mutation.
+    METHOD_INDEX_ROOTS_ADD,
 ];
 
 /// An index-scoped write whose HTTP form takes a request BODY.
@@ -299,9 +305,9 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
 
     use super::reads::IndexRef;
     use crate::service::server::{
-        create_index_report, delete_index_report, index_file_report, ingest_graph_report,
-        pause_embedding_report, quantize_report, reindex_report, relocate_index_report,
-        remove_file_report, resume_embedding_report,
+        add_index_roots_report, create_index_report, delete_index_report, index_file_report,
+        ingest_graph_report, pause_embedding_report, quantize_report, reindex_report,
+        relocate_index_report, remove_file_report, resume_embedding_report,
     };
 
     let r = router;
@@ -326,6 +332,13 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         METHOD_INDEX_RELOCATE,
         IndexBody<RelocateIndexRequest>,
         |s, p| relocate_index_report(&s, &p.index_id, p.body).await
+    );
+    // #7434: free lane, like relocate — it swaps a handle and queues a walk.
+    let r = free_write!(
+        r,
+        METHOD_INDEX_ROOTS_ADD,
+        IndexBody<AddRootsRequest>,
+        |s, p| add_index_roots_report(&s, &p.index_id, p.body).await
     );
 
     // ---- per-file writes (axum's `bulk_limited` group) ----------------------

@@ -87,9 +87,24 @@ pub(crate) fn spawn_reindex_awaitable(
 /// configured subtree and concatenate (this is how `trusty-search.yaml` slices
 /// a polyrepo into independent indexes).
 /// What: returns the merged `WalkResult` whose `files` are sorted and unique.
-/// Test: covered by `reindex_honours_include_paths_filter` below.
+/// #7434: walks every index root, and records the additional roots that were
+/// absent on `walk_diagnostics.missing_index_roots` with one `warn!`. Runs on
+/// the blocking pool (`runner.rs`), so the diagnostics write blocks.
+/// Test: covered by `reindex_honours_include_paths_filter` below;
+/// `walk_covers_every_index_root`, `walk_records_a_missing_additional_root`.
 pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::walker::WalkResult {
-    crate::service::index_admission::walk(handle)
+    let (walk, missing) = crate::service::index_admission::walk_roots(handle);
+    let missing: Vec<String> = missing.iter().map(|p| p.display().to_string()).collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            "reindex[{}]: {} index root(s) absent at walk time, not covered: {} (#7434)",
+            handle.id,
+            missing.len(),
+            missing.join(", "),
+        );
+    }
+    handle.walk_diagnostics.blocking_write().missing_index_roots = missing;
+    walk
 }
 
 /// Variant of `spawn_reindex` that GC's the progress map after completion

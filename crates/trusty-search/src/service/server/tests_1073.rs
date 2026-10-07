@@ -87,6 +87,7 @@ async fn relocate_index_updates_root_path() {
     let create_resp = super::indexes::create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "relocate-test-1073".into(),
             root_path: old_root.clone(),
             include_paths: None,

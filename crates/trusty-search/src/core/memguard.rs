@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Once;
 
-use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// Hard-coded safety-net ceiling (8 GiB). Applied when neither the env var
 /// nor `daemon.env` sets an explicit limit. This prevents an unattended
@@ -307,7 +307,8 @@ pub fn current_rss_mb() -> Option<u64> {
 /// `tests::test_rss_for_pid_tracks_live_growth` proves the reading is live
 /// rather than cached, by sampling a quiet child process across a deliberate
 /// allocation (issue #3702, made deterministic by #7926). Negative cases
-/// (pid=0, bogus pid) assert `None`.
+/// (pid=0, bogus pid) assert `None`. The sysinfo fallback's scope (#9371) is
+/// pinned by `tests::test_rss_sample_plan_refreshes_only_target_pid_memory`.
 pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
@@ -316,16 +317,61 @@ pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
     if let Some(mb) = trusty_common::sys_metrics::physical_footprint_mb(pid) {
         return Some(mb);
     }
-    let sysinfo_pid = Pid::from_u32(pid);
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-    );
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[sysinfo_pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    sys.process(sysinfo_pid).map(|p| p.memory() / (1024 * 1024))
+    sysinfo_rss_mb(Pid::from_u32(pid))
+}
+
+/// The sysinfo work one RSS sample performs: what the `System` loads at
+/// construction, which pids the follow-up refresh visits, and which fields it
+/// reads for them.
+///
+/// Why (#9371): the sample runs on every memory-pressure tick. Holding the
+/// request as data lets a test assert its scope on every platform, including
+/// macOS, where production returns the footprint reading before sysinfo runs.
+/// What: built only by [`rss_sample_plan`]; consumed only by [`sysinfo_rss_mb`].
+/// Test: `tests::test_rss_sample_plan_refreshes_only_target_pid_memory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RssSamplePlan {
+    initial: RefreshKind,
+    targets: [Pid; 1],
+    kind: ProcessRefreshKind,
+}
+
+impl RssSamplePlan {
+    /// The `ProcessesToUpdate` passed to `refresh_processes_specifics`.
+    fn targets(&self) -> ProcessesToUpdate<'_> {
+        ProcessesToUpdate::Some(&self.targets)
+    }
+}
+
+/// Plan an RSS sample of `pid`: an empty process table, then a memory-only
+/// refresh of `pid` alone.
+///
+/// Why (#9371): sysinfo 0.33's `System::new_with_specifics(RefreshKind::
+/// with_processes(everything()))` reads every host process's cmd, environ,
+/// exe, cwd and root before the single-pid refresh runs, every 30 s in
+/// production, and leaves heap residue in RssAnon (the #9368 flake).
+/// What: `initial` loads nothing; `targets` is `Some([pid])`; `kind` enables
+/// memory only, so `Process::memory()` is the same statm/stat RSS field as
+/// before, in bytes.
+/// Test: `tests::test_rss_sample_plan_refreshes_only_target_pid_memory`.
+fn rss_sample_plan(pid: Pid) -> RssSamplePlan {
+    // #9371: no constructor-time scan; refresh only `pid`, only its memory.
+    RssSamplePlan {
+        initial: RefreshKind::nothing(),
+        targets: [pid],
+        kind: ProcessRefreshKind::nothing().with_memory(),
+    }
+}
+
+/// RSS of `pid` in MB via sysinfo, executing [`rss_sample_plan`]. `None`
+/// when sysinfo cannot find the process.
+///
+/// Test: `tests::test_sysinfo_rss_mb_reads_own_pid` (runs on macOS too).
+fn sysinfo_rss_mb(pid: Pid) -> Option<u64> {
+    let plan = rss_sample_plan(pid);
+    let mut sys = System::new_with_specifics(plan.initial);
+    sys.refresh_processes_specifics(plan.targets(), true, plan.kind);
+    sys.process(pid).map(|p| p.memory() / (1024 * 1024))
 }
 
 /// Convenience helper for the reindex orchestrator: returns `true` when a
@@ -849,6 +895,71 @@ mod tests {
         // The function must return None without panicking.
         let _ = current_rss_mb_for_pid(u32::MAX);
         // No assertion — the only requirement is "no panic".
+    }
+
+    /// The sysinfo RSS sample must refresh only the target pid, and only its
+    /// memory (#9371).
+    ///
+    /// Why: a constructor that loads `ProcessRefreshKind::everything()` reads
+    /// cmd, environ, exe, cwd and root for every host process on each
+    /// memory-pressure tick. Asserting the plan covers Linux from any host,
+    /// macOS included, where production never reaches sysinfo for its own pid.
+    /// What: plan a sample of our own pid; assert the constructor loads no
+    /// processes, the refresh targets `Some([own pid])`, and the refresh kind
+    /// is memory-only.
+    /// Test: this test.
+    #[test]
+    fn test_rss_sample_plan_refreshes_only_target_pid_memory() {
+        use sysinfo::UpdateKind;
+        let own = Pid::from_u32(std::process::id());
+        let plan = rss_sample_plan(own);
+
+        assert!(
+            plan.initial.processes().is_none(),
+            "the System constructor must load no process table, got {:?}",
+            plan.initial
+        );
+        assert_eq!(plan.initial, RefreshKind::nothing());
+        assert_eq!(plan.targets(), ProcessesToUpdate::Some(&[own]));
+
+        let kind = plan.kind;
+        assert!(kind.memory(), "the refresh must read memory");
+        for (field, value) in [
+            ("cmd", kind.cmd()),
+            ("environ", kind.environ()),
+            ("exe", kind.exe()),
+            ("cwd", kind.cwd()),
+            ("root", kind.root()),
+            ("user", kind.user()),
+        ] {
+            assert_eq!(value, UpdateKind::Never, "{field} must not be refreshed");
+        }
+        assert!(
+            !kind.cpu() && !kind.disk_usage(),
+            "cpu/disk must not be refreshed"
+        );
+        assert_eq!(kind, ProcessRefreshKind::nothing().with_memory());
+    }
+
+    /// The narrowed sysinfo sample still finds our own pid and still answers
+    /// `None` for a pid that does not exist (#9371).
+    ///
+    /// Why: an empty `System` refreshed for one pid must populate that pid;
+    /// otherwise the Linux memory guard would read `None` and never trip.
+    /// What: call `sysinfo_rss_mb` directly, bypassing the macOS footprint
+    /// path, so this runs the sysinfo code on every host.
+    /// Test: this test.
+    #[test]
+    fn test_sysinfo_rss_mb_reads_own_pid() {
+        if !sysinfo::IS_SUPPORTED_SYSTEM {
+            return;
+        }
+        let mb = sysinfo_rss_mb(Pid::from_u32(std::process::id()));
+        assert!(
+            matches!(mb, Some(v) if (1..=32 * 1024).contains(&v)),
+            "own-pid sysinfo RSS must be a sane MB value, got {mb:?}"
+        );
+        assert_eq!(sysinfo_rss_mb(Pid::from_u32(u32::MAX)), None);
     }
 
     #[test]

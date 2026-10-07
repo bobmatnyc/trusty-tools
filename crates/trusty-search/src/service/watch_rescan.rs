@@ -59,7 +59,8 @@ use crate::core::registry::IndexId;
 use crate::core::CodeIndexer;
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::walk_source_files;
-use crate::service::watch_loop::watcher_relative_path;
+// #7434: the reconcile keys and resolves through the index's root table.
+use crate::service::watch_roots::WatchedRoot;
 use crate::service::watcher::WatchEvent;
 
 /// Files read and committed per batch.
@@ -215,15 +216,9 @@ pub async fn reconcile_after_rescan(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) -> Result<RescanStats, RescanError> {
-    reconcile_with_policy(
-        index_id,
-        canonical_root,
-        raw_root,
-        indexer,
-        indexed_files,
-        None,
-    )
-    .await
+    // #7434: a single-root index is the one-entry case of the root table.
+    let roots = [WatchedRoot::from_pair(canonical_root, raw_root)];
+    reconcile_with_policy(index_id, &roots, indexer, indexed_files, None).await
 }
 
 /// Reconcile against the policy the registry currently holds for this index.
@@ -239,11 +234,12 @@ pub async fn reconcile_after_rescan(
 /// What: `registry` absent means this loop was started without one, which is
 /// the pre-#7379 unfiltered behaviour and still reconciles the full root.
 /// `registry` present but holding no handle is the failure above.
-/// Test: `rescan_without_a_registered_handle_schedules_a_retry`.
+/// Test: `rescan_without_a_registered_handle_schedules_a_retry`,
+/// `a_rescan_from_a_watch_with_a_stale_root_table_keeps_the_new_roots_keys`.
 pub(crate) async fn reconcile_registered(
     index_id: &IndexId,
-    canonical_root: &Path,
-    raw_root: &Path,
+    // #7434: every root of the index, primary first.
+    roots: &[WatchedRoot],
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
     registry: Option<&crate::core::registry::IndexRegistry>,
@@ -259,15 +255,14 @@ pub(crate) async fn reconcile_registered(
         },
         None => None,
     };
-    reconcile_with_policy(
-        index_id,
-        canonical_root,
-        raw_root,
-        indexer,
-        indexed_files,
-        policy.as_deref(),
-    )
-    .await
+    // #7434: a watch captured its root table at spawn; an add-root or a
+    // relocate since then makes it stale. The live handle's table is the one
+    // the policy walk covers, so it is the one keys are computed against.
+    let live_table = policy
+        .as_deref()
+        .map(|h| WatchedRoot::table(&h.root_path, &h.additional_roots));
+    let roots = live_table.as_deref().unwrap_or(roots);
+    reconcile_with_policy(index_id, roots, indexer, indexed_files, policy.as_deref()).await
 }
 
 /// Reconcile with the current registered admission policy (#7379).
@@ -276,12 +271,15 @@ pub(crate) async fn reconcile_registered(
 /// instead of indexed, and a tracked file the policy now excludes is dropped by
 /// the sweep; both are counted in [`RescanStats::files_excluded`].
 /// #9059: a held policy refuses with [`RescanError::Held`] before the walk.
+/// #7434: walks and keys every root of `roots`, and the sweep resolves a
+/// tracked `@root<n>/…` key against its own root.
 /// Test: `rescan_drops_sops_files_and_files_the_policy_now_excludes`,
-/// `every_ingest_path_refuses_a_held_index`.
+/// `every_ingest_path_refuses_a_held_index`, `rescan_covers_every_root`,
+/// `rescan_does_not_sweep_another_root_s_files`,
+/// `a_rescan_keeps_the_chunks_of_an_absent_additional_root`.
 pub(crate) async fn reconcile_with_policy(
     index_id: &IndexId,
-    canonical_root: &Path,
-    raw_root: &Path,
+    roots: &[WatchedRoot],
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
     policy: Option<&crate::core::registry::IndexHandle>,
@@ -292,10 +290,14 @@ pub(crate) async fn reconcile_with_policy(
             index_id: hold.index_id,
         });
     }
-    let walked = policy
-        .map(crate::service::index_admission::walk)
-        .unwrap_or_else(|| walk_source_files(canonical_root))
-        .files;
+    // #7434: the policy walk covers every root; the unfiltered walk does too.
+    let walked: Vec<PathBuf> = match policy {
+        Some(handle) => crate::service::index_admission::walk(handle).files,
+        None => roots
+            .iter()
+            .flat_map(|r| walk_source_files(r.canonical()).files)
+            .collect(),
+    };
     let mut stats = RescanStats::default();
     let mut live: HashSet<PathBuf> = HashSet::with_capacity(walked.len());
     // #9230: a delete whose rows left redb stamps the corpus once, below.
@@ -330,7 +332,14 @@ pub(crate) async fn reconcile_with_policy(
             };
             // Same relative key `handle_modified` records, so the two paths
             // never disagree about what a file is called in the corpus.
-            let rel = watcher_relative_path(canonical_root, raw_root, abs);
+            // #7434: through the root that owns `abs`, as the watcher keys it.
+            // A walked file no root owns is skipped, never keyed absolute: an
+            // absolute key next to the tracked `@root<n>/…` one would let the
+            // sweep drop that root's chunks.
+            let Some(rel) = crate::service::watch_roots::key_for(roots, abs) else {
+                tracing::warn!(index_id = %index_id, path = %abs.display(), "rescan reconcile: no index root owns this walked file; skipped (#7434)");
+                continue;
+            };
             let key = PathBuf::from(&rel);
             // #8922: checked before the hash skip — a hash recorded before
             // the content check existed may sit over plaintext chunks. The
@@ -394,9 +403,21 @@ pub(crate) async fn reconcile_with_policy(
         }
     }
 
+    // #7434: an absent ADDITIONAL root walked nothing, which is no evidence its
+    // files were deleted; its keys are kept, as the reindex prune keeps them.
+    // An absent primary keeps the pre-#7434 sweep.
+    let absent: Vec<&Path> = roots
+        .iter()
+        .filter(|r| r.slot().is_some() && !r.canonical().is_dir())
+        .map(WatchedRoot::canonical)
+        .collect();
+    for root in &absent {
+        tracing::warn!(index_id = %index_id, root = %root.display(), "rescan: index root absent; its files are kept, not swept (#7434)");
+    }
     let swept = sweep_deleted(
         index_id,
-        canonical_root,
+        roots,
+        &absent,
         indexer,
         indexed_files,
         &live,
@@ -528,7 +549,8 @@ struct Swept {
 /// first, deadlocking the pass.
 async fn sweep_deleted(
     index_id: &IndexId,
-    canonical_root: &Path,
+    roots: &[WatchedRoot],
+    absent: &[&Path],
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
     live: &HashSet<PathBuf>,
@@ -540,7 +562,12 @@ async fn sweep_deleted(
         if live.contains(&tracked) {
             continue;
         }
-        let abs = canonical_root.join(&tracked);
+        // #7434: an `@root<n>/…` key is stat'd at its own root, not the primary.
+        let abs = crate::service::watch_roots::absolute_for_key(roots, &tracked);
+        // #7434: a key under an absent additional root is kept (fail closed).
+        if absent.iter().any(|a| abs.starts_with(a)) {
+            continue;
+        }
         let on_disk = abs.exists();
         // #8922: on disk but excluded by the current policy is a removal too.
         let excluded = on_disk && policy.is_some_and(|h| admits(h, &abs) == Admission::Excluded);

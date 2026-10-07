@@ -51,6 +51,8 @@ impl CodeIndexer {
         let top_k_ids: Vec<String> = top_k.iter().map(|(id, _)| id.clone()).collect();
         let chunks = self.fetch_chunks_for_ids(&top_k_ids).await?;
         let mut out = Vec::with_capacity(top_k.len());
+        // #7434: one root table per query, not per hit.
+        let roots = self.chunk_roots();
         let mut unresolved = 0_usize;
         for (id, score) in top_k {
             let Some(raw) = chunks.get(&id) else {
@@ -79,7 +81,7 @@ impl CodeIndexer {
             } else {
                 None
             };
-            let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet, &self.root_path);
+            let mut chunk = raw_to_code_chunk(raw, score, match_reason, snippet, &roots);
             if let Some(set) = branch_files {
                 chunk.on_branch = set.contains(normalize_path(&raw.file));
             }

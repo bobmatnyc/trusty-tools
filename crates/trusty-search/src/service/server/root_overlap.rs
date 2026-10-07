@@ -138,13 +138,20 @@ pub(crate) fn find_root_overlap(
         path: candidate.to_path_buf(),
         reason: e.to_string(),
     })?;
+    // #7434: every root of every index, so a candidate cannot nest inside, or
+    // enclose, another index's additional root either.
     let live = handles
         .iter()
         .filter(|h| exclude_id != Some(&h.id))
-        .map(|h| (h.id.clone(), h.root_path.clone()));
-    let cold = cold_entries.iter().filter_map(|entry| {
+        .flat_map(|h| each_root(&h.id, &h.root_path, &h.additional_roots));
+    let cold = cold_entries.iter().flat_map(|entry| {
         let id = IndexId::new(entry.id.clone());
-        (exclude_id != Some(&id)).then(|| (id, entry.root_path.clone()))
+        let roots = if exclude_id == Some(&id) {
+            Vec::new()
+        } else {
+            each_root(&id, &entry.root_path, &entry.additional_roots)
+        };
+        roots.into_iter()
     });
     Ok(live.chain(cold).find_map(|(index_id, root_path)| {
         classify_root_overlap(&candidate, &root_path).map(|overlap| RootOverlapConflict {
@@ -153,6 +160,14 @@ pub(crate) fn find_root_overlap(
             root_path,
         })
     }))
+}
+
+/// `(id, root)` for the primary root and each additional root (#7434).
+fn each_root(id: &IndexId, primary: &Path, additional: &[PathBuf]) -> Vec<(IndexId, PathBuf)> {
+    std::iter::once(primary)
+        .chain(additional.iter().map(PathBuf::as_path))
+        .map(|r| (id.clone(), r.to_path_buf()))
+        .collect()
 }
 
 /// Build the `409 Conflict` a containment refusal returns (#4289).
