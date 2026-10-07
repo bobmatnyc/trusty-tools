@@ -10,7 +10,6 @@
 //! mcp-vector-search repo prints the would-convert line; `convert all
 //! --dry-run` enumerates every detected project.
 
-use super::daemon_utils::daemon_base_url;
 use anyhow::Result;
 use clap::ValueEnum;
 use colored::Colorize;
@@ -304,8 +303,8 @@ pub async fn handle_convert(
     dry_run: bool,
     concurrency: usize,
 ) -> Result<()> {
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
 
     match target {
         ConvertTarget::Project => handle_convert_project(dry_run, &base).await,

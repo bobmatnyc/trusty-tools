@@ -1,6 +1,5 @@
 //! Handler for `trusty-search doctor` — 6-check diagnostic + auto-repair.
 
-use super::daemon_utils::daemon_base_url;
 use super::doctor_checks::{fix_stale_lock, CheckResult, EmptyIndex};
 use super::doctor_pipeline::run_doctor_checks;
 use super::reindex_engine::run_reindex;
@@ -21,9 +20,10 @@ pub async fn handle_doctor(fix: bool) -> Result<()> {
     println!("\ntrusty-search doctor\n");
     println!("Checking configuration...\n");
 
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&daemon_base_url()).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
 
-    let (checks, empty_indexes) = run_doctor_checks().await;
+    let (checks, empty_indexes) = run_doctor_checks(base).await;
 
     // Print all checks (index sub-lines were already printed inline by
     // run_doctor_checks, so we skip the index summary line itself to avoid

@@ -1,6 +1,6 @@
 //! Handler for `trusty-search reindex` (bare reindex, no force/verify).
 
-use super::daemon_utils::daemon_base_url;
+use super::daemon_http::daemon_base_url;
 use super::explicit_target::{
     classify_explicit_target, resolve_explicit_target, with_source, ExplicitTarget, IndexIdSource,
     ParkedTargets,
@@ -45,7 +45,7 @@ pub async fn handle_reindex(
         (index_id, detect_project(&cwd)?.root_path)
     } else {
         ensure_daemon().await?;
-        let base = daemon_base_url();
+        let base = daemon_base_url()?;
         let client = trusty_common::server::daemon_http_client()?;
         // #8737: any failure here (down, 404, 503, mismatch) refuses before
         // the reindex POST is ever sent.
@@ -71,5 +71,8 @@ pub async fn handle_reindex(
 /// Issue #24: prefer CPU EP for an auto-spawned daemon (CoreML init OOMs the
 /// indexing path on Apple Silicon). Already-running daemons are untouched.
 async fn ensure_daemon() -> Result<()> {
-    crate::commands::daemon_guard::ensure_daemon_running_for_indexing(&daemon_base_url()).await
+    // #9214: start the daemon over its socket; its HTTP base is resolved later.
+    super::daemon_http::ensure_daemon_http_base_for_indexing()
+        .await
+        .map(|_| ())
 }

@@ -12,7 +12,6 @@
 //! Test: `handle_index_relocate_rejects_missing_id` unit test below; the HTTP
 //! round-trip is covered by `tests_index::relocate_index_updates_root_path`.
 
-use super::daemon_utils::daemon_base_url;
 use super::explicit_target::{flag_only_index, IndexIdSource};
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
@@ -33,8 +32,8 @@ pub async fn handle_index_relocate(
     new_path: PathBuf,
 ) -> Result<()> {
     let cli_index = &flag_only_index("relocate", cli_index, index_source)?;
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
 
     let client = trusty_common::server::daemon_http_client()?;
 

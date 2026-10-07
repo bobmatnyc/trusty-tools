@@ -11,7 +11,6 @@
 //! settings files and projects it would touch without modifying anything.
 
 use super::convert::{convert_one, find_all_mvs_configs, parse_mvs_config, ConvertStatus};
-use super::daemon_utils::daemon_base_url;
 use anyhow::Result;
 use clap::ValueEnum;
 use colored::Colorize;
@@ -185,9 +184,8 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
         // Dry run never contacts the daemon, so an empty base is harmless.
         String::new()
     } else {
-        let base = daemon_base_url();
-        crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
-        base
+        // #9214: start the daemon over its socket, then resolve its HTTP base.
+        super::daemon_http::ensure_daemon_http_base().await?
     };
 
     let total = configs.len();

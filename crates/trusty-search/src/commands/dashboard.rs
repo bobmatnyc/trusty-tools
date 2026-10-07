@@ -4,11 +4,10 @@
 //! should never have to know which port the daemon chose or whether it is
 //! running yet. Mirrors the trusty-analyze pattern from PR #685.
 //!
-//! What: calls `ensure_daemon_running_or_exit` which spawns the daemon in the
-//! background if it is not yet running and polls `/health` until ready (60s
-//! budget with a braille spinner). Then discovers the bound address via
-//! `daemon_base_url()` (which reads `~/.trusty-search/http_addr` with TCP
-//! fallbacks) and opens `http://<addr>/ui` in the default browser. On
+//! What: calls `daemon_http::ensure_daemon_http_base`, which spawns the daemon
+//! in the background if it is not yet running, waits on its socket until ready
+//! (60s budget with a braille spinner), and returns the HTTP address the
+//! daemon published (#9214: no compiled-in default port). Then opens `http://<addr>/ui` in the default browser. On
 //! browser-open failure (headless env) degrades gracefully by printing the
 //! URL to stderr rather than returning an error.
 //!
@@ -16,7 +15,6 @@
 //! and opens the browser; with the daemon already running, the probe returns
 //! immediately and no spawn occurs; headless (no GUI) prints the URL.
 
-use super::daemon_utils::daemon_base_url;
 use anyhow::Result;
 use colored::Colorize;
 
@@ -33,16 +31,9 @@ use colored::Colorize;
 /// already-healthy path. Manual: `cargo run -- dashboard` with no daemon
 /// should print the "Starting…" spinner and then open the browser.
 pub async fn handle_dashboard() -> Result<()> {
-    // daemon_base_url() builds the URL from whatever address discovery info is
-    // available (http_addr file → port file → compiled-in default). We pass
-    // this to ensure_daemon_running_or_exit so it probes the right endpoint.
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
-
-    // Re-resolve after the daemon is confirmed ready: if the daemon just
-    // started, it will have written `http_addr` by now and daemon_base_url()
-    // will return the exact bound address instead of the default fallback.
-    let base = daemon_base_url();
+    // #9214: start the daemon over its socket, then resolve the address it
+    // published; no compiled-in default port.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
     open_dashboard_url(&base)
 }
 

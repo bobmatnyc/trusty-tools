@@ -2,23 +2,19 @@
 //!
 //! Why: most CLI subcommands (query, index, status, etc.) silently fail or
 //! emit a confusing connection error when the daemon isn't running. This
-//! guard probes `/health`; if the daemon is down, it spawns
-//! `trusty-search start` in the background and polls `/health` until the
-//! daemon is ready (or a 60s budget is exhausted). Users get a single
-//! informational line ("Starting trusty-search daemon…") and the command
-//! they typed Just Works.
+//! guard probes the daemon; if it is down, it spawns `trusty-search start` in
+//! the background and waits until the daemon answers (or a 60s budget is
+//! exhausted). Users get a single informational line ("Starting trusty-search
+//! daemon…") and the command they typed Just Works.
 //!
-//! What: thin shim over `trusty_common::daemon_guard` (issue #985).
-//! `ensure_daemon_running_with_device` delegates the spinner/probe/timeout
-//! loop to the shared implementation; only the trusty-search–specific knobs
-//! (PID-file check, device flag propagation, READY_TIMEOUT=60s, indexing
-//! device resolution) live here.
+//! What: #9214 — the probe is `search.health` on the daemon's Unix socket
+//! through `DaemonClient`; this module never dials TCP. The PID-file check,
+//! the device flag for the spawned daemon and the 60s budget live here.
+//! Subcommands still on HTTP reach it through `commands::daemon_http`, which
+//! resolves their HTTP base after this guard returns.
 //!
-//! Test: `probe_health_returns_false_on_connection_refused`,
-//! `probe_health_returns_false_on_bad_url`,
-//! `probe_health_respects_short_timeout`, and the indexing-device tests
-//! cover the shim layer; `trusty_common::daemon_guard` tests cover the
-//! shared spin loop.
+//! Test: `ensure_daemon_up_names_the_socket_when_it_never_answers` and the
+//! indexing-device tests.
 //!
 //! Note: only call this from commands that *require* the daemon. Commands
 //! like `start`, `stop`, `serve`, `service`, `init`, and `completions`
@@ -26,28 +22,17 @@
 
 use anyhow::{anyhow, Result};
 use colored::Colorize;
+use std::io::Write;
 use std::time::Duration;
-use trusty_common::daemon_guard::{probe_once, spin_until_ready, DaemonGuardConfig};
 use trusty_search::service::daemon_client::DaemonClient;
 
 /// Total wall-clock budget for the daemon to become ready after we spawn it.
 ///
-/// Why 60s: with the v0.3.12 deferred-embedder-init fix the HTTP port binds
+/// Why 60s: with the v0.3.12 deferred-embedder-init fix the daemon binds
 /// in ~1s, so the readiness probe normally returns near-instantly. However,
 /// ONNX/CoreML model loading on first run can take 15–30s, and we'd rather
 /// wait than fail spuriously.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Probe `GET {base}/health`. Returns `true` on any 2xx response.
-///
-/// Why: delegates to `trusty_common::daemon_guard::probe_once` so the probe
-/// logic is shared. Preserved as a public function so call sites keep their
-/// current `probe_health(base)` call shape.
-/// What: calls `probe_once("{base}/health")`.
-/// Test: `probe_health_returns_false_on_connection_refused` below.
-async fn probe_health(base: &str) -> bool {
-    probe_once(&format!("{base}/health")).await
-}
 
 /// Spawn `trusty-search start --foreground` as a detached background process.
 ///
@@ -87,42 +72,46 @@ pub(crate) fn spawn_daemon_with_device(device: Option<&str>) -> Result<u32> {
         .map_err(|e| anyhow!("trusty-search daemon spawn failed: {e}"))
 }
 
-/// Ensure the daemon at `base` is running and ready. Spawns `trusty-search
-/// start` (only when no daemon process is already running) and polls
-/// `/health` for up to `READY_TIMEOUT` if not.
+/// Ensure the daemon answers `search.health` on `client`'s socket, starting it
+/// when no daemon process is running (#6285).
 ///
-/// Why (v0.3.12): previously this unconditionally spawned a daemon when the
-/// initial `/health` probe returned false. If a daemon process existed but
-/// hadn't bound its HTTP port yet, the spawn would print "already running"
-/// and the poll would still wait. Now we check the PID lockfile first: if a
-/// daemon is already running, skip the spawn and just wait for `/health`.
-/// What: fast-path, then PID-file check, then spawn (if needed), then
-/// delegates to `spin_until_ready` with a 60s budget.
-/// Test: covered indirectly by the live CLI path.
-pub async fn ensure_daemon_running(base: &str) -> Result<()> {
-    ensure_daemon_running_with_device(base, None).await
+/// Why: a subcommand on the socket must also wait on the socket — a daemon can
+/// bind TCP before its socket, and the HTTP listener is being retired.
+/// What: [`ensure_daemon_up_with_device`] with no device override.
+///
+/// # Errors
+///
+/// When the spawn fails, or the socket still does not answer at the deadline —
+/// the error names the socket path.
+///
+/// Test: `ensure_daemon_up_names_the_socket_when_it_never_answers`.
+pub async fn ensure_daemon_up(client: &DaemonClient) -> Result<()> {
+    ensure_daemon_up_with_device(client, None).await
 }
 
-/// Like `ensure_daemon_running` but passes `--device <device>` to the
-/// spawned daemon when an auto-spawn is performed.
+/// [`ensure_daemon_up`], passing `--device <device>` to the daemon it spawns.
 ///
-/// Why (issue #24): the `index --force` flow on Apple Silicon was killed by
-/// macOS jetsam before any indexing happened, because CoreML EP init inflated
-/// virtual RSS to ~72 GB. Forcing CPU for the spawned daemon avoids the spike.
-/// What: when the daemon is auto-spawned, propagates `device` to
-/// `spawn_daemon_with_device`. Already-running daemons are left untouched.
-/// Test: covered indirectly by `cargo check -p trusty-search` and manual
-/// `index --force` on M-series.
-pub async fn ensure_daemon_running_with_device(base: &str, device: Option<&str>) -> Result<()> {
-    // Fast path: already up.
-    if probe_health(base).await {
+/// Why (issue #24): on Apple Silicon, CoreML EP session-init inflates virtual
+/// RSS to ~72 GB, so the indexing flow may start its daemon on CPU. An
+/// already-running daemon is left untouched.
+/// What: fast path on one probe; otherwise spawn `trusty-search start` unless a
+/// daemon process already holds the lockfile, then probe every 500 ms for up to
+/// [`READY_TIMEOUT`] behind a spinner. #9214: the same lines the HTTP guard
+/// printed; it never dials TCP.
+///
+/// # Errors
+///
+/// The same set as [`ensure_daemon_up`].
+///
+/// Test: `ensure_daemon_up_names_the_socket_when_it_never_answers`.
+pub async fn ensure_daemon_up_with_device(
+    client: &DaemonClient,
+    device: Option<&str>,
+) -> Result<()> {
+    if client.is_up().await {
         return Ok(());
     }
-
-    // Detect existing daemon process before spawning a duplicate.
-    let already_running = crate::service::running_daemon_pid().is_some();
-
-    if already_running {
+    if crate::service::running_daemon_pid().is_some() {
         eprintln!(
             "{} trusty-search daemon already running, waiting for it to become ready…",
             "◉".cyan()
@@ -137,97 +126,61 @@ pub async fn ensure_daemon_running_with_device(base: &str, device: Option<&str>)
         }
         spawn_daemon_with_device(device)?;
     }
-
-    let cfg = DaemonGuardConfig {
-        health_url: format!("{base}/health"),
-        service_name: "trusty-search".to_string(),
-        startup_timeout: READY_TIMEOUT,
-        poll_interval: Duration::from_millis(500),
-        timeout_hint: "try `trusty-search start` manually to see the error".to_string(),
-    };
-    spin_until_ready(&cfg).await
-}
-
-/// Ensure the daemon answers `search.health` on `client`'s socket, starting it
-/// when no daemon process is running (#6285).
-///
-/// Why: the socket twin of [`ensure_daemon_running`]. A subcommand that has
-/// moved onto the socket must also wait on the socket — a daemon can bind TCP
-/// before its socket, and the HTTP listener is being retired.
-/// What: fast path on one probe; otherwise spawn `trusty-search start` unless a
-/// daemon process already holds the lockfile, then probe every 500 ms for up to
-/// [`READY_TIMEOUT`]. It never dials TCP.
-///
-/// # Errors
-///
-/// When the spawn fails, or the socket still does not answer at the deadline —
-/// the error names the socket path.
-///
-/// Test: `ensure_daemon_up_names_the_socket_when_it_never_answers`.
-pub async fn ensure_daemon_up(client: &DaemonClient) -> Result<()> {
-    if client.is_up().await {
-        return Ok(());
-    }
-    if crate::service::running_daemon_pid().is_some() {
-        eprintln!(
-            "{} trusty-search daemon already running, waiting for its socket…",
-            "◉".cyan()
-        );
-    } else {
-        eprintln!("{} Starting trusty-search daemon…", "◉".cyan());
-        spawn_daemon_with_device(None)?;
-    }
     wait_for_socket(client, READY_TIMEOUT).await
 }
 
+/// Spinner frames, the set `trusty_common::daemon_guard` draws.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// Probe `client`'s socket until it answers or `budget` elapses.
+///
+/// What: redraws a one-line stderr spinner each poll, then prints
+/// "✓ trusty-search ready (Ns)" — the lines the HTTP guard printed (#9214).
 async fn wait_for_socket(client: &DaemonClient, budget: Duration) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + budget;
+    let start = tokio::time::Instant::now();
+    let deadline = start + budget;
+    let mut frame = 0usize;
     loop {
+        eprint!(
+            "\r{} Waiting for trusty-search to become ready… ({}s) ",
+            SPINNER[frame % SPINNER.len()].cyan(),
+            start.elapsed().as_secs()
+        );
+        let _ = std::io::stderr().flush();
+        frame = frame.wrapping_add(1);
         if client.is_up().await {
+            eprint!("\r\x1b[2K");
+            eprintln!(
+                "{} trusty-search ready ({}s)",
+                "✓".green(),
+                start.elapsed().as_secs()
+            );
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
+            eprint!("\r\x1b[2K");
+            let _ = std::io::stderr().flush();
             return Err(anyhow!(
-                "trusty-search daemon did not answer on socket {} within {}s; \
+                "trusty-search did not become ready within {}s on socket {} — \
                  try `trusty-search start` manually to see the error",
-                client.socket().display(),
-                budget.as_secs()
+                budget.as_secs(),
+                client.socket().display()
             ));
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
-/// Convenience wrapper: returns a contextualized error on failure.
-///
-/// Why: every caller of `ensure_daemon_running` would otherwise duplicate the
-/// error-handling boilerplate. Returns `Result` (not `process::exit`) so
-/// command handlers stay testable.
-/// What: delegates to `ensure_daemon_running`.
-/// Test: covered by callers.
-pub async fn ensure_daemon_running_or_exit(base: &str) -> Result<()> {
-    ensure_daemon_running(base).await
-}
-
-/// Variant of `ensure_daemon_running_or_exit` that prefers CPU EP for an
-/// auto-spawned daemon during the indexing flow.
+/// The device the indexing flow starts its daemon on, or `None` for `auto`.
 ///
 /// Why (issue #24): the indexing path is the load-bearing OOM site on Apple
 /// Silicon — CoreML EP init allocates ~72 GB of virtual RSS.
-/// What: resolves the desired device from `TRUSTY_INDEX_DEVICE` (override) or
-/// defaults to `"auto"`. Passes the resolved device to
-/// `ensure_daemon_running_with_device`.
-/// Test: `resolve_indexing_device_defaults_to_auto` and
+/// What: [`resolve_indexing_device`], with `auto` meaning "no override".
+/// Test: `resolve_indexing_device_defaults_to_auto`,
 /// `resolve_indexing_device_honours_env_override`.
-pub async fn ensure_daemon_running_for_indexing(base: &str) -> Result<()> {
+pub(crate) fn indexing_device() -> Option<String> {
     let device = resolve_indexing_device();
-    let device_opt = if device.eq_ignore_ascii_case("auto") {
-        None
-    } else {
-        Some(device.as_str())
-    };
-    ensure_daemon_running_with_device(base, device_opt).await
+    (!device.eq_ignore_ascii_case("auto")).then_some(device)
 }
 
 /// Resolve the auto-spawn device for the indexing flow.
@@ -248,42 +201,6 @@ fn resolve_indexing_device() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
-
-    /// `probe_health` against an unbound localhost port returns `false`
-    /// (connect refused) within a reasonable deadline.
-    #[tokio::test]
-    async fn probe_health_returns_false_on_connection_refused() {
-        let base = "http://127.0.0.1:65535";
-        let started = Instant::now();
-        let ok = probe_health(base).await;
-        assert!(!ok, "probe should fail against an unbound port");
-        assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "probe took too long: {:?}",
-            started.elapsed()
-        );
-    }
-
-    /// `probe_health` against a malformed URL returns `false` cleanly (no panic).
-    #[tokio::test]
-    async fn probe_health_returns_false_on_bad_url() {
-        let ok = probe_health("not-a-valid-url").await;
-        assert!(!ok);
-    }
-
-    /// `probe_health` returns false for a locally unreachable port within a
-    /// generous wall-clock bound.
-    #[tokio::test]
-    async fn probe_health_respects_short_timeout() {
-        let started = Instant::now();
-        let _ = probe_health("http://127.0.0.1:1").await;
-        assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "probe took too long: {:?}",
-            started.elapsed()
-        );
-    }
 
     /// #6285: the socket wait fails closed on a scratch socket nothing serves,
     /// names that socket, and never falls back to TCP.

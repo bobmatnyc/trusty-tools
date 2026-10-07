@@ -1342,10 +1342,9 @@ async fn run() -> Result<()> {
 
         Commands::Monitor { target } => match target {
             MonitorTarget::Web => {
-                // Issue #3545: `daemon_base_url()` is the shared, TRUSTY_DATA_DIR
-                // -aware resolver every other subcommand uses; it already falls
-                // back to the default loopback port when no daemon is discovered.
-                let url = format!("{}/ui", commands::daemon_utils::daemon_base_url());
+                // Issue #3545: the shared, TRUSTY_DATA_DIR-aware resolver. #9214:
+                // it errors when no address is published, never guessing :7878.
+                let url = format!("{}/ui", commands::daemon_http::daemon_base_url()?);
                 println!("{url}");
                 open::that(&url).ok();
             }

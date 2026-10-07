@@ -14,7 +14,6 @@
 //! tests; `cargo run -- doctor` produces byte-identical output to the
 //! pre-refactor implementation.
 
-use super::daemon_utils::daemon_base_url;
 use super::doctor_checks::mcp_registration::{
     check_claude_registrations, check_registration, read_codex_registration,
     registered_exe_version, McpRegistration,
@@ -51,10 +50,11 @@ pub(crate) struct DoctorState {
 }
 
 impl DoctorState {
-    fn new(client: reqwest::Client) -> Self {
+    // #9214: the caller resolves `base` after the daemon is up.
+    fn new(client: reqwest::Client, base: String) -> Self {
         Self {
             client,
-            base: daemon_base_url(),
+            base,
             port: read_daemon_port(),
             data_dir: doctor_data_dir(),
             daemon_running: Mutex::new(false),
@@ -331,7 +331,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
 
 /// Drive the doctor pipeline and return `(checks, empty_indexes)` for the
 /// caller (and `--fix`) to consume.
-pub(crate) async fn run_doctor_checks() -> (Vec<CheckResult>, Vec<EmptyIndex>) {
+pub(crate) async fn run_doctor_checks(base: String) -> (Vec<CheckResult>, Vec<EmptyIndex>) {
     let client = match trusty_common::server::daemon_http_client() {
         Ok(c) => c,
         Err(e) => {
@@ -344,7 +344,7 @@ pub(crate) async fn run_doctor_checks() -> (Vec<CheckResult>, Vec<EmptyIndex>) {
         }
     };
 
-    let state = DoctorState::new(client);
+    let state = DoctorState::new(client, base);
     let mut checks: Vec<CheckResult> = Vec::new();
 
     for check in default_checks() {
@@ -409,7 +409,7 @@ mod tests {
         let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
 
         let client = reqwest::Client::new();
-        let state = DoctorState::new(client);
+        let state = DoctorState::new(client, String::new());
         let results = PythonEmbedderCheck.run(&state).await;
 
         assert_eq!(
@@ -440,7 +440,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn mcp_registration_check_reports_one_result_per_client_file() {
-        let state = DoctorState::new(reqwest::Client::new());
+        let state = DoctorState::new(reqwest::Client::new(), String::new());
         let results = McpRegistrationCheck.run(&state).await;
 
         assert!(
@@ -480,7 +480,7 @@ mod tests {
         let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
 
         let client = reqwest::Client::new();
-        let state = DoctorState::new(client);
+        let state = DoctorState::new(client, String::new());
         let results = PythonEmbedderCheck.run(&state).await;
 
         assert_eq!(

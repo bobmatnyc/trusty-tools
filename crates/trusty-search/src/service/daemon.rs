@@ -990,7 +990,7 @@ pub use crate::service::shutdown_flush::{
 /// Why: separate from `write_port_file` because the format and location differ
 /// — port file stores `12345`, http_addr stores `127.0.0.1:12345`. Both write
 /// atomically via tmp-file + rename so partial reads are impossible. Exported
-/// (issue #3602 review) so `commands::daemon_utils::daemon_base_url()`'s
+/// (issue #3602 review) so the CLI resolver's (`commands::daemon_http::daemon_base_url()`)
 /// reachability-probe refresh writes through the same atomic path instead of
 /// a bare `std::fs::write`, which could tear a concurrent reader's view of the
 /// file that `trusty-console`/`trusty-mpm`'s daemon discovery trust as ground

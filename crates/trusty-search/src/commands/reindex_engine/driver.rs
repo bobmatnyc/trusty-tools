@@ -16,7 +16,7 @@ use super::progress_state::SharedProgress;
 use super::registration::fetch_chunk_count;
 use super::ticker::spawn_ticker;
 use super::verify::verify_reindex_health;
-use crate::commands::daemon_utils::daemon_base_url;
+use crate::commands::daemon_http::daemon_base_url;
 use crate::commands::format::{fmt_elapsed, format_with_commas};
 use crate::commands::reindex_ui::{print_timing_breakdown, ReindexUi};
 use anyhow::Result;
@@ -133,7 +133,7 @@ pub async fn run_reindex_with(
     root_path: &std::path::Path,
     opts: ReindexOptions,
 ) -> Result<ReindexOutcome> {
-    let base = daemon_base_url();
+    let base = daemon_base_url()?;
     let client = trusty_common::server::daemon_http_client()?;
 
     let kickoff_url = format!("{}/indexes/{}/reindex", base, index_id);
