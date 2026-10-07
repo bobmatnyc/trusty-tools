@@ -9,7 +9,6 @@
 //! Every run captures stdout, the error's `Display` and `Debug`, and TRACE
 //! tracing, and [`Outcome::assert_no_value`] checks all four.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
