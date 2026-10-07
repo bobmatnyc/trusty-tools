@@ -57,3 +57,59 @@ fn cap_detail_masks_an_x_api_key_value() {
     assert!(!detail.contains("shortkey"), "key survived: {detail}");
     assert_eq!(detail, "403 with X-Api-Key: [redacted] sent");
 }
+
+/// #9194: the password in a URL's userinfo is hidden; the user, host and
+/// path stay readable.
+#[test]
+fn cap_detail_masks_a_url_userinfo_password() {
+    let detail = cap_detail("connect to http://user:PASS1234@127.0.0.1:9/p failed");
+    assert!(!detail.contains("PASS1234"), "password survived: {detail}");
+    assert_eq!(
+        detail,
+        "connect to http://user:[redacted]@127.0.0.1:9/p failed"
+    );
+}
+
+/// #9194: a header value glued to its colon (`X-Api-Key:shortkey`) is
+/// hidden, as are `Token:` and `Password:` values written the same way.
+#[test]
+fn cap_detail_masks_a_header_value_glued_to_its_colon() {
+    for (text, secret, want) in [
+        (
+            "X-Api-Key:shortkey sent",
+            "shortkey",
+            "X-Api-Key:[redacted] sent",
+        ),
+        ("Token:tokvalue sent", "tokvalue", "Token:[redacted] sent"),
+        (
+            "Password:hunter2 sent",
+            "hunter2",
+            "Password:[redacted] sent",
+        ),
+    ] {
+        let detail = cap_detail(text);
+        assert!(!detail.contains(secret), "{secret} survived: {detail}");
+        assert_eq!(detail, want);
+    }
+}
+
+/// #9194: quotes around a JSON header name and scheme do not stop the token
+/// after `"Authorization":"Bearer` from being hidden.
+#[test]
+fn cap_detail_masks_a_json_quoted_authorization_header() {
+    let detail = cap_detail(r#"401 with {"Authorization":"Bearer abc123"} sent"#);
+    assert!(!detail.contains("abc123"), "token survived: {detail}");
+    assert_eq!(
+        detail,
+        r#"401 with {"Authorization":"Bearer [redacted] sent"#
+    );
+}
+
+/// #9194: `authorization=bearer <token>` hides the token in the next word,
+/// not only the `bearer` value of the pair.
+#[test]
+fn cap_detail_masks_an_equals_joined_bearer_scheme() {
+    let detail = cap_detail("query authorization=bearer abc123 rejected");
+    assert!(!detail.contains("abc123"), "token survived: {detail}");
+    assert_eq!(detail, "query authorization=bearer [redacted] rejected");
+}
