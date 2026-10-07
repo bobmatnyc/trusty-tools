@@ -20,6 +20,8 @@
 //!
 //! Test: `start/tests.rs` — all 14 unit tests pass.
 
+// #9214: the `start` flags, moved out of `main.rs` (frozen line-cap budget).
+mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;
@@ -59,6 +61,7 @@ mod tests_4045;
 mod swap_back_cycle_soak_tests;
 
 // Public entry point consumed by `commands/mod.rs`.
+pub use args::StartArgs;
 pub use daemon::handle_start;
 
 // Re-exports that formerly lived at the top of `start.rs` and are consumed by

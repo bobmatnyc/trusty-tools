@@ -138,6 +138,8 @@ pub(crate) fn spawn_auto_discover_arg(discover: bool, auto_discover: bool) -> Op
 pub(crate) struct Discovery {
     granted: bool,
     opted_in: bool,
+    // #9214: auto-discover talks to the daemon over HTTP.
+    http_listener: bool,
 }
 
 impl Discovery {
@@ -148,7 +150,56 @@ impl Discovery {
 
     /// Whether to spawn `auto_discover_and_index` after warm boot.
     pub(crate) fn runs_auto_discover(self) -> bool {
-        self.granted
+        self.granted && self.http_listener
+    }
+
+    /// This decision for a daemon that does (or, with `--no-http`, does not)
+    /// bind its HTTP listener.
+    ///
+    /// Why (#9214): `auto_discover_and_index` registers projects through
+    /// `daemon_utils::daemon_base_url`, which falls back to `127.0.0.1:7878` when no
+    /// `http_addr` file exists — so a socket-only daemon would register into
+    /// whatever holds that port, and refresh its own `http_addr` file to name
+    /// it. Withholding the scan is the refusal; the warm-boot colocated scan
+    /// runs in process and is unaffected, as is the flag forwarded to the child.
+    /// What: records whether the listener exists; [`Self::runs_auto_discover`]
+    /// then requires it.
+    /// Test: `auto_discover_needs_the_http_listener`.
+    pub(crate) fn with_http_listener(self, http_listener: bool) -> Self {
+        Self {
+            http_listener,
+            ..self
+        }
+    }
+
+    /// True when the scan was granted and only the missing HTTP listener
+    /// withholds it.
+    pub(crate) fn withheld_for_no_http(self) -> bool {
+        self.granted && !self.http_listener
+    }
+
+    /// The line `handle_start` logs when it does not spawn auto-discover, or
+    /// `None` when it does.
+    ///
+    /// Why (#9214): the skip used to be logged before tracing was initialised,
+    /// so it was dropped; the post-boot log line named only the older reasons.
+    /// What: names `--no-http` when the missing listener is what withheld a
+    /// granted scan; otherwise the pre-#9214 wording.
+    /// Test: `auto_discover_skip_reason_names_no_http`.
+    pub(crate) fn skip_reason(self) -> Option<&'static str> {
+        if self.runs_auto_discover() {
+            None
+        } else if self.withheld_for_no_http() {
+            Some(
+                "auto-discover: skipped — it registers projects over HTTP and --no-http \
+                 binds no HTTP listener (#9214)",
+            )
+        } else {
+            Some(
+                "auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, \
+                 or an explicit data dir without --auto-discover)",
+            )
+        }
     }
 
     /// The flag forwarded to the background child; see [`spawn_auto_discover_arg`].
@@ -215,6 +266,7 @@ impl StartPlan {
             discovery: Discovery {
                 granted,
                 opted_in: auto_discover,
+                http_listener: true,
             },
         })
     }

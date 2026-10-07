@@ -397,6 +397,32 @@ pub fn build_router_with_self_origins(
     build_router_on(Arc::new(state), self_origins)
 }
 
+/// Spawn every background ticker the daemon runs over `state_arc`.
+///
+/// Why (#9214): the tickers used to start only as a side effect of building
+/// the HTTP router. A daemon run with `--no-http` builds no router, so it
+/// would have served the socket with no residency sweep, no memory-pressure
+/// enforcement and no status events.
+/// What: the nine `spawn_*` calls [`build_router_on`] made inline. Each holds a
+/// `Weak`, so the tickers stop once the last `Arc` drops.
+/// Test: `run_daemon_without_http_serves_only_the_socket` waits for a
+/// `status_changed` event from a daemon that built no router.
+pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
+    spawn_status_ticker(Arc::clone(state_arc));
+    spawn_disk_size_ticker(Arc::clone(state_arc));
+    spawn_idle_chunk_eviction_ticker(Arc::clone(state_arc));
+    spawn_watcher_idle_suspend_ticker(Arc::clone(state_arc));
+    spawn_orphan_reaper_ticker(Arc::clone(state_arc));
+    spawn_residency_sweep_ticker(Arc::clone(state_arc));
+    spawn_memory_pressure_ticker(Arc::clone(state_arc));
+    graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(state_arc));
+    // #4250: drive indexes parked by a warm-boot restore timeout back into the
+    // registry. Nothing else will — they are absent from `list_indexes`, so a
+    // client that discovers indexes by listing never names them, and boot
+    // reconcile walks registered handles only.
+    crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(state_arc));
+}
+
 /// [`build_router_with_self_origins`], over a state the caller already shares.
 ///
 /// Why (#6285, ADR-0032): the daemon now serves the same registry on two
@@ -406,7 +432,8 @@ pub fn build_router_with_self_origins(
 /// residency sweep, and the two doors would disagree about which indexes exist.
 /// What: the whole former body of [`build_router_with_self_origins`], taking
 /// the `Arc` instead of making it. The by-value entry point above is unchanged
-/// for every existing caller and test.
+/// for every existing caller and test. Spawns the daemon's tickers via
+/// [`spawn_daemon_tickers`].
 /// Test: `health_over_the_socket_matches_the_http_body` in
 /// `service::socket::tests`.
 pub fn build_router_on(
@@ -417,19 +444,7 @@ pub fn build_router_on(
     use crate::service::ui::{
         chat_handler, list_chat_providers, ui_asset_handler, ui_index_handler,
     };
-    spawn_status_ticker(Arc::clone(&state_arc));
-    spawn_disk_size_ticker(Arc::clone(&state_arc));
-    spawn_idle_chunk_eviction_ticker(Arc::clone(&state_arc));
-    spawn_watcher_idle_suspend_ticker(Arc::clone(&state_arc));
-    spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
-    spawn_residency_sweep_ticker(Arc::clone(&state_arc));
-    spawn_memory_pressure_ticker(Arc::clone(&state_arc));
-    graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(&state_arc));
-    // #4250: drive indexes parked by a warm-boot restore timeout back into the
-    // registry. Nothing else will — they are absent from `list_indexes`, so a
-    // client that discovers indexes by listing never names them, and boot
-    // reconcile walks registered handles only.
-    crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(&state_arc));
+    spawn_daemon_tickers(&state_arc);
 
     // #6285 slice 3: both live on the state so the socket gates the same six
     // query methods on the SAME semaphore and the SAME deadline. Building them

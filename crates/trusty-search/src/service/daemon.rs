@@ -614,6 +614,10 @@ mod lock;
 use lock::acquire_lock;
 pub use lock::{remove_daemon_files_if_unheld, StaleLockRemoval};
 
+// #9214: the stop wait of a daemon with no HTTP listener.
+#[path = "daemon_socket_only.rs"]
+mod socket_only;
+
 // Why: the shared `shutdown_signal` helper in trusty-common provides identical
 // SIGTERM + SIGINT handling for all trusty-* daemons (issue #534). Delegating
 // to it removes local duplication while keeping behaviour identical.
@@ -622,10 +626,43 @@ pub use lock::{remove_daemon_files_if_unheld, StaleLockRemoval};
 // tests here exercise the full `with_graceful_shutdown` path.
 use trusty_common::shutdown_signal;
 
-/// Start the daemon: acquire the lock, bind a port, write the port file,
-/// serve the axum router until SIGTERM/SIGINT or in-process admin stop, then
-/// clean up the port file.
+/// Whether [`run_daemon_with`] binds the HTTP listener (#9214).
+///
+/// Why: ADR-0032 retires the TCP listener; `--no-http` is the step that makes
+/// a socket-only daemon a real mode before the default flips.
+/// What: `Bind(port)` walks forward from `port` exactly as before; `Off` binds
+/// no TCP listener at all.
+/// Test: `run_daemon_without_http_serves_only_the_socket`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpListener {
+    /// Bind `127.0.0.1:<port>`, walking forward when it is busy.
+    Bind(u16),
+    /// Bind no TCP listener; serve the RPC socket only.
+    Off,
+}
+
+/// Start the daemon with its HTTP listener on `requested_port`.
+///
+/// What: [`run_daemon_with`] with [`HttpListener::Bind`]; unchanged for every
+/// existing caller.
 pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<(), DaemonError> {
+    run_daemon_with(state, HttpListener::Bind(requested_port)).await
+}
+
+/// Start the daemon: acquire the lock, bind the RPC socket and (unless `http`
+/// is [`HttpListener::Off`]) a TCP port, publish the discovery files, serve
+/// until SIGTERM/SIGINT or in-process admin stop, then clean up.
+///
+/// Why (#9214): a socket-only daemon must not announce an HTTP address it
+/// never bound, and must not leave an earlier run's announcement behind.
+/// What: with `Off` it binds no TCP listener, writes no port or `http_addr`
+/// file, removes stale ones, and registers nothing in the shared discovery
+/// registry; `search.health` reports `transport.http_addr: null`. The socket
+/// bind stays fatal in both modes.
+/// Test: `run_daemon_without_http_serves_only_the_socket`,
+/// `run_daemon_without_http_removes_a_stale_http_addr`,
+/// `run_daemon_health_reports_the_transport_it_bound`.
+pub async fn run_daemon_with(state: SearchAppState, http: HttpListener) -> Result<(), DaemonError> {
     let lock_path = daemon_lock_path()?;
     let port_path = daemon_port_path()?;
 
@@ -634,9 +671,12 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // contended lock is `AlreadyRunning` whatever pid the file names.
     let lock_file = acquire_lock(&lock_path)?;
 
-    let listener = bind_with_auto_port(requested_port, 64).await?;
-    let addr = listener.local_addr()?;
-    let port = addr.port();
+    // #9214: `Off` binds no TCP listener; a failed bind under `Bind` stays fatal.
+    let listener = match http {
+        HttpListener::Bind(port) => Some(bind_with_auto_port(port, 64).await?),
+        HttpListener::Off => None,
+    };
+    let addr = listener.as_ref().map(TcpListener::local_addr).transpose()?;
 
     // #6285: both listeners bind before anything is published. A half-bound
     // daemon must not exist — the port file and the shared discovery registry
@@ -649,68 +689,68 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         .await
         .map_err(|e| DaemonError::Server(format!("{e:#}")))?;
 
-    // Atomically write the port file (write + rename).
-    write_port_file(&port_path, port)?;
-
-    // Write the http_addr discovery file (host:port) for client discovery.
-    // Issue #117: unconditional write corrects stale files from crashed daemons.
-    // Issue #3545: this path honors TRUSTY_DATA_DIR so an isolated instance
-    // never clobbers the default instance's file (or vice versa).
-    let addr_string = addr.to_string();
-    let http_addr_written = match http_addr_path() {
-        Some(path) => match write_http_addr_file(&path, &addr_string) {
-            Ok(()) => Some(path),
-            Err(e) => {
-                tracing::warn!("could not write {}: {e}", path.display());
-                None
-            }
-        },
-        None => None,
+    // #9214: publish the HTTP address only when one was bound; a socket-only
+    // daemon withdraws an earlier run's announcement instead.
+    let http_addr_written = match addr {
+        Some(addr) => publish_http_discovery(&port_path, &addr)?,
+        None => {
+            withdraw_http_discovery(&port_path)?;
+            None
+        }
     };
 
-    // Issue #3602 review (post-#3545): also populate the generic,
-    // TRUSTY_DATA_DIR-oblivious discovery registry that predates
-    // http_addr_path()'s TRUSTY_DATA_DIR-awareness -- trusty-common's monitor
-    // dashboard client (`resolve_search_url`) and trusty-installer's `ensure`
-    // (`resolve_base_url`) still read it via
-    // `trusty_common::read_daemon_addr("trusty-search")` and have no other
-    // way to discover the daemon. Gated to the default instance only; see
-    // `register_shared_discovery`'s doc for why.
-    register_shared_discovery(&addr);
-
     // Startup banner (stderr only — stdout is JSON-RPC transport).
+    // #9214: never claim an admin panel that was not bound.
+    let http_banner = match addr {
+        Some(addr) => format!("HTTP admin panel: http://{addr}"),
+        None => "HTTP listener off (--no-http)".to_string(),
+    };
     eprintln!(
-        "trusty-search v{} — HTTP admin panel: http://{} — rpc socket: {}",
+        "trusty-search v{} — {http_banner} — rpc socket: {}",
         env!("CARGO_PKG_VERSION"),
-        addr,
         rpc.path.display(),
     );
 
     // Stamp port into state so the SPA knows window.__DAEMON_PORT__.
-    let state = state.with_daemon_port(port);
+    let mut state = state;
+    if let Some(addr) = addr {
+        state = state.with_daemon_port(addr.port());
+    }
     // #9030: `search.health` reports the listeners actually bound — the
     // socket's own path and the HTTP listener's resolved address.
     let state = state.with_transport(crate::service::server::DaemonTransport {
         socket_path: Some(rpc.path.to_string_lossy().into_owned()),
-        http_addr: Some(addr_string),
+        http_addr: addr.map(|a| a.to_string()),
     });
     // Issue #85: clone before moving into build_router for post-shutdown flush.
     let flush_state = state.clone();
     // Issue #829: subscribe before moving state into build_router.
     let mut shutdown_rx = state.shutdown_tx.subscribe();
-    // #3304: trust the daemon's own resolved bind address as a self-origin so a
-    // non-loopback (Tailscale) bind still passes the router-wide write guard;
-    // `from_bind_addrs` drops loopback (already trusted), so a plain loopback
-    // bind yields the empty default.
-    let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]);
     // #6285: ONE `Arc<SearchAppState>`, shared by both transports. The socket
     // and the router are two doors onto one daemon, not two daemons — a second
     // `Arc::new` would give the socket its own registry and its own tickers.
     let state_arc = std::sync::Arc::new(state);
     let rpc_state = std::sync::Arc::clone(&state_arc);
-    let router = crate::service::server::build_router_on(state_arc, self_origins);
+    // #3304: trust the daemon's own resolved bind address as a self-origin so a
+    // non-loopback (Tailscale) bind still passes the router-wide write guard;
+    // `from_bind_addrs` drops loopback (already trusted), so a plain loopback
+    // bind yields the empty default.
+    let router = addr.map(|addr| {
+        let self_origins = trusty_common::server::SelfOrigins::from_bind_addrs(&[addr]);
+        crate::service::server::build_router_on(std::sync::Arc::clone(&state_arc), self_origins)
+    });
+    if router.is_none() {
+        // #9214: no router to start the tickers as a side effect.
+        crate::service::server::spawn_daemon_tickers(&state_arc);
+    }
 
-    tracing::info!("daemon listening on {addr} (lock {})", lock_path.display());
+    match addr {
+        Some(addr) => tracing::info!("daemon listening on {addr} (lock {})", lock_path.display()),
+        None => tracing::info!(
+            "daemon serving the rpc socket only, no HTTP listener (lock {})",
+            lock_path.display()
+        ),
+    }
 
     // Log active memory limits (confirms launchd restarts inherit correct values).
     {
@@ -770,14 +810,25 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     });
 
     let rpc_drain = drain.clone();
-    let rpc_task = tokio::spawn(async move {
+    let mut rpc_task = tokio::spawn(async move {
         socket::serve_until_shutdown(rpc, rpc_state, rpc_drain.cancelled_owned()).await;
     });
 
     let http_drain = drain.clone();
-    let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(http_drain.cancelled_owned())
-        .await;
+    let mut rpc_joined = None;
+    let serve_result = match (listener, router) {
+        (Some(listener), Some(router)) => axum::serve(listener, router)
+            .with_graceful_shutdown(http_drain.cancelled_owned())
+            .await
+            .map_err(|e| DaemonError::Server(e.to_string())),
+        // #9214: the socket is the only door; see `await_socket_only_stop`.
+        _ => {
+            let (result, joined) =
+                socket_only::await_socket_only_stop(&http_drain, &mut rpc_task).await;
+            rpc_joined = joined;
+            result
+        }
+    };
 
     // #6285: cancel unconditionally, so the socket is unlinked even when axum
     // exits for a reason that was never a shutdown signal (a bind/accept
@@ -792,9 +843,17 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     // Each parked stage wakes, abandons its work with its durable pending marker
     // still set, and the next boot re-arms it.
     drain_paused_embedders(&flush_state);
-    if let Err(e) = rpc_task.await {
+    let joined = match rpc_joined {
+        Some(joined) => joined,
+        None => rpc_task.await,
+    };
+    if let Err(e) = joined {
         tracing::warn!("the rpc serve task did not exit cleanly: {e}");
     }
+    // #9214: the tickers hold a `Weak`; this was the last strong reference
+    // once the router and the rpc task are gone, so they stop before the flush
+    // exactly as they did when the router owned it.
+    drop(state_arc);
 
     // Issue #1621: stop every filesystem watcher before flushing so no save
     // event races the shutdown flush by mutating an index mid-write. Aborts the
@@ -829,8 +888,71 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
     }
     deregister_shared_discovery();
 
-    serve_result.map_err(|e| DaemonError::Server(e.to_string()))?;
+    serve_result?;
     drop(lock_file);
+    Ok(())
+}
+
+/// Write the port file, the `http_addr` file and the shared registry entry for
+/// a bound HTTP listener; returns the `http_addr` path written, for cleanup.
+///
+/// Why: moved out of [`run_daemon_with`] unchanged (#9214) so the socket-only
+/// arm can call [`withdraw_http_discovery`] in its place.
+/// Test: `run_daemon_isolated_instance_never_pollutes_shared_discovery`.
+fn publish_http_discovery(
+    port_path: &PathBuf,
+    addr: &SocketAddr,
+) -> Result<Option<PathBuf>, DaemonError> {
+    // Atomically write the port file (write + rename).
+    write_port_file(port_path, addr.port())?;
+
+    // Write the http_addr discovery file (host:port) for client discovery.
+    // Issue #117: unconditional write corrects stale files from crashed daemons.
+    // Issue #3545: this path honors TRUSTY_DATA_DIR so an isolated instance
+    // never clobbers the default instance's file (or vice versa).
+    let http_addr_written = match http_addr_path() {
+        Some(path) => match write_http_addr_file(&path, &addr.to_string()) {
+            Ok(()) => Some(path),
+            Err(e) => {
+                tracing::warn!("could not write {}: {e}", path.display());
+                None
+            }
+        },
+        None => None,
+    };
+
+    // Issue #3602 review (post-#3545): also populate the generic,
+    // TRUSTY_DATA_DIR-oblivious discovery registry that predates
+    // http_addr_path()'s TRUSTY_DATA_DIR-awareness -- trusty-common's monitor
+    // dashboard client (`resolve_search_url`) and trusty-installer's `ensure`
+    // (`resolve_base_url`) still read it via
+    // `trusty_common::read_daemon_addr("trusty-search")` and have no other
+    // way to discover the daemon. Gated to the default instance only; see
+    // `register_shared_discovery`'s doc for why.
+    register_shared_discovery(addr);
+    Ok(http_addr_written)
+}
+
+/// Remove every HTTP announcement an earlier run of this instance left behind.
+///
+/// Why (#9214): clients resolve the daemon from the `http_addr` file, then the
+/// port file. A socket-only daemon that left either in place would send them
+/// to an address with nothing behind it — or to whatever now holds that port.
+/// What: removes the port file and the `http_addr` file (a missing file is
+/// fine; any other removal error is fatal, because the stale announcement
+/// would survive) and clears the default instance's shared registry entry.
+/// Safe because the caller holds the daemon lock, so no live instance of this
+/// data dir owns them.
+/// Test: `run_daemon_without_http_removes_a_stale_http_addr`.
+fn withdraw_http_discovery(port_path: &Path) -> Result<(), DaemonError> {
+    for path in std::iter::once(port_path.to_path_buf()).chain(http_addr_path()) {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::info!("removed stale {} (no HTTP listener)", path.display()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(DaemonError::Io(e)),
+        }
+    }
+    deregister_shared_discovery();
     Ok(())
 }
 
