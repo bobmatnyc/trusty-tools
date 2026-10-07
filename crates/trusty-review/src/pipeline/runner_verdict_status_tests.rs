@@ -133,6 +133,42 @@ async fn no_reviewer_reply_reads_no_reviewer_output() {
     }
 }
 
+/// #9310 D2: a reply cut at the token ceiling aborts, and its body is the
+/// verified summary for `no_reviewer_output`, never the truncated reply.
+#[tokio::test]
+async fn a_truncated_reply_body_is_the_template() {
+    let result = review_with(Arc::new(FakeLlm::truncated_at_ceiling())).await;
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::NoReviewerOutput)
+    );
+    let summary = crate::pipeline::summary_template::verified_summary(&result);
+    assert_eq!(result.review_body, summary);
+    assert!(!result.review_body.contains("looks fine"), "{summary}");
+}
+
+/// #9310 D2: an unparsed reply reads `parse_failed`, and its text never
+/// reaches the body; the body holds the verified summary.
+#[tokio::test]
+async fn an_unparsed_reply_posts_the_template_not_its_text() {
+    let result = review_with(text_llm("SENTINEL-9310-UNPARSED: the change looks fine.")).await;
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::ParseFailed)
+    );
+    assert!(
+        !result.review_body.contains("SENTINEL-9310"),
+        "{}",
+        result.review_body
+    );
+    let summary = crate::pipeline::summary_template::verified_summary(&result);
+    assert!(
+        result.review_body.contains(&summary),
+        "{}",
+        result.review_body
+    );
+}
+
 /// #9310 item 3, the #9306 shape: four findings dropped before grading
 /// (quoted code absent from the diff) and six dropped by the line-citation
 /// gate. `origin/main` led the body with "6 findings withheld: citation
