@@ -1183,14 +1183,66 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::BackendLocked => 27,
             // #7524 H1: a write into `file` the machine config did not select.
             ErrorKind::FileBackendNotSelected => 28,
-            ErrorKind::BackendNotEnabled => 29,
-            ErrorKind::Internal => 30,
+            ErrorKind::Internal => 29,
+            // #7519: after `Internal`, so no existing discriminant moves.
+            ErrorKind::BackendNotEnabled => 30,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
     for (i, kind) in ErrorKind::ALL.into_iter().enumerate() {
         assert_eq!(index(kind), i, "{kind:?} is out of place in ErrorKind::ALL");
         assert_eq!(ErrorKind::from_wire(kind.as_str()), Some(kind));
+    }
+}
+
+/// Why: `ErrorKind`'s discriminants are a public contract (#7524). For this
+/// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
+/// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
+/// moves a published value.
+/// What: `kind as i32` equals its pinned value for all 31 variants, and the
+/// table names every kind in `ErrorKind::ALL` exactly once.
+/// Test: itself.
+#[test]
+fn error_kind_discriminants_are_pinned() {
+    const PINNED: [(ErrorKind, i32); 31] = [
+        (ErrorKind::InvalidParams, 0),
+        (ErrorKind::ProjectInvalid, 1),
+        (ErrorKind::ProjectUnresolved, 2),
+        (ErrorKind::VaultOutOfScope, 3),
+        (ErrorKind::InvalidValue, 4),
+        (ErrorKind::NotFound, 5),
+        (ErrorKind::Unsupported, 6),
+        (ErrorKind::UnknownBackend, 7),
+        (ErrorKind::BackendFailed, 8),
+        (ErrorKind::OrphanedBackendEntry, 9),
+        (ErrorKind::IndexCorrupt, 10),
+        (ErrorKind::IndexBusy, 11),
+        (ErrorKind::StorageUnavailable, 12),
+        (ErrorKind::ConfigInvalid, 13),
+        (ErrorKind::HomeUnavailable, 14),
+        (ErrorKind::SameBackend, 15),
+        (ErrorKind::AgentUseRefused, 16),
+        (ErrorKind::InvalidEnvEntry, 17),
+        (ErrorKind::EnvResolutionFailed, 18),
+        (ErrorKind::DotenvSyntax, 19),
+        (ErrorKind::RemoteHostUnsupported, 20),
+        (ErrorKind::StorageRefused, 21),
+        (ErrorKind::TrackedBackendRefused, 22),
+        (ErrorKind::AuditUnavailable, 23),
+        (ErrorKind::TrackedAuditRefused, 24),
+        (ErrorKind::TrackedCliSettingRefused, 25),
+        (ErrorKind::CliNotInstalled, 26),
+        (ErrorKind::BackendLocked, 27),
+        (ErrorKind::FileBackendNotSelected, 28),
+        (ErrorKind::Internal, 29),
+        (ErrorKind::BackendNotEnabled, 30),
+    ];
+    for (kind, value) in PINNED {
+        assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
+    }
+    for kind in ErrorKind::ALL {
+        let rows = PINNED.iter().filter(|(k, _)| *k == kind).count();
+        assert_eq!(rows, 1, "{kind:?} must be pinned exactly once");
     }
 }
 

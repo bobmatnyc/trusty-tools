@@ -303,11 +303,16 @@ pub enum SecretsError {
         hint: &'static str,
     },
 
+    /// `$HOME` is unknown, so a default location cannot be resolved.
+    #[error("home directory is unavailable")]
+    HomeUnavailable,
+
     /// A CLI-backed backend the untracked machine config has not enabled.
     /// Raised before any process is spawned.
-    // #7519: P1 carry-over (a) — the delete sweep reaches every enabled CLI
-    // backend, so a backend opens only when enabled; no value lands outside
-    // the sweep.
+    // #7519: after `HomeUnavailable`, so no published discriminant moves
+    // (0.1.2 accepted-break declaration). P1 carry-over (a) — the delete
+    // sweep reaches every enabled CLI backend, so a backend opens only when
+    // enabled; no value lands outside the sweep.
     #[error(
         "the {backend} backend is not enabled on this machine; add a `secrets.{backend}:` \
          section, or `secrets.default_backend: {backend}`, to the machine config \
@@ -317,8 +322,4 @@ pub enum SecretsError {
         /// Backend id, e.g. `onepassword`.
         backend: String,
     },
-
-    /// `$HOME` is unknown, so a default location cannot be resolved.
-    #[error("home directory is unavailable")]
-    HomeUnavailable,
 }
