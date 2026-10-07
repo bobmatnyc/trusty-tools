@@ -389,7 +389,7 @@ async fn dedup_one(
             }
         };
         #[cfg(test)]
-        merge_seam::after_merge_persisted(handle.id.as_str()).await;
+        merge_seam::after_merge_persisted(handle.id.as_str()).await?;
         // #5231: surface a failed loser-eviction instead of discarding it —
         // the merged text is already durable, so a kept loser is a duplicate,
         // not a loss. #8732: the record names the survivor and the score.
@@ -486,10 +486,12 @@ pub(super) fn refresh_closets(handle: &Arc<PalaceHandle>) -> usize {
 ///
 /// Why: the cross-cycle interleaving that lost text happens in exactly that
 /// window, and a test can only drive it deterministically by pausing there.
+/// #8246: a cycle that fails after a persisted merge is driven from here too.
 /// What: a per-palace async hook; [`dedup_one`] awaits it when one is set.
+/// A palace in [`FAIL_AFTER_MERGE`] then fails the pass, once.
 #[cfg(test)]
 pub(super) mod merge_seam {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::{Arc, LazyLock, Mutex};
@@ -503,10 +505,18 @@ pub(super) mod merge_seam {
     pub(in crate::memory_core::dream) static HOOKS: LazyLock<Mutex<HashMap<String, Hook>>> =
         LazyLock::new(Default::default);
 
-    pub(super) async fn after_merge_persisted(palace: &str) {
+    /// Palaces whose next persisted merge ends the dedup pass with an error.
+    pub(in crate::memory_core::dream) static FAIL_AFTER_MERGE: LazyLock<Mutex<HashSet<String>>> =
+        LazyLock::new(Default::default);
+
+    pub(super) async fn after_merge_persisted(palace: &str) -> anyhow::Result<()> {
         let hook = HOOKS.lock().expect("seam lock").get(palace).cloned();
         if let Some(hook) = hook {
             hook().await;
         }
+        if FAIL_AFTER_MERGE.lock().expect("seam lock").remove(palace) {
+            anyhow::bail!("#8246 test seam: injected failure after a persisted merge");
+        }
+        Ok(())
     }
 }

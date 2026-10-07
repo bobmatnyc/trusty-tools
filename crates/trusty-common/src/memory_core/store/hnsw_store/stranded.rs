@@ -33,6 +33,10 @@
 //! list; [`merge_stranded`] scores the points those searches missed exactly,
 //! on every graph-arm query. Points are grouped by vector, so the scan costs
 //! one distance per distinct vector; most were copies of a few vectors.
+//! Only the evicted point itself is re-tested. A point that a later upsert
+//! strands transitively — one still in every list it was in, whose only path
+//! from the entry point ran through a point that upsert evicted — stays
+//! unscanned until the next open.
 //! Test: `search_finds_drawers_the_graph_cannot_reach`,
 //! `an_upsert_that_strands_an_existing_drawer_still_finds_it`.
 

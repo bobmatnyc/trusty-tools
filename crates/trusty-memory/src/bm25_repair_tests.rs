@@ -36,9 +36,10 @@ async fn mark_dirty_is_idempotent() {
 
 /// Why (#8246): a dream merge rewrites a survivor's text under its id and
 /// semantic consolidation adds drawers; either stales the lexical lane. A
-/// cycle that changed no text must not cost a repair pass.
-/// What: no hook without a lane; with one, a cycle that merged or consolidated
-/// queues its palace and a cycle that only pruned does not.
+/// failed cycle may have persisted a merge before it failed. A cycle that
+/// completed and changed no text must not cost a repair pass.
+/// What: no hook without a lane; with one, a cycle that merged, consolidated or
+/// failed (`None`) queues its palace and a cycle that only pruned does not.
 /// Test: this test itself.
 #[tokio::test]
 async fn the_dream_hook_queues_only_cycles_that_changed_text() {
@@ -55,15 +56,20 @@ async fn the_dream_hook_queues_only_cycles_that_changed_text() {
         pruned,
         ..DreamStats::default()
     };
-    hook(&PalaceId::new("pruned-only"), &stats(0, 0, 3));
-    hook(&PalaceId::new("merged"), &stats(1, 0, 0));
-    hook(&PalaceId::new("consolidated"), &stats(0, 2, 0));
+    hook(&PalaceId::new("pruned-only"), Some(&stats(0, 0, 3)));
+    hook(&PalaceId::new("merged"), Some(&stats(1, 0, 0)));
+    hook(&PalaceId::new("consolidated"), Some(&stats(0, 2, 0)));
+    hook(&PalaceId::new("failed"), None);
 
     let mut queued = dirty_palaces(&state);
     queued.sort();
     assert_eq!(
         queued,
-        vec!["consolidated".to_string(), "merged".to_string()]
+        vec![
+            "consolidated".to_string(),
+            "failed".to_string(),
+            "merged".to_string()
+        ]
     );
     lane.shutdown().await;
 }
