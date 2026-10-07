@@ -82,6 +82,8 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #9339: bounded OS-watcher start behind `FileWatcher::start`.
+pub(crate) mod watcher_start;
 // #9315: bounded OS-watcher teardown behind `WatcherTask`.
 pub(crate) mod watcher_teardown;
 // #8922: the walker's admission decision for a pushed `index_file` write.
