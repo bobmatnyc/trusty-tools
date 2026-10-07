@@ -72,7 +72,7 @@ pub async fn run_map_reduce(
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
 ) -> ReducedReview {
-    run_map_reduce_with_wiped(filtered, llm, ctx, config)
+    run_map_reduce_with_wiped(filtered, llm, ctx, config, "")
         .await
         .0
 }
@@ -92,6 +92,7 @@ pub(crate) async fn run_map_reduce_with_wiped(
     llm: &Arc<dyn LlmProvider>,
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
+    extra_sections: &str, // #9197: caller sections for every chunk prompt
 ) -> (ReducedReview, Option<Verdict>, Verdict) {
     let units = split_into_units(filtered, config);
     info!(
@@ -100,7 +101,7 @@ pub(crate) async fn run_map_reduce_with_wiped(
         concurrency = config.concurrency,
         "map-reduce: split diff into units"
     );
-    let graded = run_map_stage_graded(&units, llm, ctx, config.concurrency).await;
+    let graded = run_map_stage_graded(&units, llm, ctx, config.concurrency, extra_sections).await;
     // #9310 ruling 50: the strictest chunk floor, before hygiene relaxes a chunk.
     let chunk_floor = graded.iter().fold(Verdict::Approve, |worst, (_, f)| {
         stricter_of(worst, f.clone())
