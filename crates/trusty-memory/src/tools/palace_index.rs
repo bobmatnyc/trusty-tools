@@ -18,11 +18,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::room_identity::room_type_tag;
-use trusty_common::memory_core::store::rooms::list_room_summaries;
+use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+use trusty_common::memory_core::store::rooms::{list_room_summaries, RoomSummary};
 use uuid::Uuid;
 
 use super::helpers::open_palace_handle;
@@ -143,26 +145,63 @@ fn index_rows(state: &AppState, dirs: Vec<(String, PathBuf)>) -> Vec<Value> {
         .collect()
 }
 
+/// The two registry reads a detailed palace row makes (#8254).
+///
+/// Why: a test must be able to fail one of them against a real palace; redb
+/// offers no way to fault a table scan behind `KgStoreRedb`.
+/// What: function pointers for the wing count and the room summaries.
+/// [`LIVE_REGISTRY`] is the production pair.
+#[derive(Clone, Copy)]
+pub(super) struct RegistryReads {
+    pub(super) wing_count: fn(&KgStoreRedb) -> Result<usize>,
+    pub(super) rooms: fn(&Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>>,
+}
+
+/// The production registry reads.
+pub(super) const LIVE_REGISTRY: RegistryReads = RegistryReads {
+    wing_count: |store| Ok(store.list_wings()?.len()),
+    rooms: list_room_summaries,
+};
+
 /// Describe one palace for the index.
 ///
 /// Why: the counts are the whole reason an index beats a bare list of names —
 /// they are how a caller tells the palace it wants from four it does not.
-/// What: opens the palace and reports drawer / room / wing counts plus a row
-/// per room. A palace that cannot be opened is reported with `unreadable` and
-/// its error text rather than dropped: a palace whose bytes are on disk and
-/// unreadable must stay visible (the same posture `PalaceRegistry` takes for a
-/// hydration skip, #4911).
+/// What: [`palace_row_with`] over [`LIVE_REGISTRY`].
 /// Test: `palace_index_reports_counts_and_rooms`.
 fn palace_row(state: &AppState, id: &str, last_used_unix: Option<u64>) -> Value {
+    palace_row_with(state, id, last_used_unix, &LIVE_REGISTRY)
+}
+
+/// A palace row that reports why it has no detail.
+fn unreadable_row(id: &str, last_used_unix: Option<u64>, e: &anyhow::Error) -> Value {
+    json!({
+        "palace": id,
+        "last_used_unix": last_used_unix,
+        "unreadable": format!("{e:#}"),
+    })
+}
+
+/// [`palace_row`] with the registry reads supplied by the caller.
+///
+/// What: opens the palace and reports drawer / room / wing counts plus a row
+/// per room. A palace that cannot be opened, or whose wing or room registry
+/// cannot be read, is reported with `unreadable` and its error text rather
+/// than dropped or counted as empty: a palace whose bytes are on disk and
+/// unreadable must stay visible (the same posture `PalaceRegistry` takes for a
+/// hydration skip, #4911).
+/// Test: `palace_index_reports_counts_and_rooms`,
+/// `palace_index_reports_a_wing_read_error_instead_of_zero_wings`,
+/// `palace_index_reports_a_room_read_error_instead_of_no_rooms`.
+pub(super) fn palace_row_with(
+    state: &AppState,
+    id: &str,
+    last_used_unix: Option<u64>,
+    reads: &RegistryReads,
+) -> Value {
     let handle = match open_palace_handle(state, id) {
         Ok(h) => h,
-        Err(e) => {
-            return json!({
-                "palace": id,
-                "last_used_unix": last_used_unix,
-                "unreadable": format!("{e:#}"),
-            })
-        }
+        Err(e) => return unreadable_row(id, last_used_unix, &e),
     };
     let drawer_count = handle.list_drawers(None, None, usize::MAX).len();
     // Counted from the live drawer table, the same way `room_list` counts them
@@ -177,8 +216,16 @@ fn palace_row(state: &AppState, id: &str, last_used_unix: Option<u64>) -> Value 
                 acc
             });
     let store = handle.kg.store();
-    let wing_count = store.list_wings().map(|w| w.len()).unwrap_or(0);
-    let rooms = list_room_summaries(&store).unwrap_or_default();
+    // #8254: a failed registry read marks the row unreadable; it is never
+    // counted as zero wings or no rooms.
+    let wing_count = match (reads.wing_count)(&store).context("list wings for the palace index") {
+        Ok(n) => n,
+        Err(e) => return unreadable_row(id, last_used_unix, &e),
+    };
+    let rooms = match (reads.rooms)(&store).context("list rooms for the palace index") {
+        Ok(r) => r,
+        Err(e) => return unreadable_row(id, last_used_unix, &e),
+    };
     let room_rows: Vec<Value> = rooms
         .iter()
         .map(|r| {

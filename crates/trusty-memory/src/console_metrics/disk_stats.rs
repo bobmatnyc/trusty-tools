@@ -298,4 +298,42 @@ mod tests {
             "the error must name the file it looked for: {err}"
         );
     }
+
+    /// Why (#8254): the workspace moved redb 4.1 -> 4.3, and this module opens
+    /// every palace on disk read-only on a poll. A palace last written by 4.1
+    /// must still report its counts: a read-only open cannot repair or recreate
+    /// the file, so an unreadable 4.1 layout would surface as an error row on
+    /// every palace the daemon has not rewritten.
+    /// What: stages a `kg.redb` written by redb 4.1.0 (300 drawers, 2 rooms plus
+    /// the schema marker, 250 variable-length subject keys summing to 750) and
+    /// asserts every count and that the file's bytes are unchanged.
+    /// Test: this is the test.
+    #[test]
+    fn disk_stats_reads_a_redb_41_palace_read_only() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("testdata")
+            .join("kg-redb41.redb-fixture");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let kg = tmp.path().join(KG_FILE);
+        std::fs::copy(&fixture, &kg).expect("stage the redb 4.1 fixture");
+        let before = std::fs::read(&kg).expect("read fixture");
+
+        let stats = read(tmp.path()).expect("a redb 4.1 palace must read under 4.3");
+
+        assert_eq!(
+            stats,
+            PalaceDiskStats {
+                drawer_count: 300,
+                vector_count: 0,
+                kg_triple_count: 750,
+                room_count: 2,
+            }
+        );
+        assert_eq!(
+            std::fs::read(&kg).expect("re-read fixture"),
+            before,
+            "a read-only open must leave the 4.1 bytes untouched"
+        );
+    }
 }
