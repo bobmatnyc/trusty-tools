@@ -7,7 +7,7 @@
 //! MCP is the protocol Claude Code already speaks, so trusty-mpm exposes
 //! an MCP server rather than inventing a bespoke channel.
 //!
-//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-five
+//! What: defines the full MCP tool catalog ([`tools::TOOL_CATALOG`], thirty-six
 //! tools) — nine orchestration/bug-reporting (six core + three bug-reporting:
 //! `list_recent_errors`, `preview_bug_report`, `report_bug`), eleven
 //! session-lifecycle tools (#1221: `session_new`, `session_stop`,
@@ -16,7 +16,8 @@
 //! `session_context_pause` — a DIFFERENT concept from managed-sub-session
 //! lifecycle, kept in the same tool group for file-count reasons only), five
 //! console-facing tools, four project-registry tools, four session-manager
-//! proxy tools, and the Disk-dashboard survey (#6927) — the [`OrchestratorBackend`] trait the daemon implements to
+//! proxy tools, the Disk-dashboard survey (#6927), and `secrets_get_ref`
+//! (#7522) — the [`OrchestratorBackend`] trait the daemon implements to
 //! service them, and [`dispatch`], which routes a JSON-RPC [`Request`] to the
 //! backend. The daemon wires [`dispatch`] into both `run_stdio_loop` (the `tm
 //! daemon --mcp` path) and the loopback `POST /rpc` endpoint (the `serve
@@ -149,6 +150,20 @@ pub trait OrchestratorBackend: Send + Sync {
         budget_seconds: Option<u64>,
         group_by: Option<&str>,
     ) -> Result<Value, String>;
+
+    // ── #7522: the reference-key secrets tool ────────────────────────────────
+
+    /// Back `secrets_get_ref`: the `secret://` reference for `key` in `project`.
+    ///
+    /// Why: DOC-74 §10.2, ruling 34 — the model learns references, never
+    /// values; the lookup runs on demand, with no session-start preload.
+    /// What: a client of the trusty-secrets socket; returns
+    /// `crate::secrets_client::RefAnswer` as JSON. `project` is an absolute
+    /// directory; `key` is a key name or a `secret://` reference.
+    /// Test: `dispatch_secrets_get_ref_tool` (mock) and
+    /// `secrets_get_ref_reports_a_project_key_without_its_value` (daemon,
+    /// real socket).
+    async fn secrets_get_ref(&self, project: &str, key: &str) -> Result<Value, String>;
 
     // ── #1221: session-lifecycle tools ───────────────────────────────────────
 
@@ -703,6 +718,11 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             let group_by = args.get("group_by").and_then(Value::as_str);
             backend.disk_survey(project, budget_seconds, group_by).await
         }
+        // #7522: references only, resolved on demand.
+        "secrets_get_ref" => match (required_str(&args, "project"), required_str(&args, "key")) {
+            (Ok(project), Ok(key)) => backend.secrets_get_ref(&project, &key).await,
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
         // ── #1222: console-facing tools ──────────────────────────────────────
         "console_metrics" => backend.console_metrics().await,
         "supervisor_status" => backend.supervisor_status().await,

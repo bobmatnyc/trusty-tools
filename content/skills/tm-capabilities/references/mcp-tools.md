@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-35 tools.
+36 tools.
 
 ## `session_list`
 
@@ -324,6 +324,15 @@ Survey every managed project and worktree for the console Disk view: per-worktre
 | `budget_seconds` | `integer` | no |
 | `group_by` | `string` | no |
 | `project` | `string` | no |
+
+## `secrets_get_ref`
+
+Resolve a secret key to its `secret://` reference for one project, on demand, through the trusty-secrets socket. NEVER returns a value, a masked head or a length: the answer holds names, a flag and a timestamp only, so a reference can go in a `.env` file or an `exec --env` flag without the value entering the transcript. The key is looked up in the names-only index: the project scope first, then the owner scope, unless `key` is an explicit `secret://<owner>/KEY` or `secret://<owner>/<repo>/KEY` reference. Returns `{ reference, key, present, scope, vault, backend, imported_at }`: `reference` (string) is the canonical reference; `key` (string) the key name; `present` (bool) whether a value is stored; `scope` (`project` | `owner` | null) and `vault` (string | null) say where; `backend` (string) is the backend the project's config selects; `imported_at` (integer Unix seconds | null) is the key's last write. An unknown key is `present: false`, not an error. Errors are fixed text: a relative `project`, an invalid key, an unreachable socket, or a project whose scopes cannot be derived from its git remote.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `key` | `string` | yes |
+| `project` | `string` | yes |
 
 ## Sibling Daemon MCP Surfaces
 
