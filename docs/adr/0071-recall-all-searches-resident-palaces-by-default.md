@@ -212,7 +212,7 @@ Vetted against `docs/adr/INDEX.md` and PR #9176 on 2026-10-07:
 - **#4637 / #7125 rule in `helpers.rs:240-243`:** Conflict, resolved by this
   ADR (ruling 1). The rule becomes the `scope: "all"` behaviour.
 - **ADR-0068 / 0069 / 0070 (memory sync, PR #9176):** Consistent. This ADR
-  is numbered after them and merges after PR #9176.
+  is numbered after them and follows them on main (PR #9176 merged as 81981f465b).
 
 ## References
 
