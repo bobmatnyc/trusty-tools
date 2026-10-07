@@ -805,6 +805,10 @@ async fn doctor_renders_reasons_posture_and_headless_readiness() {
                  "reason": "cli_not_installed", "detail": "`keeper` is not installed"},
             ],
             "headless": {"onepassword_token": token},
+            "tools": [
+                {"id": "bitwarden", "program": "bw", "installed": true, "path": "/usr/bin/bw"},
+                {"id": "vault", "program": "vault", "installed": false},
+            ],
         }))
         .expect("decode")
     };
@@ -827,7 +831,15 @@ async fn doctor_renders_reasons_posture_and_headless_readiness() {
         text.contains("backend onepassword: available [READ, WRITE]\n"),
         "{text}"
     );
-    assert!(text.ends_with("token at server start: yes\n"), "{text}");
+    assert!(text.contains("token at server start: yes\n"), "{text}");
+    // #7519 P4: DOC-74 §7's tools, installed or not.
+    assert!(
+        text.ends_with(
+            "tool bitwarden (bw): installed at /usr/bin/bw; no trusty-secrets backend\n\
+             tools not installed: vault\n"
+        ),
+        "{text}"
+    );
 }
 
 #[tokio::test]

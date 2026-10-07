@@ -101,7 +101,9 @@ async fn run(
         idle.as_secs()
     );
     // #7519 P4: presence only; the token itself goes to the factory below.
-    let start = StartEnv::default().with_onepassword_token(onepassword_token.is_some());
+    let start = StartEnv::default()
+        .with_onepassword_token(onepassword_token.is_some())
+        .with_search_path(search_path.clone());
     // #7519: CLI backends read the account's own machine config (ruling
     // 74) and the template directory these settings name, and take the
     // token and `PATH` captured at start.

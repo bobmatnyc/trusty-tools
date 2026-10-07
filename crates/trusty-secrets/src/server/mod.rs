@@ -36,6 +36,7 @@ mod methods;
 pub mod project;
 mod router;
 pub mod settings;
+mod tools;
 
 pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
@@ -53,6 +54,7 @@ pub use settings::{
     AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,
     INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError, template_root_beside,
 };
+pub use tools::DetectedTool;
 
 #[cfg(test)]
 #[path = "server_tests.rs"]

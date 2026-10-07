@@ -266,3 +266,35 @@ async fn binary_doctor_reports_token_presence_and_never_the_token() {
     assert!(!stderr.is_empty(), "the server wrote no stderr at all");
     assert!(!stderr.contains(TOKEN), "{stderr}");
 }
+
+/// Why: #7519 P4, DOC-74 §7 — the real binary detects an unsupported tool
+/// on the `PATH` it started with, and runs nothing it finds.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_doctor_detects_tools_on_its_start_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = paths();
+    let bin = p.tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let marker = p.tmp.path().join("doppler-ran");
+    let doppler = bin.join("doppler");
+    std::fs::write(&doppler, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&doppler, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = server_command(&p, 1)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .spawn()
+        .unwrap();
+    wait_serving(&p.socket).await;
+    let report = doctor(&p.socket).await;
+    let found = report["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "doppler")
+        .cloned()
+        .unwrap();
+    assert_eq!(found["installed"], json!(true));
+    assert_eq!(found["path"], json!(doppler.display().to_string()));
+    assert!(wait_exit(&mut child, Duration::from_secs(15)).success());
+    assert!(!marker.exists(), "the server ran doppler");
+}

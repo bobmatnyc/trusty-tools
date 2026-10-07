@@ -145,19 +145,30 @@ pub(crate) fn open_local(
 /// Why: A10 — the binary takes the 1Password service-account token out of
 /// its environment before any thread starts and hands it to the factory;
 /// doctor may report only that it was there (owner ruling Q1).
-/// What: presence flags only, so `Debug` and every copy carry no value.
-/// Test: `doctor_reports_token_presence_and_never_the_token`.
+/// What: the token's presence, never its value, and the `PATH` doctor's
+/// tool detection searches (DOC-74 §7), so `Debug` carries no secret.
+/// Test: `doctor_reports_token_presence_and_never_the_token`,
+/// `doctor_detects_unsupported_tools_on_the_start_path_without_running_them`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct StartEnv {
     /// Whether `OP_SERVICE_ACCOUNT_TOKEN` was set and non-empty at start.
     pub onepassword_token: bool,
+    /// The `PATH` the binary read at start; only its absolute entries are
+    /// searched.
+    pub search_path: Option<OsString>,
 }
 
 impl StartEnv {
     /// This environment with the 1Password token's presence set.
     pub fn with_onepassword_token(mut self, present: bool) -> Self {
         self.onepassword_token = present;
+        self
+    }
+
+    /// This environment with the `PATH` read at start.
+    pub fn with_search_path(mut self, path: Option<OsString>) -> Self {
+        self.search_path = path;
         self
     }
 }

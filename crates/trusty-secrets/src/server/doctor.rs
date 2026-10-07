@@ -15,6 +15,9 @@
 //! text as the detail. A project whose tracked config is refused still gets
 //! a report; its selected row carries [`Unavailable::TrackedSettingRefused`].
 //! Headless readiness is whether the token was present at start, yes or no.
+//! DOC-74 §7's unsupported tools (`bw`, `vault`, `pass`, `gopass`, `doppler`,
+//! `infisical`) are listed by an absolute-`PATH` lookup that runs nothing
+//! (`tools.rs`).
 //! Test: `doctor_tests.rs` beside this module,
 //! `server_doctor_reports_backends_and_paths_only`,
 //! `server_doctor_lists_onepassword_without_spawning`,
@@ -29,6 +32,7 @@ use super::errors::ErrorKind;
 use super::methods::to_json;
 use super::project::{self, ProjectContext, RefusedProject};
 use super::router::State;
+use super::tools::{self, DetectedTool};
 use crate::api::{BackendId, SecretsError};
 use crate::store::config::{self, MachineSecretsConfig};
 use crate::store::{Capabilities, cli_backends};
@@ -244,6 +248,10 @@ pub struct DoctorResponse {
     /// Headless readiness. `None` only from a server older than #7519 P4.
     #[serde(default)]
     pub headless: Option<HeadlessReadiness>,
+    /// DOC-74 §7's detected-but-unsupported tools. Empty from a server
+    /// older than #7519 P4.
+    #[serde(default)]
+    pub tools: Vec<DetectedTool>,
 }
 
 /// What a doctor call reports about its project, if it named one.
@@ -423,6 +431,8 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
         headless: Some(HeadlessReadiness {
             onepassword_token: state.start.onepassword_token,
         }),
+        // #7519 P4: DOC-74 §7 — a PATH lookup only; nothing is spawned.
+        tools: tools::detect(state.start.search_path.as_deref()),
     })
 }
 

@@ -171,6 +171,11 @@ persistent login are not detected; a headless Keeper call made before that
 human step fails as `backend_locked`. Doctor reads no secret, spawns no
 process and writes no audit record.
 
+`tools` lists secrets tools trusty-secrets has no backend for — `bw`,
+`vault`, `pass`, `gopass`, `doppler` and `infisical` — as installed or not,
+with the path found. The lookup searches only the absolute entries of the
+`PATH` the server started with, and runs nothing it finds.
+
 ## 1Password
 
 With the `cli-backends` feature (Unix), the `onepassword` backend keeps values

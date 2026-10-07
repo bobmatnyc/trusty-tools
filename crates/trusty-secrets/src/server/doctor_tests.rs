@@ -471,6 +471,61 @@ async fn doctor_answer_decodes_on_an_old_client_and_an_old_answer_on_a_new_one()
         (decoded.posture, decoded.account_config, decoded.headless),
         (None, None, None)
     );
+    assert!(decoded.tools.is_empty());
+}
+
+/// Why: #7519 P4, DOC-74 §7 and owner amendment 5 — doctor lists bw, vault,
+/// pass, gopass, doppler and infisical as installed or not, from the
+/// absolute entries of the `PATH` read at start, and runs none of them.
+/// A relative entry and a file without an execute bit find nothing.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_detects_unsupported_tools_on_the_start_path_without_running_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    let bin = fx.tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let marker = fx.tmp.path().join("tool-ran");
+    for name in ["bw", "gopass", "pass"] {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+        let mode = if name == "pass" { 0o644 } else { 0o755 };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    // `doppler` only under a relative entry, which names the working directory.
+    let search = std::env::join_paths([PathBuf::from("relative/bin"), bin.clone()]).unwrap();
+    let mut state = fx.state(fx.backends());
+    state.start = StartEnv::default().with_search_path(Some(search));
+    let server = fx.start_state(state).await;
+    let report = doctor(&fx, Value::Null).await;
+    server.stop().await;
+    let tools: Vec<_> = report
+        .tools
+        .iter()
+        .map(|t| (t.id.as_str(), t.program.as_str(), t.installed, t.supported))
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            ("bitwarden", "bw", true, false),
+            ("vault", "vault", false, false),
+            ("pass", "pass", false, false),
+            ("gopass", "gopass", true, false),
+            ("doppler", "doppler", false, false),
+            ("infisical", "infisical", false, false),
+        ]
+    );
+    assert_eq!(report.tools[0].path, Some(bin.join("bw")));
+    assert_eq!(report.tools[1].path, None);
+    assert!(!marker.exists(), "doctor ran a detected tool");
+
+    // No `PATH` at start finds nothing.
+    let fx = fixture();
+    let server = fx.start().await;
+    let report = doctor(&fx, Value::Null).await;
+    server.stop().await;
+    assert_eq!(report.tools.len(), 6);
+    assert!(report.tools.iter().all(|t| !t.installed));
 }
 
 /// Why: #7519 P4 — a reason added later decodes as `Other` on this client.

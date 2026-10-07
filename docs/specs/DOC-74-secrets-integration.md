@@ -334,6 +334,11 @@ project file's `secrets.vault` shares a vault only among one owner's repos
 > - Headless readiness is one yes/no: whether `OP_SERVICE_ACCOUNT_TOKEN` was
 >   set when the server started (§13 Q4). Keeper device approval and
 >   persistent login are not detected (#7519 P3 ruling 6).
+> - The unsupported tools in the table below (`bw`, `vault`, `pass`,
+>   `gopass`, `doppler`, `infisical`) are reported as `tools`: installed or
+>   not, and where, from the absolute entries of the `PATH` the server read
+>   at start. Nothing is run, so nothing can prompt or unlock. `ksm` and the
+>   Running/Configured columns are not probed.
 
 **API** (trusty-common, original design, not built):
 

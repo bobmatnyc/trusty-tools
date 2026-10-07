@@ -68,12 +68,13 @@ async fn ask(ctx: &Ctx<'_>, out: &mut dyn Write) -> anyhow::Result<DoctorRespons
 }
 
 /// Write the report: paths, the selection and its posture, one line per
-/// backend, then headless readiness.
+/// backend, headless readiness, then DOC-74 §7's unsupported tools: one line
+/// per installed tool and one listing the rest.
 pub(super) fn render(report: &DoctorResponse, out: &mut dyn Write) -> anyhow::Result<()> {
     writeln!(out, "socket {}: reachable", report.socket.display())?;
     writeln!(out, "index: {}", report.index_root.display())?;
     writeln!(out, "machine config: {}", report.machine_config.display())?;
-    // #7519 P4: the file that enables a CLI backend, when it differs in role.
+    // #7519 P4: the one file that enables a CLI backend (ruling 74).
     if let Some(account) = &report.account_config {
         writeln!(out, "account machine config: {}", account.display())?;
     }
@@ -94,6 +95,28 @@ pub(super) fn render(report: &DoctorResponse, out: &mut dyn Write) -> anyhow::Re
             out,
             "headless: 1Password service-account token at server start: {present}"
         )?;
+    }
+    // #7519 P4: DOC-74 §7 — report-only; trusty-secrets has no backend for these.
+    let mut absent = Vec::new();
+    for tool in &report.tools {
+        match &tool.path {
+            Some(path) if tool.installed => writeln!(
+                out,
+                "tool {} ({}): installed at {}; {}",
+                tool.id,
+                tool.program,
+                path.display(),
+                if tool.supported {
+                    "supported"
+                } else {
+                    "no trusty-secrets backend"
+                }
+            )?,
+            _ => absent.push(tool.program.as_str()),
+        }
+    }
+    if !absent.is_empty() {
+        writeln!(out, "tools not installed: {}", absent.join(", "))?;
     }
     Ok(())
 }
