@@ -19,6 +19,7 @@
 //! `dream_recall_benchmark_returns_score_with_drawers`, and
 //! `dream_recall_benchmark_compression_ratio_math` in `dream::tests`.
 
+use crate::memory_core::embed::Embedder;
 use crate::memory_core::retrieval::{PalaceHandle, shared_embedder};
 use crate::memory_core::store::vector::VectorStore;
 use std::sync::Arc;
@@ -78,7 +79,10 @@ pub(super) const BENCHMARK_QUERIES: &[&str] = &[
 /// seeds the palace and asserts a `Some(score)` that is finite and
 /// non-negative; the exact upper bound depends on the vector store's
 /// distance metric.
-pub(super) async fn run_benchmark(handle: &Arc<PalaceHandle>) -> Option<f64> {
+pub(super) async fn run_benchmark(
+    handle: &Arc<PalaceHandle>,
+    embedder: Option<Arc<dyn Embedder + Send + Sync>>,
+) -> Option<f64> {
     // Guard: if there are no drawers the vector store returns nothing useful.
     if handle.drawers.read().is_empty() {
         tracing::debug!(
@@ -88,7 +92,12 @@ pub(super) async fn run_benchmark(handle: &Arc<PalaceHandle>) -> Option<f64> {
         return None;
     }
 
-    let embedder = match shared_embedder().await {
+    // #9391: `Some` is a test dreamer's own embedder.
+    let resolved = match embedder {
+        Some(embedder) => Ok(embedder),
+        None => shared_embedder().await,
+    };
+    let embedder = match resolved {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(

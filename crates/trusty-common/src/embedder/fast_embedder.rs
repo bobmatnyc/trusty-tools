@@ -757,15 +757,19 @@ impl super::types::Embedder for FastEmbedder {
     /// what that costs in bytes.
     /// What: reads the cache under its lock, collecting misses with their input
     /// slots; embeds only the misses, in
-    /// [`resolve_embed_onnx_batch`]-sized batches, on a blocking thread holding
-    /// the model mutex; then caches each vector and reassembles the result in
-    /// INPUT order, cache hits and freshly computed vectors interleaved. An
-    /// all-zero vector from any batch fails the whole call, as does an error or
-    /// a wrong-length result from any single batch.
+    /// [`resolve_embed_onnx_batch`]-sized batches (#9391: shortened to stay
+    /// within [`EMBED_BATCH_BYTE_BUDGET`](super::types::EMBED_BATCH_BYTE_BUDGET)),
+    /// on a blocking thread holding the model mutex; then caches each vector
+    /// and reassembles the result in INPUT order, cache hits and freshly
+    /// computed vectors interleaved. An all-zero vector from any batch fails
+    /// the whole call, as does an error or a wrong-length result from any
+    /// single batch.
     /// Test: `bounded_batches_never_exceed_the_ceiling` and its siblings in
     /// `batching_tests.rs` cover the batching contract without a model;
-    /// `fastembed_returns_correct_dim` and `fastembed_cache_hit_is_idempotent`
-    /// (`#[ignore]`, real ONNX) cover the end-to-end path.
+    /// `a_budget_split_moves_no_vector_beyond_main_rounding` (real model) pins
+    /// the budget's output; `fastembed_returns_correct_dim` and
+    /// `fastembed_cache_hit_is_idempotent` (`#[ignore]`, real ONNX) cover the
+    /// end-to-end path.
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());

@@ -13,7 +13,10 @@
 //! sharing the module tree's `ENV_LOCK` for the env-touching ones.
 //! Test: this file.
 
-use super::types::{DEFAULT_EMBED_ONNX_BATCH, embed_in_bounded_batches, resolve_embed_onnx_batch};
+use super::types::{
+    DEFAULT_EMBED_ONNX_BATCH, EMBED_BATCH_BYTE_BUDGET, EMBED_INPUT_BYTE_CAP,
+    embed_in_bounded_batches, resolve_embed_onnx_batch,
+};
 use crate::embedder::test_env::{EnvVarGuard, env_lock};
 use anyhow::Result;
 use std::cell::RefCell;
@@ -318,4 +321,59 @@ fn a_resolved_env_ceiling_drives_the_chunking() -> Result<()> {
 
     assert_eq!(log.batch_sizes(), vec![100; 6]);
     Ok(())
+}
+
+/// Why (#9391): a batch pads to its longest input, so one long drawer sized
+/// every attention tensor of its 16-input call at up to 512 tokens. The budget
+/// bounds inputs-per-call × longest input instead of truncating anything.
+/// What: 16 inputs of 2000 bytes reach the stub as four calls of 4, and 15
+/// short inputs followed by one long one as calls of 15 and 1. Every input
+/// reaches the stub byte-for-byte and in order. Without the budget both sets
+/// are a single call of 16, which fails the first assertion.
+/// Test: itself.
+#[test]
+fn long_inputs_split_under_the_byte_budget() {
+    let long: Vec<String> = (0..16)
+        .map(|i| format!("{i:04}{}", "x".repeat(1996)))
+        .collect();
+    let log = CallLog::default();
+    let seen = RefCell::new(Vec::new());
+    let out = embed_in_bounded_batches(&long, DEFAULT_EMBED_ONNX_BATCH, |chunk, ceiling| {
+        log.record(chunk, ceiling);
+        seen.borrow_mut().extend(chunk.iter().cloned());
+        Ok(echo_vectors(chunk))
+    })
+    .expect("budgeted embed must succeed");
+    let per_call = EMBED_BATCH_BYTE_BUDGET / 2000;
+    assert_eq!(
+        log.batch_sizes(),
+        vec![per_call; 16 / per_call],
+        "2000-byte inputs must split so count × longest stays within the budget"
+    );
+    assert_eq!(
+        *seen.borrow(),
+        long,
+        "inputs must reach ONNX unaltered and in order"
+    );
+    assert_eq!(out.len(), 16);
+    assert!(
+        log.ceilings()
+            .iter()
+            .all(|c| *c == DEFAULT_EMBED_ONNX_BATCH),
+        "the ceiling handed to fastembed is unchanged by the budget"
+    );
+
+    let mut mixed = inputs(15);
+    mixed.push("y".repeat(EMBED_INPUT_BYTE_CAP * 4));
+    let log = CallLog::default();
+    embed_in_bounded_batches(&mixed, DEFAULT_EMBED_ONNX_BATCH, |chunk, ceiling| {
+        log.record(chunk, ceiling);
+        Ok(echo_vectors(chunk))
+    })
+    .expect("budgeted embed must succeed");
+    assert_eq!(
+        log.batch_sizes(),
+        vec![15, 1],
+        "one long input must not pad fifteen short ones to its length"
+    );
 }

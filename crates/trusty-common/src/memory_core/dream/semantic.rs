@@ -257,13 +257,49 @@ async fn apply_alias_and_flag_passes(
     }
 }
 
+/// What [`semantic_consolidation_pass`] did, and whether it covered the palace.
+///
+/// Why (#9391): a pass that returned no canonicals because it was parked, its
+/// config failed to build, or an inference call failed looks the same in the
+/// counts as one that ran and found nothing. Only the second may settle the
+/// palace, so the pass reports which one it was.
+/// What: the three counts the cycle records, plus `settles` — `true` when the
+/// pass ran to completion or is disabled by config.
+/// Test: `settled_corpus_tests::a_parked_consolidator_does_not_settle_the_palace`,
+/// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SemanticPassOutcome {
+    pub(super) consolidated: usize,
+    pub(super) llm_calls: usize,
+    pub(super) cache_hits: usize,
+    pub(super) settles: bool,
+}
+
+impl SemanticPassOutcome {
+    /// A pass that did no work and may settle the palace: disabled by config,
+    /// or nothing to consolidate.
+    pub(super) const SETTLED_NOOP: Self = Self {
+        consolidated: 0,
+        llm_calls: 0,
+        cache_hits: 0,
+        settles: true,
+    };
+    /// A pass that did no work and must not settle the palace.
+    const UNSETTLED_NOOP: Self = Self {
+        consolidated: 0,
+        llm_calls: 0,
+        cache_hits: 0,
+        settles: false,
+    };
+}
+
 /// Optional inference-backed semantic consolidation pass.
 ///
 /// Why: the NLP-only passes miss semantic equivalence (aliases, paraphrases,
 /// near-duplicate triples expressed differently). This phase delegates
 /// canonicalization to a cheap LLM, preserving original drawers and adding
 /// canonical replacements with `superseded_by` links in the KG.
-/// What: returns `(0, 0, 0)` at DEBUG when `semantic.enabled` is false, which
+/// What: returns zero counts at DEBUG when `semantic.enabled` is false, which
 /// is the default (#5188). Otherwise runs consolidation on all current non-Task
 /// drawers, writes each canonical drawer via `handle.remember`, and records the
 /// `superseded_by` KG triple so the original drawers are traceable.
@@ -271,9 +307,11 @@ async fn apply_alias_and_flag_passes(
 /// `build_consolidator_from_config` reports the phase as enabled but unusable —
 /// no provider resolved (#5188) or a model the resolved provider cannot serve
 /// (#2593) — logs ONE `warn!` naming the model, the provider, and the config
-/// knob to fix, sets `disabled`, and returns `(0, 0, 0)`; every subsequent call
+/// knob to fix, sets `disabled`, and returns zero counts; every subsequent call
 /// short-circuits on that flag instead of rebuilding and failing every cycle.
-/// Returns `(canonical_count, llm_calls, cache_hits)`.
+/// #9391: the returned [`SemanticPassOutcome`] says whether the pass may
+/// settle the palace; only the disabled-by-config and ran-to-completion paths
+/// may.
 /// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
 /// consolidator); `dream_cycle_semantic_consolidation_no_inference`;
 /// `dream_semantic_no_provider_parks_without_local_fallback`;
@@ -283,7 +321,7 @@ pub(super) async fn semantic_consolidation_pass(
     config: &DreamConfig,
     injected: Option<Arc<SemanticConsolidator>>,
     disabled: &AtomicBool,
-) -> (usize, usize, usize) {
+) -> SemanticPassOutcome {
     // The idle cycle honours the `semantic.enabled` switch even when a
     // consolidator is injected (tests rely on this): disabling the phase in
     // config must skip it entirely.
@@ -292,7 +330,7 @@ pub(super) async fn semantic_consolidation_pass(
             palace = %handle.id,
             "skipping semantic consolidation: disabled in config"
         );
-        return (0, 0, 0);
+        return SemanticPassOutcome::SETTLED_NOOP;
     }
 
     // Use the injected consolidator (test path) or build one from config.
@@ -302,8 +340,9 @@ pub(super) async fn semantic_consolidation_pass(
             if disabled.load(Ordering::Relaxed) {
                 // Already failed loud once for this palace's Dreamer
                 // lifetime; skip without rebuilding or retrying the
-                // known-bad config every cycle (issue #2593).
-                return (0, 0, 0);
+                // known-bad config every cycle (issue #2593). #9391: a parked
+                // pass examined nothing, so it never settles the palace.
+                return SemanticPassOutcome::UNSETTLED_NOOP;
             }
             match build_consolidator_from_config(config) {
                 Ok(Some(c)) => c,
@@ -312,7 +351,7 @@ pub(super) async fn semantic_consolidation_pass(
                         palace = %handle.id,
                         "skipping semantic consolidation: disabled in config"
                     );
-                    return (0, 0, 0);
+                    return SemanticPassOutcome::SETTLED_NOOP;
                 }
                 Err(e) => {
                     // #5188: one warn, then park — never a per-cycle retry of a
@@ -323,7 +362,7 @@ pub(super) async fn semantic_consolidation_pass(
                         "semantic consolidation disabled for this palace: {e:#}"
                     );
                     disabled.store(true, Ordering::Relaxed);
-                    return (0, 0, 0);
+                    return SemanticPassOutcome::UNSETTLED_NOOP;
                 }
             }
         }
@@ -339,10 +378,11 @@ pub(super) async fn semantic_consolidation_pass(
         .cloned()
         .collect();
     if snapshot.is_empty() {
-        return (0, 0, 0);
+        return SemanticPassOutcome::SETTLED_NOOP;
     }
 
-    let result = consolidator.consolidate(&snapshot).await;
+    // #9391: a run that parked or hit its call budget left batches unexamined.
+    let (result, ran_to_completion) = consolidator.consolidate_reporting(&snapshot).await;
     let (canonical_count, _superseded) = apply_consolidation_result(handle, &result).await;
 
     tracing::debug!(
@@ -355,7 +395,13 @@ pub(super) async fn semantic_consolidation_pass(
         "semantic consolidation phase complete"
     );
 
-    (canonical_count, result.llm_calls, result.cache_hits)
+    SemanticPassOutcome {
+        consolidated: canonical_count,
+        llm_calls: result.llm_calls,
+        cache_hits: result.cache_hits,
+        // #9391: a canonical that failed to write is consolidation still owed.
+        settles: ran_to_completion && canonical_count == result.canonical_drawers.len(),
+    }
 }
 
 /// On-demand, room-scoped semantic consolidation that compacts older history
