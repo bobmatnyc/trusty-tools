@@ -397,6 +397,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 toml.workspace = true
+# #7521: `tm secrets` is a client of the trusty-secrets socket. The client
+# (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
+# (`parse_dotenv` for `import`) and `api` (the method types).
+trusty-secrets = { workspace = true, features = ["server"] }
 # #8436: `tm fleet init` edits ~/.trusty-mpm/config.toml keeping comments and
 # unrelated keys; already in this crate's graph through trusty-common.
 toml_edit.workspace = true
@@ -531,6 +535,10 @@ trusty-common = { workspace = true, features = [
 # --all-targets`, in every worktree — which is the cost that mattered.
 # `scripts/check_dev_dep_edges.sh` refuses a new edge of this shape.
 tempfile.workspace = true
+# #7521: re-declared for `test-support` — the in-memory backend the
+# `tm secrets` tests serve the socket from, so no test opens the Keychain.
+# Dev-only so `MemoryBackend` never ships in a production `tm`.
+trusty-secrets = { workspace = true, features = ["server", "test-support"] }
 # #8378 PR-C: the content-cache tests build `content-vX.Y.Z.tar.gz` fixtures.
 # Both are already in this crate's normal graph through
 # `trusty-common/content-resolver`.

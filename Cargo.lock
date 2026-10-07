@@ -11613,6 +11613,7 @@ dependencies = [
  "trusty-common",
  "trusty-mcp",
  "trusty-progress",
+ "trusty-secrets",
  "unicode-width",
  "utoipa",
  "utoipa-swagger-ui",

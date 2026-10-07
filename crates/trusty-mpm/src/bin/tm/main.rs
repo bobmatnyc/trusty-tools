@@ -275,9 +275,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(Command::Env { action }) = cli.command {
         return commands::env_file::run(action);
     }
+    // #7521: `tm secrets` talks to the trusty-secrets socket, not the daemon.
     // #8378 PR-C: `tm content` is daemon-less as well.
-    if let Some(Command::Content { action }) = cli.command {
-        return commands::content::run(action).await;
+    match cli.command {
+        Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
+        Some(Command::Content { action }) => return commands::content::run(action).await,
+        _ => {}
     }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
@@ -631,6 +634,7 @@ async fn main() -> anyhow::Result<()> {
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
         Some(Command::Env { action }) => commands::env_file::run(action),
+        Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,
         Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
