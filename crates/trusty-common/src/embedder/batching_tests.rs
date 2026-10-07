@@ -13,7 +13,10 @@
 //! sharing the module tree's `ENV_LOCK` for the env-touching ones.
 //! Test: this file.
 
-use super::types::{DEFAULT_EMBED_ONNX_BATCH, embed_in_bounded_batches, resolve_embed_onnx_batch};
+use super::fast_embedder::FastEmbedder;
+use super::types::{
+    DEFAULT_EMBED_ONNX_BATCH, MAX_EMBED_TOKENS, embed_in_bounded_batches, resolve_embed_onnx_batch,
+};
 use crate::embedder::test_env::{EnvVarGuard, env_lock};
 use anyhow::Result;
 use std::cell::RefCell;
@@ -318,4 +321,36 @@ fn a_resolved_env_ceiling_drives_the_chunking() -> Result<()> {
 
     assert_eq!(log.batch_sizes(), vec![100; 6]);
     Ok(())
+}
+
+/// Why (#9391): the sequence length is the other axis of every attention
+/// tensor. Without an explicit bound fastembed truncates at 512, and one long
+/// drawer pads its whole batch to that length.
+/// What: builds the session options for both models `FastEmbedder` can load
+/// and asserts each truncates at [`MAX_EMBED_TOKENS`], and that the bound is
+/// 256. Removing `with_max_length` from `init_options` leaves fastembed's 512
+/// and fails the first assertion; raising the constant fails the second.
+/// Test: itself.
+#[test]
+fn every_session_truncates_input_at_the_token_bound() {
+    // `init_options` reads HOME and writes FASTEMBED_CACHE_DIR. Lock order:
+    // crate-wide, then `env_lock()` (see `resolve_fastembed_cache_dir_prefers_env_vars`).
+    let _home = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = env_lock();
+    for model in [
+        fastembed::EmbeddingModel::AllMiniLML6V2,
+        fastembed::EmbeddingModel::AllMiniLML6V2Q,
+    ] {
+        let (opts, _provider) = FastEmbedder::init_options(model.clone());
+        assert_eq!(
+            opts.max_length, MAX_EMBED_TOKENS,
+            "{model:?}: every session must truncate input at the token bound"
+        );
+    }
+    assert_eq!(
+        MAX_EMBED_TOKENS, 256,
+        "all-MiniLM-L6-v2's sentence-transformers limit is 256 word pieces"
+    );
 }

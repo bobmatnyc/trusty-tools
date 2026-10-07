@@ -9,7 +9,8 @@
 //! `resolve_expected_provider`, `is_zero_vector`, and — since #7106 — the
 //! per-inference batch ceiling (`DEFAULT_EMBED_ONNX_BATCH`,
 //! `resolve_embed_onnx_batch`, `embed_in_bounded_batches`) that every
-//! `FastEmbedder::embed_batch` caller is funnelled through.
+//! `FastEmbedder::embed_batch` caller is funnelled through, and since #9391
+//! the per-input token bound (`MAX_EMBED_TOKENS`).
 //! Test: tests in `mod.rs` cover all exported symbols from this file; the
 //! #7106 batching primitives are covered by `batching_tests.rs`.
 
@@ -530,6 +531,19 @@ pub(crate) fn is_zero_vector(vector: &[f32]) -> bool {
 /// `TRUSTY_EMBED_ONNX_BATCH` is unset or unusable.
 /// Test: `embed_onnx_batch_defaults_when_unset`.
 pub(crate) const DEFAULT_EMBED_ONNX_BATCH: usize = 16;
+
+/// Tokens of one input that reach ONNX; the rest is truncated (#9391).
+///
+/// Why: fastembed's default is 512, and a batch pads to its longest member, so
+/// one long drawer sized every attention tensor of its batch at 512². The
+/// sentence-transformers config for all-MiniLM-L6-v2 truncates at 256 word
+/// pieces (`max_seq_length`), and the model was fine-tuned on 128, so tokens
+/// past 256 add little to the vector. At 256 each attention tensor is a
+/// quarter of its 512 size.
+/// What: `256`, counting the `[CLS]`/`[SEP]` tokens. An input that tokenizes
+/// to 256 or fewer embeds as before; a longer one embeds its first 256 tokens.
+/// Test: `every_session_truncates_input_at_the_token_bound`.
+pub(crate) const MAX_EMBED_TOKENS: usize = 256;
 
 /// Resolve the per-inference ONNX batch bound from the process environment.
 ///

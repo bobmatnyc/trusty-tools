@@ -1,0 +1,2 @@
+Changed
+- `FastEmbedder` truncates each input at 256 tokens instead of fastembed's default of 512. This is the limit sentence-transformers applies to all-MiniLM-L6-v2, and it shrinks each attention tensor of an ONNX call to a quarter of its 512-token size. An input of 256 tokens or fewer embeds as before; a longer one embeds only its first 256 tokens. Vectors already stored for longer inputs were computed from up to 512 tokens and are not recomputed (#9391).

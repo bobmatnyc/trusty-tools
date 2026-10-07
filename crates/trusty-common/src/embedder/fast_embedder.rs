@@ -15,7 +15,7 @@
 //! that call `FastEmbedder::init_options` directly.
 
 use super::types::{
-    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions,
+    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, MAX_EMBED_TOKENS, OrtThreadingOptions,
     embed_in_bounded_batches, is_zero_vector, resolve_embed_onnx_batch,
     resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
@@ -374,10 +374,11 @@ impl FastEmbedder {
     /// request. On non-Apple platforms, or if CoreML registration fails for
     /// any reason, we transparently fall back to the default CPU provider.
     /// What: returns `(TextInitOptions, ExecutionProvider)` where the tag
-    /// reflects which backend was actually wired in.
-    /// Test: on an M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu`
-    /// is set (then `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is
-    /// always `Cpu`.
+    /// reflects which backend was actually wired in. Every option set
+    /// truncates input at [`MAX_EMBED_TOKENS`] (#9391).
+    /// Test: `every_session_truncates_input_at_the_token_bound`; on an
+    /// M-series Mac the tag is `Cpu` unless `TRUSTY_DEVICE=gpu` is set (then
+    /// `CoreML`/`CoreMLAne`); on Intel/Linux/Windows the tag is always `Cpu`.
     pub(super) fn init_options(model: EmbeddingModel) -> (TextInitOptions, ExecutionProvider) {
         use ort::execution_providers::ExecutionProviderDispatch;
 
@@ -405,7 +406,10 @@ impl FastEmbedder {
         unsafe {
             std::env::set_var("FASTEMBED_CACHE_DIR", &cache_dir);
         }
-        let opts = TextInitOptions::new(model).with_cache_dir(cache_dir);
+        // #9391: an explicit token bound, not fastembed's 512 default.
+        let opts = TextInitOptions::new(model)
+            .with_cache_dir(cache_dir)
+            .with_max_length(MAX_EMBED_TOKENS);
 
         // Always register an explicit CPU EP with the memory arena DISABLED.
         //
