@@ -7,7 +7,8 @@
 //! source must fail loud in each of them.
 //! What: [`agent_roster`] and [`harness_doc`] resolve the dev override from the
 //! cwd (a trusty-tools checkout wins), else the bundle installed by `tm content
-//! install`. Every failure is an [`AgentContentError`] naming the fix.
+//! update`. The framework-content resolvers fetch that bundle on first use
+//! (#9396). Every failure is an [`AgentContentError`] naming the fix.
 //! Functions tests drive hermetically take an [`AgentRoster`] parameter instead.
 //! Test: `agent_roster_in_an_empty_cache_is_not_installed`,
 //! `the_checkout_roster_resolves_from_inside_the_checkout`.
@@ -18,6 +19,8 @@ pub use trusty_agents_common::agent_content::{AgentContentError, AgentRoster, De
 use trusty_agents_common::agent_content::{resolve_content, resolve_content_in};
 use trusty_agents_common::harness_doc::HarnessDoc;
 use trusty_common::content::find_dev_checkout;
+
+use crate::content::first_use::resolve_or_fetch;
 
 pub use crate::core::framework_content::FrameworkContent;
 
@@ -73,8 +76,17 @@ pub fn harness_doc() -> Result<HarnessDoc, AgentContentError> {
 }
 
 /// trusty-mpm's skills and instructions, resolved like [`agent_roster`] (#9012).
+///
+/// #9396: with nothing installed and no checkout, the content release is
+/// fetched once first ([`resolve_or_fetch`]).
 pub fn framework_content() -> Result<FrameworkContent, AgentContentError> {
-    FrameworkContent::load(&resolve_content(dev_override())?)
+    FrameworkContent::load(&resolve_or_fetch(dev_override())?)
+}
+
+/// [`agent_roster`], fetching the content release on first use (#9396): the
+/// `tm install` gate, which reads the roster before anything else.
+pub fn agent_roster_or_fetch() -> Result<AgentRoster, AgentContentError> {
+    AgentRoster::load(&resolve_or_fetch(dev_override())?)
 }
 
 /// [`framework_content`] against an explicit cache directory and override.
@@ -93,8 +105,10 @@ pub fn framework_content_in(
 /// What: the trusted checkout enclosing `dir`, else the one enclosing this
 /// process's cwd (the rule [`agent_roster`] applies), else the installed
 /// bundle. A checkout that is found is the source; a failure reading it is
-/// returned, never answered by another source.
-/// Test: `framework_content_resolves_from_the_named_dir`.
+/// returned, never answered by another source. #9396: with no checkout and
+/// no lock, the content release is fetched once ([`resolve_or_fetch`]).
+/// Test: `framework_content_resolves_from_the_named_dir`;
+/// `missing_lock_fetches_the_release_once` (the fetch).
 pub fn framework_content_for(dir: &Path) -> Result<FrameworkContent, AgentContentError> {
     let checkout = find_dev_checkout(dir).or_else(|| {
         std::env::current_dir()
@@ -103,7 +117,8 @@ pub fn framework_content_for(dir: &Path) -> Result<FrameworkContent, AgentConten
     });
     let content = match checkout {
         Some(root) => resolve_content(DevOverride::At(root))?,
-        None => resolve_content(DevOverride::Off)?,
+        // #9396: the session-provisioning path fetches on first use.
+        None => resolve_or_fetch(DevOverride::Off)?,
     };
     FrameworkContent::load(&content)
 }

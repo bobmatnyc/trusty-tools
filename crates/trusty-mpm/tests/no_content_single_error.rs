@@ -12,7 +12,8 @@
 //! remote (the in-place path that provisions in this process) under an empty
 //! `$HOME`, optionally seeded with a stale agent source, and checks the exit
 //! status, that no agent reached a deploy tier, and the output lines that name
-//! the remedy.
+//! the remedy. #9396: that line also names the `TRUSTY_CONTENT_OFFLINE`
+//! switch the helper sets.
 //! Test: this file IS the test.
 
 use std::path::Path;
@@ -103,6 +104,29 @@ fn sessions_start_without_content_prints_one_line_naming_the_remedy() {
         remedy[0].to_ascii_lowercase().starts_with("error:"),
         "{}",
         remedy[0]
+    );
+    // #9396: the remedy named first is `tm content update`.
+    assert!(remedy[0].contains("tm content update"), "{}", remedy[0]);
+}
+
+/// #9396: with `TRUSTY_CONTENT_OFFLINE=1` set (the helper sets it) and no lock,
+/// the one error line says the fetch was skipped because of the switch, and
+/// names both remedies: `tm content update` and `tm content install --from`.
+#[test]
+fn sessions_start_offline_names_the_switch_and_both_remedies() {
+    let (home, project) = scratch_home_and_project();
+    let (ok, stdout, stderr) = sessions_start(home.path(), project.path());
+    assert!(!ok, "stdout: {stdout}\nstderr: {stderr}");
+    let line = stdout
+        .lines()
+        .chain(stderr.lines())
+        .find(|l| l.contains("tm content install"))
+        .unwrap_or_else(|| panic!("no remedy line\nstdout: {stdout}\nstderr: {stderr}"));
+    assert!(line.contains("TRUSTY_CONTENT_OFFLINE=1"), "{line}");
+    assert!(line.contains("tm content update"), "{line}");
+    assert!(
+        line.contains("tm content install --from <bundle.tar.gz>"),
+        "{line}"
     );
 }
 

@@ -43,6 +43,9 @@ pub(crate) fn fake_checkout(root: &Path) {
 
 /// #9011: with no checkout and no lock, resolution fails and names the fix.
 /// It never yields an empty source a caller could read as "no agents".
+/// #9396: the fix named first is `tm content update`; the offline
+/// `tm content install --from` stays as the alternative, for every
+/// not-installed arm.
 #[test]
 fn not_installed_names_tm_content_install() {
     let cache = tempfile::tempdir().expect("tempdir");
@@ -51,7 +54,19 @@ fn not_installed_names_tm_content_install() {
         matches!(err, AgentContentError::NotInstalled { .. }),
         "got {err:?}"
     );
-    assert!(err.to_string().contains("tm content install"), "{err}");
+    let fetch_failed = AgentContentError::FetchFailed {
+        reason: "could not reach api.github.com".to_string(),
+    };
+    assert!(fetch_failed.is_not_installed());
+    for err in [err, AgentContentError::NoCacheDir, fetch_failed] {
+        let msg = err.to_string();
+        assert!(msg.contains("tm content install"), "{msg}");
+        assert!(msg.contains("run `tm content update`"), "{msg}");
+        assert!(
+            msg.contains("tm content install --from <bundle.tar.gz>"),
+            "{msg}"
+        );
+    }
 }
 
 /// #9012: a present file this binary cannot use names both remedies — a
