@@ -165,7 +165,7 @@ fn onepassword_machine_pin_overrides_the_system_dirs() {
     );
     std::fs::write(&planted.machine, yaml).unwrap();
 
-    let backend = planted.open_in(&[planted.dir.clone()]).unwrap();
+    let backend = planted.open_in(std::slice::from_ref(&planted.dir)).unwrap();
     let shown = format!("{backend:?}");
     assert!(shown.contains(&pinned.display().to_string()), "{shown}");
     assert!(backend.get(&vault(), &key()).unwrap().is_none());
