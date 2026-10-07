@@ -105,6 +105,81 @@ fn config_tracked_file_backend_is_refused_on_a_keychain_build() {
     check_project_backend(Some(&tracked), &path).unwrap();
 }
 
+/// Why: #7519, owner ruling 2026-10-07 — a tracked project file may not aim
+/// a vendor CLI at an account or config directory of its choosing. Refused
+/// on every build, Keychain or not, in the brief's top-level shape and the
+/// DOC-74 §6.2 per-backend shape. The refusal never echoes the file.
+/// Red when `check_project_backend_for` lets either key through.
+/// Test: itself.
+#[test]
+fn config_tracked_cli_settings_are_refused_on_every_build() {
+    let tmp = TempDir::new().unwrap();
+    let cases = [
+        ("account", "secrets:\n  account: SENTINEL-7519-acct\n"),
+        (
+            "config_path",
+            "secrets:\n  config_path: /tmp/SENTINEL-7519-cfg\n",
+        ),
+        (
+            "onepassword.account",
+            "secrets:\n  onepassword:\n    account: SENTINEL-7519-acct\n",
+        ),
+        (
+            "keeper.config_path",
+            "secrets:\n  keeper:\n    config_path: /tmp/SENTINEL-7519-cfg\n",
+        ),
+    ];
+    for (key, body) in cases {
+        let path = write(tmp.path(), "trusty-secrets.yaml", body);
+        let tracked = load_project_at(&path).unwrap().unwrap();
+        let expected = format!(
+            "secrets config {} is tracked and may not set `{key}`: a repository could \
+             point the CLI at an account or config directory of its choosing; remove \
+             it and set it in the machine config instead",
+            path.display()
+        );
+        for keychain_compiled in [true, false] {
+            let err =
+                check_project_backend_for(Some(&tracked), &path, keychain_compiled).expect_err(key);
+            assert_eq!(err.to_string(), expected, "{key}");
+            let debug = format!("{err:?}");
+            assert!(!debug.contains("SENTINEL-7519"), "{key}: {debug}");
+        }
+        check_project_backend(Some(&tracked), &path).expect_err(key);
+    }
+}
+
+/// Why: #7519 — the untracked machine config is where `account` and
+/// `config_path` belong, so it loads with them, and a project file that
+/// names only its backend passes the tracked-file check.
+/// Test: itself.
+#[test]
+fn config_untracked_cli_settings_are_accepted() {
+    let tmp = TempDir::new().unwrap();
+    let machine_path = write(
+        tmp.path(),
+        "config.yaml",
+        "secrets:\n  default_backend: onepassword\n  account: my.1password.com\n  \
+         config_path: /home/x/.keeper/config.json\n  onepassword:\n    account: \
+         my.1password.com\n  keeper:\n    config_path: /home/x/.keeper/config.json\n",
+    );
+    let machine = load_machine_at(&machine_path).unwrap().unwrap();
+    assert_eq!(
+        resolve(None, Some(&machine)).backend.as_str(),
+        "onepassword"
+    );
+    let project_path = write(
+        tmp.path(),
+        "trusty-secrets.yaml",
+        "secrets:\n  backend: onepassword\n",
+    );
+    let project = load_project_at(&project_path).unwrap().unwrap();
+    for keychain_compiled in [true, false] {
+        check_project_backend_for(Some(&project), &project_path, keychain_compiled).unwrap();
+        check_project_backend_for(None, &project_path, keychain_compiled).unwrap();
+    }
+}
+
 fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
