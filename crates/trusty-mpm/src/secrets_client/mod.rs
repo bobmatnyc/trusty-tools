@@ -6,8 +6,7 @@
 //! request shape and the fixed error text both callers rely on live here once.
 //! What: [`with_project`] folds the project directory into a request's params;
 //! [`describe`] renders a [`ClientError`] as text that cannot carry a request
-//! field; [`rpc_kind`] reads a server refusal's machine-readable kind;
-//! [`default_client`] is the process-wide handle for the default socket;
+//! field; [`default_client`] is the process-wide handle for the default socket;
 //! [`get_ref`] backs the MCP tool. Nothing here logs a value.
 //! Test: `tests.rs` beside this module — the tool end to end through
 //! `crate::mcp::dispatch` over a real socket, plus the helpers' fixed text.
@@ -20,7 +19,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
-use trusty_secrets::server::{ClientError, ErrorKind, OnDemandSecrets, PROJECT_FIELD};
+use trusty_secrets::server::{ClientError, OnDemandSecrets, PROJECT_FIELD};
 
 mod get_ref;
 
@@ -65,14 +64,6 @@ pub fn describe(prefix: &str, error: &ClientError, socket: &Path) -> String {
         // #7521: `ClientError` is `#[non_exhaustive]`; a later variant gets
         // fixed text, never its own detail.
         _ => format!("{prefix}: trusty-secrets at {socket} failed"),
-    }
-}
-
-/// The machine-readable kind of a server refusal, e.g. `project_unresolved`.
-pub fn rpc_kind(error: &ClientError) -> Option<&'static str> {
-    match error {
-        ClientError::Rpc(e) => e.kind.map(ErrorKind::as_str),
-        _ => None,
     }
 }
 

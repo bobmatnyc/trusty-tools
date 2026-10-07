@@ -42,7 +42,6 @@ fn describe_keeps_the_cli_text_and_drops_transport_detail() {
         describe("tm secrets", &rpc, socket),
         "tm secrets: secrets.list: the key is not in that vault"
     );
-    assert_eq!(rpc_kind(&rpc), Some("not_found"));
     assert_eq!(
         describe("tm secrets", &ClientError::HomeUnavailable, socket),
         "tm secrets: the home directory is unavailable"
@@ -60,7 +59,6 @@ fn describe_keeps_the_cli_text_and_drops_transport_detail() {
         text,
         "secrets_get_ref: the request did not cross the trusty-secrets socket /run/s.sock"
     );
-    assert_eq!(rpc_kind(&transport), None);
 }
 
 /// #7522: the answer's field set is exactly DOC-74 §10.2's — nothing that
