@@ -126,8 +126,8 @@ pub(super) fn graph_candidates(k: usize, live: usize, graph_points: usize) -> us
 /// re-traverses. Terminates because the count strictly increases and stops at
 /// `graph_points`. Distinct rather than raw count because a re-upsert leaves two
 /// points under one `vector_id` and `HnswStore::search` emits each id once.
-/// Returns `(vector_id, distance)` pairs in the traversal's ascending-distance
-/// order.
+/// Returns `(vector_id, distance)` pairs sorted by ascending distance, then id
+/// (#9280), so equal distances rank the same on every build of the graph.
 ///
 /// What this does NOT repair: a live drawer the traversal cannot REACH from its
 /// descent pivot along pruned layer-0 neighbour lists. Widening the candidate
@@ -142,7 +142,8 @@ pub(super) fn graph_candidates(k: usize, live: usize, graph_points: usize) -> us
 /// traversal, which is the honest price of not handing the caller an empty
 /// result while its neighbours sit in the index.
 /// Test: `search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours`,
-/// `search_above_the_threshold_stops_widening_when_the_graph_is_exhausted`.
+/// `search_above_the_threshold_stops_widening_when_the_graph_is_exhausted`,
+/// `graph_nearest_orders_equal_distances_by_id`.
 pub(super) fn graph_nearest(
     index: &Hnsw<'static, f32, DistCosine>,
     query: &[f32],
@@ -172,6 +173,10 @@ pub(super) fn graph_nearest(
             .collect::<HashSet<u64>>()
             .len();
         if distinct >= k || want >= graph_points {
+            // #9280: `hnsw_rs` returns equal distances in heap order, which
+            // differs between two builds of the same rows.
+            let mut hits = hits;
+            hits.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
             return hits;
         }
         want = want.saturating_mul(2).min(graph_points);
