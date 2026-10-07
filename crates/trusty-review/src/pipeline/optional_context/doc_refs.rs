@@ -11,7 +11,7 @@
 
 use crate::integrations::context::contents_at_ref::validate_repo_path;
 
-/// Most `.md` tokens one body is scanned for, so a hostile body costs O(1)
+/// Most distinct doc paths one body yields, so a hostile body costs O(1)
 /// fetch planning.
 pub(crate) const MAX_DOC_PATH_CANDIDATES: usize = 64;
 
@@ -85,25 +85,30 @@ fn token_path<'a>(token: &'a str, owner: &str, repo: &str) -> Option<&'a str> {
 /// The review-doc paths `body` names, first-seen order, no repeats (#9193).
 ///
 /// Why: plan §2 — the PR body is the primary source of doc paths.
-/// What: splits `body` on prose and markdown delimiters; each token ending in
-/// `.md` (after an SLD anchor and trailing punctuation are removed) counts
-/// toward [`MAX_DOC_PATH_CANDIDATES`]; a `github.com` URL counts only as a
-/// blob URL of `owner/repo`. A candidate is kept when it passes
-/// `validate_repo_path` and [`is_doc_path`].
+/// What: splits `body` on prose and markdown delimiters; a token ending in
+/// `.md` (after an SLD anchor and trailing punctuation are removed) is a
+/// candidate, and a `github.com` URL counts only as a blob URL of
+/// `owner/repo`. A candidate is kept when it passes `validate_repo_path` and
+/// [`is_doc_path`] and is not a repeat; the scan stops at
+/// [`MAX_DOC_PATH_CANDIDATES`] kept paths, so tokens outside the allowlist
+/// never use up the budget (#9193 code-critic).
 /// Test: `extracts_adr_spec_and_sld_paths`, `sld_anchor_is_split_off`,
 /// `github_blob_url_ref_is_ignored`, `traversal_absolute_and_foreign_repo_paths_are_rejected`,
-/// `foreign_repo_comparison_is_case_insensitive`, `a_thousand_paths_scan_is_bounded`.
+/// `foreign_repo_comparison_is_case_insensitive`, `a_thousand_paths_scan_is_bounded`,
+/// `junk_md_tokens_never_crowd_out_a_doc_path`.
 pub(crate) fn extract_doc_paths(body: &str, owner: &str, repo: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let candidates = body
+    // #9193: the cap counts kept doc paths, never raw `.md` tokens.
+    let docs = body
         .split(is_delimiter)
         .filter(|t| t.contains(".md"))
-        .take(MAX_DOC_PATH_CANDIDATES);
-    for token in candidates {
-        let Some(path) = token_path(token, owner, repo) else {
-            continue;
-        };
-        if validate_repo_path(path).is_ok() && is_doc_path(path) && !out.iter().any(|p| p == path) {
+        .filter_map(|t| token_path(t, owner, repo))
+        .filter(|path| validate_repo_path(path).is_ok() && is_doc_path(path));
+    for path in docs {
+        if out.len() == MAX_DOC_PATH_CANDIDATES {
+            break;
+        }
+        if !out.iter().any(|p| p == path) {
             out.push(path.to_string());
         }
     }

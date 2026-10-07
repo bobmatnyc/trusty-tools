@@ -494,6 +494,14 @@ async fn search_down_is_unavailable_and_explicit_paths_still_read() {
         SourceState::Unavailable
     );
     assert_eq!(seen.row("spec_docs").state, SourceState::Unavailable);
+    // #9193 amendment 7: the item names the search failure as the cause.
+    let row = seen.row("spec_docs");
+    let detail = row.items.iter().find(|i| i.id == "discovery");
+    let detail = detail.and_then(|i| i.detail.as_deref()).unwrap_or_default();
+    assert!(
+        detail.starts_with("trusty-search failed:") && detail.contains("fixture: search down"),
+        "{detail}"
+    );
     assert_eq!(seen.item("spec_docs", ADR), SourceState::Used);
     assert!(seen.reviewer_user().contains("ADR_SENTINEL_9193"));
     assert_completed(&seen);

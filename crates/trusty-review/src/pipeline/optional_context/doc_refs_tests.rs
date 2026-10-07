@@ -79,6 +79,15 @@ fn a_thousand_paths_scan_is_bounded() {
     assert_eq!(got[0], "docs/adr/0000-x.md");
 }
 
+/// #9193 code-critic: 70 README/CHANGELOG tokens ahead of an ADR path do
+/// not use up the candidate budget; the ADR is still extracted.
+#[test]
+fn junk_md_tokens_never_crowd_out_a_doc_path() {
+    let mut body = "README.md CHANGELOG.md ".repeat(35);
+    body.push_str("Implements docs/adr/0061-commits.md.");
+    assert_eq!(paths(&body), ["docs/adr/0061-commits.md"]);
+}
+
 /// #9193 amendment 5: an absolute hit inside the index root is made
 /// relative; outside the root, or with no known root, it is dropped.
 #[test]
