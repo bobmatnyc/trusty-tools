@@ -8,7 +8,9 @@
 //! What: [`agent_roster`] and [`harness_doc`] resolve the dev override from the
 //! cwd (a trusty-tools checkout wins), else the bundle installed by `tm content
 //! update`. The framework-content resolvers fetch that bundle on first use
-//! (#9396). Every failure is an [`AgentContentError`] naming the fix.
+//! (#9396) — only on the session-composition and `tm install` paths; every
+//! read-only caller (doctor, retirement, savings) resolves with
+//! [`Fetch::Never`]. Every failure is an [`AgentContentError`] naming the fix.
 //! Functions tests drive hermetically take an [`AgentRoster`] parameter instead.
 //! Test: `agent_roster_in_an_empty_cache_is_not_installed`,
 //! `the_checkout_roster_resolves_from_inside_the_checkout`.
@@ -16,11 +18,102 @@
 use std::path::Path;
 
 pub use trusty_agents_common::agent_content::{AgentContentError, AgentRoster, DevOverride};
-use trusty_agents_common::agent_content::{resolve_content, resolve_content_in};
+use trusty_agents_common::agent_content::{
+    ResolvedContent, checkout_content, resolve_content, resolve_content_in,
+};
 use trusty_agents_common::harness_doc::HarnessDoc;
 use trusty_common::content::find_dev_checkout;
 
-use crate::content::first_use::resolve_or_fetch;
+use crate::content::first_use::resolve_or_fetch_at;
+
+/// Whether a resolver may fetch the content release when nothing is
+/// installed (#9396).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fetch {
+    /// Fetch once on first use: session composition and `tm install`.
+    OnFirstUse,
+    /// Never touch the network: `tm doctor` and every read-only caller.
+    Never,
+}
+
+/// The content for work on `dir`, or on the cwd when `dir` is `None`.
+///
+/// Why: one rule for every caller, so a launch, its roster and the doctor
+/// row that predicts the launch cannot resolve different sources (#9396).
+/// What: [`resolve_for_in`] with this process's cwd and the default cache.
+pub fn resolve_for(dir: Option<&Path>, fetch: Fetch) -> Result<ResolvedContent, AgentContentError> {
+    let cwd = std::env::current_dir().ok();
+    let cache = trusty_common::content::default_cache_dir();
+    resolve_for_in(dir, cwd.as_deref(), cache.as_deref(), fetch)
+}
+
+/// [`resolve_for`] with the cwd and the cache named.
+///
+/// What: the trusted checkout enclosing `dir`, else the one enclosing `cwd`,
+/// else the installed bundle in `cache`. A checkout that is found is the
+/// source; a failure reading it is returned, never answered by another
+/// source. With no checkout, [`Fetch::OnFirstUse`] fetches the release when
+/// no lock is installed; [`Fetch::Never`] answers `NotInstalled`.
+/// [`AgentContentError::NoCacheDir`] when no checkout serves and `cache` is
+/// `None`.
+/// Test: `a_managed_workspace_resolves_the_cache_once_a_bundle_lands`,
+/// `the_launch_roster_comes_from_the_launch_content`,
+/// `the_content_row_never_fetches`.
+pub fn resolve_for_in(
+    dir: Option<&Path>,
+    cwd: Option<&Path>,
+    cache: Option<&Path>,
+    fetch: Fetch,
+) -> Result<ResolvedContent, AgentContentError> {
+    let checkout = dir
+        .and_then(find_dev_checkout)
+        .or_else(|| cwd.and_then(find_dev_checkout));
+    if let Some(root) = checkout {
+        return checkout_content(&root);
+    }
+    let cache = cache.ok_or(AgentContentError::NoCacheDir)?;
+    match fetch {
+        Fetch::OnFirstUse => resolve_or_fetch_at(cache, DevOverride::Off),
+        Fetch::Never => resolve_content_in(cache, DevOverride::Off),
+    }
+}
+
+/// The PM content and the agent roster of one launch, read from one source.
+#[derive(Debug)]
+pub struct LaunchContent {
+    /// The skills and instructions.
+    pub framework: FrameworkContent,
+    /// The agent roster of the same source, or why it does not load.
+    pub roster: Result<AgentRoster, AgentContentError>,
+}
+
+impl LaunchContent {
+    /// Loads both from `resolved`; only a framework failure is an error.
+    ///
+    /// Test: `the_launch_roster_comes_from_the_launch_content`.
+    pub fn load(resolved: &ResolvedContent) -> Result<Self, AgentContentError> {
+        Ok(Self {
+            framework: FrameworkContent::load(resolved)?,
+            roster: AgentRoster::load(resolved),
+        })
+    }
+}
+
+/// The content and roster for a launch of `dir` (#9396).
+///
+/// Why: the roster used to resolve from the process cwd while the content
+/// resolved for the project, so one launch could mix two sources.
+/// What: [`resolve_for`] `dir` with [`Fetch::OnFirstUse`], then
+/// [`LaunchContent::load`].
+pub fn launch_content_for(dir: &Path) -> Result<LaunchContent, AgentContentError> {
+    LaunchContent::load(&resolve_for(Some(dir), Fetch::OnFirstUse)?)
+}
+
+/// [`framework_content_for`], or [`framework_content`] for `None`, that never
+/// fetches: `tm doctor` and the read-only callers (#9396).
+pub fn framework_content_local(dir: Option<&Path>) -> Result<FrameworkContent, AgentContentError> {
+    FrameworkContent::load(&resolve_for(dir, Fetch::Never)?)
+}
 
 pub use crate::core::framework_content::FrameworkContent;
 
@@ -78,15 +171,15 @@ pub fn harness_doc() -> Result<HarnessDoc, AgentContentError> {
 /// trusty-mpm's skills and instructions, resolved like [`agent_roster`] (#9012).
 ///
 /// #9396: with nothing installed and no checkout, the content release is
-/// fetched once first ([`resolve_or_fetch`]).
+/// fetched once first ([`Fetch::OnFirstUse`]).
 pub fn framework_content() -> Result<FrameworkContent, AgentContentError> {
-    FrameworkContent::load(&resolve_or_fetch(dev_override())?)
+    FrameworkContent::load(&resolve_for(None, Fetch::OnFirstUse)?)
 }
 
 /// [`agent_roster`], fetching the content release on first use (#9396): the
 /// `tm install` gate, which reads the roster before anything else.
 pub fn agent_roster_or_fetch() -> Result<AgentRoster, AgentContentError> {
-    AgentRoster::load(&resolve_or_fetch(dev_override())?)
+    AgentRoster::load(&resolve_for(None, Fetch::OnFirstUse)?)
 }
 
 /// [`framework_content`] against an explicit cache directory and override.
@@ -102,25 +195,14 @@ pub fn framework_content_in(
 /// Why: a daemon-spawned launch runs with the daemon's cwd, which says nothing
 /// about the project; a launch of a trusty-tools checkout must read that
 /// checkout's content, as `tm launch` run inside it does.
-/// What: the trusted checkout enclosing `dir`, else the one enclosing this
-/// process's cwd (the rule [`agent_roster`] applies), else the installed
-/// bundle. A checkout that is found is the source; a failure reading it is
-/// returned, never answered by another source. #9396: with no checkout and
-/// no lock, the content release is fetched once ([`resolve_or_fetch`]).
+/// What: [`resolve_for`] `dir` — the checkout enclosing `dir`, else the
+/// one enclosing this process's cwd, else the installed bundle. #9396: with
+/// no checkout and no lock, the content release is fetched once
+/// ([`Fetch::OnFirstUse`]).
 /// Test: `framework_content_resolves_from_the_named_dir`;
 /// `missing_lock_fetches_the_release_once` (the fetch).
 pub fn framework_content_for(dir: &Path) -> Result<FrameworkContent, AgentContentError> {
-    let checkout = find_dev_checkout(dir).or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|cwd| find_dev_checkout(&cwd))
-    });
-    let content = match checkout {
-        Some(root) => resolve_content(DevOverride::At(root))?,
-        // #9396: the session-provisioning path fetches on first use.
-        None => resolve_or_fetch(DevOverride::Off)?,
-    };
-    FrameworkContent::load(&content)
+    FrameworkContent::load(&resolve_for(Some(dir), Fetch::OnFirstUse)?)
 }
 
 /// Test helpers: the repository's own content, through `DevOverride::At`, so
@@ -232,3 +314,7 @@ mod tests {
 #[cfg(test)]
 #[path = "content_source_root_tests.rs"]
 mod content_source_root_tests;
+
+#[cfg(test)]
+#[path = "content_source_launch_tests.rs"]
+mod content_source_launch_tests;

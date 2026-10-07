@@ -137,7 +137,8 @@ fn a_missing_harness_doc_is_an_error() {
         ),
         other => panic!("expected Missing, got {other:?}"),
     }
-    assert!(err.to_string().contains("tm content update"), "{err}");
+    // #9396: a checkout is fixed in the checkout.
+    assert!(err.to_string().contains("git pull"), "{err}");
 }
 
 /// A content-v0.1.0 bundle carries the docs under the old top-level

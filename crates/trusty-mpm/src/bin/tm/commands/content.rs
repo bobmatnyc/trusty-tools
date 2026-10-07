@@ -11,8 +11,9 @@
 //! the verbs' behaviour is covered in `trusty_mpm::content::bundle_cache::tests`.
 
 use anyhow::Context;
+use trusty_agents_common::agent_content::REMEDY;
 use trusty_mpm::content::bundle_cache::{
-    GithubReleases, INSTALL_HINT, UpdateAction, UpdateOutcome, install_from_file, update,
+    UpdateAction, UpdateOutcome, github_source, install_from_file, update,
 };
 use trusty_mpm::content::status::{ContentStatus, content_status};
 
@@ -33,7 +34,9 @@ fn run_blocking(action: ContentAction) -> anyhow::Result<()> {
             print_outcome(&install_from_file(&cache, &from)?);
         }
         ContentAction::Update { content_ref } => {
-            let source = GithubReleases::new()
+            // #9396: retried on a 5xx; authenticated through `gh` when no
+            // token variable is set.
+            let source = github_source()
                 .map_err(|e| anyhow::anyhow!("could not build an HTTP client: {}", e.reason))?;
             print_outcome(&update(&cache, &source, content_ref.as_deref())?);
         }
@@ -63,9 +66,7 @@ fn status_report(status: &ContentStatus) -> (Vec<String>, anyhow::Result<()>) {
     let verdict = if status.exits_ok() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!(
-            "no verified content source; run `tm content update`, or offline `{INSTALL_HINT}`"
-        ))
+        Err(anyhow::anyhow!("no verified content source; {REMEDY}"))
     };
     (lines, verdict)
 }
@@ -92,7 +93,7 @@ mod tests {
 
         let (lines, verdict) = status_report(&status);
         let err = verdict.expect_err("no source serves");
-        assert!(err.to_string().contains(INSTALL_HINT), "{err}");
+        assert!(err.to_string().contains(REMEDY), "{err}");
         assert!(!lines.iter().any(|l| l.starts_with("info: ")), "{lines:?}");
 
         let lock = cache.path().join(trusty_common::content::LOCK_FILE_NAME);

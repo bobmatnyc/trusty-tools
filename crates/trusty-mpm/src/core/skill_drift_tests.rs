@@ -162,7 +162,7 @@ fn reference_without_content_names_tm_content_update() {
     assert!(
         reference
             .origin
-            .contains("tm content install --from <bundle.tar.gz>"),
+            .contains("tm content install --from <dir>/<tag>.tar.gz"),
         "{}",
         reference.origin
     );

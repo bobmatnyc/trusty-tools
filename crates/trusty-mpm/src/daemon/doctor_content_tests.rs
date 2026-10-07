@@ -86,5 +86,42 @@ fn content_row_fails_when_the_pm_package_does_not_parse() {
     let cache = tempfile::tempdir().unwrap();
     let row = check_content(Some(&project), Some(cache.path()));
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
-    assert!(row.message.contains("tm content update"), "{}", row.message);
+    // #9396: the checkout serves, so the remedy is in the checkout.
+    assert!(row.message.contains("git pull"), "{}", row.message);
+}
+
+/// A first-use fetch that panics: the doctor row must never reach it.
+fn fetch_panics(
+    _: &Path,
+) -> Result<
+    Option<crate::content::bundle_cache::UpdateOutcome>,
+    crate::content::bundle_cache::CacheError,
+> {
+    panic!("tm doctor fetched the content release")
+}
+
+/// #9396: `tm doctor` is read-only. With no checkout at the project or the
+/// cwd and no lock in the cache, the content row reports WARN naming the
+/// same remedy as every not-installed error, and never fetches.
+#[test]
+fn the_content_row_never_fetches() {
+    use crate::content::first_use::FETCH_OVERRIDE;
+    let (project, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    FETCH_OVERRIDE.with(|f| f.set(Some(fetch_panics)));
+    let row = std::panic::catch_unwind(|| {
+        check_content_in(Some(project.path()), Some(cache.path()), None)
+    });
+    FETCH_OVERRIDE.with(|f| f.set(None));
+    let row = row.expect("the content row fetched");
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(
+        row.message
+            .contains(trusty_agents_common::agent_content::REMEDY),
+        "{}",
+        row.message
+    );
+    assert!(
+        !cache.path().join(LOCK_FILE_NAME).exists(),
+        "nothing pinned"
+    );
 }

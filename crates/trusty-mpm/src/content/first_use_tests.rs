@@ -156,10 +156,7 @@ fn missing_lock_offline_fails_closed_naming_update_and_from() {
         assert!(err.is_not_installed(), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("run `tm content update`"), "{msg}");
-        assert!(
-            msg.contains("tm content install --from <bundle.tar.gz>"),
-            "{msg}"
-        );
+        assert!(msg.contains(INSTALL_HINT), "{msg}");
         assert!(!cache.path().join(LOCK_FILE_NAME).exists(), "no lock");
         assert!(stored_bundles(cache.path()).is_empty(), "no stored bundle");
     }
@@ -205,4 +202,233 @@ fn concurrent_first_use_leaves_one_valid_lock() {
     assert_eq!(source.listings(), 1, "only one first use fetched");
     assert_eq!(pinned(cache.path()).tag(), B);
     resolves_to(cache.path(), B);
+}
+
+/// A first-use fetch that fails as an unreachable network does.
+fn unreachable_fetch(_: &Path) -> Result<Option<UpdateOutcome>, CacheError> {
+    Err(CacheError::Network {
+        url: "https://api.github.com".to_owned(),
+        reason: "network is unreachable".to_owned(),
+        tag: None,
+        fallback: Fallback::None,
+    })
+}
+
+/// #9396: after a failed fetch, a composition within the window does not
+/// fetch again, and says why; after the window it does. The memo never
+/// serves content: a bundle installed meanwhile resolves at once.
+#[test]
+fn a_failed_fetch_is_not_retried_within_the_window() {
+    use crate::content::first_use::{FailureMemo, resolve_or_fetch_with};
+    let memo = FailureMemo::new(Duration::from_secs(60));
+    let cache = tempfile::tempdir().unwrap();
+    let t0 = std::time::Instant::now();
+    let calls = AtomicUsize::new(0);
+    let failing = |c: &Path| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        unreachable_fetch(c)
+    };
+    let first = resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, || t0)
+        .expect_err("unreachable");
+    assert!(
+        first.to_string().contains("network is unreachable"),
+        "{first}"
+    );
+    let again = resolve_or_fetch_with(
+        cache.path(),
+        DevOverride::Off,
+        |_: &Path| -> Result<Option<UpdateOutcome>, CacheError> {
+            panic!("retried inside the window")
+        },
+        &memo,
+        || t0 + Duration::from_secs(30),
+    )
+    .expect_err("still not installed");
+    assert!(again.is_not_installed(), "{again:?}");
+    let msg = again.to_string();
+    assert!(msg.contains("network is unreachable"), "{msg}");
+    assert!(msg.contains("did not retry"), "{msg}");
+    assert!(msg.contains("tm content update"), "{msg}");
+
+    let later = t0 + Duration::from_secs(61);
+    resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, || later)
+        .expect_err("still unreachable");
+    assert_eq!(calls.load(Ordering::SeqCst), 2, "retried after the window");
+
+    let src = tempfile::tempdir().unwrap();
+    let bytes = bundle(A, 1, A.as_bytes());
+    install_from_file(cache.path(), &bundle_file(src.path(), A, &bytes, true)).expect("pin A");
+    let content = resolve_or_fetch_with(
+        cache.path(),
+        DevOverride::Off,
+        |_: &Path| -> Result<Option<UpdateOutcome>, CacheError> { panic!("a lock is present") },
+        &memo,
+        || later,
+    )
+    .expect("the installed bundle serves inside the window");
+    assert_eq!(installed_tag(&content), A);
+}
+
+/// #9396: a fetch that takes 120 s to fail is memoized from when it failed,
+/// so a composition 10 s after the failure does not fetch again.
+#[test]
+fn a_slow_failed_fetch_is_memoized_from_when_it_failed() {
+    use crate::content::first_use::{FailureMemo, resolve_or_fetch_with};
+    let memo = FailureMemo::new(Duration::from_secs(60));
+    let cache = tempfile::tempdir().unwrap();
+    let t0 = std::time::Instant::now();
+    let clock = Mutex::new(t0);
+    let now = || *clock.lock().unwrap();
+    let slow = |c: &Path| {
+        *clock.lock().unwrap() += Duration::from_secs(120);
+        unreachable_fetch(c)
+    };
+    resolve_or_fetch_with(cache.path(), DevOverride::Off, slow, &memo, now)
+        .expect_err("unreachable");
+    *clock.lock().unwrap() = t0 + Duration::from_secs(130);
+    let never = |_: &Path| -> Result<Option<UpdateOutcome>, CacheError> {
+        panic!("fetched again 10 s after a failure")
+    };
+    let again = resolve_or_fetch_with(cache.path(), DevOverride::Off, never, &memo, now)
+        .expect_err("memoized");
+    assert!(again.to_string().contains("did not retry"), "{again}");
+}
+
+/// #9396: callers that queue behind a failing fetch read its failure from
+/// the memo, so an outage costs one fetch, not one per caller.
+#[test]
+fn callers_queued_behind_a_failing_fetch_do_not_fetch_again() {
+    use crate::content::first_use::{FailureMemo, resolve_or_fetch_with};
+    const CALLERS: usize = 8;
+    let memo = FailureMemo::new(Duration::from_secs(60));
+    let cache = tempfile::tempdir().unwrap();
+    let fetches = AtomicUsize::new(0);
+    let start = std::sync::Barrier::new(CALLERS);
+    let failing = |c: &Path| {
+        fetches.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(200));
+        unreachable_fetch(c)
+    };
+    std::thread::scope(|s| {
+        for _ in 0..CALLERS {
+            s.spawn(|| {
+                start.wait();
+                let err = resolve_or_fetch_with(
+                    cache.path(),
+                    DevOverride::Off,
+                    failing,
+                    &memo,
+                    std::time::Instant::now,
+                )
+                .expect_err("unreachable");
+                assert!(err.to_string().contains("network is unreachable"), "{err}");
+            });
+        }
+    });
+    assert_eq!(fetches.load(Ordering::SeqCst), 1, "one fetch per outage");
+}
+
+/// #9396: a fetch run from a task on a one-worker runtime hands the worker
+/// off, so another task still runs while the fetch blocks. Without that the
+/// releasing task starves until the fetch gives up.
+#[test]
+fn a_fetch_inside_a_runtime_leaves_the_worker_free() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let cache = tempfile::tempdir().unwrap();
+    let path = cache.path().to_path_buf();
+    let (entered_tx, entered_rx) = channel::<()>();
+    let (release_tx, release_rx) = channel::<()>();
+    let released = runtime.block_on(async move {
+        let fetching = tokio::spawn(async move {
+            let mut released = false;
+            let _ = resolve_or_fetch_in(&path, DevOverride::Off, |c| {
+                let _ = entered_tx.send(());
+                released = release_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+                unreachable_fetch(c)
+            });
+            released
+        });
+        // The fetch now blocks the only worker; this task needs one to run.
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the fetch started");
+        tokio::spawn(async move {
+            let _ = release_tx.send(());
+        });
+        fetching.await.expect("fetch task")
+    });
+    assert!(
+        released,
+        "the releasing task never ran while the fetch blocked"
+    );
+}
+
+/// Lays out a tm-managed workspace `<home>/trusty-mpm-projects/<owner>/<repo>`
+/// holding `.git`; a `trusty-tools` repo also gets a stale checkout's layout
+/// (every class directory, a `[workspace]` manifest, no `BASE-AGENT.md`).
+fn managed_workspace(home: &Path, owner: &str, repo: &str) -> std::path::PathBuf {
+    let root = home.join("trusty-mpm-projects").join(owner).join(repo);
+    std::fs::create_dir_all(root.join(".git")).expect(".git");
+    if repo == "trusty-tools" {
+        for (_, rel) in trusty_common::content::DEV_CLASS_SOURCES {
+            std::fs::create_dir_all(root.join(rel)).expect("class dir");
+        }
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = []\n").expect("manifest");
+        std::fs::write(root.join("content/agents/engineer.md"), "e\n").expect("agent");
+    } else {
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"w\"\n").expect("manifest");
+    }
+    root
+}
+
+/// #9396: from a tm-managed workspace that is not trusty-tools, an empty
+/// cache is `NotInstalled` naming the remedy (the first-use fetch failing
+/// leaves the same answer), and once a bundle is installed into the cache
+/// the very next resolution serves it — no restart, no re-init. A stale
+/// trusty-tools base clone serves its own tree, and its error names the
+/// clone and `git pull`, never `tm content update`.
+#[test]
+fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
+    use crate::content::first_use::FETCH_OVERRIDE;
+    use crate::core::content_source::{Fetch, resolve_for_in};
+    use trusty_agents_common::agent_content::{AgentRoster, REMEDY};
+
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join(".trusty-mpm/content");
+    std::fs::create_dir_all(&cache).unwrap();
+    let project = managed_workspace(home.path(), "acme", "widget");
+    let stale = managed_workspace(home.path(), "bobmatnyc", "trusty-tools");
+
+    let err =
+        resolve_for_in(Some(&project), None, Some(&cache), Fetch::Never).expect_err("empty cache");
+    assert!(err.is_not_installed(), "{err:?}");
+    assert!(err.to_string().contains(REMEDY), "{err}");
+    FETCH_OVERRIDE.with(|f| f.set(Some(unreachable_fetch)));
+    let fetched = resolve_for_in(Some(&project), None, Some(&cache), Fetch::OnFirstUse);
+    FETCH_OVERRIDE.with(|f| f.set(None));
+    let err = fetched.expect_err("the fetch failed");
+    assert!(err.is_not_installed(), "{err:?}");
+    assert!(err.to_string().contains("tm content update"), "{err}");
+
+    let src = tempfile::tempdir().unwrap();
+    let bytes = bundle(A, 1, A.as_bytes());
+    install_from_file(&cache, &bundle_file(src.path(), A, &bytes, true)).expect("pin A");
+    for fetch in [Fetch::Never, Fetch::OnFirstUse] {
+        let content = resolve_for_in(Some(&project), None, Some(&cache), fetch)
+            .expect("the installed bundle serves");
+        assert_eq!(installed_tag(&content), A);
+    }
+
+    let content = resolve_for_in(Some(&stale), None, Some(&cache), Fetch::Never)
+        .expect("the clone serves its working tree");
+    let msg = AgentRoster::load(&content)
+        .expect_err("no BASE-AGENT.md in the stale clone")
+        .to_string();
+    assert!(msg.contains(&stale.display().to_string()), "{msg}");
+    assert!(msg.contains("git pull"), "{msg}");
+    assert!(!msg.contains("tm content update"), "{msg}");
 }

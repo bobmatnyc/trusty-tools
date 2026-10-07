@@ -85,7 +85,8 @@ fn a_source_without_skills_is_an_error() {
         matches!(&err, AgentContentError::Missing { path, .. } if path == "skills/"),
         "got {err:?}"
     );
-    assert!(err.to_string().contains("tm content update"), "{err}");
+    // #9396: a checkout is fixed in the checkout.
+    assert!(err.to_string().contains("git pull"), "{err}");
 }
 
 /// #9012: a source lacking one required instruction names that file.
@@ -166,7 +167,7 @@ fn a_source_whose_package_does_not_parse_is_an_error() {
     for needle in [
         "instructions/pm-instruction-package.json",
         "a-section-from-a-newer-release",
-        "tm content update",
+        "git pull",
     ] {
         assert!(shown.contains(needle), "{needle} missing: {shown}");
     }
@@ -191,6 +192,6 @@ fn a_launch_from_a_checkout_whose_package_does_not_parse_is_refused() {
     )
     .expect_err("a package this binary cannot parse must refuse the launch");
     assert!(msg.contains("pm-instruction-package.json"), "{msg}");
-    assert!(msg.contains("tm content update"), "{msg}");
+    assert!(msg.contains("git pull"), "{msg}");
     assert!(!dest.exists(), "a refused launch writes no compiled prompt");
 }
