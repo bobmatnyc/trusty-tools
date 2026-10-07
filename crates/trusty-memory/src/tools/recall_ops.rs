@@ -38,6 +38,9 @@ use super::palace_index::{resolve_palace_or_index, PalaceScope};
 use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
 use super::recall_rulings::{fetch_user_rulings, fold_rulings, RulingsFold};
 use super::recall_rulings_floor::apply_rulings_floor;
+// #9421: drawers superseded through a `superseded_by` edge rank below their
+// replacements on every recall path.
+use super::recall_supersede::{supersessions_across, supersessions_for, Supersessions};
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
@@ -211,8 +214,9 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         let results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
+        let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), &sup));
     }
 
     let embedder = state.embedder().await?;
@@ -244,11 +248,12 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // #9143: user-scope rulings join at L1, after fusion so they compete on
     // the fused scale; failed rulings palaces are reported, never fatal.
     let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
+    let sup = supersessions_for(&handle, &results).await;
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold, &sup))
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
@@ -282,8 +287,9 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         let results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
+        let sup = supersessions_for(&handle, &results).await;
         let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), &sup));
     }
 
     let embedder = state.embedder().await?;
@@ -304,9 +310,10 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
     let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
+    let sup = supersessions_for(&handle, &results).await;
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
     let cut = RecallCut::new(top_k, min_score, include_creator_tags);
-    Ok(cut.rank_and_serialize(&palace, query, results, fold))
+    Ok(cut.rank_and_serialize(&palace, query, results, fold, &sup))
 }
 
 /// The caller's cut for a single-palace recall: count, floor and tag view.
@@ -329,17 +336,18 @@ impl RecallCut {
         }
     }
 
-    /// Demote stale snapshots (#8246), lift answering rulings into reserved
-    /// slots (#9143), apply the floor, cut to `top_k`, and serialize with any
-    /// failed rulings palaces (#9143).
+    /// Demote stale snapshots (#8246) and superseded drawers (#9421), lift
+    /// answering rulings into reserved slots (#9143), apply the floor, cut to
+    /// `top_k`, and serialize with any failed rulings palaces (#9143).
     fn rank_and_serialize(
         &self,
         palace: &str,
         query: &str,
         mut results: Vec<RecallResult>,
         rulings: RulingsFold,
+        sup: &Supersessions,
     ) -> Value {
-        demote_stale_snapshots(&mut results, chrono::Utc::now());
+        demote_stale_snapshots(&mut results, chrono::Utc::now(), sup);
         // #9143 AC2: after the score sort, before the floor and the cut, so
         // the reserved slots sit inside `top_k`.
         apply_rulings_floor(&mut results, &rulings.floored, self.top_k);
@@ -426,16 +434,19 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // time and hands back everything the query itself brought in.
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     // #4836: gated on the embedder's real state, as the per-palace paths are.
+    // #9421: each batch reads its own palaces' `superseded_by` edges while its
+    // handles are open; the merged list is demoted once, below.
+    let sup = std::sync::Arc::new(parking_lot::Mutex::new(Supersessions::new()));
     let mut results = if !vector_lane_available(state) {
-        recall_streamed(
-            state,
-            &palaces,
-            "memory_recall_all",
-            window,
-            |handles| async move {
-                Ok(recall_all_without_embedder(state, &handles, query, window).await)
-            },
-        )
+        recall_streamed(state, &palaces, "memory_recall_all", window, |handles| {
+            let sup = sup.clone();
+            async move {
+                let hits = recall_all_without_embedder(state, &handles, query, window).await;
+                let found = supersessions_across(&handles, &hits).await;
+                sup.lock().extend(found);
+                Ok(hits)
+            }
+        })
         .await?
     } else {
         // #4836: `embedder()` now yields the type-erased shared embedder
@@ -443,13 +454,20 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         let embedder = state.embedder().await?;
         recall_streamed(state, &palaces, "memory_recall_all", window, |handles| {
             let embedder = embedder.clone();
-            async move { recall_across_palaces(&handles, &embedder, query, window, deep).await }
+            let sup = sup.clone();
+            async move {
+                let hits = recall_across_palaces(&handles, &embedder, query, window, deep).await?;
+                let found = supersessions_across(&handles, &hits).await;
+                sup.lock().extend(found);
+                Ok(hits)
+            }
         })
         .await
         .context("recall_across_palaces")?
     };
     // #8246: the merged list gets the same snapshot demotion, then the cut.
-    demote_stale_snapshots_across(&mut results, chrono::Utc::now());
+    let sup = std::mem::take(&mut *sup.lock());
+    demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
     results.truncate(top_k);
 
     let payload: Vec<Value> = results

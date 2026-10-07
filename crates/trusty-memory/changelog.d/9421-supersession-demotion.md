@@ -1,0 +1,2 @@
+Added
+- Recall ranks a drawer that another drawer superseded through a `superseded_by` KG edge below its replacement, on every recall surface. The superseded drawer keeps half its score when its replacement is not in the result window, so it stays recallable as history. A drawer with no edge keeps its score and rank. If the edge lookup fails or takes longer than 200 ms, recall logs a warning and answers without this demotion (#9421).
