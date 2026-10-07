@@ -25,6 +25,7 @@
 //! `run_is_failure_catches_a_skipped_review`,
 //! `run_is_failure_passes_a_clean_review`.
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::models::ReviewResult;
@@ -50,6 +51,14 @@ pub fn run_json_payload(result: &ReviewResult) -> Value {
     serde_json::to_value(result).unwrap_or_else(
         |e| serde_json::json!({ "error": format!("failed to serialise the review result: {e}") }),
     )
+}
+
+/// The `context_sources` value `run --json` and the MCP envelope carry (#9194).
+///
+/// Test: `ledger_value_reports_a_serialisation_failure`.
+pub fn ledger_value<T: Serialize + ?Sized>(sources: &T) -> Value {
+    // #9194: stub; a later commit makes a failure an `{"error": ..}` object.
+    serde_json::to_value(sources).unwrap_or(Value::Null)
 }
 
 /// Whether this review must exit the process non-zero.

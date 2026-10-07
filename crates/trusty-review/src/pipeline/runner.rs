@@ -23,6 +23,7 @@ use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC
 use super::runner_helpers::{
     DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
     claim_slot, finalize_run, ground_parsed_findings, mark_no_head_sha_abort, resolve_diff_token,
+    subject_of,
 };
 #[cfg(test)]
 use crate::store::{ClaimOutcome, DedupError};
@@ -237,30 +238,8 @@ async fn run_pipeline(
     ledger: &mut ContextLedger,
 ) -> ReviewResult {
     // ── Step 1: determine owner/repo/pr from diff source ──────────────────
-    // `LocalFile`, `GitRange`, and `Stdin` are all treated identically here:
-    // owner="local" is the sentinel `post::finalize_review` checks (via
-    // `is_github = owner != "local"`) to force `FinalizeAction::LogOnly` — so
-    // every non-GitHub source automatically inherits the "never post" / #2993
-    // dry-run guarantee without a separate posting check.
-    let (owner, repo, pr_number, is_local) = match &input.diff_source {
-        DiffSource::Github {
-            owner, repo, pr, ..
-        } => (owner.clone(), repo.clone(), *pr, false),
-        DiffSource::LocalFile { path } => {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
-            ("local".to_string(), stem.to_string(), 0_u64, true)
-        }
-        DiffSource::GitRange { base, head, .. } => {
-            let head_label = head.as_deref().unwrap_or("HEAD");
-            (
-                "local".to_string(),
-                format!("{base}...{head_label}"),
-                0_u64,
-                true,
-            )
-        }
-        DiffSource::Stdin => ("local".to_string(), "stdin".to_string(), 0_u64, true),
-    };
+    // A non-GitHub source gets owner `LOCAL_OWNER`, the never-post sentinel.
+    let (owner, repo, pr_number, is_local) = subject_of(&input.diff_source);
 
     let pr_url = if !is_local {
         format!("https://github.com/{owner}/{repo}/pull/{pr_number}")

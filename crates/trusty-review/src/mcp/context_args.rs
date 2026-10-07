@@ -41,6 +41,20 @@ pub(crate) const SPEC_DOCS: &str = "spec_docs";
 /// Read CLAUDE.md conventions at the PR head, on both review tools (#9193).
 pub(crate) const CLAUDE_MD: &str = "claude_md";
 
+/// Ask for the context-source ledger alone, on both review tools (#9194).
+#[allow(dead_code)] // #9194: stub; the parameter is read from a later commit.
+pub(crate) const REPORT_CONTEXT: &str = "report_context";
+
+/// `request` with the `report_context` flag (#9194).
+///
+/// Test: `report_context_mistyped_is_invalid_params`.
+pub(crate) fn with_report_context_flag(
+    request: OptionalContextRequest,
+    _args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    Ok(request) // #9194: stub; the parameter is read from a later commit.
+}
+
 /// `review_pr`'s parsed optional context.
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPrContext {
@@ -100,6 +114,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
         .with_caller_text(caller_text);
     parsed.request = with_issue_docs(parsed.request, args)?; // #9197
     parsed.request = with_doc_flags(parsed.request, args)?; // #9193
+    parsed.request = with_report_context_flag(parsed.request, args)?; // #9194
     Ok(parsed)
 }
 

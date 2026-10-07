@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 /// What: `Used` reached the reviewer whole; `Truncated` reached it cut at its
 /// cap with a visible marker; `Absent` had no text; `Unavailable` could not be
 /// read, with the reason in `detail`; `Omitted` (items only, #9197) was left
-/// out whole, with the reason in `detail`.
+/// out whole, with the reason in `detail`; `NotRequested` (#9194) was not
+/// asked for, with the reason in `detail`.
 /// Test: `context_sources_serialize_in_snake_case`,
 /// `more_than_eight_docs_drop_the_tail_with_omitted_records`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +37,8 @@ pub enum SourceState {
     /// An item left out whole — over a count or size cap, or a duplicate;
     /// `detail` names which (#9197).
     Omitted,
+    /// The request did not ask for this source; `detail` names why (#9194).
+    NotRequested,
 }
 
 /// One part of a source, such as one caller-context field.

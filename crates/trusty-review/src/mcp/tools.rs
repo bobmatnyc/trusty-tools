@@ -265,6 +265,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let request = context_args::with_issue_docs(OptionalContextRequest::default(), args)?;
     // #9193: accepted, and reported `unavailable`: a raw diff has no head SHA.
     let request = context_args::with_doc_flags(request, args)?;
+    let request = context_args::with_report_context_flag(request, args)?; // #9194
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")

@@ -5,7 +5,8 @@
 //! What: [`ContextLedger`] collects [`ContextSourceRecord`]s in order.
 //! Test: `context_sources_absent_unless_requested`.
 
-use crate::models::ContextSourceRecord;
+use super::{OptionalContextRequest, probes::ContextRows};
+use crate::{models::ContextSourceRecord, pipeline::context_gate::GateFacts};
 
 /// Collects one record per optional source, when enabled.
 #[derive(Debug, Default)]
@@ -33,6 +34,18 @@ impl ContextLedger {
         if self.enabled {
             self.records.push(record);
         }
+    }
+
+    /// Add the review's own rows and complete the ledger (#9194).
+    ///
+    /// Test: `ledger_fills_not_requested_rows`, `finish_does_not_duplicate_a_row`.
+    #[allow(dead_code)] // #9194: stub; completes the ledger from a later commit.
+    pub(crate) fn finish(
+        &mut self,
+        _request: &OptionalContextRequest,
+        _rows: ContextRows,
+        _facts: &GateFacts,
+    ) {
     }
 
     /// The records, in the order they were pushed.

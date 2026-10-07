@@ -50,6 +50,39 @@ pub enum GateOutcome {
     Degraded(String),
 }
 
+/// Which dependency the gate found wanting, and why (#9194).
+///
+/// Why: a `Degraded(reason)` is one string; the context-source ledger needs
+/// to know whether search, analyze, or both were the cause.
+/// What: `search` and `analyze` each hold the reason that dependency is
+/// unavailable or degraded, `None` when the gate found nothing wrong with it
+/// or never probed it.
+/// Test: `facts_name_search_when_the_daemon_is_down`,
+/// `facts_are_empty_when_the_gate_proceeds`.
+#[allow(dead_code)] // #9194: stub; the ledger reads it from the next commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GateFacts {
+    /// Why trusty-search is unavailable or degraded for this review.
+    pub(crate) search: Option<String>,
+    /// Why trusty-analyze is unavailable for this review.
+    pub(crate) analyze: Option<String>,
+}
+
+/// [`preflight_context`] plus the [`GateFacts`] behind its outcome (#9194).
+///
+/// Test: `preflight_context_and_detailed_return_the_same_outcome`.
+#[allow(dead_code)] // #9194: stub; facts are filled from the next commit.
+pub(crate) async fn preflight_context_detailed(
+    config: &ReviewConfig,
+    deps: &ReviewDeps,
+    surface: InvocationSurface,
+) -> (GateOutcome, GateFacts) {
+    (
+        preflight_context(config, deps, surface).await,
+        GateFacts::default(),
+    )
+}
+
 /// Probe the required context dependencies and decide whether to proceed.
 ///
 /// Why: enforces the #590 contract — both trusty-search and trusty-analyze are

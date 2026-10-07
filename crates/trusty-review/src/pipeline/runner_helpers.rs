@@ -18,7 +18,7 @@ use crate::integrations::github::{
     fetch_pr_metadata,
 };
 use crate::{
-    config::ReviewConfig,
+    config::{ReviewConfig, constants::LOCAL_OWNER},
     models::{InlineCommentOut, ReviewResult, Verdict},
     pipeline::{
         diff::DiffSource,
@@ -32,6 +32,35 @@ use crate::{
 };
 
 use super::runner::{ReviewDeps, ReviewInput};
+
+/// The review subject a diff source names: `(owner, repo, pr, is_local)`.
+///
+/// Why: moved from `run_pipeline` step 1 for `runner.rs` SLOC headroom (#9194).
+/// What: a GitHub source names its PR. `LocalFile`, `GitRange` and `Stdin`
+/// share the owner [`LOCAL_OWNER`], the sentinel `post::finalize_review`
+/// checks (`is_github = owner != "local"`) to force `FinalizeAction::LogOnly`,
+/// so every non-GitHub source inherits the never-post / #2993 dry-run
+/// guarantee without a separate posting check.
+/// Test: `run_review_local_diff_is_dry_run_and_not_posted`,
+/// `run_review_git_range_is_dry_run_and_not_posted`,
+/// `run_review_stdin_is_dry_run_and_not_posted`.
+pub(super) fn subject_of(source: &DiffSource) -> (String, String, u64, bool) {
+    match source {
+        DiffSource::Github {
+            owner, repo, pr, ..
+        } => (owner.clone(), repo.clone(), *pr, false),
+        DiffSource::LocalFile { path } => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
+            (LOCAL_OWNER.to_string(), stem.to_string(), 0_u64, true)
+        }
+        DiffSource::GitRange { base, head, .. } => {
+            let head_label = head.as_deref().unwrap_or("HEAD");
+            let repo = format!("{base}...{head_label}");
+            (LOCAL_OWNER.to_string(), repo, 0_u64, true)
+        }
+        DiffSource::Stdin => (LOCAL_OWNER.to_string(), "stdin".to_string(), 0_u64, true),
+    }
+}
 
 /// Combine caller-supplied PR description + discussion into a single author-
 /// rationale block for the adversarial verifier (#1618).

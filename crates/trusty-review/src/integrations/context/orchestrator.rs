@@ -29,6 +29,7 @@ use futures_util::future::join_all;
 use tracing::{debug, warn};
 
 use super::{ContextSection, ContextSource, ReviewSubject};
+use crate::models::SourceState;
 
 /// Max number of context sources to query concurrently.
 ///
@@ -43,6 +44,52 @@ const MAX_CONCURRENCY: usize = 4;
 /// "no extra context".  Each source also sets its own client timeout, but this
 /// is the orchestrator-level backstop honouring the fail-open contract.
 const PER_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// What one enabled source did during a gather (#9194).
+///
+/// Why: the fail-open gather drops an errored or timed-out source silently;
+/// the context-source ledger must name it.
+/// What: the source's name, its ledger state (`used`, `absent` or
+/// `unavailable`), the rendered characters it contributed, and the raw
+/// reason for an `absent` or `unavailable` state.
+/// Test: `failed_external_source_is_unavailable_with_its_error`.
+#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceOutcome {
+    /// `ContextSource::name()`.
+    pub(crate) name: &'static str,
+    /// What happened to it.
+    pub(crate) state: SourceState,
+    /// Characters of its rendered section, when it contributed.
+    pub(crate) chars: usize,
+    /// Why it was absent or unavailable; not yet bounded.
+    pub(crate) detail: Option<String>,
+}
+
+/// A gather's sections plus one [`SourceOutcome`] per enabled source (#9194).
+#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExternalGather {
+    /// The non-empty sections, in source order.
+    pub(crate) sections: Vec<ContextSection>,
+    /// One outcome per enabled source, in source order.
+    pub(crate) outcomes: Vec<SourceOutcome>,
+}
+
+/// [`gather_external_context`] plus what each enabled source did (#9194).
+///
+/// Test: `failed_external_source_is_unavailable_with_its_error`,
+/// `timed_out_external_source_is_unavailable`, `empty_external_source_is_absent`.
+#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
+pub(crate) async fn gather_external_context_detailed(
+    sources: &[Box<dyn ContextSource>],
+    subject: &ReviewSubject,
+) -> ExternalGather {
+    ExternalGather {
+        sections: gather_external_context(sources, subject).await,
+        outcomes: Vec::new(),
+    }
+}
 
 /// Gather context from all enabled sources, fail-open, bounded-concurrent.
 ///
