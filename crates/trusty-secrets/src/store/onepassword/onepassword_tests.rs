@@ -163,8 +163,9 @@ fn onepassword_errors_never_carry_the_value() {
     assert!(!format!("{:?}", fx.backend).contains(VALUE));
 }
 
-/// Why: A3 — a missing item or vault is a miss; a locked, signed-out or
-/// unknown failure is an error and never a miss.
+/// Why: A3 — a missing item is a miss, and so is a missing vault for
+/// `get`; a locked, signed-out or unknown failure is an error and never a
+/// miss. #7524 P2-M3: a missing vault on `delete` is an error.
 /// Test: itself.
 #[test]
 fn onepassword_missing_is_none_and_failures_are_errors() {
@@ -179,7 +180,9 @@ fn onepassword_missing_is_none_and_failures_are_errors() {
         "[ERROR] \"trusty/acme/web\" isn't a vault in this account.",
     );
     assert!(fx.backend.get(&v, &k).unwrap().is_none(), "no such vault");
-    assert!(!fx.backend.delete(&v, &k).unwrap());
+    // #7524 P2-M3: on delete, "isn't a vault" is an error, never a miss.
+    let err = fx.backend.delete(&v, &k).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
     let err = fx.backend.set(&v, &k, &value()).unwrap_err();
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 
@@ -222,6 +225,49 @@ fn onepassword_missing_is_none_and_failures_are_errors() {
     fx.shim.fail("delete", "[ERROR] session expired");
     let err = fx.backend.delete(&v, &k).unwrap_err();
     assert!(matches!(err, SecretsError::BackendLocked { .. }), "{err:?}");
+}
+
+/// Why: #7524 P2-M3, Fail-Open Check — `op` says "isn't a vault" both for
+/// a missing vault and for one this identity cannot see. A delete sweep
+/// that read it as a miss dropped the index row while the item stayed in
+/// 1Password. The delete is an error, the row stays, and the configured
+/// backend is still cleared. Red when `delete` maps no vault to `Ok(false)`.
+/// Test: itself.
+#[test]
+fn onepassword_delete_keeps_the_index_row_when_op_shows_no_vault() {
+    let (v, k) = (vault(), key("API_KEY"));
+    let configured = std::sync::Arc::new(crate::store::MemoryBackend::new());
+    let index_dir = TempDir::new().unwrap();
+    let store = SecretStore::new(
+        std::sync::Arc::clone(&configured) as std::sync::Arc<dyn SecretBackend>,
+        NamesIndex::at(index_dir.path().join("index")),
+    );
+    store.set(&v, &k, &value()).unwrap();
+    let fx = new_fx();
+    fx.shim.seed("item1", "API_KEY", VALUE, "PASSWORD");
+    fx.shim.fail(
+        "list",
+        "[ERROR] \"trusty/acme/web\" isn't a vault in this account.",
+    );
+    let others = [std::sync::Arc::new(fx.backend) as std::sync::Arc<dyn SecretBackend>];
+
+    let err = store.delete_across(&v, &k, &others).unwrap_err();
+    assert!(
+        matches!(&err, SecretsError::Backend { backend, .. } if backend == "onepassword"),
+        "{err:?}"
+    );
+    assert!(!shown(&err).contains(VALUE), "{}", shown(&err));
+    let rows = store.list(&v).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the row was dropped while 1Password may hold the key"
+    );
+    assert!(
+        configured.is_empty(),
+        "the configured backend was not cleared"
+    );
+    assert_eq!(fx.shim.items().len(), 1);
 }
 
 /// Why: #7519 A3 — an item that vanished between the listing and the

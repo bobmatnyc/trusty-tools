@@ -22,8 +22,9 @@
 pub(super) const MISSING: &[&str] = &[
     // `op read`, `op item edit|delete <id>`: the item is gone.
     "isn't an item",
-    // `op item list --vault <v>`: this account has no such vault, so it
-    // holds no item of this backend's either.
+    // `op item list --vault <v>`: no such vault, or one this identity
+    // cannot see. A miss for `get` only; `delete` makes it an error
+    // (#7524 P2-M3).
     "isn't a vault",
 ];
 

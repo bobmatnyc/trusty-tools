@@ -456,6 +456,16 @@ would otherwise render into a log line (see `GhCommand::argv_display`,
 `gh.rs:289`, which exists precisely so a command can be logged — the new
 commands must never call the equivalent for a value-carrying argument).
 
+**1Password (#7519 P2; #7524 part 2).**
+
+- *Lookup.* Every operation first runs `op item list --vault <vault>`. `op`
+  answers "isn't a vault" both for a vault the account lacks and for one the
+  current identity cannot see, so that answer never proves a key absent.
+- *Missing vault.* For `get` it is a miss (`Ok(None)`); for `set` it is an
+  error naming the vault. For `delete` it is an error, never a miss, so the
+  delete sweep keeps the key's index row (#7524 P2-M3, Architect Decision B).
+  A missing item in a listed vault stays a miss for every operation.
+
 **Keeper (#7519 P3, Architect rulings 2026-10-07 17:11Z) — shims only, and
 provisional.** No test has run against a real Keeper account; every ruling
 below is revisited when the first Keeper user exists, and the command output

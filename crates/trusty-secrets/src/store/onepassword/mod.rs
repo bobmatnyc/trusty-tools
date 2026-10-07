@@ -10,9 +10,10 @@
 //! 1Password vault's name; `<id>` is an id a listing returned):
 //! - every operation first runs `op item list --vault <v> --format json`,
 //!   which returns titles and ids, and keeps the rows titled with the key.
-//!   A vault this account lacks is a miss. A row of another category than
+//!   `op` says "isn't a vault" both for a vault the account lacks and for
+//!   one this identity cannot see. A row of another category than
 //!   `PASSWORD` is refused, so no other item is read, edited or deleted.
-//! - `get`: no row is `Ok(None)`. One row is
+//! - `get`: no vault or no row is `Ok(None)`. One row is
 //!   `op read --no-newline op://<vault id>/<id>/password`, the value on
 //!   stdout. Two rows are an error.
 //! - `set`: no row is `op item create --vault <v> -`, the JSON item template
@@ -20,8 +21,10 @@
 //!   --template <file>`, the template in a 0600 file in a 0700 directory
 //!   that is removed on drop (owner ruling 2026-10-07). Never
 //!   delete-then-create or create-then-archive. Two rows are an error.
-//! - `delete`: `op item delete <id> --vault <v>` for each row; none is
-//!   `Ok(false)`.
+//! - `delete`: `op item delete <id> --vault <v>` for each row; no row is
+//!   `Ok(false)`. No vault is an error, never a miss (#7524 P2-M3): the
+//!   item may sit in a vault this identity cannot see, so the delete sweep
+//!   must keep the index row.
 //! - `list_names` is not implemented: listing goes through the names-only
 //!   index, so the capabilities are `READ | WRITE` only (A6).
 //!
@@ -89,6 +92,8 @@ const AMBIGUOUS: &str = "more than one 1Password item has this key's title; none
 const FOREIGN: &str =
     "a 1Password item with this key's title is not a Password item; it was left alone";
 const NO_VAULT: &str = "this account has no 1Password vault with this name; create it first";
+const NO_VAULT_ON_DELETE: &str = "1Password shows no vault with this name to this identity, which \
+     may only be unable to see it; the key was not confirmed deleted";
 const VANISHED: &str = "the 1Password item was removed while it was being updated";
 
 /// The 1Password backend.
@@ -104,7 +109,8 @@ pub struct OnePasswordBackend {
 
 /// What `op item list` said about a key.
 enum Lookup {
-    /// The account has no vault with this name.
+    /// `op` shows no vault with this name: it is missing, or this identity
+    /// cannot see it.
     NoVault,
     /// The `PASSWORD` rows titled with the key.
     Rows(Vec<Listed>),
@@ -301,7 +307,9 @@ impl SecretBackend for OnePasswordBackend {
 
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         let rows = match self.lookup(vault, key)? {
-            Lookup::NoVault => return Ok(false),
+            // #7524 P2-M3: "isn't a vault" is also what `op` says for a vault
+            // this identity cannot see; a miss here let the sweep drop the row.
+            Lookup::NoVault => return Err(self.failed(vault, key, NO_VAULT_ON_DELETE)),
             Lookup::Rows(rows) => rows,
         };
         let mut removed = false;

@@ -1,0 +1,2 @@
+Security
+- A 1Password `delete` whose `op item list` answers "isn't a vault" now fails instead of reporting a miss ([#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)). `op` gives that answer for a vault the current identity cannot see as well as for a missing one, so `secrets.delete` dropped the index row while the item stayed in 1Password. The row now stays and the call fails with `backend_failed`. A `get` still reads the answer as a miss.

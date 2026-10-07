@@ -214,7 +214,10 @@ of whatever started the server. With no such `op`, calls fail with
   sessions, from its own environment, and passes the token to `op` only. With
   no token and no session, calls fail as locked. Nothing falls back to the
   Keychain or to files.
-- Enabling 1Password adds one `op item list` to every `delete`.
+- Enabling 1Password adds one `op item list` to every `delete`. When `op`
+  answers that the vault "isn't a vault", which it also says for a vault the
+  current identity cannot see, the `delete` fails and the key's index row
+  stays; a `get` treats the same answer as a miss.
 - `doctor` lists the backend without running `op`, and reports whether a
   token was present at server start (see Doctor above).
 
