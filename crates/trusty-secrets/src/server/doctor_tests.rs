@@ -68,6 +68,17 @@ fn planted(fx: &Fixture, marker: &Path) -> PathBuf {
     crate::store::onepassword::shim::plant_op(&fx.tmp.path().join("planted"), marker)
 }
 
+/// One account config case: name, YAML (`None` for no file), the 1Password
+/// and Keeper reasons expected, and text the 1Password detail must carry.
+#[cfg(feature = "cli-backends")]
+type Case = (
+    &'static str,
+    Option<String>,
+    Option<Unavailable>,
+    Option<Unavailable>,
+    &'static str,
+);
+
 /// Why: #7519 P4 A4 — each cause of an unavailable CLI row has its own
 /// reason and fix: off in the account's config, an unreadable account
 /// config, no account home, a missing CLI, a relative program pin, an
@@ -85,13 +96,7 @@ async fn doctor_reasons_name_each_cause() {
         "secrets:\n  onepassword:\n    program: {}\n",
         program.display()
     );
-    let cases: [(
-        &str,
-        Option<String>,
-        Option<Unavailable>,
-        Option<Unavailable>,
-        &str,
-    ); 6] = [
+    let cases: [Case; 6] = [
         (
             "missing",
             None,
