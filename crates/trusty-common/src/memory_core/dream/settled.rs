@@ -7,14 +7,15 @@
 //! will change nothing again, so it can skip them.
 //! What: [`corpus_fingerprint`] digests the inputs of the embedding passes —
 //! each drawer's id, content digest and protected flag, plus the dedup
-//! threshold. [`record_settled`] stores a fingerprint in
+//! threshold and the semantic phase's switch and model. [`record_settled`] stores a fingerprint in
 //! `<data_dir>/dream_settled.json` after a cycle that changed nothing, and
 //! [`is_settled`] compares the current fingerprint with it. The fingerprint is
 //! computed from the drawer table, which is reloaded from disk on open, so the
 //! signal survives a daemon restart.
 //! Test: `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`,
 //! `settled_corpus_tests::a_write_between_cycles_makes_the_next_cycle_embed`,
-//! `settled_corpus_tests::an_unreadable_marker_makes_the_cycle_run`.
+//! `settled_corpus_tests::an_unreadable_marker_makes_the_cycle_run`,
+//! `settled_corpus_tests::enabling_semantic_consolidation_makes_the_next_cycle_run`.
 
 use super::config::DreamConfig;
 use crate::memory_core::retrieval::PalaceHandle;
@@ -45,11 +46,17 @@ struct SettledMarker {
 /// every add, forget and content edit, whichever path made it. Recall-side
 /// metadata (`access_count`, `last_accessed_at`) is left out, so reading a
 /// palace does not make it dream again.
-/// What: SHA-256 over the domain tag, `dedup_threshold`, and one entry per
-/// drawer sorted by id: the id, the protected flag, and the stored content
-/// digest. A drawer whose digest was never recorded contributes a digest of its
-/// raw content instead. Lowercase hex.
-/// Test: `settled_corpus_tests::a_write_between_cycles_makes_the_next_cycle_embed`.
+/// #9391: `semantic.enabled` and `semantic.model` are folded in too, so a
+/// palace settled while the phase was off, or under another model, runs again
+/// once the config changes.
+/// What: SHA-256 over the domain tag, `dedup_threshold`, `semantic.enabled`,
+/// the length-prefixed `semantic.model`, and one entry per drawer sorted by id:
+/// the id, the protected flag, and the stored content digest. A drawer whose
+/// digest was never recorded contributes a digest of its raw content instead.
+/// Lowercase hex.
+/// Test: `settled_corpus_tests::a_write_between_cycles_makes_the_next_cycle_embed`,
+/// `settled_corpus_tests::enabling_semantic_consolidation_makes_the_next_cycle_run`,
+/// `settled_corpus_tests::changing_the_semantic_model_makes_the_next_cycle_run`.
 pub(super) fn corpus_fingerprint(handle: &PalaceHandle, config: &DreamConfig) -> String {
     let mut entries: Vec<(uuid::Uuid, bool, [u8; 32])> = {
         let drawers = handle.drawers.read();
@@ -70,6 +77,10 @@ pub(super) fn corpus_fingerprint(handle: &PalaceHandle, config: &DreamConfig) ->
     let mut hasher = Sha256::new();
     hasher.update(FINGERPRINT_DOMAIN);
     hasher.update(config.dedup_threshold.to_bits().to_le_bytes());
+    hasher.update([u8::from(config.semantic.enabled)]);
+    let model = config.semantic.model.as_bytes();
+    hasher.update((model.len() as u64).to_le_bytes());
+    hasher.update(model);
     for (id, protected, digest) in &entries {
         hasher.update(id.as_bytes());
         hasher.update([u8::from(*protected)]);

@@ -10,12 +10,14 @@
 
 use super::concurrency::{DreamCycleGauge, acquire_dream_permit};
 use super::config::{DreamConfig, DreamStats};
-use super::cycle::{compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets};
+use super::cycle::{
+    DedupOutcome, compact_pass, content_prune_pass, dedup_pass, prune_pass, refresh_closets,
+};
 use super::fading::detect_fading;
 use super::guard::CompactionGuard;
 use super::kg_compact::kg_compact_pass;
 use super::recall_benchmark::run_benchmark;
-use super::semantic::semantic_consolidation_pass;
+use super::semantic::{SemanticPassOutcome, semantic_consolidation_pass};
 use super::settled;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::PalaceId;
@@ -256,7 +258,10 @@ impl Dreamer {
     /// #9391: when the palace's drawer set matches the one a previous full
     /// cycle left unchanged (see `settled`), steps 2 and 6 and the recall
     /// benchmark are skipped, so the cycle does no embedding work. The other
-    /// passes still run, so age-based pruning continues on an idle palace.
+    /// passes still run, so age-based pruning continues on an idle palace. Only
+    /// a cycle that changed nothing, stayed in budget, completed every dedup
+    /// merge it attempted, and either finished the semantic pass or had it
+    /// disabled by config records the marker.
     ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
     /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
@@ -264,7 +269,9 @@ impl Dreamer {
     /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`,
     /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`,
     /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`,
-    /// `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`.
+    /// `settled_corpus_tests::a_second_cycle_on_an_unchanged_palace_embeds_nothing`,
+    /// `settled_corpus_tests::a_failed_merge_persist_does_not_settle_the_palace`,
+    /// `settled_corpus_tests::an_inference_error_does_not_settle_the_palace`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         // #7106: wait for a slot in the process-wide bound before doing any
         // work. The daemon runs one loop per resident palace and they all woke
@@ -335,8 +342,8 @@ impl Dreamer {
         } else {
             0
         };
-        let merged = if unchanged {
-            0
+        let dedup = if unchanged {
+            DedupOutcome::default()
         } else {
             let embedder = self.embedder.clone();
             dedup_pass(
@@ -358,8 +365,8 @@ impl Dreamer {
         let closets_updated = refresh_closets(handle);
 
         // ── Phase: Semantic consolidation (optional, inference-gated) ──────────
-        let (semantically_consolidated, semantic_llm_calls, semantic_cache_hits) = if unchanged {
-            (0, 0, 0)
+        let semantic = if unchanged {
+            SemanticPassOutcome::SETTLED_NOOP
         } else {
             semantic_consolidation_pass(
                 handle,
@@ -369,8 +376,11 @@ impl Dreamer {
             )
             .await
         };
-        // #9391: a budget-truncated pass did not examine the whole corpus.
-        let within_budget = started.elapsed() < budget;
+        // #9391: the completion gate. A budget-truncated pass did not examine
+        // the whole corpus, a failed merge left a duplicate pair behind, and a
+        // parked, failed or unfinished semantic pass consolidated nothing it
+        // could vouch for. None of them may settle the palace.
+        let passes_complete = started.elapsed() < budget && dedup.failed == 0 && semantic.settles;
 
         // Persist the trimmed L1 snapshot so a restart sees the consolidated state.
         if let Err(e) = handle.flush() {
@@ -394,14 +404,14 @@ impl Dreamer {
         };
 
         let mut stats = DreamStats {
-            merged,
+            merged: dedup.merged,
             pruned,
             closets_updated,
             compacted,
             content_pruned,
-            semantically_consolidated,
-            semantic_llm_calls,
-            semantic_cache_hits,
+            semantically_consolidated: semantic.consolidated,
+            semantic_llm_calls: semantic.llm_calls,
+            semantic_cache_hits: semantic.cache_hits,
             duration_ms: started.elapsed().as_millis() as u64,
             drawers_before,
             drawers_after,
@@ -460,10 +470,10 @@ impl Dreamer {
             if let Err(e) = persisted.save(data_dir) {
                 tracing::warn!(palace = %handle.id, "persist dream_stats.json failed: {e:#}");
             }
-            // #9391: a full, in-budget cycle that changed nothing settles the
+            // #9391: a full, complete cycle that changed nothing settles the
             // corpus it started from; the next cycle on it skips embedding.
             if !unchanged
-                && within_budget
+                && passes_complete
                 && changed_nothing(&stats)
                 && let Err(e) = settled::record_settled(data_dir, &fingerprint)
             {
