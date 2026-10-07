@@ -141,7 +141,7 @@ namespace (§9.3, `SessionSecretCache`).
 **T-2. The LLM never sees a value, only a reference.** A config row, a tool
 schema, and a chat transcript may all hold `secret://<project>/<KEY>` freely —
 it is exactly as non-secret as `CredentialRef` is today (`handle.rs`, DOC-45
-§4). The MCP tool this document adds (`secrets_get_ref`, §10.3) returns
+§4). The MCP tool this document adds (`secrets_get_ref`, §10.2) returns
 references and metadata (last-import time, backend, whether a value is
 present) — **never** a value — mirroring DOC-64's "never displays a secret
 value" rule for the panel.
@@ -213,6 +213,7 @@ existing `crate_config` convention (`crate_config.rs:1-30`) exactly:
 ```yaml
 secrets:
   default_backend: keychain   # owner ruling: this is the shipped default
+  onepassword: {}             # enables the 1Password CLI backend (see below); never set by a tracked file
 ```
 
 **Project level** — inside the project's own tracked config, alongside where
@@ -221,7 +222,7 @@ secrets:
 
 ```yaml
 secrets:
-  backend: onepassword         # overrides the machine default for this project only
+  backend: keychain            # overrides the machine default for this project only
   vault: trusty/bobmatnyc/trusty-tools   # optional explicit override of §6.3's derived name
 ```
 
@@ -231,6 +232,20 @@ a project either names a backend or it doesn't). A project with zero
 `secrets:` config and a machine with zero `secrets:` config both resolve to
 `keychain` with no CLI installed and no prompt — this is what makes
 `keychain` a true zero-configuration default (owner ruling, §3 G-2).
+
+**CLI backends are enabled by the machine config alone
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519); owner ruling
+2026-10-07, "Accept gate, amend §6.1").** A CLI backend such as 1Password opens
+only when the untracked machine config enables it, through a
+`secrets.onepassword:` section (`{}` is enough) or
+`secrets.default_backend: onepassword`. A tracked project config that names
+`backend: onepassword` does not enable it. Without machine enablement the
+request fails with `backend_not_enabled` (-32078). A repository must not be
+able to steer the server to a CLI backend, and enablement makes the delete
+sweep complete, because the sweep visits every enabled backend. The `program`,
+`account` and `config_path` settings are machine-config only; a tracked file
+that sets one is refused. `program` must be an absolute path; otherwise `op` is
+resolved from absolute `PATH` entries only.
 
 This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
@@ -262,14 +277,16 @@ either file says.
 
 ```yaml
 secrets:
-  backend: onepassword
   onepassword:
     account: my.1password.com   # `op` account shorthand, passed to `op --account`
+    program: /opt/homebrew/bin/op   # optional; absolute path to `op`
   keeper:
     config_path: ~/.keeper/config.json   # KSM config, when not the CLI default
 ```
 
-Neither section ever holds a token or password — only the shape needed to
+These sections belong to the untracked machine config only (§6.1,
+[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)). Neither
+section ever holds a token or password — only the shape needed to
 invoke the CLI (account name, config path). A service-account token
 (`OP_SERVICE_ACCOUNT_TOKEN`, headless Keeper KSM config) is read from the
 external tool's own documented environment/config location, never copied into
@@ -386,14 +403,18 @@ third and fourth hand-rolled `Command::new`.
 
 ```rust
 // op read "op://<vault>/<item>/<field>"  →  one value, stdout only, never argv-visible on the value side
-// op item create --category=login --vault <vault> --title <key> password=<value> --format=json  (via stdin, not argv — op supports assignment via - / stdin)
+// op item create -  (JSON item template, value inside, on stdin — #7519)
+// op item edit <id> --template <0600 file>  (template file removed after the call — #7519)
 // keeper get <record-uid> --format json   /   ksm secret get <uid> --format json
 ```
 
 **Delivery of the value out of the subprocess never touches argv.** `op read`
 takes a reference in argv (not a secret), and returns the secret on stdout —
 safe. Writing a *new* value (`tm secrets add`) pipes the value to the CLI's
-stdin (`op item create … password=- ` / Keeper Commander's `--from-file -`)
+stdin (`op item create -` with a JSON template on stdin; `op item edit <id>
+--template <0600 file>` for an existing item, per
+[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519) / Keeper
+Commander's `--from-file -`)
 rather than composing it into the argv this document's own `ExternalCliCommand`
 would otherwise render into a log line (see `GhCommand::argv_display`,
 `gh.rs:289`, which exists precisely so a command can be logged — the new
@@ -575,6 +596,17 @@ happens only in Rust code that builds a subprocess env map or an HTTP client
 (§9.5), never through a tool call whose `ToolResult` an LLM turn could echo.
 Amended 2026-10-01: the value-returning `secrets.resolve` UDS method (§15.8
 tier 3) has no MCP tool and no console route.
+
+**`secrets_get_ref` as built (#7522).** Arguments: `project`, an absolute
+path to the checkout, and `key`, a key name or a `secret://` reference.
+The tool calls `secrets.scopes`, then `secrets.list` on each candidate vault
+(project first, then owner, per §15.3), then `secrets.doctor`. Its answer
+is `{reference, key, present, scope, vault, backend, imported_at}`.
+`backend` is the backend the project's config selects, because the
+names-only index records no per-key backend. `imported_at` is the index
+row's `updated_at`. The tool drops the row's length and its "agents may
+use" flag. An unknown key is `present: false`, not an error. Nothing calls
+the socket at session start. `secrets_list` is not built yet.
 
 ### 10.3 Where session state lives
 

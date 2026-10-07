@@ -172,14 +172,18 @@ impl SecretStore {
     /// Why: #7519 A5 — after a backend switch, or a `copy`, a value can sit
     /// in a backend other than the configured one. A delete that clears only
     /// the configured backend leaves that credential behind.
-    /// What: refuses a configured backend without `WRITE`. Deletes from the
-    /// configured backend, then from each of `others`, and keeps going after
-    /// a failure so every backend that can be cleared is. If any backend
-    /// failed, the first error is returned and the index row is kept, so
-    /// `list` still shows a key a backend may hold. Otherwise the row is
-    /// dropped. `removed` is true when any backend or the index held the key.
+    /// What: refuses a configured backend without `WRITE`. Then, under the
+    /// index lock (a corrupt or locked index fails before any backend is
+    /// touched), deletes from the configured backend, then from each of
+    /// `others`, and keeps going after a failure so every backend that can
+    /// be cleared is. If any backend failed, the first error is returned and
+    /// the index row is kept, so `list` still shows a key a backend may hold.
+    /// Otherwise the row is dropped in the same locked update, so no `set`
+    /// can land between the sweep and the removal. `removed` is true when
+    /// any backend or the index held the key.
     /// Test: `store_delete_across_removes_the_key_from_every_backend`,
-    /// `store_delete_across_keeps_the_row_when_any_backend_fails`.
+    /// `store_delete_across_keeps_the_row_when_any_backend_fails`,
+    /// `store_delete_across_holds_the_index_lock_through_the_sweep`.
     pub fn delete_across(
         &self,
         vault: &VaultName,
@@ -187,20 +191,20 @@ impl SecretStore {
         others: &[Arc<dyn SecretBackend>],
     ) -> Result<DeleteResponse, SecretsError> {
         self.require(Capabilities::WRITE, "delete")?;
-        let mut existed = false;
-        let mut failure: Option<SecretsError> = None;
-        for backend in std::iter::once(&self.backend).chain(others) {
-            match backend.delete(vault, key) {
-                Ok(held) => existed |= held,
-                // #7519: a failed delete may leave a value; never a miss.
-                Err(e) if failure.is_none() => failure = Some(e),
-                Err(_) => {}
+        // #7519: the sweep and the row removal are one locked index update.
+        let (existed, had_row) = self.index.remove_with(vault, key, || {
+            let mut existed = false;
+            let mut failure: Option<SecretsError> = None;
+            for backend in std::iter::once(&self.backend).chain(others) {
+                match backend.delete(vault, key) {
+                    Ok(held) => existed |= held,
+                    // #7519: a failed delete may leave a value; never a miss.
+                    Err(e) if failure.is_none() => failure = Some(e),
+                    Err(_) => {}
+                }
             }
-        }
-        if let Some(e) = failure {
-            return Err(e);
-        }
-        let had_row = self.index.remove(vault, key)?;
+            failure.map_or(Ok(existed), Err)
+        })?;
         Ok(DeleteResponse {
             removed: existed || had_row,
         })

@@ -17,8 +17,11 @@ use super::prompt::{ReviewContext, ReviewPrMeta};
 /// What: formats PR metadata as a header, then the diff block, then optional
 /// context sections for code search and static analysis, then any external
 /// context (`## Related <source>` markdown already rendered by the context
-/// orchestrator — JIRA / Confluence / GitHub Issues).
-/// Test: `prompt_includes_context_blocks`, `prompt_includes_external_context`.
+/// orchestrator — JIRA / Confluence / GitHub Issues). #9197: `extra_sections`
+/// (caller-requested blocks such as `## Linked issues`, already rendered and
+/// fenced) follow `## Referenced Code`; an empty string adds nothing.
+/// Test: `prompt_includes_context_blocks`, `prompt_includes_external_context`,
+/// `an_empty_extra_section_renders_nothing`.
 pub(super) fn build_user_message(
     owner: &str,
     repo: &str,
@@ -26,6 +29,7 @@ pub(super) fn build_user_message(
     diff: &str,
     context: &ReviewContext,
     external_context: &str,
+    extra_sections: &str,
 ) -> String {
     let mut msg = String::with_capacity(diff.len() + 2048);
 
@@ -71,6 +75,12 @@ pub(super) fn build_user_message(
         "## Referenced Code",
         context.referenced_code.as_deref(),
     );
+    // #9197: caller-requested sections, before the retrieved context.
+    let extra = extra_sections.trim();
+    if !extra.is_empty() {
+        msg.push_str(extra);
+        msg.push_str("\n\n");
+    }
 
     // Code search context block.
     if !context.search_results.is_empty() {

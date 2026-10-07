@@ -18,7 +18,6 @@
 //! Test: unit tests for the rendering helper and cwd resolution in this module
 //! and `index_cwd_resolve`; integration coverage via `cargo test -p trusty-search`.
 
-use super::daemon_utils::daemon_base_url;
 use super::format::format_with_commas;
 use anyhow::Result;
 use colored::Colorize;
@@ -71,8 +70,8 @@ pub async fn handle_index_status(index_id: Option<&str>, watch: bool, json: bool
         anyhow::bail!("`--watch` and `--json` cannot be used together");
     }
 
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
 
     let client = trusty_common::server::daemon_http_client()?;
 
@@ -579,7 +578,7 @@ mod tests {
     /// Why: the watch loop emits one JSON document per poll and, on a TTY,
     /// interleaves them with in-place cursor-up escape codes — garbled,
     /// unparseable output. The guard lives at the top of `handle_index_status`
-    /// (before `ensure_daemon_running_or_exit`), so it fails fast without a
+    /// (before `ensure_daemon_http_base`), so it fails fast without a
     /// live daemon and covers both `status <idx> --watch --json` and
     /// `index-status <idx> --watch --json`, which both delegate here.
     /// What: calls `handle_index_status` with `watch=true, json=true` and

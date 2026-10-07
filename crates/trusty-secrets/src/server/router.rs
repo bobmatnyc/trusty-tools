@@ -13,6 +13,7 @@
 //! `server_second_instance_is_refused_and_the_first_keeps_serving`,
 //! `server_bind_failure_is_reported_and_the_occupant_kept`.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -29,8 +30,12 @@ use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
-use crate::api::{BackendId, SecretsError};
-use crate::store::{NamesIndex, SecretBackend, open_backend};
+use crate::api::{BackendId, SecretValue, SecretsError};
+use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
+use crate::store::{
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at,
+    platform,
+};
 
 /// Maps a configured backend id to an implementation.
 ///
@@ -39,17 +44,108 @@ use crate::store::{NamesIndex, SecretBackend, open_backend};
 pub type BackendFactory =
     Arc<dyn Fn(&BackendId) -> Result<Arc<dyn SecretBackend>, SecretsError> + Send + Sync>;
 
-/// The production factory: S1's [`open_backend`].
+/// S1's [`open_backend`]: CLI backends read the machine config under
+/// `$HOME` and get no token overlay. The binary uses [`backends_for`].
 pub fn default_backends() -> BackendFactory {
     Arc::new(open_backend)
+}
+
+/// The production factory for a server with `settings` (#7519).
+///
+/// Why: a CLI backend must write its template files where the startup
+/// sweep looks and get the service-account token the binary took out of its
+/// own environment. Ruling 74: whether it opens at all, and which `op` runs,
+/// is the account's own machine config's to say, never a file the spawner
+/// chose through `--machine-config` or `$HOME`.
+/// What: `backends_with` on `account_machine_config`, the file #7524
+/// reads `file` consent from; with no account home, every CLI backend is
+/// off.
+/// Test: `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
+pub fn backends_for(
+    settings: &ServerSettings,
+    onepassword_token: Option<SecretValue>,
+    search_path: Option<OsString>,
+) -> BackendFactory {
+    backends_with(
+        account_machine_config(),
+        settings,
+        onepassword_token,
+        search_path,
+    )
+}
+
+/// [`backends_for`] with the account's machine config given.
+///
+/// What: a CLI backend opens through [`open_backend_at`] with
+/// `account_config`, [`ServerSettings::template_root`], `onepassword_token`
+/// and `search_path` (the `PATH` the binary read at start), only when
+/// [`account_machine`] enables it; else [`SecretsError::BackendNotEnabled`].
+/// The file is read on each open, so a change is seen on the next request.
+/// `keychain` and `file` open through [`open_backend`].
+/// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
+/// `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
+pub(crate) fn backends_with(
+    account_config: Option<PathBuf>,
+    settings: &ServerSettings,
+    onepassword_token: Option<SecretValue>,
+    search_path: Option<OsString>,
+) -> BackendFactory {
+    let template_root = settings.template_root.clone();
+    Arc::new(move |id: &BackendId| {
+        if !cli_backends().contains(id) {
+            return open_backend(id);
+        }
+        // #7519: ruling 74 — `settings.machine_config` is the spawner's to
+        // choose, so only the account's own file enables a CLI backend or
+        // pins its `program`; a missing or unreadable one leaves it off.
+        let config = account_config
+            .as_deref()
+            .filter(|path| account_machine(Some(path)).is_some_and(|machine| machine.enables(id)));
+        let Some(config) = config else {
+            return Err(SecretsError::BackendNotEnabled {
+                backend: id.to_string(),
+            });
+        };
+        open_backend_at(
+            id,
+            config,
+            &template_root,
+            onepassword_token.clone(),
+            search_path.as_deref(),
+        )
+    })
+}
+
+/// The account's own machine config: [`MACHINE_CONFIG_SUBPATH`] under
+/// `platform::account_home_dir`, or `None` when that home is unknown.
+///
+/// Why: #7524 H1 and ruling 74 — `--machine-config` and `$HOME` are the
+/// spawner's to set; this path is not.
+/// Test: `server_file_consent_defaults_to_the_account_home_config`.
+fn account_machine_config() -> Option<PathBuf> {
+    platform::account_home_dir()
+        .ok()
+        .map(|home| home.join(MACHINE_CONFIG_SUBPATH))
+}
+
+/// The account machine config at `path`, if it is given and loads.
+///
+/// What: a missing path, a missing or unreadable file, or a parse failure
+/// is `None`, so a caller that reads enablement from it fails closed.
+pub(crate) fn account_machine(path: Option<&Path>) -> Option<MachineSecretsConfig> {
+    path.and_then(|path| load_machine_at(path).ok().flatten())
 }
 
 /// What every handler shares.
 ///
 /// What: the settings, the names-only index rooted at
-/// [`ServerSettings::index_root`], the backend factory, and the audit log at
-/// [`ServerSettings::audit_log`] (#4567). `Debug` shows settings and the
-/// index root only.
+/// [`ServerSettings::index_root`], the backend factory, the audit log at
+/// [`ServerSettings::audit_log`] (#4567), whether this server acts as a
+/// Keychain build (#7524), and the account's own machine config, the one
+/// file that may consent to `file` writes there (#7524 H1). `Debug` shows
+/// settings and the index root only.
 // #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
 #[non_exhaustive]
 pub struct State {
@@ -61,10 +157,23 @@ pub struct State {
     pub backends: BackendFactory,
     /// The credential access audit log.
     pub(crate) audit: AuditSink,
+    /// Whether this build links a Keychain, for the `file` posture checks.
+    // #7524: a field, not the constant, so tests can act as either build.
+    pub(crate) keychain_compiled: bool,
+    /// The machine config whose `default_backend: file` consents to value
+    /// writes into `file` on a Keychain build; `None` refuses them. #7519:
+    /// also the one whose enabled CLI backends the delete sweep reaches.
+    // #7524 H1: from the password database, never `--machine-config` or
+    // `$HOME`; a crate-private field so only tests can aim it elsewhere.
+    pub(crate) file_consent_config: Option<PathBuf>,
 }
 
 impl State {
     /// State for `settings`, opening backends through `backends`.
+    ///
+    /// What: the file consent config is [`MACHINE_CONFIG_SUBPATH`] under
+    /// `platform::account_home_dir`; `None` when that home is unknown.
+    /// Test: `server_file_consent_defaults_to_the_account_home_config`.
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
         let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
@@ -73,6 +182,9 @@ impl State {
             index,
             backends,
             audit,
+            keychain_compiled: KEYCHAIN_COMPILED,
+            // #7524 H1: resolved once; a lookup failure refuses `file` writes.
+            file_consent_config: account_machine_config(),
         }
     }
 }
@@ -182,7 +294,15 @@ pub enum ServeError {
 /// Bind the socket and serve until idle or `shutdown`, then unlink it.
 ///
 /// Why: see the module docs.
-/// What: `prepare_socket_dir` on the socket's parent, then
+/// What: first, on a `cli-backends` build, sweeps template files a crashed
+/// server left under [`ServerSettings::template_root`] (#7519). An entry the
+/// sweep cannot remove does not stop it: every other stale directory is
+/// still removed, and the first failure is reported on stderr. A refused
+/// root (symlink, too wide, another user's) stops the sweep before any
+/// entry. Either way serving goes on; the failed entry stays on disk until
+/// a later start removes it, and a refused root also refuses every template
+/// write. Then `prepare_socket_dir` on
+/// the socket's parent, then
 /// `bind_singleton_hardened`, which takes over only a socket the kernel
 /// proves nobody serves and refuses a live one, so a second instance never
 /// clobbers the first. Serves with an [`IdleTracker`] of
@@ -196,13 +316,27 @@ pub enum ServeError {
 ///
 /// Test: `server_exits_when_idle_and_removes_its_socket`,
 /// `server_second_instance_is_refused_and_the_first_keeps_serving`,
-/// `server_bind_failure_is_reported_and_the_occupant_kept`.
+/// `server_bind_failure_is_reported_and_the_occupant_kept`,
+/// `server_startup_sweeps_stale_template_dirs`.
 pub async fn serve(
     settings: ServerSettings,
     backends: BackendFactory,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
-    let socket = settings.socket.clone();
+    serve_state(State::new(settings, backends), shutdown).await
+}
+
+/// [`serve`] over a prepared [`State`].
+// #7524: tests set `State::keychain_compiled` to act as either build.
+pub(crate) async fn serve_state(
+    state: State,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<ServeExit, ServeError> {
+    // #7519: owner ruling — a crash skips the template guard's drop, so the
+    // leftover is removed here, before any request can write a new one.
+    #[cfg(all(unix, feature = "cli-backends"))]
+    sweep_templates(&state.settings.template_root);
+    let socket = state.settings.socket.clone();
     let dir = socket.parent().ok_or_else(|| ServeError::NoParent {
         path: socket.clone(),
     })?;
@@ -216,8 +350,8 @@ pub async fn serve(
             path: socket.clone(),
             source: Box::new(source),
         })?;
-    let idle = IdleTracker::new(settings.idle_timeout);
-    let router = Arc::new(build_router(Arc::new(State::new(settings, backends))));
+    let idle = IdleTracker::new(state.settings.idle_timeout);
+    let router = Arc::new(build_router(Arc::new(state)));
     let exit = serve_until_idle(
         &listener,
         router,
@@ -229,6 +363,24 @@ pub async fn serve(
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))
+}
+
+/// Remove stale template directories under `root`, reporting on stderr.
+///
+/// What: [`crate::store::cli::sweep_stale_templates`]; the report names the
+/// directory and a count, or the first error, which names a path, never
+/// content. The sweep has already visited every other entry by then.
+#[cfg(all(unix, feature = "cli-backends"))]
+fn sweep_templates(root: &Path) {
+    match crate::store::cli::sweep_stale_templates(root) {
+        Ok(0) => {}
+        Ok(removed) => eprintln!(
+            "trusty-secrets: removed {removed} stale template director{} under {}",
+            if removed == 1 { "y" } else { "ies" },
+            root.display()
+        ),
+        Err(e) => eprintln!("trusty-secrets: template sweep incomplete: {e}"),
+    }
 }
 
 /// Unlink the socket file; already gone is fine.

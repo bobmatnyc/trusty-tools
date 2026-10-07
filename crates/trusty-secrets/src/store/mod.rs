@@ -25,12 +25,21 @@ mod keychain;
 mod mask;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
+// #7519: the 1Password backend; spawns `op` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod onepassword;
 pub(crate) mod platform;
 pub mod resolve;
 mod scope;
 mod secret_store;
 
-pub use backend::{Capabilities, SecretBackend, default_backend, local_backends, open_backend};
+// #7524: only the server's `State` reads it; unused without `server`.
+#[cfg(feature = "server")]
+pub(crate) use backend::KEYCHAIN_COMPILED;
+pub use backend::{
+    Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
+    open_backend_at, swept_backends,
+};
 pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};

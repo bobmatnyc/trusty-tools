@@ -22,22 +22,28 @@ const HTTP_MARKERS: &[&str] = &[
     ".http.get(",
     ".http.post(",
     ".http.delete(",
+    // #9214: the HTTP-base guard the not-yet-moved subcommands call.
+    "ensure_daemon_http_base",
 ];
 
 /// Files that still dial HTTP, relative to the crate root. Remove a row when
 /// its file moves onto `service::daemon_client`; never add one.
 ///
-/// `src/main.rs` and `src/commands/dashboard.rs` open the browser UI at
-/// `<base>/ui`, which is not a daemon call and moves with #6155's UI carve-out.
+/// #9214 B2(d1) moved `src/main.rs` and `src/commands/dashboard.rs` off: the
+/// dashboard URL now comes from `search.health` over the socket.
 /// #9168 moved the MCP bridge (`src/mcp/**`, `serve.rs`, `serve_scope.rs`) off
 /// this list; [`the_mcp_bridge_builds_no_http_url`] keeps it off.
+///
+/// #9214 B2(a) moved `add`, `daemon_utils`, `list`, `remove`, `status` and
+/// `watch` off it, and `daemon_guard` now waits on the socket;
+/// [`the_b2a_cli_paths_dial_no_http`] keeps them off. The HTTP resolver
+/// `daemon_utils` held moved, fail-closed, to `daemon_http.rs`: the one row
+/// this list gained, and the file the last B2 phase deletes.
 const NOT_YET_MOVED: &[&str] = &[
-    "src/commands/add.rs",
     "src/commands/cleanup.rs",
     "src/commands/config.rs",
     "src/commands/convert.rs",
-    "src/commands/daemon_utils.rs",
-    "src/commands/dashboard.rs",
+    "src/commands/daemon_http.rs",
     "src/commands/discover/http.rs",
     "src/commands/discover/mod.rs",
     "src/commands/doctor.rs",
@@ -50,7 +56,6 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/index_remove.rs",
     "src/commands/index_remove_stale.rs",
     "src/commands/index_status.rs",
-    "src/commands/list.rs",
     "src/commands/migrate.rs",
     "src/commands/query.rs",
     "src/commands/reindex.rs",
@@ -59,11 +64,7 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/reindex_engine/registration.rs",
     "src/commands/reindex_engine/tests.rs",
     "src/commands/reindex_engine/verify.rs",
-    "src/commands/remove.rs",
     "src/commands/start/tests.rs",
-    "src/commands/status.rs",
-    "src/commands/watch.rs",
-    "src/main.rs",
 ];
 
 /// Every `.rs` file under `dir`, recursively.
@@ -132,6 +133,44 @@ fn no_cli_or_bridge_file_reintroduces_an_http_daemon_call() {
 fn the_quantize_command_dials_no_http() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(!files_dialling_http(root).contains(&"src/commands/quantize.rs".to_string()));
+}
+
+/// #9214 B2(a): the CLI paths moved onto `DaemonClient` stay moved, and
+/// none of them builds a literal daemon URL.
+///
+/// Why: the ratchet above lets a listed file keep dialling; these left the
+/// list, so a regression must name the file rather than add a row back.
+/// What: each file is free of [`HTTP_MARKERS`], and no non-comment line builds
+/// a `7878` address or a `daemon_base_url` call.
+/// Test: this test.
+#[test]
+fn the_b2a_cli_paths_dial_no_http() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dialling = files_dialling_http(root);
+    let forbidden = [["daemon_base", "_url"].concat(), ["78", "78"].concat()];
+    for f in [
+        "add.rs",
+        "daemon_guard.rs",
+        "daemon_utils.rs",
+        "list.rs",
+        "remove.rs",
+        "status.rs",
+        "watch.rs",
+    ] {
+        let rel = format!("src/commands/{f}");
+        assert!(!dialling.contains(&rel), "{rel} dials HTTP");
+        let text = std::fs::read_to_string(root.join(&rel)).expect("read a B2(a) file");
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            assert!(
+                !forbidden.iter().any(|m| line.contains(m.as_str())),
+                "{rel}:{} reaches for an HTTP daemon address",
+                n + 1
+            );
+        }
+    }
 }
 
 /// The MCP bridge's own files, crate-relative: everything under `src/mcp/`,

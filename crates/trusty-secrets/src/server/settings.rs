@@ -19,6 +19,10 @@
 //! spawner's environment would otherwise move the names index for every
 //! client of the shared server; a test or sandbox in its own directory keeps
 //! the override, and `--index-dir` works on any socket.
+//! #7519: the template directory for `op item edit` follows the same rule:
+//! beside an index named by `--index-dir`, else under `$HOME`
+//! ([`template_root_beside`]), so no environment variable can put a
+//! value-bearing file in a project tree.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
@@ -27,15 +31,16 @@
 //! `settings_index_env_is_ignored_on_the_default_socket`,
 //! `settings_index_override_survives_off_the_default_socket`,
 //! `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
-//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
+//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+//! `settings_index_env_is_ignored_on_the_account_default_socket_under_another_home`.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::SecretsError;
-use crate::store::INDEX_SUBDIR;
 use crate::store::config::MACHINE_CONFIG_SUBPATH;
+use crate::store::{INDEX_SUBDIR, platform};
 
 /// Socket path under `$HOME` (owner ruling 31).
 pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
@@ -117,6 +122,9 @@ pub struct ServerSettings {
     pub audit_log: PathBuf,
     /// Size at which [`Self::audit_log`] is rotated when next opened.
     pub audit_max_bytes: u64,
+    /// The 0700 directory a CLI backend writes template files under, and
+    /// the startup sweep clears (#7519).
+    pub template_root: PathBuf,
 }
 
 impl ServerSettings {
@@ -124,6 +132,7 @@ impl ServerSettings {
     ///
     /// What: the audit log is [`audit_log_beside`] the index, capped at
     /// [`DEFAULT_AUDIT_MAX_BYTES`]; change either with the `with_` methods.
+    /// Template files go [`template_root_beside`] the index.
     pub fn new(
         socket: PathBuf,
         index_root: PathBuf,
@@ -133,6 +142,7 @@ impl ServerSettings {
         Self {
             audit_log: audit_log_beside(&index_root),
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+            template_root: template_root_beside(&index_root),
             socket,
             index_root,
             machine_config,
@@ -177,6 +187,16 @@ impl ServerSettings {
         args: impl IntoIterator<Item = OsString>,
         env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, SettingsError> {
+        Self::from_args_with(args, env, || platform::account_home_dir().ok())
+    }
+
+    /// [`Self::from_args`] with the password-database home lookup injected.
+    // #7524: tests stand a temp dir in for that home; none sets `$HOME`.
+    pub(crate) fn from_args_with(
+        args: impl IntoIterator<Item = OsString>,
+        env: impl Fn(&str) -> Option<String>,
+        account_home: impl Fn() -> Option<PathBuf>,
+    ) -> Result<Self, SettingsError> {
         let mut args = args.into_iter();
         if args.next().as_deref() != Some(SERVE_SUBCOMMAND.as_ref()) {
             return Err(SettingsError::Usage);
@@ -220,10 +240,17 @@ impl ServerSettings {
             (None, None) => under_home(AUDIT_LOG_SUBPATH)?,
         };
         let socket = pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?;
+        // #7519: likewise the template directory, which holds values.
+        let template_root = match &index_root {
+            Some(index_flag) => template_root_beside(index_flag),
+            None => template_root_beside(&under_home(INDEX_SUBDIR)?),
+        };
         let index_root = match index_root {
             Some(path) => path,
             // #7524: a caller's environment never moves the shared server's index.
-            None if is_default_socket(&socket) => under_home(INDEX_SUBDIR)?,
+            None if is_default_socket(&socket, account_home().as_deref()) => {
+                under_home(INDEX_SUBDIR)?
+            }
             None => pick(None, INDEX_DIR_ENV, INDEX_SUBDIR)?,
         };
         Ok(Self {
@@ -235,6 +262,7 @@ impl ServerSettings {
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+            template_root,
             index_root,
         })
     }
@@ -255,19 +283,27 @@ pub fn audit_log_beside(index_root: &Path) -> PathBuf {
         .join("audit.jsonl")
 }
 
-/// Whether `socket` is the shared default socket under `$HOME`.
+/// Whether `socket` is the shared default socket, under `$HOME` or under
+/// `account_home`, the password database's home for this uid.
 ///
 /// Why: #7524 M3 — [`INDEX_DIR_ENV`] must not reach the server every client
 /// shares. A case-insensitive filesystem serves `SECRETS.SOCK` to a client
 /// dialling `secrets.sock`, so the decision rests on the directory alone.
-/// What: `true` when `$HOME` is unknown (fail closed), or when `socket` sits
-/// in the default socket's directory by [`same_socket`], whatever its file
-/// name.
+/// #7524 H1 Route 2: `$HOME` is the spawner's to set, so a redirected
+/// `$HOME` must not make the real default socket look like another one.
+/// What: `true` when either home is unknown (`None` for `account_home` means
+/// the lookup failed; fail closed), or when `socket` sits in either home's
+/// default socket directory by [`same_socket`], whatever its file name.
 /// Test: `settings_index_env_is_ignored_on_the_default_socket`,
 /// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
-/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
-pub(crate) fn is_default_socket(socket: &Path) -> bool {
-    dirs::home_dir().is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH)))
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`,
+/// `settings_index_env_is_ignored_on_the_account_default_socket_under_another_home`.
+pub(crate) fn is_default_socket(socket: &Path, account_home: Option<&Path>) -> bool {
+    let env_home = dirs::home_dir();
+    // #7524: `$HOME` first, as before; the account's home catches a redirect.
+    [env_home.as_deref(), account_home]
+        .into_iter()
+        .any(|home| home.is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH))))
 }
 
 /// Whether sockets `a` and `b` sit in one directory; file names are ignored.
@@ -329,6 +365,17 @@ fn dir_identity(socket: &Path) -> Option<DirIdentity> {
         }
     }
     None
+}
+
+/// The template directory for an index at `index_root`: `tmp` in the
+/// index's parent directory.
+///
+/// Why: #7519 — for the default index this is
+/// `~/.trusty-tools/trusty-secrets/tmp`, the CLI runner's `TMP_SUBDIR`; for
+/// an index redirected by the `--index-dir` flag it follows the index.
+/// Test: `settings_template_root_follows_the_index_flag_only`.
+pub fn template_root_beside(index_root: &Path) -> PathBuf {
+    index_root.parent().unwrap_or(index_root).join("tmp")
 }
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.

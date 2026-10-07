@@ -162,7 +162,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         auto_discover,
     )?;
     // #9214: auto-discover registers over HTTP; without the listener it must
-    // not run, or `daemon_utils::daemon_base_url` falls back to 127.0.0.1:7878.
+    // not run: it has no HTTP address to reach.
     // The skip is logged after tracing is up, at the spawn site below.
     let discovery = discovery.with_http_listener(!no_http);
     if let Some(dir) = resolved_data_dir.as_deref() {

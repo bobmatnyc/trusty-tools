@@ -59,7 +59,7 @@ use crate::output::render_json;
 mod install_report;
 use install_report::{
     plans_mpm_supervisor_bootstrap, plans_service_bootstrap, print_dry_run, print_human_summary,
-    InstallOutcome, InstallReport,
+    report_with_content, InstallOutcome, InstallReport,
 };
 
 /// Handle `tctl install [<members>…]`.
@@ -429,6 +429,8 @@ async fn install_all(
     // TRUSTY_SIGN_IDENTITY) should be printed — true as soon as ANY
     // component's TCC guidance (not a signed-OK note) is collected below.
     let mut show_signing_tip = false;
+    // #9396: what landed, for the content step after the loop.
+    let mut placed = Vec::new();
 
     for m in selected {
         checklist.set(&m.crate_name, ComponentState::Downloading);
@@ -437,6 +439,7 @@ async fn install_all(
         }
         match install_one(m).await {
             Ok(installed) => {
+                placed.push((m.crate_name.clone(), installed.path.clone()));
                 checklist.set(&m.crate_name, ComponentState::Verifying);
                 // #4964: size of the binary THIS run just placed, at its
                 // concrete path — never a name re-joined onto a directory the
@@ -696,7 +699,7 @@ async fn install_all(
     if show_signing_tip {
         eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
-    InstallReport::build(outcomes)
+    report_with_content(outcomes, &placed, &super::content_step::ProcessRunner, json)
 }
 
 /// Whether an install failure is a failed integrity check rather than a routine
