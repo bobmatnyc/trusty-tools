@@ -6,14 +6,15 @@
 //! spans several concepts — the original orchestration/bug-reporting tools
 //! ([`core`]), the session-lifecycle tools ([`session`]), the console tools
 //! ([`console`]), the project-registry + NL-resolver tools ([`project`],
-//! #1519 / #1517), the session-manager proxy tools ([`proxy`], #2550), and the
-//! Disk-dashboard survey ([`disk`], #6927) — so
-//! this is a thin facade that re-exports all and concatenates their descriptors,
-//! keeping each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the thirty-five MCP tool descriptors (nine core +
-//! twelve session + five console + four project + four proxy + one disk — #1222 /
-//! #1220 / #1508 / #1519 / #1517 WI-5 / #2012 / #2550 / #6927 / session-context
-//! tools); [`TOOL_CATALOG`]
+//! #1519 / #1517), the session-manager proxy tools ([`proxy`], #2550), the
+//! Disk-dashboard survey ([`disk`], #6927), and the secrets reference tool
+//! ([`secrets`], #7522) — so this is a thin facade that re-exports all and
+//! concatenates their descriptors, keeping each leaf file well under the
+//! 500-SLOC production cap.
+//! What: [`tool_catalog`] builds the thirty-six MCP tool descriptors (nine core +
+//! twelve session + five console + four project + four proxy + one disk + one
+//! secrets — #1222 / #1220 / #1508 / #1519 / #1517 WI-5 / #2012 / #2550 / #6927 /
+//! #7522 / session-context tools); [`TOOL_CATALOG`]
 //! lists their names for tests and the startup log; `tool` is the shared
 //! descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
@@ -27,6 +28,8 @@ pub mod core;
 pub mod disk;
 pub mod project;
 pub mod proxy;
+// #7522: `secrets_get_ref`, a client of the trusty-secrets socket.
+pub mod secrets;
 pub mod session;
 
 /// Canonical names of every tool the server exposes, in catalog order.
@@ -34,12 +37,13 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the thirty-five tool names — the nine core/bug tools,
+/// What: a static slice of the thirty-six tool names — the nine core/bug tools,
 /// the twelve session-lifecycle tools, the five console-facing tools, the four
 /// project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5), the four
-/// session-manager proxy tools (#2550), and the Disk survey (#6927).
+/// session-manager proxy tools (#2550), the Disk survey (#6927), and
+/// `secrets_get_ref` (#7522).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 35] = [
+pub const TOOL_CATALOG: [&str; 36] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -86,6 +90,8 @@ pub const TOOL_CATALOG: [&str; 35] = [
     "session_proxy_summary",
     // ── 1 Disk-dashboard tool (#6927, DOC-73 §16.6 item 2) ──────────────────
     "disk_survey",
+    // ── 1 secrets tool (#7522, DOC-74 §10.2) ────────────────────────────────
+    "secrets_get_ref",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -97,8 +103,9 @@ pub const TOOL_CATALOG: [&str; 35] = [
 /// `session::session_tools` (twelve descriptors), `console::console_tools`
 /// (five descriptors), `project::project_tools` (four descriptors, WI-5 adds
 /// `project_resolve`), `proxy::proxy_tools` (four descriptors, #2550) and
-/// `disk::disk_tools` (one descriptor, #6927) in catalog order, returning
-/// thirty-five `{ name, description, inputSchema }` objects.
+/// `disk::disk_tools` (one descriptor, #6927) and `secrets::secrets_tools` (one
+/// descriptor, #7522) in catalog order, returning thirty-six
+/// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
     let mut tools = core::core_tools();
@@ -107,6 +114,7 @@ pub fn tool_catalog() -> Vec<Value> {
     tools.extend(project::project_tools());
     tools.extend(proxy::proxy_tools());
     tools.extend(disk::disk_tools());
+    tools.extend(secrets::secrets_tools());
     tools
 }
 
@@ -137,8 +145,9 @@ mod tests {
         // session-context tools add session_context_catchup + session_context_pause → 11;
         // #6431 adds session_delete_records → 12)
         // #6927 adds disk_survey → 35.
-        assert_eq!(tool_catalog().len(), 35);
-        assert_eq!(TOOL_CATALOG.len(), 35);
+        // #7522 adds secrets_get_ref → 36.
+        assert_eq!(tool_catalog().len(), 36);
+        assert_eq!(TOOL_CATALOG.len(), 36);
     }
 
     #[test]
@@ -303,6 +312,40 @@ mod tests {
             desc.contains("READ-ONLY"),
             "the description must state the tool removes nothing: {desc}"
         );
+    }
+
+    /// #7522: the schema stays closed, so no argument can ask for a value, and
+    /// the description documents a response that carries none.
+    #[test]
+    fn secrets_get_ref_schema_is_closed_and_documents_no_value() {
+        let catalog = tool_catalog();
+        let tool = catalog
+            .iter()
+            .find(|t| t["name"] == "secrets_get_ref")
+            .expect("secrets_get_ref must be in the catalog");
+        let schema = &tool["inputSchema"];
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
+        assert_eq!(schema["required"], json!(["project", "key"]), "{schema}");
+        let props = schema["properties"].as_object().expect("properties");
+        let mut names: Vec<&str> = props.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["key", "project"], "{schema}");
+        let desc = tool["description"].as_str().expect("a description");
+        assert!(desc.contains("NEVER returns a value"), "{desc}");
+        for field in [
+            "reference",
+            "key",
+            "present",
+            "scope",
+            "vault",
+            "backend",
+            "imported_at",
+        ] {
+            assert!(
+                desc.contains(field),
+                "the description omits `{field}`: {desc}"
+            );
+        }
     }
 
     #[test]
