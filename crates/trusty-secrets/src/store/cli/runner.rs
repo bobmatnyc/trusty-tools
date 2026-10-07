@@ -13,8 +13,8 @@
 //! in its own process group; stdout and stderr drain on threads, capped at
 //! [`OUTPUT_CAP`] each; the stdin write runs on a thread too, so a child
 //! that never reads cannot block the timeout. A `try_wait` poll enforces
-//! the timeout; on timeout and on every early return the group gets
-//! `SIGKILL` and the child is reaped. stderr only feeds the `classify`
+//! the timeout; on timeout, on a stdin write that did not finish, and on
+//! every early return the group gets `SIGKILL` and the child is reaped. stderr only feeds the `classify`
 //! verdict and is then dropped; no error carries child output.
 //! Test: `runner_tests.rs` beside this file.
 
@@ -167,14 +167,16 @@ impl CliCommand {
     /// Why: DOC-74 §8.2 — a value reaches a vendor CLI only through stdin.
     /// What: refuses `value` in argv or the overlay, and an overlay value in
     /// argv, before spawning. The verdict is `Ok` or `Other` only: stderr of
-    /// a value-bearing run is never read for meaning. A child that exits
-    /// before reading all of stdin is classified by its exit status; any
-    /// other write failure kills it.
+    /// a value-bearing run is never read for meaning. A child that closes
+    /// stdin before reading the whole value has its group killed, and the
+    /// run is `Other` whatever its exit status; any other write failure
+    /// kills the group and is an error.
     /// Test: `runner_value_reaches_the_child_on_stdin_only`,
     /// `runner_refuses_the_value_in_argv_before_spawn`,
     /// `runner_refuses_a_token_in_argv_before_spawn`,
     /// `runner_echoed_stdin_never_reaches_an_error`,
-    /// `runner_early_exit_on_stdin_is_classified`.
+    /// `runner_early_exit_on_stdin_is_classified`,
+    /// `runner_stdin_closed_early_is_never_ok_and_kills_the_group`.
     pub fn run_with_stdin(&self, value: &SecretValue) -> Result<CliRun, SecretsError> {
         let value = value.expose().as_bytes();
         self.refuse_leaks(Some(value))?;
@@ -227,6 +229,7 @@ impl CliCommand {
         let (tx, rx) = mpsc::channel();
         let (stdout, stderr) = (guard.child.stdout.take(), guard.child.stderr.take());
         let stdin_pipe = guard.child.stdin.take();
+        let feeding = stdin.is_some() && stdin_pipe.is_some();
         let started = drain(stdout, Event::Stdout, &tx)
             .and_then(|()| drain(stderr, Event::Stderr, &tx))
             .and_then(|()| match (stdin, stdin_pipe) {
@@ -236,12 +239,19 @@ impl CliCommand {
         started.map_err(|_| self.failure(THREAD_FAILED))?;
         drop(tx);
 
-        let mut got = Collected::default();
+        let mut got = Collected {
+            stdin_pending: feeding,
+            ..Collected::default()
+        };
         let status = loop {
             while let Ok(event) = rx.try_recv() {
-                self.absorb(event, &mut got)?;
+                self.absorb(event, &mut got, &guard)?;
             }
-            if let Some(status) = guard.try_wait().map_err(|_| self.failure(COLLECT_FAILED))? {
+            // #7519: no reap until the stdin write ends, so a failed write
+            // can still kill the group while the leader holds its id.
+            if !got.stdin_pending
+                && let Some(status) = guard.try_wait().map_err(|_| self.failure(COLLECT_FAILED))?
+            {
                 break status;
             }
             let now = Instant::now();
@@ -254,7 +264,7 @@ impl CliCommand {
         // The child is reaped; its streams close once the last holder exits.
         loop {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(event) => self.absorb(event, &mut got)?,
+                Ok(event) => self.absorb(event, &mut got, &guard)?,
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     // A straggler still holds a pipe. The group id cannot be
@@ -267,16 +277,28 @@ impl CliCommand {
         self.finish(status, got, stdin.is_some())
     }
 
-    fn absorb(&self, event: Event, got: &mut Collected) -> Result<(), SecretsError> {
+    fn absorb(
+        &self,
+        event: Event,
+        got: &mut Collected,
+        guard: &GroupGuard,
+    ) -> Result<(), SecretsError> {
         match event {
             Event::Stdout(read) => got.stdout = read.map_err(|_| self.failure(COLLECT_FAILED))?,
             Event::Stderr(read) => got.stderr = read.map_err(|_| self.failure(COLLECT_FAILED))?,
-            // #7519: a broken pipe means the child exited early; its exit
-            // status says why. Any other write failure ends the run.
-            Event::Stdin(Err(e)) if e.kind() != ErrorKind::BrokenPipe => {
-                return Err(self.failure(WRITE_FAILED));
+            Event::Stdin(written) => {
+                got.stdin_pending = false;
+                match written {
+                    Ok(()) => {}
+                    // #7519: the child closed stdin before reading the whole
+                    // value. Kill the group; the run is classified, never Ok.
+                    Err(e) if e.kind() == ErrorKind::BrokenPipe => {
+                        guard.kill_unreaped_group();
+                        got.stdin_short = true;
+                    }
+                    Err(_) => return Err(self.failure(WRITE_FAILED)),
+                }
             }
-            Event::Stdin(_) => {}
         }
         Ok(())
     }
@@ -290,7 +312,12 @@ impl CliCommand {
         if got.stdout.overflow {
             return Err(self.failure(TOO_LARGE));
         }
-        let verdict = classify(status.success(), &got.stderr.bytes, had_stdin, &self.spec);
+        // #7519: a value the child did not fully read is never stored.
+        let verdict = if got.stdin_short {
+            Verdict::Other
+        } else {
+            classify(status.success(), &got.stderr.bytes, had_stdin, &self.spec)
+        };
         // #7519: stderr is dropped here; nothing but `classify` read it.
         drop(got.stderr);
         // #7519: a failed run's stdout is untrusted; only a success keeps it.
@@ -390,6 +417,10 @@ struct Capped {
 struct Collected {
     stdout: Capped,
     stderr: Capped,
+    /// The stdin write has not reported yet.
+    stdin_pending: bool,
+    /// The child closed stdin before the whole value was written.
+    stdin_short: bool,
 }
 
 /// One helper thread's result. Each thread sends exactly one, then exits.
@@ -410,6 +441,13 @@ impl GroupGuard {
         let status = self.child.try_wait()?;
         self.reaped = status.is_some();
         Ok(status)
+    }
+
+    /// `SIGKILL` the group, only while the unreaped leader holds its id.
+    fn kill_unreaped_group(&self) {
+        if !self.reaped {
+            kill_group(self.child.id());
+        }
     }
 }
 

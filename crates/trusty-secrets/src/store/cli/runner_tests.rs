@@ -66,6 +66,27 @@ impl Shim {
             .iter()
             .all(|name| !self.dir.path().join(name).exists())
     }
+
+    /// The pid a script wrote to `@LOG@/pid`.
+    fn logged_pid(&self) -> libc::pid_t {
+        let pid: libc::pid_t = self.log("pid").trim().parse().unwrap();
+        assert!(pid > 1);
+        pid
+    }
+}
+
+/// Whether `pid` is gone within ~2 s. A killed grandchild is reparented and
+/// reaped, which takes a moment.
+fn gone_soon(pid: libc::pid_t) -> bool {
+    (0..200).any(|_| {
+        // SAFETY: signal 0 sends nothing; `kill` only checks that `pid` exists.
+        let rc = unsafe { libc::kill(pid, 0) };
+        let gone = rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        if !gone {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        gone
+    })
 }
 
 /// Why: DOC-74 §8.2, #7519 A1 and A10 — the value reaches the child on
@@ -326,4 +347,35 @@ fn runner_early_exit_on_stdin_is_classified() {
     let run = shim.command().run_with_stdin(&value).unwrap();
     assert_eq!(run.verdict, Verdict::Other);
     assert_eq!(run.code, Some(3));
+}
+
+/// Why: #7519 — a child that closes stdin before reading the whole value
+/// and exits 0 must not read as stored, and its process group is killed so
+/// no grandchild outlives the run. The grandchild holds no pipe, so only
+/// the group kill can reach it.
+/// Test: itself.
+#[test]
+fn runner_stdin_closed_early_is_never_ok_and_kills_the_group() {
+    let shim = Shim::new(
+        "sleep 60 </dev/null >/dev/null 2>&1 &\n\
+         echo $! > '@LOG@/pid'\n\
+         exec 0<&-\n\
+         exit 0\n",
+    );
+    let value = SecretValue::new("v".repeat(4 * 1024 * 1024));
+    let started = Instant::now();
+    let run = shim.command().run_with_stdin(&value).unwrap();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+    assert_ne!(
+        run.verdict,
+        Verdict::Ok,
+        "a partly read value read as stored"
+    );
+    assert!(run.into_value().is_err());
+    let pid = shim.logged_pid();
+    assert!(
+        gone_soon(pid),
+        "grandchild {pid} outlived a short stdin write"
+    );
 }
