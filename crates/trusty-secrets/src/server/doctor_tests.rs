@@ -303,6 +303,74 @@ async fn doctor_selected_is_the_backend_a_write_uses_when_the_configs_differ() {
     assert!(!marker.exists(), "doctor or set ran the 1Password program");
 }
 
+/// Why: #7519 P4 critic HIGH, #7524 H1 — on a Keychain build every value
+/// write into `file` needs the account's own machine config to select it
+/// (`check_value_write_for`). Case A: the spawner's file selects `file`
+/// and the account's config is absent or keeps the Keychain — doctor's
+/// selected `file` row is unavailable with the consent refusal as its
+/// detail, and `set` is refused the same way. Case B: the account's config
+/// selects `file` — the row is available and `set` writes the value.
+/// Red before doctor applied the consent check: case A read available.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn doctor_file_row_is_unavailable_when_every_write_into_it_is_refused() {
+    for account_yaml in [None, Some("secrets:\n  default_backend: keychain\n")] {
+        let fx = fixture();
+        std::fs::write(
+            &fx.settings.machine_config,
+            "secrets:\n  default_backend: file\n",
+        )
+        .unwrap();
+        let consent = match account_yaml {
+            Some(yaml) => account(&fx, yaml),
+            None => fx.tmp.path().join("account").join("absent.yaml"),
+        };
+        let (factory, values) = with_file_backend(&fx);
+        let mut state = fx.state(factory);
+        state.keychain_compiled = true;
+        state.file_consent_config = Some(consent);
+        let server = fx.start_state(state).await;
+        for params in [Value::Null, json!({"project": fx.project()})] {
+            let report = doctor(&fx, params).await;
+            assert_eq!(report.selected_backend, BackendId::file());
+            let (available, reason, detail) = row(&report, "file");
+            assert!(!available, "{account_yaml:?}: {report:?}");
+            assert_eq!(reason, Some(Unavailable::NotEnabled), "{account_yaml:?}");
+            assert_eq!(detail, SecretsError::FileBackendNotSelected.to_string());
+        }
+        let refused = set(&fx).await;
+        assert_eq!(
+            fixed_error(&refused, method::SET),
+            ErrorKind::FileBackendNotSelected
+        );
+        server.stop().await;
+        assert!(!values.root().exists(), "a value reached `file`");
+    }
+
+    // Case B: the account's own config selects `file`.
+    let fx = fixture();
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: file\n",
+    )
+    .unwrap();
+    let consent = account(&fx, "secrets:\n  default_backend: file\n");
+    let (factory, values) = with_file_backend(&fx);
+    let mut state = fx.state(factory);
+    state.keychain_compiled = true;
+    state.file_consent_config = Some(consent);
+    let server = fx.start_state(state).await;
+    let report = doctor(&fx, json!({"project": fx.project()})).await;
+    let (available, reason, _) = row(&report, "file");
+    assert_eq!((available, reason), (true, None));
+    ok(set(&fx).await);
+    server.stop().await;
+    assert!(
+        values.root().exists(),
+        "the value was not written to `file`"
+    );
+}
+
 /// Why: #7519 P4 — a project whose tracked config sets what only the
 /// machine config may is refused on every request. Doctor reports it on
 /// the selected row, with the fix, instead of failing the call; the reply

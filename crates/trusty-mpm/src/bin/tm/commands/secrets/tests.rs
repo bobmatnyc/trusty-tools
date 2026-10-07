@@ -867,18 +867,21 @@ async fn doctor_renders_reasons_posture_and_headless_readiness() {
 }
 
 /// A doctor report selecting `selected`, with 1Password available and the
-/// token's presence at server start `token`.
-fn ci_report(selected: &str, token: bool) -> trusty_secrets::server::DoctorResponse {
-    serde_json::from_value(serde_json::json!({
+/// token's presence at server start `token`; `None` omits `headless`, as a
+/// server older than #7519 P4 does.
+fn ci_report(selected: &str, token: Option<bool>) -> trusty_secrets::server::DoctorResponse {
+    let mut report = serde_json::json!({
         "socket": "/s", "index_root": "/i", "machine_config": "/m",
         "project_root": null, "project_config": null, "selected_backend": selected,
         "backends": [
             {"id": "keychain", "available": true, "capabilities": ["READ", "WRITE"]},
             {"id": "onepassword", "available": true, "capabilities": ["READ", "WRITE"]},
         ],
-        "headless": {"onepassword_token": token},
-    }))
-    .expect("decode")
+    });
+    if let Some(token) = token {
+        report["headless"] = serde_json::json!({"onepassword_token": token});
+    }
+    serde_json::from_value(report).expect("decode")
 }
 
 /// #7519 d4 Q2 (owner ruling): under `CI=true`, doctor exits non-zero when
@@ -888,8 +891,12 @@ fn ci_report(selected: &str, token: bool) -> trusty_secrets::server::DoctorRespo
 #[tokio::test]
 async fn doctor_under_ci_fails_when_onepassword_has_no_headless_credential() {
     use doctor::{Judged, is_ci, verdict};
-    let err = verdict(&ci_report("onepassword", false), Judged::Project, true)
-        .expect_err("CI with no token must fail");
+    let err = verdict(
+        &ci_report("onepassword", Some(false)),
+        Judged::Project,
+        true,
+    )
+    .expect_err("CI with no token must fail");
     assert!(
         err.to_string().contains("OP_SERVICE_ACCOUNT_TOKEN"),
         "{err}"
@@ -899,9 +906,13 @@ async fn doctor_under_ci_fails_when_onepassword_has_no_headless_credential() {
         ("onepassword", true, true),
         ("keychain", false, true),
     ] {
-        verdict(&ci_report(selected, token), Judged::Project, ci)
+        verdict(&ci_report(selected, Some(token)), Judged::Project, ci)
             .unwrap_or_else(|e| panic!("{selected} token={token} ci={ci}: {e}"));
     }
+    // #7519 P4 critic: a server too old to report readiness fails closed.
+    let old = ci_report("onepassword", None);
+    assert_eq!(old.headless, None);
+    verdict(&old, Judged::Project, true).expect_err("CI with no readiness reported must fail");
     for (value, ci) in [
         (Some("true"), true),
         (Some("TRUE"), true),

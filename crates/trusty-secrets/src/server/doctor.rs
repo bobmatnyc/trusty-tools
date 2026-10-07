@@ -14,6 +14,8 @@
 //! open error is folded to its [`Unavailable`] kind with the error's own
 //! text as the detail. A project whose tracked config is refused still gets
 //! a report; its selected row carries [`Unavailable::TrackedSettingRefused`].
+//! A selected `file` every write would refuse for want of the account's
+//! consent (#7524 H1) is [`Unavailable::NotEnabled`], with that refusal's text.
 //! Headless readiness is whether the token was present at start, yes or no.
 //! DOC-74 §7's unsupported tools (`bw`, `vault`, `pass`, `gopass`, `doppler`,
 //! `infisical`) are listed by an absolute-`PATH` lookup that runs nothing
@@ -387,7 +389,8 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
 /// `server_doctor_lists_onepassword_without_spawning`,
 /// `doctor_reasons_name_each_cause`,
 /// `doctor_selected_is_the_backend_a_write_uses_when_the_configs_differ`,
-/// `doctor_reports_a_refused_tracked_setting_on_the_selected_row`.
+/// `doctor_reports_a_refused_tracked_setting_on_the_selected_row`,
+/// `doctor_file_row_is_unavailable_when_every_write_into_it_is_refused`.
 pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
@@ -412,11 +415,25 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
         .into_iter()
         .map(|id| judge(state, account.as_ref(), id))
         .collect();
-    if let Some(detail) = target.refused
+    // The selected row says what a write meets first: the tracked refusal,
+    // then the `file` consent check, then the open.
+    let refusal = match target.refused {
+        Some(detail) => Some((Unavailable::TrackedSettingRefused, detail)),
+        // #7519 P4: the same check, with the same inputs, as
+        // `ProjectContext::open_for_write`; `file` read available while every
+        // write into it was refused (#7524 H1).
+        None => config::check_value_write_for(
+            &target.selected,
+            state.file_consent_config.as_deref(),
+            state.keychain_compiled,
+        )
+        .err()
+        .map(|e| (Unavailable::NotEnabled, e.to_string())),
+    };
+    if let Some((reason, detail)) = refusal
         && let Some(row) = backends.iter_mut().find(|row| row.id == target.selected)
     {
-        *row =
-            BackendStatus::unavailable(row.id.clone(), Unavailable::TrackedSettingRefused, detail);
+        *row = BackendStatus::unavailable(row.id.clone(), reason, detail);
     }
     to_json(&DoctorResponse {
         socket: state.settings.socket.clone(),
