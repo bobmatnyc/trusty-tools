@@ -203,8 +203,29 @@ empty result.
   `http(s)://` link and renders as `URL: <url>`. A `[gh: #N — "excerpt"]`
   citation resolves only against text the reviewer saw. The verifier never
   sees issue text. Works on a local diff.
+- `--spec-docs` (#9193) reads the ADR, spec and SLD docs the PR body names
+  (`docs/adr`, `docs/specs`, `docs/design`, `docs/prd`, `docs/architecture`,
+  `docs/reference`, `crates/*/docs`; an SLD `#anchor` reads the whole file),
+  plus doc paths trusty-search finds. Each is read through the GitHub
+  Contents API at the PR head SHA, never the default branch, and renders as
+  `## Referenced docs`, fenced as data under a `path@sha` heading. Each doc is
+  capped at 16,000 characters with a visible marker; at most 6 docs and
+  48,000 characters are shown, and a doc past either limit is left out whole
+  and recorded `omitted`. A doc the PR itself changes is marked "this PR
+  modifies this doc". The verifier never sees doc text.
+- `--claude-md` (#9193) reads the root `CLAUDE.md` and up to 3 nested ones
+  found by trusty-search, at the PR head SHA, as `## Repository conventions
+  (CLAUDE.md)`, 16,000 characters in total.
+- With either doc flag, a finding may cite `[doc: path@sha — "excerpt"]`. It
+  resolves only when the path was read, the SHA is a 7+ character prefix of
+  the head, and every excerpt is in the text the reviewer saw; otherwise the
+  finding is withheld. A missing path is recorded `absent`; an API error, a
+  directory, a fork head the base repository cannot resolve, or a failed
+  search is `unavailable`; none stops the review. A local diff has no head
+  SHA, so both sources are recorded `unavailable` and the review runs.
 
-With `--include-pr-body`, `--issue-docs-file` or `--report-context`, `--json` prints
+With `--include-pr-body`, `--issue-docs-file`, `--spec-docs`, `--claude-md` or
+`--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
 one line per source that was `unavailable` or `truncated`. Without either flag,
 `--json` prints the review object alone, exactly as before. The text flags and
@@ -277,10 +298,12 @@ Optional PR context (#9192), all off by default:
 | `pr_discussion` | string | Review and issue comments for the reviewer and the verifier. |
 | `referenced_code` | string | Related code the diff depends on, for the reviewer. |
 | `issue_docs` | array | Issues the change addresses (#9197), `[{id, title?, body, url?}]`; also on `review_diff`. Same caps and rules as `run --issue-docs-file`. A malformed value is an invalid-params error. |
+| `spec_docs` | boolean | Read the ADR, spec and SLD docs the PR body names, plus trusty-search hits, at the PR head SHA (#9193); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same caps and `[doc:]` rules as `run --spec-docs`. A non-boolean is an invalid-params error. |
+| `claude_md` | boolean | Read the root `CLAUDE.md` and up to 3 nested ones at the PR head SHA (#9193); also on `review_diff`, as above. Same caps as `run --claude-md`. A non-boolean is an invalid-params error. |
 
-A mistyped text param is ignored with a warning. When any of the five is
+A mistyped text param is ignored with a warning. When any of the seven is
 sent, the response envelope carries `context_sources`: one record per source
-(`pr_body`, `caller_context`, `issues`) with state `used`, `truncated`,
+(`pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`) with state `used`, `truncated`,
 `absent` or `unavailable`, and per-item rows (`omitted` names a doc left out
 whole). The `ReviewResult` text inside the envelope is unchanged.
 

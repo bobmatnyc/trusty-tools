@@ -861,3 +861,31 @@ fn both_review_tools_list_issue_docs() {
         assert!(!required.iter().any(|r| r == "issue_docs"), "{name}");
     }
 }
+
+/// #9193: both review tools list the optional `spec_docs` and `claude_md`
+/// booleans.
+#[test]
+fn review_pr_schema_lists_spec_docs_and_claude_md() {
+    let tools = tool_descriptors();
+    for name in ["review_pr", "review_diff"] {
+        let tool = tools
+            .as_array()
+            .and_then(|a| a.iter().find(|t| t["name"] == name))
+            .expect(name);
+        for flag in ["spec_docs", "claude_md"] {
+            let schema = &tool["inputSchema"]["properties"][flag];
+            assert_eq!(schema["type"], "boolean", "{name}.{flag}");
+            assert!(
+                schema["description"]
+                    .as_str()
+                    .is_some_and(|d| d.contains("PR head SHA"))
+            );
+        }
+        let required = tool["inputSchema"]["required"].as_array().expect(name);
+        assert!(
+            !required
+                .iter()
+                .any(|r| r == "spec_docs" || r == "claude_md")
+        );
+    }
+}

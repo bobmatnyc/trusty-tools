@@ -99,6 +99,7 @@ async fn dedup(handle: &Arc<PalaceHandle>) -> usize {
     )
     .await
     .unwrap()
+    .merged
 }
 
 fn ids(handle: &PalaceHandle) -> Vec<Uuid> {

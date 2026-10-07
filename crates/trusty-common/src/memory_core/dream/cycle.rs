@@ -189,7 +189,22 @@ pub(super) async fn compact_pass(
     Ok(removed)
 }
 
-/// Find near-duplicates and merge survivors; returns the merge count.
+/// What one dedup pass did (#9391).
+///
+/// Why: a merge whose persist or loser-evict failed is logged and skipped so
+/// the rest of the pass still runs. The cycle must still learn of it: a pass
+/// that left a duplicate pair behind must not settle the palace.
+/// What: `merged` counts merges whose text persisted; `failed` counts merges
+/// whose persist failed plus losers that could not be evicted.
+/// Test: `settled_corpus_tests::a_failed_merge_persist_does_not_settle_the_palace`,
+/// `settled_corpus_tests::a_failed_loser_evict_does_not_settle_the_palace`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct DedupOutcome {
+    pub(super) merged: usize,
+    pub(super) failed: usize,
+}
+
+/// Find near-duplicates and merge survivors; returns a [`DedupOutcome`].
 ///
 /// Why: The previous implementation initialised `FastEmbedder` once but
 /// then called `recall_deep` per drawer — each call does a fresh embed
@@ -216,14 +231,18 @@ pub(super) async fn dedup_pass(
     started: std::time::Instant,
     budget: Duration,
     dedup_threshold: f32,
-) -> Result<usize> {
+    embedder: Option<Arc<dyn Embedder + Send + Sync>>,
+) -> Result<DedupOutcome> {
     // Reuse the process-wide shared embedder instead of constructing a
     // fresh ONNX session for every dream cycle (issue #57). The previous
     // per-cycle construction multiplied the daemon's memory footprint by
-    // the number of palaces.
-    let embedder = shared_embedder()
-        .await
-        .map_err(|e| e.context("acquire shared embedder for dream dedup"))?;
+    // the number of palaces. #9391: `Some` is a test dreamer's own embedder.
+    let embedder = match embedder {
+        Some(embedder) => embedder,
+        None => shared_embedder()
+            .await
+            .map_err(|e| e.context("acquire shared embedder for dream dedup"))?,
+    };
     dedup_pass_with_embedder(
         handle,
         started,
@@ -259,13 +278,13 @@ pub(super) async fn dedup_pass_with_embedder(
     dedup_threshold: f32,
     embedder: &(dyn Embedder + Send + Sync),
     embed_timeout: Duration,
-) -> Result<usize> {
+) -> Result<DedupOutcome> {
     let snapshot: Vec<Drawer> = handle.drawers.read().clone();
     if snapshot.len() < 2 {
-        return Ok(0);
+        return Ok(DedupOutcome::default());
     }
 
-    let mut merges: usize = 0;
+    let mut outcome = DedupOutcome::default();
     let mut already_removed: HashSet<Uuid> = HashSet::new();
 
     for chunk in snapshot.chunks(DREAM_EMBED_CHUNK) {
@@ -314,19 +333,20 @@ pub(super) async fn dedup_pass_with_embedder(
             if drawer.drawer_type.is_protected() {
                 continue;
             }
-            merges += dedup_one(
+            dedup_one(
                 handle,
                 &snapshot,
                 drawer,
                 query_vec,
                 dedup_threshold,
                 &mut already_removed,
+                &mut outcome,
             )
             .await?;
         }
         // `vectors` drops here — the next chunk never overlaps this one's.
     }
-    Ok(merges)
+    Ok(outcome)
 }
 
 /// Merge `drawer`'s nearest duplicate, if it has one above the threshold.
@@ -337,8 +357,9 @@ pub(super) async fn dedup_pass_with_embedder(
 /// What: searches the HNSW index with `query_vec`, takes the first neighbour
 /// that is a different, not-yet-removed, unprotected drawer scoring at least
 /// `dedup_threshold`, persists the merge via `helpers::persist_merge`, then
-/// forgets the loser. Returns 1 when a merge happened, 0 otherwise — at most
-/// one merge per source, which keeps the pass's behaviour predictable.
+/// forgets the loser. Adds to `outcome` — at most one merge per source, which
+/// keeps the pass's behaviour predictable. A failed persist or evict is logged
+/// and counted in `outcome.failed` (#9391), not returned as an error.
 /// Test: `dream_cycle_merges_duplicates`,
 /// `concurrency_tests::chunking_preserves_dedup_behaviour`,
 /// `dedup_survivor_tests::a_failed_merge_persist_keeps_the_duplicate`.
@@ -349,7 +370,8 @@ async fn dedup_one(
     query_vec: &[f32],
     dedup_threshold: f32,
     already_removed: &mut HashSet<Uuid>,
-) -> Result<usize> {
+    outcome: &mut DedupOutcome,
+) -> Result<()> {
     // Top-3 keeps the dedup pass cheap; the first neighbor is `drawer`
     // itself (score ~1.0) so we look at index 1+. `vector_store.search`
     // returns pure cosine similarity — no importance weighting baked
@@ -385,7 +407,9 @@ async fn dedup_one(
                     palace = %handle.id, a = %drawer.id, b = %hit_drawer.id,
                     "#9172: dream dedup merge not persisted; both drawers kept: {e:#}"
                 );
-                return Ok(0);
+                // #9391: the pair is still a duplicate; the cycle must not settle.
+                outcome.failed += 1;
+                return Ok(());
             }
         };
         #[cfg(test)]
@@ -399,11 +423,13 @@ async fn dedup_one(
             .await
         {
             tracing::warn!(id = ?loser_id, "dream dedup: loser evict failed: {e:#}");
+            outcome.failed += 1;
         }
         already_removed.insert(loser_id);
-        return Ok(1);
+        outcome.merged += 1;
+        return Ok(());
     }
-    Ok(0)
+    Ok(())
 }
 
 /// Drop drawers whose effective importance is below `prune_importance`

@@ -19,6 +19,10 @@
 //! spawner's environment would otherwise move the names index for every
 //! client of the shared server; a test or sandbox in its own directory keeps
 //! the override, and `--index-dir` works on any socket.
+//! #7519: the template directory for `op item edit` follows the same rule:
+//! beside an index named by `--index-dir`, else under `$HOME`
+//! ([`template_root_beside`]), so no environment variable can put a
+//! value-bearing file in a project tree.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
@@ -118,6 +122,9 @@ pub struct ServerSettings {
     pub audit_log: PathBuf,
     /// Size at which [`Self::audit_log`] is rotated when next opened.
     pub audit_max_bytes: u64,
+    /// The 0700 directory a CLI backend writes template files under, and
+    /// the startup sweep clears (#7519).
+    pub template_root: PathBuf,
 }
 
 impl ServerSettings {
@@ -125,6 +132,7 @@ impl ServerSettings {
     ///
     /// What: the audit log is [`audit_log_beside`] the index, capped at
     /// [`DEFAULT_AUDIT_MAX_BYTES`]; change either with the `with_` methods.
+    /// Template files go [`template_root_beside`] the index.
     pub fn new(
         socket: PathBuf,
         index_root: PathBuf,
@@ -134,6 +142,7 @@ impl ServerSettings {
         Self {
             audit_log: audit_log_beside(&index_root),
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+            template_root: template_root_beside(&index_root),
             socket,
             index_root,
             machine_config,
@@ -231,6 +240,11 @@ impl ServerSettings {
             (None, None) => under_home(AUDIT_LOG_SUBPATH)?,
         };
         let socket = pick(socket, SOCKET_ENV, SOCKET_SUBPATH)?;
+        // #7519: likewise the template directory, which holds values.
+        let template_root = match &index_root {
+            Some(index_flag) => template_root_beside(index_flag),
+            None => template_root_beside(&under_home(INDEX_SUBDIR)?),
+        };
         let index_root = match index_root {
             Some(path) => path,
             // #7524: a caller's environment never moves the shared server's index.
@@ -248,6 +262,7 @@ impl ServerSettings {
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+            template_root,
             index_root,
         })
     }
@@ -350,6 +365,17 @@ fn dir_identity(socket: &Path) -> Option<DirIdentity> {
         }
     }
     None
+}
+
+/// The template directory for an index at `index_root`: `tmp` in the
+/// index's parent directory.
+///
+/// Why: #7519 — for the default index this is
+/// `~/.trusty-tools/trusty-secrets/tmp`, the CLI runner's `TMP_SUBDIR`; for
+/// an index redirected by the `--index-dir` flag it follows the index.
+/// Test: `settings_template_root_follows_the_index_flag_only`.
+pub fn template_root_beside(index_root: &Path) -> PathBuf {
+    index_root.parent().unwrap_or(index_root).join("tmp")
 }
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.

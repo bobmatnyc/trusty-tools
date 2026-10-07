@@ -46,8 +46,9 @@ use crate::{
             ReviewOptions,
             ReviewOutcome,
             assemble::{PrBody, apply_caller_context, refs_for_review}, // #9188 D, #9192, #9197
+            docs::{DocsCall, apply_docs},                              // #9193
             ledger::ContextLedger,
-            seams::{load_diff_via, pr_meta_via},
+            seams::{PrHead, load_diff_via, pr_meta_via},
         },
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
         post::{FinalizeAction, decide_action},
@@ -305,12 +306,13 @@ async fn run_pipeline(
     // #6062: the fetch failure's own reason travels with the empty head SHA —
     // the guard below reports both the consequence and the cause, so a run that
     // stops for a missing SHA still names the config an operator has to fix.
-    let (pr_meta, head_sha, meta_error): (ReviewPrMeta, String, Option<String>) = if is_local {
-        (ReviewPrMeta::default(), String::new(), None)
+    // #9193: `head` also says whether the head is in a fork.
+    let (pr_meta, head, meta_error): (ReviewPrMeta, PrHead, Option<String>) = if is_local {
+        (ReviewPrMeta::default(), PrHead::default(), None)
     } else {
         let source = options.pr_source.as_deref(); // #9192: test seam; None in production
         match pr_meta_via(source, config, &owner, &repo, pr_number, input.run_mode).await {
-            Ok((m, sha)) => (m, sha, None),
+            Ok((m, head)) => (m, head, None),
             Err(e) => {
                 warn!("failed to fetch PR metadata: {e} — using empty metadata");
                 (
@@ -320,7 +322,7 @@ async fn run_pipeline(
                         author: String::new(),
                         url: pr_url.clone(),
                     },
-                    String::new(),
+                    PrHead::default(),
                     Some(e.to_string()),
                 )
             }
@@ -335,7 +337,7 @@ async fn run_pipeline(
         pr_meta.title.clone(),
         pr_url,
     );
-    result.head_sha = head_sha.clone();
+    result.head_sha = head.sha.clone();
 
     // ── Step 2a: no head SHA, no post (#6062) ─────────────────────────────
     // The claim below and `finalize_review`'s `complete()` both key on the head
@@ -344,7 +346,7 @@ async fn run_pipeline(
     // retry after the same failure posted a duplicate. Ask `decide_action`
     // whether the post path is reachable, exactly as the #5113 guard does.
     if !is_local
-        && head_sha.is_empty()
+        && head.sha.is_empty()
         && decide_action(config.dry_run, input.trigger, input.allow_posting, true)
             == FinalizeAction::Post
     {
@@ -547,7 +549,11 @@ async fn run_pipeline(
     // #9192: the requested PR body merges in here, ahead of the caller's text.
     let body = PrBody::of(is_local, meta_error.as_deref(), &pr_meta.body);
     // #9197: `applied` also carries the issue section for both prompts and the refs.
-    let applied = apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
+    let mut applied =
+        apply_caller_context(&mut input.caller_context, &options.request, body, ledger);
+    // #9193: ADR/spec/SLD docs and CLAUDE.md read at the head SHA, when asked for.
+    let docs = DocsCall::new(config, &deps, options, &diff_source, &pr_meta, &filtered);
+    apply_docs(&mut applied, docs.at(&head), ledger).await;
     context.pr_description = input.caller_context.pr_description.clone();
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
@@ -585,7 +591,7 @@ async fn run_pipeline(
         &input.reviewer_model,
         &voice_config,
         config.coverage.enabled,
-        &applied.sections,
+        &applied.prompt_sections(), // #9193: issues, then docs
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
@@ -746,6 +752,7 @@ async fn run_pipeline(
         per_file: false,
         author_rationale: author_rationale.as_deref(),
         refs: &refs,
+        docs: &applied.docs, // #9193
         narrative: &narrative,
         wiped_model_verdict,
         judged: judged_review(

@@ -276,6 +276,14 @@ impl BackendId {
     /// no Keychain backend, otherwise chosen only by config.
     pub const FILE: &'static str = "file";
 
+    /// The 1Password CLI backend (#7519), compiled under `cli-backends`.
+    pub const ONEPASSWORD: &'static str = "onepassword";
+
+    /// The `onepassword` backend id.
+    pub fn onepassword() -> Self {
+        Self(Self::ONEPASSWORD.to_string())
+    }
+
     /// The `keychain` backend id.
     pub fn keychain() -> Self {
         Self(Self::KEYCHAIN.to_string())

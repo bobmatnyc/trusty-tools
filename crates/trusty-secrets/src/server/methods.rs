@@ -31,7 +31,8 @@ use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
-use crate::store::{Capabilities, SecretBackend, SecretStore, local_backends};
+use crate::store::config::{MachineSecretsConfig, load_machine_at};
+use crate::store::{Capabilities, SecretBackend, SecretStore, cli_backends, swept_backends};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -134,13 +135,17 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 
 /// `secrets.delete`: remove one key from every backend and the index.
 ///
-/// What: the scope check runs before any backend is opened. The key is
-/// then deleted from the configured backend and from [`other_backends`]
-/// through [`SecretStore::delete_across`] (#7519). #4567 — audited like
-/// [`set`].
+/// What: the scope check runs before any backend is opened. Then the
+/// account's machine config is read by [`sweep_machine`]: an error refuses
+/// the delete before any backend is touched, and the index row stays
+/// (#7519). The key is then deleted from the configured backend and from
+/// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
+/// #4567 — audited like [`set`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`,
 /// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Delete, Recording::Once, |gate| {
@@ -150,31 +155,57 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
+        // #7519: a missing account file skips 1Password; an unreadable one
+        // refuses, since a 1Password copy from when it was readable may remain.
+        let account = sweep_machine(state)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
         // #7519: a backend switch or a copy leaves values in other backends.
-        let others = other_backends(state, &project.resolved_config().backend)?;
+        // Ruling 74: the CLI backends swept are the ones the factory opens,
+        // so enablement comes from the account's file, not the spawner's.
+        let others = other_backends(state, &project.resolved_config().backend, account.as_ref())?;
         gate.admit()?;
         let response = store.delete_across(&request.vault, &request.key, &others)?;
         to_json(&response)
     })
 }
 
+/// The account machine config whose CLI backends a delete sweeps (#7519).
+///
+/// Why: set, get and list treat an unreadable account file as "1Password
+/// off", which fails closed for them. For a delete it fails open: a key
+/// written to 1Password while the file was readable would stay there while
+/// the index row went.
+/// What: `None` when the server knows no account file or the file is
+/// missing; a read or parse error is returned as its [`ErrorKind`].
+/// Test: `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`.
+fn sweep_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKind> {
+    match state.file_consent_config.as_deref() {
+        Some(path) => Ok(load_machine_at(path)?),
+        None => Ok(None),
+    }
+}
+
 /// Every backend but `configured` that may hold a key (#7519).
 ///
 /// Why: A5 — a delete must clear the backend a key was set under before a
 /// switch, not only the one configured now.
-/// What: [`local_backends`] minus `configured`, each opened through the
-/// factory. A factory that answers [`SecretsError::UnknownBackend`] has no
-/// such backend, so it holds nothing and is skipped. Any other open failure
-/// is returned: that backend may still hold a value.
+/// What: [`swept_backends`] for the account's machine config — the local backends,
+/// plus each CLI backend it enables (#7519 P1 carry-over (a)) — minus
+/// `configured`, each opened through the factory. A factory that answers
+/// [`SecretsError::UnknownBackend`] has no such backend, so it holds
+/// nothing and is skipped. Any other open failure is returned: that backend
+/// may still hold a value.
 /// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
-/// `server_delete_fails_closed_when_an_old_backend_cannot_open`.
+/// `server_delete_fails_closed_when_an_old_backend_cannot_open`,
+/// `server_delete_sweeps_onepassword_when_the_machine_enables_it`.
 fn other_backends(
     state: &State,
     configured: &BackendId,
+    machine: Option<&MachineSecretsConfig>,
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
-    for id in local_backends() {
+    for id in swept_backends(machine) {
         if id == *configured {
             continue;
         }
@@ -380,10 +411,13 @@ pub struct DoctorResponse {
 ///
 /// What: S2 has no `detect_backends` yet (§7 lands with the CLI-backed
 /// integrations), so "available" means "this build opens it". Opening a
-/// backend reads no secret. Reports paths, ids and the selected backend's
+/// backend reads no secret and spawns no CLI, so 1Password's row never runs
+/// `op read` (#7519 A9); it is available when the build links it and the
+/// machine config enables it. Reports paths, ids and the selected backend's
 /// [`StoragePosture`] only.
 /// Test: `server_doctor_reports_backends_and_paths_only`,
-/// `server_doctor_reports_the_file_posture`.
+/// `server_doctor_reports_the_file_posture`,
+/// `server_doctor_lists_onepassword_without_spawning`.
 pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     let request: DoctorRequest = match params {
         Value::Null => DoctorRequest::default(),
@@ -403,6 +437,8 @@ pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
     };
     // #9326: the file backend is listed beside the Keychain.
     let mut ids = vec![BackendId::keychain(), BackendId::file()];
+    // #7519: A9 — every CLI backend this build links.
+    ids.extend(cli_backends());
     if !ids.contains(&selected) {
         ids.push(selected.clone());
     }

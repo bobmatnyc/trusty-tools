@@ -6,24 +6,29 @@
 //! records the exact address the daemon bound; this command exposes it as a
 //! first-class, machine-parsable CLI surface.
 //!
-//! What: reads the daemon's persisted address via
-//! `trusty_search::service::http_addr_path()` (issue #3545: switched from the
-//! generic, `TRUSTY_DATA_DIR`-oblivious `trusty_common::read_daemon_addr` so
-//! `port` agrees with `start`/`index`/`list`/`reindex`/`search` on which
-//! daemon instance is addressed) and prints one of
-//! three formats to stdout based on the caller's flags:
+//! What: asks the daemon on its socket (`search.health`, #9214) which HTTP
+//! address it bound, and prints one of three formats to stdout based on the
+//! caller's flags:
 //!   - default: bare port number  →  `7879\n`
 //!   - `--addr`: `host:port`      →  `127.0.0.1:7879\n`
 //!   - `--json`: JSON object      →  `{"addr":"127.0.0.1","port":7879}\n`
 //!
 //! Every intentional port/JSON output goes to **stdout**. Error messages go to
-//! **stderr**. When no daemon is running the command exits non-zero so shell
-//! substitution (`$(trusty-search port)`) fails cleanly.
+//! **stderr**. The command exits 1 when no daemon answers on the socket, and
+//! also when the daemon answers but serves no HTTP listener (`--no-http`), so
+//! shell substitution (`$(trusty-search port)`) fails cleanly. It only probes;
+//! it never starts a daemon.
 //!
-//! Test: unit tests in this module cover all three output formats plus the
-//! missing-daemon error path using a fake address string.
+//! Test: unit tests in this module cover the output formats; the daemon-facing
+//! paths are covered end to end by `port_names_the_socket_when_the_daemon_is_http_less`,
+//! `port_reports_no_daemon_only_when_the_socket_is_dead` and
+//! `port_prints_the_http_address_the_daemon_reports`.
+
+use std::path::Path;
 
 use anyhow::Result;
+use serde_json::Value;
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
 
 /// Output format requested by the caller.
 ///
@@ -80,70 +85,117 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
     }
 }
 
+/// What a live daemon says about its HTTP listener (#9214).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HttpListener {
+    /// The daemon serves HTTP at this `host:port`.
+    Bound(String),
+    /// The daemon serves only its socket (`start --no-http`).
+    SocketOnly,
+    /// A daemon from before #9030 reports no transport, and left no
+    /// `http_addr` file to read instead.
+    Unreported,
+}
+
+/// Ask the daemon on `client`'s socket whether it serves HTTP, and where.
+///
+/// Why (#9214): the `http_addr` and `daemon.port` files outlive the daemon
+/// that wrote them, and a `--no-http` daemon writes neither, so a file read
+/// can neither prove a daemon is up nor tell a dead one from a socket-only one.
+/// Only the daemon knows which listeners it bound (#9030).
+/// What: one `search.health` probe. Reads `transport.http_addr`: a string is
+/// [`HttpListener::Bound`], `null` is [`HttpListener::SocketOnly`]. A body
+/// with no `transport` key comes from a pre-#9030 daemon, which always bound
+/// HTTP and wrote `http_addr`; that file is read instead. Never dials TCP and
+/// never starts a daemon.
+///
+/// # Errors
+///
+/// The probe's own [`DaemonCallError`] — `Unreachable` when nothing serves the
+/// socket.
+///
+/// Test: `port_names_the_socket_when_the_daemon_is_http_less`,
+/// `dashboard_under_no_http_errors_and_opens_nothing`.
+pub(crate) async fn probe_http_listener(
+    client: &DaemonClient,
+) -> Result<HttpListener, DaemonCallError> {
+    let health = client.health().await?;
+    let Some(transport) = health.get("transport") else {
+        // #9214: a pre-#9030 daemon; it wrote the file this CLI used to read.
+        return Ok(trusty_search::service::http_addr_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .map_or(HttpListener::Unreported, HttpListener::Bound));
+    };
+    Ok(match transport.get("http_addr").and_then(Value::as_str) {
+        Some(addr) if !addr.trim().is_empty() => HttpListener::Bound(addr.trim().to_string()),
+        _ => HttpListener::SocketOnly,
+    })
+}
+
+/// The one wording every CLI command uses for a socket-only daemon (#9214).
+pub(crate) fn socket_only_message(socket: &Path) -> String {
+    format!(
+        "no HTTP listener (socket-only daemon at {})",
+        socket.display()
+    )
+}
+
 /// Entry point for `trusty-search port [--json | --addr]`.
 ///
 /// Why: exposes the daemon's listening port as a first-class CLI command so
 /// shell substitutions like `curl http://127.0.0.1:$(trusty-search port)/health`
 /// work without guessing. Issue #526.
-/// What: reads the address from the `http_addr` discovery file via
-/// `trusty_search::service::http_addr_path()` (issue #3545 -- honours
-/// `TRUSTY_DATA_DIR` so an isolated instance's port is reported instead of the
-/// production daemon's), formats it per the caller's flags, and prints to
-/// stdout. On any error (no daemon, missing file, corrupt address) the
-/// message goes to stderr and the function returns `Err` so `main` exits
-/// non-zero.
-/// Test: unit tests cover all format variants; integration tests in
-/// `tests/port_command.rs` cover the end-to-end path with a real lockfile.
-pub fn handle_port(format: PortFormat) -> Result<()> {
-    // Prefer the canonical address-discovery file written by a running daemon.
-    // Fall back to the legacy daemon_port_path (daemon.port) when available.
-    let addr = match trusty_search::service::http_addr_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-    {
-        Some(a) if !a.trim().is_empty() => a.trim().to_string(),
-        _ => {
-            // Legacy fallback: try the port-only daemon.port file.
-            match read_legacy_port_file() {
-                Some(port) => format!("127.0.0.1:{port}"),
-                None => {
-                    eprintln!(
-                        "trusty-search: no daemon running (address file not found). \
-                         Start with `trusty-search start`."
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-
-    match format_output(&addr, format) {
-        Some(out) => {
+/// What: resolves the socket the daemon binds (honouring `TRUSTY_DATA_DIR`,
+/// #3545), runs [`port_output`], prints the result to stdout, or prints the
+/// error to stderr and exits 1.
+/// Test: `port_names_the_socket_when_the_daemon_is_http_less`,
+/// `port_reports_no_daemon_only_when_the_socket_is_dead`,
+/// `port_prints_the_http_address_the_daemon_reports`.
+pub async fn handle_port(format: PortFormat) -> Result<()> {
+    let client = DaemonClient::resolve()?;
+    match port_output(&client, format).await {
+        Ok(out) => {
             println!("{out}");
             Ok(())
         }
-        None => {
-            eprintln!(
-                "trusty-search: daemon address file contains an unrecognised \
-                 address `{addr}` (expected host:port). \
-                 Re-start the daemon with `trusty-search start`."
-            );
+        Err(message) => {
+            eprintln!("trusty-search: {message}");
             std::process::exit(1);
         }
     }
 }
 
-/// Read the port number from the legacy `daemon.port` file as a fallback.
+/// The line `port` prints, or the reason it prints none.
 ///
-/// Why: deployments that were started before the `http_addr` convention was
-/// introduced only have a `daemon.port` file. Rather than losing backward
-/// compatibility, we check both locations.
-/// What: delegates to `commands::daemon_utils::daemon_port_path()`, reads the
-/// file, trims whitespace, and parses as `u16`. Returns `None` on any failure.
-/// Test: absence is covered by `handle_port_missing_daemon_test` in unit tests.
-fn read_legacy_port_file() -> Option<u16> {
-    let path = crate::commands::daemon_utils::daemon_port_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    raw.trim().parse::<u16>().ok()
+/// Why (#9214): "no daemon running" is true only when nothing answers on the
+/// socket. A daemon that answers but serves no HTTP gets its own message, and
+/// a stale discovery file is never reported as the port.
+/// What: maps [`probe_http_listener`] onto the output line or an error message
+/// naming the socket.
+/// Test: as [`handle_port`].
+async fn port_output(client: &DaemonClient, format: PortFormat) -> Result<String, String> {
+    let socket = client.socket().display();
+    let addr = match probe_http_listener(client).await {
+        Ok(HttpListener::Bound(addr)) => addr,
+        Ok(HttpListener::SocketOnly) => return Err(socket_only_message(client.socket())),
+        Ok(HttpListener::Unreported) => {
+            return Err(format!(
+                "the daemon at socket {socket} reported no HTTP address; restart it"
+            ));
+        }
+        Err(e) if e.is_unreachable() => {
+            return Err(format!(
+                "no daemon running (nothing answers on socket {socket}). \
+                 Start with `trusty-search start`."
+            ));
+        }
+        Err(e) => return Err(format!("the daemon at socket {socket} did not answer: {e}")),
+    };
+    format_output(&addr, format).ok_or_else(|| {
+        format!("the daemon reported an unrecognised address `{addr}` (expected host:port)")
+    })
 }
 
 #[cfg(test)]

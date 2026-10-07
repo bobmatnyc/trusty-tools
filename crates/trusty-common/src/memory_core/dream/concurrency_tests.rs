@@ -627,7 +627,8 @@ async fn chunking_preserves_dedup_behaviour() {
         Duration::from_secs(60),
     )
     .await
-    .expect("dedup pass");
+    .expect("dedup pass")
+    .merged;
 
     assert_eq!(merged, 1, "two identical drawers still collapse to one");
     assert_eq!(handle.drawers.read().len(), 1);

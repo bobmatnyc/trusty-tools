@@ -127,7 +127,7 @@ pub(super) async fn run_mapreduce_branch(
             &deps.llm,
             &ctx,
             mr_config,
-            &run.applied.sections,
+            &run.applied.prompt_sections(), // #9193: issues, then docs
         )
         .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
@@ -480,6 +480,7 @@ async fn fold_reduced_into_result(
         per_file: true,
         author_rationale: author_rationale.as_deref(),
         refs: &refs,
+        docs: &run.applied.docs,    // #9193
         narrative: &parsed.summary, // #9188 C: the synthesis summary
         wiped_model_verdict: facts.wiped_model_verdict,
         judged: facts.judged,
