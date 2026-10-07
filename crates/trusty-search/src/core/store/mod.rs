@@ -7,6 +7,8 @@
 //! (the primary concrete impl).
 //! Test: see `tests` submodule for async unit tests.
 
+// #9414: the search beam and query floor, scaled with index size.
+mod hnsw_tuning;
 pub(crate) mod path_match;
 // #2936: reaps staging files a SIGKILLed process left behind. Its own file so
 // `usearch_store.rs` stays under the 500-SLOC production cap.
@@ -19,6 +21,8 @@ mod snapshot_publish;
 mod snapshot_tests;
 #[cfg(test)]
 mod tests_2936;
+#[cfg(test)]
+mod tests_9414;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.

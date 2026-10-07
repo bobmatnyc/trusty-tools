@@ -28,6 +28,7 @@ mod corpus_corruption_quarantine_4227;
 mod corpus_open_quarantine_4122;
 mod daemon_env_precedence;
 mod data_dir_forward;
+mod hnsw_recall_9414;
 mod index_remove_env_conflict_8175;
 mod integration_tests;
 mod mcp_reindex_quarantine_8105;

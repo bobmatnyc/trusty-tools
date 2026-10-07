@@ -88,8 +88,11 @@ impl VectorStore for UsearchStore {
             let index = self.index.read().await;
             // #8232: checked under the read lock the close's reset waits on.
             self.refuse_if_closed("search")?;
+            // #9414: ask for at least the size-scaled beam (usearch searches
+            // with max(expansion_search, count)); hits are truncated below.
+            let count = super::hnsw_tuning::search_count(top_k, index.size());
             index
-                .search(query, top_k)
+                .search(query, count)
                 .map_err(|e| anyhow!("usearch search failed: {e}"))?
         };
 
@@ -108,6 +111,8 @@ impl VectorStore for UsearchStore {
             // Silently skip orphaned keys (e.g. removed mid-search) — the alternative
             // of erroring would tear down a valid query for a benign race.
         }
+        // #9414: the floor may have fetched more than the caller asked for.
+        hits.truncate(top_k);
         Ok(hits)
     }
 
@@ -163,8 +168,10 @@ impl VectorStore for UsearchStore {
                 super::path_match::matches_chunk_id(id.as_str(), path_prefix, repos, shapes)
             })
         };
+        // #9414: the same size-scaled floor as `search`, truncated below.
+        let count = super::hnsw_tuning::search_count(top_k, index.size());
         let matches = index
-            .filtered_search(query, top_k, filter)
+            .filtered_search(query, count, filter)
             .map_err(|e| anyhow!("usearch filtered_search failed: {e}"))?;
 
         let mut hits = Vec::with_capacity(matches.keys.len());
@@ -177,6 +184,7 @@ impl VectorStore for UsearchStore {
                 });
             }
         }
+        hits.truncate(top_k);
         Ok(hits)
     }
 

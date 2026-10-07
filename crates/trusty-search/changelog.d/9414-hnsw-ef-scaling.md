@@ -1,0 +1,2 @@
+Fixed
+- The vector lane no longer misses the true nearest neighbour on large indexes. The HNSW search beam now grows with index size: 64 up to 50K vectors, 256 up to 250K, 512 above. Searches on an index above 50K vectors ask usearch for at least that many candidates and keep the requested top-k, so an index built in the running daemon gets the same beam as a reloaded one. Existing indexes pick up the change on their next load, with no reindex. On a 150K-vector test corpus, recall@10 rose from 0.978 to 0.999 and no self-query missed rank 1 (#9414).
