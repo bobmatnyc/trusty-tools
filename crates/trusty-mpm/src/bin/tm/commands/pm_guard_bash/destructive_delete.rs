@@ -238,8 +238,60 @@ fn classify_destructive_delete_in(
     // #7190: a lone stdin consumer of a quoted here-document reads its body
     // as data, so only its operator line is judged.
     let masked = lone_inert_heredoc(command);
+    // #9344: the mask hides no root delete from the data-body floor.
+    let belt = data_body_root_delete(command, &[cwd.to_path_buf()], env);
     let command = masked.as_deref().unwrap_or(command);
-    classify_at_depth(command, cwd, env, 0, &Cell::new(0))
+    classify_at_depth(command, cwd, env, 0, &Cell::new(0)).max(belt)
+}
+
+/// [`DeleteTarget::Root`] when a line of any here-document body in `command`
+/// is a destructive-root command, whatever program reads the body (#9344);
+/// [`DeleteTarget::Unresolved`] for a wrapper the resolver cannot measure.
+///
+/// Why: a body read as data is never judged as a command, and a reader can
+/// run it after all — a `!`-alias, a gh extension, a `gpg.program` set in an
+/// earlier call. Belt and braces under [`super::heredoc_line`]'s trust rule.
+/// What: splits each body into lines, each line into shell segments, and
+/// denies a segment whose program word, past wrappers, is a delete verb with
+/// a target in the root class, judged from every directory in `cwds`. A verb
+/// anywhere else in a sentence, a backticked delete, an unresolvable target
+/// and a repository or worktree target do not count, so prose stays allowed.
+/// #9344 round 2: a segment whose program word the resolver cannot name and
+/// that names a delete verb is [`DeleteTarget::Unresolved`], as in
+/// [`classify_at_depth`].
+/// Test: `data_reader_tests::a_data_reader_body_holding_a_root_delete_is_denied_9344`,
+/// `data_reader_tests::commit_and_pr_body_shapes_stay_allowed_9344`.
+fn data_body_root_delete(command: &str, cwds: &[PathBuf], env: &PathEnv) -> Option<DeleteTarget> {
+    let heredocs = HeredocBodies::scan(command);
+    heredocs
+        .bodies()
+        .iter()
+        .flat_map(|body| command[body.span.0..body.span.1].lines())
+        .flat_map(split_shell_segments_raw)
+        .filter_map(|segment| {
+            let trimmed = segment.trim();
+            let argv = shlex::split(trimmed).unwrap_or_else(|| {
+                let words = trimmed.split_whitespace();
+                words.map(|w| w.replace(['\'', '"'], "")).collect()
+            });
+            // #9344 round 2: an unresolvable wrapper fails closed.
+            let Ok(word) = resolve_program_word(&argv) else {
+                return segment_mentions_a_delete_verb(trimmed).then_some(DeleteTarget::Unresolved);
+            };
+            let verb = argv.get(word.index).map_or("", |w| verb_name(w));
+            let root = !word.lookup
+                && DELETE_VERBS.contains(&verb)
+                && delete_targets(verb, &argv[word.index + 1..])
+                    .iter()
+                    .any(|target| {
+                        cwds.iter().any(|dir| {
+                            let path = resolve_target_path(target, dir, env);
+                            is_root_class(glob_parent(&path), env)
+                        })
+                    });
+            root.then_some(DeleteTarget::Root)
+        })
+        .max()
 }
 
 /// Programs that read a quoted here-document body on stdin as data (#7190).
@@ -472,6 +524,8 @@ fn classify_at_depth(
             worst = worst.max(classify_at_depth(body.text(), dir, env, depth + 1, work));
         }
     }
+    // #9344: a root delete in any here-document body, data or not.
+    worst = worst.max(data_body_root_delete(command, &cwds_seen, env));
     // #9155: split at its newlines, a nested here-document was never whole.
     for inner in nested_commands(command) {
         if !judged.insert(inner.clone()) {
