@@ -83,13 +83,19 @@ pub enum ErrorKind {
     /// The tracked project config selected `file` on a Keychain build.
     // #9326: Architect ruling, basis ruling 06 R2.
     TrackedBackendRefused,
+    /// The credential access audit record could not be guaranteed.
+    // #4567: fail-closed on an allowed set, delete or copy (DOC-45 C-7.12).
+    AuditUnavailable,
+    /// The tracked project config tried to turn the audit off.
+    // #4567: DOC-45 C-7.10 — only the untracked machine config may.
+    TrackedAuditRefused,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 26] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -113,6 +119,8 @@ impl ErrorKind {
         Self::RemoteHostUnsupported,
         Self::StorageRefused,
         Self::TrackedBackendRefused,
+        Self::AuditUnavailable,
+        Self::TrackedAuditRefused,
         Self::Internal,
     ];
 
@@ -149,6 +157,8 @@ impl ErrorKind {
             Self::RemoteHostUnsupported => "remote_host_unsupported",
             Self::StorageRefused => "storage_refused",
             Self::TrackedBackendRefused => "tracked_backend_refused",
+            Self::AuditUnavailable => "audit_unavailable",
+            Self::TrackedAuditRefused => "tracked_audit_refused",
             Self::Internal => "internal",
         }
     }
@@ -191,6 +201,14 @@ impl ErrorKind {
             Self::TrackedBackendRefused => {
                 "the project's tracked config may not select the `file` backend on a build with a Keychain; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
             }
+            // #4567: fixed text, no path or value. Usually returned before the
+            // backend call; after a completed one the change stands (DOC-45 C-7.7a).
+            Self::AuditUnavailable => {
+                "the credential access audit log could not be written; the requested change may already have been applied"
+            }
+            Self::TrackedAuditRefused => {
+                "the project's tracked config may not turn the credential audit off; set `secrets.audit: false` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -225,6 +243,9 @@ impl ErrorKind {
             // #9326: the next unused code.
             Self::StorageRefused => -32070,
             Self::TrackedBackendRefused => -32071,
+            // #4567: the next unused codes.
+            Self::AuditUnavailable => -32072,
+            Self::TrackedAuditRefused => -32073,
         }
     }
 

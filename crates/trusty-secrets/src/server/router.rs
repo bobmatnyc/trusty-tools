@@ -24,6 +24,7 @@ use trusty_common::uds::server::{
 };
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
+use super::audit::AuditSink;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
@@ -46,8 +47,9 @@ pub fn default_backends() -> BackendFactory {
 /// What every handler shares.
 ///
 /// What: the settings, the names-only index rooted at
-/// [`ServerSettings::index_root`], and the backend factory. `Debug` shows
-/// settings and the index root only.
+/// [`ServerSettings::index_root`], the backend factory, and the audit log at
+/// [`ServerSettings::audit_log`] (#4567). `Debug` shows settings and the
+/// index root only.
 // #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
 #[non_exhaustive]
 pub struct State {
@@ -57,16 +59,20 @@ pub struct State {
     pub index: NamesIndex,
     /// Backend id → implementation.
     pub backends: BackendFactory,
+    /// The credential access audit log.
+    pub(crate) audit: AuditSink,
 }
 
 impl State {
     /// State for `settings`, opening backends through `backends`.
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
+        let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
         Self {
             settings,
             index,
             backends,
+            audit,
         }
     }
 }
