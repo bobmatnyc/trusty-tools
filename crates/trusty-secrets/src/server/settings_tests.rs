@@ -7,7 +7,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::{INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings};
+use super::{INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError};
 use crate::store::INDEX_SUBDIR;
 
 /// An environment that sets only [`INDEX_DIR_ENV`], to `value`.
@@ -24,6 +24,17 @@ fn serve_args(socket: Option<&Path>, extra: &[&str]) -> Vec<OsString> {
     }
     args.extend(extra.iter().map(OsString::from));
     args
+}
+
+/// [`ServerSettings::from_args`] with a fixed account home that is never
+/// `$HOME` and holds no socket a test names.
+// #7524: no test reads the real password database; a host without a row for
+// the test uid would fail closed and read every socket as the default.
+fn parse_settings(
+    args: impl IntoIterator<Item = OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ServerSettings, SettingsError> {
+    ServerSettings::from_args_with(args, env, || Some(PathBuf::from("/account-home-7524")))
 }
 
 /// Why: #7524 M3 — the on-demand client passes the caller's environment to
@@ -47,7 +58,7 @@ fn settings_index_env_is_ignored_on_the_default_socket() {
     ];
     let sockets = std::iter::once(None).chain(spellings.iter().map(|s| Some(s.as_path())));
     for socket in sockets {
-        let parsed = ServerSettings::from_args(serve_args(socket, &[]), env).unwrap();
+        let parsed = parse_settings(serve_args(socket, &[]), env).unwrap();
         assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR), "{socket:?}");
     }
 }
@@ -60,7 +71,7 @@ fn settings_index_env_is_ignored_on_the_default_socket() {
 fn settings_index_override_survives_off_the_default_socket() {
     let env = index_env("/env/index");
     let sandbox = Path::new("/sandbox-7524/s.sock");
-    let parsed = ServerSettings::from_args(serve_args(Some(sandbox), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(sandbox), &[]), env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/env/index"));
 
     let Some(home) = dirs::home_dir() else {
@@ -68,7 +79,7 @@ fn settings_index_override_survives_off_the_default_socket() {
     };
     let default_socket = home.join(SOCKET_SUBPATH);
     let args = serve_args(Some(&default_socket), &["--index-dir", "/flag/index"]);
-    let parsed = ServerSettings::from_args(args, env).unwrap();
+    let parsed = parse_settings(args, env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/flag/index"));
 }
 
@@ -122,7 +133,7 @@ fn settings_index_env_is_ignored_for_a_case_variant_default_socket() {
     };
     let variant = home.join(".trusty-tools/trusty-secrets/SECRETS.SOCK");
     let env = index_env("/repo/checkout/index");
-    let parsed = ServerSettings::from_args(serve_args(Some(&variant), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(&variant), &[]), env).unwrap();
     assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
 
@@ -153,7 +164,7 @@ fn settings_index_env_is_ignored_for_a_bare_relative_default_socket() {
     relative.push(below_root);
     relative.push(SOCKET_SUBPATH);
     let env = index_env("/repo/checkout/index");
-    let parsed = ServerSettings::from_args(serve_args(Some(&relative), &[]), env).unwrap();
+    let parsed = parse_settings(serve_args(Some(&relative), &[]), env).unwrap();
     assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
 
@@ -183,4 +194,48 @@ fn settings_non_ascii_missing_name_is_the_default_socket() {
     let socket = tmp.path().join("secrets/s.sock");
     let candidate = tmp.path().join("\u{17f}ecrets/s.sock");
     assert!(super::same_socket(&candidate, &socket));
+}
+
+/// Why: #7524 H1 Route 2 — `dirs::home_dir` reads `$HOME` first, so a
+/// spawner that set `HOME=/tmp/h` and bound the real default socket made
+/// the guard compare against `/tmp/h` and honour [`INDEX_DIR_ENV`] for the
+/// shared server. The guard now also checks the password database's home.
+/// What: this process's `$HOME`, never changed here, plays the redirected
+/// one; a temp dir injected as the account home plays the real one. A socket
+/// in neither home's default directory keeps the override.
+/// Red when only `$HOME` decides the default socket.
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_on_the_account_default_socket_under_another_home() {
+    if dirs::home_dir().is_none() {
+        return;
+    }
+    let account = tempfile::TempDir::new().unwrap();
+    let account_home = || Some(account.path().to_path_buf());
+    let env = index_env("/repo/checkout/index");
+    let socket = account.path().join(SOCKET_SUBPATH);
+    let args = serve_args(Some(&socket), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, account_home).unwrap();
+    assert_ne!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+
+    let sandbox = account.path().join("sandbox/s.sock");
+    let args = serve_args(Some(&sandbox), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, account_home).unwrap();
+    assert_eq!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+}
+
+/// Why: #7524 H1 Route 2 — when the password database has no entry for this
+/// uid, the guard cannot tell the real default socket from another, so it
+/// fails closed: every socket counts as the default and [`INDEX_DIR_ENV`] is
+/// ignored, even for a socket in neither home's default directory.
+/// Red when a failed account-home lookup reads as "not the default socket".
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_on_any_socket_when_the_account_home_is_unknown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let sandbox = tmp.path().join("sandbox/s.sock");
+    let env = index_env("/repo/checkout/index");
+    let args = serve_args(Some(&sandbox), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, || None).unwrap();
+    assert_ne!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
 }

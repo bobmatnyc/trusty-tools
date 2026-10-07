@@ -32,7 +32,16 @@ Tracking: [#9073](https://github.com/bobmatnyc/trusty-tools/issues/9073).
   (`~/.trusty-tools/trusty-common/config.yaml`) names it. A tracked project
   config naming `backend: file` is refused with
   `SecretsError::TrackedBackendRefused`. A failing Keychain never falls back
-  to files.
+  to files. The server writes a value into `file` only when the user's own
+  machine config selects it: `.trusty-tools/trusty-common/config.yaml` under
+  the home directory the password database records for the server's user.
+  A config named with `serve --machine-config`, or found under a different
+  `$HOME`, does not count. A `set` or a `copy` into `file` without that
+  selection — or when that home cannot be looked up, or the file cannot be
+  read or parsed — is refused with `SecretsError::FileBackendNotSelected`
+  (wire kind `file_backend_not_selected`), opens no backend, writes nothing,
+  and leaves one audit denial. Reading from `file` and deleting from it stay
+  allowed.
 
 An explicitly configured `keychain` stays the Keychain on every host; off
 macOS it fails with `SecretsError::UnknownBackend`.
@@ -114,7 +123,8 @@ trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--audit-
 The environment variables `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR`
 and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values, with one limit:
 `TRUSTY_SECRETS_INDEX_DIR` is read only by a server whose socket is not the
-default one. A client passes its environment to the server it starts, and that
+default one, under `$HOME` or under the home directory the password database
+records for the server's user. A client passes its environment to the server it starts, and that
 server answers every client of the default socket, so one caller's environment
 must not move the names index for all of them. A test or sandbox on its own
 socket keeps the variable, and `--index-dir` works on any socket. Only flags
@@ -131,6 +141,13 @@ and sends a request.
 (the Keychain on macOS, and the file backend), not only the configured one, so
 a value left behind by a backend switch or a `copy` is removed too. If any
 backend fails to delete, the call fails and the key stays listed.
+
+`copy` moves keys between two backends of the same project. On macOS its
+destination may be `file` only when the user's own machine config, at its
+fixed location (see above), sets `secrets.default_backend: file`. Any process
+running as the same user can call the socket, and can start a server with
+its own `--machine-config` or `$HOME`, so without that rule it could move
+Keychain values into plaintext files.
 
 ## Audit trail
 

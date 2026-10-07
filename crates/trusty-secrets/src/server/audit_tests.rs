@@ -618,7 +618,7 @@ fn settings_audit_log_defaults_beside_the_index() {
         settings::audit_log_beside(&home.join(INDEX_SUBDIR)),
         home.join(AUDIT_LOG_SUBPATH)
     );
-    let parsed = ServerSettings::from_args(
+    let parsed = parse_settings(
         ["serve", "--index-dir", "/x/index"].map(std::ffi::OsString::from),
         |_| None,
     )
@@ -645,7 +645,7 @@ fn settings_ignore_an_audit_log_environment_variable() {
         SOCKET_ENV => Some("/x/s.sock".to_string()),
         _ => None,
     };
-    let parsed = ServerSettings::from_args(["serve"].map(std::ffi::OsString::from), env).unwrap();
+    let parsed = parse_settings(["serve"].map(std::ffi::OsString::from), env).unwrap();
     assert_eq!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
     assert_eq!(parsed.audit_log, home.join(AUDIT_LOG_SUBPATH));
 }

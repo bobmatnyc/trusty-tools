@@ -108,10 +108,13 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// What: the value goes to the project's backend through [`SecretStore`]
 /// and is dropped with the request. Neither the request nor the response is
 /// logged or formatted here. #4567: one audit record per call; the audit log
-/// is opened before the backend is touched (see `gate`).
+/// is opened before the backend is touched (see `gate`). #7524 H1: the
+/// backend opens through [`ProjectContext::open_for_write`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_malformed_set_never_echoes_its_value`,
-/// `audit_set_and_delete_write_one_record_per_call`.
+/// `audit_set_and_delete_write_one_record_per_call`,
+/// `server_set_writes_file_only_when_the_machine_config_selects_it`,
+/// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Set, Recording::Once, |gate| {
         let (dir, rest) = split_project(params)?;
@@ -120,7 +123,9 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
-        let store = SecretStore::new(project.backend(state)?, state.index.clone());
+        // #7524: the `file` posture check every value write passes.
+        let backend = project.open_for_write(state, &project.resolved_config().backend)?;
+        let store = SecretStore::new(backend, state.index.clone());
         gate.admit()?;
         let response = store.set(&request.vault, &request.key, &request.value)?;
         to_json(&response)
@@ -207,9 +212,12 @@ impl CopySelection {
 /// vault; the vault is always this project's own project vault. #9065: the
 /// destination write and its index row must not drift apart, so each key
 /// goes through [`SecretStore::set`] rather than a bare backend write.
-/// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a source without
+/// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a destination
+/// [`ProjectContext::open_for_write`] refuses (#7524 H1:
+/// [`ErrorKind::FileBackendNotSelected`] for `file` on a Keychain build the
+/// account's own machine config did not opt in), and a source without
 /// `READ` or a destination without `WRITE` ([`ErrorKind::Unsupported`]),
-/// before any key moves. Each key is read from the source and written with
+/// before any key moves. The `file` refusal comes before any backend opens. Each key is read from the source and written with
 /// [`SecretStore::set`] on the destination, which takes the index lock,
 /// upserts the row and, when the publish fails, deletes a new entry again.
 /// A key the source lacks, or any other per-key failure, lands in `failed`
@@ -225,7 +233,9 @@ impl CopySelection {
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
-/// `audit_copy_writes_one_record_per_key`.
+/// `audit_copy_writes_one_record_per_key`,
+/// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Copy, Recording::PerKey, |gate| {
         let (dir, rest) = split_project(params)?;
@@ -238,8 +248,10 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         gate.project(&project);
         let vault = project.scopes().project().clone();
         gate.name(&vault, None);
+        // #7524 H1: the destination's posture check runs before any backend
+        // opens; `tm secrets copy --to file` moved Keychain values to files.
+        let destination = project.open_for_write(state, &request.to_backend)?;
         let source = (state.backends)(&request.from_backend)?;
-        let destination = (state.backends)(&request.to_backend)?;
         if !source.capabilities().contains(Capabilities::READ)
             || !destination.capabilities().contains(Capabilities::WRITE)
         {

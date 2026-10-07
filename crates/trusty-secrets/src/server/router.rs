@@ -30,7 +30,8 @@ use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretsError};
-use crate::store::{NamesIndex, SecretBackend, open_backend};
+use crate::store::config::MACHINE_CONFIG_SUBPATH;
+use crate::store::{KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, platform};
 
 /// Maps a configured backend id to an implementation.
 ///
@@ -47,9 +48,11 @@ pub fn default_backends() -> BackendFactory {
 /// What every handler shares.
 ///
 /// What: the settings, the names-only index rooted at
-/// [`ServerSettings::index_root`], the backend factory, and the audit log at
-/// [`ServerSettings::audit_log`] (#4567). `Debug` shows settings and the
-/// index root only.
+/// [`ServerSettings::index_root`], the backend factory, the audit log at
+/// [`ServerSettings::audit_log`] (#4567), whether this server acts as a
+/// Keychain build (#7524), and the account's own machine config, the one
+/// file that may consent to `file` writes there (#7524 H1). `Debug` shows
+/// settings and the index root only.
 // #9073: S8's grant registry (DOC-74 §15.8) joins this; build it with `new`.
 #[non_exhaustive]
 pub struct State {
@@ -61,10 +64,22 @@ pub struct State {
     pub backends: BackendFactory,
     /// The credential access audit log.
     pub(crate) audit: AuditSink,
+    /// Whether this build links a Keychain, for the `file` posture checks.
+    // #7524: a field, not the constant, so tests can act as either build.
+    pub(crate) keychain_compiled: bool,
+    /// The machine config whose `default_backend: file` consents to value
+    /// writes into `file` on a Keychain build; `None` refuses them.
+    // #7524 H1: from the password database, never `--machine-config` or
+    // `$HOME`; a crate-private field so only tests can aim it elsewhere.
+    pub(crate) file_consent_config: Option<PathBuf>,
 }
 
 impl State {
     /// State for `settings`, opening backends through `backends`.
+    ///
+    /// What: the file consent config is [`MACHINE_CONFIG_SUBPATH`] under
+    /// `platform::account_home_dir`; `None` when that home is unknown.
+    /// Test: `server_file_consent_defaults_to_the_account_home_config`.
     pub fn new(settings: ServerSettings, backends: BackendFactory) -> Self {
         let index = NamesIndex::at(&settings.index_root);
         let audit = AuditSink::new(settings.audit_log.clone(), settings.audit_max_bytes);
@@ -73,6 +88,11 @@ impl State {
             index,
             backends,
             audit,
+            keychain_compiled: KEYCHAIN_COMPILED,
+            // #7524 H1: resolved once; a lookup failure refuses `file` writes.
+            file_consent_config: platform::account_home_dir()
+                .ok()
+                .map(|home| home.join(MACHINE_CONFIG_SUBPATH)),
         }
     }
 }
@@ -202,7 +222,16 @@ pub async fn serve(
     backends: BackendFactory,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<ServeExit, ServeError> {
-    let socket = settings.socket.clone();
+    serve_state(State::new(settings, backends), shutdown).await
+}
+
+/// [`serve`] over a prepared [`State`].
+// #7524: tests set `State::keychain_compiled` to act as either build.
+pub(crate) async fn serve_state(
+    state: State,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<ServeExit, ServeError> {
+    let socket = state.settings.socket.clone();
     let dir = socket.parent().ok_or_else(|| ServeError::NoParent {
         path: socket.clone(),
     })?;
@@ -216,8 +245,8 @@ pub async fn serve(
             path: socket.clone(),
             source: Box::new(source),
         })?;
-    let idle = IdleTracker::new(settings.idle_timeout);
-    let router = Arc::new(build_router(Arc::new(State::new(settings, backends))));
+    let idle = IdleTracker::new(state.settings.idle_timeout);
+    let router = Arc::new(build_router(Arc::new(state)));
     let exit = serve_until_idle(
         &listener,
         router,
