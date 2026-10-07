@@ -402,10 +402,8 @@ pub fn retire_orphaned_skills(
 ) -> Vec<RetiredSkill> {
     // #9012: without content the bundled half of the live set is unknown, and
     // an incomplete live set would misread live skills as retired — skip.
-    let content = match project_dir {
-        Some(dir) => crate::core::content_source::framework_content_for(dir),
-        None => crate::core::content_source::framework_content(),
-    };
+    let content = // #9396: read-only; never fetches the content release.
+    crate::core::content_source::framework_content_local(project_dir);
     let content = match content {
         Ok(content) => content,
         Err(error) => {

@@ -88,6 +88,8 @@ fn no_content_logs_one_error_naming_tm_content_install() {
         "exactly one line must name the remedy\nstderr: {stderr}"
     );
     assert!(remedy[0].contains("ERROR"), "{}", remedy[0]);
+    // #9396: the remedy named first is `tm content update`.
+    assert!(remedy[0].contains("tm content update"), "{}", remedy[0]);
     assert!(
         !stdout.contains("tm content install"),
         "the remedy is a log line, not protocol output\nstdout: {stdout}"

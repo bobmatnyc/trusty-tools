@@ -254,9 +254,55 @@ fn install_without_content_fails_naming_tm_content_install() {
     )
     .expect_err("no content installed");
     assert!(err.to_string().contains("tm content install"), "{err}");
+    assert!(err.to_string().contains("tm content update"), "{err}");
     assert!(
         !paths.framework.exists(),
         "a failed install must leave the framework tree unwritten"
+    );
+}
+
+/// #9396: the `tm install` gate fetches on first use; when that fetch fails
+/// it fails closed — nothing written, nothing pinned — naming `tm content
+/// update` and the offline `--from` install.
+#[test]
+fn install_with_a_failed_first_use_fetch_fails_closed() {
+    use trusty_mpm::content::bundle_cache::{CacheError, Fallback};
+    use trusty_mpm::content::first_use::resolve_or_fetch_in;
+    use trusty_mpm::core::content_source::{AgentRoster, DevOverride};
+
+    let cache = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let paths = trusty_mpm::core::paths::FrameworkPaths::under(home.path());
+    let mut fetches = 0;
+    let err = install_to_resolving(
+        &paths,
+        false,
+        || {
+            let content = resolve_or_fetch_in(cache.path(), DevOverride::Off, |_| {
+                fetches += 1;
+                Err(CacheError::Network {
+                    url: "https://api.github.com".to_owned(),
+                    reason: "network is unreachable".to_owned(),
+                    tag: None,
+                    fallback: Fallback::None,
+                })
+            })?;
+            AgentRoster::load(&content)
+        },
+        || unreachable!("the roster gate refuses first"),
+    )
+    .expect_err("the fetch failed");
+    let msg = err.to_string();
+    assert_eq!(fetches, 1, "one fetch attempt");
+    assert!(msg.contains("network is unreachable"), "{msg}");
+    assert!(msg.contains("run `tm content update`"), "{msg}");
+    assert!(msg.contains("tm content install --from"), "{msg}");
+    assert!(!paths.framework.exists(), "nothing written");
+    assert!(
+        !cache
+            .path()
+            .join(trusty_common::content::LOCK_FILE_NAME)
+            .exists()
     );
 }
 

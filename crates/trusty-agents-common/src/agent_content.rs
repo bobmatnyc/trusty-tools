@@ -8,8 +8,8 @@
 //! answers with an empty roster.
 //! What: [`resolve_content`] / [`resolve_content_in`] / [`checkout_content`]
 //! pick the source; [`AgentRoster`] lists and reads `agents/*.md` from it;
-//! [`AgentContentError`] is every failure, each naming `tm content install`
-//! or `tm content update`. [`crate::harness_doc::HarnessDoc`] reads the
+//! [`AgentContentError`] is every failure, each naming `tm content update`
+//! (and, when nothing is installed, the offline `tm content install --from`). [`crate::harness_doc::HarnessDoc`] reads the
 //! harness-understanding docs from the same source.
 //! Test: `not_installed_names_tm_content_install`,
 //! `an_unverifiable_bundle_is_a_content_error`, `an_empty_roster_is_an_error`,
@@ -30,6 +30,32 @@ pub const AGENTS_CLASS: &str = "agents";
 /// The root of every `extends:` chain; a roster without it cannot compose.
 pub const FOUNDATION_FILE: &str = "BASE-AGENT.md";
 
+/// What every not-installed error tells the operator to run (#9396): the
+/// fetch first, then the manual path that needs no API call.
+pub const REMEDY: &str = "run `tm content update`, or install by hand: `gh release download \
+     <tag> --repo bobmatnyc/trusty-tools`, then `tm content install --from <dir>/<tag>.tar.gz`";
+
+/// How [`describe_source`] names a dev checkout: this prefix, then the root.
+const DEV_ORIGIN: &str = "dev checkout ";
+
+/// What clears an error about the content of `origin` (a [`describe_source`] name).
+///
+/// Why: a dev checkout serves its working tree, so `tm content update`
+/// cannot change what it serves (#9396).
+/// What: for a checkout, `git pull` there or running tm outside it; for an
+/// installed release, `tm content update`.
+/// Test: `a_stale_checkout_names_git_pull_not_tm_content_update`.
+fn source_remedy(origin: &str) -> String {
+    match origin.strip_prefix(DEV_ORIGIN) {
+        // #9396: a stale clone is cured in the clone, never by the cache.
+        Some(root) => format!(
+            "the trusty-tools checkout at {root} serves its working tree, not the installed \
+             release: run `git pull` in {root}, or run tm from outside that checkout"
+        ),
+        None => "run `tm content update`".to_owned(),
+    }
+}
+
 /// Every way loading the agent roster or a harness doc can fail.
 ///
 /// Why: content is runtime-only after #9011, so each failure means a harness
@@ -44,18 +70,27 @@ pub const FOUNDATION_FILE: &str = "BASE-AGENT.md";
 #[non_exhaustive]
 pub enum AgentContentError {
     /// Nothing serves content: no trusted checkout and no `content-lock.toml`.
-    #[error(
-        "no instructional content is installed ({source}); run `tm content install` \
-         (offline: `tm content install --from <bundle.tar.gz>`)"
-    )]
+    // #9396: `tm content update` fetches; `--from` is the offline install.
+    #[error("no instructional content is installed ({source}); {remedy}", remedy = REMEDY)]
     NotInstalled {
         /// The resolver's `NotInstalled` error.
         #[source]
         source: ContentError,
     },
     /// The home directory is unknown, so the cache cannot be located.
-    #[error("cannot locate the content cache (no home directory); run `tm content install`")]
+    #[error("cannot locate the content cache (no home directory); {remedy}", remedy = REMEDY)]
     NoCacheDir,
+    /// Nothing was installed and the first-use fetch of the content release
+    /// failed (#9396); nothing unverified was pinned or served.
+    #[error(
+        "no instructional content is installed, and fetching the content release \
+         failed: {reason}; {remedy}",
+        remedy = REMEDY
+    )]
+    FetchFailed {
+        /// Why the fetch failed (unreachable, missing sidecar, checksum, ...).
+        reason: String,
+    },
     /// Any other resolver failure (checksum, schema, untrusted checkout, I/O).
     #[error("instructional content could not be loaded: {source}")]
     Content {
@@ -64,13 +99,13 @@ pub enum AgentContentError {
         source: ContentError,
     },
     /// The source resolved but holds no `agents/*.md`.
-    #[error("the content from {origin} holds no agents; run `tm content update`")]
+    #[error("the content from {origin} holds no agents; {}", source_remedy(.origin))]
     EmptyRoster {
         /// Where the content came from (see [`describe_source`]).
         origin: String,
     },
     /// A required file (`BASE-AGENT.md`, a harness doc, a named agent) is absent.
-    #[error("the content from {origin} has no `{path}`; run `tm content update`")]
+    #[error("the content from {origin} has no `{path}`; {}", source_remedy(.origin))]
     Missing {
         /// Where the content came from (see [`describe_source`]).
         origin: String,
@@ -81,8 +116,9 @@ pub enum AgentContentError {
     /// manifest that does not parse or validate, typically one a newer content
     /// release extended with a section or key this binary does not know.
     #[error(
-        "the content from {origin} has an unusable `{path}` ({reason}); run \
-         `tm content update`, or upgrade tm if that content is newer than this binary"
+        "the content from {origin} has an unusable `{path}` ({reason}); {}, or upgrade tm \
+         if that content is newer than this binary",
+        source_remedy(.origin)
     )]
     Invalid {
         /// Where the content came from (see [`describe_source`]).
@@ -113,9 +149,13 @@ impl From<ContentError> for AgentContentError {
 }
 
 impl AgentContentError {
-    /// Whether nothing is installed: no checkout, no lock, or no home directory.
+    /// Whether nothing is installed: no checkout, no lock, no home directory,
+    /// or a first-use fetch that failed (#9396).
     pub fn is_not_installed(&self) -> bool {
-        matches!(self, Self::NotInstalled { .. } | Self::NoCacheDir)
+        matches!(
+            self,
+            Self::NotInstalled { .. } | Self::NoCacheDir | Self::FetchFailed { .. }
+        )
     }
 }
 
@@ -160,7 +200,7 @@ pub fn mark_not_installed_reported() {
 /// installed release tag (`content-v0.2.0`).
 pub fn describe_source(source: &ContentSource) -> String {
     match source {
-        ContentSource::DevCheckout { root } => format!("dev checkout {}", root.display()),
+        ContentSource::DevCheckout { root } => format!("{DEV_ORIGIN}{}", root.display()),
         ContentSource::Installed { tag, .. } => tag.clone(),
         other => format!("{other:?}"),
     }

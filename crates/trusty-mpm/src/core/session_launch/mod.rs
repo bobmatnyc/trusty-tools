@@ -639,7 +639,11 @@ pub(super) fn prepare_session_inner(
     // #9012: the PM sections, output styles and skills are runtime content,
     // loaded ONCE per launch. With none the launch is refused (fatal), naming
     // `tm content install`, before anything is provisioned.
-    let content = crate::core::content_source::framework_content_for(project_dir)
+    // #9396: the roster comes from this same source, never the process cwd.
+    let crate::core::content_source::LaunchContent {
+        framework: content,
+        roster,
+    } = crate::core::content_source::launch_content_for(project_dir)
         .map_err(|source| PrepError::Content { source })?;
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
@@ -687,8 +691,7 @@ pub(super) fn prepare_session_inner(
     );
     // #9011 critic r1: no content means zero agents. The framework source may
     // still hold a previous binary's roster; the quarantine below reports why.
-    let stale_source =
-        plan.agent_source == fw.agents && crate::core::content_source::agent_roster().is_err();
+    let stale_source = plan.agent_source == fw.agents && roster.is_err();
     // #7727: `fw.skill_deploy_dir()` is the skills tier the agent bodies name.
     let deploy = if stale_source {
         DeployResult::default()

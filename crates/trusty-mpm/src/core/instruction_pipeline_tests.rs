@@ -1612,6 +1612,7 @@ fn refresh_compiled_prompt_without_content_names_tm_content_install() {
     })
     .expect_err("no content installed");
     assert!(msg.contains("tm content install"), "{msg}");
+    assert!(msg.contains("tm content update"), "{msg}");
     assert!(
         !dest.exists(),
         "a refused refresh writes no compiled prompt"

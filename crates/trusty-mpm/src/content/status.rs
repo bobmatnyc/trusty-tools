@@ -16,7 +16,9 @@ use trusty_common::content::{
 };
 use trusty_common::integrity::Sha256Digest;
 
-use super::bundle_cache::INSTALL_HINT;
+use trusty_agents_common::agent_content::REMEDY;
+
+use super::bundle_cache::manual_install;
 
 /// A verified installed pin.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,9 +106,10 @@ impl ContentStatus {
                 "installed: {} sha256 {} (verified)",
                 pin.tag, pin.sha256
             )),
-            Err(ContentError::NotInstalled { .. }) => lines.push(format!(
-                "installed: none — run `tm content update`, or offline `{INSTALL_HINT}`"
-            )),
+            // #9396: the same remedy every not-installed error names.
+            Err(ContentError::NotInstalled { .. }) => {
+                lines.push(format!("installed: none — {REMEDY}"));
+            }
             Err(e) => lines.push(format!("installed: UNHEALTHY — {e}; {}", remedy(e))),
         }
         lines.push(format!("cache: {}", self.cache_dir.display()));
@@ -128,15 +131,16 @@ fn remedy(error: &ContentError) -> String {
     match error {
         ContentError::LockInvalid { .. } | ContentError::LockUnreadable { .. } => format!(
             "the lock cannot be read, so replace it: run `tm content update --content-ref \
-             content-vX.Y.Z`, or offline `{INSTALL_HINT}`"
+             content-vX.Y.Z`, or {}",
+            manual_install(None)
         ),
         ContentError::UnsupportedSchema { .. } => "upgrade tm to a release that reads this \
              schema, or pin an older release with `tm content update --content-ref \
              content-vX.Y.Z`"
             .to_owned(),
         _ => format!(
-            "run `tm content update` to fetch and pin the newest release, or offline \
-             `{INSTALL_HINT}`"
+            "run `tm content update` to fetch and pin the newest release, or {}",
+            manual_install(None)
         ),
     }
 }

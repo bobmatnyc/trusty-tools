@@ -43,6 +43,9 @@ pub(crate) fn fake_checkout(root: &Path) {
 
 /// #9011: with no checkout and no lock, resolution fails and names the fix.
 /// It never yields an empty source a caller could read as "no agents".
+/// #9396: the fix named first is `tm content update`; the offline
+/// `tm content install --from` stays as the alternative, for every
+/// not-installed arm.
 #[test]
 fn not_installed_names_tm_content_install() {
     let cache = tempfile::tempdir().expect("tempdir");
@@ -51,7 +54,22 @@ fn not_installed_names_tm_content_install() {
         matches!(err, AgentContentError::NotInstalled { .. }),
         "got {err:?}"
     );
-    assert!(err.to_string().contains("tm content install"), "{err}");
+    let fetch_failed = AgentContentError::FetchFailed {
+        reason: "could not reach api.github.com".to_string(),
+    };
+    assert!(fetch_failed.is_not_installed());
+    for err in [err, AgentContentError::NoCacheDir, fetch_failed] {
+        let msg = err.to_string();
+        assert!(msg.contains("tm content install"), "{msg}");
+        assert!(msg.contains("run `tm content update`"), "{msg}");
+        // #9396: the manual path needs no GitHub API call.
+        for needle in [
+            "gh release download <tag> --repo bobmatnyc/trusty-tools",
+            "tm content install --from <dir>/<tag>.tar.gz",
+        ] {
+            assert!(msg.contains(needle), "{needle} missing: {msg}");
+        }
+    }
 }
 
 /// #9012: a present file this binary cannot use names both remedies — a
@@ -125,7 +143,40 @@ fn an_empty_roster_is_an_error() {
         matches!(err, AgentContentError::EmptyRoster { .. }),
         "got {err:?}"
     );
-    assert!(err.to_string().contains("tm content update"), "{err}");
+    // #9396: a checkout is fixed in the checkout, not by the content cache.
+    assert!(err.to_string().contains("git pull"), "{err}");
+}
+
+/// #9396: a stale trusty-tools clone (a tm-managed base clone that is never
+/// pulled) serves its working tree, so its Missing and Invalid errors name the
+/// checkout and `git pull`, and never claim `tm content update` cures them.
+/// An installed release still names `tm content update`.
+#[test]
+fn a_stale_checkout_names_git_pull_not_tm_content_update() {
+    let root = tempfile::tempdir().expect("tempdir");
+    fake_checkout(root.path());
+    std::fs::write(root.path().join("content/agents/engineer.md"), "e\n").expect("agent");
+    let content = checkout_content(root.path()).expect("fake checkout resolves");
+    let missing = AgentRoster::load(&content).expect_err("no foundation file");
+    let origin = describe_source(content.source());
+    let invalid = AgentContentError::Invalid {
+        origin: origin.clone(),
+        path: "instructions/pm-instruction-package.json".to_string(),
+        reason: "unknown variant".to_string(),
+    };
+    let root_shown = root.path().display().to_string();
+    for err in [missing, invalid] {
+        let msg = err.to_string();
+        assert!(msg.contains(&root_shown), "checkout root missing: {msg}");
+        assert!(msg.contains("git pull"), "git pull missing: {msg}");
+        assert!(msg.contains("outside"), "run-outside missing: {msg}");
+        assert!(!msg.contains("tm content update"), "false remedy: {msg}");
+    }
+    let installed = AgentContentError::Missing {
+        origin: "content-v0.2.0".to_string(),
+        path: "agents/BASE-AGENT.md".to_string(),
+    };
+    assert!(installed.to_string().contains("run `tm content update`"));
 }
 
 /// #9011: a roster without `BASE-AGENT.md` cannot compose anything, so it is

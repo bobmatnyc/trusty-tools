@@ -170,7 +170,8 @@ const CHILD_STATE_ENV: &[&str] = &[
 /// operator's own framework root — observed as `migrations.json`,
 /// `compression.jsonl` and `usage/` markers appearing under a real `$HOME`
 /// during `cargo test -p trusty-mpm`.
-/// What: one `env("HOME", …)` plus an `env_remove` per [`CHILD_STATE_ENV`]
+/// What: one `env("HOME", …)`, `TRUSTY_CONTENT_OFFLINE=1` (#9396: no
+/// first-use content fetch), plus an `env_remove` per [`CHILD_STATE_ENV`]
 /// entry, applied to the child's environment block. A caller that needs its own
 /// value for one of these chains `.env(…)` afterwards — the later call for a key
 /// wins — and a caller that needs `$HOME` absent chains `.env_remove("HOME")`.
@@ -178,6 +179,9 @@ const CHILD_STATE_ENV: &[&str] = &[
 /// `the_helper_clears_every_state_pointing_var`.
 pub fn isolate_spawned_tm<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Command {
     cmd.env("HOME", home);
+    // #9396: a child under a scratch `$HOME` has no content installed; it
+    // must report that, never fetch the release from GitHub.
+    cmd.env(trusty_mpm::content::first_use::OFFLINE_ENV, "1");
     for key in CHILD_STATE_ENV {
         cmd.env_remove(key);
     }
@@ -209,7 +213,8 @@ const DAEMON_PASSTHROUGH_ENV: &[&str] = &["PATH", "TMUX_TMPDIR"];
 /// config), `TRUSTY_MPM_WORKSPACE_ROOT` = `workspace_root` (the tree the disk
 /// survey walks; without it the daemon falls back to a home-relative default),
 /// `TRUSTY_MPM_ORPHAN_GC=0` (a test daemon must not reap processes it did not
-/// start), and each [`DAEMON_PASSTHROUGH_ENV`] name this process has set.
+/// start), `TRUSTY_CONTENT_OFFLINE=1` (#9396: no first-use content fetch), and
+/// each [`DAEMON_PASSTHROUGH_ENV`] name this process has set.
 /// Test: `a_test_daemon_env_carries_no_secret_shaped_variable`.
 pub fn apply_daemon_env<'a>(
     cmd: &'a mut Command,
@@ -219,7 +224,9 @@ pub fn apply_daemon_env<'a>(
     cmd.env_clear()
         .env("HOME", home)
         .env("TRUSTY_MPM_WORKSPACE_ROOT", workspace_root)
-        .env("TRUSTY_MPM_ORPHAN_GC", "0");
+        .env("TRUSTY_MPM_ORPHAN_GC", "0")
+        // #9396: a test daemon never fetches the content release.
+        .env(trusty_mpm::content::first_use::OFFLINE_ENV, "1");
     for key in DAEMON_PASSTHROUGH_ENV {
         if let Some(value) = std::env::var_os(key) {
             cmd.env(key, value);

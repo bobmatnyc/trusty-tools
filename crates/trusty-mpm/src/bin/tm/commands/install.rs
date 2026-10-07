@@ -674,11 +674,13 @@ fn overwrite_one(dest: &std::path::Path, rel_path: &str, contents: &str) -> anyh
 /// Why: separating the filesystem work from argument parsing and stdout makes
 /// the installer unit-testable against a `tempfile::TempDir`.
 /// What: resolves the agent roster (#9011) and the skills and bundled docs
-/// (#9012) from content and hands them to [`install_to_with`]. With no content
-/// resolvable this fails before writing anything, and the error names
-/// `tm content install`.
+/// (#9012) from content and hands them to [`install_to_with`]. #9396: with no
+/// content installed and no checkout, the content release is fetched once
+/// first. With no content resolvable this fails before writing anything, and
+/// the error names `tm content update` and the offline `tm content install`.
 /// Test: `install_writes_all_artifacts`,
-/// `install_without_content_fails_naming_tm_content_install`.
+/// `install_without_content_fails_naming_tm_content_install`,
+/// `install_with_a_failed_first_use_fetch_fails_closed`.
 pub(crate) fn install_to(
     paths: &trusty_mpm::core::paths::FrameworkPaths,
     force: bool,
@@ -686,7 +688,8 @@ pub(crate) fn install_to(
     install_to_resolving(
         paths,
         force,
-        trusty_mpm::core::content_source::agent_roster,
+        // #9396: the gate fetches the content release on first use.
+        trusty_mpm::core::content_source::agent_roster_or_fetch,
         trusty_mpm::core::content_source::framework_content,
     )
 }
