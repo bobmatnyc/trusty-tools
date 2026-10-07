@@ -53,9 +53,10 @@ trusty-search	typeahead::typeahead_blended_mode_returns_results_tagged_by_source
 
 # THE UNSELECTED REMAINDER. 143 ignored tests are enumerable in this workspace
 # on the Linux runner; the 27 rows above run, and 116 do not. A macOS checkout
-# enumerates one more (trusty-mpm's macOS-only
-# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper`), so a
-# local `--list-only` run there reads 127 against this Linux baseline. The gate
+# enumerates two more (trusty-mpm's macOS-only
+# `core::process::tests::claude_pid_resolves_through_disclaim_wrapper` and
+# `core::process::tests::claude_pid_resolves_from_inside_its_own_pane`), so a
+# local `--list-only` run there reads 118 against this Linux baseline. The gate
 # prints that number on every run, grouped by crate, and FAILS if it grows — so a new ignored test either
 # joins the list above or forces this number up in a reviewed diff.
 #
