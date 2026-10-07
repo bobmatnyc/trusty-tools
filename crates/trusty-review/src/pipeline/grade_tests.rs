@@ -1861,11 +1861,11 @@ fn pr84_prose_with_embedded_ref_does_not_reopen_block() {
     }
 }
 
-/// #9310: `#0` names no issue and a bare `§1` names no document, so neither
-/// qualifies a High finding for the BLOCK floor.
+/// #9310: `#0` names no issue, a bare `§1` names no document and `path:0`
+/// names no line, so none qualifies a High finding for the BLOCK floor.
 #[test]
 fn pr84_hash_zero_and_bare_section_do_not_reopen_block() {
-    for citation in ["#0", "§1"] {
+    for citation in ["#0", "§1", "src/a.rs:0", "owner/repo#0"] {
         let (plain, graded) = floored_with_citation(citation);
         assert_ne!(plain, Verdict::Block, "derive_verdict, {citation:?}");
         assert_ne!(graded, Verdict::Block, "with_grade, {citation:?}");
@@ -1882,10 +1882,13 @@ fn pr84_bad_citation_high_finding_is_not_block_through_derive_verdict_with_grade
 }
 
 /// #9310 control: every well-formed citation — the documented shapes, the
-/// `code:` / `jira:` / `gh:` prefixes the prompt teaches, and a list of
+/// `code:` / `jira:` / `gh:` prefixes the prompt teaches (in any case), path
+/// characters web frameworks use, `path:line:col`, line ranges, cross-repo
+/// GitHub references, SLD spec ids, a trailing `.`, and a list of
 /// well-formed citations — still drives BLOCK through both entry points.
 #[test]
 fn well_formed_citations_still_block_through_both_entry_points() {
+    let mut missed = Vec::new();
     for citation in [
         "src/handler.ts:42",
         "IMPL-2026-05-009 WP-9",
@@ -1898,11 +1901,31 @@ fn well_formed_citations_still_block_through_both_entry_points() {
         "jira:PROJ-1",
         "gh: #123",
         "src/a.rs:3, src/b.rs:4",
+        "src/a.rs:3; #12",
+        "website/src/routes/+page.svelte:12",
+        "app/[id]/page.tsx:4",
+        "app/(group)/page.tsx:5",
+        "node_modules/@scope/x/index.ts:3",
+        "src/a.rs:42:7",
+        "src/a.rs:10-20",
+        "owner/repo#123",
+        "gh: owner/repo#123",
+        "SPEC-CONFORMANCE-03~draft",
+        "CONFORMANCE-03",
+        "src/a.rs:42.",
+        "GH: #12",
+        "Code: src/a.rs:3",
+        "JIRA: ABC-1",
     ] {
         let (plain, graded) = floored_with_citation(citation);
-        assert_eq!(plain, Verdict::Block, "derive_verdict, {citation:?}");
-        assert_eq!(graded, Verdict::Block, "with_grade, {citation:?}");
+        if plain != Verdict::Block || graded != Verdict::Block {
+            missed.push(format!("{citation:?}: {plain:?} / {graded:?}"));
+        }
     }
+    assert!(
+        missed.is_empty(),
+        "not BLOCK (derive_verdict / with_grade): {missed:#?}"
+    );
 }
 
 // ── #PR84 adversarial-review follow-up: downgrade-scope tightening (item 2/LOW) ─

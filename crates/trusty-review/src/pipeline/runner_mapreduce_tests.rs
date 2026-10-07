@@ -1613,3 +1613,35 @@ async fn mapreduce_chunk_approve_graded_f_with_wiped_finding_is_suppressed_rejec
         Some(crate::models::VerdictStatus::SuppressedReject)
     );
 }
+
+/// #9310: with synthesis on, a chunk reply of APPROVE graded F makes the
+/// mechanical verdict BLOCK, which `apply_synthesis_floor` Tier 2 floors to
+/// at least REQUEST_CHANGES even when synthesis answers APPROVE graded A.
+/// Before, the chunk grade was dropped and the review read APPROVE.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_on_chunk_approve_graded_f_is_at_least_request_changes() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[]}"#;
+    let synthesis = r#"{"verdict":"APPROVE","grade":"A","summary":"looks fine."}"#;
+    let result = run_scripted(chunk, synthesis).await;
+    assert!(
+        matches!(result.verdict, Verdict::RequestChanges | Verdict::Block),
+        "{result:?}"
+    );
+}
+
+/// #9310: with synthesis on, a chunk reply of APPROVE graded F whose one
+/// finding the map-stage citation pass withholds reads `suppressed_reject`,
+/// not APPROVE / `all_withheld`.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_on_wiped_f_chunk_is_suppressed_reject() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[{"title":"bad import","body":"`helper` is never defined.","severity":"high","confidence":0.9,"file":"src/not_in_diff.rs","line":1,"code_provable":true}]}"#;
+    let synthesis = r#"{"verdict":"APPROVE","grade":"A","summary":"looks fine."}"#;
+    let result = run_scripted(chunk, synthesis).await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_ne!(result.verdict, Verdict::Approve, "{result:?}");
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject),
+        "{result:?}"
+    );
+}
