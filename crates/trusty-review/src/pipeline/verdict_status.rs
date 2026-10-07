@@ -8,15 +8,17 @@
 //! What: [`unparsed_status`] classes a reply that did not parse;
 //! [`withheld_outcome`] is the mapping, a pure function;
 //! [`apply_withheld_outcome`] applies it at the end of the gates;
-//! [`judged_verdict`] is the reviewer verdict the mapping reads.
+//! [`judged_verdict`] is the reviewer verdict the mapping reads;
+//! [`apply_grade_floor`] holds a D or F review at its floor (ruling 50).
 //! Test: `verdict_status_tests.rs`; end to end in
 //! `runner_verdict_status_tests.rs` and `runner_citation_gate_tests.rs`.
 
 use crate::coverage::{CoverageVerdictContrib, apply_coverage_floor};
 use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus};
 use crate::pipeline::{
-    grade::{derive_verdict, stricter_of},
-    letter_grade::{Grade, default_grade_for_verdict, verdict_for_grade},
+    grade::{derive_verdict, floors_verdict_to_block, stricter_of},
+    letter_grade::{Grade, default_grade_for_verdict, grade_floor, verdict_for_grade},
+    verify_posted::REFUTED_REASON,
 };
 
 /// The status of a reply the parser failed closed on (#9310).
@@ -63,6 +65,106 @@ pub(crate) fn judged_verdict(
         }
         None => model,
     }
+}
+
+/// The reviewer's verdict and grade floor, both read before grounding (#9310).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Judged {
+    /// What the withheld mapping reads ([`judged_verdict`]).
+    pub(crate) verdict: Verdict,
+    /// Owner ruling 50: the verdict no gate may relax the review below
+    /// (`letter_grade::grade_floor`); APPROVE when no grade floors it.
+    pub(crate) grade_floor: Verdict,
+}
+
+/// [`judged_verdict`] plus the grade floor, from the reviewer's own reply.
+///
+/// What: an UNKNOWN reply has no floor (APPROVE), so a parse failure stays
+/// UNKNOWN.
+/// Test: `judged_review_floors_only_a_d_or_f_grade`.
+pub(crate) fn judged_review(
+    model: Verdict,
+    grade: Option<&str>,
+    coverage: Option<&CoverageVerdictContrib>,
+) -> Judged {
+    // #9310 ruling 50: the floor reads the raw grade, never a reconciled one.
+    let floor = if model == Verdict::Unknown {
+        Verdict::Approve
+    } else {
+        grade_floor(grade)
+    };
+    Judged {
+        verdict: judged_verdict(model, grade, coverage),
+        grade_floor: floor,
+    }
+}
+
+/// Hold `result` at the reviewer's grade floor after every gate ran (#9310,
+/// owner ruling 50).
+///
+/// Why: the low-confidence override, the advisory ceiling, RULE 2, the wipe
+/// relax, the map-reduce aggregate and the verifier round can each relax a
+/// D-graded review below REQUEST_CHANGES or an F below BLOCK. One choke point
+/// after them all repairs every path.
+/// What: the stricter of the verdict and `floor`. UNKNOWN stays UNKNOWN
+/// (`stricter_of` ranks it last). A `suppressed_reject` review with no
+/// surviving finding is left at REQUEST_CHANGES (owner answer Q1). When the
+/// floor raises the verdict, the status becomes `parsed`, so a withheld label
+/// never names a verdict the review no longer has. When the verifier refuted
+/// every blocker (owner ruling on item 76, `verifier_withdrew_every_blocker`)
+/// the F is withdrawn and the floor gives at most REQUEST_CHANGES.
+/// Test: `apply_grade_floor_raises_a_relaxed_verdict`,
+/// `apply_grade_floor_caps_an_f_whose_blockers_the_verifier_refuted`,
+/// `run_review_refuted_sole_blocker_does_not_clamp_to_block`,
+/// `f_with_a_gate_withheld_provable_blocker_and_a_survivor_reads_block`,
+/// `apply_grade_floor_keeps_a_suppressed_reject`,
+/// `apply_grade_floor_lifts_a_suppressed_reject_with_survivors`,
+/// `f_with_one_confirmed_low_confidence_finding_reads_block`,
+/// `f_with_a_withheld_blocker_and_a_surviving_finding_reads_block`.
+pub(crate) fn apply_grade_floor(result: &mut ReviewResult, floor: &Verdict) {
+    // #9310 Q1: only an all-withheld rejection stays REQUEST_CHANGES.
+    if result.verdict_status == Some(VerdictStatus::SuppressedReject) && result.findings.is_empty()
+    {
+        return;
+    }
+    // #9310 item 76 ("Widen exemption"): a verifier-refuted sole blocker withdraws the F.
+    let floor = if *floor == Verdict::Block && verifier_withdrew_every_blocker(result) {
+        Verdict::RequestChanges
+    } else {
+        floor.clone()
+    };
+    let floored = stricter_of(result.verdict.clone(), floor);
+    if floored != result.verdict {
+        result.verdict = floored;
+        result.verdict_status = Some(VerdictStatus::Parsed); // #9310: the label follows the verdict
+    }
+}
+
+/// Whether the verifier refuted every blocker the review had (#9310, owner
+/// ruling on item 76: "Widen exemption").
+///
+/// Why: an F that rested on a blocker the verifier refuted is withdrawn with
+/// it, so the #4044 refuted-sole-blocker reviews keep REQUEST_CHANGES. A
+/// blocker the citation or line gate withheld was never judged false, so it
+/// does not withdraw the F.
+/// What: a blocker is a finding `grade::floors_verdict_to_block` accepts, the
+/// category-aware predicate #4044 added for floors outside `derive_verdict`.
+/// True when at least one withheld blocker carries `REFUTED_REASON` and no
+/// other blocker remains: none among the survivors, none withheld for another
+/// reason.
+/// Test: `apply_grade_floor_caps_an_f_whose_blockers_the_verifier_refuted`.
+fn verifier_withdrew_every_blocker(result: &ReviewResult) -> bool {
+    let refuted = |reason: &str| reason == REFUTED_REASON;
+    let refuted_blocker = result
+        .withheld_findings
+        .iter()
+        .any(|w| refuted(w.reason.as_str()) && floors_verdict_to_block(&w.finding));
+    let other_blocker = result.findings.iter().any(floors_verdict_to_block)
+        || result
+            .withheld_findings
+            .iter()
+            .any(|w| !refuted(w.reason.as_str()) && floors_verdict_to_block(&w.finding));
+    refuted_blocker && !other_blocker
 }
 
 /// The verdict and status a review takes once the gates withheld findings,
