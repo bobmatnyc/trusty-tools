@@ -38,15 +38,24 @@ impl RpcFallback for HealthOnly {
     }
 }
 
-/// A mock daemon on `socket` whose health reports `http_addr`. Dropping the
-/// returned sender stops it.
-async fn mock_daemon(socket: &Path, http_addr: Option<&str>) -> tokio::sync::oneshot::Sender<()> {
+/// Answers `search.health` with a JSON-RPC error; every other method is `-32601`.
+struct HealthRefused;
+
+#[async_trait]
+impl RpcFallback for HealthRefused {
+    async fn call(&self, method: &str, _params: Value) -> Result<Value, RpcError> {
+        Err(RpcError::method_not_found(method, &[]))
+    }
+}
+
+/// A mock daemon on `socket` served by `fallback`. Dropping the returned
+/// sender stops it.
+async fn serve_mock(
+    socket: &Path,
+    fallback: impl RpcFallback + 'static,
+) -> tokio::sync::oneshot::Sender<()> {
     let listener = trusty_common::uds::bind_hardened(socket).expect("bind the mock socket");
-    let health = json!({
-        "status": "ok",
-        "transport": { "socket_path": socket, "http_addr": http_addr },
-    });
-    let router = Arc::new(RpcRouter::new().fallback(HealthOnly(health)));
+    let router = Arc::new(RpcRouter::new().fallback(fallback));
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         serve_until(&listener, router, RpcServeOptions::default(), async {
@@ -55,6 +64,15 @@ async fn mock_daemon(socket: &Path, http_addr: Option<&str>) -> tokio::sync::one
         .await;
     });
     stop
+}
+
+/// A mock daemon on `socket` whose health reports `http_addr`.
+async fn mock_daemon(socket: &Path, http_addr: Option<&str>) -> tokio::sync::oneshot::Sender<()> {
+    let health = json!({
+        "status": "ok",
+        "transport": { "socket_path": socket, "http_addr": http_addr },
+    });
+    serve_mock(socket, HealthOnly(health)).await
 }
 
 /// The socket the binary derives from `TRUSTY_DATA_DIR`.
@@ -294,4 +312,67 @@ async fn dashboard_never_dials_a_default_port() {
         "no browser may open: {}",
         run.combined
     );
+}
+
+/// Run `port` against `data_dir` and return (exit code, stdout, stderr).
+async fn run_port(data_dir: &Path) -> (Option<i32>, String, String) {
+    let out = output(cli(data_dir, &["port"])).await;
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Why (#9214): a pre-#9030 daemon reports no `transport`; with no `http_addr`
+/// file either, there is no address to print, and `port` must not guess one.
+/// What: a mock daemon whose health body has no `transport`; no `http_addr`;
+/// `daemon.port` names a counting listener. Asserts exit 1, the "reported no
+/// HTTP address" message naming the socket, empty stdout, zero connections.
+/// Test: this function.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn port_fails_closed_when_the_daemon_reports_no_http_address() {
+    let dir = tempfile::tempdir().expect("data dir");
+    let socket = socket_in(dir.path());
+    let _daemon = serve_mock(&socket, HealthOnly(json!({ "status": "ok" }))).await;
+    let listener = CountingListener::start();
+    std::fs::write(dir.path().join("daemon.port"), listener.port.to_string())
+        .expect("plant daemon.port");
+
+    let (code, stdout, stderr) = run_port(dir.path()).await;
+
+    assert_eq!(code, Some(1), "stdout: {stdout} stderr: {stderr}");
+    let expected = format!(
+        "the daemon at socket {} reported no HTTP address; restart it",
+        socket.display()
+    );
+    assert!(stderr.contains(&expected), "stderr: {stderr}");
+    assert!(stdout.trim().is_empty(), "stdout: {stdout}");
+    assert_eq!(listener.accepted.load(Ordering::SeqCst), 0, "dialled TCP");
+}
+
+/// Why (#9214): a live socket whose `search.health` fails is neither "no
+/// daemon running" nor a port; `port` must say the daemon did not answer.
+/// What: a mock daemon refusing every method including `search.health`;
+/// `daemon.port` names a counting listener. Asserts exit 1, the "did not
+/// answer" message naming the socket, no "no daemon running", empty stdout,
+/// zero connections.
+/// Test: this function.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn port_fails_closed_when_a_live_socket_refuses_health() {
+    let dir = tempfile::tempdir().expect("data dir");
+    let socket = socket_in(dir.path());
+    let _daemon = serve_mock(&socket, HealthRefused).await;
+    let listener = CountingListener::start();
+    std::fs::write(dir.path().join("daemon.port"), listener.port.to_string())
+        .expect("plant daemon.port");
+
+    let (code, stdout, stderr) = run_port(dir.path()).await;
+
+    assert_eq!(code, Some(1), "stdout: {stdout} stderr: {stderr}");
+    let expected = format!("the daemon at socket {} did not answer", socket.display());
+    assert!(stderr.contains(&expected), "stderr: {stderr}");
+    assert!(!stderr.contains("no daemon running"), "stderr: {stderr}");
+    assert!(stdout.trim().is_empty(), "stdout: {stdout}");
+    assert_eq!(listener.accepted.load(Ordering::SeqCst), 0, "dialled TCP");
 }
