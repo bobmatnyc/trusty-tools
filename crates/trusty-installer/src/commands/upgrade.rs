@@ -39,6 +39,7 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 use trusty_progress::{Component, ComponentTracker};
 
+use super::content_step::{CommandRunner, ContentStepOutcome, ProcessRunner};
 use super::progress_ui::{is_tty, narrator, prompt_yes_no};
 use super::runtime::with_runtime;
 use super::shadow_check;
@@ -101,6 +102,10 @@ pub struct UpgradeReport {
     pub members: Vec<UpgradeOutcome>,
     /// Whether every applied member succeeded (true when nothing was applied).
     pub all_ok: bool,
+    /// #9396: the `tm content update` step run once trusty-mpm was upgraded;
+    /// `None` when trusty-mpm was not placed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentStepOutcome>,
 }
 
 impl UpgradeReport {
@@ -116,6 +121,7 @@ impl UpgradeReport {
             candidates,
             members: Vec::new(),
             all_ok: true,
+            content: None,
         }
     }
 
@@ -138,7 +144,22 @@ impl UpgradeReport {
             candidates,
             members,
             all_ok,
+            content: None,
         }
+    }
+
+    /// Fold the content step's outcome into this report (#9396).
+    ///
+    /// Why: a failed `tm content update` leaves tm unable to compose a
+    /// session, so the run exits non-zero; every member outcome stands.
+    /// What: attaches `content`; a failed one flips `all_ok` to `false`.
+    /// Test: `a_failed_content_update_after_an_upgrade_exits_non_zero`.
+    fn with_content(mut self, content: Option<ContentStepOutcome>) -> Self {
+        if content.as_ref().is_some_and(|c| !c.ok) {
+            self.all_ok = false;
+        }
+        self.content = content;
+        self
     }
 
     /// Process exit code per status.
@@ -286,10 +307,29 @@ fn resolve_and_apply(
         }
         ApplyDecision::Decline => UpgradeReport::non_applying("declined", candidates),
         ApplyDecision::Apply => {
-            let outcomes = handle.block_on(apply_all(&candidates, json));
-            UpgradeReport::applied(candidates, outcomes)
+            let (outcomes, placed) = handle.block_on(apply_all(&candidates, json));
+            applied_with_content(candidates, outcomes, &placed, &ProcessRunner, json)
         }
     }
+}
+
+/// The applied report, then the content step for what `placed` holds (#9396).
+///
+/// Why: the step runs after every member's upgrade and daemon restart
+/// finished; its failure only adds to the report, never undoes a member.
+/// What: [`UpgradeReport::applied`] then [`UpgradeReport::with_content`] over
+/// [`super::content_step::run_if_mpm_placed`].
+/// Test: `upgrade_of_trusty_mpm_runs_content_update`,
+/// `a_failed_content_update_after_an_upgrade_exits_non_zero`.
+fn applied_with_content(
+    candidates: Vec<UpdateCandidate>,
+    outcomes: Vec<UpgradeOutcome>,
+    placed: &[(String, std::path::PathBuf)],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> UpgradeReport {
+    let content = super::content_step::run_if_mpm_placed(placed, runner, json);
+    UpgradeReport::applied(candidates, outcomes).with_content(content)
 }
 
 /// Decide whether to show the interactive confirmation prompt.
@@ -392,7 +432,8 @@ impl UpgradeDetail {
 /// What: For each candidate, attempts a prebuilt download (Phase 2 / #1760),
 /// falling back to `perform_upgrade` (`cargo install`), then health-gates the
 /// concrete path. Non-daemons additionally run a PATH-shadow check (#3554);
-/// daemons are restarted via `restart_daemon_member` (#4964).
+/// daemons are restarted via `restart_daemon_member` (#4964). Returns the
+/// outcomes and each placed member's concrete binary path (#9396).
 ///
 /// Renders a per-member narration line + a final component table. A genuine
 /// shadow is surfaced via `narr.error` (not `info`), same as a real failure,
@@ -400,10 +441,15 @@ impl UpgradeDetail {
 ///
 /// Test: Side-effecting; the prebuilt routing and report shaping are tested via
 /// `UpgradeReport` and `crate::download::tests`.
-async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOutcome> {
+async fn apply_all(
+    candidates: &[UpdateCandidate],
+    json: bool,
+) -> (Vec<UpgradeOutcome>, Vec<(String, std::path::PathBuf)>) {
     let narr = narrator(json);
     let mut tracker = ComponentTracker::new(narr.output());
     let mut outcomes = Vec::with_capacity(candidates.len());
+    // #9396: what landed, for the content step after the loop.
+    let mut placed = Vec::new();
     // #3554: the real $PATH, resolved once, used by every non-daemon
     // candidate's shadow-detection check below (mirrors `install::install_all`).
     let path_env = std::env::var_os("PATH").unwrap_or_default();
@@ -421,6 +467,7 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
                 // #8642: the real size of the binary just placed, via the
                 // same helper `tctl install` uses — not a hardcoded 0.
                 let size_bytes = super::install::binary_size(&d.bin_path);
+                placed.push((c.crate_name.clone(), d.bin_path.clone()));
                 outcomes.push(UpgradeOutcome {
                     member: c.crate_name.clone(),
                     ok: true,
@@ -451,7 +498,7 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
     if !json {
         let _ = tracker.print();
     }
-    outcomes
+    (outcomes, placed)
 }
 
 /// Upgrade a single candidate, prebuilt-first with cargo/restart fallback.
@@ -837,6 +884,10 @@ fn print_human(report: &UpgradeReport) {
             // into the exit code.
             for m in report.members.iter().filter(|m| m.ok && !m.shadow_ok) {
                 eprintln!("  {} — {}", m.member, m.shadow_detail);
+            }
+            // #9396: the content step gates the exit code, so name it.
+            if let Some(c) = report.content.as_ref().filter(|c| !c.ok) {
+                eprintln!("  failed: content — {}", c.detail);
             }
         }
         _ => {}

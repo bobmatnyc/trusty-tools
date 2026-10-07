@@ -8,8 +8,8 @@
 //! answers with an empty roster.
 //! What: [`resolve_content`] / [`resolve_content_in`] / [`checkout_content`]
 //! pick the source; [`AgentRoster`] lists and reads `agents/*.md` from it;
-//! [`AgentContentError`] is every failure, each naming `tm content install`
-//! or `tm content update`. [`crate::harness_doc::HarnessDoc`] reads the
+//! [`AgentContentError`] is every failure, each naming `tm content update`
+//! (and, when nothing is installed, the offline `tm content install --from`). [`crate::harness_doc::HarnessDoc`] reads the
 //! harness-understanding docs from the same source.
 //! Test: `not_installed_names_tm_content_install`,
 //! `an_unverifiable_bundle_is_a_content_error`, `an_empty_roster_is_an_error`,
@@ -30,6 +30,10 @@ pub const AGENTS_CLASS: &str = "agents";
 /// The root of every `extends:` chain; a roster without it cannot compose.
 pub const FOUNDATION_FILE: &str = "BASE-AGENT.md";
 
+/// What every not-installed error tells the operator to run (#9396).
+pub const REMEDY: &str =
+    "run `tm content update` (offline: `tm content install --from <bundle.tar.gz>`)";
+
 /// Every way loading the agent roster or a harness doc can fail.
 ///
 /// Why: content is runtime-only after #9011, so each failure means a harness
@@ -44,18 +48,27 @@ pub const FOUNDATION_FILE: &str = "BASE-AGENT.md";
 #[non_exhaustive]
 pub enum AgentContentError {
     /// Nothing serves content: no trusted checkout and no `content-lock.toml`.
-    #[error(
-        "no instructional content is installed ({source}); run `tm content install` \
-         (offline: `tm content install --from <bundle.tar.gz>`)"
-    )]
+    // #9396: `tm content update` fetches; `--from` is the offline install.
+    #[error("no instructional content is installed ({source}); {remedy}", remedy = REMEDY)]
     NotInstalled {
         /// The resolver's `NotInstalled` error.
         #[source]
         source: ContentError,
     },
     /// The home directory is unknown, so the cache cannot be located.
-    #[error("cannot locate the content cache (no home directory); run `tm content install`")]
+    #[error("cannot locate the content cache (no home directory); {remedy}", remedy = REMEDY)]
     NoCacheDir,
+    /// Nothing was installed and the first-use fetch of the content release
+    /// failed (#9396); nothing unverified was pinned or served.
+    #[error(
+        "no instructional content is installed, and fetching the content release \
+         failed: {reason}; {remedy}",
+        remedy = REMEDY
+    )]
+    FetchFailed {
+        /// Why the fetch failed (unreachable, missing sidecar, checksum, ...).
+        reason: String,
+    },
     /// Any other resolver failure (checksum, schema, untrusted checkout, I/O).
     #[error("instructional content could not be loaded: {source}")]
     Content {
@@ -113,9 +126,13 @@ impl From<ContentError> for AgentContentError {
 }
 
 impl AgentContentError {
-    /// Whether nothing is installed: no checkout, no lock, or no home directory.
+    /// Whether nothing is installed: no checkout, no lock, no home directory,
+    /// or a first-use fetch that failed (#9396).
     pub fn is_not_installed(&self) -> bool {
-        matches!(self, Self::NotInstalled { .. } | Self::NoCacheDir)
+        matches!(
+            self,
+            Self::NotInstalled { .. } | Self::NoCacheDir | Self::FetchFailed { .. }
+        )
     }
 }
 

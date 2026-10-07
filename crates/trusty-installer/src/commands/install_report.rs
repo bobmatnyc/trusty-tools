@@ -20,6 +20,7 @@
 
 use serde::Serialize;
 
+use crate::commands::content_step::{CommandRunner, ContentStepOutcome};
 use crate::commands::progress_ui::narrator;
 use crate::commands::stable_set::{ManageStrategy, StableMember};
 use crate::commands::verify_tail::VerifyTailReport;
@@ -127,6 +128,10 @@ pub struct InstallReport {
     /// the #2498 kickstart retry). `None` when `--no-verify` skipped it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verify: Option<VerifyTailReport>,
+    /// #9396: the `tm content update` step run once trusty-mpm landed;
+    /// `None` when trusty-mpm was not placed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentStepOutcome>,
 }
 
 impl InstallReport {
@@ -185,7 +190,23 @@ impl InstallReport {
             members,
             all_ok,
             verify: None,
+            content: None,
         }
+    }
+
+    /// Fold the content step's outcome into this report (#9396).
+    ///
+    /// Why: a failed `tm content update` leaves tm unable to compose a
+    /// session, so the run must not exit 0 — yet the binaries stay placed
+    /// and every member's own outcome stands; nothing is rolled back.
+    /// What: attaches `content`; a failed one flips `all_ok` to `false`.
+    /// Test: `a_failed_content_update_keeps_the_install_and_exits_non_zero`.
+    pub(super) fn with_content(mut self, content: Option<ContentStepOutcome>) -> Self {
+        if content.as_ref().is_some_and(|c| !c.ok) {
+            self.all_ok = false;
+        }
+        self.content = content;
+        self
     }
 
     /// Fold the post-install verify-tail result into this report (#2560).
@@ -279,6 +300,10 @@ pub struct DryRunReport {
     /// `install_one` makes — so the preview cannot name a directory the
     /// install would not use.
     pub install_dir: String,
+    /// #9396: the `tm content update` the install would run once trusty-mpm
+    /// lands; `None` when trusty-mpm is not selected. Reported, never run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_update: Option<String>,
 }
 
 /// Whether an install (real or previewed) would attempt a launchd service
@@ -357,6 +382,10 @@ pub(super) fn build_dry_run_report(
         members,
         service_bootstrap_enabled: service_enabled,
         install_dir: install_dir.display().to_string(),
+        content_update: crate::commands::content_step::dry_run_command(
+            selected.iter().map(|m| m.crate_name.as_str()),
+            install_dir,
+        ),
     }
 }
 
@@ -404,6 +433,9 @@ pub(super) fn print_dry_run(selected: &[StableMember], service_enabled: bool, js
             m.member,
             m.binaries.join(", ")
         );
+    }
+    if let Some(cmd) = &report.content_update {
+        eprintln!("tctl install:   then: {cmd} (instructional content; not run)");
     }
     eprintln!("tctl install: dry run complete — no changes made.");
     0
@@ -519,6 +551,15 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .map(|m| format!("{}: {}", m.member, m.detail)),
     );
 
+    // #9396: the content step gates the exit code, so the footer names it.
+    errors.extend(
+        report
+            .content
+            .iter()
+            .filter(|c| !c.ok)
+            .map(|c| format!("content: {}", c.detail)),
+    );
+
     SummaryLines {
         headline: format!("installed {gating_ok}/{} {noun} component(s)", gating.len()),
         errors,
@@ -529,6 +570,25 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
             .map(|m| format!("{}: skipped (no prebuilt for this platform)", m.member))
             .collect(),
     }
+}
+
+/// Build the install report from `outcomes`, then run the content step for
+/// what `placed` holds (#9396).
+///
+/// Why: one place orders the two — the step runs after every member's own
+/// steps finished, and its failure only adds to the report.
+/// What: [`InstallReport::build`] then [`InstallReport::with_content`] over
+/// [`crate::commands::content_step::run_if_mpm_placed`].
+/// Test: `install_runs_content_update_after_tm_lands`,
+/// `a_failed_content_update_keeps_the_install_and_exits_non_zero`.
+pub(super) fn report_with_content(
+    outcomes: Vec<InstallOutcome>,
+    placed: &[(String, std::path::PathBuf)],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> InstallReport {
+    let content = crate::commands::content_step::run_if_mpm_placed(placed, runner, json);
+    InstallReport::build(outcomes).with_content(content)
 }
 
 /// Print the human-readable install summary footer.

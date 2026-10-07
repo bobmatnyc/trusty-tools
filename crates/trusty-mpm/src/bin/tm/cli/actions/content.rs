@@ -5,7 +5,8 @@
 //! `~/.trusty-mpm/content/content-lock.toml`; these verbs are how it gets there.
 //! What: [`ContentAction`] — `install --from`, `update [--content-ref]`, `status`.
 //! Test: `cli_parses_content_install_update_and_status`,
-//! `update_help_limits_the_pin_check_to_the_current_pin`.
+//! `update_help_limits_the_pin_check_to_the_current_pin`,
+//! `update_help_names_the_offline_switch`.
 
 use std::path::PathBuf;
 
@@ -45,6 +46,12 @@ pub(crate) enum ContentAction {
     /// Trust is on first use: the pinned sha256 is what every later read
     /// checks, and a re-fetch of the currently pinned tag that returns other
     /// bytes is refused. Only the current pin is checked.
+    ///
+    /// First use: with nothing installed, tm runs this fetch itself before it
+    /// composes a session's PM instructions. `TRUSTY_CONTENT_OFFLINE=1` turns
+    /// that first-use fetch off; tm then reports the missing content, naming
+    /// the switch, this command and `tm content install --from`.
+    // #9396: the production switch is documented where operators look.
     Update {
         /// The release tag to pin, e.g. `content-v0.1.0`.
         #[arg(long, value_name = "TAG")]

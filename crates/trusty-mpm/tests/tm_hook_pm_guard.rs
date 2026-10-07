@@ -5394,5 +5394,7 @@ fn pm_guard_refuses_a_dispatch_when_no_content_is_installed() {
         );
         assert_denied(&stdout);
         assert!(stdout.contains("tm content install"), "{stdout}");
+        // #9396: the remedy named first is `tm content update`.
+        assert!(stdout.contains("tm content update"), "{stdout}");
     }
 }

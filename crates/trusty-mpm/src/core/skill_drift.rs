@@ -151,7 +151,8 @@ pub struct SkillReference {
 /// unverifiable at once.
 /// Test: `reference_prefers_the_submodule`, `reference_falls_back_to_embedded`,
 /// `reference_includes_nested_reference_keys`,
-/// `a_pristine_bundled_deploy_is_entirely_fresh`.
+/// `a_pristine_bundled_deploy_is_entirely_fresh`,
+/// `reference_without_content_names_tm_content_update`.
 pub fn skill_reference(
     submodule_source: Option<&Path>,
     content: Option<&FrameworkContent>,
@@ -175,7 +176,11 @@ pub fn skill_reference(
     let Some(content) = content else {
         return SkillReference {
             assets: BTreeMap::new(),
-            origin: "no instructional content (run `tm content install`)".to_string(),
+            // #9396: name the fetch first, the offline install second.
+            origin: format!(
+                "no instructional content ({})",
+                trusty_agents_common::agent_content::REMEDY
+            ),
         };
     };
     let assets = content

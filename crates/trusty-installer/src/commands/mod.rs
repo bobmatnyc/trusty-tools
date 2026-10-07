@@ -16,6 +16,8 @@ pub mod auto_update;
 // #4714: `tctl install` bundle keywords (`core`, `agents`).
 pub mod bundles;
 pub mod config;
+// #9396: `tm content update` once trusty-mpm lands.
+pub mod content_step;
 pub mod dependency_graph;
 pub mod doctor;
 pub mod ensure;

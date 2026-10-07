@@ -534,3 +534,71 @@ fn placed_state_error_names_the_replaced_path_and_version() {
     );
     assert!(msg.contains("previous binary was not kept"), "{msg}");
 }
+
+/// #9396: an upgrade that placed trusty-mpm runs the just-placed `tm content
+/// update`, by its concrete path, after every member's upgrade.
+#[test]
+fn upgrade_of_trusty_mpm_runs_content_update() {
+    use crate::commands::content_step::tests::{placed_with_mpm, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::succeeding();
+    let outcomes = vec![
+        outcome("trusty-search", true, "upgraded"),
+        outcome("trusty-mpm", true, "upgraded"),
+    ];
+    let report = applied_with_content(
+        vec![candidate()],
+        outcomes,
+        &placed_with_mpm(dir.path()),
+        &runner,
+        true,
+    );
+    assert_eq!(
+        runner.calls(),
+        vec![(
+            dir.path().join("tm"),
+            vec!["content".to_owned(), "update".to_owned()]
+        )]
+    );
+    assert!(report.content.as_ref().is_some_and(|c| c.ok), "{report:?}");
+    assert_eq!(report.exit_code(), 0);
+
+    // An upgrade that did not place trusty-mpm runs nothing.
+    let quiet = FakeRunner::succeeding();
+    let placed = vec![("trusty-search".to_owned(), dir.path().join("trusty-search"))];
+    let report = applied_with_content(
+        vec![candidate()],
+        vec![outcome("trusty-search", true, "upgraded")],
+        &placed,
+        &quiet,
+        true,
+    );
+    assert!(quiet.calls().is_empty());
+    assert!(report.content.is_none());
+}
+
+/// #9396 Fail-Open Check: a failed content step after an upgrade exits
+/// non-zero and names `tm content update`; every member's upgrade stands.
+#[test]
+fn a_failed_content_update_after_an_upgrade_exits_non_zero() {
+    use crate::commands::content_step::tests::{placed_with_mpm, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::failing();
+    let outcomes = vec![
+        outcome("trusty-search", true, "upgraded"),
+        outcome("trusty-mpm", true, "upgraded"),
+    ];
+    let report = applied_with_content(
+        vec![candidate()],
+        outcomes,
+        &placed_with_mpm(dir.path()),
+        &runner,
+        true,
+    );
+    assert!(report.members.iter().all(|m| m.ok), "{report:?}");
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(!content.ok);
+    assert!(content.detail.contains("tm content update"), "{content:?}");
+    assert!(!report.all_ok);
+    assert_eq!(report.exit_code(), 2);
+}

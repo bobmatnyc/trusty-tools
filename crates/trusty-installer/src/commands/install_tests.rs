@@ -1256,3 +1256,94 @@ fn failed_supervisor_bootstrap_fails_the_install_report() {
         assert!(report.all_ok, "{ok:?} must not fail the install");
     }
 }
+
+/// #9396: once trusty-mpm lands, the install runs the just-placed `tm
+/// content update` once — by its concrete path, after every member.
+#[test]
+fn install_runs_content_update_after_tm_lands() {
+    use crate::commands::content_step::tests::{placed_with_mpm, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::succeeding();
+    let outcomes = vec![
+        outcome("trusty-search", true, "installed"),
+        outcome("trusty-mpm", true, "installed"),
+    ];
+    let report = report_with_content(outcomes, &placed_with_mpm(dir.path()), &runner, true);
+    assert_eq!(
+        runner.calls(),
+        vec![(
+            dir.path().join("tm"),
+            vec!["content".to_owned(), "update".to_owned()]
+        )]
+    );
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(content.ok, "{content:?}");
+    assert!(
+        content.detail.contains("pinned content-v0.3.0"),
+        "{content:?}"
+    );
+    assert!(report.all_ok);
+    assert_eq!(report.exit_code(), 0);
+}
+
+/// #9396 Fail-Open Check: a failed `tm content update` leaves a working
+/// install — every member's outcome stands, nothing is rolled back — but the
+/// run exits non-zero and the footer names `tm content update`.
+#[test]
+fn a_failed_content_update_keeps_the_install_and_exits_non_zero() {
+    use crate::commands::content_step::tests::{placed_with_mpm, FakeRunner};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let runner = FakeRunner::failing();
+    let outcomes = vec![
+        outcome("trusty-search", true, "installed"),
+        outcome("trusty-mpm", true, "installed"),
+    ];
+    let report = report_with_content(outcomes, &placed_with_mpm(dir.path()), &runner, true);
+    assert_eq!(runner.calls().len(), 1, "the step ran once, after the loop");
+    assert!(
+        report
+            .members
+            .iter()
+            .all(|m| m.ok && m.service_ok && m.detail == "installed"),
+        "every member's own outcome stands: {:?}",
+        report.members
+    );
+    let content = report.content.as_ref().expect("the content step ran");
+    assert!(!content.ok);
+    assert!(content.detail.contains("tm content update"), "{content:?}");
+    assert!(content.detail.contains("could not reach"), "{content:?}");
+    assert!(!report.all_ok);
+    assert_eq!(report.exit_code(), 2);
+    let lines = install_report::summary_lines(&report);
+    assert!(
+        lines.errors.iter().any(|l| l.contains("tm content update")),
+        "{lines:?}"
+    );
+}
+
+/// #9396: `--dry-run` reports the content step when trusty-mpm is selected,
+/// and runs nothing — the preview takes no runner at all.
+#[test]
+fn dry_run_reports_the_content_step_without_running_it() {
+    let dir = std::path::Path::new("/tmp/tctl-test-bin");
+    let with_mpm = vec![
+        stable_member_for_test("trusty-search", "trusty-search", ManageStrategy::Launchd),
+        stable_member_for_test("trusty-mpm", "trusty-mpm", ManageStrategy::OwnVerb),
+    ];
+    let report = build_dry_run_report(&with_mpm, true, dir);
+    assert_eq!(
+        report.content_update.as_deref(),
+        Some("/tmp/tctl-test-bin/tm content update")
+    );
+    let json = serde_json::to_value(&report).expect("json");
+    assert_eq!(
+        json["content_update"],
+        "/tmp/tctl-test-bin/tm content update"
+    );
+
+    let without = vec![stable_member_for_test("tga", "tga", ManageStrategy::None)];
+    assert_eq!(
+        build_dry_run_report(&without, true, dir).content_update,
+        None
+    );
+}
