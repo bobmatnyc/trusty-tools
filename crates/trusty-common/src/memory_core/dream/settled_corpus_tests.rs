@@ -15,7 +15,6 @@
 use super::config::DreamConfig;
 use super::dreamer::Dreamer;
 use super::settled;
-use crate::credentials::env_guard::EnvVarGuard;
 use crate::embedder::MockEmbedder;
 use crate::memory_core::PalaceRegistry;
 use crate::memory_core::embed::{EMBED_DIM, Embedder};
@@ -29,7 +28,6 @@ use crate::memory_core::store::kg_redb::BatchWriteOp;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use serial_test::serial;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -404,7 +402,9 @@ fn semantic_dreamer(
         semantic: semantic.clone(),
         recall_benchmark_enabled: true,
         compact: false,
-        local_model_enabled: true,
+        // An `ollama/` model then resolves to no provider without reading
+        // the environment.
+        local_model_enabled: false,
         openrouter_api_key: String::new(),
         ..DreamConfig::default()
     };
@@ -443,18 +443,17 @@ impl Inference for FailingInference {
 /// Why (HIGH 2): a semantic phase whose config fails to build parks with zero
 /// counts, which read as "changed nothing". The palace settled, and stayed
 /// settled after the key or model was fixed.
-/// What: semantic on with a model the local provider rejects. The first cycle
+/// What: semantic on with an `ollama/` model while the local backend is
+/// disabled, so no provider resolves. The first cycle
 /// parks the phase, the second runs parked; neither records a marker, and the
 /// third still embeds.
 /// Test: itself.
 #[tokio::test]
-#[serial(dotenv_credential_env)]
 async fn a_parked_consolidator_does_not_settle_the_palace() {
-    let _key = EnvVarGuard::remove("OPENROUTER_API_KEY");
     let (_registry, _root, handle) = open_palace("settled-parked").await;
     seed(&handle).await;
     let embedder = CountingEmbedder::new();
-    let dreamer = semantic_dreamer(&embedder, "ollama/anthropic/claude-haiku-4-5", None);
+    let dreamer = semantic_dreamer(&embedder, "ollama/llama3.2", None);
 
     dreamer
         .dream_cycle(&handle)
