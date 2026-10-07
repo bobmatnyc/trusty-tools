@@ -184,3 +184,31 @@ fn settings_non_ascii_missing_name_is_the_default_socket() {
     let candidate = tmp.path().join("\u{17f}ecrets/s.sock");
     assert!(super::same_socket(&candidate, &socket));
 }
+
+/// Why: #7524 H1 Route 2 — `dirs::home_dir` reads `$HOME` first, so a
+/// spawner that set `HOME=/tmp/h` and bound the real default socket made
+/// the guard compare against `/tmp/h` and honour [`INDEX_DIR_ENV`] for the
+/// shared server. The guard now also checks the password database's home.
+/// What: this process's `$HOME`, never changed here, plays the redirected
+/// one; a temp dir injected as the account home plays the real one. A socket
+/// in neither home's default directory keeps the override.
+/// Red when only `$HOME` decides the default socket.
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_on_the_account_default_socket_under_another_home() {
+    if dirs::home_dir().is_none() {
+        return;
+    }
+    let account = tempfile::TempDir::new().unwrap();
+    let account_home = || Some(account.path().to_path_buf());
+    let env = index_env("/repo/checkout/index");
+    let socket = account.path().join(SOCKET_SUBPATH);
+    let args = serve_args(Some(&socket), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, account_home).unwrap();
+    assert_ne!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+
+    let sandbox = account.path().join("sandbox/s.sock");
+    let args = serve_args(Some(&sandbox), &[]);
+    let parsed = ServerSettings::from_args_with(args, env, account_home).unwrap();
+    assert_eq!(parsed.index_root, PathBuf::from("/repo/checkout/index"));
+}
