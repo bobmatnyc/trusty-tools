@@ -73,8 +73,9 @@ fn settings_index_override_survives_off_the_default_socket() {
 }
 
 /// Why: #7524 M3 — a socket path through a symlinked directory names the
-/// same socket, so it must not unlock [`INDEX_DIR_ENV`] for the shared
-/// server; a different file, or a directory that does not exist, is not it.
+/// same directory, so it must not unlock [`INDEX_DIR_ENV`] for the shared
+/// server. Any file name in that directory counts; another directory, or
+/// one that does not exist, is not it.
 /// Test: itself.
 #[test]
 fn settings_socket_alias_through_a_symlinked_dir_is_the_same_socket() {
@@ -86,11 +87,72 @@ fn settings_socket_alias_through_a_symlinked_dir_is_the_same_socket() {
     let socket = real.join("secrets.sock");
     assert!(super::same_socket(&link.join("secrets.sock"), &socket));
     assert!(super::same_socket(&real.join("x/../secrets.sock"), &socket));
-    assert!(!super::same_socket(&link.join("other.sock"), &socket));
+    assert!(super::same_socket(&link.join("other.sock"), &socket));
     assert!(!super::same_socket(
         &tmp.path().join("secrets.sock"),
         &socket
     ));
     let absent = tmp.path().join("absent/secrets.sock");
     assert!(!super::same_socket(&absent, &socket));
+}
+
+/// Why: #7524 M3 review — APFS compares names case-insensitively, so a
+/// server on `SECRETS.SOCK` in the default directory answers a client
+/// dialling the default socket. Any socket in that directory is the default,
+/// and so is a directory spelled in another case where the filesystem holds
+/// it to be one directory.
+/// What: the directory-case assertion runs only when a probe finds the
+/// tempdir case-insensitive, so a case-sensitive Linux volume skips it.
+/// Red when the file-name comparison is case-sensitive.
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_for_a_case_variant_default_socket() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().join("Sockets");
+    std::fs::create_dir(&dir).unwrap();
+    let socket = dir.join("secrets.sock");
+    assert!(super::same_socket(&dir.join("SECRETS.SOCK"), &socket));
+    let folded = tmp.path().join("sockets");
+    if std::fs::metadata(&folded).is_ok() {
+        assert!(super::same_socket(&folded.join("Secrets.Sock"), &socket));
+    }
+
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let variant = home.join(".trusty-tools/trusty-secrets/SECRETS.SOCK");
+    let env = index_env("/repo/checkout/index");
+    let parsed = ServerSettings::from_args(serve_args(Some(&variant), &[]), env).unwrap();
+    assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
+}
+
+/// Why: #7524 M3 review — `--socket secrets.sock` run from the default
+/// directory binds the default socket, but its parent is the empty path,
+/// which `canonicalize` refuses, so the pre-fix check judged it another
+/// socket.
+/// What: the test reads the process working directory and never changes
+/// it. The working directory stands in for the default directory in the
+/// `same_socket` assertions; then a relative spelling of the real default
+/// socket, climbing to `/` with `..`, goes through `from_args`.
+/// Red when an empty parent does not resolve to the working directory.
+/// Test: itself.
+#[test]
+fn settings_index_env_is_ignored_for_a_bare_relative_default_socket() {
+    let cwd = std::env::current_dir().unwrap();
+    let socket = cwd.join("secrets.sock");
+    assert!(super::same_socket(Path::new("secrets.sock"), &socket));
+    assert!(super::same_socket(Path::new("./secrets.sock"), &socket));
+
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let Ok(below_root) = home.strip_prefix("/") else {
+        return;
+    };
+    let mut relative: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+    relative.push(below_root);
+    relative.push(SOCKET_SUBPATH);
+    let env = index_env("/repo/checkout/index");
+    let parsed = ServerSettings::from_args(serve_args(Some(&relative), &[]), env).unwrap();
+    assert_eq!(parsed.index_root, home.join(INDEX_SUBDIR));
 }
