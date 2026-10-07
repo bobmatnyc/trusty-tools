@@ -27,8 +27,8 @@ const HTTP_MARKERS: &[&str] = &[
 /// Files that still dial HTTP, relative to the crate root. Remove a row when
 /// its file moves onto `service::daemon_client`; never add one.
 ///
-/// `src/main.rs` and `src/commands/dashboard.rs` open the browser UI at
-/// `<base>/ui`, which is not a daemon call and moves with #6155's UI carve-out.
+/// #9214 B2(d1) moved `src/main.rs` and `src/commands/dashboard.rs` off: the
+/// dashboard URL now comes from `search.health` over the socket.
 /// #9168 moved the MCP bridge (`src/mcp/**`, `serve.rs`, `serve_scope.rs`) off
 /// this list; [`the_mcp_bridge_builds_no_http_url`] keeps it off.
 const NOT_YET_MOVED: &[&str] = &[
@@ -37,7 +37,6 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/config.rs",
     "src/commands/convert.rs",
     "src/commands/daemon_utils.rs",
-    "src/commands/dashboard.rs",
     "src/commands/discover/http.rs",
     "src/commands/discover/mod.rs",
     "src/commands/doctor.rs",
@@ -63,7 +62,6 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/start/tests.rs",
     "src/commands/status.rs",
     "src/commands/watch.rs",
-    "src/main.rs",
 ];
 
 /// Every `.rs` file under `dir`, recursively.
