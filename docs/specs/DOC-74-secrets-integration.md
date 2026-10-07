@@ -15,9 +15,9 @@ spec_refs:
 
 **Status:** Draft
 **Spec ID:** `SPEC-SECRETS-01~draft` … `SPEC-SECRETS-14~draft` (DOC-74)
-**Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon hosts the `secrets.*` UDS methods, the `tm secrets` CLI group, the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
+**Subsystem:** `trusty-secrets` (new crate, §15.2) — backend trait, scopes, masking, lazy resolution, exec grants; `trusty-mpm` — the tm daemon and the `tm secrets` CLI group are clients of the trusty-secrets socket that serves the `secrets.*` methods (owner ruling 24, 2026-10-02), plus the `secrets_get_ref` / `secrets_list` MCP tools; `trusty-console` — the `secrets_uds` bridge and the `/tools/secrets/` page (§15.6); `trusty-common` — the shared CLI runner and UDS seams; `trusty-agents`, `trusty-code` — consumers that resolve a `secret://` reference. Amended 2026-10-01 (§15): the 2026-09-11 placement of the module in `trusty-common`, the `SessionStart` preload hook, and the `!tm secrets add` entry are superseded.
 **Owner:** Engineering (trusty-common) / Bob Matsuoka
-**Last-updated:** 2026-10-01
+**Last-updated:** 2026-10-06
 **PRD:** [PRD-SECRETS-01](../prd/PRD-SECRETS-01-console-secrets.md) — the WHAT and WHY of the console secrets service. This document is the HOW.
 **DOC-N claim:** `DOC-74`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md). Verified free: `docs/specs/README.md`'s own catalog note (line 97, "Next free `DOC-N` = `DOC-74`", recorded 2026-09-02 after `DOC-73` was claimed) is current — no file under `docs/specs/**` claims `DOC-74` by filename or self-label, and no currently open PR (#7511, #7507, #7506, #7396) is a spec.
 **Builds on:** [DOC-45](./DOC-45-credential-authority-model.md) — the authority (principal, `CredentialRef`, `Secret<T>`, default-deny, audit, delivery, at-rest storage). [DOC-64](./DOC-64-credentials-panel.md) — the per-assistant credential-set panel, a client of the same authority. [ADR-0026](../adr/0026-credential-grants-do-not-survive-delegation.md) — a grant does not survive delegation.
@@ -148,7 +148,7 @@ value" rule for the panel.
 
 **Console path (amended 2026-10-01, §15.6).** A developer types a value into
 the console's `/tools/secrets/` page. The value travels browser → console
-`secrets_uds` bridge → tm daemon UDS → store, in one direction. No
+`secrets_uds` bridge → trusty-secrets socket → store, in one direction. No
 `secrets.*` method returns a value to the console, and no response, error or
 log line on that path carries one. The value never passes through an agent,
 a terminal or a transcript, so T-2 holds without relying on the model to
@@ -198,7 +198,7 @@ regression of it.
 | **Reference key** | `secret://KEY` (project, then owner) or the explicit `secret://<owner>[/<repo>]/KEY` — non-secret, freely printable (§4 T-2, §15.3; amended 2026-10-01). |
 | **Session cache** | The in-process cache of resolved values, kept only for CLI-backed sources and filled on first use (§8.4, amended 2026-10-01). |
 | **Sync target** | A write-only destination such as Vercel or GitHub Actions; it cannot be read back (§15.4). |
-| **Exec grant** | A token `tm secrets exec` registers with the tm daemon, naming the child pid, the allowed keys and an expiry (§15.8). |
+| **Exec grant** | A token `tm secrets exec` registers on the trusty-secrets socket, next to `secrets.resolve`, by calling `secrets.grant` as a client (S8, #9070; the method name is final per S8; ruling 34, 2026-10-05), naming the child pid, the allowed keys and an expiry (§15.8). |
 | **Detection** | A read-only probe of what secrets tooling exists on the machine — installed, running, configured — never an unlock (§7). |
 
 ---
@@ -236,6 +236,28 @@ This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
 2026-10-01).
 
+**Vault override narrowing — owner ruling 06, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)), R2 "Owner's
+vaults only".** The project file is tracked, so anyone who can land a change
+in the repository can edit it. Its `secrets.vault` may name only a project
+vault under the owner derived from the git remote: `trusty/<owner>/<name>`.
+Any other value — another owner's vault, or the owner vault `trusty/<owner>`
+itself — is refused with `vault_out_of_scope`. The refusal never falls back
+to the derived vault. A wider override is honoured only from the untracked
+machine config, keyed by the remote's `<owner>/<repo>` (keys compare
+case-insensitively):
+
+```yaml
+secrets:
+  project_vaults:
+    acme/web: trusty/acme-platform/shared   # machine-only; may name any vault
+```
+
+A machine `project_vaults` entry for the checkout's `<owner>/<repo>` wins over
+the project file's `secrets.vault`. A checkout with no `origin` remote has no
+owner to check an override against, so its scope is undetermined whatever
+either file says.
+
 ### 6.2 Backend-specific settings
 
 ```yaml
@@ -259,8 +281,10 @@ Default vault name is derived, never chosen ad hoc: `trusty/<owner>/<repo>`,
 where `<owner>/<repo>` comes from the same git-remote-derived identity `tm`
 already resolves for GitHub account selection (memory: "tm GitHub account
 selection" — owner ruling that a managed session picks the right account from
-the remote). A project may override it explicitly (§6.1) when it wants to
-share a vault across repos or match an existing 1Password vault name.
+the remote). A project may override it explicitly (§6.1). The tracked
+project file's `secrets.vault` shares a vault only among one owner's repos
+(`trusty/<owner>/<name>`); the machine config's `secrets.project_vaults` map
+(§6.1) may share one across owners or match an existing 1Password vault name.
 
 ---
 
@@ -536,7 +560,7 @@ posture (`resolver.rs:74-81`, `default_store`'s own fallback chain).
 A new tool, `secrets_get_ref`, joins the daemon's MCP catalog
 (`crates/trusty-mpm/src/mcp/tools/mod.rs` — the pattern is `mod.rs`'s thin
 facade plus a new `secrets.rs` leaf, matching how `disk.rs` was added for
-Disk in #6927) alongside `secrets_list`. Both return only names/references
+Disk in #6927) alongside `secrets_list`. `secrets_get_ref` stays in the tm daemon's MCP catalog as a client of the trusty-secrets socket and returns references, never values (ruling 34, 2026-10-05). Both return only names/references
 and metadata (`backend`, `imported_at`, `present: bool`) — never a value —
 the same non-goal DOC-64 states for its panel. A tool that resolves an actual
 *value* into a subprocess environment (the MCP equivalent of `tm secrets
@@ -601,7 +625,7 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
 | Single-unlock-per-session | `MemoryBackend` test double that panics on a second unlock call; two `resolve` calls in the same session must not trigger it twice | New; parallels `KeyringStore`'s existing `probe_is_cached_across_instances` (`keyring_store.rs:155-160`) |
 | Backend detection | Fixture `PATH` containing a fake `op`/`keeper` shim and a fake socket path, assert `detect_backends()` reports `Installed`/`Running` correctly per tool and `Unsupported` for the listed-but-unimplemented tools (`bw`, `vault`, `pass`, `gopass`, `doppler`, `infisical`) without any real network or unlock call | New, in the spirit of `keyring_store.rs`'s "probe never touches a real keychain in tests" discipline |
 | Precedence: project config over machine default | `MemoryKeyStore`-style hermetic config resolution test: project config present → its backend wins; absent → machine default; both absent → `keychain` | Parallels `resolver_tests::env_beats_store` et al. (`resolver.rs:172-243`) |
-| `copy` never observes the destination write partially applied | Interrupt (simulated backend error) mid-copy of N keys; assert already-written keys are reported and no value appears in the error text | New — DOC-45-style honesty about partial-failure states |
+| `copy` never observes the destination write partially applied | Interrupt (simulated backend error) mid-copy of N keys; assert already-written keys are reported and no value appears in the error text. Exception: a destination entry whose index publish and compensating delete both fail aborts the copy with `orphaned_backend_entry` and no copied list; keys copied before it stay visible through `secrets.list`. See [#9065](https://github.com/bobmatnyc/trusty-tools/issues/9065) | New — DOC-45-style honesty about partial-failure states |
 | No value reaches the console (2026-10-01) | Drive every `secrets.*` method through the `secrets_uds` bridge with a specimen value; assert no response body, error body or log line contains it | New — PRD-SECRETS-10 |
 | Fixed error text (2026-10-01) | Send a malformed `secrets.set` whose bad field holds a specimen value; assert the error text is the fixed string and omits the specimen | New — the echo at `router.rs:144` |
 | `mask_secret` (2026-10-01) | Table test: a value of ≤8 characters yields its length only; a longer value yields the first 8 characters and the length; `redact_secret`'s 4-character output is unchanged | New; `redact_secret_short_inputs_table` stays green |
@@ -657,6 +681,11 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Resolved 2026-09-23** ([#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5802789914)):
    explicit `secrets.vault` override only. The 2026-10-01 owner vault
    (§15.3) covers sharing across one owner's repos.
+   **Narrowed 2026-10-06 by owner ruling 06 R2
+   ([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)):** the
+   override in the tracked project file may share a vault only among one
+   owner's repos (`trusty/<owner>/<name>`). Sharing across owners needs the
+   machine config's `secrets.project_vaults` (§6.1).
 6. **`tm secrets copy`'s scope.** Confirmed in-scope: moving a project's own
    vault contents between backends. Out of scope unless the owner says
    otherwise: copying between two *different* projects' vaults, which is a
@@ -710,7 +739,7 @@ languages."*
 The result:
 
 - Value entry moves out of the session and into a console page (§15.6).
-- The design ships as a library crate hosted by the tm daemon (§15.2).
+- The design ships as a library crate that serves its own on-demand socket; the tm daemon and the console are clients (§15.2, owner ruling 24, 2026-10-02).
 - Secrets gain an owner scope beside the project scope (§15.3).
 - Nothing resolves at startup (§15.5).
 - App code reads secrets through three language tiers (§15.8).
@@ -735,13 +764,13 @@ resolution, masking and the exec-grant logic. It has three features:
 | `store` | `SecretBackend` implementations, scope resolution, `mask_secret`, the CLI-source cache | The tm daemon and the `tm` CLI |
 | `client` | A UDS client for `secrets.resolve` inside an exec grant (§15.8). No new dependencies. | Rust app code (S9) |
 
-**Host.** The tm daemon serves the methods on its existing UDS socket. The
-family registers in
-[`build_router`](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-mpm/src/daemon/socket.rs#L68),
-and the socket's peer-uid check runs on every accepted connection before a
-byte is read
-([`socket.rs` module doc](https://github.com/bobmatnyc/trusty-tools/blob/51d28c2562f66db27fb5fa91a1be2021cc230e72/crates/trusty-mpm/src/daemon/socket.rs#L14-L18)).
-There is no new daemon and no TCP listener.
+**Host (owner ruling 24, 2026-10-02).** `trusty-secrets` owns and serves its
+own on-demand socket. The tm daemon and the console are clients of that socket;
+neither hosts a `secrets.*` method. The socket spawns on the first call, holds
+no background task and exits when idle, so it is not a daemon (owner ruling 28).
+There is no new resident daemon and no TCP listener. The socket is ~/.trusty-tools/trusty-secrets/secrets.sock under a 0700 parent directory, bound with trusty-common `prepare_socket_dir` plus `bind_singleton_hardened`. Clients spawn it on demand through `uds::on_demand`; there is no launchd job. It exits after 60 s idle, with an env override (name per S2) (ruling 31, 2026-10-05).
+An earlier draft placed the methods on the tm daemon's existing UDS socket
+(`build_router`); ruling 24 supersedes that placement.
 
 **Methods.**
 
@@ -770,12 +799,41 @@ in-process through the `store` feature, so its values never cross a socket.
 A project key wins over an owner key with the same name (owner answers
 2026-10-01).
 
+**github.com only — owner ruling 06 R3, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)).** The vault
+names carry no host, so a remote on any other host would map to a github.com
+project's vaults. In 0.1.0 the `origin` remote must be on `github.com` in
+one of these forms, each with or without `.git`:
+
+- `https://[<userinfo>@]github.com[:<port>]/<owner>/<repo>`
+- `ssh://[<user>@]github.com[:<port>]/<owner>/<repo>`, also spelled
+  `git+ssh://` or `ssh+git://`
+- scp form `[<user>@]github.com:<owner>/<repo>`
+
+Any other host, any other scheme (`http://`, `git://`, `file://`, ...), and
+any remote-helper URL holding `::` (`<helper>::<address>`) is refused with the
+fixed `remote_host_unsupported` error, which names neither the host nor the
+URL.
+GitHub Enterprise Server support comes later and is additive; the host is
+not added to vault names.
+
 **Reference grammar.**
 
 - `secret://KEY` — look up `KEY` in the names-only index: the project vault
   first, then the owner vault. A miss is `SecretsError::NotFound`.
 - `secret://<owner>/KEY` — the owner vault, explicitly.
 - `secret://<owner>/<repo>/KEY` — a project vault, explicitly.
+
+**Own vaults only — owner ruling 06 R1, 2026-10-06
+([#9328](https://github.com/bobmatnyc/trusty-tools/issues/9328)).** An
+explicit form may name only a vault in the caller's own lookup order: the
+project vault or its owner vault. Any other vault, including a sibling repo
+of the same owner, is refused with `SecretsError::VaultOutOfScope`
+(`vault_out_of_scope` on the wire) before the index or a backend is read; the
+refusal carries no value. Without this rule, a `.env` edited in a pull
+request to `DB=secret://victim/prod-repo/DB_URL` would inject another
+project's secret. Cross-project access comes later, through the S8 grant
+registry (§15.9).
 
 The names-only index stores key names and per-key metadata. It stores no
 plaintext (owner answer 2026-10-01).
@@ -821,7 +879,7 @@ Every CLI-backed integration needs the stdin-capable CLI runner (§8.2) first.
 ### 15.6 Console bridge, page, masking and hardening (S3a, S4)
 
 trusty-console adds a `secrets_uds` bridge at `/api/secrets/*` and a page at
-`/tools/secrets/`. The bridge forwards to the tm daemon's `secrets.*` methods.
+`/tools/secrets/`. The bridge is a client of the trusty-secrets socket and forwards its `secrets.*` calls there (socket and spawn contract per ruling 31, 2026-10-05: §15.2).
 The console never opens a store.
 
 **Masking.** A new `mask_secret` in `trusty-secrets`:
@@ -895,7 +953,7 @@ not a per-language library, because a library would need a value-returning
 method.
 
 **Exec grant (tier 3).** `tm secrets exec` mints a random token and registers
-it with the tm daemon, with the child pid, the allowed keys and an expiry. The
+it on the trusty-secrets socket, next to `secrets.resolve`. tm, the spawner, is the client and registers it by calling `secrets.grant` (S8, #9070; the method name is final per S8; ruling 34, 2026-10-05), with the child pid, the allowed keys and an expiry. The
 child receives the token in its env. `secrets.resolve` answers only when all
 three hold:
 
@@ -944,11 +1002,13 @@ per registry.
 
 Rungs follow the [Rust Test Ladder](../../CLAUDE.md#rust-test-ladder).
 
+Owner ruling 30 makes this S-series the master sequence for milestone 123.
+
 | Slice | Scope | Rung | Gate or dependency |
 |---|---|---|---|
 | S0 | This amendment and PRD-SECRETS-01 | 1 | — |
 | S1 | `trusty-secrets` crate: `api` and `store` features, scopes, `mask_secret`, Keychain backend | 4 | S0 |
-| S2 | tm daemon `secrets.*` methods | 5 | S1 |
+| S2 | trusty-secrets on-demand socket serving `secrets.*`; tm daemon as client (socket and spawn contract per ruling 31, 2026-10-05) | 5 | S1 |
 | S3a | Console `secrets_uds` bridge and hardening (§15.6) | 5 | S2 |
 | S3b | Tailnet gate (§15.7); closes [#9035](https://github.com/bobmatnyc/trusty-tools/issues/9035) for secrets routes | 5 | S3a |
 | S4 | `/tools/secrets/` page, including the "agents may use" toggle | 6 | S3a; tailnet access waits on S3b |

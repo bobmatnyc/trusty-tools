@@ -1,0 +1,36 @@
+diff --git a/crates/trusty-search/src/service/reindex/aged_pick.rs b/crates/trusty-search/src/service/reindex/aged_pick.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/service/reindex/aged_pick.rs
+@@ -0,0 +1,30 @@
++//! Pick the next deferred embed job.
++
++use std::time::{Duration, Instant};
++
++/// One queued job.
++#[derive(Debug, Clone)]
++pub struct Pending {
++    /// Queue sequence number.
++    pub seq: u64,
++    /// When the job was queued.
++    pub arrival: Instant,
++    /// Larger runs first among fresh jobs.
++    pub priority: u32,
++}
++
++/// A job older than this jumps the priority order so it cannot starve.
++pub const MAX_WAIT: Duration = Duration::from_secs(120);
++
++/// The seq to run next: the oldest job past `MAX_WAIT`, else the highest
++/// priority.
++pub fn best_pending_seq(pending: &[Pending], now: Instant) -> Option<u64> {
++    let aged = pending
++        .iter()
++        .filter(|p| now.duration_since(p.arrival) >= MAX_WAIT)
++        .max_by_key(|p| p.arrival);
++    if let Some(job) = aged {
++        return Some(job.seq);
++    }
++    pending.iter().max_by_key(|p| p.priority).map(|p| p.seq)
++}

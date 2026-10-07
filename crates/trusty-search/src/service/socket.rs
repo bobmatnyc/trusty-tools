@@ -66,7 +66,7 @@ use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
-use crate::service::rpc::{admin, chat, queries, reads, streams, warm, writes};
+use crate::service::rpc::{admin, chat, file, project, queries, reads, streams, warm, writes};
 use crate::service::server::SearchAppState;
 
 #[cfg(test)]
@@ -148,6 +148,10 @@ pub const METHODS: &[&str] = &[
     // #9027 — warm-all, both unary and in the free lane.
     warm::METHOD_WARM_START,
     warm::METHOD_WARM_STATUS,
+    // #9169 — project-to-index resolution. Socket-only and in the free lane.
+    project::METHOD_PROJECT_RESOLVE,
+    // #9029 — one indexed file and its diff. Socket-only and in the free lane.
+    file::METHOD_FILE_GET,
 ];
 
 /// The params of a method that takes no arguments.
@@ -280,6 +284,8 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = admin::register(router, state);
     let router = chat::register(router, state);
     let router = warm::register(router, state);
+    let router = project::register(router, state);
+    let router = file::register(router, state);
     streams::register(router, state)
 }
 

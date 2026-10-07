@@ -10,17 +10,19 @@
 //! `>( … )` and backtick bodies of one segment that are live shell syntax.
 //! [`command_substitutions`] does the same for a whole command: every segment
 //! [`split_shell_segments`] yields (so an `sh -c` string is read too), plus
-//! the `$( … )` and backticks of an unquoted-delimiter here-document body,
-//! which the shell expands. Callers recurse into each body themselves, which
-//! is what reaches a nested substitution.
+//! the `$( … )` and backticks of every unquoted-delimiter here-document body,
+//! which the shell expands whoever runs it (#9155). Callers recurse into each
+//! body themselves, which is what reaches a nested substitution.
 //! Test: `substitutions_list_each_live_body_once`,
 //! `substitutions_read_an_expanding_heredoc_body_only`,
 //! `inert_heredoc_bodies_leave_the_argv_text`; the forbidden-verb callers in
 //! `evaluate_bash_command_*`.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
-use super::heredoc::{DataBody, blank_spans, data_bodies};
+use super::heredoc::{HeredocBodies, blank_spans};
+use super::heredoc_line::{line_names, line_reads_as_data};
 use super::shell_lex::QuoteScan;
 use super::{is_evaluator, split_shell_segments};
 
@@ -175,40 +177,190 @@ fn escaped(bytes: &[u8], i: usize) -> bool {
 ///
 /// What: data here-document bodies leave the argv text first, so a
 /// quoted-delimiter body — literal text — contributes nothing; each remaining
-/// segment contributes its [`segment_substitutions`]; an unquoted-delimiter
-/// body contributes every `$(` and backtick in it, quotes included, since the
-/// body's quotes are literal characters.
-/// Test: `substitutions_read_an_expanding_heredoc_body_only`.
+/// segment contributes its [`segment_substitutions`]; every unquoted-delimiter
+/// body, a shell-run one included (#9155), contributes every `$(` and
+/// backtick in it, quotes included, since the body's quotes are literal
+/// characters. A body found twice is listed once.
+/// Test: `substitutions_read_an_expanding_heredoc_body_only`,
+/// `substitutions_read_a_shell_run_expanding_heredoc_body_9155`.
 pub(crate) fn command_substitutions(command: &str) -> Vec<Substitution> {
-    let owned = data_bodies(command);
-    let bodies: Vec<&DataBody> = owned.iter().collect();
-    let spans: Vec<(usize, usize)> = bodies.iter().map(|b| b.span).collect();
+    let heredocs = HeredocBodies::scan(command);
+    let spans: Vec<(usize, usize)> = heredocs.data().iter().map(|b| b.span).collect();
     let argv_text = blank_spans(command, &spans);
-    let mut found: Vec<Substitution> = split_shell_segments(&argv_text)
+    let found: Vec<Substitution> = split_shell_segments(&argv_text)
         .iter()
         .flat_map(|segment| segment_substitutions(segment.trim()))
         .collect();
-    found.extend(expanding_substitutions(command, &bodies));
+    with_expanded(found, command, heredocs.expanding())
+}
+
+/// `found` extended with the `$( … )` and backtick bodies each `expanding`
+/// here-document body runs, read with the body's quotes as literal text, and
+/// any body already listed dropped (#9155).
+///
+/// Why: a body that stays in the argv text (one a program runs as code) is
+/// also read by the argv scan, so without the drop each of its substitutions
+/// would be judged twice per level, which nested bodies multiply.
+fn with_expanded(
+    mut found: Vec<Substitution>,
+    command: &str,
+    expanding: &[(usize, usize)],
+) -> Vec<Substitution> {
+    for &(start, end) in expanding {
+        // #9155: bash drops `\`+newline in the body before expanding it.
+        let text = join_continuations(&command[start..end]);
+        let bodies = scan_bodies(
+            &text,
+            true,
+            |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
+            |_| true,
+        );
+        for (_, body) in bodies {
+            if !found.contains(&body) {
+                found.push(body);
+            }
+        }
+    }
     found
 }
 
-/// The `$( … )` and backtick bodies an unquoted-delimiter here-document body
-/// among `bodies` runs, quotes included, since its quotes are literal.
-fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitution> {
-    bodies
+/// `body` with each line continuation removed, as bash reads an unquoted
+/// here-document body before expanding it (#9155).
+///
+/// Why: `$\`, newline, `(rm -rf /)` is `$(rm -rf /)` to bash, and the
+/// literal scan found no opener.
+/// What: drops a `\` and the newline after it when that `\` ends a run of
+/// odd length; in an even run (`\\`, newline) the backslashes escape each
+/// other and the newline stays.
+/// Test: `substitutions_join_a_line_continuation_in_an_expanding_body_9155`.
+fn join_continuations(body: &str) -> Cow<'_, str> {
+    if !body.contains("\\\n") {
+        return Cow::Borrowed(body);
+    }
+    let bytes = body.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut run = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            run += 1;
+            if run % 2 == 1 && bytes.get(i + 1) == Some(&b'\n') {
+                run = 0;
+                i += 2;
+                continue;
+            }
+        } else {
+            run = 0;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Only ASCII `\` and `\n` bytes were removed, so the text stays UTF-8.
+    Cow::Owned(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// `body`, an unquoted here-document body, as the shell hands it to the
+/// program that reads it: `\\`, `\$` and `\`` lose their backslash and a
+/// line continuation is removed (#9155). Every other `\` stays.
+/// Test: `shell_run_heredoc_bodies_are_read_as_whole_commands_9155`.
+fn unescape_expanding_body(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('\\' | '$' | '`') => {
+                    out.extend(chars.next());
+                    continue;
+                }
+                Some('\n') => {
+                    chars.next();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Programs whose here-document body a shell runs (`sudo -s`, `su`,
+/// `parallel`), so the body is read as a command (#9155).
+pub(crate) const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
+
+/// Whether a here-document operator line names one of `runners`; #9180: read
+/// with the operator-line tokenizer, so `(sudo -s<<O` names `sudo`.
+fn names_a_runner(line: &str, runners: &[&str]) -> bool {
+    line_names(line, |word| runners.contains(&word))
+}
+
+/// The text of each here-document body a shell may run, as that shell
+/// receives it (#9155).
+///
+/// Why: such a body is a command of its own, but the segment splitter cuts it
+/// at every newline, so a here-document nested in it (`bash <<'O'` around
+/// `bash <<I` around `echo '$(rm -rf /)'`) was never read whole and its
+/// single-quoted substitution never expanded.
+/// What: each body [`HeredocBodies::bodies`] lists whose operator line does
+/// not read it as data ([`line_reads_as_data`]); an unquoted-delimiter body
+/// is first unescaped as the outer shell does ([`unescape_expanding_body`]).
+/// #9180: the list holds a body the scan claimed nothing for — one with no
+/// terminator, read to the end of input, or one in a command whose quotes do
+/// not balance — so a here-document nested in it is still read.
+/// #9180 critic: fail-closed — a body is shell-run unless every program on
+/// its operator line is a literal data reader, so `$(printf bas)h`, `b$X`, a
+/// function, `.`, `source`, `eval` and `tcsh` run theirs.
+/// Test: `shell_run_heredoc_bodies_are_read_as_whole_commands_9155`,
+/// `shell_run_heredoc_bodies_include_an_unterminated_body_9180`,
+/// `continuation_tests::the_floor_reads_every_unnamed_program_body_9180`.
+pub(crate) fn shell_run_heredoc_bodies(command: &str) -> Vec<String> {
+    HeredocBodies::scan(command)
+        .bodies()
         .iter()
-        .filter(|b| b.expands)
-        .flat_map(|body| {
-            scan_bodies(
-                &command[body.span.0..body.span.1],
-                true,
-                |bytes, i| (bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'(')).then_some(true),
-                |_| true,
-            )
-            .into_iter()
-            .map(|(_, body)| body)
+        // #9180: unknown programs run their body.
+        .filter(|body| !line_reads_as_data(&command[body.operator_line.0..body.operator_line.1]))
+        .map(|body| {
+            let text = &command[body.span.0..body.span.1];
+            if body.expands {
+                unescape_expanding_body(text)
+            } else {
+                text.to_string()
+            }
         })
         .collect()
+}
+
+/// Every `$( … )` and backtick body the unquoted here-documents of `command`
+/// expand, a here-document nested in a shell-run body included (#9180).
+///
+/// Why: the forbidden-verb guard judged only substitutions its quote map called
+/// live, and a here-document body's quotes are literal text, so
+/// `cat <<X` around `'$(curl …)'` ran `curl` unjudged. The rm-root floor has
+/// read these since #9155; this is the same reading for the other rules.
+/// What: [`with_expanded`] over the command's expanding bodies, then the same
+/// for each [`shell_run_heredoc_bodies`] body, recursively. `None` past
+/// [`MAX_SUBSTITUTION_DEPTH`] levels, which a caller must deny.
+/// Test: `heredoc_expansions_reach_a_nested_body_9180`.
+pub(crate) fn heredoc_expansions(command: &str) -> Option<Vec<Substitution>> {
+    let mut found = Vec::new();
+    collect_expansions(command, 0, &mut found).then_some(found)
+}
+
+/// The walk behind [`heredoc_expansions`]; `false` past the depth cap.
+fn collect_expansions(command: &str, depth: usize, found: &mut Vec<Substitution>) -> bool {
+    if depth > MAX_SUBSTITUTION_DEPTH {
+        return false;
+    }
+    let heredocs = HeredocBodies::scan(command);
+    for body in with_expanded(Vec::new(), command, heredocs.expanding()) {
+        if !found.contains(&body) {
+            found.push(body);
+        }
+    }
+    shell_run_heredoc_bodies(command)
+        .iter()
+        .all(|body| collect_expansions(body, depth + 1, found))
 }
 
 /// `command` with each here-document body that is stdin text blanked, and the
@@ -218,25 +370,28 @@ fn expanding_substitutions(command: &str, bodies: &[&DataBody]) -> Vec<Substitut
 /// (`git commit -F - <<'EOF'`) as a live substitution and denied it. A body is
 /// kept when its operator line runs it as code ([`runs_as_code`]) or names one
 /// of `runners` — a program that runs its stdin as shell text.
-/// What: blanks the other data bodies ([`blank_spans`]); an unquoted-delimiter
-/// body's `$( … )` and backticks are returned, since the shell runs them.
-/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`.
+/// What: blanks the other data bodies ([`blank_spans`]). Every
+/// unquoted-delimiter body's `$( … )` and backticks are returned, read with
+/// the body's quotes as literal text, whether the body was blanked or kept:
+/// the shell expands them before any program reads the body (#9155). A kept
+/// body stays in the argv text too, so the verb scan still sees what runs.
+/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`,
+/// `blank_inert_heredocs_returns_every_expanding_body_9155`.
 pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, Vec<Substitution>) {
-    let bodies = data_bodies(command);
-    let inert: Vec<&DataBody> = bodies
+    let heredocs = HeredocBodies::scan(command);
+    let spans: Vec<(usize, usize)> = heredocs
+        .data()
         .iter()
         .filter(|b| {
             let line = &command[b.operator_line.0..b.operator_line.1];
-            !runs_as_code(line)
-                && !line
-                    .split_whitespace()
-                    .any(|w| runners.contains(&w.rsplit('/').next().unwrap_or(w)))
+            !runs_as_code(line) && !names_a_runner(line, runners)
         })
+        .map(|b| b.span)
         .collect();
-    let spans: Vec<(usize, usize)> = inert.iter().map(|b| b.span).collect();
+    // #9155: every expanding body, not only the blanked ones, reaches the floor.
     (
         blank_spans(command, &spans),
-        expanding_substitutions(command, &inert),
+        with_expanded(Vec::new(), command, heredocs.expanding()),
     )
 }
 
@@ -251,7 +406,8 @@ pub(crate) fn blank_inert_heredocs(command: &str, runners: &[&str]) -> (String, 
 /// keeping every byte offset and newline.
 /// Test: `inert_heredoc_bodies_leave_the_argv_text`.
 pub(crate) fn without_inert_heredoc_bodies(command: &str) -> String {
-    let inert: Vec<(usize, usize)> = data_bodies(command)
+    let inert: Vec<(usize, usize)> = HeredocBodies::scan(command)
+        .data()
         .iter()
         .filter(|b| !runs_as_code(&command[b.operator_line.0..b.operator_line.1]))
         .map(|b| b.span)
@@ -259,12 +415,10 @@ pub(crate) fn without_inert_heredoc_bodies(command: &str) -> String {
     blank_spans(command, &inert)
 }
 
-/// Whether any word of an operator line is a program that runs its input.
+/// Whether any word of an operator line is a program that runs its input;
+/// #9180: read with the operator-line tokenizer, so `(python3 -<<PY` counts.
 fn runs_as_code(line: &str) -> bool {
-    line.split_whitespace().any(|word| {
-        let base = word.rsplit('/').next().unwrap_or(word);
-        is_evaluator(&base.to_ascii_lowercase())
-    })
+    line_names(line, |word| is_evaluator(&word.to_ascii_lowercase()))
 }
 
 #[cfg(test)]
@@ -317,6 +471,103 @@ mod tests {
         );
         assert!(command_substitutions("cat <<'EOF'\n$(a)\nEOF").is_empty());
         assert_eq!(command_substitutions("bash -c 'echo $(a)'"), closed(&["a"]));
+    }
+
+    /// #9155: a body a shell or interpreter runs still expands, so its
+    /// single-quoted `$(…)` and backtick are listed, each once; a quoted
+    /// delimiter lists nothing.
+    #[test]
+    fn substitutions_read_a_shell_run_expanding_heredoc_body_9155() {
+        assert_eq!(
+            command_substitutions("bash <<X\necho '$(a)' `b` $(c)\nX"),
+            closed(&["b", "c", "a"])
+        );
+        assert!(command_substitutions("bash <<'X'\necho '$(a)'\nX").is_empty());
+    }
+
+    /// #9155: the kept (code-run) body stays in the argv text, and its
+    /// single-quoted substitution is returned beside it; a quoted delimiter
+    /// returns nothing; an inert body is blanked and still returns its own.
+    #[test]
+    fn blank_inert_heredocs_returns_every_expanding_body_9155() {
+        for kept in [
+            "python3 - <<PY\nprint('$(a)')\nPY",
+            "bash <<X\necho '$(a)'\nX",
+        ] {
+            let (argv, found) = blank_inert_heredocs(kept, &[]);
+            assert_eq!(argv, kept);
+            assert_eq!(found, closed(&["a"]), "{kept:?}");
+        }
+        let (_, found) = blank_inert_heredocs("python3 - <<'PY'\nprint('$(a)')\nPY", &[]);
+        assert!(found.is_empty());
+        let (argv, found) = blank_inert_heredocs("cat <<EOF\n'$(a)'\nEOF", &[]);
+        assert!(!argv.contains("$(a)"));
+        assert_eq!(found, closed(&["a"]));
+    }
+
+    /// #9155: `\`+newline inside an expanding body is removed before the
+    /// scan, so `$\`, newline, `(a)` opens a substitution; an even backslash
+    /// run keeps its newline, and a benign continuation lists nothing.
+    #[test]
+    fn substitutions_join_a_line_continuation_in_an_expanding_body_9155() {
+        for command in [
+            "cat <<X\n'$\\\n(a)'\nX",
+            "python3 - <<PY\nprint('$\\\n(a)')\nPY",
+        ] {
+            assert_eq!(
+                command_substitutions(command),
+                closed(&["a"]),
+                "{command:?}"
+            );
+        }
+        for command in [
+            "cat <<X\n'$\\\\\n(a)'\nX",
+            "python3 - <<PY\nprint('a' \\\n  'b')\nPY",
+            "cat <<'X'\n'$\\\n(a)'\nX",
+        ] {
+            assert!(command_substitutions(command).is_empty(), "{command:?}");
+        }
+    }
+
+    /// #9155: a body a shell or runner runs is returned whole, an unquoted one
+    /// unescaped as the outer shell does; a data body is not.
+    #[test]
+    fn shell_run_heredoc_bodies_are_read_as_whole_commands_9155() {
+        assert_eq!(
+            shell_run_heredoc_bodies("bash <<'O'\nbash <<I\nx\nI\nO"),
+            ["bash <<I\nx\nI\n"]
+        );
+        assert_eq!(
+            shell_run_heredoc_bodies("sudo -s <<O\necho \\$(a) \\\\ \\q\nO"),
+            ["echo $(a) \\ \\q\n"]
+        );
+        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI\nO").is_empty());
+    }
+
+    /// #9180: an unterminated shell-run body is returned to the end of input,
+    /// and a shell glued to its operator still runs its body.
+    #[test]
+    fn shell_run_heredoc_bodies_include_an_unterminated_body_9180() {
+        assert_eq!(
+            shell_run_heredoc_bodies("bash <<'O'\ncat <<I\nx\nI"),
+            ["cat <<I\nx\nI"]
+        );
+        assert_eq!(shell_run_heredoc_bodies("(sudo -s<<'O'\nx\nO\n)"), ["x\n"]);
+        assert!(shell_run_heredoc_bodies("cat <<'O'\nbash <<I\nx\nI").is_empty());
+    }
+
+    /// #9180: the expansions of a here-document nested in a shell-run body
+    /// are listed; a quoted nested body lists none.
+    #[test]
+    fn heredoc_expansions_reach_a_nested_body_9180() {
+        assert_eq!(
+            heredoc_expansions("bash <<'O'\ncat <<I\n'$(a)'\nI\nO"),
+            Some(closed(&["a"]))
+        );
+        assert_eq!(
+            heredoc_expansions("bash <<'O'\ncat <<'I'\n'$(a)'\nI\nO"),
+            Some(Vec::new())
+        );
     }
 
     /// A body `cat` or `git` reads is blanked; one `ssh` or a shell runs stays.

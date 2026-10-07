@@ -18,7 +18,7 @@ name = "trusty-mcp"
 # 0.2.0 -> 0.2.1: patch — `spawn_daemon_detached` starts the auto-started
 # daemon in its own session via `setsid()` so a group kill/Ctrl-C aimed at the
 # bridge cannot reach it (#8783). No public item added or changed.
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

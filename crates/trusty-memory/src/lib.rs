@@ -90,6 +90,8 @@ pub mod bm25_lane;
 pub mod bm25_repair;
 pub mod bootstrap;
 pub mod dream_scheduler;
+// #9283: daily per-palace drawer-count history for the doctor stability check.
+pub mod drawer_counts;
 pub mod exit_runtime;
 pub mod fd_metrics;
 pub mod idle_evict;
@@ -348,6 +350,13 @@ pub struct AppState {
     /// via `with_multi_tenant_mode_from_env` (`TRUSTY_MEMORY_MULTI_TENANT=1`);
     /// see the `authz` module docs for the full design rationale.
     pub multi_tenant_mode: bool,
+    /// The user-scope rulings leg (#9143): the configured palaces, the
+    /// per-recall time bound and each palace's search state. Empty (the
+    /// default) disables the leg; `new` reads no environment, so a test state
+    /// is hermetic. The daemon reads `TRUSTY_MEMORY_RULINGS_PALACES` through
+    /// `with_rulings_palaces_from_env`. Override with `with_rulings_palaces`
+    /// and `with_rulings_timeout`. See `tools::recall_rulings`.
+    pub rulings: Arc<tools::recall_rulings::RulingsLeg>,
     /// Most recent on-disk footprint of `data_root`, in bytes (issue #35).
     ///
     /// Why: `GET /health` reports `disk_bytes`. Walking the data directory on
@@ -718,7 +727,8 @@ impl AppState {
             machine: trusty_common::machine_tier::MachineBudget::detect(),
             // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
             // so operators can bound resident-palace RAM without a rebuild.
-            registry: Arc::new(PalaceRegistry::from_env()),
+            // #9173: the dream scheduler walks the root for unopened palaces.
+            registry: Arc::new(PalaceRegistry::from_env().with_data_root(&data_root)),
             data_root,
             default_palace: None,
             chat_provider: Arc::new(OnceCell::new()),
@@ -737,6 +747,11 @@ impl AppState {
             // unexpected files are written to the OS data dir.
             error_store: None,
             multi_tenant_mode: false,
+            // #9143 review: no env read here; the daemon opts in.
+            rulings: Arc::new(tools::recall_rulings::RulingsLeg::new(
+                Vec::new(),
+                tools::recall_rulings::RULINGS_TIMEOUT,
+            )),
             disk_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sys_metrics: Arc::new(tokio::sync::Mutex::new(
                 trusty_common::sys_metrics::SysMetrics::new(),
@@ -1107,7 +1122,8 @@ impl AppState {
         self.registry = Arc::new(
             PalaceRegistry::from_env()
                 .with_writer_intent()
-                .with_maintenance_lease(Arc::new(lease)),
+                .with_maintenance_lease(Arc::new(lease))
+                .with_data_root(&self.data_root),
         );
         self
     }

@@ -279,6 +279,20 @@ impl ManagedTmuxDriver for RealTmuxDriver {
         self.driver.pane_id(name)
     }
 
+    /// #9313: the id column of `list-panes -s`; a failed query is `Err`.
+    fn session_pane_ids(&self, name: &str) -> Result<Vec<String>, ManagedError> {
+        let rows = self
+            .driver
+            .list_panes(name)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| row.split(':').next())
+            .filter(|id| id.starts_with('%'))
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// #9004: one `display-message -t %N`, parsed strictly — a missing pane
     /// answers exit 0 with empty fields, which parses as `Err`.
     fn pane_identity(

@@ -1,0 +1,422 @@
+//! The live leg of the model-eval harness: real Bedrock reviewers, a Haiku 4.5
+//! verifier, a hard cost cap, and a JSON report (Q86 ruling).
+//!
+//! Why: choosing the reviewer default needs recall, false positives and cost
+//! per model, measured on the same 40 labelled diffs. That costs real money,
+//! so it runs only on an explicit opt-in and stops at a cap.
+//! What: [`live_settings`] reads the environment and returns `None` unless
+//! `TRUSTY_EVAL_LIVE=1`; [`run_live`] checks every model is priced, then runs
+//! passes x models x diffs through [`review_diff`] with providers from the
+//! injected factory, and schedules nothing new once the shared [`Budget`] is
+//! spent. Only full passes are scored ([`split_passes`]; a pass the cap cut
+//! is excluded, AQ-ce), and every model is scored on the same
+//! [`common_cells`], the (pass, diff) cells of full passes every model
+//! completed; incomplete rows are counted per
+//! model and pass, and dropped cells per model. It writes `<out>/<UTC ts>.json` and prints a markdown summary. The factory is the
+//! only place a network provider is built, and it is never called when the
+//! opt-in is absent.
+//! Test: `live_leg_is_inert_without_opt_in`, `live_settings_read_overrides`,
+//! `live_leg_refuses_an_unpriced_model`, `live_leg_writes_a_report_and_stops_at_the_cap`,
+//! `models_are_scored_on_common_cells`, `capture_files_join_rows_by_reply_text`.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use futures_util::stream::{self, StreamExt};
+use serde::Serialize;
+use trusty_review::llm::bedrock::estimate_bedrock_cost_usd;
+use trusty_review::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_VERIFIER_MODEL};
+use trusty_review::llm::{LlmProvider, strip_provider_prefix};
+
+use crate::eval::{Entry, Row, Totals, eval_config, load_dataset, markdown_table, review_diff};
+use crate::metered::Budget;
+
+/// Default cap on reviewer plus verifier spend, USD (Q86 ruling).
+pub const DEFAULT_MAX_USD: f64 = 22.00;
+/// Default passes per model (Q86 ruling).
+pub const DEFAULT_PASSES: u32 = 3;
+/// Default reviews in flight per model and pass.
+pub const DEFAULT_CONCURRENCY: usize = 4;
+/// Most reviews in flight; bounds how far past the cap a run can spend.
+pub const MAX_CONCURRENCY: usize = 8;
+
+/// Reads one environment variable; injected so tests never touch the process
+/// environment.
+pub type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// Builds a provider for a model id; injected so tests never build a network
+/// provider.
+pub type Factory<'a> = &'a (dyn Fn(&str) -> Result<Arc<dyn LlmProvider>, String> + Sync);
+
+/// What one live run is configured to do.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LiveSettings {
+    /// Reviewer model ids (`TRUSTY_EVAL_MODELS`, comma-separated).
+    pub models: Vec<String>,
+    /// Verifier model id (Haiku 4.5).
+    pub verifier: String,
+    /// Passes per model (`TRUSTY_EVAL_PASSES`).
+    pub passes: u32,
+    /// Spend cap, USD (`TRUSTY_EVAL_MAX_USD`).
+    pub max_usd: f64,
+    /// Reviews in flight (`TRUSTY_EVAL_CONCURRENCY`, clamped to
+    /// [`MAX_CONCURRENCY`]).
+    pub concurrency: usize,
+    /// Only these entry ids, when set (`TRUSTY_EVAL_ONLY`, comma-separated).
+    pub only: Vec<String>,
+    /// Report directory (`TRUSTY_EVAL_OUT_DIR`, else `<target>/model_eval`).
+    pub out_dir: PathBuf,
+    /// Raw reviewer-reply capture directory (`TRUSTY_REVIEW_CAPTURE_DIR`, the
+    /// variable the Bedrock provider reads); rows name their files (#9310).
+    pub capture_dir: Option<PathBuf>,
+}
+
+fn list(raw: Option<String>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn parsed<T: std::str::FromStr>(env: Env<'_>, key: &str, default: T) -> Result<T, String> {
+    match env(key).filter(|v| !v.trim().is_empty()) {
+        None => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse()
+            .map_err(|_| format!("{key}={v} does not parse")),
+    }
+}
+
+/// The workspace target directory: `CARGO_TARGET_DIR`, else `<repo>/target`.
+fn target_dir(env: Env<'_>) -> PathBuf {
+    env("CARGO_TARGET_DIR").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        PathBuf::from,
+    )
+}
+
+/// The live settings, or `None` unless `TRUSTY_EVAL_LIVE=1`.
+pub fn live_settings(env: Env<'_>) -> Result<Option<LiveSettings>, String> {
+    if env("TRUSTY_EVAL_LIVE").as_deref() != Some("1") {
+        return Ok(None);
+    }
+    let mut models = list(env("TRUSTY_EVAL_MODELS"));
+    if models.is_empty() {
+        models = COMPARE_CANDIDATE_MODELS
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+    }
+    let passes = parsed(env, "TRUSTY_EVAL_PASSES", DEFAULT_PASSES)?;
+    let max_usd = parsed(env, "TRUSTY_EVAL_MAX_USD", DEFAULT_MAX_USD)?;
+    let concurrency =
+        parsed(env, "TRUSTY_EVAL_CONCURRENCY", DEFAULT_CONCURRENCY)?.min(MAX_CONCURRENCY);
+    if passes == 0 || concurrency == 0 || max_usd.is_nan() || max_usd <= 0.0 {
+        return Err("TRUSTY_EVAL_PASSES, _CONCURRENCY and _MAX_USD must be positive".into());
+    }
+    let out_dir = env("TRUSTY_EVAL_OUT_DIR")
+        .map_or_else(|| target_dir(env).join("model_eval"), PathBuf::from);
+    Ok(Some(LiveSettings {
+        models,
+        verifier: DEFAULT_VERIFIER_MODEL.to_string(),
+        passes,
+        max_usd,
+        concurrency,
+        only: list(env("TRUSTY_EVAL_ONLY")),
+        out_dir,
+        capture_dir: env("TRUSTY_REVIEW_CAPTURE_DIR")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from),
+    }))
+}
+
+/// Whether `model` has a Bedrock price; an unpriced model would meter as $0
+/// and slip past the cap.
+pub fn is_priced(model: &str) -> bool {
+    estimate_bedrock_cost_usd(strip_provider_prefix(model), 1_000_000, 1_000_000) > 0.0
+}
+
+/// How a live run ended.
+#[derive(Debug)]
+pub enum LiveOutcome {
+    /// `TRUSTY_EVAL_LIVE` was not `1`; nothing was built or called.
+    Skipped,
+    /// The run finished or stopped at the cap.
+    Ran {
+        /// The JSON report.
+        report: PathBuf,
+        /// Total spend, USD.
+        spent_usd: f64,
+        /// Why the run stopped early, if it did.
+        stopped: Option<String>,
+        /// Rows written.
+        rows: usize,
+    },
+}
+
+fn git_sha() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// One model's reviews over `entries` for one pass, `concurrency` at a time.
+async fn model_pass(
+    settings: &LiveSettings,
+    entries: &[Entry],
+    model: &str,
+    pass: u32,
+    factory: Factory<'_>,
+    budget: &Arc<Budget>,
+) -> Result<Vec<Row>, String> {
+    let config = eval_config(&settings.verifier);
+    let mut jobs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        jobs.push((entry, factory(model)?, factory(&settings.verifier)?));
+    }
+    // Checked as each entry is scheduled: once the cap is spent, nothing new starts.
+    let mut rows: Vec<Row> = stream::iter(jobs)
+        .take_while(|_| std::future::ready(!budget.exhausted()))
+        .map(|(entry, llm, verifier)| {
+            review_diff(&config, entry, model, pass, llm, verifier, budget)
+        })
+        .buffer_unordered(settings.concurrency)
+        .collect()
+        .await;
+    rows.sort_by(|a, b| a.diff.cmp(&b.diff));
+    Ok(rows)
+}
+
+/// The passes the cap did not cut, and those it did, among passes that
+/// started. AQ-ce (Bob 2026-10-05): "score only the FULL passes that
+/// complete; cut passes are excluded". A pass is full when every model has a
+/// row for each of `entries` diffs and the cap refused none of them; a
+/// started pass that is not full is cut.
+pub fn split_passes(
+    rows: &[Row],
+    models: &[String],
+    passes: u32,
+    entries: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let started = |p: u32| rows.iter().any(|r| r.pass == p);
+    let full = |p: u32| {
+        models.iter().all(|m| {
+            let mine: Vec<&Row> = rows
+                .iter()
+                .filter(|r| r.pass == p && &r.model == m)
+                .collect();
+            mine.len() == entries && !mine.iter().any(|r| r.cut_by_cap())
+        })
+    };
+    (1..=passes).filter(|&p| started(p)).partition(|&p| full(p))
+}
+
+/// The (pass, diff) cells, within `full` passes, that every model completed:
+/// each model has a row there and none of those rows is incomplete. Every
+/// model is scored on exactly these cells, so one model's throttle drops that
+/// cell for all, and a cut pass contributes no cell at all.
+pub fn common_cells(rows: &[Row], models: &[String], full: &[u32]) -> BTreeSet<(u32, String)> {
+    let done = |m: &String| -> BTreeSet<(u32, String)> {
+        rows.iter()
+            .filter(|r| &r.model == m && r.incomplete.is_none() && full.contains(&r.pass))
+            .map(|r| (r.pass, r.diff.clone()))
+            .collect()
+    };
+    let mut models = models.iter();
+    let Some(first) = models.next() else {
+        return BTreeSet::new();
+    };
+    models.fold(done(first), |acc, m| {
+        acc.intersection(&done(m)).cloned().collect()
+    })
+}
+
+/// Rows run and incomplete rows, per model and pass, for the report.
+pub fn incomplete_by_pass(rows: &[Row], models: &[String], passes: u32) -> serde_json::Value {
+    let mut out = Vec::new();
+    for m in models {
+        for p in 1..=passes {
+            let mine: Vec<&Row> = rows
+                .iter()
+                .filter(|r| r.pass == p && &r.model == m)
+                .collect();
+            out.push(serde_json::json!({
+                "model": m,
+                "pass": p,
+                "rows": mine.len(),
+                "incomplete": mine.iter().filter(|r| r.incomplete.is_some()).count(),
+                "cut_by_cap": mine.iter().filter(|r| r.cut_by_cap()).count(),
+            }));
+        }
+    }
+    serde_json::Value::Array(out)
+}
+
+/// Point each row at the raw-capture files of its reviewer replies (#9310).
+///
+/// Why: an offline scorer joins report rows to raw replies by file name.
+/// What: reads every `*.json` in `dir`, keys it by its `reply` field, and sets
+/// each row's `capture_files` to the sorted names whose reply equals one of
+/// the row's reviewer replies; identical replies share their files. An
+/// unreadable dir or file is skipped with a note on stderr, so the join never
+/// fails a run. Use a fresh dir per run: an older capture with the same reply
+/// text would join too.
+/// Test: `capture_files_join_rows_by_reply_text`.
+pub fn join_captures(dir: &Path, rows: &mut [Row]) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("capture join skipped: {}: {e}", dir.display());
+            return;
+        }
+    };
+    let mut by_reply: HashMap<String, Vec<String>> = HashMap::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let reply = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|record| record.get("reply")?.as_str().map(str::to_string));
+        match reply {
+            Some(reply) => by_reply.entry(reply).or_default().push(name.to_string()),
+            None => eprintln!("capture join skipped unreadable {name}"),
+        }
+    }
+    for row in rows.iter_mut() {
+        let mut files: Vec<String> = row
+            .replies
+            .iter()
+            .filter_map(|reply| by_reply.get(reply))
+            .flatten()
+            .cloned()
+            .collect();
+        files.sort();
+        files.dedup();
+        row.capture_files = files;
+    }
+}
+
+/// Run the live comparison, or return [`LiveOutcome::Skipped`] without
+/// building a provider when the opt-in is absent.
+pub async fn run_live(env: Env<'_>, factory: Factory<'_>) -> Result<LiveOutcome, String> {
+    let Some(settings) = live_settings(env)? else {
+        return Ok(LiveOutcome::Skipped);
+    };
+    let unpriced: Vec<&String> = settings
+        .models
+        .iter()
+        .chain([&settings.verifier])
+        .filter(|m| !is_priced(m))
+        .collect();
+    if !unpriced.is_empty() {
+        return Err(format!(
+            "no Bedrock price for {unpriced:?}; the cost cap cannot meter them"
+        ));
+    }
+    let entries: Vec<Entry> = load_dataset()
+        .into_iter()
+        .filter(|e| settings.only.is_empty() || settings.only.contains(&e.id))
+        .collect();
+    let started = chrono::Utc::now();
+    let budget = Budget::new(settings.max_usd);
+    let (mut rows, mut stopped) = (Vec::new(), None);
+    'passes: for pass in 1..=settings.passes {
+        for model in &settings.models {
+            if budget.exhausted() {
+                break 'passes;
+            }
+            rows.extend(model_pass(&settings, &entries, model, pass, factory, &budget).await?);
+            if budget.exhausted() {
+                stopped = Some(format!(
+                    "cost cap ${:.2} reached after pass {pass} of {model}",
+                    settings.max_usd
+                ));
+                break 'passes;
+            }
+        }
+    }
+    if let Some(dir) = &settings.capture_dir {
+        join_captures(dir, &mut rows);
+    }
+    let (full, cut) = split_passes(&rows, &settings.models, settings.passes, entries.len());
+    let cells = common_cells(&rows, &settings.models, &full);
+    let in_cells = |r: &Row| cells.contains(&(r.pass, r.diff.clone()));
+    let passes_in_cells = full.len() as u32;
+    let summary: Vec<(String, u32, Totals)> = settings
+        .models
+        .iter()
+        .map(|m| {
+            let mine = rows.iter().filter(|r| &r.model == m && in_cells(r));
+            (m.clone(), passes_in_cells, Totals::of(mine))
+        })
+        .collect();
+    let dropped: serde_json::Map<String, serde_json::Value> = settings
+        .models
+        .iter()
+        .map(|m| {
+            let n = rows
+                .iter()
+                .filter(|r| &r.model == m && !in_cells(r))
+                .count();
+            (m.clone(), n.into())
+        })
+        .collect();
+    let incomplete = incomplete_by_pass(&rows, &settings.models, settings.passes);
+    let table = markdown_table(&summary);
+    println!(
+        "full passes {full:?}, cut passes {cut:?}; compared on {} (pass, diff) cells every model completed in a full pass; dropped per model: {}",
+        cells.len(),
+        serde_json::Value::Object(dropped.clone())
+    );
+    println!("{table}");
+    if let Some(why) = &stopped {
+        println!("STOPPED: {why}");
+    }
+    let report = serde_json::json!({
+        "config": settings,
+        "git_sha": git_sha(),
+        "dataset": { "entries": entries.len() },
+        "started_utc": started.to_rfc3339(),
+        "finished_utc": chrono::Utc::now().to_rfc3339(),
+        "spent_usd": budget.spent(),
+        "stopped_reason": stopped,
+        "full_passes": full,
+        "cut_passes": cut,
+        "compared_cells": cells.len(),
+        "dropped_cells_by_model": dropped,
+        "incomplete_by_model_pass": incomplete,
+        "summary": summary.iter().map(|(model, passes, totals)| serde_json::json!({
+            "model": model, "passes": passes, "recall": totals.recall(), "totals": totals,
+        })).collect::<Vec<_>>(),
+        "rows": rows,
+    });
+    std::fs::create_dir_all(&settings.out_dir)
+        .map_err(|e| format!("cannot create {}: {e}", settings.out_dir.display()))?;
+    let path = settings
+        .out_dir
+        .join(format!("{}.json", started.format("%Y%m%dT%H%M%SZ")));
+    let text = serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    println!("report: {}", path.display());
+    Ok(LiveOutcome::Ran {
+        report: path,
+        spent_usd: budget.spent(),
+        stopped,
+        rows: rows.len(),
+    })
+}

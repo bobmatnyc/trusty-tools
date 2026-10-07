@@ -277,9 +277,8 @@ fn project_config_rejects_prompt_self_improvement_inside_session() {
 /// 2026-09-12), and it must keep parsing against the schema that reads it.
 #[test]
 fn this_repositorys_project_config_enables_prompt_self_improvement() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
+    let path = trusty_common::test_harness::test_repo_root()
+        .expect("resolve the checkout")
         .join(PROJECT_CONFIG_FILE);
     let raw = std::fs::read_to_string(&path).expect("the committed project config is readable");
     let cfg = ProjectLevelConfig::from_toml(&raw, &path).expect("it parses");

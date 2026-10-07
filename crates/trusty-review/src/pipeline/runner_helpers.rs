@@ -8,9 +8,10 @@
 //!
 //! Test: covered transitively by runner integration tests.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
-use tracing::{error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::integrations::github::{
     AuthStrategy, CommentableLines, GithubClient, GithubError, RunMode, build_inline_plan,
@@ -24,7 +25,7 @@ use crate::{
         grade::derive_verdict_with_grade,
         letter_grade::default_grade_for_verdict,
         output::{print_review_result, write_review_log},
-        post::{PostContext, finalize_review},
+        post::{FinalizeAction, PostContext, decide_action, finalize_review},
         prompt::ReviewPrMeta,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
@@ -273,13 +274,17 @@ pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Opti
 /// or LLM transport error) must never be posted live — it carries only a
 /// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
-/// What: syncs `findings_count` to `findings.len()` (#1877), releases the
-/// in-progress dedup claim when `claim` is `Held` (fail-safe on error), writes
+/// What: syncs `findings_count` to `findings.len()` (#1877), sets a missing
+/// `verdict_status` to `no_reviewer_output` (#9310), releases the
+/// in-progress dedup claim when `claim` is `Held` and the run could post (the
+/// only runs that claim, #9348; fail-safe on error), writes
 /// the dry-run log so the failure is inspectable, prints when requested, and
 /// returns the result flagged `dry_run = true`.
 /// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
 /// `findings_count_matches_len_on_abort`,
-/// `failed_claim_abort_does_not_delete_another_processes_record`.
+/// `failed_claim_abort_does_not_delete_another_processes_record`,
+/// `dry_run_abort_keeps_a_completed_record`,
+/// `no_reviewer_reply_reads_no_reviewer_output`.
 pub(super) async fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -295,9 +300,16 @@ pub(super) async fn abort_dry(
     // it too rather than leaving a stale zero.
     result.unverified_count = crate::pipeline::post::count_unverified(&result.findings)
         + result.withheld_unverified_count; // #8904
+    // #9310: an abort has no parsed reviewer reply, unless a stage said otherwise.
+    result
+        .verdict_status
+        .get_or_insert(crate::models::VerdictStatus::NoReviewerOutput);
+    crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
+    // #9348: a run that cannot post never claimed, so its `Held` means nothing.
     if claim == DedupClaim::Held
+        && claims_dedup_slot(config, input)
         && !result.head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
         && let Err(e) = store
@@ -413,14 +425,18 @@ pub(super) async fn finalize_run(
 ///
 /// Returns every finding passes 1–3 dropped, each with its reason, for the
 /// caller to record in `ReviewResult::withheld_findings` (#4044; owner ruling
-/// on #8905, 2026-09-30).
+/// on #8905, 2026-09-30), and the model's verdict when pass 4 relaxed it, for
+/// `settle_no_survivors` (#9188, option A).
 /// Test: `run_review_outer_and_embedded_verdict_agree_after_severity_floor`,
 /// `unified_path_emits_no_finding_citing_a_path_outside_the_diff`,
 /// `run_review_records_self_negated_findings_as_withheld`.
 pub(super) fn ground_parsed_findings(
     parsed: &mut crate::pipeline::parser::ParsedReview,
     filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
-) -> Vec<crate::models::WithheldFinding> {
+) -> (
+    Vec<crate::models::WithheldFinding>,
+    Option<crate::models::Verdict>,
+) {
     let findings_before = parsed.findings.len();
     let mut withheld = Vec::new();
     crate::pipeline::finding_hygiene::sanitize_findings(&mut parsed.findings, &mut withheld);
@@ -437,13 +453,13 @@ pub(super) fn ground_parsed_findings(
         &mut withheld,
     );
 
-    crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+    let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,
         &mut parsed.grade,
         findings_before,
         &parsed.findings,
     );
-    withheld
+    (withheld, wiped_model_verdict)
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -494,6 +510,115 @@ pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> Claim
         Ok(ClaimOutcome::Skipped) => ClaimGate::DuplicateSkip,
         Ok(ClaimOutcome::InProgressElsewhere) => ClaimGate::InProgressElsewhere,
         Err(e) => ClaimGate::Abort(e.to_string()),
+    }
+}
+
+/// Whether this review takes a dedup claim at all (#9348).
+///
+/// Why: the claim exists to make a live post idempotent (#5113). A run that
+/// cannot post took it anyway and released it only on an abort, so a dry run
+/// left an `InProgress` record that blocked a live review of the same head for
+/// the whole `DEDUP_STALE_SECS` window.
+/// What: true exactly when `decide_action` lets this input reach
+/// `FinalizeAction::Post` on a GitHub source — the same question the runner's
+/// #5113 and #6062 guards ask, and the same inputs `finalize_review` decides
+/// on, so a run that claims is the only run that can post.
+/// Test: `dry_run_leaves_no_in_progress_claim`,
+/// `dry_run_never_claims_over_another_holder`.
+pub(super) fn claims_dedup_slot(config: &ReviewConfig, input: &ReviewInput) -> bool {
+    decide_action(config.dry_run, input.trigger, input.allow_posting, true) == FinalizeAction::Post
+}
+
+/// Take the dedup claim for this review's head SHA, or end the review (#582).
+///
+/// Why: moved out of `run_review` for `runner.rs`'s SLOC cap (#9192). A
+/// completed claim for the same head SHA short-circuits the whole pipeline,
+/// and a store error aborts without posting (#5064).
+/// What: on a GitHub source with a head SHA, a wired store, and a run that can
+/// post ([`claims_dedup_slot`], #9348), claims `(owner, repo, pr, head_sha)`
+/// and maps the outcome through [`classify_claim`]: `Continue(result)`
+/// proceeds, `Break(result)` is the finished result the runner returns. Every
+/// other case is `Continue` with no claim taken.
+/// Test: `live_run_on_a_completed_head_is_still_skipped`,
+/// `stranded_in_progress_claim_is_not_a_duplicate_skip`,
+/// `failed_claim_abort_does_not_delete_another_processes_record`,
+/// `dry_run_leaves_no_in_progress_claim`.
+pub(super) async fn claim_slot(
+    config: &ReviewConfig,
+    input: &ReviewInput,
+    deps: &ReviewDeps,
+    mut result: ReviewResult,
+    is_local: bool,
+) -> ControlFlow<ReviewResult, ReviewResult> {
+    let (owner, repo, pr_number) = (result.owner.clone(), result.repo.clone(), result.pr_number);
+    let head_sha = result.head_sha.clone();
+    // #9348: a run that cannot post holds no claim, so it strands none.
+    let Some(store) = deps
+        .dedup
+        .as_ref()
+        .filter(|_| !is_local && !head_sha.is_empty() && claims_dedup_slot(config, input))
+    else {
+        return ControlFlow::Continue(result);
+    };
+    match classify_claim(store.claim(&owner, &repo, pr_number, &head_sha).await) {
+        ClaimGate::DuplicateSkip => {
+            info!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup: a completed review already exists for this head SHA — skipping"
+            );
+            result.verdict = Verdict::Approve;
+            result.error = Some("skipped: duplicate of a completed review".to_string());
+            result.dry_run = true;
+            // #1877: `result.findings` is empty here (no LLM call happened
+            // yet) but keep the sync explicit rather than relying on the
+            // `ReviewResult::new()` default staying 0 forever.
+            result.findings_count = result.findings.len();
+            // #9310: no reviewer ran for this result; the verdict is the skip's.
+            result.verdict_status = Some(crate::models::VerdictStatus::NoReviewerOutput);
+            ControlFlow::Break(result)
+        }
+        // #5126: the slot is held by someone else, so this review never
+        // ran. Report that, never a verdict.
+        ClaimGate::InProgressElsewhere => {
+            warn!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup: another holder owns the in-progress claim — not reviewed"
+            );
+            let stale_secs = crate::config::constants::DEDUP_STALE_SECS;
+            result.verdict = Verdict::Unknown;
+            result.error = Some(format!(
+                "not reviewed: another review holds the in-progress dedup claim for \
+                 head SHA {head_sha}; it clears when that review finishes or after \
+                 {stale_secs}s"
+            ));
+            // NotHeld — this review never acquired the claim, so it must
+            // not delete the holder's record.
+            ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
+        }
+        ClaimGate::Proceed => {
+            debug!(head_sha = %head_sha, "dedup: claimed review slot");
+            ControlFlow::Continue(result)
+        }
+        // #5064: the claim gate did not engage — abort rather than post.
+        ClaimGate::Abort(reason) => {
+            error!(
+                owner = %owner,
+                repo = %repo,
+                pr = pr_number,
+                head_sha = %head_sha,
+                "dedup claim failed — aborting without posting: {reason}"
+            );
+            result.error = Some(format!("dedup claim unavailable: {reason}"));
+            // #5064: NotHeld — this review never acquired the claim, so it
+            // must not delete whatever record is on disk.
+            ControlFlow::Break(abort_dry(result, config, input, deps, DedupClaim::NotHeld).await)
+        }
     }
 }
 

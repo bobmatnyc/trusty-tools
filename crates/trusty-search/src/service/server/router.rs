@@ -221,6 +221,22 @@ pub struct CreateIndexRequest {
     #[serde(default)]
     pub defer_embed: Option<bool>,
 
+    /// Storage-layout opt-out (#8147). `Some(false)` ⇒ the store lives at
+    /// `<data_dir>/indexes/<id>/`, even when `<root_path>/.trusty-search/`
+    /// already holds a corpus, and registration writes nothing under the root.
+    /// `None` or `Some(true)` ⇒ the #8499 placement: adopt an existing
+    /// colocated corpus, otherwise the data dir.
+    ///
+    /// Why: registration adopted any `.trusty-search/` it found, so a
+    /// read-only or root-owned one answered `500 corpus open failed`, and the
+    /// field that would have avoided it was not on the wire.
+    /// What: `Some(false)` against an id registered colocated at the same root
+    /// is a `409`; see `create_layout::registration_layout`.
+    /// Test: `colocated_false_over_a_read_only_colocated_corpus_registers_in_the_data_dir`,
+    /// `colocated_false_against_a_colocated_registration_is_a_409`.
+    #[serde(default)]
+    pub colocated: Option<bool>,
+
     /// Issue #1372: extra directory basenames pruned during the reindex walk on
     /// top of the built-in `SKIP_DIRS`. `None`/missing ⇒ the targeted default
     /// set (`data`/`exports`/`output`/`reports`/`snapshots`/`results`); an

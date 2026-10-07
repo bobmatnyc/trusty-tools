@@ -1577,3 +1577,79 @@ fn a_non_maintainer_open_deletes_no_expired_row() {
         "the new maintainer reclaims the expired row"
     );
 }
+
+/// Why (#9173): the dream scheduler reads the data root from the registry to
+/// reach palaces outside the handle cache; a registry built without one, or by
+/// the eager `open`, must answer accordingly.
+#[test]
+fn data_root_is_unset_by_default_and_named_by_open_and_the_builder() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(PalaceRegistry::new().data_root().is_none());
+    let named = PalaceRegistry::new().with_data_root(dir.path());
+    assert_eq!(named.data_root(), Some(dir.path()));
+    let opened = PalaceRegistry::open(dir.path()).unwrap();
+    assert_eq!(opened.data_root(), Some(dir.path()));
+}
+
+/// Why (#9140 batch, 2026-10-04 15:27Z): `palace.json` records an absolute
+/// `data_dir`, and `load_palace` trusted it. A palace root copied to a sandbox
+/// therefore listed and opened the ORIGINAL live palace files, so a bench
+/// pointed at the copy held the live daemon's redb locks.
+/// What: creates a palace under root A, copies only its `palace.json` (still
+/// naming A) to root B, then lists and opens it from B. The listed `data_dir`
+/// and the opened store must be under B, and A's directory must gain no file.
+/// Test: itself.
+#[test]
+fn a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir() {
+    let a = tempdir().unwrap();
+    let b = tempdir().unwrap();
+    let id = PalaceId::new("copied");
+    let reg = PalaceRegistry::new();
+    let palace = Palace {
+        id: id.clone(),
+        name: "copied".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: a.path().join("copied"),
+    };
+    drop(reg.create_palace(a.path(), palace).unwrap());
+    reg.remove(&id);
+    drop(reg);
+
+    let src = a.path().join("copied");
+    let dst = b.path().join("copied");
+    std::fs::create_dir(&dst).unwrap();
+    std::fs::copy(src.join("palace.json"), dst.join("palace.json")).unwrap();
+    let names = |dir: &std::path::Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let a_before = names(&src);
+
+    let listed = PalaceRegistry::list_palaces(b.path()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].data_dir, dst,
+        "listing must use the palace's location"
+    );
+
+    let reg = PalaceRegistry::new();
+    let handle = reg.open_palace(b.path(), &id).unwrap();
+    assert_eq!(handle.data_dir.as_deref(), Some(dst.as_path()));
+    assert!(
+        dst.join("kg.redb").exists(),
+        "the copy's own store must be opened"
+    );
+    drop(handle);
+    reg.remove(&id);
+    assert_eq!(
+        names(&src),
+        a_before,
+        "the recorded data_dir must not be touched"
+    );
+}

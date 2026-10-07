@@ -15,7 +15,7 @@
 //! Test: this file. The test is `#[ignore]` because it does a full release
 //! build (~minutes) and should only run in explicit release-validation
 //! contexts, not in normal `cargo test` CI sweeps. Run with:
-//!   cargo test -p trusty-search --test bundled_install -- --include-ignored
+//!   cargo test -p trusty-search --test integration bundled_install:: -- --include-ignored
 
 use std::process::Command;
 

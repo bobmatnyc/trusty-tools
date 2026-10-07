@@ -107,9 +107,16 @@ use std::path::{Component, Path, PathBuf};
 
 use trusty_mpm::core::project_aliases::main_checkout_root;
 
-use super::heredoc::{blank_spans, data_bodies};
-use super::substitutions::{Substitution, blank_inert_heredocs, segment_substitutions};
-use super::{MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, split_shell_segments};
+use super::continuation;
+use super::heredoc::{HeredocBodies, blank_spans, data_bodies};
+use super::substitutions::{
+    HEREDOC_RUNNERS, Substitution, blank_inert_heredocs, segment_substitutions,
+    shell_run_heredoc_bodies,
+};
+use super::{
+    MAX_WRAPPER_DEPTH, PathEnv, resolve_target_path, shell_lex, split_shell_segments,
+    split_shell_segments_raw,
+};
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::program_word::resolve_program_word;
 
@@ -231,8 +238,60 @@ fn classify_destructive_delete_in(
     // #7190: a lone stdin consumer of a quoted here-document reads its body
     // as data, so only its operator line is judged.
     let masked = lone_inert_heredoc(command);
+    // #9344: the mask hides no root delete from the data-body floor.
+    let belt = data_body_root_delete(command, &[cwd.to_path_buf()], env);
     let command = masked.as_deref().unwrap_or(command);
-    classify_at_depth(command, cwd, env, 0, &Cell::new(0))
+    classify_at_depth(command, cwd, env, 0, &Cell::new(0)).max(belt)
+}
+
+/// [`DeleteTarget::Root`] when a line of any here-document body in `command`
+/// is a destructive-root command, whatever program reads the body (#9344);
+/// [`DeleteTarget::Unresolved`] for a wrapper the resolver cannot measure.
+///
+/// Why: a body read as data is never judged as a command, and a reader can
+/// run it after all — a `!`-alias, a gh extension, a `gpg.program` set in an
+/// earlier call. Belt and braces under [`super::heredoc_line`]'s trust rule.
+/// What: splits each body into lines, each line into shell segments, and
+/// denies a segment whose program word, past wrappers, is a delete verb with
+/// a target in the root class, judged from every directory in `cwds`. A verb
+/// anywhere else in a sentence, a backticked delete, an unresolvable target
+/// and a repository or worktree target do not count, so prose stays allowed.
+/// #9344 round 2: a segment whose program word the resolver cannot name and
+/// that names a delete verb is [`DeleteTarget::Unresolved`], as in
+/// [`classify_at_depth`].
+/// Test: `data_reader_tests::a_data_reader_body_holding_a_root_delete_is_denied_9344`,
+/// `data_reader_tests::commit_and_pr_body_shapes_stay_allowed_9344`.
+fn data_body_root_delete(command: &str, cwds: &[PathBuf], env: &PathEnv) -> Option<DeleteTarget> {
+    let heredocs = HeredocBodies::scan(command);
+    heredocs
+        .bodies()
+        .iter()
+        .flat_map(|body| command[body.span.0..body.span.1].lines())
+        .flat_map(split_shell_segments_raw)
+        .filter_map(|segment| {
+            let trimmed = segment.trim();
+            let argv = shlex::split(trimmed).unwrap_or_else(|| {
+                let words = trimmed.split_whitespace();
+                words.map(|w| w.replace(['\'', '"'], "")).collect()
+            });
+            // #9344 round 2: an unresolvable wrapper fails closed.
+            let Ok(word) = resolve_program_word(&argv) else {
+                return segment_mentions_a_delete_verb(trimmed).then_some(DeleteTarget::Unresolved);
+            };
+            let verb = argv.get(word.index).map_or("", |w| verb_name(w));
+            let root = !word.lookup
+                && DELETE_VERBS.contains(&verb)
+                && delete_targets(verb, &argv[word.index + 1..])
+                    .iter()
+                    .any(|target| {
+                        cwds.iter().any(|dir| {
+                            let path = resolve_target_path(target, dir, env);
+                            is_root_class(glob_parent(&path), env)
+                        })
+                    });
+            root.then_some(DeleteTarget::Root)
+        })
+        .max()
 }
 
 /// Programs that read a quoted here-document body on stdin as data (#7190).
@@ -311,10 +370,6 @@ pub(crate) fn lone_inert_heredoc(command: &str) -> Option<String> {
 /// directory its level saw, so nested bodies multiply the work.
 const MAX_DELETE_WORK: usize = 4096;
 
-/// Programs whose here-document body a shell runs (`sudo -s`, `su`,
-/// `parallel`), so its substitutions stay live for the floor.
-const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
-
 /// [`classify_destructive_delete_in`] for text nested `depth` substitutions
 /// deep (#8735).
 ///
@@ -328,10 +383,19 @@ const HEREDOC_RUNNERS: &[&str] = &["parallel", "sudo", "doas", "su", "runuser"];
 /// reads the body, since a captured body can run again (`eval $(cat <<'X'…)`).
 /// A body a separator split across segments is judged whole afterwards from
 /// every working directory the segments saw, and the most severe class kept
-/// (#8735 round 2). Past [`MAX_WRAPPER_DEPTH`]
+/// (#8735 round 2). #9155: each here-document body a shell runs, and each
+/// string a `bash -c`-style wrapper runs, is judged the same way as a whole
+/// command ([`nested_commands`]), which reads a here-document nested in it.
+/// Past [`MAX_WRAPPER_DEPTH`]
 /// levels the text is not read further, and a delete verb anywhere in it
 /// denies as unresolved; past [`MAX_DELETE_WORK`] calls, anything does.
+/// #9180: each level also judges its continuation-joined spelling
+/// ([`continuation::joined`]), and a level whose here-document scan lost
+/// confidence denies as unresolved once a delete verb is in sight.
 /// Test: `denies_a_delete_inside_a_substitution_body`,
+/// `continuation_tests::the_floor_denies_each_9180_class`,
+/// `continuation_tests::the_floor_fails_closed_on_an_unplaceable_heredoc_9180`,
+/// `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`,
 /// `denies_a_delete_nested_past_the_depth_cap`,
 /// `allows_a_scratch_delete_inside_a_substitution`,
 /// `judges_a_split_body_from_every_directory_seen`,
@@ -351,7 +415,14 @@ fn classify_at_depth(
     if depth > MAX_WRAPPER_DEPTH {
         return segment_mentions_a_delete_verb(command).then_some(DeleteTarget::Unresolved);
     }
-    let mut worst: Option<DeleteTarget> = None;
+    // #9180: a here-document the scan gave up on leaves which lines run
+    // unknown, so a delete verb in sight fails closed.
+    if HeredocBodies::scan(command).lost_confidence() && segment_mentions_a_delete_verb(command) {
+        return Some(DeleteTarget::Unresolved);
+    }
+    // #9180: the continuation-joined spelling is judged too; it only adds.
+    let mut worst = continuation::joined(command)
+        .and_then(|joined| classify_at_depth(&joined, cwd, env, depth, work));
     let mut effective_cwd = cwd.to_path_buf();
     let mut cwds_seen: Vec<PathBuf> = vec![effective_cwd.clone()];
     let mut judged: HashSet<String> = HashSet::new();
@@ -453,17 +524,56 @@ fn classify_at_depth(
             worst = worst.max(classify_at_depth(body.text(), dir, env, depth + 1, work));
         }
     }
+    // #9344: a root delete in any here-document body, data or not.
+    worst = worst.max(data_body_root_delete(command, &cwds_seen, env));
+    // #9155: split at its newlines, a nested here-document was never whole.
+    for inner in nested_commands(command) {
+        if !judged.insert(inner.clone()) {
+            continue;
+        }
+        for dir in &cwds_seen {
+            worst = worst.max(classify_at_depth(&inner, dir, env, depth + 1, work));
+        }
+    }
     worst
 }
 
+/// The commands `command` runs as text of their own: each here-document body
+/// a shell may run (#9180: any but a data reader's), and the inner string of each
+/// top-level `sh -c` / `bash -c` / `eval` / `xargs` wrapper (#9155).
+///
+/// Why: the segment splitter cuts both at every newline, so `bash <<'O'`
+/// around `bash <<I` around `echo '$(rm -rf /)'` reached the floor as lines,
+/// and the inner unquoted here-document — whose single-quoted substitution
+/// bash expands — was never recognised.
+/// What: [`shell_run_heredoc_bodies`], then [`shell_lex::wrapped_command`] of
+/// each top-level segment. A deeper wrapper is reached by the recursion.
+/// Test: `denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155`.
+fn nested_commands(command: &str) -> Vec<String> {
+    let mut found = shell_run_heredoc_bodies(command);
+    for raw in split_shell_segments_raw(command) {
+        if let shell_lex::WrappedCommand::Inner(inner) = shell_lex::wrapped_command(raw.trim()) {
+            found.push(inner);
+        }
+    }
+    found
+}
+
 /// The substitution bodies `text` runs: those of its argv text with each
-/// stdin-text here-document body blanked, then those an unquoted-delimiter
-/// body expands (#8735 round 2 — a backtick in `git commit -F - <<'EOF'` is
-/// text).
+/// stdin-text here-document body blanked, then those every unquoted-delimiter
+/// body expands, quotes read as literal text (#8735 round 2 — a backtick in
+/// `git commit -F - <<'EOF'` is text; #9155 — `python3 - <<PY` with
+/// `print('$(rm -rf /)')` runs the `rm`). A body found twice is listed once.
+/// Test: `allows_a_backtick_in_a_quoted_heredoc_body`,
+/// `denies_a_single_quoted_substitution_in_an_expanding_body_9155`.
 fn substitution_bodies(text: &str) -> Vec<Substitution> {
     let (argv_text, expanded) = blank_inert_heredocs(text, HEREDOC_RUNNERS);
     let mut bodies = segment_substitutions(&argv_text);
-    bodies.extend(expanded);
+    for body in expanded {
+        if !bodies.contains(&body) {
+            bodies.push(body);
+        }
+    }
     bodies
 }
 
@@ -1288,6 +1398,74 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    /// #9155: an unquoted-delimiter body is expanded by the shell before any
+    /// program reads it, so a single-quoted substitution in a body an
+    /// interpreter or shell runs still reaches the floor. Each deny row was
+    /// allowed at dcd33f9591. A quoted delimiter, or a body with no
+    /// substitution, still allows.
+    #[test]
+    fn denies_a_single_quoted_substitution_in_an_expanding_body_9155() {
+        for command in [
+            "python3 - <<PY\nprint('$(rm -rf /)')\nPY",
+            "bash <<X\necho '$(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('`rm -rf /`')\nPY",
+            "node - <<JS\nconsole.log('$(rm -rf /)')\nJS",
+            "bash <<X\ncat <<'Y'\n'$(rm -rf ~)'\nY\nX",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+        for command in [
+            "python3 - <<'PY'\nprint('$(rm -rf /)')\nPY",
+            "bash <<'X'\necho '$(rm -rf /)'\nX",
+            "python3 - <<PY\nprint('it is rm -rf / in prose')\nPY",
+            "python3 - <<PY\nprint('hello')\nPY",
+            "python3 - <<PY\nprint('\\$(rm -rf /)')\nPY",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+    }
+
+    /// #9155: an unquoted here-document nested in a body a shell runs, or in
+    /// a wrapper's string, is read whole, so its single-quoted substitution
+    /// expands. A benign nested body allows; nesting past the depth cap with
+    /// a delete verb in sight denies as unresolved.
+    #[test]
+    fn denies_a_heredoc_nested_in_a_shell_run_body_or_wrapper_9155() {
+        for command in [
+            "bash <<'O'\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "cat <<'O' | bash\nbash <<I\necho '$(rm -rf /)'\nI\nO",
+            "sudo -s <<'O'\ncat <<I\n'$(rm -rf /)'\nI\nO",
+            "bash -c \"bash <<I\necho '\\$(rm -rf /)'\nI\"",
+            "bash -c \"cat <<I\n'\\$(rm -rf /)'\nI\"",
+            // The outer shell turns `\$(` into `$(` before the inner one reads it.
+            "bash <<O\nbash <<I\necho '\\$(rm -rf /)'\nI\nO",
+        ] {
+            assert!(
+                class_of(command).is_some_and(DeleteTarget::is_floor),
+                "{command}"
+            );
+        }
+        for command in [
+            "bash <<'O'\nbash <<I\necho '$(date)'\nI\nO",
+            "bash -c \"cat <<I\nhello\nI\"",
+            "bash <<'O'\nbash <<'I'\necho '$(rm -rf /)'\nI\nO",
+        ] {
+            assert_eq!(class_of(command), None, "{command}");
+        }
+        let nest = |levels: usize| {
+            let mut text = "cat <<I\n'$(rm -rf /)'\nI".to_string();
+            for level in 0..levels {
+                text = format!("bash <<'L{level}'\n{text}\nL{level}");
+            }
+            text
+        };
+        assert_eq!(class_of(&nest(3)), Some(DeleteTarget::Root));
+        assert_eq!(class_of(&nest(12)), Some(DeleteTarget::Unresolved));
     }
 
     /// #8735 round 2: a lookup runs nothing, and `sudo -k` and BSD `xargs -J`

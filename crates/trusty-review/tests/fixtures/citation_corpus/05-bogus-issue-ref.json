@@ -1,0 +1,19 @@
+{
+  "leak": "D",
+  "about": "A real code quote rests on a GitHub issue that is not in any context the reviewer saw.",
+  "diff_file": "billing.diff",
+  "pr_description": "Adds an invoice total.",
+  "reviewer": {
+    "prose": "Overflow risk.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "overflow-regression", "body": "`amounts.iter().sum::<u64>()` reintroduces the overflow [gh: #99999 — \"overflow fixed by checked_add in billing\"].", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["overflow-regression"],
+  "forbidden_in_body": [],
+  "expect_survivors": 0,
+  "expect_verdict": "REQUEST_CHANGES"
+}

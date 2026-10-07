@@ -12,6 +12,7 @@
 //! Test: covered indirectly by `reindex_walks_directory_and_emits_events` (the
 //! second reindex run on an unchanged workspace must skip all files).
 
+use crate::core::indexer::RedbChunkDelete;
 use crate::core::registry::IndexId;
 use dashmap::DashMap;
 use sha2::{Digest, Sha256};
@@ -103,6 +104,14 @@ pub(crate) fn hash_content(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// #9236: test-only fault seam. For each index id listed here, the durable
+/// hash-row delete in [`forget_file_hash`] fails after the cache entry is
+/// dropped — the state a refused redb write leaves. Keyed by index id so
+/// concurrent tests never see each other's faults.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_FORGET_HASH: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Drop a file's content hash from the in-process cache and the durable corpus.
 ///
 /// Why (#8922): a purge that leaves the hash behind makes the next reindex or
@@ -121,6 +130,13 @@ pub(crate) async fn forget_file_hash(
     let Some(corpus) = indexer.corpus_store() else {
         return Ok(());
     };
+    #[cfg(test)]
+    if TEST_FAIL_FORGET_HASH
+        .lock()
+        .is_ok_and(|f| f.contains(&index_id.0))
+    {
+        anyhow::bail!("injected file-hash delete failure (#9236 test seam)");
+    }
     let rows = vec![rel.to_string()];
     tokio::task::spawn_blocking(move || corpus.delete_file_hash_entries(&rows))
         .await
@@ -130,13 +146,26 @@ pub(crate) async fn forget_file_hash(
 impl crate::core::CodeIndexer {
     /// Purge one file for #8922: its chunks without a symbol-graph rebuild,
     /// then its content hash. Returns the chunks removed; the caller rebuilds
-    /// the graph once, and only when something was removed.
+    /// the graph once, and only when something was removed. Stamps the
+    /// durable graph-dirty mark first (#8959).
+    ///
+    /// The redb chunk-delete failure mode is the caller's; `index_file`'s
+    /// sops arm and `purge_file_committed` use `FailClosed` (#8959, #9230), so
+    /// a failed delete keeps the ids and the hash for a retry.
     ///
     /// A method, not a free function, so `scripts/check_teardown_guard.sh`
-    /// sees every `.purge_file(` call site: both writes are durable and each
-    /// caller must hold the teardown guard (#3049).
-    pub(crate) async fn purge_file(&self, index_id: &IndexId, rel: &str) -> anyhow::Result<usize> {
-        let removed = self.remove_file_no_kg_rebuild(rel).await?;
+    /// sees every `.purge_file_with(` call site: both writes are durable and
+    /// each caller must hold the teardown guard (#3049).
+    pub(crate) async fn purge_file_with(
+        &self,
+        index_id: &IndexId,
+        rel: &str,
+        mode: RedbChunkDelete,
+    ) -> anyhow::Result<usize> {
+        // #8959: durable stale mark before anything leaves, so a crash before
+        // the caller's per-pass rebuild still rebuilds at the next boot.
+        let _graph_write = self.begin_graph_write_for_removal(rel).await?;
+        let removed = self.remove_file_no_kg_rebuild_with(rel, mode).await?;
         forget_file_hash(index_id, self, rel).await?;
         Ok(removed)
     }

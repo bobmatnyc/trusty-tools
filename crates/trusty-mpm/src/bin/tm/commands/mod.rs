@@ -40,7 +40,11 @@ pub(crate) mod divert_worker;
 // #6892: the machine-wide builder-slot row — holders, the cap, and a Warn
 // for a lease only the TTL could have ended.
 pub(crate) mod build_lease;
+// #9239: the read-only `status` and `--census` views of `tm build-lease`.
+pub(crate) mod build_lease_status;
 pub(crate) mod doctor_builder_cap;
+// #8451: the slot pool's volume against its eviction threshold.
+pub(crate) mod doctor_slot_pool;
 // #6336: the standalone `tm doctor` — the battery runs in-process and the
 // daemon is one appended reachability row, never a precondition.
 pub(crate) mod doctor_daemon_row;
@@ -201,6 +205,8 @@ pub(crate) mod project;
 pub(crate) mod projects;
 pub(crate) mod prune;
 pub(crate) mod push_guard;
+// #9313: `tm sessions rebind` — re-bind a record to its live tmux pane.
+pub(crate) mod rebind;
 pub(crate) mod reconcile_worktrees;
 // #4912: `tm register` positional resolution — URL first, alias optional, with
 // the legacy alias-first order still accepted.

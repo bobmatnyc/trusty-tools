@@ -423,10 +423,13 @@ fn missing(dir: &Path) -> String {
 /// entry is missing, and naming the alias is what turns a `gh` connection error
 /// into an actionable line (#7196).
 /// What: one sentence per [`SlugRefusal`] variant, each naming the directory and
-/// what was read.
+/// what was read, the URL's credentials redacted.
 /// Test: `an_unparseable_origin_refuses_and_quotes_the_url`,
-/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`.
+/// `an_unresolvable_ssh_alias_refuses_and_names_the_alias`,
+/// `a_refusal_never_quotes_the_origin_credentials_9124`.
 fn refusal(dir: &Path, url: &str, why: &SlugRefusal) -> String {
+    // #9124: the refusal is logged on every reclaim poll; never the token.
+    let url = crate::core::remote_url_redact::redact_stored_url(url);
     match why {
         SlugRefusal::NoRepository => format!(
             "the `origin` remote at {} is {url:?}, which names no GitHub `owner/repo` — \

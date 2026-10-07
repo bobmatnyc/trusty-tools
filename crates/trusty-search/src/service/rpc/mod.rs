@@ -43,6 +43,12 @@ pub mod chat;
 /// Registration for warm-all: start and status (#9027).
 pub mod warm;
 
+/// Registration for project-to-index resolution (#9169).
+pub mod project;
+
+/// Registration for the dashboard's file read (#9029).
+pub mod file;
+
 /// Per-method admission and deadline lane pins for the whole socket surface
 /// (#6285 slice 5, widened in slice 5.5 to every lock-taking method).
 #[cfg(test)]

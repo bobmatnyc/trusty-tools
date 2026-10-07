@@ -15,7 +15,7 @@ use super::account_clone::{AccountCloneEnv, account_clone_env};
 use super::{ensure_worktrees_gitignored, migrate_old_layout_aside};
 use crate::core::gh_account_registry::RegistryPin;
 use crate::core::gh_org_accounts::{OrgAccounts, OrgAccountsError};
-use crate::core::remote_url_redact::redact_url;
+use crate::core::remote_url_redact::{redact_stored_url, redact_url};
 
 /// Ensure a base clone exists at `base_path`, cloning from `origin_url` if not.
 ///
@@ -156,7 +156,7 @@ pub(crate) fn ensure_base_clone_with(
 
     // #9124: `origin_url` may carry `user:token@`; the log gets it redacted.
     info!(
-        url = %redact_url(origin_url),
+        url = %redact_stored_url(origin_url),
         dest = %base_path.display(),
         "inproject: cloning base repo"
     );
@@ -188,7 +188,8 @@ pub(crate) fn ensure_base_clone_with(
         .map_err(|e| format!("inproject: git clone failed to spawn: {e}"))?;
 
     if !out.status.success() {
-        // #9124: git's stderr can quote the URL it was given.
+        // #9124: git's stderr can quote the URL it was given. #9259: it is
+        // free text, so `redact_url`, not `redact_stored_url`.
         let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(format!(
             "inproject: git clone failed ({}): {}",

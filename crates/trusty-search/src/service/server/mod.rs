@@ -30,7 +30,11 @@ mod facet_route;
 mod fanout;
 // #9027: per-index deadline and one query embed for the all-index fan-out.
 mod fanout_deadline;
+// #9029: `search.file.get`, one indexed file and its diff.
+mod file_get;
 mod files;
+// #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
+mod graph_refresh_ticker;
 mod health;
 pub(crate) mod helpers;
 mod index_config;
@@ -42,6 +46,8 @@ mod indexes_relocate;
 // #6822: the scalar-precision backfill route.
 mod quantize_handlers;
 mod reindex_handlers;
+// #9236: maps a remove-file path onto the stored index-relative key.
+mod remove_path;
 mod residency_sweep;
 // #4289: the create-index-time containment guard over registered index roots.
 mod root_overlap;
@@ -117,6 +123,9 @@ mod tests_8499;
 // #8499 round 2: store placement, registration claims, relocate vs reindex.
 #[cfg(test)]
 mod registration_8499_tests;
+// #8147: `POST /indexes` honours `colocated: false`.
+#[cfg(all(test, unix))]
+mod colocated_8147_tests;
 // #8777: a created index is stamped at the current schema version.
 #[cfg(test)]
 mod tests_schema_stamp_8777;
@@ -132,6 +141,9 @@ mod tests_8134;
 // #8105: a reindex of a write-quarantined index is refused, not queued.
 #[cfg(test)]
 mod tests_8105;
+// #8883: a serve-only index refuses every reindex and gets no watcher.
+#[cfg(test)]
+mod serve_only_8883_tests;
 // #8889: one reindex per index through the HTTP handler.
 #[cfg(test)]
 mod tests_8889;
@@ -216,6 +228,9 @@ mod tests_8348;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;
+// #9235: status and search meta report BM25 corpus-cap truncation.
+#[cfg(test)]
+mod tests_9235;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]
@@ -233,7 +248,7 @@ pub use reindex_handlers::ReindexRequest;
 pub use router::{CreateIndexRequest, IndexFileRequest, RemoveFileRequest};
 pub use routing::SearchSimilarRequest;
 pub use search_global::GlobalSearchRequest;
-pub use state::{DaemonEvent, ReconcileSummary, SearchAppState, WarmBootSummary};
+pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, WarmBootSummary};
 
 use axum::{
     response::Redirect,
@@ -332,6 +347,8 @@ pub(crate) use index_config::{patch_index_config_report, PatchIndexConfigRequest
 
 // #9027: warm-all, served on both transports.
 pub(crate) use warm_all::{warm_start_report, warm_status_report};
+// #9029: the socket-only file read.
+pub(crate) use file_get::{file_get_report, FileGetParams, FILE_GET_MAX_CONCURRENT};
 pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 
 /// Build the axum router with the shared state.
@@ -407,6 +424,7 @@ pub fn build_router_on(
     spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
     spawn_residency_sweep_ticker(Arc::clone(&state_arc));
     spawn_memory_pressure_ticker(Arc::clone(&state_arc));
+    graph_refresh_ticker::spawn_graph_refresh_ticker(Arc::clone(&state_arc));
     // #4250: drive indexes parked by a warm-boot restore timeout back into the
     // registry. Nothing else will — they are absent from `list_indexes`, so a
     // client that discovers indexes by listing never names them, and boot

@@ -1,0 +1,18 @@
+{
+  "leak": "A",
+  "about": "An APPROVE review whose only (advisory) finding is withheld keeps APPROVE (AQ-7t) and posts nothing; its grade comes from no survivor, never the model's A-.",
+  "diff_file": "billing.diff",
+  "reviewer": {
+    "prose": "Looks fine apart from a slow flush.",
+    "verdict": "APPROVE",
+    "grade": "A-",
+    "findings": [
+      {"title": "slow-flush", "body": "`ledger.flush_all()` is slow.", "severity": "low", "confidence": 0.3, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["slow-flush"],
+  "forbidden_in_body": ["slow flush"],
+  "expect_survivors": 0,
+  "expect_verdict": "APPROVE"
+}

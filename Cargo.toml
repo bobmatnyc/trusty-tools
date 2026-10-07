@@ -114,8 +114,8 @@ trusty-code = { path = "crates/trusty-code", version = "0.7" }
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.8" }
-trusty-common = { path = "crates/trusty-common", version = "0.53" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9" }
+trusty-common = { path = "crates/trusty-common", version = "0.54" }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
@@ -545,6 +545,12 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# #9302: `test` already inherits the two settings above; this pins its own so a
+# later full-debuginfo `dev` cannot grow test binaries. macOS scans every new
+# executable on its first exec, and the scan time grows with the file size.
+[profile.test]
+debug = "line-tables-only"
 
 [profile.release]
 opt-level = 3

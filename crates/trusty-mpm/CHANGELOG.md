@@ -6,6 +6,1250 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.7.11] — 2026-10-05
+
+### Fixed
+
+- `tm daemon --sandbox` admits `TRUSTY_SANDBOX` in its closed environment allowlist, and `scripts/sandbox_daemon.sh` passes `TRUSTY_SANDBOX=1`, so the sandboxed daemon loads no `.env.local` credentials (#9178).
+- `tm daemon --sandbox` now refuses to start unless `TRUSTY_SANDBOX` is exactly `1`; an absent, empty, `0`, `true` or non-UTF-8 value refuses with a message that names the variable and never its value, so a hand-built sandbox cannot load `.env.local` credentials (#9178).
+
+### Security
+
+- pm-guard reads the `$(…)` and backtick substitutions of every unquoted-delimiter here-document body with the body's quotes as literal text, including a body that `python3`, `node` or `bash` runs. `python3 - <<PY` with `print('$(rm -rf /)')` was allowed under every bypass; it now hits the rm-root floor. A quoted-delimiter body stays inert (#9155).
+- pm-guard expands an unquoted here-document body that has no terminator line, or only one with trailing whitespace, to the end of the command, as bash runs it; `cat <<X` then `'$(rm -rf /)'` was allowed. Every byte of such a command still stays live for the other rules, and an arithmetic `<<` is unchanged (#9155).
+- pm-guard removes each `\`+newline whose backslash ends an odd-length run before it scans an unquoted here-document body, as bash does, so `$\`, newline, `(rm -rf /)` is read as `$(rm -rf /)` (#9155).
+- The rm-root floor judges each here-document body a shell, `sudo -s`, `su` or `parallel` runs, and each `bash -c`, `sh -c`, `eval` or `xargs` string, as a whole command, so a here-document nested inside one is read and its substitutions expand. `bash <<'O'` around `bash <<I` around `echo '$(rm -rf /)'` was allowed. Nesting past the depth cap with a delete verb in sight denies (#9155).
+- `tm register <url>` removes only the secret before writing `registry.json`: the `:password` on any scheme, and the whole userinfo on `http(s)://`, where a bare `user@` is a token. The `git@` login of `git@github.com:o/r.git` and `ssh://git@host/…` is kept, so `tm load` no longer logs in as the local user and a re-register no longer collides. The stderr notice prints only when a secret was removed and names no part of the URL (#9124, #9155).
+- `tm register` and `tm run` refusals redact an scp-style `user:token@host:path`; the worktree-reclaim origin refusal, logged on every poll, redacts the remote URL; the alias-collision error's `Debug` output redacts the stored URL (#9124).
+- Registry entries `tm register` wrote before #9124 keep any token embedded in their URL, and `tm load` clones from them as stored. They are not migrated: `tm register --force <url-without-token> <alias>` replaces one (#9124).
+
+## [1.7.10] — 2026-10-05
+
+### Added
+
+- The daemon socket serves `mpm.mcp.dispatch`, which takes the MCP JSON-RPC
+  envelope `POST /rpc` takes and returns the same response, through the same
+  body (#6288).
+- The daemon socket serves `mpm.delegation.list`, `mpm.delegation.repair`,
+  `mpm.delegation.repair_by_id`, `mpm.sessions.context` and
+  `mpm.sessions.chat`, each through the same body as its HTTP route. A repair's
+  caller session, an HTTP header, is the `caller_session` param on the socket
+  (#6288).
+- The socket route table maps the SESSCTL control, L2 proxy, delegation,
+  coordinator and `/rpc` routes onto their socket methods. No client call site
+  changed (#6288).
+- The daemon socket serves `mpm.build_lease.decision`,
+  `mpm.builder_slot.claim`, `mpm.builder_slot.list` and
+  `mpm.managed.adopt_worktree`, each through the same body as its HTTP route
+  (#6288).
+- `DaemonClient::over_socket` and `DaemonClient::from_resolved_socket` build a
+  client that sends every request to the daemon's unix socket and refuses a
+  route the socket does not serve rather than falling back to TCP (#6288).
+- `tm doctor --dir <DIR>` scopes the project-scoped rows (`session_scope`,
+  `instructions`, `agents`, `skills`, ...) to another project instead of the
+  current directory. A missing or non-directory `--dir` is an error and the
+  report is not printed; it never falls back to the cwd. The flag is
+  report-only and conflicts with `--fix`, `--fix-skills`, `--fix-agents`,
+  `--fix-launchd-secrets` and `--quarantine-mcp` (#7757).
+- `[pm_guard] documents_repos` in `~/.trusty-mpm/config.toml` lists documents repositories whose main checkout may write and commit any path, source extensions included, so a repository that forbids worktrees can commit a utility script. Entries match the checkout root by canonical path; a relative entry, a mistyped list or an unreadable file lists nothing, and a repo-local config grants nothing. The list is trusted to the #8878 trust-anchor floor, with the #8879 residual (#7905).
+- `tm sessions catchup --json [--sessions-offset <n>]` prints the paged JSON
+  payload of the `session_context_catchup` MCP tool, so a session that lost the
+  MCP server can still page its catch-up rather than read one unbounded
+  markdown digest. The `tm-session-resume` skill names the new fallback.
+- `rust-build-performance` skill gains a "Build Output Volume" section (`--message-format=short`, `-q`, redirect-and-read, and why `--no-fail-fast` must be redirected rather than dropped) and an Apple Silicon note: `nice`-ing a build confines its threads to the efficiency cores, which on this host produced load average 27-37 with the CPU 70% idle. Section 5's worktree note corrected — it claimed a fresh worktree has no shared `target/` to inherit, which a shared `CARGO_TARGET_DIR` makes false; it now records what the shared directory does and does not buy (registry dependencies reused, workspace path crates still rebuilt because cargo fingerprints a path crate by its absolute source path) and that cargo's target lock serialises builds sharing it, pointing at `rust-delivery-workflow` section 4 and the `rust_build_env` doctor row for the mechanism (Refs #8251).
+- `tm build-lease -- <command>` runs a heavy build under a machine-wide build slot (#8261, absorbing #8297). The slot is a kernel `flock` on `~/.trusty-mpm/build-slots/slot-K.lock`, held for the build's whole life and released by the kernel however the build ends, so a long cold compile can no longer lose its slot to a 45-minute lease TTL. A broken slot file is skipped, never a reason to lift the cap. When no lease can be taken — no usable store, an unopenable `admission.lock`, no lockable slot file — the build runs unleased only while the process census counts fewer than `builders.max_concurrent` builds without a lease, with a DEGRADED warning naming the store, the OS error and the repair; when the census cannot be read either, the build does not run. When `~/.trusty-mpm/build-slots` is unusable the store is the fixed per-uid `/tmp/trusty-mpm-build-slots-<uid>` (owner and mode checked), never `$TMPDIR`. Slot files are created mode 0600. The wait is bounded by `builders.lease_wait_secs` (default 90 s, at most 600 s, and at most half a Bash call's own timeout); on timeout it exits 75 naming the holders by program, subcommand and `-p` package only, the memory-pressure signals, the load and the ceiling. Every decision is logged by the daemon.
+- `tm build-lease` runs only a command the heavy-build classifier matches; anything else exits 64 without running.
+- The slot reaches the agent that runs the build, not the PM that dispatched it: the build's own environment carries the slot's `CARGO_TARGET_DIR`, and `tm build-lease` prints `slot N — CARGO_TARGET_DIR=<dir>` on stderr when that directory replaced a shared one, so the agent runs its binaries from the slot instead of the shared directory its `.envrc` names. That directory is exclusively this build's only while its lease is held — the stderr line says so — because once the lease releases, another checkout can win the same slot and rebuild `debug/<bin>` there. An explicit `--target-dir` in the command's own argv is read and rewritten too, since that flag outranks `CARGO_TARGET_DIR` from the environment and would otherwise still point at the shared directory.
+- A shared `CARGO_TARGET_DIR` — the configured `build.cargo_target_dir`, anything under `~/.trusty-tools/cargo-target/`, or anything under `builders.slot_pool_root` — is moved to the held slot's private directory; an unset one (cargo's `./target`, a repo's `build.target-dir`) and any other pinned one are left alone. A build that would run in a shared directory with no slot directory to replace it (no git origin, a slot that cannot be made, stale fingerprints that cannot be cleared) exits 75 without running. A free slot whose directory an orphaned build still uses (cargo's `.cargo-lock` held) is skipped. A slot that last built a different worktree has that worktree's crate fingerprints cleared first, so cargo cannot report the new worktree's crates "Fresh" from the old one's build.
+- The `PreToolUse` guard rewrites heavy builds — `cargo build/test/clippy/check/doc/install/run/bench`, their aliases `b/t/c/d/r`, and `fix`, `rustc`, `rustdoc`, `publish`, `package`, `nextest`, `llvm-cov`, `miri`, `watch`; configurable as `builders.heavy_build_commands` — to run under `tm build-lease`, before the subagent exemptions, so dispatched agents' builds are capped too. Composed commands, `case` arms, `sh -c`/`xargs`/`find -exec` wrappers, `rustup run <toolchain>`, wrapper options that take a value (`env -u NAME`, `sudo -u user`, `timeout -s KILL 600`) and `$(…)` substitutions are handled, and the lease goes outside `sudo`/`doas`; nothing inside a here-document body is ever rewritten. A cargo verb that compiles nothing — `--help`, `-h`, `--version`, `-V`, `cargo install --list` — is not leased. Inside an isolation worktree the lease is inserted without the output-compression wrap (#7477). `tm hook` emits the same rewrite so the two hooks agree.
+- Claude Code permission rules are decided against the original command: a `deny` match is not rewritten, so Claude Code denies it as before; an `ask` match is rewritten with `permissionDecision: "ask"`, so the user is still asked; a command whose every part matches an `allow` rule is rewritten with `permissionDecision: "allow"`. A command that can run something its parts do not show gets no decision, so Claude Code's normal permission flow applies: a `$(…)`, backtick or `${…}` expansion, any `(` (bash or zsh process substitution such as `<(…)`, `>(…)` and `=(…)`, a zsh glob qualifier such as `*(e:…:)` or `*(+cmd)`, and a subshell), a newline, an `eval`/`source`/`.` part, or a `KEY=value` prefix other than an inert build setting (`CARGO_TARGET_DIR`, `CARGO_BUILD_JOBS`, `CARGO_INCREMENTAL`, `CARGO_TERM_COLOR`, `SKIP_UI_BUILD`, `RUST_BACKTRACE`, `RUST_LOG`, `RUST_TEST_THREADS`, `NO_COLOR`, `RUSTC_WRAPPER=sccache`). A command the shared classifier cannot establish a program for at all — ANSI-C (`$'…'`) quoting included, which reads as one balanced segment and used to reach an allow — never gets one either (#8261 round 6).
+- Admission reads memory PRESSURE (macOS `kern.memorystatus_vm_pressure_level` and `kern.memorystatus_level`; Linux PSI, cgroup PSI in a container, or `MemAvailable`), the load average, and a process census that counts compiler groups holding no lease (`rustc`, `clippy-driver`, cargo `build-script-*` processes, C/C++ compilers and linkers, and others; never `rust-analyzer`). High memory pressure or low available memory refuses a new build even when no lease is held; a load over its threshold still admits one leased build when none is held. The census has no floor: every build running without a lease counts against `builders.max_concurrent`, so when that many run, every leased build waits and then exits 75 until they finish (owner ruling (a), "roll out together").
+- `tm build-lease --census` runs no build; it probes the slot locks as `tm doctor` does, and prints the lease holders and each build group the census counts: its process group, the group leader and the driver (program, subcommand and `-p` packages only, for a build driver; any other program by name only), the compilers, and the parent chain up to the process that started it. New `[builders]` keys, read by the new `core::build_lease::config::BuildLeaseConfig` so `BuildersConfig` keeps its published shape: `memory_pressure_max`, `min_available_pct`, `lease_wait_secs`, `heavy_build_commands`, `count_foreign_builds`.
+- A heavy build `tm hook --pm-guard` refuses under the build-lease rule is recorded in the pm-guard denial store under the `build-lease` check, like every other deny, so `list_recent_errors` and `preview_bug_report` see it (#8722).
+- `tm doctor --network` adds a `gcloud_auth` row. It names the active
+  gcloud account, redacted to `a***@domain`, and says whether `gcloud` can
+  mint an access token for it. It tells "no credentials" apart from
+  "credentials present, but every account needs an interactive reauth", and
+  names `! gcloud auth login` as the operator step for both. Each `gcloud`
+  call is bounded at 10 s. A missing binary, a timeout, a non-zero exit or
+  unparseable output is a WARN naming the reason, never a pass. No token
+  value is printed. A bare `tm doctor` stays offline: the row reads
+  `skipped (needs --network)` and `gcloud` is never spawned.
+- `tm content install --from <bundle.tar.gz>` installs a content bundle
+  offline, `tm content update [--content-ref content-vX.Y.Z]` fetches a
+  release and its `.sha256` sidecar from GitHub, and `tm content status` shows
+  the content source (`dev`, `bundle` or `none`), the pinned tag and sha256,
+  and the binary version (ADR-0064, #8378). A bundle is pinned only after it
+  matches its sidecar and passes the runtime resolver's own checks; it is
+  stored in `~/.trusty-mpm/content` before `content-lock.toml` names it, and
+  every write holds an exclusive lock on `.update.lock`. The sidecar is
+  required by both verbs; it proves the transfer only, and trust is on first
+  use (the pinned sha256 is what later reads check), as both verbs' `--help`
+  states. `update` with no flag installs the newest published release —
+  neither a draft nor a pre-release in GitHub's releases API, not a bare
+  `content-v*` git tag — and re-pins to it; the pin changes only when a
+  `tm content` command runs. A sha256 mismatch, a missing sidecar, a tag
+  missing upstream, a re-fetch of the currently pinned tag that returns other
+  bytes (only the current pin is checked), a newer or missing `schema_major`, a
+  failed releases listing or an unreachable host fails without touching the
+  previous pin; with nothing installed, the error names
+  `tm content install --from <bundle.tar.gz>`. `tm content status` with
+  nothing installed prints the doctor's `info:` line and exits 0 while `tm`
+  still compiles its content in, and exits non-zero once ADR-0064 PHASE_1
+  removes it.
+- `tm doctor` gains a `content` row: OK for a dev checkout or a verified
+  bundle; with nothing installed and no checkout serving, INFO (an `Ok` row
+  whose message starts `info:`) while `tm` still compiles its content in, and
+  WARN once ADR-0064 PHASE_1 removes it; and, when the lock or the bundle
+  fails verification, FAIL if no checkout serves or WARN if a dev checkout
+  does. The remedy it names fits the failure: a broken lock or a too-new
+  schema names `--content-ref` (and, for the schema, upgrading `tm`), not a
+  plain `tm content update`.
+- Opt-in `Notification` hook: with `[notification_hook] enabled = true` in `~/.trusty-mpm/config.toml`, `tm install` and `tm doctor --fix --yes` write one `Notification` entry running `tm hook` into the managed settings file, and remove only that entry when the opt-in is off. Off is the default; any value other than `true` is off, and a malformed settings file is refused and left unchanged (#8392).
+- Optional push target for `Notification` events: `TRUSTY_MPM_NOTIFY_INBOX`, else `[notification_hook] inbox`, names an absolute inbox directory. `tm hook` appends one JSON line to `<inbox>/events.jsonl`, waits at most 1 second, and on any failure logs one line and still exits 0. No target configured means no forward. The line's `tmux_pane` and `tmux_session` come only from a `TMUX_PANE` that is a `%N` pane id; any other value is dropped and never reaches `tmux -t`, where tmux would prefix-match it (#8392).
+- `GET /sessions/{id}/output` (and `mpm.sessions.output` / `mpm.sessions.pane`)
+  reports `input_box`: `empty`, `suggestion` or `typed`, or `null` when the box
+  could not be read. A `suggestion` is Claude Code's dim next-prompt text,
+  which a plain capture shows exactly like a typed draft. `tm sessions output`
+  prints it as `[input box: …]` on stderr, so stdout stays the pane text.
+- An extended colour (`38;5;n`, `38;2;r;g;b`, the `48`/`58` forms and the
+  colon forms) no longer reads as dim or reverse, so a typed draft in a
+  coloured span reports `typed`, not `suggestion`.
+- `session_context_catchup` responses carry an optional `resolved_note` when
+  `tmux_window` was passed without `tmux_session_created` and nothing resolved.
+  It says the tmux-session route was not tried, so a skipped route no longer
+  reads as "nothing paused". Every other response omits the key.
+- `tm fleet init` now seeds the Architect project: a `CLAUDE.md` with the fleet specifics, a `.gitignore` for the poller runtime, `records/` (`state.md`, `actions.md`, `projects/`), the deterministic poller under `scripts/`, and the Architect-only skills `tm-fleet-check` and `tm-context-refresh` under `.claude/skills/`. Each file is written only when absent; an edited one is reported as skipped and never overwritten ([#8436](https://github.com/bobmatnyc/trusty-tools/issues/8436)).
+- With a launch, `tm fleet init` starts the poller in tmux session `tm-architect-poll` unless it already runs there. A poller that does not start, whose pane is dead, or whose tmux state cannot be read is a FAILED step and the command exits 1 ([#8436](https://github.com/bobmatnyc/trusty-tools/issues/8436)).
+- A bundled `tm-architect-setup` skill that describes how to set up the Architect, the one fleet session per user. It states what `tm fleet init` will do: create the project at `~/trusty-mpm-projects/architect` (`--dir` overrides), `git init` with no remote, write `profile = "supervisor"` and always add the user-level `[supervisor] projects` entry, launch on the `opus` alias, and leave twin mode out. It also gives the manual steps to use until `tm fleet` ships. The canonical copy lives in the new `python/trusty-architect/` sub-project, and a drift check fails when the shipped copy differs (#8436).
+- `tm fleet init [--dir <path>] [--no-launch]` sets up the Architect, the one fleet supervisor per user. It creates the project (default `~/trusty-mpm-projects/architect`) as a local git repo with no remote, writes `profile = "supervisor"` to its `.trusty-mpm.toml`, adds its canonical path to `[supervisor] projects` in `~/.trusty-mpm/config.toml`, and starts tmux session `tm-architect` detached on the `opus` alias. Both file writes are atomic and keep every other key and comment. A malformed config fails the command and is left untouched. A second run changes nothing and says so, and a second Architect elsewhere is refused. The allowlist write departs from #3981: it happens also when a PM runs the command (owner ruling on #8436).
+- `tm fleet status [--dir <path>] [--json]` reports, read-only, the allowlist entry, the profile request, the running `tm-architect` session and its supervisor launch stamp, and exits 1 when any is missing (#8436).
+- The daemon evicts idle builder-slot directories once the volume holding
+  `builders.slot_pool_root` reaches `builders.slot_pool_evict_pct` (default
+  85%, always below the `disk.max_usage_pct` worktree guard). It removes
+  whole `slot-N` directories oldest-first, and spares a slot whose lease is
+  held, whose dead holder's build still runs, whose record cannot be read,
+  whose `.cargo-lock` is held, or whose seed is staging. It refuses to
+  sweep, logs a warning and deletes nothing when the pool root is `/`, the
+  home directory, an ancestor of home, or does not resolve. Daemon
+  shutdown stops a sweep at the next slot boundary. The sweep runs every
+  10 minutes; a pass longer than that logs a warning.
+  `TRUSTY_MPM_SLOT_POOL_EVICT=0` turns it off and
+  `TRUSTY_MPM_SLOT_POOL_EVICT_INTERVAL_SECS` sets the cadence.
+- `tm doctor` gains a `slot_pool_budget` row: the pool's slot count and its
+  volume's usage against the eviction threshold.
+- A supervisor instruction profile. A session runs it only when the project's `.trusty-mpm.toml` sets `profile = "supervisor"` AND the operator lists the project under `[supervisor] projects` in the user-level `~/.trusty-mpm/config.toml`; the project file alone keeps the PM profile, so a project cannot exempt itself. It launches with the bundled supervisor instructions instead of the PM instructions, the new bundled `trusty-mpm-supervisor` output style, and the Opus tier alias (`opus`, never a pinned model id) as its model. The `model` settings key is written only when absent or previously written by tm, and removed again on the next PM launch; a `model` the operator set is never changed. `tm launch`, `tm connect`, the daemon's managed launch and the in-place relaunch stamp the resolved profile into the spawned `claude` as `TRUSTY_MPM_SESSION_PROFILE`; every launch path, including `tm run`, the control-plane backends and the daemon client's launch and connect, first clears an inherited stamp, so a session a supervisor starts never inherits the supervisor profile. `tm hook --pm-guard` lifts the PM delegation rules only when the stamp, the allowlist and the project file all say supervisor — editing the file mid-session changes nothing. The destructive-command, worktree, secret and write-boundary guards still apply to a supervisor. Anything missing, unreadable, malformed or unknown keeps the PM profile. PM sessions are unchanged, and a PM project cannot select the supervisor style. `tm doctor` recognises the new style and gains a `session_profile` row that warns when a project asks for the supervisor profile without the allowlist entry. Known limitation: a `tm` binary older than this release rejects the whole `.trusty-mpm.toml` when it meets the new `profile` key, so mixed-version machines lose that file's other settings (#8453).
+- `tm hook --pm-guard` allows `git reset --keep [<rev>]` in a main checkout listed under `[pm_guard] runtime_checkouts` in `~/.trusty-mpm/config.toml`, when the reset is the only command in the call and `git diff --quiet <rev>` reports the tracked content already equal. Cron hosts can now reconcile a launchd-read checkout in place. Every other destructive git command stays denied on those paths, and a probe git cannot answer denies (#8524).
+- `tm pr merge --allow-failing <check>` merges over a failing or still-running check that the PM has waived (#8614). It is repeatable, matches the check name exactly, never waives a check that branch protection or a repository ruleset requires, and records each waived check in the output and at the head of the squash commit body.
+- `tm pr merge --allow-no-checks` merges a PR on which no check has registered, for a repository with no CI (#8614). Without it, such a PR is refused unless the base branch requires a check.
+- `tm hook --pm-guard` denies three more hard-floor classes for every session
+  except the Architect's main thread: a network upload of local content
+  (`curl` with `-d @file`, `-T` or a `-F` file field, `wget --post-file`,
+  `scp` or `rsync` to a remote host, `nc` other than `-z`, `socat`, a
+  redirect into `/dev/tcp` or `/dev/udp`, `sftp` fed from a pipe, a file or
+  `-b`, and `ssh` fed from a pipe, a `<` file, a here-document or a
+  here-string), a destructive disk tool (`diskutil`
+  erase/partition/resize/delete and forced `unmount`/`umount`,
+  `dd of=/dev/…` after path normalization,
+  `mkfs`, `newfs`, `fdisk`, `asr`, and destructive `hdiutil` verbs), and a
+  force-push to the default branch (`--force`, `-f`, `--force-with-lease`,
+  a `+ref` refspec, or `--mirror`, including any unique prefix of a long
+  option, and any unknown long option; `main` and `master` when the default
+  is unknown). A command the guard cannot parse that names one of these
+  programs is denied. Plain downloads are not affected (#8878).
+- `tm fleet init --session <name>` and `tm fleet status --session <name>` set the Architect's tmux session name; the poller runs as `<name>-poll`. `init` records the name as `[supervisor] session` in `~/.trusty-mpm/config.toml` and in a `<pid>.architect-session` file beside the launch record, which pm-guard refuses to let a PM write, however the path is spelled. Later runs without the flag use the same name. Without the flag the names stay `tm-architect` and `tm-architect-poll`. Invalid names are refused before any write (#8878).
+- `tm fleet status` reports `binding`: whether the `claude` in the Architect's session is the one `tm fleet init` launched under that session name. `tm fleet init` makes the same check on a session that is already running and reports one that is not bound (#8878).
+- The seeded Architect `CLAUDE.md` and `tm-fleet-check` skill derive the poller's session from the Architect's own session name (#8878).
+- The `tm fleet init` preflight accepts one private child repository at `<dir>/local` when it has no git remote and holds no nested repository; every other child repository is still refused (#8878).
+- pm-guard's Architect pane floor marks the recorded `--session` names when the Architect launch lineage cannot be read, and denies every deny-set tmux command when those records cannot be read either (#8878).
+- `tm hook --pm-guard` denies a write to a trust anchor —
+  `~/.trusty-mpm/config.toml`, `~/.trusty-mpm/architect-launch/`, and
+  `~/.trusty-mpm/twin/armed/*.json` while any exist — from every session
+  except the Architect's main thread. It reads
+  the edit tools, the shell write classifier, the destinations of `cp`, `mv`,
+  `ln`, `install` and `sed -i`, and the sources of `ln`, `mv`, `cp -l` and
+  `cp -s`, following symlinks and hard links and comparing anchor names
+  without case. A directory above an anchor, `twin/` and `twin/armed/`
+  included, is protected too. A `cp`/`mv`/`ln`/`install`/`sed -i` run by
+  `xargs` is denied unless it is `cp -t DIR` or `install -t DIR` into a
+  directory that leads to no anchor. The deny holds under
+  `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS`, and fails
+  closed on an unknown home, an unresolvable target, and an unreadable
+  payload (#8878).
+- The Architect identity is process-bound: `tm fleet init` records the
+  `claude` it launches in `tm-architect` by PID and start time under
+  `~/.trusty-mpm/architect-launch/`, and the guard admits the Architect only
+  when the hook's parent `claude` matches that record. The supervisor stamp
+  and project files alone no longer pass (#8878).
+- `tm launch --twin` arms the `claude` it starts for supervisor-twin mode
+  (#8878). The session counts as a twin only when all of these hold: the
+  project is in `[supervisor.twin] projects` and `[supervisor] projects` in
+  `~/.trusty-mpm/config.toml`, the session runs the supervisor profile,
+  `tm launch --twin` recorded that `claude` process by PID and start time, and
+  the call comes from the main thread, not a subagent. Any read error, parse
+  error or mismatch means not a twin. `TRUSTY_MPM_PM_UNRESTRICTED` and
+  `TRUSTY_MPM_DISABLE_HOOKS` never make a session a twin. This release only
+  establishes the identity: no `tm hook --pm-guard` decision reads it yet.
+- `tm launch --twin` refuses `--worktree`, and checks the twin grant for the
+  managed checkout before it clones or provisions anything, so a refused launch
+  leaves nothing behind (#8878). The armed `claude` must be the hook's direct
+  parent, so a session started from the twin's own shell is never a twin.
+- `tm hook --pm-guard` denies, while a live Architect launch record exists,
+  every tmux command from a session other than the Architect's main thread
+  that types into, kills, respawns, swaps, joins, breaks, moves, links,
+  unlinks or clears the history of the Architect's pane, window or session:
+  `send-keys`, `send-prefix`, `paste-buffer`, `pipe-pane`, `kill-pane`,
+  `kill-window`, `kill-session`, `kill-server`, `respawn-pane`,
+  `respawn-window`, `swap-pane`, `swap-window`, `join-pane`, `move-pane`,
+  `break-pane`, `move-window`, `link-window`, `unlink-window`,
+  `clear-history` and `new-window -k`, with their aliases and unique
+  prefixes. The Architect's pane is resolved from its launch record (the
+  pane running the recorded `claude`) and the `tm-architect` session, by
+  `=name`, prefix name, `%N`, `@N` and `$N` targets. A target the guard
+  cannot resolve — a shell variable, `$(…)`, a glob, a special token, an
+  unknown current pane — an unknown tmux command or option, `source-file`
+  and control mode are denied too. A tmux command reached through a wrapper
+  such as `setsid`, `chrt`, `flock` or `timeout` is judged by its target,
+  and a nested `tmux` with no `-L`/`-S` in typed keys or a command a server
+  runs is judged on that server. A tmux command whose server or target the
+  guard cannot see before it runs is denied: one under a relative `-S`
+  socket; one run under `sudo`, `doas`, `env -i` or `exec -c`; one in a
+  command that sets or unsets `TMUX` or `TMUX_TMPDIR`, including
+  `${TMUX:=…}`; one on a server holding the Architect's pane in a command
+  that also renames or creates a session; and a hook, binding or
+  `run-shell` command with no target. The rule holds under
+  `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS`; read verbs
+  such as `capture-pane`, and geometry verbs such as `resize-pane` and
+  `select-layout`, are not affected (#8902).
+- `tm doctor` has a `tcp_listeners` row. It lists the trusty-* processes that
+  listen on TCP, read from libproc on macOS and `/proc` on Linux, and grades
+  them against `crates/trusty-mpm/src/daemon/tcp_listener_allowlist.tsv`. Only
+  trusty-console may listen on TCP (ADR-0032), plus the trusty-gworkspace
+  OAuth loopback redirect (RFC 8252, owner ruling 135). The row is OK when
+  only those listen, WARNs naming the issue while tm (#6288) or trusty-search
+  (#6285) still listen, FAILs on any other trusty-* listener, and WARNs on an
+  allowlisted listener bound to a non-loopback address. It reports UNKNOWN,
+  never OK, when the probe cannot run or cannot read, or on macOS cannot
+  name, a live process. The CI lint `scripts/check_no_tcp_listeners.sh`
+  reads the same allowlist and fails on any TCP bind in source outside it,
+  including a call to `trusty_common::bind_with_auto_port`.
+- `tm sessions new` now spawns a managed session in a git repository with no `origin` remote. Before, the daemon refused it with "managed sessions require a GitHub remote". The session runs on the repository itself, or, when a worktree is requested, on a `session/<name>` worktree cut from the repository's local default branch (`init.defaultBranch`, else `main`, else `master`), whatever branch the root has checked out. A repository with none of these refuses the worktree. There is nothing to fetch, and no upstream is set (#8934).
+- A session in a repository with no `origin` cannot run `gh`. Its `GH_CONFIG_DIR` points under `/dev/null`, so gh cannot start; inherited `GH_TOKEN`, `GITHUB_TOKEN` and enterprise tokens are replaced or removed; and git's credential helpers are cleared with prompts off, so HTTPS git cannot use a stored credential. A `tm` command run in such a repository, or anywhere inside such a session, gets the same pin instead of the global `github:` binding or the machine's active account. The allow-listed supervisor (Architect) directory, which has no origin by design, keeps the machine's gh (#8934).
+- A session pause in a repository with no `origin` skips its push-and-PR publish with the reason `local_only` (#8934).
+- `tm env set <path> <KEY> --from-keychain <service> --account <account>` and
+  `tm env keys <path>` edit a dotenv file without printing a value. `set`
+  reads the value only from the login Keychain and refuses a `KEY=value`
+  argument or a value on stdin; it writes atomically with mode 0600. `keys`
+  prints key names only, and prints nothing when any line is not a blank, a
+  comment or an assignment. Both verbs run only in the bound Architect
+  session, only when `$HOME` is the account's own home, only on a `.env` or
+  `.env.*` file inside a `[supervisor] projects` root, and only for a call the
+  pm-guard exempted for the Architect's main thread: the guard writes a
+  one-shot grant for that exact call, valid for one minute, and the verb
+  refuses without it, so an Architect subagent is refused. They follow no
+  symlink anywhere on the path and refuse a file with more than one hard
+  link. The pm-guard's trust-anchor rule denies a write that could plant a
+  grant (`*.grant`, `envfile-grants`).
+- `tm fleet init` registers a bound Architect with the daemon, so `tm ls`
+  lists it as a protected `supervisor` record under a stable id, pinned first
+  and tagged `[architect]`. Its poller (`<session>-poll`) and collector
+  (`<session>-collector`) are registered as `supervisor_aux` records, tagged
+  `[architect-helper]`, when their pane runs in the Architect directory and
+  no `claude` runs in it, the pane's own process included. When that cannot
+  be read, the helper is not registered. A registration replaces the Architect's record,
+  and marks deleted, record-only, any other live record with the same tmux
+  name and every other Architect record that is not already deleted or
+  decommissioned, stopped and errored ones included, so a stale one no
+  longer protects its name. With no daemon running, init prints `NOT
+  registered` as a warning and still succeeds; a refused or failed
+  registration fails init (#8942).
+- `POST /api/v1/sessions/managed/supervisor` (socket method
+  `mpm.managed.register_supervisor`) registers the Architect's sessions only
+  for a `claude` the launch record binds to the directory: 200 with the
+  report, 400 for a malformed request (including a helper name other than
+  `<session>-poll` or `<session>-collector`), 403 when the session is not the bound
+  Architect, 500 when the store cannot be written.
+- `tm fleet init` removes an Architect launch sidecar only when its pid is
+  dead, no process has its recorded start time, and no tmux session with its
+  name exists. When any of these cannot be determined, the sidecar is kept.
+- Managed session records carry a `kind`: `ordinary` (the default for every
+  existing record), `supervisor` (the Architect), `supervisor_aux` (its
+  `-poll`/`-collector` helpers), or `unknown` for a value this build does not
+  recognise. Every kind except `ordinary` is protected: the supervisor sweep
+  and boot reconcile never auto-resume it, and the managed-session list and
+  get endpoints report the kind (#8942).
+- The daemon refuses to kill or signal a tmux session by name when an
+  Architect launch sidecar names it (or its `-poll`/`-collector` helper), or
+  when a live record of a protected kind carries it. It also refuses, with a
+  warning naming the caller, when the sidecars or the session store cannot be
+  read. A stale record that reuses the Architect's tmux name can no longer
+  take the Architect down (#8935, #8942).
+- Do not run a pre-#8942 daemon against a post-#8942 store: an older daemon
+  drops the `kind` field on its next write, and it has no kill-by-name
+  protection for the Architect.
+- `tm doctor` has a `session_claudes` row. It warns when
+  `~/.trusty-mpm/session-claudes.json` is unreadable, corrupt, owned by
+  another user, or open to other users. Such a file seals the session-claude
+  registry: no session may repair its own delegation records, `set_pid` is
+  refused, and the reaper skips every session. The row says to fix or remove
+  the file and restart the daemon, which stays sealed until restart (#8980).
+- The daemon's doctor route reports the running daemon's own seal in the
+  `session_claudes` row, so a file fixed or removed without a restart no
+  longer reads `Ok` while the daemon stays sealed. `tm doctor`, which runs
+  in-process and never through the daemon, still reads only the file, and its
+  `Ok` text says so (#8980).
+- A `[pm_guard] enabled` key in `~/.trusty-mpm/config.toml` turns the PM guard
+  off (owner ruling 307). With `enabled = false`, the launch, resume and
+  `tm install` writers no longer register the `tm hook --pm-guard`
+  `PreToolUse` entry, and they remove one a prior launch wrote. Every other
+  managed hook, including the observability `tm hook`, is unchanged. A missing
+  key, and a config file that cannot be read or parsed, keep the guard on. A
+  running Claude Code session keeps the hooks it loaded at startup, so the
+  change applies at its next launch (#9018).
+- `tm doctor` has a `pm_guard` row. It reports `Ok` while the guard is on and
+  warns "pm-guard disabled by [pm_guard] enabled = false" when the key turns
+  it off (#9018).
+- `--u <account>` selects the `gh` account, as `--account` and `--user` do. It
+  works in the bare form, `tm run` and `tm register`, before or after the
+  repository, so `tm duettoresearch/duetto-blast-mfes --u bob-duetto` no
+  longer fails with "takes no further arguments".
+- An `[accounts]` table in `~/.trusty-mpm/config.toml` maps a GitHub org to the
+  `gh` account that clones and spawns for it, for example
+  `duettoresearch = "bob-duetto"`. Precedence: `--account`/`--user`/`--u`, then
+  the project's registry pin (any pinned field, login from `gh_account` or
+  `github.account`), then the table, then the ambient identity. For a
+  github.com remote, clone, spawn and the launch preflight read the pin through
+  one selection, so they agree. For any other host (for example GitHub
+  Enterprise Server), clone and preflight do not read the pin, and the spawn
+  still applies and proves it. Org names match without case. Only
+  github.com remotes are mapped, after resolving an SSH host alias; gitlab.com,
+  Bitbucket and Enterprise Server remotes are not.
+- A malformed table is an error: `tm run` and `tm launch` refuse and print it,
+  a clone refuses without touching the disk, a spawn's `gh` authenticates as
+  nobody, and the new `tm doctor` row `org_accounts` reports `Fail`. A TOML
+  syntax error in a file where no line names `accounts` (any header or key
+  spelling of the table) reads as an empty table with a warning.
+
+### Fixed
+
+- The project hook-set resolver behind `tm doctor --fix`, `tm validate` and
+  the resume merge now reads `[pm] prompt_self_improvement` from the same
+  framework-root `config.toml` as `[hooks] prompt_context` and
+  `[divert] enabled`. Before, that one toggle was read through `$HOME`
+  separately, so a caller supplying its own framework layout still got the
+  host's answer for the `Stop`/`SubagentStop` capture groups. Production
+  output is unchanged: both reads resolve to `~/.trusty-mpm/config.toml`.
+- The guided-fallback tests no longer leave `tm-<uuid>` tmux sessions on the operator's live tmux server. Every test that drives the daemon-unreachable fallback now launches its session on a private `tmux -L` server that the test kills when it ends, through a new task-scoped `core::tmux::with_tmux_binary` override (#6542).
+- Test binaries no longer reach the operator's tmux server: each one runs on its own default tmux server under `/tmp/tm-tmux-u<uid>/<pid>`, started config-free on the first tmux use and reaped at exit, and the tests that spawn sessions use a per-test private `-L` server. `TmuxDriver::discover` now honours the `with_tmux_binary` test scope (#6542).
+- The reaper for a killed test run's leftover tmux directory acts only on Unix sockets and private directories owned by the current uid, checked without following symlinks and re-checked just before each `kill-server`, so a planted symlink cannot make a test run kill another tmux server (#6542).
+- pm-guard's destructive-delete rule no longer refuses a lone `python3`/`python`/`node`/`ruby` or `cat` fed one quoted here-document whose body mentions `find` or `rm` in text that does not lex. A body a shell runs, a capture re-runs, an expansion reaches or a later segment can use is still judged, and a delimiter the guard cannot read still refuses the whole command (#7190, #9150).
+- `tm session prune-worktrees --merged-prs`, the supervisor's cleanup sweep (through its session store) and `tm pr cleanup` now reclaim a merged, clean agent worktree whose dispatching Claude session no session record proves ended. That covers an owner session `tm` never recorded, and a PM record that still reads live because the PM was relaunched in the same tmux window under a new session id. The proof is Claude Code's own per-process registry (`<config dir>/sessions/<pid>.json`): the session's transcript is on this host, no running process is registered to it, and every running Claude Code process (found by its executable or argv, not its process name) has a registry entry; for a relaunch, the record's tmux window runs a different session. `tm pr cleanup` reads the registry again at every gate, including the one just before removal, and no longer refuses such a tree only because it cannot observe tmux. A running Claude Code process with no registry entry, a process table that cannot be listed, a registry entry the process table cannot settle (including a process that started before its entry's recorded start), a live entry that does not parse, a registry that cannot be read, an unreadable session-link history, a dirty tree, a held harness lock and a process inside the tree still keep it (#7771).
+- `tm session prune-worktrees --merged-prs` now reclaims a merged, clean agent worktree whose dispatching Claude session was replaced by a restart or `/clear`. The owner file names that old Claude session id, which the session record no longer carries, so every such tree was spared with "nothing proves that session ended". The reclaim now reads the session-link history, and an id that history ties only to stored sessions that have since moved on counts as ended. A delegation record still `Running` after its dispatching session ended no longer keeps the tree either. A live harness lock, a process inside the tree, the calling session's own running agent, an unreadable link history, and a link to a session no record names still keep it (#7771).
+- `tm generate capabilities` and `--check` now read and write the asset directory of the checkout the command runs in, found from the current directory's git root. Before, they used the checkout `tm` was built from, so an installed `tm` run in another worktree reported every generated file "(missing)" and its write path dirtied the build worktree. A directory with no resolvable trusty-tools checkout now fails with a path-resolution error naming the path it tried. A drifted file that is absent is reported as "not found at <path>" (#7776).
+- pm-guard no longer refuses `cat > file <<'EOF'` or `cat >> file` writing a quoted here-document whose body carries a word shaped like a secret file name, such as `print(r.key)` or `rows.append({"id": 1})`. The destination is still checked, and a body that `cat` prints, including to a device such as `/dev/stdout`, a shell or interpreter runs, or an unquoted delimiter expands is still scanned (#7833).
+- `tm hook --pm-guard` refuses the PM's `SendMessage` to an agent whose
+  isolated worktree is gone, instead of letting Claude Code resume that agent
+  in the main checkout, where it cannot commit. The refusal names the missing
+  tree and its branch, and says to re-dispatch fresh with
+  `isolation: "worktree"`. A recorded tree that cannot be confirmed to exist
+  is treated as gone. A subagent's own `SendMessage` is never checked.
+  (Refs #8004)
+- The refusal's advice now distinguishes a tree the guard confirmed removed
+  or missing (re-dispatch fresh) from one it could not verify at all — an
+  unreadable or unparsable harness record, or an I/O error while probing the
+  recorded tree — which may still be live, so the advice there is to retry or
+  check `git worktree list` instead. (Refs #8004)
+- pm-guard allows a lone `cp` of a secret-bearing file to a sibling in the same directory whose name is itself in the secret class, such as a dated Terraform state backup beside the state file or `.env` to `.env.bak`. The grant needs the whole command to be that one `cp`, with no wrapper and no path on the program word (`./cp` or `bin/cp` gets no grant), and the source to be a regular file with one link; a destination that already stands as a directory, a symlink or a hard-linked file keeps the refusal. A dated `*.tfstate.*` backup is now in the secret class, so reading it is refused like the state itself, and so is naming it in `terraform state pull > …` (#8093).
+- pm-guard's secret-file rule no longer refuses a `curl` or `wget` of one of Google's OAuth2 `tokeninfo` endpoints, a `cd`/`pushd` into a source directory named `secrets` or `credentials`, or a `git checkout`/`git switch` of an existing branch whose name carries one of those words. Any other URL naming a secret-shaped word, such as a metadata server's `…/token`, is still refused (#8110).
+- `tm pr open --head <branch>` no longer refuses the changelog-fragment gate in a project that has no `scripts/check_changelog_fragment.sh`. The script's absence is now checked before the `--head` check, so such a project skips the gate for any head instead of being told to pass `--docs-only`. Where the script exists, a `--head` that is not the checkout's commit is still refused (#8145).
+- The build-slot notice no longer contradicts the "never override `CARGO_TARGET_DIR`" rule. `tm build-lease`'s `slot N — CARGO_TARGET_DIR=<dir>` notice, `CLAUDE.md` and `docs/reference/agent-cost-controls.md` now state one rule: never override `CARGO_TARGET_DIR` except with the builder slot the hook grants, which the lease sets for the build itself (Refs [#8261](https://github.com/bobmatnyc/trusty-tools/issues/8261)).
+- A build slot whose `tm build-lease` holder was killed with SIGKILL stays taken while the build it started is still running, and frees when that build exits. Cargo releases its `.cargo-lock` before it runs test binaries, so a `cargo test` run orphaned mid-run left its slot free and a second build could take it (#8261).
+- A free slot whose leftover record is corrupt, or whose build pid or start time cannot be read, is reported as broken instead of free. `tm build-lease` skips it and `tm doctor` fails on it, naming the slot file (#8736).
+- A released build slot is free at once, even while the same process is spawning children. The slot lock was only released when the file closed, and a child in the middle of being spawned briefly held a copy of that file (#8736).
+- `tm session start` in a git repository with no GitHub remote now starts Claude Code with the compiled PM instructions through `--append-system-prompt-file`, like every other PM launch mode. Before, its launch spec carried no prompt flag and the session ran on the project `CLAUDE.md` alone. If the prompt file cannot be written, the launch is refused before the session is registered, instead of starting without instructions. `runtime::cli_launch::inplace_spec` now takes the prompt file as a required argument, and the new `model_inject::build_inplace_session_command_with_prompt` is its shell-string twin; `build_inplace_session_command` and `build_inplace_session_command_configured` keep their signatures and still carry no prompt flag (#8286).
+- A daemon-managed spawn, a managed resume, the bare-`tm` in-place relaunch and `tm connect` now refuse to start when the PM system-prompt file cannot be written. Before, each one logged a warning and started Claude Code without `--append-system-prompt-file`. The error names the file and the I/O cause. The new `model_inject::write_prompt_file_in` returns that error as `PromptFileError` (#8286).
+- `tm launch`, the `DaemonClient` launch and `/connect`, `tm session start` and the Architect launch now refuse the same way when the prompt file cannot be written: "could not write the PM system-prompt file <path>: <io error>; refusing to launch <project> without its PM instructions (#8286)". Before, `tm launch` printed "launching without prompt" and the two `DaemonClient` paths started a bare `claude`. The `DaemonClient` `/connect` now writes the prompt before it registers the session, so a refusal leaves nothing registered. `model_inject::write_prompt_file`, which swallowed the error, is removed; `model_inject::write_pm_prompt_file_in` is the shared refusing writer (#8286).
+- `tm run <alias>` and the GUI "New Session" spawn now start Claude Code with `--append-system-prompt-file` and the matching `TRUSTY_MPM_SESSION_PROFILE` stamp. Before, both started a bare `claude` with no PM instructions. Each refuses when the prompt file cannot be written; the GUI spawn refuses before it creates the tmux session, so nothing is registered. The config-apply restarter still relaunches a bare `claude` (#8286).
+- `tm launch` now writes the PM prompt file before `POST /sessions`, so a prompt that cannot be written leaves no session record. `tm session start`'s in-place launch now composes its prompt and its `TRUSTY_MPM_SESSION_PROFILE` stamp from one profile resolution, and its "run `claude` manually" hint names the prompt file (#8286).
+- The PM prompt file is now created with mode 0600 and refuses a file already at its path, instead of being written with the default mode over whatever was there (#8286).
+- `tm session prune-worktrees --merged-prs` previews now finish in bounded
+  time. The daemon stops classifying after 10 minutes, and every `gh`/`git`
+  call a worktree's inspection starts ends at that deadline. A worktree the
+  preview did not reach, or whose inspection the deadline interrupted, is
+  reported as not inspected and kept — never as removable. Before, a preview
+  over ~240 worktrees ran 78 minutes, one bounded call at a time, and the
+  client gave up first (#8301).
+- The preview prints a heartbeat every 30 s while it waits on the daemon, in
+  place of one line and then silence.
+- The reclaim survey lists every pull request in one `gh pr list` call, so a
+  branch outside the old 400-row page, or its review-round stem, no longer
+  costs a `gh` lookup of its own.
+- A `gh` call the survey deadline cuts short no longer counts toward the
+  `gh` polling suspension, and `git merge-base --is-ancestor` in the
+  head-commit match is now bounded like every other sweep git call.
+- The orphan-worktree sweep no longer waits forever on a wedged `git`. Every git call it makes — the registry scan, the `git worktree list` cross-check, the dirty-tree check, the removal and its ref cleanup — now runs under a 60-second ceiling, and a git that outlives it is killed together with its process group and logged. A timed-out check counts as "unknown": the dirty check reports the tree dirty and the `git worktree list` cross-check disagrees, so the worktree is kept, and the sweep moves on to its next candidate (#8306).
+- The shared kill-on-timeout runner reports a child that exits while something it started still holds its output pipe open as an error. It used to return empty output, which a `git status` caller would read as a clean tree (#8306).
+- When a child exits while a process it started still holds its output pipe open, the runner now kills the child's whole process group before reporting the error. It used to leave that process — typically a git transport or credential helper — running forever after every worktree removal, branch deletion or prune that hit the case (#8306).
+- `tm launch`, `tm connect`, the in-place `tm session start`, the TUI's
+  `DaemonClient` launch and connect, and the Architect launch in `tm fleet` now
+  type their launch line through the pane-command length guard
+  (`MAX_PANE_COMMAND_BYTES`, 960 bytes). A line over the limit is refused with
+  an error that names its size, instead of being cut off by the tty with no
+  error. `tm launch`/`tm connect` ask you to report a failed start with
+  `tm doctor` output.
+- `tm launch`, `tm connect`, the in-place `tm session start`, the TUI's
+  `DaemonClient` launch and connect, and the Architect launch in `tm fleet`
+  now start `claude` from a mode-0600 launch spec file, as the daemon's
+  managed launch has since #8233. The pane types only
+  `'<tm>' internal-spawn-disclaimed --launch-spec '<file>'`, so the typed line
+  stays short (it reached 1229 bytes with an OAuth token and a supervisor's
+  divert settings) and `CLAUDE_CODE_OAUTH_TOKEN` no longer appears in the
+  pane's scrollback.
+- Session preparation now advances the DOC-28 catch-up watermark under the framework root it was given (`<root>/projects/<palace>/catchup-state.json`) instead of under the user home. A launch with no home named no longer falls back to the process home, so a test driving session prep under a temporary framework root cannot leave a `projects/<palace>` directory in the operator's `~/.trusty-mpm` (#8311).
+- Session prep writes the #1939 palace alias only to the trusty-memory
+  registry its caller names. `maybe_register_palace_alias` takes the registry
+  dir, and the launch threads it from its host inputs, so a launch with an
+  injected registry no longer registers the alias in the real one. Production
+  launches still use the registry the trusty-memory daemon reads.
+- The supervisor's sweep loop can no longer wedge silently (#8335). The fleet
+  sweep and the post-merge cleanup sweep now run on the blocking pool, so a
+  `gh`, `git` or tmux call that blocks its thread no longer holds the loop.
+  The loop stops waiting after `tick_timeout` (10 minutes by default; an
+  await inside the sweep is dropped at that bound, a blocked call is given
+  500 ms more) and logs at ERROR. A blocked call is not killed: its thread and
+  child process run until the call returns, and later sweeps of that kind are
+  skipped until it does. Each session's `resume_auto` and classification
+  awaits for at most `step_timeout` (2 minutes by default) and is logged with
+  the session id, name and step when it expires.
+- Abandoned sweeps are visible. The published run stats carry
+  `sweeps_abandoned`, `consecutive_sweeps_abandoned` and
+  `cleanup_sweeps_abandoned`, and a snapshot whose last fleet sweep was
+  abandoned reads `stale`, even though the loop still publishes it on time.
+- A watchdog task logs at ERROR when the heartbeat goes stale, and at INFO
+  when it recovers. It skips its verdict after a wall-clock gap of more than
+  twice its period, so waking from system sleep does not log a false ERROR.
+  The loop ending any way other than a shutdown signal (a dropped future or a
+  panic) is logged at ERROR.
+- `tm issue seed-labels`, `tm issue standard` and the other `tm` CLI `gh` calls no longer fail with "Could not resolve to a Repository" in a repository no project entry binds, when the shell exports a `GH_TOKEN` that can see it (#8383). The global `github:` fallback removed the shell's token, so `gh` asked as the global `config_dir`'s account. The global fallback now removes nothing: a global `config_dir` or `host` leaves the shell's token deciding, and a global `token_env` still sets `GH_TOKEN`, as explicit config. A project's own `github:` binding still outranks the shell's token.
+- `session_context_catchup` called with `tmux_window` and the new
+  `tmux_session_created` (tmux `#{session_created}`) resolves the caller's
+  prior snapshot after a relaunch changed the window id. It falls back to the
+  tmux session name, only for snapshots paused after that session was
+  created, and answers `resolved_via: "tmux_session"`. A fresh `tm-<folder>`
+  session reusing the name does not resolve its predecessor's snapshot, and
+  without `tmux_session_created` the session-name route resolves nothing.
+- The catch-up digest no longer marks every snapshot sharing the caller's tmux
+  session name `owned`. The session-name route owns only the one snapshot it
+  resolved.
+- The `tm-session-resume` skill no longer tells a resumed PM to
+  `tmux select-window` the recorded window, which a relaunch has already
+  replaced, and now passes `tmux_session_created`.
+- `tm fleet init` no longer ends with only "Architect set up" when it started the Architect but could not bind it to its `claude`: the summary adds "(NOT bound: anchor writes will be denied; see the warning above)". The command still exits 0 ([#8436](https://github.com/bobmatnyc/trusty-tools/issues/8436)).
+- When `tm pr open` refuses a body for a missing or empty contract heading, it now also names `--minimal` as the full opt-out. The flag drops all nine headings, including `## Gates not run` and `## Partial-red accounting`. The attribution footer, the closing-keyword ban and the changelog gate still apply under it (#8467).
+- Every daemon HTTP route now has a server-side deadline. A request whose handler outlives it gets `504 Gateway Timeout` with a JSON `error` naming the route and deadline, and the handler is abandoned; before, a stalled handler held the connection until the caller gave up, which trusty-console reported as an opaque `502`. Routes default to 25 s. Routes that legitimately run long get a longer deadline set just under the client timeout their callers already use: session lifecycle and git work 90 s, `tm doctor` 115 s, LLM chat 125 s, provisioning and `/rpc` 175 s, and the worktree prune and reconcile survey 1795 s. SSE streams are not cut off, because the deadline bounds the handler and not the streamed body (#8476).
+- `tm hook --pm-guard` no longer refuses a lone `git commit` (including `git commit -F-` fed a heredoc) inside a disposable clone under the session scratchpad. The exemption applies only when the call is a single commit and every commit target is a scratchpad clone, judged by canonical path; a symlink into a real checkout still denies, and a clone commit chained to a main-checkout commit is refused in either order (#8485).
+- The commit rule now judges the first commit aimed at a main checkout, not the first commit segment, so `git -C <worktree> commit && git -C <main> commit -a` is refused as a composed commit instead of being allowed (#8485).
+- `tm hook --pm-guard` builds the shared-tree query's HTTP client on a
+  detached thread instead of inside the async call. The worktree-removal
+  budget's deadline can now fire while that build is still running, and the
+  process can exit with the deny without waiting for the build. A client that
+  cannot be built still denies the removal. The client's 500 ms connect and
+  2 s request timeouts are unchanged (#8492).
+- `tm repair delegation` no longer trusts a caller-written session id. The
+  owning session's right to clear its own live record is granted only over
+  the daemon socket, when the kernel-reported peer pid runs under that
+  session's own `claude` process. The `x-tm-caller-session` header and the
+  socket `caller_session` param are ignored, so a sibling session can no
+  longer impersonate the owner. A caller whose process, ancestry or owner
+  process cannot be read is refused (#8531).
+- The owner's `claude` is no longer found by the session's tmux name or its
+  `pid` field. A sibling could squat the tmux name or set the pid through
+  `PATCH /sessions/{id}/pid`. `tm hook SessionStart` now reaches the daemon
+  over its socket, and the daemon binds the session to the `claude` above the
+  hook process, by pid and start time, once. A session announced over HTTP,
+  or one that already owns delegation records, stays unbound and cannot
+  clear its own live records (#8531).
+- A daemon restart no longer lets a sibling claim a live session's id. The
+  first `SessionStart` of each session id is kept in
+  `~/.trusty-mpm/session-claudes.json` (mode `0600`, replaced atomically), so
+  a later `SessionStart` naming the same id never rebinds it, and the owner is
+  still granted after a restart while its `claude` (same pid and start time)
+  runs. A binding whose `claude` has exited grants nothing. An id whose first
+  `SessionStart` arrived over HTTP or could not be bound is never bound. An
+  unreadable, unparseable or foreign-owned file, or one other users can
+  access, makes the daemon grant no owner until it is fixed or removed
+  (#8531).
+- A repair or `SessionStart` whose peer pid names a process started after
+  the connection was accepted, which is a reused pid, is refused. The accept
+  instant is stamped before the request is read (#8531).
+- `tm repair delegation` now always reaches the daemon over its socket. The
+  HTTP repair routes still end records whose owner is gone, stale or forced,
+  but never establish an owner (#8531).
+- A `SessionStart` that settles an id as unproven while the registry file
+  cannot be written (for example, a full disk) still closes the id to a
+  later announcer for the daemon's lifetime, and the failed save is logged
+  as a warning. A repair refused because the registry is sealed now says so,
+  instead of saying the owner never announced its `claude` (#8531).
+- Known limits. Three cases leave an owner unable to clear its own records
+  until the 6 h stale or owner-gone repair path ends them: sessions already
+  running at the first daemon start on this version, which has no registry
+  file yet; a session whose first `SessionStart` fell back to HTTP, which
+  stays unproven; and a resumed session (`claude --resume <id>`, which tm
+  uses to relaunch), whose id is settled while its earlier `claude` has
+  exited. Separately, a session id whose `SessionStart` never reached the daemon (daemon
+  down at launch, project missing the tm `SessionStart` hook — see the
+  `hooks_missing_tm_group` doctor check — or a session started before the
+  upgrade) can be claimed by a sibling that knows the id and announces it
+  first (#8531).
+- `tm session decommission --force` no longer deletes an untracked `CLAUDE.md`,
+  `.claude/settings.json` or `.claude/settings.json.bak` by path alone. It
+  excuses one only while its bytes still match what the provisioning ledger
+  recorded tm writing. Notes appended to `CLAUDE.md` after launch, a missing
+  or unreadable ledger, or an unreadable file keep the worktree, and the
+  refusal names the file and says nothing was deleted. The plain refusal no
+  longer warns that `--force` discards these files. A workspace launched
+  before the ledger existed (#8663) now needs its files checked by hand
+  before removal.
+- A `CLAUDE.md` or settings file that is a symlink, FIFO or other non-regular
+  file is never excused by `--force` and is no longer opened, so a FIFO can
+  no longer hang decommission.
+- Worktree removal no longer treats a gitignored `.claude/` file whose name
+  merely starts with `settings.json` (for example
+  `.claude/settings.json-notes.md`) as tm's own bookkeeping. Only
+  `settings.json`, `settings.json.bak`, its lock file and its timestamped
+  snapshots are excused; any other such file keeps the worktree.
+- Agent-worktree reaping, `tm pr cleanup` and the shared worktree remover no
+  longer treat a user file whose name only starts with
+  `.claude/settings.local.json` (for example `settings.local.json-notes.md`)
+  as harness output. Before, such a file was excused and then deleted with
+  the tree. Only the exact settings file names, their `.bak`, timestamped
+  snapshots and atomic-write staging names are excused.
+- A `settings.json.tmp.<pid>.<seq>`, `settings.json.bak.<pid>.<seq>` or
+  `settings.json.<pid>.<seq>.tmp` file left by a crashed write no longer keeps
+  a worktree dirty forever.
+- A FIFO or other non-regular file named `CLAUDE.md`, `.claude/settings.json`
+  or `.gitignore` no longer hangs the provisioning-ledger snapshot a launch
+  takes, or the decommission `?? .gitignore` checks. tm checks the file type
+  without blocking and treats such a file as user content.
+- A symlinked untracked `.gitignore` is no longer excused as provisioning
+  output on the strength of its target's lines; the provisioning checks never
+  follow a symlink.
+- `tm doctor --fix --yes` now sets `ProcessType=Interactive` in the
+  `com.trusty.mpm` daemon and `com.trusty.mpm.supervisor` LaunchAgent plists
+  (#8562), which replaces the manual `plutil` step. It replaces an existing
+  value or adds the key, writes atomically, and refuses binary or symlinked
+  plists. It rewrites the plist file only and never runs `launchctl`. launchd
+  applies the new class when it next loads the label: at login, or on
+  `launchctl bootout` then `bootstrap`. A `launchctl kickstart` or a crash
+  respawn does not re-read the plist, and restarting the tm daemon does not
+  reload the supervisor. Each step and the row's findings say this for their
+  own label.
+- The `launchd_process_type` row no longer shows green before launchd has
+  loaded the new class. It does not read the loaded class, because
+  `launchctl print` prints the job's `EnvironmentVariables`, so an
+  `Interactive` plist changed since this boot warns "written; pending reload"
+  and passes after the next boot.
+- A read-only dispatch (`code-critic`, `code-analyzer`, `research`, `security`, `Explore`, `Plan`) may run `cp` and `rm` when every operand is a literal absolute path inside its own session's scratchpad (`…/<session_id>/scratchpad`, the id taken from the hook payload), so a red-on-base tree under `<scratchpad>/base-<sha>/` can be copied and deleted. Refused: another session's scratchpad, a call with no session id, a symlinked `scratchpad` root, a `..`, a symlink out, an operand with a `.git` component in any letter case, as spelled or once resolved through a symlink, a variable, the scratchpad root itself, and `cp -t` (#8571).
+- A tm-managed Claude session no longer inherits `RUSTUP_TOOLCHAIN` from the
+  `tm` that launched it. A `tm` run through a mise shim carried the toolchain
+  mise resolved for its own directory, and rustup ranks that variable above a
+  project's `rust-toolchain.toml`, so agents ran clippy and tests on the wrong
+  toolchain. Every launch path now removes it, as the daemon's already did, and
+  the session's project decides the toolchain. (Refs #8583)
+- `tm pr cleanup` states how each kept worktree's tip relates to the merged
+  head: it is the head, it is an ancestor (every commit on it is in the
+  merge), or it carries N commits the merge did not, which gets a separate
+  WARNING line. An unreadable relation is stated as unknown.
+- `tm issue transition` in a repo with no `issue-state.yaml` now accepts the `status:*` lifecycle that TICKETING.md documents: open → `status:in-progress` → `status:coded` → `status:merged` → `status:tested` → closed. When the target is not a state of the built-in Unicorn Factory model but is a state of that lifecycle, the transition runs against a built-in copy of it, and the model line names it. Closing still requires `--note`. A model read from a file is never replaced (#8609).
+- `tm pr merge` refuses (exit 1), with or without `--auto`, while any check on the PR head has failed, whether or not branch protection requires it, and names each failing check (#8614). It also refuses while any unwaived check is still running, and while no check has registered: a direct merge never defers to GitHub, whose client-side check misses an UNKNOWN state right after a push and is bypassed by an admin merge. Only `--auto` waits for a running required check, or for a required check that has not registered yet, because auto-merge fires once the required checks pass. The required checks are the base branch's `.protection` on `repos/{owner}/{repo}/branches/{branch}`, which answers for an unprotected branch too, plus every `required_status_checks` rule on `repos/{owner}/{repo}/rules/branches/{branch}`. A failed or unparseable read of either refuses the merge.
+- `tm hook --pm-guard` lets a read-only agent (`security`, `research`,
+  `code-critic`, `code-analyzer`, `Explore`, `Plan`) run
+  `GH_CONFIG_DIR=<dir> git ls-remote ...`, so the pre-push base-ref check
+  (#7748) can use the project's gh credential. `<dir>` must be an absolute
+  literal path, and the prefix is admitted only
+  before `git ls-remote`; every other environment prefix, and this one before
+  any other command, stays refused
+  ([#8628](https://github.com/bobmatnyc/trusty-tools/issues/8628)).
+- `tm hook --pm-guard` refuses more commands that print a credential into
+  tool output (#8677). It now refuses `security -i` and `security -p`, which
+  run commands read from stdin, as in
+  `echo 'find-generic-password -w' | security -i`. It refuses `curl -v`,
+  `--trace`, `--trace-ascii` and `--libcurl` when an argument carries a
+  credential. It refuses a credential written to a redirect target chosen at
+  run time (`> "$OUT"`), including a name bound to `$(mktemp)`. It
+  refuses a device path with extra `/`, `.` or `..` segments
+  (`> /dev/./tty`), and it refuses any terminal device. It also refuses
+  `gcloud secrets versions access`, `gh auth token`, `op read`,
+  `aws configure get` for a secret or token key, and
+  `aws configure export-credentials`, unless the value is captured, piped to a
+  consumer, or written to a file.
+- `tm hook --pm-guard` refuses the credential-print bypasses the #8677
+  review found (#8677). It refuses `security -i` behind any wrapper, such as
+  `arch -arm64`, unless the program only reads the word, as `grep` does. It
+  reads a device path such as `/DEV/stdout` in any letter case. It refuses a
+  relative target that may name a device, a relative target after `cd`,
+  `pushd` or `popd`, and a `~+` or `~-` target. It reads a `tee` or `dd of=`
+  output file like a redirect target, so `tee "$OUT"` refuses. It refuses a
+  `gh`, `op`, `aws` or `gcloud` subcommand chosen at run time, also after a
+  global flag and its value (`gh -R owner/repo auth …`) or inside a flag word
+  (`--hostname=$(…)`). To keep a credential in a file, write it to a literal
+  `~/…` path under `umask 077`; a variable target such as `$HOME/…` refuses,
+  and the deny message now says so.
+- `tm issue epic create`, `tm pr open`, `tm issue seed-labels` and
+  `tm issue standard` without `--session` now read the tmux session of the
+  caller's own pane (`tmux display-message -t "$TMUX_PANE"`). They used to get
+  the most recently attached client's session and label work `ws/<other>`.
+  When `$TMUX_PANE` is unset or the lookup fails, `epic create` and `pr open`
+  refuse and ask for `--session`.
+- `tm issue transition`, `current`, `repair` and the epic tracker resolve an issue's state from a label that differs from the model's `label.name` only in case, as GitHub treats label names (#8703). `tm issue seed-labels` counts such a label as present instead of trying to create it again.
+- `DaemonClient::launch_session` (the TUI's `/connect` launch) now checks that
+  the daemon answers `GET /health` before it runs session prep. An unreachable
+  daemon fails the launch with nothing written: no agent deploy, no
+  skill-source refresh, no `~/.claude.json` and no project
+  `.claude/settings.json`. The session is registered only after prep and the
+  `claude` line are ready, so a fatal prep failure no longer leaves a
+  registered session with no tmux session behind it.
+- A clean worktree with a detached HEAD whose content is already on
+  `origin/main` can now be removed. `version-control`'s guarded
+  `git worktree remove` and `tm session prune-worktrees --merged-prs` both
+  run the landed-content check on such a tree once no merged pull request
+  names its commit. Before, both refused it for having no branch. A detached
+  tree holding content `origin/main` lacks is still refused, and the refusal
+  names the first such path. A refresh of `origin` that fails still refuses,
+  and so does a pull request search that does not answer: the sweep now
+  reports that search as a failed lookup.
+- The pm-guard secret rule now refuses `launchctl print`, `launchctl dumpstate`, `pm2 jlist`, `pm2 prettylist`, `pm2 env` and `pm2 describe|show|info`, which print a launchd or pm2 job's environment and its API keys into the transcript. `launchctl list`, `pm2 ls` and `pm2 logs` still run (#8756).
+- The pm-guard process and pod environment-dump rules now read inside command substitutions, so `echo "$(pm2 jlist)"`, `` echo `pm2 jlist` ``, `x=$(launchctl print gui/501/x)`, `diff <(pm2 jlist) f` and `echo "$(docker exec web env)"` are refused, nested and inside `sh -c` too. A substitution that never closes but names a dump is refused. A here-document body that no program runs as code, such as a commit message or PR body naming `pm2 jlist`, no longer counts as a dump (#8756).
+- The pm-guard rules now read the command an `eval` runs, and the command string of `bash -ce "…"`, `bash -c -e "…"` and `sh -c -- "…"`, so `eval "pm2 jlist"`, `eval "launchctl print gui/501/x"` and `eval "docker exec web env"` are refused, alone or inside `$( )`. The forbidden-verb rules read through the same unwrap. `eval "$(ssh-agent -s)"` and `eval "$(direnv export bash)"` still run (#8756).
+- The pm-guard secret rule now refuses three more commands that print another process's environment: `ps` with the BSD `e` or the `-E` option (`ps eww`, `ps auxe`, `ps -Eww`) and a `/proc/<pid>/environ` read; `pm2 get` and `pm2 conf`, which print pm2's module config; and an `ssh` remote command that prints the remote host's environment (`ssh host env`, `ssh host printenv`, `ssh host 'cat /proc/1/environ'`, `ssh host 'pm2 jlist'`). Each is refused bare and through `$( )`, `eval` and `sh -c`. `ps aux`, `ps -ef`, `ps -o pid,command`, `pm2 ls`, `pm2 logs <app>` and `ssh host uptime` still run (#8756).
+- `tm session launch` no longer edits a project's tracked `.gitignore`, so
+  `git status` stays clean after a launch. The harness-scaffolding paths
+  (`.claude/agents/`, generated output styles, settings lock files,
+  `.trusty-mpm/sessions/` and the rest) now go to the repository's shared
+  `.git/info/exclude`. A managed block already in a `.gitignore` is left as
+  it is. The launch no longer reads `.gitignore`, so a FIFO there cannot
+  block this step. The `scaffold_tracking` doctor remediation now says the
+  paths stay excluded through `.git/info/exclude`.
+  `core::scaffold_gitignore::ensure_scaffold_gitignored` and its block
+  refresh are removed, so no code path rewrites a tracked `.gitignore`: the
+  refresh used to drop operator lines inside the managed block and convert
+  CRLF line endings to LF.
+- The credential-print check in `tm hook --pm-guard` no longer rescans a
+  command that binds a credential to a variable unless the first pass judged
+  some text before that binding could reach it (a loop, a function, a later
+  substitution). A command such as `T=$(gcloud auth print-access-token); …`
+  is scanned once again, and each pass that does run gets its own work
+  budget, so a large command is refused at the same size as before the
+  rescan was added. A command that would need more than four passes is
+  refused.
+- The daemon `tm daemon start` and the guided-launch autostart spawn now starts in its own session, so Ctrl-C to `tm`'s foreground group or a group kill aimed at `tm` no longer kills it (#8783).
+- Builder-slot seeding no longer deletes a slot directory that a running cargo build is using. The seed checks the cargo `flock`s in the slot (`<profile>/.cargo-lock` and the newer build-dir locks), before the clone and again before the replace. It refuses while any lock is held and leaves the slot as it was. A lock file left behind by a finished build does not block the seed (#8794).
+- A failed seed no longer writes a marker that reads as seeded. The marker now carries a `status: seeded` line and is written only on success. A failed clone or replace leaves the slot unseeded for the next attempt and records the error in `.slot-<n>.seed-failed` beside the slot. A pre-#8794 marker holding failure text, such as `ColdDirectory("could not replace ...")`, is treated as unseeded and is replaced by the next successful seed (#8794).
+- The auto-resume breaker tests no longer write `/tmp/.trusty-mpm/scrollback.txt`, and the ancestor `CLAUDE.md` tests no longer resolve their project root to a `/tmp` that holds a `.trusty-mpm/` directory, so `cargo test -p trusty-mpm` stays green when run twice on one Linux host (Refs [#8838](https://github.com/bobmatnyc/trusty-tools/pull/8838)).
+- `version-control`'s guarded `git worktree remove` no longer refuses a clean worktree left on an earlier review round, whose HEAD is an ancestor of its merged pull request's head (the last round landed on a renamed `-rN` branch). The guard now admits it when HEAD is that head or one of its ancestors and the pull request's merge commit is on the refreshed `origin` base. A commit that pull request never carried, a dirty tree, an unrefreshable `origin`, a missing or off-base merge commit, and any failed ancestry probe still refuse, and the refusal says which (#8849).
+- The `a_held_cargo_lock_marks_the_directory_busy` test no longer fails under the full suite. It released its `.cargo-lock` flock by closing the file, and a child that another test thread was spawning still held a copy of the descriptor, so the lock read as held. The test now releases with `LOCK_UN`, as the build slots do, and holds a second copy of the descriptor across the release so it always covers that case (#8850).
+- The statusline account-segment test no longer fails under a loaded test run.
+  The account probe now takes its time budget and reader as parameters, so the
+  test waits for the config read instead of racing the live 100 ms budget. The
+  timeout fallback has its own deterministic test. The live statusline still
+  gives up on the account read after 100 ms.
+- pm-guard now refuses a `gh api` DELETE of a GitHub secret (`…/secrets/NAME` of a repo, org, user or environment, including Actions, Dependabot and Codespaces secrets) in every method spelling: `-X DELETE`, `-XDELETE`, `--method DELETE`, `--method=DELETE`, any case, before or after the endpoint, and inside `sh -c`, `ssh host '…'`, `eval`, a substitution or a here-document run as code. A `gh api` DELETE whose endpoint the guard cannot read literally (a variable such as `"$EP"` or `repos/$OWNER/…`, `$'…'`, a brace or glob, or an endpoint fed in by `xargs`) is refused whether or not the command names `secrets`, as is one run through a program or subcommand word the shell rewrites (`$G api`, `g[h] api`, `gh $A`, `gh {api,}`) or a shell named by a variable (`$S -c '…'`); write the endpoint out literally. The guard also refuses `gh secret delete` (and its `remove` alias), a `gh alias set` whose expansion runs an `api` DELETE or `secret delete`, `gh alias import`, a `curl -X DELETE`/`--request DELETE` of a `secrets` URL, and any `gh api`, `gh secret`, `gh alias` or `curl` call it cannot parse. The GET that lists secret names (#8869), a DELETE of a literal non-secret endpoint, and `gh api` GETs with a variable endpoint are unchanged (#8875).
+- The pm-guard brace expander now applies its reading cap to comma groups too, so a word of thirty `{a,b}` groups is denied at once instead of expanding 2^30 words and running the hook past its timeout (#8878).
+- The secret-read guard now denies a word in an inline program or here-document body that the brace expander cannot resolve (past its cap, or an unbalanced `${`), where it used to allow it (#8878).
+- A copy or rename of a secret file (`git mv terraform.tfvars 'x{.rs'`) is now denied when the destination is a brace word the expander cannot resolve; that destination used to count as still unreadable and the rename was allowed (#8878).
+- `tm hook --pm-guard` now judges a script a Bash command runs by the
+  script's body: `bash <file>`, `sh`/`zsh`/`source`, `python3 <file>`,
+  `node`/`ruby`/`perl <file>`, and `./<file>` (shebang scripts); scripts a
+  shell script calls are followed to the depth bound. A script fed on an
+  interpreter's stdin is not judged. A body that reads a Keychain entry, prints a token or names a
+  secret-bearing file is refused exactly as the same read written inline
+  (#8879, owner rulings 263 and 268). The guard reads at most 256 KiB of a
+  body and fails closed: a script it cannot read in full (permission-denied,
+  a symlink, over the bound, not UTF-8 text), an interpreter's script named
+  through a variable, substitution or glob, and a missing script that nothing
+  else in the command names are all refused. A compiled executable is not
+  inspected. The documented residuals: a script that an earlier stage of the
+  same command writes, scripts a script runs or sources through a variable,
+  and a secret file a body names only through a bracket or brace shape.
+- The credential-print refusal now tells the caller to stop and report to
+  the Architect, names the script-body check, and no longer suggests how to
+  consume the value in another command.
+- `tm hook --pm-guard`'s Architect pane floor judges a nested `tmux` with no
+  `-L`/`-S` in keys that `send-keys` types on another server against that
+  server and the default one, because the pane's process may lack `TMUX`. An
+  omitted target on a server other than the one the keys go to is a pane tmux
+  picks, and it denies where the Architect is (#8902).
+- The floor counts zsh's `${TMUX::=…}`, a quote-split name
+  (`export TM''UX=…`), and an assignment through a name it cannot read
+  (`${(P)n::=…}`, `${!n:=…}`, `export "$n=…"`, `unset "$n"`,
+  `printf -v "$n"`, `eval "$x"`) as a `TMUX` change, so the tmux command
+  denies while an Architect is live (#8902).
+- The floor reads a deeply nested `${a${a…}}` in linear time. It rescanned
+  each `${` to its end, so a 100,000-deep expansion held the hook for minutes,
+  past the hook timeout (#8902).
+- `tm sessions new --account X`, `tm sessions start --account X` and `tm launch --account X` now run the session's `gh` and HTTPS git as X. Before, the flag was parsed and dropped, and the session ran as the machine's active gh account (#8914).
+- tm now writes the account's proven token into its own `~/.trusty-mpm/gh-accounts/<login>/hosts.yml` (mode 0600), taken from `gh auth token -u X` against your default gh config or from stdin with the new `--account-token-stdin` flag, and proves it with `GET /user` first. tm no longer suggests `gh auth login`, which moves the machine-wide keyring's active account (#8914).
+- Every session whose project pins a gh config dir, tm's own or one set with `--gh-config-dir`, now gets that account's proven token, `GH_CONFIG_DIR` and a git credential helper pin. When no token is proven, the session gets a token that authenticates as nobody. Before, `GH_CONFIG_DIR` alone resolved the keyring's active account (#8914).
+- Registry records that pin different accounts for one repository, and a registry that cannot be read, now give the session a token that authenticates as nobody instead of the active account (#8914).
+- An `--account` that has no proven credential, an unreadable per-account dir, an unresolved SSH host alias, or a malformed `hosts.yml` or `config.yml` now refuses the command. `--account` prints each project it re-pins with the account it replaces, and says when git uses SSH and so is not pinned (#8914).
+- `--account` on a `tm sessions` verb that spawns nothing is refused rather than ignored (#8914).
+- `tm hook --pm-guard` refuses a file read whose filename comes from a
+  command substitution, such as `awk … $(ls -a | grep -E '^\.env\.local$')`
+  or `` cat `ls | grep local` ``, when the guard cannot work out the name.
+  A substitution with fixed output (`$(echo name)`, arithmetic, `$(pwd)`,
+  `$(git rev-parse --show-toplevel)`) is judged on that output. A
+  substitution outside a file operand, such as a commit message or a search
+  pattern, is not affected.
+- `tm hook --pm-guard` no longer reads a command substitution that opens
+  with a subshell, such as `$( (cmd) )` or `$((cmd) )`, as arithmetic. The
+  computed-filename rule and the credential-print rule now treat `$((` as
+  arithmetic only when the shell does, so such a substitution is judged as
+  the command it runs.
+- A managed session whose `origin` remote git cannot read now gets the nobody-token for gh. Before, it spawned with no gh pin and ran gh as the machine's active account (#8934).
+- Stopping, deleting, pruning or decommissioning a stale session record no
+  longer kills a live tmux session that has since taken its name. The
+  teardown now signals and kills only a session that still holds the record's
+  own tmux pane (`%N` id), and signals that pane's `claude`, not the
+  session's active pane — the Ctrl-C fallback, used when no `claude` pid is
+  found, goes to that pane too. When another session holds the name, the
+  record moves and nothing is killed. `tm session stop`, `tm session delete`
+  and the `tm ls` delete say "record only" and name the session they left
+  running.
+- When tmux cannot prove whose the live session is — the record has no pane
+  id, or the pane list or the session probe fails — decommission now refuses
+  and leaves the workspace and the record as they were, and the idle reaper
+  skips the session instead of marking it stopped. A plain stop still moves
+  the record only. The refusal is an HTTP 409 whose message gives the reason,
+  says whether the record's pane was already signalled, and names the ways
+  out: end the session yourself and rerun, or `tm session delete --force <id>`
+  to drop the record only.
+- A stop no longer snapshots a tmux session it has not proved is the
+  record's own: the scrollback is read from the record's own pane, and a
+  session that took the name is never written into the stale record's
+  workspace.
+- `tm session delete` of a stale record whose name a different live session
+  now uses no longer needs `--force`; a delete still never touches tmux.
+  `tm session delete --force` now succeeds when tmux is absent or its session
+  probe fails, and says so.
+- The MCP `session_stop` tool and the `sm.sessions.stop` stdio method now
+  return `runtime_left_running`: the reason a live session was left running,
+  or `null`.
+- `tm fleet status`, run from inside the bound Architect's own session, now
+  reports `ok binding` and `ok this_session` instead of `UNBOUND`. The
+  `claude` lookup under a tmux pane reads its child list from the process
+  table instead of `pgrep -P`, which on macOS drops its own ancestors. The
+  `this_session` check walks up to three process hops to the `claude` above
+  the Bash tool's shell; the pm-guard hook keeps its one-hop walk.
+- A heavy build after a `cd` no longer builds another checkout when Claude
+  Code drops the `cd`. The `tm build-lease` rewrite now carries the
+  directory into the lease. A `cd /abs/path && cargo …` chain with nothing
+  after the build gets `--chdir <dir>`, so the build runs in the `cd`'s
+  directory wherever the shell started. Any other `cd` that can be resolved,
+  such as a relative one or a chain that continues after the build (`&& git
+  commit`), gets `--expect-cwd <dir>`, and the lease refuses with exit 78
+  when it does not stand there, so the rest of the chain stops too. A build
+  after a `cd` the hook cannot resolve (`cd "$VAR"`, `cd -`, `cd ''`, a bare
+  `pushd`) is refused with a message advising `tm build-lease --chdir
+  <dir> -- <command>`. A quoted `"~/x"` is a literal directory, not the
+  home directory.
+- A forged `SessionEnd` no longer releases another session's live delegation
+  records. The daemon stales a session's live records on `SessionEnd` only
+  when the event arrives over the daemon socket from under that session's own
+  bound `claude`; an HTTP `SessionEnd`, or one from any other process, stales
+  nothing. `tm hook SessionEnd` now reaches the daemon over its socket. A
+  session that was never bound, or was resumed with `claude --resume`, keeps
+  its records until the 6 h stale path or `tm repair delegation` ends them
+  (#8980).
+- `PATCH /sessions/{id}/pid` and `mpm.sessions.set_pid` refuse a session that
+  a `SessionStart` announced or that owns delegation records. A dead pid
+  written there made the session read as gone, so a sibling could end its
+  live records. A launcher's own session still accepts its pid. While the
+  session-claude registry is sealed, every pid is refused and the error
+  names the seal (#8980).
+- The session reaper no longer removes a session that a `SessionStart`
+  announced, or stales its live delegations. Such a record's tmux name is
+  never live, so a forged `SessionStart`, or a `compact`/`clear`/`resume`
+  one, used to stale the session's own agents within a minute. While the
+  session-claude registry is sealed the reaper skips every session (#8980).
+- A session the daemon relaunches with `claude --resume <id>` (an operator
+  resume or an automatic relaunch) can again clear its own delegation
+  records. The daemon records the pane and time before it sends the launch
+  line, and drops that record when the launch fails. When the resumed
+  `claude` announces the id over the daemon socket, the id is rebound to it,
+  but only if it is the `claude` running in the record's own pane and it
+  started after the resume. A sibling's `claude` announcing the same id is
+  not bound. A record with no stored pane, or a pane lookup that fails,
+  rebinds nothing; the daemon never looks in the session's active pane.
+  A resume grant older than five reap intervals (300 s) is dropped and
+  rebinds nothing.
+- `disk_survey` no longer answers a fleet too large for its 55-second clamp
+  with the same partial pass on every call. A budgeted pass that runs out of
+  budget starts one unbudgeted background pass; later budgeted calls get the
+  last complete pass at once, with per-worktree byte counts. A call that
+  omits `budget_seconds` always runs a live, unbounded survey. Every response
+  carries `freshness` (`live`, `cached` or `partial`), `age_seconds` and
+  `background_pass`, and a budgeted pass waits for the shared size index no
+  longer than the time it has left.
+- `tm fleet status`, `tm fleet init` and `tm env` without `--dir` now use the
+  Architect recorded in `[supervisor] projects` of `~/.trusty-mpm/config.toml`,
+  and fall back to `~/trusty-mpm-projects/architect` only when none is
+  recorded. Two recorded Architects are an error that asks for `--dir`. The
+  "incomplete" hint now names the checked directory:
+  `tm fleet init --dir <dir>`.
+- `tm hook --pm-guard` no longer refuses `gh issue list --search ".env.*"` or
+  `gh pr list --search …`: a search string reads no file. A `for` loop whose
+  words reach only `echo` and that `--search` value is allowed too; any other
+  use of the loop variable still refuses.
+- An unreadable command that spells `curl` from variables or a glob
+  (`$C$R -X DELETE …/secrets/X`) is now refused as a GitHub secret DELETE. The
+  #8875 rule recognised only a literal `curl` there; this gap predates #9001.
+- Two #9001 false positives are not fixed here and still refuse. A SQL
+  wildcard such as `` `db`.* `` in a `mysql -e` statement (case 2) folds into
+  #9006. A Python here-document refused as a secret DELETE (case 4) is split
+  out to #9006 too.
+- A command with a `$'…'` quote and no tmux is no longer refused as an
+  unresolvable tmux command. It is still refused, and the refusal now names the
+  `$'…'` token it cannot decode.
+- The read-only dispatch refusal now names the remedy for a path held in a
+  shell variable: write the path out literally.
+- `tm hook --pm-guard` refuses a tmux `send-keys`, `kill-*`, `respawn-*` or other
+  pane-changing command whose written `-t`/`-s` target does not resolve exactly
+  to an existing session, window or pane. tmux matches an unknown session name
+  by prefix, so `-t nosuch:0` could reach a live `nosuch-…` session. A
+  prefix-only name, a missing target, a target the shell expands, and a server
+  the guard cannot list (no tmux, a query error, an unreadable socket, a
+  listing that takes over 2 seconds) are refused, naming the target.
+  `TRUSTY_MPM_PM_UNRESTRICTED` and `TRUSTY_MPM_DISABLE_HOOKS` do not lift this.
+  Read verbs such as `capture-pane`, `has-session` and `list-panes` are not
+  affected. A command with no `-t` is left to the Architect pane floor.
+- The same floor refuses a tmux command it cannot read, naming the token or
+  the reason: a `TMUX`/`TMUX_TMPDIR` change, `sudo`, `env -i`, `exec -c`, a
+  relative `-S` socket, an option it does not know, a word the shell expands
+  before `--` ends the options (`$F -t x`, `"$@"`), and a program name the
+  shell expands (`$T`, `${T}ux`, `$a$b`) when the command names tmux or a
+  deny verb, or when an argument in a verb position is a deny verb, its alias
+  or a unique prefix of it. Also refused: an `xargs` whose argv holds `tmux`
+  (`xargs tmux send-keys`); an `xargs` with a replacement string (`-I`, `-J`,
+  `-i`, `--replace`) in a command naming tmux, since a stdin word can become
+  the program (`echo tmux | xargs -I{} env {} kill-server`); `find -exec tmux
+  … +`; and a shell that reads program text on stdin (`bash <<<`, `| sh`) in a
+  command naming tmux in any letter case. A shell given a script file
+  (`cat log | bash scripts/report.sh tmux`) reads stdin as data and passes.
+- A tmux command after shell grammar is now found: `{ …; }`, `( … )`, `!`,
+  `if`/`then`/`else`, `for`/`while`/`until … do`, `case` arms including
+  `(pat)`, function bodies (`f() {`, `f(){`, `f (){`), `time { …; }`, and
+  `coproc`. `kill-session -a -t X` now checks `X`. A pane-position word
+  (`top`, `bottom-left`, …) is no exact target for a pane verb.
+- Prose in a here-document data body (`cat <<'EOF' > notes.md`) and a program
+  path such as `~/.cargo/bin/tm` are no longer refused by this floor. A body
+  is still read when the command names an evaluator or runs a program word
+  the shell expands (`read -d '' C <<EOF … eval "$C"`, `while read a b; do
+  $a $b; done <<EOF`).
+- Not covered: a fully dynamic program word with only dynamic arguments and
+  no tmux text (`$P "$A"`), tmux reached through a runner the guard does not
+  unwrap (`watch`, `script`, `parallel`), a script file, or an interpreter
+  (`python3 -c`).
+- A session record whose tmux pane id was captured before a tmux server
+  restart no longer owns a live session that reuses its name and pane id.
+  Records now store the tmux server instance (`<pid>:<start_time>`) with the
+  pane id, and stop, delete and decommission leave a session on another server
+  running (#9004).
+- Limit: a session that was live when this version was installed has no
+  server identity, so tm cannot kill its tmux session. Stop, delete and
+  decommission leave it running. Resuming it while its tmux session is still
+  live re-attaches to the pane and does not record the server. The record gets
+  a server identity only after its tmux session ends and a resume creates a
+  new one (#9004).
+- The stop and decommission teardown now kills the record's tmux session by
+  its `$N` session id, read in the post-grace ownership re-check, instead of
+  by its reusable name (#9004).
+- A pane id capture that cannot read the pane's server, or that reads a pane
+  now in another session, logs a warning and stores no server identity
+  (#9004).
+- pm-guard's `gh api` secret-DELETE rule no longer reads a glob-only word that cannot match `gh`, `api` or `curl` — a Python subscript pair such as `d[k] x[0]` in a here-document body — as a rewritten program name. An expansion, a backtick, a brace and a glob that can spell the name still count (#9006).
+- pm-guard's secret-file rule reads a `mysql`/`mariadb` `-e`/`--execute` statement as SQL, so `` `db`.* `` is no `.env.*` glob, unless the statement carries a backslash or a `system`, `pager` or `edit` client command that reaches a shell (#9006).
+- The session reaper now removes a `SessionStart`-announced session whose
+  bound `claude` has exited, and stales its live delegations. Before, such a
+  session stayed Active for the daemon's lifetime. A `claude` counts as gone
+  only on proof: no process holds its pid, or the process now holding it
+  started at another time and is not a `claude`. Just before it removes the
+  session, the reaper checks again, and keeps the session when the id was
+  rebound since the probe, the daemon started resuming it within the last
+  five reap intervals (300 s), a hook event for it arrived within the last
+  reap interval (60 s), or a later `claude` that announced the id over the
+  daemon socket still runs. A resume that never completed therefore holds
+  the session for 300 s at most. A session whose process lookup cannot
+  answer is also kept. A later announcer is held in memory only, so after a
+  daemon restart an idle `claude --resume <id>` run by hand is kept only by
+  its hook events.
+- Bare `tm` no longer reads a slow daemon as a down one. A timed-out session
+  listing, an HTTP error reply, or a refused connection while `daemon.lock`
+  names a live pid for that address now stops with a "not responding" error.
+  It no longer auto-starts a second daemon or redirects the pane to a managed
+  clone. Only a refused connection with no live pid starts the daemon, and
+  only a down daemon that cannot be started takes the offline fallback
+  (#9034).
+- Guided autostart no longer deletes `~/.trusty-mpm/daemon.lock` while the
+  launchd service is loaded or the lock's pid is alive. A `launchctl
+  bootstrap` that fails with exit 5 on a loaded service now counts as already
+  loaded, so autostart waits for that daemon instead of spawning another
+  (#9034).
+- Guided autostart reads the `state =` line of `launchctl print`. A loaded
+  launchd job that is not running (for example after `tm stop`) is now
+  started with `launchctl kickstart` instead of being awaited as if it were
+  running. The stop message names the host's restart command (#9034).
+- Daemon process discovery now reads each process's command line, so
+  `tm stop` finds a running daemon again. Autostart deletes `daemon.lock`
+  only when the pid it names is dead. A live pid that is not confirmed as a
+  tm daemon (another program, or a command line `tm` cannot read) is never
+  deleted: bare `tm` stops and tells you to remove the lock if no tm daemon
+  is running, then run `tm start`. A spawned daemon that is still starting
+  when the 5 s health poll ends is reported as slow, not as down (#9034).
+- `tm stop` and the autostart lock check count a process as the daemon only
+  when `daemon` is its subcommand, so `tm build-lease -- cargo test daemon`
+  or `tm doctor daemon` is never stopped as a daemon. A lock pid owned by
+  another user (`kill` answers EPERM) now counts as alive, so its lock is
+  kept instead of deleted (#9034).
+- `tm content update` finds the newest `content-v*` release with one unpaged `git/matching-refs/tags/content-v` request and one `releases/tags/<tag>` read: 2 API requests however many releases the repository has. Before, it paged the whole `/releases` listing (about 6.4 MB over 4 requests) against GitHub's 60 requests/hour unauthenticated limit. It now sends `Authorization: Bearer <token>` on API calls when `GITHUB_TOKEN` or `GH_TOKEN` is set; an empty or whitespace-only `GITHUB_TOKEN` falls through to `GH_TOKEN`, and the token is never logged or put in an error. A non-2xx answer, a tag listing over 4 MiB, an empty tag list, a `content-v*` tag that is not a version, or a newest tag whose release is a draft is an error, never "no update". `--content-ref` is unchanged.
+- `tm hook --pm-guard` judges a symlinked script by the file it points to, so
+  a `node_modules/.bin` or Homebrew shim to a clean script is no longer
+  refused. A symlink loop still refuses.
+- A script run inside another script is now resolved as strictly as one the
+  command runs directly: a nested script named through a variable or a
+  missing nested script refuses, and a chain of scripts past the depth bound
+  refuses instead of allowing. A script that locates a helper through its own
+  path (`$(dirname "${BASH_SOURCE[0]}")`, `$0`, a variable set once from
+  them) has that helper judged.
+- `tm build-lease` no longer stalls on a pool slot with a large `deps` directory. The stale-slot guard lists only the slot root and probes `<profile>/.cargo-lock`, `<triple>/<profile>/.cargo-lock` and the matching `.fingerprint` directories by direct path; it never reads `deps`, `build` or `incremental`. Before, it read every directory three levels deep, and a slot whose `debug/deps` held 458,794 entries kept a lease waiting past its 90 s limit while the readdir ran for 30+ minutes.
+- The guard now fails closed: a slot root it cannot list, or a `.cargo-lock` it cannot stat or open, marks the slot busy, and an error on a single listing entry counts as busy rather than as an absent slot. Before, a lock file behind an unreadable profile directory read as absent and the slot as free.
+- The checkout-change invalidation also fails closed: when the `.fingerprint` directories cannot be enumerated it returns an error and leaves the last-checkout marker unchanged, so the next holder repeats the clear instead of building on stale fingerprints.
+- The Architect-pane tmux floor in `tm hook --pm-guard` now reads tmux run
+  through `watch` and `script`, and refuses tmux reached through GNU
+  `parallel` or through `xargs` into a wrapper with no program of its own
+  (`xargs env`, `xargs sudo`, `xargs timeout 5`).
+- Unparseable text naming `TMUX` in any case is treated as tmux, and a shell,
+  Python, Node or Ruby option the guard does not know no longer makes the
+  next word read as a script, so text piped into that program is judged.
+- In-project cold start (`tm <owner>/<repo>`) no longer refuses an existing
+  checkout whose origin uses an `~/.ssh/config` host alias. An origin such as
+  `git@github-duetto:duettoresearch/APEX.git`, with `Host github-duetto`
+  mapped to `HostName github.com`, now matches
+  `https://github.com/duettoresearch/apex` instead of failing with
+  `RemoteMismatch`. A host with no alias entry, or an ssh config that cannot
+  be read, compares exactly as before
+  ([#9089](https://github.com/bobmatnyc/trusty-tools/issues/9089)).
+- `tm projects config <p> set gh-user <login>` no longer refuses a logged-in
+  account when the daemon runs under launchd. launchd passes no
+  `GH_CONFIG_DIR`, so the daemon's own `gh auth status` found no account when
+  the operator keeps gh's config in a non-default dir. The check now also asks
+  gh in the project's pinned `github.config_dir` and in tm's per-account dir
+  (`~/.trusty-mpm/gh-accounts/<login>`, the dir the `--account` clone uses).
+- A refused `gh_user` now says which of two things happened: "could not run
+  gh: <reason>" (HTTP 503) or "gh reports no logged-in account" (HTTP 400). A
+  `gh auth status` that fails without naming an account, such as a broken gh
+  config, is no longer read as "no account"; its reason names the exit status
+  only, never gh's own output. Neither case stores the login.
+- `~/.trusty-mpm/config.toml` no longer warns `ignoring 1 unrecognised key(s):
+  supervisor.session`. `tm fleet init --session` writes that key, so the
+  unknown-key report now exempts it. Each remaining unrecognised-key warning
+  prints once per file per process, not once per config load (about twenty
+  times per `tm doctor` run before).
+- A session record whose tmux pane id was captured before a tmux server
+  restart no longer sends keys to, reads, or resumes into the live pane that
+  reuses its id. `tm session send`, inject, answer, observe, the activity and
+  idle-reaper captures, and resume now act on a pane only when its tmux
+  server matches the one the record captured it on; any other answer refuses
+  and touches no pane (#9101).
+- A record with no pane id, or with no tmux server identity (written before
+  #9004), now refuses those operations instead of falling back to the tmux
+  session's active pane. The refusal names the recovery: if the session is
+  the record's, end it with `tmux kill-session -t '=<name>'`, then run
+  `tm session resume <id>`, which creates a new session and captures its
+  pane with the server (#9101).
+- The runtime-exit reap no longer binds a record with no pane id to the
+  server of whatever session holds its name. It backfills the pane id only,
+  so the record stays unproven and the auto-resume that follows refuses
+  instead of typing `claude --resume` into that session (#9101).
+- Daemon shutdown now stops only managed sessions it proves it owns: it
+  signals each owned pane, waits the grace window, re-checks ownership and
+  kills by `$N` session id. Any other session is skipped and logged, and
+  legacy-registry sessions, which carry only a name, are left running
+  (#9101).
+- `tm session resume` no longer kills a session by name before it recreates
+  the pane, and its create no longer attaches to a session that took the
+  name in between: the create is exclusive and refuses a taken name (#9101).
+- `POST /claude-config/restart`, the `--task` injection readiness poll, and
+  both resume spawns (`tm session resume` and the auto-resume relaunch) now
+  act on a record's pane only once it is proven on the live tmux server. Any
+  other answer refuses and touches no pane; the restart route answers 409
+  (#9101).
+- `tm session send`'s submit check reads back the pane the send was proven
+  for, instead of looking the pane up again (#9101).
+- `tm session rename` renames only the record when the live session with its
+  name is on a restarted tmux server, and refuses when ownership cannot be
+  proved, including for a record with no pane id. A live rename proves
+  ownership before it takes the store lock and renames the session by its
+  `$N` id. Two renames of one record run one after the other, so tmux and
+  the record always end under the same name (#9101).
+- A resume refused because the session's name is taken now answers 409
+  instead of 500 (#9101).
+- The bare-`tm` in-place relaunch no longer reactivates a stale record whose
+  pane id the current pane reuses after a tmux server restart; the daemon's
+  reactivate answers 409 (#9101).
+- The bug-report token tests, the activity classifier's credential tests,
+  the manager inference tests and the LLM overseer tests run `#[serial]`
+  inside the shared credential sandbox, so none reads a real credential and
+  none prints a resolved token on failure. A new test-code scan fails CI on
+  any credential test in the workspace that is not `#[serial]` and sandboxed,
+  including one that clears a credential, or loads `.env.local`, through a
+  helper in the same file or in another file. Known exceptions are listed by
+  test name, so the list only shrinks. A `#[path]` attribute quoted in a
+  comment no longer maps a test file onto itself. The scan runs on every pull request in
+  the required `Capabilities drift` job (#9123).
+- The daemon no longer logs a remote URL's embedded credentials. The managed
+  base clone logged `remote.origin.url` verbatim, so an origin of
+  `https://<user>:<token>@github.com/…` wrote the token to `trusty-mpm.log`.
+  One helper, `core::remote_url_redact::redact_url`, now replaces the userinfo
+  with `***` — including a password holding a raw `/`, `?` or `#` — and masks
+  the value of
+  `access_token`, `private_token`, `oauth_token` and `token` query keys. It
+  runs at the clone log line, the clone's git stderr, the start-point fetch
+  error, the unparseable remote warning, the cold-start remote-mismatch
+  errors, the local-spawn refusals, the gh-account spawn warnings and
+  account-pin refusal, the reclaim and PR-cleanup origin refusals, both
+  project-registry auto-registration log lines, the catalog-sync log lines,
+  the standalone clone error, the non-local `repo_url` refusal, the
+  unregistered-project 404 (whose `Debug` output is redacted too), and `tm`'s clone, fallback, launch,
+  account-preflight and `--account` messages (#9124).
+- `tm hook --pm-guard` now refuses a `git commit` aimed at a main checkout
+  when it is wrapped in a `( … )` subshell, a `{ …; }` brace group, a nested
+  group, a `sh -c`/`bash -c` string holding a group, or behind a reserved word
+  such as `then`, `do`, `!` or `coproc` (with or without a coproc NAME). These
+  forms were allowed because the guard read `(git`, `{` or `coproc` as the
+  program. The destructive-git and HEAD-move rules read the same walker, so a
+  grouped `git reset --hard` is refused too.
+- A `cd` inside a subshell, a coproc or a `sh -c`/`env -S`/`flock -c`/`xargs`
+  string no longer moves the directory the guard resolves for the commands
+  after it, so `sh -c 'cd <worktree>' && git commit -a` in a main checkout is
+  refused. A `cd` inside `eval` does persist, as it does in bash, so
+  `eval "cd <main checkout>"; git commit` from a worktree is refused. Behind a
+  process wrapper such as `env` or `nohup`, `eval` runs in a child process, so
+  `env eval "cd <worktree>"; git commit -a` in a main checkout is refused.
+  Only assignments or a bare `builtin` keep `eval` in the current shell. Behind
+  `command`, `command -p`, `builtin --`, `noglob` or `nocorrect`, bash and zsh
+  disagree on where `eval` runs, so a `git commit` or destructive git command
+  in that command is refused as one the guard cannot place.
+- A `git commit` the guard cannot place is refused from any directory: inside
+  grouping that does not balance (a stray `)` in a comment counts), a
+  paren-form `case` arm, a function definition, or a coproc. The check reads
+  `g''it`, `c''ommit` and `co\mmit` as `git` and `commit`, and a brace
+  expansion such as `{git,-C,<dir>,commit}` as its words. A destructive git
+  command (`reset --hard`, `clean -f`, `checkout -- .`, …) in such a command is
+  refused the same way. Grouped commits in
+  a worktree or a scratchpad clone, quoted commit messages containing
+  parentheses, and grouped reads such as `(git status)` stay allowed.
+- The HEAD-switch, main-checkout HEAD-move, linked-worktree HEAD-move and
+  worktree-removal rules refuse a command the guard cannot place, as the
+  commit and destructive rules do. From a dirty main checkout,
+  `command -p eval "cd <worktree>"; git stash` (or `git checkout x`) was
+  judged in the worktree and allowed, while zsh never runs that `cd`.
+- A command whose program word is a brace expansion, such as
+  `{git,-C,<dir>,commit}`, is refused as unclassifiable, like `$'…'` quoting.
+- A source-scan test now fails CI when a pm-guard rule reads the shell-group
+  walk without refusing a command the walk cannot place.
+- `tm hook --pm-guard` refuses a Bash command whose here-document delimiter word is not a plain word: letters, digits, `_`, `.` and `-`, bare, in one pair of quotes, or `\`-escaped (`<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<E'O'F`). A space, `$(…)`, `$((…))`, `${…}`, `$[…]`, a backtick, `(…)`, `<(…)` or a `\` the shell keeps (`<<'A\B'`, `<<A\\B`) in the word, or a quote left open on the `<<` line, now denies under every bypass. Before, the guard ended such a body at a different line than bash and zsh do, so a `$(rm -rf /)` line after the shell's real terminator read as quoted body text and passed the destructive-delete floor (#9150).
+- `tm hook --pm-guard` no longer reads a `<<` as a here-document where the shell does not: after a `#` comment, inside `${…}` text, or as `\<<`. The next lines stay live and are checked. A `<<` in arithmetic (`$((…))`, `((…))`, `$[…]`), or in a `$(…)` or backtick that closes on the same line, is refused when a later line matches its word, because bash 3.2 and zsh 5.9 run those lines (#9150).
+- `tm hook --pm-guard` reads a CRLF here-document as bash and zsh do: the `\r` stays in the delimiter word and in the terminator line. Before, an `A\r` line ended an `A` body, so a `$(rm -rf /)` line the shell runs read as the body of a following `<<'X'` and passed every floor, while a CRLF body holding `$(…)` text was denied. The credential-print rule now reads a delimiter word with the same grammar, so it strips no body behind a word the guard refuses (#9150).
+- A daemon lock naming pid 0 or a pid above `i32::MAX` now reads as dead. `pid_alive` used to cast the pid to `pid_t`, so `kill` probed a process group instead of one process and the corrupt lock read as alive (#9153).
+- `tm slack stop` refuses a PID file naming pid 0 or a pid above `i32::MAX` instead of sending `SIGTERM` to a whole process group, which for pid 0 was its own (#9153).
+
+### Performance
+
+- trusty-mpm builds one full binary, `tm`. The `trusty-mpm` binary is now a
+  small alias that execs the `tm` installed beside it, with the same
+  arguments, stdin and exit status, instead of a second compile and link of
+  the whole CLI. `cargo install trusty-mpm` still installs both names, so
+  launchd plists, hook commands and `.mcp.json` entries that name
+  `trusty-mpm` keep working. A daemon started through the alias now runs as
+  `tm`, and the hooks it rewrites name `tm`.
+- A default `cargo test -p trusty-mpm` no longer compiles ONNX (`ort`, `ort-sys`, `fastembed`) or trusty-common's `memory-core`. The test-only `[dev-dependencies]` entry stopped turning `memory-core` on; the memory-palace tests still run under `--features sm-memory` and `--features manager-memory`, which CI's affected-crates lane now runs for trusty-mpm.
+
+### Changed
+
+- `tm health`, `tm status`, `tm doctor`, `tm sessions …` (except `tui` and
+  `disk`), `tm pr …`, `tm ticket` and `tm build-lease`'s decision log now
+  reach the daemon only over its unix socket (`TRUSTY_MPM_SOCKET`, else the
+  data-dir `trusty-mpm.sock`). They no longer probe the console gateway or
+  any TCP address, and there is no HTTP fallback (ADR-0032, #6288).
+- `--url` and `TRUSTY_MPM_URL` no longer choose the daemon for those
+  commands. A loopback URL is ignored with one stderr line; a URL naming
+  another host is refused with an error, so a verb meant for a remote daemon
+  never acts on the local one.
+- With the socket absent or refusing, `tm health` and `tm status` now exit
+  non-zero with an error naming the socket path, instead of printing
+  `daemon: unreachable` and exiting 0.
+- `tm doctor`'s `trusty_mpm_daemon` row names the transport it probed, for
+  example `reachable (via unix socket …)`.
+- `tm-delegation-patterns` skill: every dispatch brief names the agent's own scratch directory, so concurrent agents stop overwriting each other's files at the scratchpad root (Refs #7791).
+- A dispatch no longer takes a builder slot (#8261, option D). The #6892 dispatch-time cap refused agents by type — a typescript-engineer or a CI-polling local-ops — while builds run by other agents and sessions went uncounted; the cap is now enforced at the build command by `tm build-lease`. No dispatch is refused or queued by it, and none receives a dispatch-time `CARGO_TARGET_DIR` notice.
+- `builders.free_memory_floor_mb` is deprecated and ignored by the build lease; a config carrying it still loads, and `tm build-lease` and `tm doctor` name the replacement keys. The `tm doctor` `builder_cap` row now reads the local lease holders, the census, the memory-pressure signals and the ceiling, and no longer needs the daemon; it FAILS, naming an UNKNOWN lease state with the store, the error and the repair, on a broken slot file, an unopenable `admission.lock` or no usable store, and WARNS while the per-uid fallback store is in use.
+- `documentation-style` skill states that prose documents carry no line or word cap (owner ruling 2026-09-20), and `tm-delegation-patterns` tells the PM not to put a cap on a brief that commissions one (Refs #8309).
+- `tm-workflow` skill (worktree provisioning): Python projects under worktree isolation use a per-worktree venv with `pip install -e --no-cache-dir --force-reinstall`, or `PYTHONPATH=<worktree>/src`, so pip's wheel cache cannot bind an editable install to a sibling worktree (Refs #8386).
+- The setup skill is now `tm-architect-setup`, and the Architect skills, templates, workflow skill and roadmap say "Architect" where they said "supervisor" for the fleet session. The `supervisor` profile, the `trusty-mpm-supervisor` output style, `supervisor_status`, the relay marker and every CLI verb keep their names. After upgrading, `tm install` removes the old deployed skill and deploys the new one ([#8436](https://github.com/bobmatnyc/trusty-tools/issues/8436)).
+- pm-guard's refusal of a count-only read of a secret-bearing file (`grep -c`, `grep -q`, `grep -l`), on the host or sent through `ssh` or `aws ssm`, now says why a count is refused and names the supported route (#8520).
+- The worktree disk-usage gate now compares `disk.max_usage_pct` against the
+  Capacity figure `df` prints for the mount (`used / (used + available)`, via
+  `statvfs`), instead of `sysinfo`'s "available for important usage". An
+  existing threshold therefore fires at a different point: one mount read 93%
+  before and reads 74% now, so a value tuned against the old figure refuses
+  later than it did. A refusal now states the used and available bytes it
+  measured.
+- `tm slack start` resolves `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` through the shared credential resolver, as the Telegram bot does: the process environment first, then `.env.local`, then the credential store (#8568). Behaviour change: plain `.env` is no longer read for a Slack token (owner ruling 88), and an exported variable now beats `.env.local`. Move a token kept in `.env` into `.env.local` or the credential store.
+- `tm-delegation-patterns` skill: a code-critic brief states `PR: <n>|none` and that the critic's gates are read-only (Refs #8584).
+- pm-guard's refusal of a Terraform state or vars name, and the `tm-delegation-patterns` skill, now say who applies a local Terraform root whose state lives in the main checkout: the operator or `local-ops` dispatched there, while a worktree agent may run `terraform plan|apply -state=<that state>` (#8660).
+- The `tm issue` state-model validator rejects a model in which two states share one `label.name`, compared case-insensitively, and names both states (#8703). A model that loads today can now fail to load; give each labelled state its own label.
+- `tm session prune-worktrees` now acts only on the worktrees of the repository it is run from. The old daemon-global behaviour needs the new `--all-projects` flag, and outside a git repository the command refuses instead of widening (#8782).
+- The prune-worktrees preview now lists every path it would remove, grouped by project, with the reason and a count. Worktrees whose pull-request state cannot be read (no `origin` remote, failed lookup) are listed as `unknown` and kept (#8782).
+- `tm session prune-worktrees --force` previews first and then removes only the paths that preview listed, each pass bounded by its own list. It refuses to continue when the daemon does not confirm the requested scope, which is what a daemon older than this change does (#8782).
+- Pausing a PM session (`session_context_pause`) now prunes orphaned worktrees only in the paused project, and prunes nothing when the project directory is outside a git checkout. It used to sweep every registered project (#8782).
+- Under `--discard-dirty` the prune preview says which orphaned worktrees hold unsaved work that the removal will discard, instead of reporting "no unsaved work" for them (#8782).
+- A scoped prune run from a checkout the daemon does not scan now says so instead of printing a bare `total: 0`, and `tm doctor` suggests `tm session prune-worktrees --all-projects` (#8782).
+- `tm session prune-worktrees --force --discard-dirty` now discards unsaved work only in the worktrees its preview named as holding it. A worktree the preview reported clean but which is dirty at removal time is kept and reported as skipped, and the removal output names every discard with its reason (#8782).
+- `--force` now refuses to send a removal request when the daemon's preview does not echo every allowlist (`only_orphan_paths`, `only_merged_paths`, `only_discard_paths`), and reports an error when the removal reply echoes allowlist sizes other than the ones sent (#8782).
+- Every orphan-worktree removal (PM pause, the periodic orphan sweep, `prune-worktrees --force`) now skips a path that no longer resolves to the scanned worktree at removal time, for example because it was replaced by a symlink (#8782).
+- The merged-PR reclaim (`tm session prune-worktrees --merged-prs --force` and the hourly sweep) now refuses a worktree path that no longer resolves to itself, checked immediately before `git worktree remove` runs. A path replaced by a symlink to another worktree could make git remove that other worktree. The orphan sweep now runs the same check at the same point (#8782).
+- A `git worktree remove --force` that fails after deleting some or all of a worktree is reported as partially removed, with git's error, instead of as kept. The prune-worktrees output, the merged-PR sweep log and the agent-worktree reap summary each list these separately (#8782).
+- The pm-guard secret-bearing-file rule (#7266) now lets a key file go, as a literal path, to a program that prints none of it: `gh secret set NAME < key.pem`, `openssl dgst -sign`, `openssl pkeyutl -sign -inkey`, `openssl pkey -in … -pubout` and `ssh-keygen -y|-l -f`, including a `NAME=$(…)` capture of one. A GET `gh api` of a secret-listing endpoint (`repos/O/R`, `orgs/O`, `user` or `repositories/N`, optionally under an environment, ending in `/secrets`) may list secret names. Every other flag, a write method, a nested command, a non-literal key path and any print or copy of the key (`cat`, `cp`, `--body "$(cat key.pem)"`) still denies (#8869).
+- `tm hook --pm-guard` now names the Architect identity check that failed
+  when it denies a trust-anchor write or a D4-remainder command: an unknown
+  thread, a subagent, no `supervisor` launch stamp, no `CLAUDE_PROJECT_DIR`,
+  a launch directory that does not request the supervisor profile or is not
+  allow-listed, an unknown home, an unreadable process table, no `claude`
+  ancestor, a missing or unreadable launch record, a record naming another
+  PID, a start-time mismatch (PID reuse), or a record for another project.
+  The same reason reaches the audit line, and `tm fleet status` prints it on
+  a new informational `this_session` line that does not change `complete`.
+  No reason carries a PID, a start time or an environment value. Allow and
+  deny outcomes are unchanged (#8878).
+- `TRUSTY_MPM_PM_UNRESTRICTED=1` and `TRUSTY_MPM_DISABLE_HOOKS` no longer lift
+  the hard floor, for any session, the Architect's included: `rm -rf` of a
+  filesystem root or home directory (or a delete whose target cannot be
+  resolved), a command the guard cannot classify (`$'…'` quoting), a read
+  that would print a secret value, and the new
+  upload, disk-tool and force-push rules now deny under both variables
+  (#8878).
+- The process-bound Architect's main thread is exempt from the rules that
+  protect other sessions' work: the main-checkout write, commit and
+  destructive-git rules, `rm -rf` of a worktree, and HEAD moves in a main
+  checkout or linked worktree (#8878).
+- `tm fleet init` now also writes `scripts/fleet-classify.py` into the Architect project. The fleet poller, `scripts/fleet-poll.py`, was split to get under the 500-line cap, and it loads this new sibling file by path. The poller behaves as before (#8891).
+- In a repository with no `origin`, a `tm pr` verb given no `--repo` prints `local-only repo: no remote; skipping push/PR` and exits 0. A verb given `--repo` runs as usual and fails under the session's gh pin, so `tm pr merge <n> --repo o/r` never reports a skip that a delivery flow reads as a merge. The allow-listed supervisor directory never skips (#8934).
+- The pm-guard secret-file rule lets the Architect's main thread run
+  `tm env keys` and `tm env set` on a `.env`, `.env.local` or `.env.*` file
+  inside its project directory (`CLAUDE_PROJECT_DIR`) or a root listed in
+  `[supervisor] projects` of `~/.trusty-mpm/config.toml`, with and without a
+  bypass. `~/.trusty-mpm/project-paths.json` grants no scope, and an
+  unreadable or malformed config leaves only the project directory in scope.
+  Each such call writes an `architect-envfile` audit line with the path and
+  key names only. A subagent, a PM, a piped or wrapped form, the `Write` tool
+  and every command that prints a value stay denied.
+- The daemon never stops, decommissions, prunes, resumes, deletes, idle-stops,
+  nudges or injects a task into a live Architect session (kind `supervisor`
+  or `supervisor_aux`). A stop answers "exit claude in its pane"; a resume
+  points to `tm fleet init`. Daemon shutdown leaves those sessions running,
+  and when the Architect's pane is gone its record is marked stopped without
+  any teardown (#8942).
+- Boot reconcile adopts a live pane that an Architect launch sidecar names as
+  the Architect's record, under a stable id, never as an ordinary adopted
+  session. When the sidecars cannot be read, no pane is adopted that pass.
+- When the kill-by-name floor refuses a kill (including when it cannot read
+  the sidecars or the store), `stop` and `decommission` now abort with the
+  refusal and leave the workspace and the record untouched, instead of
+  marking the record stopped or decommissioned while claude still runs.
+- `POST /api/v1/sessions/managed/{id}/runtime-stop` answers a refused stop
+  with 409 and the reason, instead of 404.
+- The agent roster and the session manager's harness docs are read from instructional content at runtime (#9011, ADR-0064): a trusty-tools checkout above the cwd, else the bundle `tm content install` pinned. The 43 agent consts and the `agents/*.md` rows of `bundle::ALL` are removed; `tm install` writes the roster from content and fails, naming `tm content install`, when none resolves.
+- With no content, `tm hook --pm-guard` refuses a PM's subagent dispatch (owner ruling 09(a)), the daemon's shared-tree classifier counts every agent as a writer (it resolves content from the query's cwd and logs a WARN when none resolves), session provisioning deploys no agent — a framework source an earlier binary left behind is stale and is not deployed — and prints one line naming `tm content install` (`error: roster provisioning gap: …`), the shadow quarantine, agent autodeploy and project-tier stray sweep skip without a line of their own, and an SM turn fails with the same message.
+- `tm launch` and `tm connect` print a roster provisioning gap to stderr; it was a tracing event those commands never displayed.
+- `tm doctor` grades "no content installed" WARN and `tm content status` exits non-zero (`BUILTIN_CONTENT_EMBEDDED` is now `false`).
+- The framework manifest is checked for shape at runtime; a roster agent it does not declare deploys uncategorized with a warning instead of panicking the launch. `tm generate capabilities` renders the agent reference from the checkout's `content/agents`.
+- Loading instructional content now parses and validates the PM instruction package. A package this binary cannot parse, such as one from a newer content release with an unknown section, refuses every launch, resume and relaunch with an error naming `tm content update` or a tm upgrade. The legacy-assembly fallback that sent a prompt missing the manifest-authored rules is gone (#9012).
+- `tm doctor --fix` with no instructional content reports the output-style repair as a failed step naming the remedy, so the summary no longer reads clean (#9012).
+- `tm doctor` grades the `content` row FAIL when the resolved content carries a PM instruction package this binary cannot parse, so it no longer reads OK while every launch is refused (#9012).
+- Skills, the PM instruction sections and package, the supervisor sections, the output-style bodies, the SM instructions and the two bundled docs are read from instructional content at runtime (#9012, ADR-0064): the trusty-tools checkout enclosing the project (or the cwd), else the bundle `tm content install` pinned. None of them is compiled in any more; `bundle::ALL` holds only the hook policies, and the per-skill, per-section and per-style constants are removed.
+- A launch, connect, `tm run`, GUI spawn or daemon spawn with no content resolvable is refused before anything is registered, naming `tm content install`; it used to compose from compiled-in text. `tm install` writes the skills and docs from content and fails the same way before writing anything.
+- The composers take the loaded content as a parameter (`resolve_pm_prompt`, `build_system_prompt_for*`, `cli_launch`, `supervisor_prompt`, the output-style floor and injection functions, `assemble_sm_prompt`); `BundledStyle` carries a `content_path` and reads its body with `BundledStyle::content`.
+- `tm doctor`: `skill_staleness` and `output_style_staleness` report Unknown when no content resolves; `bundled_asset_lag` now compares the skills tm deploys (checkout or installed bundle) against `origin/main`'s `content/skills`, with a remedy matching the source. The framework manifest's skill roster is checked for shape at runtime; the strict partition against the content is a test.
+- `tm generate capabilities` writes to and reads from `content/skills`.
+- `ManagedTmuxDriver::graceful_stop` is deprecated. It kills by session name,
+  and no production path calls it; prove ownership with `runtime_ownership`
+  and kill with `kill_session_id` instead (#9101).
+
+### Removed
+
+- `tm gui` and the empty `gui` Cargo feature are gone with the retired `trusty-mpm-gui` Tauri client; the fleet dashboard is hosted by trusty-console (#6924) (Refs [#7964](https://github.com/bobmatnyc/trusty-tools/issues/7964))
+- BREAKING (HTTP API): the daemon's `POST /api/v1/sessions/{id}/delegations/builder-slot` and `GET /api/v1/builder-slots` routes answer `410 Gone` (#8261, option D). The daemon no longer allocates slot directories, so it cannot hand out a directory a build lease holds; `tm build-lease` enforces the cap locally.
+- BREAKING (library API): the public items behind those routes are removed — the modules `core::builder_capacity` and `daemon::state::builder_slots`, with the six `daemon::state` re-exports `BUILDER_LEASE_TTL_SECS`, `BuilderHolder`, `BuilderLease`, `BuilderSlotCensus`, `BuilderSlotGrant` and `builder_lease`; `core::dispatch_isolation::agent_is_builder`; the `DaemonState` methods `builder_slot_holders`, `builder_slot_census`, `builder_capacity`, `claim_builder_slot`, `claim_builder_slot_with_pool`, `finish_builder_seed` and `release_denied_builder_dispatch`; and from `daemon::builder_slot_routes` the types `BuilderSlotRequest`, `BuilderSlotResponse` and `SlotClaimOutcome` and the functions `builder_slot_route`, `builder_slot_op`, `builder_slot_op_with_pool`, `builder_slot_op_with_capacity` and `builder_slot_census_route`.
+- The `tm doctor` `tcp_listeners` allowlist no longer lists trusty-common's symgraph HTTP server (`symgraph/server.rs`), which is deleted (#8926).
+
+### Security
+
+- `tm fleet init` refuses, before it writes the project or the `[supervisor] projects` grant, a directory the Architect must never own: `/` or a mount root, `$HOME`, the tm config directory `~/.trusty-mpm` (or a path inside or holding it), a path inside another git work tree, a repository with a remote, and a workspace parent (any projects root — `~/trusty-mpm-projects`, the configured root and `TRUSTY_MPM_WORKSPACE_ROOT` — an ancestor of `$HOME` or of a projects root, or a directory with a repository anywhere beneath it). The check runs on the canonical path, and a fact it cannot establish is a refusal, including a `~/.trusty-tools/trusty-mpm/config.yaml` that exists but cannot be read or parsed (#8436).
+- `tm hook --pm-guard` now refuses a credential handed to `cat`, `printf` or
+  zsh `print` when that program would repeat it in an error message on a
+  visible stderr — `wc -c < <(cat "$T")`, `cat "$T" >/dev/null`,
+  `printf '%d' "$T"` — inside `<(…)`, `>(…)`, `$(…)`, subshells and the
+  wrappers the rule already follows, and through `2>&1` and `|&`. Stderr sent
+  to `/dev/null` or a file stays allowed; a stderr target or `printf` format
+  chosen at run time refuses. `echo`, `cat <(…)` (which names a `/dev/fd`
+  path, not the value) and a `printf` format of text conversions only (`%s`,
+  `%b`, `%q`, `%c`) are unchanged. zsh `print -u N` given a credential is
+  routed to descriptor N, and refuses when N is chosen at run time or is the
+  `-p` coprocess (#8735).
+- `tm hook --pm-guard` now finds the program behind wrapper and precommand
+  words and their options — `timeout 5`, `nice -n 5`, `noglob`, `nocorrect`,
+  `sudo -u x`, `env -i PATH=/bin`, `time -p`, `stdbuf`, `ionice`,
+  `caffeinate`, `xargs` — so `timeout 5 cat "$T"` or `noglob echo "$T"` given a
+  credential refuses like the bare command. A wrapper option the guard does
+  not know refuses once the command carries a credential or names a delete
+  verb. The universal delete floor now judges each `$(…)`, backtick, `<(…)`
+  and `>(…)` body as a command of its own, eight levels deep, so
+  `echo "$(rm -rf /)"` refuses; `x=$(rm -f /tmp/scratch/file)` stays allowed
+  (#8735).
+- `tm hook --pm-guard` now reads a `-c`, `env -S` or `flock -c` command string
+  behind a wrapper and its options, so `timeout 60 bash -c 'rm -rf ~'` and
+  `timeout 5 env -S 'cat $T'` refuse. It also knows Homebrew's `gtimeout`,
+  `gnice`, `gstdbuf`, `gnohup` and `genv`, plus `setsid`, `chrt`, `taskset`,
+  `unbuffer` and `flock`. A substitution body split across segments is judged
+  from every directory a `cd` reached, so `cd / && x=$(true; rm -rf Users)`
+  refuses (#8735).
+- The delete floor no longer refuses a backtick inside a quoted here-document
+  body, such as a commit message or PR body, and no longer refuses
+  `command -v rm`, `sudo -k rm -f x` or macOS `xargs -J % rm %` (#8735).
+- A session whose `SessionStart` never reached the daemon (daemon down at
+  start, no tm `SessionStart` hook, a pre-upgrade session) is now settled as
+  unproven by its first in-session hook event, such as `PreToolUse` or
+  `Stop`. A sibling's forged `SessionStart` for that id can no longer bind it
+  as the delegation-repair owner. A legitimate socket `SessionStart` already
+  in flight when that event arrives still binds. Start-up events
+  (`InstructionsLoaded`, `ConfigChange` and the like) do not settle an id.
+- `tm daemon --sandbox` runs an isolated live-check daemon. It refuses to
+  start, naming the variables but never their values, when any environment
+  variable outside a closed allowlist is set (`HOME`, `PATH`,
+  `TRUSTY_DATA_DIR_OVERRIDE`, `TRUSTY_MPM_ADDR`, `TMPDIR`, `TERM`, `LANG`, the
+  `LC_*` locale categories, `USER`, `LOGNAME`, `SHELL`, `RUST_LOG`, and the
+  `__CF_USER_TEXT_ENCODING` macOS sets itself), when `TRUSTY_DATA_DIR_OVERRIDE`
+  is unset, or when `$HOME` is the account's real home as the password
+  database records it. A sandbox daemon never starts the Telegram bot and
+  never reads `.env.local`, the credential store or the Keychain through any
+  in-process path: credential resolution, the manager and activity-classifier inference
+  stores, the `/activity` key-presence probe, the bug-report token and the
+  `credential_reach` doctor row all answer "absent". A `claude` or `gh` child
+  the daemon spawns is out of scope and reads its own credentials (#2246).
+  `scripts/sandbox_daemon.sh`
+  starts one under `env -i`, forwarding only allowlisted names; a hand-built
+  sandbox daemon is no longer sanctioned.
+
 ## [1.7.9] — 2026-09-27
 
 ### Fixed

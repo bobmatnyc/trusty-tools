@@ -117,9 +117,11 @@ pub(crate) fn classify_run_target_with_account(
     let gh = parse_owner_repo(spec)
         .or_else(|| parse_github_path(&clone_url))
         .ok_or_else(|| {
+            // #9124: the spec may embed `user:token@`.
             anyhow::anyhow!(
-                "cannot derive an owner/repo identity from '{spec}'. \
-                 Pass <owner>/<repo>, or a full repository URL."
+                "cannot derive an owner/repo identity from '{}'. \
+                 Pass <owner>/<repo>, or a full repository URL.",
+                super::register_args::shown(spec)
             )
         })?;
     let account = super::register_args::resolve_account(
@@ -453,7 +455,7 @@ async fn run_managed(
         // #9124: a remote URL may embed `user:token@`.
         eprintln!(
             "tm: cloned {} → {}",
-            trusty_mpm::core::remote_url_redact::redact_url(clone_url),
+            trusty_mpm::core::remote_url_redact::redact_stored_url(clone_url),
             checkout.base_path.display()
         );
     }
@@ -515,7 +517,7 @@ pub(crate) fn preflight_verdict(
         anyhow::anyhow!(
             "cannot choose the gh account for {}: {e}\n\
              No session was started. `tm doctor` reports the [accounts] table.",
-            trusty_mpm::core::remote_url_redact::redact_url(origin) // #9124
+            trusty_mpm::core::remote_url_redact::redact_stored_url(origin) // #9124
         )
     })
 }

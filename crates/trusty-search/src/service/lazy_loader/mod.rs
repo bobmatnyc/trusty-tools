@@ -10,7 +10,8 @@
 //! Architecture:
 //!   - `env` — `warmboot_max_indexes()`, `cold_reload_timeout()`, and
 //!     `LAST_QUERIED_WRITE_INTERVAL_SECS`.
-//!   - `store` — `ColdIndexStore` + `select_warmboot_entries()`.
+//!   - `store` — `ColdIndexStore` + `select_warmboot_entries()`, and the
+//!     warm-boot-only `select_fresh_warmboot_entries()` (#8275).
 //!   - `loader` — `get_or_load_index()` + `LazyLoadError`.
 //!   - `residency` — issue #2161's usage-based resident-index cap:
 //!     `resolve_max_resident_indexes_for()`, `warmboot_cap_for()`,
@@ -34,14 +35,17 @@ mod store;
 
 // Re-export all public symbols so callers that use
 // `crate::service::lazy_loader::*` need no changes.
-pub use env::{cold_reload_timeout, warmboot_max_indexes, LAST_QUERIED_WRITE_INTERVAL_SECS};
+pub use env::{
+    cold_reload_timeout, parse_warmboot_max_age, warmboot_max_age, warmboot_max_indexes,
+    DEFAULT_WARMBOOT_MAX_AGE_HOURS, LAST_QUERIED_WRITE_INTERVAL_SECS, WARMBOOT_MAX_AGE_HOURS_ENV,
+};
 pub use loader::{get_or_load_index, LazyLoadError};
 pub use residency::{
     cold_park_index, default_max_resident_indexes, ids_to_park, log_resident_index_cap,
     max_resident_indexes, residency_sweep_secs, resolve_max_resident_indexes,
     resolve_max_resident_indexes_for, warmboot_cap_for, ResidentCapSource, ResidentIndexCap,
 };
-pub use store::{select_warmboot_entries, ColdIndexStore};
+pub use store::{select_fresh_warmboot_entries, select_warmboot_entries, ColdIndexStore};
 
 // #6957: the residency-sweep ticker parks through the hook-taking inner form so
 // the sweep-level regression test can force the reindex-arrives-mid-park

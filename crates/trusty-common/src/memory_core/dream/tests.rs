@@ -1,5 +1,5 @@
 use super::guard::CompactionGuard;
-use super::helpers::{MERGED_CONTENT_CAP, char_safe_prefix, merge_into, now_secs};
+use super::helpers::{MERGE_MAX_BYTES, char_safe_prefix, merged_drawer, now_secs};
 use super::*;
 use crate::credentials::env_guard::EnvVarGuard;
 use crate::memory_core::palace::{Drawer, Palace, PalaceId, RoomType};
@@ -477,8 +477,10 @@ async fn dream_cycle_toggles_is_compacting() {
 
     // Direct guard exercise — the in-flight `true` window.
     {
-        let _g = CompactionGuard::new(handle.is_compacting.clone());
+        let _g = CompactionGuard::try_claim(handle.is_compacting.clone()).expect("free flag");
         assert!(handle.is_compacting(), "guard must set the flag");
+        // #9172: the claim is exclusive while the first guard lives.
+        assert!(CompactionGuard::try_claim(handle.is_compacting.clone()).is_none());
     }
     assert!(!handle.is_compacting(), "guard must clear on drop");
 
@@ -1999,84 +2001,58 @@ fn dedup_only_config_ignores_an_ambient_openrouter_key() {
     );
 }
 
-/// Why (#5187): `merge_into` capped the merged drawer with a raw
-/// `String::truncate(500)`. When the 500th byte fell inside a multi-byte char
-/// that truncate panicked — `assertion failed: self.is_char_boundary(new_len)`
-/// — killing a `tokio-rt-worker` inside the shipped `com.trusty.memory`
-/// daemon mid-consolidation.
+/// Why (#5187, #9172): the merge used to cap the merged drawer at 500 bytes.
+/// A raw `String::truncate` there panicked when the cap fell inside a
+/// multi-byte char (#5187); the char-safe cut that replaced it still dropped
+/// the loser's text (#9172). A merge now keeps both bodies whole.
 /// What: merges a 490-byte survivor with a loser whose first char is a 4-byte
-/// emoji, so the merged string straddles the cap at byte 500. Asserts the
-/// input really straddles it, then that the merge cuts at the boundary below
-/// instead of panicking.
+/// emoji at byte 498 — the input that used to straddle the cap — and asserts
+/// the merged body is both texts, unchanged.
 /// Test: this test.
-#[tokio::test]
-async fn dream_merge_into_caps_multibyte_content_without_panicking() {
-    let handle = open_test_handle("dream-merge-utf8").await;
-
-    // 490 ASCII bytes plus the 8-byte "\n\nAlso: " joiner puts the loser's
-    // first char at byte 498; a 4-byte emoji there spans 498..502, so the
-    // 500-byte cap lands two bytes inside it.
-    // Real prose, not filler — the write path rejects content that reads as
-    // raw code or JSON, and the merge must run against a drawer it accepted.
+#[test]
+fn a_merge_keeps_multibyte_loser_text_whole() {
     let mut survivor_content =
         "The Tokyo office rollout review covered staffing and timelines. ".repeat(8);
     survivor_content.truncate(490);
-    assert_eq!(survivor_content.len(), 490);
-    let loser_content =
-        "🎉 The 祝賀会 celebration is on Friday evening in the Tokyo office".to_string();
+    let loser_content = "🎉 The 祝賀会 celebration is on Friday evening in the Tokyo office";
+    let room = Uuid::new_v4();
+    let survivor = Drawer::new(room, survivor_content.clone());
+    let mut loser = Drawer::new(room, loser_content);
+    loser.tags = vec!["祝賀会".into()];
 
-    let naive = format!("{survivor_content}\n\nAlso: {loser_content}");
-    assert!(
-        naive.len() > MERGED_CONTENT_CAP,
-        "input must exceed the cap to exercise the truncate at all"
-    );
-    assert!(
-        !naive.is_char_boundary(MERGED_CONTENT_CAP),
-        "input must straddle the cap — otherwise this test cannot reproduce #5187"
-    );
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
 
-    let survivor_id = handle
-        .remember(survivor_content.clone(), RoomType::General, vec![], 0.8)
-        .await
-        .unwrap();
-    let loser_id = handle
-        .remember(
-            loser_content.clone(),
-            RoomType::General,
-            vec!["祝賀会".into()],
-            0.5,
-        )
-        .await
-        .unwrap();
-
-    let (survivor, loser) = {
-        let drawers = handle.drawers.read();
-        let find = |id: Uuid| drawers.iter().find(|d| d.id == id).cloned().unwrap();
-        (find(survivor_id), find(loser_id))
-    };
-
-    // Pre-fix, this call panics inside `String::truncate`.
-    merge_into(&handle, &survivor, &loser);
-
-    let merged = {
-        let drawers = handle.drawers.read();
-        drawers
-            .iter()
-            .find(|d| d.id == survivor_id)
-            .map(|d| d.content().to_string())
-            .unwrap()
-    };
-
-    assert!(
-        merged.len() <= MERGED_CONTENT_CAP,
-        "merged content must respect the cap, got {} bytes",
-        merged.len()
-    );
     assert_eq!(
-        merged,
-        format!("{survivor_content}\n\nAlso: "),
-        "merge should cut at the char boundary below the cap, dropping the emoji whole"
+        merged.content(),
+        format!("{survivor_content}\n\nAlso: {loser_content}")
     );
+    assert_eq!(merged.id, survivor.id);
+    assert_eq!(merged.tags, vec!["祝賀会".to_string()]);
+}
+
+/// Why (#9172): a near-duplicate that keeps coming back was appended to the
+/// same survivor on every cycle, so the drawer grew without bound.
+/// What: a merge whose content is exactly [`MERGE_MAX_BYTES`] goes through
+/// whole; one byte more is refused. An exact duplicate of an over-bound drawer
+/// appends nothing and still merges.
+/// Test: this test.
+#[test]
+fn a_merge_is_skipped_past_the_byte_bound() {
+    let room = Uuid::new_v4();
+    let survivor = Drawer::new(room, "s".repeat(1000));
+    let sep = "\n\nAlso: ".len();
+    let at_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep));
+    let merged = merged_drawer(&survivor, &at_bound).expect("a merge at the bound");
+    assert_eq!(merged.content().len(), MERGE_MAX_BYTES);
+    assert!(merged.content().ends_with(at_bound.content()));
+
+    let past_bound = Drawer::new(room, "l".repeat(MERGE_MAX_BYTES - 1000 - sep + 1));
+    assert!(merged_drawer(&survivor, &past_bound).is_none());
+
+    let big = Drawer::new(room, "b".repeat(MERGE_MAX_BYTES * 2));
+    let same = Drawer::new(room, big.content().to_string());
+    let merged = merged_drawer(&big, &same).expect("an exact duplicate adds no bytes");
+    assert_eq!(merged.content(), big.content());
 }
 
 /// Why (#5187): the semantic pass logs a fixed-width preview of a canonical
@@ -2117,7 +2093,7 @@ fn char_safe_prefix_stops_below_a_multibyte_char() {
     assert_eq!(char_safe_prefix("🎉", 0), "");
 }
 
-/// Why (#5902): `merge_into` is the ONE production path that rewrites a stored
+/// Why (#5902): `merged_drawer` is the ONE production path that rewrites a stored
 /// drawer's content in place. Content-derived identity only holds if the digest
 /// moves with the body — a drawer left carrying its pre-merge hash would export
 /// under an identity no other machine can reproduce, and would collide on import
@@ -2166,16 +2142,7 @@ async fn merge_into_keeps_the_content_hash_in_step() {
     };
     let before = survivor.content_hash();
 
-    merge_into(&handle, &survivor, &loser);
-
-    let merged = {
-        let drawers = handle.drawers.read();
-        drawers
-            .iter()
-            .find(|d| d.id == survivor_id)
-            .cloned()
-            .unwrap()
-    };
+    let merged = merged_drawer(&survivor, &loser).expect("within the bound");
     assert_ne!(
         merged.content(),
         survivor.content(),

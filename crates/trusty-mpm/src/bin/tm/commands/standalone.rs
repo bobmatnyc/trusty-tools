@@ -14,7 +14,10 @@
 //! `core::standalone::registry`'s `test_registry_*`. (#4912: the former pointer
 //! here named `cli_parses_register`/`cli_parses_ls`, neither of which exists.)
 
+use std::path::Path;
+
 use anyhow::Context;
+use trusty_mpm::core::standalone::registry::RegistryEntry;
 
 use super::managed_root::ManagedPaths;
 
@@ -26,9 +29,10 @@ use super::managed_root::ManagedPaths;
 /// [`super::register_args::resolve_register_args`] (which accepts both the
 /// `<url> [alias]` and legacy `<alias> <url>` orders and derives an `owner-repo`
 /// alias when none was given), validates the alias, calls `ManagedRegistry::add`,
-/// saves, and prints `registered <alias> → <url>` to stdout. A derived alias that
-/// is already bound to a different URL refuses without touching the registry —
-/// `add` errors before mutating and `save` is never reached.
+/// saves, and prints [`register_alias`]'s `registered <alias> → <url>` line to
+/// stdout. A derived alias that is already bound to a different URL refuses
+/// without touching the registry — `add` errors before mutating and `save` is
+/// never reached.
 /// Test: `register_args_tests.rs`; registry semantics in registry tests.
 pub(crate) fn register_cmd(
     paths: &ManagedPaths,
@@ -36,9 +40,41 @@ pub(crate) fn register_cmd(
     second: Option<&str>,
     force: bool,
 ) -> anyhow::Result<()> {
+    println!("{}", register_alias(paths, first, second, force)?);
+    Ok(())
+}
+
+/// [`register_cmd`] without the print: registers the alias and returns the
+/// confirmation line.
+///
+/// Why (#9124): `tm register https://user:<token>@host/o/r` printed the token
+/// and wrote it to `registry.json`. Nothing downstream needs it there: `tm
+/// load` runs a plain `git clone`, which asks for credentials when the URL
+/// carries none, and a stored token would also land in the clone's
+/// `.git/config`. So the secret is stripped before the URL is stored, with a
+/// stderr notice, rather than the URL being refused. #9155: only the secret
+/// goes — `git@` in `git@github.com:o/r.git` is the ssh login, and dropping it
+/// made `tm load` log in as the local user.
+/// What: resolves the positionals, takes the URL's [`storage_form`], adds and
+/// saves, and returns `registered <alias> → <url>` with the stored URL, which
+/// carries no secret: [`super::register_args::resolved_url`] already dropped
+/// any query string.
+/// Test: `register_never_prints_or_stores_an_embedded_token_9124`,
+/// `register_keeps_the_ssh_login_and_drops_only_the_secret_9155`.
+pub(crate) fn register_alias(
+    paths: &ManagedPaths,
+    first: &str,
+    second: Option<&str>,
+    force: bool,
+) -> anyhow::Result<String> {
     // #4912: URL first, alias optional — and the legacy order still accepted.
-    let (alias, url) = super::register_args::resolve_register_args(first, second)?;
+    let (alias, raw_url) = super::register_args::resolve_register_args(first, second)?;
     let derived = second.is_none();
+    // #9124: a credential embedded in the URL is never written to disk.
+    let (url, notice) = storage_form(&raw_url);
+    if let Some(notice) = notice {
+        eprintln!("{notice}");
+    }
 
     let root = &paths.root;
     let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
@@ -54,8 +90,26 @@ pub(crate) fn register_cmd(
         }
     })?;
     registry.save().context("failed to save registry")?;
-    println!("registered {alias} → {url}");
-    Ok(())
+    Ok(format!("registered {alias} → {url}"))
+}
+
+/// The stderr notice [`storage_form`] returns when it removed a secret.
+pub(crate) const SECRET_REMOVED_NOTICE: &str = "tm register: removed the password or token \
+     embedded in the URL before storing it; git asks for credentials when it clones the repository";
+
+/// The URL `tm register` stores for `raw_url`, and the notice to print when
+/// that removed a secret (#9124, #9155).
+///
+/// What: [`trusty_common::url_userinfo::strip_url_secret`] — the `:password`
+/// on any scheme, the whole userinfo on http(s) — and
+/// [`SECRET_REMOVED_NOTICE`] only when it changed the URL. The notice names no
+/// part of the URL, so it cannot carry the secret.
+/// Test: `register_keeps_the_ssh_login_and_drops_only_the_secret_9155`.
+pub(crate) fn storage_form(raw_url: &str) -> (String, Option<&'static str>) {
+    // #9155: `strip_userinfo` also dropped the `git@` ssh login.
+    let url = trusty_common::url_userinfo::strip_url_secret(raw_url);
+    let notice = (url != raw_url).then_some(SECRET_REMOVED_NOTICE);
+    (url.into_owned(), notice)
 }
 
 /// Handle `tm ls [--json]`.
@@ -97,15 +151,7 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             .collect();
         let fleet_rows: Vec<serde_json::Value> = fleet_entries
             .iter()
-            .map(|e| {
-                serde_json::json!({
-                    "alias": e.alias,
-                    "url": e.url,
-                    "ref": e.git_ref,
-                    "loaded": registry.is_loaded(&e.alias, root),
-                    "repo_path": root.join("projects").join(&e.alias).join("repo"),
-                })
-            })
+            .map(|e| fleet_json_row(e, registry.is_loaded(&e.alias, root), root))
             .collect();
         println!(
             "{}",
@@ -162,16 +208,37 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
             "─".repeat(30)
         );
         for e in &fleet_entries {
-            let loaded = if registry.is_loaded(&e.alias, root) {
-                "yes"
-            } else {
-                "no"
-            };
-            println!("  {:<alias_w$}  {:<10}  {}", e.alias, loaded, e.url);
+            let loaded = registry.is_loaded(&e.alias, root);
+            println!("{}", fleet_table_row(e, loaded, alias_w));
         }
     }
 
     Ok(())
+}
+
+/// One `managed_fleet` object of `tm list --json`.
+///
+/// Why (#9124, #9227): an entry stored before #9124 may carry a token, and
+/// its password may hold a quote or space that free-text redaction misses.
+/// What: the entry's fields, with the URL through `redact_stored_url`.
+/// Test: `fleet_rows_never_print_a_quoted_password`.
+fn fleet_json_row(e: &RegistryEntry, loaded: bool, root: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "alias": e.alias,
+        "url": trusty_mpm::core::remote_url_redact::redact_stored_url(&e.url),
+        "ref": e.git_ref,
+        "loaded": loaded,
+        "repo_path": root.join("projects").join(&e.alias).join("repo"),
+    })
+}
+
+/// One managed-fleet line of the `tm list` table, URL redacted as in
+/// [`fleet_json_row`].
+/// Test: `fleet_rows_never_print_a_quoted_password`.
+fn fleet_table_row(e: &RegistryEntry, loaded: bool, alias_w: usize) -> String {
+    let loaded = if loaded { "yes" } else { "no" };
+    let url = trusty_mpm::core::remote_url_redact::redact_stored_url(&e.url);
+    format!("  {:<alias_w$}  {:<10}  {url}", e.alias, loaded)
 }
 
 /// Handle `tm load <alias>`.
@@ -413,3 +480,7 @@ pub(crate) fn login_cmd(paths: &ManagedPaths) -> anyhow::Result<()> {
         anyhow::bail!("claude auth login failed: {status}")
     }
 }
+
+#[cfg(test)]
+#[path = "standalone_tests.rs"]
+mod standalone_tests;

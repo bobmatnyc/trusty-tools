@@ -11,7 +11,8 @@
 #   and arguments it received, from a caller environment (built with `env -i`,
 #   so the host's own variables cannot change the answer) polluted with fake
 #   secrets. No real daemon starts. Cases:
-#     allowlist     the stub sees exactly the four pinned names plus the
+#     allowlist     the stub sees exactly the five pinned names (HOME, PATH,
+#                   TRUSTY_DATA_DIR_OVERRIDE, TRUSTY_MPM_ADDR, TRUSTY_SANDBOX) plus the
 #                   forwarded names the caller set (LANG, RUST_LOG), never the
 #                   fake secrets or `LC_API_KEY` (plus the names /bin/sh adds
 #                   itself), and `daemon --sandbox`
@@ -26,6 +27,21 @@
 #     missing-dir   --dir that does not exist refuses
 #     bad-bin       a --bin that is not executable refuses
 #     bad-arg       an unknown argument is a usage error (exit 2)
+#     cwd           run from a caller cwd beside a fake `.env.local`, with a
+#                   relative --bin, the stub runs with cwd <dir>/home (#9161)
+#     cwd-env-local a --dir below an ancestor `.env.local` refuses
+#     cwd-symlinked-home  a <dir>/home symlinked into a tree under a
+#                   `.env.local` refuses: the walk uses the physical path
+#     cwd-home-env-local  <dir>/home/.env.local itself refuses
+#     cwd-newline   a `.env.local` in an ancestor whose name ends in a newline
+#                   refuses
+#     cwd-newline-symlinked-home  <dir>/home linked to a newline-ended dir
+#                   holding a `.env.local` refuses; the stub never runs
+#     unresolvable-home  an existing <dir>/home that cannot be entered (mode
+#                   000) refuses before the walk falls back to <dir>
+#     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
+#                   enter; it exits 1 and the daemon never starts
+#   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
 # Exit:  0 when every case behaves; 1 naming each case that does not.
@@ -39,8 +55,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER="$SCRIPT_DIR/sandbox_daemon.sh"
 PASSED=0
 FAILED=0
-TMP_ROOT="$(mktemp -d)"
-trap 'rm -rf "$TMP_ROOT"' EXIT
+# Physical, so it compares equal to the stub's `pwd -P` (macOS TMPDIR is a symlink).
+TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+# chmod first: the mode-000 cases leave directories rm cannot descend into.
+trap 'chmod -R u+rwx "$TMP_ROOT" 2>/dev/null; rm -rf "$TMP_ROOT"' EXIT
 
 FAKE_TOKEN="9121-selftest-fake-token-value"
 FAKE_KEY="9121-selftest-fake-key-value"
@@ -56,6 +74,7 @@ cat > "$STUB" <<'STUB_EOF'
 #!/bin/sh
 env | cut -d= -f1 | sort > "$HOME/stub-env-names"
 printf '%s\n' "$@" > "$HOME/stub-args"
+pwd -P > "$HOME/stub-pwd"
 STUB_EOF
 chmod +x "$STUB"
 
@@ -82,7 +101,7 @@ launcher_names() {
   {
     grep '^PINNED="' "$LAUNCHER"
     sed -n '/^FORWARDED="/,/"$/p' "$LAUNCHER"
-  } | sed -e 's/^[A-Z]*="//' | tr -d '"\\' | tr ' ' '\n' \
+  } | sed -e 's/^[A-Z]*="//' | tr -d '\\"' | tr ' ' '\n' \
     | grep -E '^[A-Z_]+$' | sort -u
 }
 
@@ -109,7 +128,7 @@ elif [ ! -f "$DIR1/home/stub-env-names" ]; then
 else
   # /bin/sh exports PWD, SHLVL, OLDPWD and _ on its own; they are not inherited.
   GOT="$(grep -vxE 'PWD|OLDPWD|SHLVL|_' "$DIR1/home/stub-env-names" | tr '\n' ' ')"
-  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR "
+  WANT="HOME LANG PATH RUST_LOG TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX "
   if [ "$GOT" != "$WANT" ]; then
     fail allowlist "stub saw [$GOT], want [$WANT]"
   elif [ "$(tr '\n' ' ' < "$DIR1/home/stub-args")" != "daemon --sandbox " ]; then
@@ -135,7 +154,7 @@ if [ "$STATUS2" -ne 0 ]; then
 elif [ -e "$DIR2/home" ]; then
   fail dry-run "a dry run created $DIR2/home"
 elif ! printf '%s' "$OUT2" \
-    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR LANG RUST_LOG"; then
+    | grep -qF "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_MPM_ADDR TRUSTY_SANDBOX LANG RUST_LOG"; then
   fail dry-run "the passed names were not printed"
 else
   case "$OUT2" in
@@ -208,6 +227,99 @@ touch "$TMP_ROOT/not-executable"
 expect_refusal bad-bin 1 "not an executable file" \
   --bin "$TMP_ROOT/not-executable" --dir "$DIR2" --dry-run
 expect_refusal bad-arg 2 "unknown argument" --bin "$STUB" --no-such-flag
+
+# 4. cwd (#9161): the caller sits beside a fake `.env.local` and names the stub
+# by a relative path; the stub must run under <dir>/home, never that cwd.
+LEAK="$TMP_ROOT/leak"
+DIR4="$TMP_ROOT/case4"
+mkdir -p "$LEAK" "$DIR4"
+echo "OPENAI_API_KEY=$FAKE_KEY" > "$LEAK/.env.local"
+set +e
+OUT4="$(cd "$LEAK" && run_launcher --bin ../stub-tm --dir "$DIR4" 2>&1)"
+STATUS4=$?
+set -e
+CWD4="$(cat "$DIR4/home/stub-pwd" 2>/dev/null || true)"
+if [ "$STATUS4" -ne 0 ]; then
+  fail cwd "launcher exit $STATUS4"
+  printf '%s\n' "$OUT4" | sed 's/^/    /'
+elif [ "$CWD4" != "$DIR4/home" ]; then
+  fail cwd "stub cwd was [$CWD4], want [$DIR4/home]"
+else
+  pass cwd
+fi
+mkdir -p "$LEAK/sb"
+expect_refusal cwd-env-local 1 "$LEAK/.env.local would be loaded" \
+  --bin "$STUB" --dir "$LEAK/sb" --dry-run
+
+# A <dir>/home symlinked into a tree under a `.env.local`: the daemon's cwd is
+# the physical path, so the walk must follow the link.
+LEAK2="$TMP_ROOT/leak2"
+DIR5="$TMP_ROOT/case5"
+mkdir -p "$LEAK2/real" "$DIR5"
+touch "$LEAK2/.env.local"
+ln -s "$LEAK2/real" "$DIR5/home"
+expect_refusal cwd-symlinked-home 1 "$LEAK2/.env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR5" --dry-run
+DIR6="$TMP_ROOT/case6"
+mkdir -p "$DIR6/home"
+touch "$DIR6/home/.env.local"
+expect_refusal cwd-home-env-local 1 "$DIR6/home/.env.local would be loaded" \
+  --bin "$STUB" --dir "$DIR6" --dry-run
+
+# `$(dirname)` strips a trailing newline, so the walk would skip this ancestor.
+NL_DIR="$TMP_ROOT/nl
+"
+mkdir -p "$NL_DIR/sb"
+touch "$NL_DIR/.env.local"
+expect_refusal cwd-newline 1 ".env.local would be loaded" \
+  --bin "$STUB" --dir "$NL_DIR/sb" --dry-run
+
+# <dir>/home links to a newline-ended dir; `$(pwd -P)` drops the newline, so
+# the walk would start in another dir. Not a dry run: the stub must not start.
+NL_HOME="$TMP_ROOT/nlhome
+"
+DIR9="$TMP_ROOT/case9"
+mkdir -p "$NL_HOME" "$DIR9"
+touch "$NL_HOME/.env.local"
+ln -s "$NL_HOME" "$DIR9/home"
+expect_refusal cwd-newline-symlinked-home 1 "cannot resolve <dir>/home" \
+  --bin "$STUB" --dir "$DIR9"
+[ ! -e "$NL_HOME/stub-pwd" ] || fail cwd-newline-symlinked-home "the stub ran"
+
+if [ "$(id -u)" -eq 0 ]; then
+  echo "skip unresolvable-home, cd-fails: root enters a mode-000 directory"
+else
+  # An existing home the launcher cannot resolve must refuse, not fall back
+  # to walking from <dir>.
+  DIR7="$TMP_ROOT/case7"
+  mkdir -p "$DIR7/home"
+  chmod 000 "$DIR7/home"
+  expect_refusal unresolvable-home 1 "cannot resolve <dir>/home" \
+    --bin "$STUB" --dir "$DIR7"
+  chmod 700 "$DIR7/home"
+
+  # The home is absent at the walk, and mkdir under umask 0777 creates it with
+  # mode 000, so only the `cd` fails. The stub's marker is outside that home,
+  # where a started daemon could still write it.
+  DIR8="$TMP_ROOT/case8"
+  mkdir -p "$DIR8"
+  MARK_STUB="$TMP_ROOT/mark-stub"
+  printf '#!/bin/sh\ntouch "%s"\n' "$DIR8/stub-ran" > "$MARK_STUB"
+  chmod +x "$MARK_STUB"
+  set +e
+  OUT8="$(umask 0777 && run_launcher --bin "$MARK_STUB" --dir "$DIR8" 2>&1)"
+  STATUS8=$?
+  set -e
+  chmod 700 "$DIR8/home" "$DIR8/data" 2>/dev/null || true
+  if [ "$STATUS8" -ne 1 ] || [ -e "$DIR8/stub-ran" ]; then
+    fail cd-fails "exit $STATUS8 (want 1), stub ran: $([ -e "$DIR8/stub-ran" ] && echo yes || echo no)"
+    printf '%s\n' "$OUT8" | sed 's/^/    /'
+  elif ! printf '%s' "$OUT8" | grep -qF "cannot enter <dir>/home"; then
+    fail cd-fails "output lacks 'cannot enter <dir>/home'"
+  else
+    pass cd-fails
+  fi
+fi
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

@@ -34,6 +34,9 @@
 //! the credential is consumed rather than at config load;
 //! [`CredentialError`] is the five-variant denial taxonomy.
 //!
+//! **Delivery to a vendor CLI** (#9311). [`ExternalCliCommand`] runs `op`,
+//! `keeper`, `vercel` or `gh` with a [`Secret`] on stdin, never argv or env.
+//!
 //! This module holds **no** authorization. Which principal may resolve which
 //! credential is DOC-45 §5 and lands with #4566; the storage tiers here
 //! determine *where a value lives*, never *who may read it* (`C-9.8`). The
@@ -59,6 +62,7 @@
 //! [`Principal`]: crate::credentials::Principal
 //! [`Scope`]: crate::credentials::Scope
 //! [`CredentialError`]: crate::credentials::CredentialError
+//! [`ExternalCliCommand`]: crate::credentials::ExternalCliCommand
 //! [`authority`]: crate::credentials::authority
 
 pub mod authority;
@@ -70,6 +74,8 @@ mod dotenv;
 #[cfg(test)]
 pub(crate) mod env_guard;
 mod error;
+// #9311: the stdin-only runner every CLI-backed secrets integration uses.
+pub mod external_cli;
 mod file_store;
 mod handle;
 #[cfg(feature = "keyring-store")]
@@ -108,10 +114,11 @@ pub use bounded_store::{
     resolve_env_var_bounded, resolve_provider_bounded_with, store_get_bounded,
 };
 pub use dotenv::{
-    env_local_value, find_workspace_env_local, load_env_from_path, load_env_local_once,
-    read_var_from_env_local, user_env_local_path,
+    SANDBOX_ENV_VAR, env_local_value, find_workspace_env_local, load_env_from_path,
+    load_env_local_once, read_var_from_env_local, sandbox_flag_set, user_env_local_path,
 };
 pub use error::CredentialError;
+pub use external_cli::{ExternalCliCommand, ExternalCliError, ExternalCliOutput};
 pub use file_store::FileKeyStore;
 pub use handle::{CredentialRef, CredentialRefError};
 #[cfg(feature = "keyring-store")]

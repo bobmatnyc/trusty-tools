@@ -14,7 +14,7 @@
 //!    `CorpusStore::open` to fail, and the whole pipeline from
 //!    `build_indexer_from_entry` → `derive_warm_boot_stages` emits `Failed`.
 //!
-//! Test: `cargo test -p trusty-search --test warm_boot_corpus_open_failure`
+//! Test: `cargo test -p trusty-search --test integration warm_boot_corpus_open_failure::`
 
 use trusty_search::core::registry::StageStatus;
 use trusty_search::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};

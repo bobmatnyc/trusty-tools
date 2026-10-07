@@ -67,6 +67,9 @@ impl SearchAppState {
             // surface on these.
             query_limiter: crate::service::concurrency::ConcurrencyLimiter::from_env(),
             query_timeout: crate::service::query_timeout::QueryTimeoutConfig::from_env(),
+            file_get_limiter: Arc::new(tokio::sync::Semaphore::new(
+                crate::service::server::FILE_GET_MAX_CONCURRENT,
+            )),
             cold_store: Arc::new(crate::service::lazy_loader::ColdIndexStore::new()),
             reindex_progress: Arc::new(DashMap::new()),
             last_reindex_aborted_at: Arc::new(DashMap::new()),
@@ -76,6 +79,7 @@ impl SearchAppState {
             embedder_ready_tx: Arc::new(ready_tx),
             embedder_error: Arc::new(RwLock::new(None)),
             daemon_port: None,
+            transport: Default::default(),
             openrouter_enabled: !openrouter_api_key.is_empty(),
             started_at: Instant::now(),
             local_model: LocalModelConfig::default(),
@@ -323,6 +327,13 @@ impl SearchAppState {
     /// the UI handler to inject `window.__DAEMON_PORT__`.
     pub fn with_daemon_port(mut self, port: u16) -> Self {
         self.daemon_port = Some(port);
+        self
+    }
+
+    /// Builder-style: record the listeners the daemon bound, for
+    /// `search.health`'s `transport` (#9030).
+    pub fn with_transport(mut self, transport: super::state::DaemonTransport) -> Self {
+        self.transport = transport;
         self
     }
 

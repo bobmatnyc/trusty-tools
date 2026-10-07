@@ -5,58 +5,76 @@
 //! What: `bedrock_cost_per_million`, `normalize_model_family`, and
 //! `estimate_bedrock_cost_usd` — the full pricing lookup chain.
 //! Test: `bedrock_cost_estimate_*` and `bedrock_normalize_model_family_*`
-//! tests live in `bedrock/mod.rs` test module.
+//! tests live in `bedrock/tests.rs`.
 
-use tracing::debug;
+use tracing::{debug, warn};
 
-use super::INFERENCE_PROFILE_PREFIXES;
+use super::{INFERENCE_PROFILE_PREFIXES, arn};
 
-/// Approximate Bedrock pricing per million tokens (input, output) in USD.
+/// The inference-profile prefix billed at the global on-demand rate.
+const GLOBAL_PROFILE_PREFIX: &str = "global.";
+
+/// On-demand rates for one model family, in USD per million tokens, as
+/// `(input, output)` pairs.
+struct FamilyRates {
+    /// Rate for a `global.` cross-region inference profile.
+    global: (f64, f64),
+    /// Rate for a geographic profile (`us.`, `eu.`, `ap.`, `jp.`) or a bare id.
+    geo: (f64, f64),
+}
+
+impl FamilyRates {
+    /// One rate for both profile kinds (legacy models with no global premium).
+    const fn flat(input: f64, output: f64) -> Self {
+        Self {
+            global: (input, output),
+            geo: (input, output),
+        }
+    }
+}
+
+/// Bedrock on-demand pricing per million tokens (input, output) in USD.
 ///
-/// Why: surfaces cost estimates in [`LlmResponse`] for the `compare` mode.
-/// What: keyed by model id (inference-profile id without the `us.`/`eu.` prefix
-/// since the per-token cost is the same across regions for the same model).
-/// After stripping the geo-prefix the lookup also normalises date/version
-/// suffixes (e.g. `-20251001-v1:0`) via [`normalize_model_family`] so that
-/// date-stamped ids like `anthropic.claude-haiku-4-5-20251001-v1:0` match the
-/// same table entry as the family prefix `anthropic.claude-haiku-4-5`.
-/// Unknown ids → cost 0.0 with a debug log.
-///
-/// Sources: AWS Bedrock On-Demand pricing page (us-east-1, June 2026).
+/// Why: surfaces cost estimates in [`LlmResponse`] for `run` and `compare`.
+/// AWS bills a geographic inference profile (`us.` and the other geo prefixes)
+/// at the "Regional" rate, 10% above the `global.` rate for Claude 4.5 and
+/// later, so the prefix must pick the rate before it is stripped.
+/// What: a Bedrock model ARN is first replaced by the model id it embeds
+/// (#9200); an application-inference-profile ARN embeds none, so it is
+/// unpriced: `(0.0, 0.0)` with a warn log naming it unpriced. Then reads
+/// whether the id carries the `global.` prefix, strips any inference-profile
+/// prefix, normalises date/version suffixes via [`normalize_model_family`],
+/// and returns the matching family's global or geo rate. Unknown ids →
+/// `(0.0, 0.0)` with a debug log.
+/// Test: `bedrock_cost_estimate_matches_price_list_per_profile`,
+/// `bedrock_cost_estimate_haiku_date_versioned`,
+/// `arn_pricing_resolves_the_embedded_model_or_reports_unpriced`.
 pub(super) fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
-    // Step 1: strip the geography prefix (us., eu., ap., jp., global.) so
-    // the pricing table works for all cross-region inference profiles.
+    // #9200: price an ARN as the model it names; never guess a hidden one.
+    let model = match arn::parse(model) {
+        None => model,
+        Some(parsed) => match parsed.priced_model() {
+            Some(embedded) => embedded,
+            None => {
+                warn!(
+                    model = %arn::mask_account_ids(model),
+                    "Bedrock application inference profile is unpriced: its ARN does not \
+                     name the model it runs, so cost_usd 0.0 is not a measured cost"
+                );
+                return (0.0, 0.0);
+            }
+        },
+    };
+    let is_global = model.starts_with(GLOBAL_PROFILE_PREFIX);
     let after_geo = INFERENCE_PROFILE_PREFIXES
         .iter()
         .find_map(|pfx| model.strip_prefix(pfx))
         .unwrap_or(model);
 
-    // Step 2: normalise by stripping any date/version suffix of the form
-    // `-YYYYMMDD-vN:N` so that date-stamped ids (e.g. the verified Haiku 4.5
-    // id `anthropic.claude-haiku-4-5-20251001-v1:0`) match the same table
-    // entry as the short family prefix (`anthropic.claude-haiku-4-5`).
-    let normalized = normalize_model_family(after_geo);
-
-    match normalized {
-        // Claude Sonnet 4.6 — default reviewer model.
-        "anthropic.claude-sonnet-4-6" => (3.00, 15.00),
-        // Claude Sonnet 4.5 — second tier in compare set.
-        // Confirmed-available in target account; pricing ≈ Sonnet 4.6.
-        "anthropic.claude-sonnet-4-5" => (3.00, 15.00),
-        // Claude Haiku 4.5 — default verifier/summarizer model.
-        // Matches both `anthropic.claude-haiku-4-5` and the date-versioned
-        // `anthropic.claude-haiku-4-5-20251001-v1:0` after normalization.
-        "anthropic.claude-haiku-4-5" => (0.80, 4.00),
-        // Claude Opus 4.8 — premium option.
-        "anthropic.claude-opus-4-8" => (15.00, 75.00),
-        // Legacy Claude 3.5 Sonnet (cross-region profile, date-versioned).
-        "anthropic.claude-3-5-sonnet-20241022-v2:0" | "anthropic.claude-3-5-sonnet" => {
-            (3.00, 15.00)
-        }
-        // Legacy Claude 3 Haiku (cross-region profile, date-versioned).
-        "anthropic.claude-3-haiku-20240307-v1:0" | "anthropic.claude-3-haiku" => (0.25, 1.25),
-        // Unknown model — no cost estimate.
-        _ => {
+    match family_rates(normalize_model_family(after_geo)) {
+        Some(rates) if is_global => rates.global,
+        Some(rates) => rates.geo,
+        None => {
             debug!(
                 model = %model,
                 "BedrockProvider: no pricing entry for model id — cost_usd will be 0.0"
@@ -64,6 +82,65 @@ pub(super) fn bedrock_cost_per_million(model: &str) -> (f64, f64) {
             (0.0, 0.0)
         }
     }
+}
+
+/// Price table keyed by normalised model family (no profile prefix, no
+/// date/version suffix).
+///
+/// Source for every entry: AWS Price List API, service code
+/// `AmazonBedrockFoundationModels`, region `us-east-1`, retrieved 2026-10-05.
+/// Global rates are the `*_Global` / `*_global_standard` usage types; geo rates
+/// are the regional `InputTokenCount` / `input_tokens_standard` usage types.
+/// SKUs are listed as input-global, output-global / input-geo, output-geo.
+fn family_rates(family: &str) -> Option<FamilyRates> {
+    let rates = match family {
+        // Claude Sonnet 5.5 — default reviewer (Bob 2026-10-05). Effective
+        // 2026-09-01. SKUs PXMCKMF8EGSRB3GB, HP32J6RXJZ3XYFUM /
+        // 6TG78WT6WYJUVS72, ZNY2E4B6MTPHYXVH.
+        "anthropic.claude-sonnet-5-5" => FamilyRates {
+            global: (2.00, 10.00),
+            geo: (2.20, 11.00),
+        },
+        // Claude Opus 5.5 — compare set. Effective 2026-09-01. SKUs
+        // KVG5FBPDJPKF5TJY, MWH4TD2A4D5CEBAP / J9QFZT8WAQABG9ZX, FCRGDQ596BG7EQKH.
+        "anthropic.claude-opus-5-5" => FamilyRates {
+            global: (4.00, 20.00),
+            geo: (4.40, 22.00),
+        },
+        // Claude Sonnet 4.6 — compare set. Effective 2026-09-01. SKUs
+        // 4BCSX42248MW35W4, CMWTKXQCAJ2T8A4U / KPFGPZJ8VWMREGAV, GMB9AQ5DYNAGYZEC.
+        "anthropic.claude-sonnet-4-6" => FamilyRates {
+            global: (3.00, 15.00),
+            geo: (3.30, 16.50),
+        },
+        // Claude Sonnet 4.5. Effective 2026-09-01. SKUs GJ7NHAXUYKGEHMVV,
+        // W4BVSJCZM5M9FZYT / SSK4DT4JBRUQJYP5, 3YN5KGC2HJU9VC5A.
+        "anthropic.claude-sonnet-4-5" => FamilyRates {
+            global: (3.00, 15.00),
+            geo: (3.30, 16.50),
+        },
+        // Claude Haiku 4.5 — default verifier/summarizer; matches the
+        // date-versioned id after normalisation. Effective 2026-09-01. SKUs
+        // DY4B4Q3TRTAY8V6G, XADKFYXVGBFBJSU7 / JQDUC8Q4K8C6GSGH, X629GDA2GXAP6R54.
+        "anthropic.claude-haiku-4-5" => FamilyRates {
+            global: (1.00, 5.00),
+            geo: (1.10, 5.50),
+        },
+        // Claude Opus 4.8. Effective 2026-09-01. SKUs UF2KA578YZK6T9UE,
+        // DWUA6RYSEUDBTPA4 / 4AVHTD2NXFKSU6HU, YKJ5FPMCZAQF5BHF.
+        "anthropic.claude-opus-4-8" => FamilyRates {
+            global: (5.00, 25.00),
+            geo: (5.50, 27.50),
+        },
+        // Legacy Claude 3.5 Sonnet v2 (one rate, no global profile).
+        // Effective 2026-07-01. SKUs G9H8GZD6JNDG8SYS, XGQXAJ2EEBAXERX5.
+        "anthropic.claude-3-5-sonnet" => FamilyRates::flat(3.00, 15.00),
+        // Legacy Claude 3 Haiku (one rate, no global profile).
+        // Effective 2026-07-01. SKUs XQ9Q5XG2HVDMTF2S, NNM89KRFHHY9RWAT.
+        "anthropic.claude-3-haiku" => FamilyRates::flat(0.25, 1.25),
+        _ => return None,
+    };
+    Some(rates)
 }
 
 /// Normalise a model id by stripping date/version suffixes of the form

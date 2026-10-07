@@ -137,7 +137,14 @@ pub struct CodeChunk {
   `http_status` — so `error`, `index_id`, `retryable`, `restore_via`, `reason`,
   `transient`, and `stages` read exactly as the HTTP table above describes
   them. A `503` with no JSON body, or any other status, still reaches the
-  caller as the plain transport error it always did.
+  caller as the plain transport error it always did. Since #9168 the bridge
+  (`trusty-search serve`) reaches the daemon only over its Unix socket: the
+  `503` body arrives as the refusal's `data` member and is relayed unchanged,
+  and every MCP error names the daemon socket rather than a URL. The read
+  tools that take one index also accept an optional `project` (name,
+  `owner/repo`, or path), resolved by the daemon's `search.project.resolve`;
+  a miss answers `PROJECT_UNRESOLVED` (bare-method code `-32014`) carrying the
+  daemon's `candidates`.
 - **CORS**: permissive (`*`) for browser-based admin UIs.
 - **Gzip**: responses are gzipped when `Accept-Encoding: gzip` is set.
 
@@ -263,6 +270,24 @@ Register a new (empty) index. Idempotent: re-registering an existing id returns
   open under an earlier registration of the same index (a deferred embed job
   or an unfinished delete close). Carries `index_id`, `failure_kind`, and
   `retryable: true`; nothing is registered. Retry.
+- **`colocated` (bool, optional, #8147)**: `false` keeps the store at
+  `<data_dir>/indexes/<id>/` even when `<root_path>/.trusty-search/` already
+  holds a corpus, and registration writes nothing under `root_path`. Use it to
+  register a read-only or root-owned root. Omitted or `true` is the #8499
+  placement below. Carried by `POST /indexes` and `search.index.create`; the
+  MCP `create_index` tool and the CLI do not send it.
+- **Response 403** (#8147): the root's `.trusty-search/` holds a corpus the
+  daemon would adopt but cannot write. `error` starts `permission denied:`
+  and names the directory and the `colocated: false` alternative. Nothing is
+  registered or created, so that retry succeeds. This used to be a
+  `500 corpus open failed`.
+- **Response 409** (#8147): `colocated: false` for an id registered colocated
+  at the same `root_path`, resident or recorded in `indexes.toml`. A
+  registration never changes an index's layout. The body carries
+  `registered_colocated: true` and `requested_colocated: false`; nothing
+  changes. Checked before embedder readiness, so a `503` never hides it. If
+  `indexes.toml` cannot be read for this check the answer is `500` and nothing
+  is registered.
 
 Concurrent registrations and relocates wait for each other only when they
 share an id or their roots are equal or nested; unrelated roots register in
@@ -329,6 +354,37 @@ Skipping the `DELETE` and dropping a handle out-of-process (or
 racing the two calls) risks `DatabaseAlreadyOpen` on the re-register, because
 some other handle (e.g. a detached watcher task) still holds the corpus open;
 see `tests_2984.rs` for the concrete failure mode this ordering avoids.
+
+###### Serve-only indexes (issue #8883)
+
+A serving daemon that loads an index built on a dedicated indexer can mark it
+serve-only, so a stray reindex never rebuilds it locally and replaces it. Set
+the mark on the index's `indexes.toml` entry and restart the daemon; the flag
+is read at restore, and no route sets it. A `POST /indexes` over an id that
+is already registered, live or cold, keeps the mark. `DELETE /indexes/:id`
+removes the entry and the mark with it:
+
+```toml
+[[index]]
+id = "my-project"
+root_path = "/srv/my-project"
+serve_only = true
+```
+
+For a serve-only index the daemon:
+
+- refuses every reindex with `403 index_serve_only` — HTTP, the socket, the
+  MCP `reindex` tool, the CLI, and the catch-up a config PATCH starts;
+- starts no file watcher, so saves under its root are not indexed;
+- skips it in the boot reconcile (no stuck-walk retry, git delta, mtime
+  catch-up or full reindex);
+- queues no boot deferred-embed re-arm and no vector-gap backfill. A gap in the
+  shipped vectors marks `stages.semantic` `failed` with a reason naming the mark.
+
+Search and every other read are unaffected. Explicit per-file writes
+(`index-file`, `remove-file`), `PATCH /indexes/:id/config` component toggles,
+`quantize` and relocate are not gated. To rebuild, reindex on the indexer and
+ship the result, or remove the line and restart.
 
 ##### `DELETE /indexes/:id[?delete_data=true]`
 
@@ -489,6 +545,16 @@ Per-index stats.
     is driving it any more, so `status: "indexing"` and
     `stages.lexical: in_progress` above are a frozen claim rather than live
     work. `POST /indexes/:id/reindex` clears it.
+  - `bm25_truncated` / `bm25_docs_dropped` / `bm25_corpus_cap` (#9235): the
+    BM25 corpus cap (`TRUSTY_BM25_CORPUS_CAP`) kept `bm25_docs_dropped`
+    resident chunks out of the lexical lane; only the vector lane can find
+    them. `bm25_docs_dropped` is the resident chunk-map length minus
+    `bm25.len()`, saturating at `0` — not the durable `chunk_count` above.
+    While the index is evicted, or a memory-pressure reclaim is clearing it,
+    it is the durable chunk count minus the cap. When that durable count
+    cannot be read, all three are `null` and
+    `bm25_truncation_unavailable_reason` is `"corpus_count_unreadable"`; it
+    is `null` otherwise. The search `meta` block carries the same four fields.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
@@ -556,6 +622,11 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
+  - `meta.bm25_truncated` / `meta.bm25_docs_dropped` / `meta.bm25_corpus_cap`
+    / `meta.bm25_truncation_unavailable_reason` (#9235): the
+    converged-but-truncated signal, the same four fields
+    `GET /indexes/:id/status` reports. `bm25_lane_degraded` means the lane has
+    not converged; these mean it converged without some chunks.
   - `meta.exact_match_floor` / `meta.exact_match_literal` (#7675): `true` when
     the query named a literal that occurs verbatim in the corpus, and every
     chunk carrying it was ranked above every chunk that does not, declaration
@@ -720,6 +791,23 @@ Remove a file (and all its chunks) from the index.
   ```json
   { "index_id": "my-project", "path": "src/auth.rs", "removed_chunks": 4 }
   ```
+  - `path` (#9236) is index-relative, or absolute under the index root. An
+    absolute path is mapped to its index-relative key by text against the raw
+    and the canonical root; only when both fail is its parent directory
+    canonicalized. The last component is never resolved, so an in-root
+    symlink removes its own key, not its target's. A key stored verbatim by
+    an absolute `index-file` write is removed too. `path` in the reply echoes
+    the request.
+  - A successful removal also drops the file's content hash, so the next
+    reindex indexes the file again.
+- **Response 500** `remove_file_failed`: a 500 from the delete itself keeps
+  the file's chunks and its hash. A 500 from the hash step comes after the
+  chunks are gone; the request is safe to retry, and the retry answers 200
+  with `removed_chunks: 0` and clears the hash.
+- **Response 400** `remove_file_path_outside_root` (#9236): an absolute path
+  outside the root, the root itself, or a path, relative or absolute, that is
+  empty, `.`, or holds a `..` segment. Nothing is removed (`removed_chunks: 0`);
+  `message` names both accepted forms.
 
 ###### Supported network-mount pattern (EFS/NFS/SMB) — issue #3408
 
@@ -797,8 +885,12 @@ git diff --name-status "$PREV_HEAD" HEAD | while IFS=$'\t' read -r status path n
 done
 ```
 
-Note: `index_file` triggers a full `rebuild_symbol_graph` per call
-(`core/indexer/ingest/mod.rs`) — fine for a handful of files per push. There is
+Note: `index_file` replaces the file's prior chunks, and neither it nor
+`remove_file` rebuilds the symbol graph per call (#8959, #9179). Each marks the
+graph stale; the daemon rebuilds it once the index has been quiet for 2 s, or
+after 60 s under a continuous write stream. Search reads the last built graph
+in the meantime; `GET /graph`, `call_chain` and `graph/neighbors` flush pending
+writes first. There is
 currently no HTTP/MCP-exposed batch variant (the internal
 `index_files_batch_no_rebuild` fast path is only used by the full-reindex
 pipeline); a consumer that needs to apply a LARGE batch of per-file changes at
@@ -844,6 +936,13 @@ Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
 - **Response 409** `index_held` (#9059): an `exclude_globs` entry does not
   parse, so the index takes no reindex. Same body as `index-file`'s 409, plus
   `queued: false`. Fix the globs with `PATCH /indexes/:id/config`.
+- **Response 403** `index_serve_only` (#8883): the index is serve-only on this
+  daemon (see "Serve-only indexes" below), so it is never rebuilt here.
+  Nothing is queued and the corpus is unchanged. The body carries `index_id`,
+  `reason: "serve_only"`, a `message` naming the index and both remedies,
+  `queued: false`, and `retryable: false`. The socket's
+  `search.index.reindex` answers `CODE_FORBIDDEN` with the same message, and
+  the MCP `reindex` tool and `trusty-search index --force` / `reindex` relay it.
 
 ##### `GET /indexes/:id/reindex/stream`
 
@@ -973,7 +1072,7 @@ Serves the embedded Svelte admin UI. Not part of the integration contract.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **20 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -982,23 +1081,22 @@ this table is generated from it, not maintained by hand.
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
-| `get_call_chain` | `index_id`, `entry_point`, `direction?`, `full?`, `include_source?`, `max_bytes?`, `max_depth?` | Annotated call tree for a function entry point (issue #76). |
-| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
+| `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
+| `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |
-| `index_status` | `index_id?` | Get stats for an index (chunk count, root path). |
-| `list_chunks` | `index_id`, `after?`, `full?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?` | Paginated enumeration of every chunk in an index (issue #54). |
+| `index_status` | `index_id?`, `project?` | Get stats for an index (chunk count, root path). |
+| `list_chunks` | `after?`, `full?`, `index_id?`, `limit?`, `max_bytes?`, `offset?`, `path_prefix?`, `project?` | Paginated enumeration of every chunk in an index (issue #54). |
 | `list_indexes` | — | List all registered indexes on this daemon |
 | `reindex` | `index_id`, `root_path?` | Trigger a full reindex of a collection (async, returns immediately) |
 | `remove_file` | `index_id`, `path` | Remove a file's chunks from an index |
-| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
-| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
+| `search` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Unified hybrid search (BM25+vector+KG+RRF) with mode-aware ranking (issue #77). |
+| `search_all` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `full_content?`, `index_id?`, `max_bytes?`, `max_fanout_concurrency?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `serial?`, `top_k?` | When in doubt, use this. |
 | `search_health` | `index_id?` | Diagnose this session's search back-end (issue #5264). |
-| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
-| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
-| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
+| `search_kg` | `query`, `compact?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `refine_query?`, `repos?`, `top_k?` | Explore code structure from a known seed — either a chunk_id (from a previous search result) or a symbol name. |
+| `search_lexical` | `query`, `branch?`, `branch_boost?`, `branch_files?`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by exact symbol name, regex, or literal string. |
+| `search_semantic` | `query`, `compact?`, `exclude_archived?`, `full?`, `index_id?`, `max_bytes?`, `mode?`, `path_prefix?`, `project?`, `repos?`, `top_k?` | Find code by meaning, not by literal text. |
 | `search_similar` | `file`, `function?`, `index?`, `top_k?` | Find chunks semantically similar to a given file/function via HNSW (issue #31) |
-| `typeahead` | `query`, `index_id?`, `limit?`, `mode?` | Fast per-keystroke autocomplete suggestions for an index. |
-| `upgrade` | `check?`, `confirm?` | Check for or install a new version of trusty-search (issue #537). |
+| `typeahead` | `query`, `index_id?`, `limit?`, `mode?`, `project?` | Fast per-keystroke autocomplete suggestions for an index. |
 <!-- END GENERATED: mcp-tools -->
 
 ## Stack
@@ -1263,6 +1361,7 @@ daemon assumes 8 GB — the `Degraded` tier — with a `tracing::warn!`.
 | `TRUSTY_MAX_RESIDENT_INDEXES` | Usage-based resident-index cap (issue #2161; **defaults ON, tier-scaled, since #6822's sibling #6821**). A periodic sweep (`TRUSTY_RESIDENCY_SWEEP_SECS`) ranks every currently-**resident** index by the same recency key used at boot-time selective warm-boot (`max(last_queried_unix, last_indexed_unix)`, issue #993) and cold-parks everything beyond the top `N` — a **non-destructive** detach that only removes the in-memory `IndexHandle` from the registry; `indexes.toml`, `roots.toml`, and every on-disk artifact (redb corpus, HNSW snapshot) are left untouched. The next query against a parked index reloads it lazily via the same cold-load path a never-yet-warm-booted index uses (subject to `TRUSTY_INDEX_COLD_RELOAD_TIMEOUT_SECS`). An index with an in-flight reindex is never parked. **Unset resolves to the machine tier's default** (see the table below), NOT to disabled — before #6821 the feature shipped built and tested but off, so an index queried even once stayed resident for the daemon's whole lifetime (56 indexes / 15 GB on a 128 GB reporting host, 35 of them never queried). **`off` (any case) is the one spelling that disables it** and restores the pre-#6821 posture. A number is honoured verbatim: `0` still parks every resident index on the next sweep (the #2161 meaning — which is exactly why `off` had to be a separate spelling). An unparseable value warns and falls back to the tier default, not to disabled. The resolved cap and its source are logged once at startup and reported on `GET /health` as `resident_index_cap` / `resident_index_cap_source` (`"env"` \| `"env (off)"` \| `"tier default"`). |
 | `TRUSTY_RESIDENCY_SWEEP_SECS` | Interval (seconds) between residency-cap sweeps (issue #2161). Default `120`. `0` disables the sweep ticker outright (it never spawns), independent of `TRUSTY_MAX_RESIDENT_INDEXES`. Since #6821 the cap defaults on, so a tick is no longer a no-op unless `TRUSTY_MAX_RESIDENT_INDEXES=off`. |
 | `TRUSTY_WARMBOOT_MAX_INDEXES` | How many indexes warm-boot loads **eagerly** at startup (issue #993); the rest are parked in the cold store and loaded on first query. **Unset now inherits `TRUSTY_MAX_RESIDENT_INDEXES`'s resolved cap (#6821)** rather than warm-booting everything — otherwise a boot loads every registered index and waits up to `TRUSTY_RESIDENCY_SWEEP_SECS` for the sweep to park them back down, and it is that transient peak, not the steady state, that a 16 GB host cannot absorb (epic #6802). Ordering is unchanged: most-recently-used first, and an index that was never queried and never indexed (sort key `0`) is always in the deferred remainder. `0` lazy-loads everything. `TRUSTY_MAX_RESIDENT_INDEXES=off` with this unset restores the pre-#993 warm-boot-everything behaviour. |
+| `TRUSTY_WARMBOOT_MAX_AGE_HOURS` | Warm-boot age gate, in hours (#8275). Default `24`. An index whose recency key (`max(last_queried_unix, last_indexed_unix)`) is older than this, or was never set, is not loaded eagerly at startup; it is parked in the cold store and loads on its first query, like the rest of the deferred set. The filter runs **before** the `TRUSTY_WARMBOOT_MAX_INDEXES` cut, so a stale index never takes a slot from a fresh one, and it applies with the cap off too. `0` disables the gate. An unparsable value logs a warning and uses the default. Warm-boot only: the residency sweep is unchanged. After a restart, an index idle for 24 h or more stays cold until a per-index search (or an `index-file` / `remove-file` write) names it; the global `POST /search` / `search_all` fan-out searches hot indexes only, counting cold ones in `cold_indexes_skipped` without reviving them. |
 | `TRUSTY_HNSW_MMAP_SERVE` | **Out-of-core quick win #1 (#709).** Controls whether warm-booted HNSW snapshots are served directly from the memory-mapped `Index::view` (low RSS — the OS page cache holds the graph) or eagerly promoted to a heap-resident copy at load time. Default **enabled** (`1`/`true`/`yes`/`on`): search serves from the view and never duplicates the graph onto the heap; promotion to a mutable heap copy happens lazily only on the first *write* (index_file / reindex / add / remove). Set to `0`/`false`/`no`/`off` to opt out — `load_from` then promotes immediately so all serving is heap-resident (higher RSS, but no cold page-fault latency on the first queries). **Trade-off:** mmap serving lowers RSS but the first touch of a cold page faults it in from disk; on EFS/NFS-backed snapshot storage that fault is a network round-trip and can add noticeable tail latency to the first few queries after a restart — opt out on such hosts if cold-start latency matters more than RSS. |
 | `TRUSTY_VECTOR_QUANT` | **Out-of-core quick win #2 (#709); default flipped to `f16` by #6822.** Scalar precision new HNSW indexes are built with: `f16` (**default** — ≈2× smaller vectors, recall@10 = 1.00 in the `ooc_quick_wins` fixture, no measured loss) \| `f32` / `none` (full precision — opt in to keep the pre-#6822 behaviour) \| `i8` (≈4× smaller vectors, recall ≈0.96 — stays opt-in). An empty value means unset and resolves to the default; an unrecognised value warns and falls back to the default. Applied only at index **creation** time and maps onto usearch's `ScalarKind`. The `search` API still takes `f32` queries regardless (usearch quantizes the query internally). **An existing index is never re-quantized by this knob** — usearch writes the scalar kind into the snapshot header and `load`/`view` rebuild the metric and casts from there, so opening an f32 index under the f16 default reads it as f32 and rewrites nothing. **A forced reindex does not adopt the new setting either** (#6822 corrects the earlier claim here): the store object is built once at warm-boot by `service::persistence_loader::build_store_for_entry` and a reindex upserts into that same handle, so `reindex --force` re-embeds at the OLD precision. Converting an existing index is the explicit backfill below. The whole-snapshot on-disk reduction is diluted by fixed HNSW graph + key-map overhead at small dimensionality; at the production 384-dim size the vector-byte reduction measures exactly 2.000× (`tests/vector_quant_default_6822.rs::backfill_halves_the_vector_bytes_within_five_percent`). |
 

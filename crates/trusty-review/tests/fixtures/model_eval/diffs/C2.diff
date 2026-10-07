@@ -1,0 +1,26 @@
+diff --git a/crates/trusty-search/src/service/reindex/turn_gate.rs b/crates/trusty-search/src/service/reindex/turn_gate.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-search/src/service/reindex/turn_gate.rs
+@@ -0,0 +1,20 @@
++//! Wait for this job's turn in the embed queue.
++
++use std::collections::VecDeque;
++use std::sync::Mutex;
++use std::time::Duration;
++
++/// Jobs waiting to embed, front runs next.
++pub static QUEUE: Mutex<VecDeque<u64>> = Mutex::new(VecDeque::new());
++
++/// Resolve once `my_seq` is at the front of [`QUEUE`].
++pub async fn wait_for_turn(my_seq: u64) {
++    loop {
++        let queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
++        if queue.front() == Some(&my_seq) {
++            return;
++        }
++        tokio::time::sleep(Duration::from_millis(25)).await;
++        drop(queue);
++    }
++}

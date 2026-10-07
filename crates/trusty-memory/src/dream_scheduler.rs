@@ -24,16 +24,26 @@
 //! the watch-channel helpers that wire those loops to the daemon's
 //! graceful-shutdown signal.
 //!
+//! #9173: those loops cover only the palaces open when the scheduler starts,
+//! at most `max_open` of them. A rotation task dreams every other on-disk
+//! palace, one at a time, opening it through the LRU cache when needed.
+//!
 //! Test: `tests::dream_scheduler_spawns_per_palace_loop`,
 //! `tests::dream_scheduler_honors_disable_flag`,
-//! `tests::dream_scheduler_shutdown_stops_all_loops`.
+//! `tests::dream_scheduler_shutdown_stops_all_loops`,
+//! `tests::a_palace_outside_the_open_set_still_dreams`.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
-use tracing::info;
-use trusty_common::memory_core::dream::{dream_max_concurrent, stagger_offset, Dreamer};
+use tracing::{info, warn};
+use trusty_common::memory_core::dream::{
+    dream_max_concurrent, stagger_offset, Dreamer, PersistedDreamStats,
+};
+use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::PalaceRegistry;
 
 /// Environment variable that disables autonomous dream scheduling when set to
@@ -98,6 +108,7 @@ pub fn spawn_dream_scheduler(
     let config_template = crate::service::dream_config_from_user_config(&user_cfg);
 
     let palace_ids = registry.list();
+    let looped: Arc<HashSet<PalaceId>> = Arc::new(palace_ids.iter().cloned().collect());
     let total = palace_ids.len();
     let interval = Duration::from_secs(config_template.idle_secs.max(1));
     let mut spawned: usize = 0;
@@ -135,12 +146,159 @@ pub fn spawn_dream_scheduler(
         );
     }
 
+    // #9173: the loops above cover only the palaces open right now — the LRU
+    // set, at most `max_open` of them. The rotation reaches every other palace.
+    if let Some(root) = registry.data_root() {
+        spawn_cold_rotation(
+            Rotation {
+                registry: registry.clone(),
+                data_root: root.to_path_buf(),
+                dreamer: Arc::new(Dreamer::new(config_template)),
+                looped,
+            },
+            interval,
+            shutdown_rx,
+        );
+    }
+
     info!(
         loops_spawned = spawned,
         max_concurrent = dream_max_concurrent(),
         "dream_scheduler: all per-palace loops running"
     );
     spawned
+}
+
+/// A palace whose last dream is older than this is due for the rotation.
+///
+/// Why (#9173): a resident palace dreams every `idle_secs` on its own loop;
+/// a palace nobody has open changes rarely, so once an hour is enough and
+/// keeps the rotation from reopening cold palaces back to back.
+pub const ROTATION_DREAM_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// Dream every on-disk palace the per-palace loops do not reach (#9173).
+///
+/// Why: `spawn_dream_scheduler` spawns loops for `registry.list()` — the open
+/// handles, capped at `max_open` (64). On a 104-palace host 40 palaces never
+/// had a loop, and a looped palace that is later evicted skips every tick.
+/// What: one task. Its first tick runs at once, then one per `interval`. Each
+/// tick calls [`rotation_tick`], so the rotation dreams at most one palace at a
+/// time; a due palace waits at most one `interval` per due palace ahead of it.
+/// Exits on the shutdown watch.
+/// Test: `tests::a_palace_outside_the_open_set_still_dreams`.
+fn spawn_cold_rotation(
+    rotation: Rotation,
+    interval: Duration,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut cursor = 0usize;
+        loop {
+            if *shutdown.borrow() {
+                return;
+            }
+            rotation_tick(&rotation, &mut cursor).await;
+            tokio::select! {
+                _ = tokio::time::sleep(interval) => {}
+                res = shutdown.changed() => if res.is_err() || *shutdown.borrow() { return; },
+            }
+        }
+    })
+}
+
+/// What the rotation task owns (#9173).
+struct Rotation {
+    registry: PalaceRegistry,
+    data_root: PathBuf,
+    dreamer: Arc<Dreamer>,
+    /// Palaces with their own loop; the rotation leaves them alone while open.
+    looped: Arc<HashSet<PalaceId>>,
+}
+
+/// Dream the next due palace after `cursor`, opening it only if it is closed.
+///
+/// What: skipped unless this process holds maintenance. Walks the on-disk
+/// palaces from `cursor` and takes the first whose `dream_stats.json` is
+/// missing or older than [`ROTATION_DREAM_AFTER`], skipping a palace that is
+/// open and either has its own loop or is mid-cycle. An open palace is dreamed
+/// on its live handle. A closed one is opened
+/// through `open_palace` — the LRU cache, so the open count stays within its
+/// bound — dreamed, and released if nothing else took a reference. Returns the
+/// palace it dreamed.
+async fn rotation_tick(rotation: &Rotation, cursor: &mut usize) -> Option<PalaceId> {
+    let Rotation {
+        registry,
+        data_root,
+        dreamer,
+        looped,
+    } = rotation;
+    if !registry.may_run_maintenance() {
+        return None;
+    }
+    let root = data_root.to_path_buf();
+    let palaces =
+        match tokio::task::spawn_blocking(move || PalaceRegistry::list_palaces(&root)).await {
+            Ok(Ok(palaces)) => palaces,
+            Ok(Err(e)) => {
+                warn!("#9173: dream rotation could not list palaces: {e:#}");
+                return None;
+            }
+            Err(e) => {
+                warn!("#9173: dream rotation list task failed: {e}");
+                return None;
+            }
+        };
+    let n = palaces.len();
+    let start = *cursor % n.max(1);
+    let due = (0..n).map(|k| (start + k) % n).find(|&i| {
+        let id = &palaces[i].id;
+        let free = registry
+            .peek(id)
+            .is_none_or(|h| !looped.contains(id) && !h.is_compacting());
+        free && dream_is_due(&palaces[i].data_dir)
+    })?;
+    *cursor = due + 1;
+    let id = palaces[due].id.clone();
+    let (handle, opened_here) = match registry.peek(&id) {
+        Some(h) => (h, false),
+        None => {
+            let (reg, root, pid) = (registry.clone(), data_root.to_path_buf(), id.clone());
+            match tokio::task::spawn_blocking(move || reg.open_palace(&root, &pid)).await {
+                Ok(Ok(h)) => (h, true),
+                Ok(Err(e)) => {
+                    warn!(palace = %id, "#9173: dream rotation could not open palace: {e:#}");
+                    return None;
+                }
+                Err(e) => {
+                    warn!(palace = %id, "#9173: dream rotation open task failed: {e}");
+                    return None;
+                }
+            }
+        }
+    };
+    match dreamer.dream_cycle(&handle).await {
+        Ok(stats) => info!(palace = %id, merged = stats.merged, "dream rotation: cycle complete"),
+        Err(e) => warn!(palace = %id, "dream rotation: cycle failed: {e:#}"),
+    }
+    drop(handle);
+    if opened_here {
+        registry.release_if_unreferenced(&id);
+    }
+    Some(id)
+}
+
+/// Whether `data_dir`'s last recorded dream is missing or past due.
+fn dream_is_due(data_dir: &Path) -> bool {
+    match PersistedDreamStats::load(data_dir) {
+        Ok(Some(p)) => (chrono::Utc::now() - p.last_run_at)
+            .to_std()
+            .is_ok_and(|age| age >= ROTATION_DREAM_AFTER),
+        Ok(None) => true,
+        Err(e) => {
+            warn!(dir = %data_dir.display(), "#9173: unreadable dream stats; treating as due: {e:#}");
+            true
+        }
+    }
 }
 
 /// Spawn all background maintenance loops (dream scheduler + idle-to-disk
@@ -164,7 +322,16 @@ pub fn spawn_background_maintenance(
 ) -> usize {
     let idle_evict_rx = dream_shutdown_rx.clone();
     let loops = spawn_dream_scheduler(registry, dream_shutdown_rx);
-    crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), idle_evict_rx);
+    // #9283: the daily drawer-count snapshot rides the same shutdown watch,
+    // and shares a gate with the idle-evict sweep so a sweep never pulls a
+    // resident handle out from under a count.
+    let gate = crate::idle_evict::new_evict_gate();
+    crate::drawer_counts::spawn_snapshot_task(
+        registry.clone(),
+        gate.clone(),
+        idle_evict_rx.clone(),
+    );
+    crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), gate, idle_evict_rx);
     // Bridge is spawned AFTER the loops exist (see #1529 ordering note).
     spawn_shutdown_bridge(dtx);
     loops
@@ -370,6 +537,53 @@ mod tests {
         let (_tx, rx) = make_shutdown_watch();
         let count = spawn_dream_scheduler(&registry, rx);
         assert_eq!(count, 0, "empty registry should produce 0 loops");
+    }
+
+    /// Why (#9173): the scheduler drove only the palaces open when it started —
+    /// the LRU set, capped at 64 of ~104 on the reporting host — so a palace
+    /// outside that set never dreamed.
+    /// What: a one-handle registry over two on-disk palaces; the evicted one
+    /// must get a dream pass (its `dream_stats.json` appears) while the open
+    /// handle count never passes the cap.
+    /// Test: itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn a_palace_outside_the_open_set_still_dreams() {
+        use trusty_common::memory_core::registry::MAX_OPEN_PALACES_ENV;
+        // #5937: lock order `#[serial]` (the attribute), then `env_test_lock()`.
+        let _env = crate::commands::env_test_lock().lock().await;
+        let root = tempfile::tempdir().expect("tempdir");
+        // SAFETY: serialised by `env_test_lock()`; both restored below.
+        unsafe {
+            std::env::remove_var(DREAM_DISABLED_ENV);
+            std::env::set_var(MAX_OPEN_PALACES_ENV, "1");
+        }
+        let state = crate::AppState::new(root.path().to_path_buf());
+        unsafe {
+            std::env::remove_var(MAX_OPEN_PALACES_ENV);
+        }
+        let cold = register_temp_palace(&state.registry, root.path());
+        register_temp_palace(&state.registry, root.path());
+        assert!(
+            state.registry.peek(&cold).is_none(),
+            "precondition: evicted"
+        );
+
+        let (tx, rx) = make_shutdown_watch();
+        spawn_dream_scheduler(&state.registry, rx);
+        let cold_dir = root.path().join(cold.as_str());
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut dreamed = false;
+        while !dreamed && std::time::Instant::now() < deadline {
+            assert!(state.registry.len() <= 1, "open handles passed the cap");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            dreamed = trusty_common::memory_core::dream::PersistedDreamStats::load(&cold_dir)
+                .expect("load stats")
+                .is_some();
+        }
+        let _ = tx.send(true);
+        assert!(dreamed, "the palace outside the open set never dreamed");
+        assert!(state.registry.len() <= 1, "open handles passed the cap");
     }
 
     /// Why: verify `make_shutdown_watch` returns a functioning watch pair.

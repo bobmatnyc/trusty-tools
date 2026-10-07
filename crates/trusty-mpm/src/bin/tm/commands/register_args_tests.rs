@@ -746,3 +746,171 @@ fn resolve_account_rejects_a_malformed_flag_value() {
         "{err}"
     );
 }
+
+/// The synthetic credential the #9124 tests feed in, and the lowercase
+/// fragments that must never appear in what comes back (sink 3 lowercases).
+const TOKEN_URL_PARTS: [&str; 2] = ["secretqatoken2", "qauser"];
+
+/// Fail when `text` holds any part of the #9124 synthetic credential.
+fn assert_no_token(what: &str, text: &str) {
+    let lowered = text.to_ascii_lowercase();
+    for part in TOKEN_URL_PARTS {
+        assert!(!lowered.contains(part), "{what} leaks {part:?}: {text}");
+    }
+}
+
+/// #9124 sink 1: `tm register` with a credentialed URL prints and stores the
+/// URL without its userinfo; the alias and the stored URL hold no token.
+#[test]
+fn register_never_prints_or_stores_an_embedded_token_9124() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let line = crate::commands::standalone::register_alias(
+        &paths,
+        "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+        None,
+        false,
+    )
+    .unwrap();
+    assert_no_token("the printed line", &line);
+    let stored = std::fs::read_to_string(dir.path().join("registry.json")).unwrap();
+    assert_no_token("registry.json", &stored);
+    let registry =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    assert_eq!(registry.list()[0].url, "https://example.invalid/org/x.git");
+    assert_eq!(registry.list()[0].alias, "org-x");
+}
+
+/// #9124 sink 2: every refusal `tm register` makes for a credentialed URL —
+/// host-only, a web-UI path, a collision with an entry stored before the fix
+/// — names the URL without its token.
+#[test]
+fn register_errors_never_echo_an_embedded_token_9124() {
+    for bad in [
+        "https://qauser:SECRETQATOKEN2@example.invalid/",
+        "https://qauser:SECRETQATOKEN2@github.com/o/r/issues",
+        // #9259: a quote or space in the password does not end the userinfo.
+        "https://qauser:pa'ssSECRETQATOKEN2@example.invalid/",
+        "https://qauser:\"pSECRETQATOKEN2\"@example.invalid/",
+        "https://qauser:pa ssSECRETQATOKEN2@github.com/o/r/issues",
+    ] {
+        let err = resolve_register_args(bad, None).unwrap_err();
+        assert_no_token(bad, &format!("{err:#}"));
+    }
+    let err = resolve_register_args(
+        "https://qauser:SECRETQATOKEN2@example.invalid/a/b",
+        Some("https://qauser:SECRETQATOKEN2@example.invalid/c/d"),
+    )
+    .unwrap_err();
+    assert_no_token("two repos", &format!("{err:#}"));
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let mut old =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    old.add(
+        "org-x",
+        "https://qauser:SECRETQATOKEN2@example.invalid/org/x.git",
+        false,
+    )
+    .unwrap();
+    old.save().unwrap();
+    let err = crate::commands::standalone::register_alias(
+        &paths,
+        "https://example.invalid/other/y.git",
+        Some("org-x"),
+        false,
+    )
+    .unwrap_err();
+    assert_no_token("the collision", &format!("{err:#}"));
+}
+
+/// The URL `register_alias` stored for `url` in a fresh managed root.
+fn stored_after_register(url: &str) -> String {
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = crate::commands::managed_root::ManagedPaths::from_root(dir.path().to_path_buf());
+    let line = crate::commands::standalone::register_alias(&paths, url, None, false).unwrap();
+    // #9155: registering the same URL again is a no-op, not a DuplicateAlias.
+    crate::commands::standalone::register_alias(&paths, url, None, false).unwrap();
+    let registry =
+        trusty_mpm::core::standalone::registry::ManagedRegistry::load(dir.path()).unwrap();
+    let stored = registry.list()[0].url.clone();
+    assert!(line.ends_with(&stored), "{line:?} names {stored:?}");
+    stored
+}
+
+/// #9155: `tm register` keeps the ssh login and removes only a secret — the
+/// `:password` on any scheme, the whole userinfo on http(s). The notice
+/// prints only when a secret went, and an scp-style URL holding a password is
+/// refused without echoing it (#9124 item 7).
+#[test]
+fn register_keeps_the_ssh_login_and_drops_only_the_secret_9155() {
+    for (url, want, removed) in [
+        ("git@github.com:o/r.git", "git@github.com:o/r.git", false),
+        ("ssh://git@h:2222/t/r", "ssh://git@h:2222/t/r", false),
+        (
+            "ssh://u:SECRETQATOKEN2@h:2222/t/r",
+            "ssh://u@h:2222/t/r",
+            true,
+        ),
+        (
+            "https://SECRETQATOKEN2@github.com/o/r",
+            "https://github.com/o/r",
+            true,
+        ),
+        (
+            "https://qauser:SECRETQATOKEN2@github.com/o/r",
+            "https://github.com/o/r",
+            true,
+        ),
+    ] {
+        assert_eq!(stored_after_register(url), want, "{url:?}");
+        let (form, notice) = crate::commands::standalone::storage_form(url);
+        assert_eq!(form, want, "{url:?}");
+        assert_eq!(notice.is_some(), removed, "{url:?}");
+        assert_no_token(url, notice.unwrap_or_default());
+    }
+    let scp = "qauser:SECRETQATOKEN2@host:o/r";
+    assert_eq!(
+        crate::commands::standalone::storage_form(scp),
+        (
+            "qauser@host:o/r".to_string(),
+            Some(crate::commands::standalone::SECRET_REMOVED_NOTICE)
+        )
+    );
+    let err = resolve_register_args(scp, None).unwrap_err();
+    assert_no_token(scp, &format!("{err:#}"));
+}
+
+/// #9124 item 7: an scp-style `user:token@host:path` names no `://`, so the
+/// error text masks its password through the scp branch.
+#[test]
+fn shown_masks_an_scp_style_password_9124() {
+    assert_eq!(
+        super::shown("qauser:SECRETQATOKEN2@host:o/r"),
+        "***@host:o/r"
+    );
+    assert_eq!(
+        super::shown("git@github.com:o/r.git"),
+        "git@github.com:o/r.git"
+    );
+    assert_eq!(
+        super::shown("https://qauser:SECRETQATOKEN2@h/o/r"),
+        "https://***@h/o/r"
+    );
+    // #9259: a quoted or spaced password, in the URL and the scp form.
+    for (s, want) in [
+        (
+            "https://qauser:pa'ssSECRETQATOKEN2@h/o/r",
+            "https://***@h/o/r",
+        ),
+        (
+            "https://qauser:\"p@ssSECRETQATOKEN2\"@h/o/r",
+            "https://***@h/o/r",
+        ),
+        ("qauser:pa ssSECRETQATOKEN2@host:o/r", "***@host:o/r"),
+        ("qauser:pa'ssSECRETQATOKEN2@h:o/r://x", "***@h:o/r://x"),
+    ] {
+        assert_eq!(super::shown(s), want);
+    }
+}

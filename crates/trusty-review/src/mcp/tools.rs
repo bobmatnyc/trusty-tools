@@ -28,7 +28,10 @@ use crate::{
     integrations::github::RunMode,
     mcp::console_metrics,
     models::{ReviewResult, ReviewStatus},
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    pipeline::{
+        DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
+        withheld_contract::withheld_by_reason,
+    },
     service::{
         AppState,
         handlers::{compute_status, probe_deps},
@@ -98,12 +101,36 @@ pub fn tool_descriptors() -> Value {
                         "description": "Override the reviewer model slug. \
                                        Use a `bedrock/<id>` prefix to force AWS Bedrock, \
                                        `openrouter/<id>` for OpenRouter. \
-                                       Default: us.anthropic.claude-sonnet-4-6 on Bedrock.",
+                                       Default: us.anthropic.claude-sonnet-5-5 on Bedrock.",
                         "examples": [
                             "bedrock/us.anthropic.claude-sonnet-4-6",
                             "bedrock/us.anthropic.claude-haiku-4-5",
                             "openrouter/openai/gpt-5.4-mini-20260317"
                         ]
+                    },
+                    // #9192: optional PR context, all off by default.
+                    "include_pr_body": {
+                        "type": "boolean",
+                        "description": "Merge the fetched PR body into the reviewer's PR \
+                                       description (capped at 64,000 characters, with a \
+                                       visible marker), ahead of any pr_description. \
+                                       Default false. The response then carries a \
+                                       context_sources ledger."
+                    },
+                    "pr_description": {
+                        "type": "string",
+                        "description": "PR description for the reviewer and the verifier \
+                                       (capped at 64,000 characters)."
+                    },
+                    "pr_discussion": {
+                        "type": "string",
+                        "description": "PR discussion (review and issue comments) for the \
+                                       reviewer and the verifier (capped at 64,000 characters)."
+                    },
+                    "referenced_code": {
+                        "type": "string",
+                        "description": "Referenced or related code the diff depends on, for \
+                                       the reviewer (capped at 64,000 characters)."
                     }
                 }
             }
@@ -199,6 +226,9 @@ pub async fn call_tool(tool: &str, args: &Value, state: &AppState) -> Result<Val
 // #8649: the handler and its per-call index resolution live in `review_pr.rs`.
 #[path = "review_pr.rs"]
 mod review_pr;
+// #9192: `review_pr`'s optional PR-context parameters.
+#[path = "context_args.rs"]
+pub(crate) mod context_args;
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
 
@@ -515,10 +545,16 @@ const MCP_STATUS_DEGRADED_CONTEXT: &str = "degraded_context";
 /// `isError: false` — only a genuine infra outage gets the loud treatment.
 /// What: serialises `ReviewResult` to pretty JSON inside a text content block,
 /// then stamps the `mcp_status` sentinel for an infra outage or a degraded
-/// verdict.
+/// verdict. #9188 K: when any finding was withheld, adds `withheld`
+/// (`count`, `by_reason`); absent otherwise, and `isError` is unchanged.
+/// #9310: adds the result's `verdict_status` (`parsed`, `parse_failed`,
+/// `no_reviewer_output`, `all_withheld`, `suppressed_reject`) whenever set.
 /// Test: `wrap_result_never_carries_a_reviewer_model_fallback`,
 /// `wrap_result_infra_unavailable_sets_error_and_sentinel`,
-/// `wrap_result_degraded_stays_isError_false` (in `tools_tests.rs`).
+/// `wrap_result_degraded_stays_isError_false` (in `tools_tests.rs`),
+/// `wrap_result_names_a_suppressed_reject_without_is_error`,
+/// `wrap_result_names_an_all_withheld_approve`,
+/// `wrap_result_names_the_status_of_a_clean_review`.
 fn wrap_result(result: &ReviewResult) -> Value {
     let payload = serde_json::to_value(result).unwrap_or(Value::Null);
     let text = serde_json::to_string_pretty(&payload)
@@ -530,6 +566,26 @@ fn wrap_result(result: &ReviewResult) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": infra_unavailable,
     });
+    // #9188 K: withheld findings are named on the envelope with typed counts.
+    // `isError` stays false: the review ran (Architect ruling 2026-10-05).
+    if !result.withheld_findings.is_empty()
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        let by_reason = withheld_by_reason(&result.withheld_findings);
+        obj.insert(
+            "withheld".to_string(),
+            serde_json::json!({ "count": result.withheld_findings.len(), "by_reason": by_reason }),
+        );
+    }
+    // #9310: every result names its outcome class, withheld or not.
+    if let Some(status) = result.verdict_status
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        obj.insert(
+            "verdict_status".to_string(),
+            Value::String(status.to_string()),
+        );
+    }
     if infra_unavailable && let Some(obj) = envelope.as_object_mut() {
         obj.insert(
             "mcp_status".to_string(),
@@ -551,6 +607,24 @@ fn wrap_result(result: &ReviewResult) -> Value {
                 Value::String(reason.to_string()),
             );
         }
+    }
+    envelope
+}
+
+/// Wrap a `run_review_with` outcome: [`wrap_result`] plus its source ledger.
+///
+/// Why: #9192 keeps `ReviewResult` unchanged, so the ledger of optional
+/// context sources is reported on the envelope, beside `withheld`.
+/// What: adds `context_sources` (an array of records) when the outcome has
+/// any; a review that asked for no new input carries no such key.
+/// Test: `wrap_outcome_adds_context_sources_only_when_present`.
+fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome) -> Value {
+    let mut envelope = wrap_result(&outcome.result);
+    if !outcome.context_sources.is_empty()
+        && let Some(obj) = envelope.as_object_mut()
+    {
+        let sources = serde_json::to_value(&outcome.context_sources).unwrap_or(Value::Null);
+        obj.insert("context_sources".to_string(), sources);
     }
     envelope
 }

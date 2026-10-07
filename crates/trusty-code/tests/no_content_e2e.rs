@@ -12,7 +12,7 @@
 //! paths (`serve` and `run-task`) and checks the project afterwards.
 //! Test: this file IS the test.
 
-mod support;
+use crate::support;
 
 use std::io::Write;
 use std::path::Path;

@@ -1,0 +1,13 @@
+diff --git a/crates/trusty-common/src/daemon_token.rs b/crates/trusty-common/src/daemon_token.rs
+index 1111111..2222222 100644
+--- a/crates/trusty-common/src/daemon_token.rs
++++ b/crates/trusty-common/src/daemon_token.rs
+@@ -13,8 +13,5 @@
+ 
+ /// Whether `presented` matches the daemon's `expected` token.
+ pub fn credentials_match(expected: &str, presented: &str) -> bool {
+-    if expected.len() < MIN_TOKEN_LEN {
+-        return false;
+-    }
+     ct_eq(expected.as_bytes(), presented.as_bytes())
+ }

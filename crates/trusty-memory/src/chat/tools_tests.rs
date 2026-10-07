@@ -196,3 +196,82 @@ async fn chat_kg_assert_reports_tier_s_refusal_without_writing() {
         "refused write reached the prompt cache"
     );
 }
+
+/// Write one drawer through `memory_remember`, `age` in the past; its id.
+async fn remember_aged(
+    state: &crate::AppState,
+    palace: &str,
+    text: &str,
+    tags: &[&str],
+    age: chrono::Duration,
+) -> String {
+    let args = json!({ "palace": palace, "text": text, "tags": tags, "force": true });
+    let out = crate::tools::dispatch_tool(state, "memory_remember", args)
+        .await
+        .expect("memory_remember");
+    let id = out["drawer_id"].as_str().expect("drawer_id").to_string();
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+    let mut drawers = handle.drawers.write();
+    let drawer = drawers
+        .iter_mut()
+        .find(|d| d.id.to_string() == id)
+        .expect("drawer present");
+    drawer.created_at = chrono::Utc::now() - age;
+    id
+}
+
+/// Why (#8246 review): the surface test drove the service methods, not the
+/// chat entry points that now call them.
+/// What: a 30-day-old snapshot and a fresh ruling on one subject. The chat
+/// `recall_memories` tool, the chat `memory_recall_all` tool and the chat
+/// context injection each rank the ruling above the snapshot, or drop it.
+#[tokio::test]
+async fn chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot() {
+    let state = test_state();
+    seed_palace(&state, "chatrank");
+    let snapshot_text = "rust builder cap snapshot: the band allowed six builders as of 2026-09-01";
+    let ruling_text = "Owner ruling 2026-10-01: at most four rust builders run at once";
+    let snapshot = remember_aged(
+        &state,
+        "chatrank",
+        snapshot_text,
+        &["status", "resume-target"],
+        chrono::Duration::days(30),
+    )
+    .await;
+    let ruling = remember_aged(
+        &state,
+        "chatrank",
+        ruling_text,
+        &["bob-ruling"],
+        chrono::Duration::zero(),
+    )
+    .await;
+    let query = "rust builder cap";
+    let rank = |rows: &serde_json::Value, id: &str| {
+        rows.as_array()
+            .expect("array")
+            .iter()
+            .position(|r| r["drawer_id"] == id)
+    };
+
+    let args = json!({ "palace_id": "chatrank", "query": query }).to_string();
+    let rows = super::tools::execute_tool("recall_memories", &args, &state).await;
+    let args = json!({ "q": query }).to_string();
+    let all = super::tools::execute_tool("memory_recall_all", &args, &state).await;
+    for (surface, rows) in [("recall_memories", &rows), ("memory_recall_all", &all)] {
+        let (r, s) = (rank(rows, &ruling), rank(rows, &snapshot));
+        assert!(r.is_some(), "{surface}: ruling recalled: {rows}");
+        assert!(s.is_none() || r < s, "{surface}: ruling first: {rows}");
+    }
+
+    let context = super::handler::recall_context(&state, "chatrank", query).await;
+    let r = context.find(ruling_text).expect("ruling in the context");
+    assert!(
+        context.find(snapshot_text).is_none_or(|s| r < s),
+        "context injection: ruling first:\n{context}"
+    );
+}

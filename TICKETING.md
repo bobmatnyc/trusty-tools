@@ -30,14 +30,16 @@ the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
 "Abbreviations & Aliases" table first.
 
 Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
-`trusty-agents-ui`, `trusty-analyze`, `trusty-audit`, `trusty-audit-ui`,
+`trusty-agents-ui`, `trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
 `trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`, `trusty-kb`,
 `trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
-`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-sld-lint`,
-`tc-services`, `tga`, `cto-assistant`.
+`trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-secrets`, `trusty-sld-lint`,
+`tc-services`, `cto-assistant`.
+
+trusty-git-analytics and trusty-audit are tracked in bobmatnyc/trusty-git-analytics.
 
 Subsystem labels for paths no crate owns: `ci`, `daemon`, `deps`, `dx`,
 `launchd`, `mcp`, `monitor`, `ops`, `performance`, `spec`, `test`, `ui`.
@@ -76,10 +78,10 @@ created. Run `tm issue seed-labels` first; it is idempotent and creates the four
 Live titles, as of generation:
 
 - Crate backlogs: `Backlog · agents`, `Backlog · analyze/review`,
-  `Backlog · audit`, `Backlog · code`, `Backlog · console`,
+  `Backlog · code`, `Backlog · console`,
   `Backlog · embedderd`, `Backlog · installer`, `Backlog · mcp`,
   `Backlog · memory (triaged)`, `Backlog · mpm/core`, `Backlog · search`,
-  `Backlog · tc-services`, `Backlog · tga`.
+  `Backlog · tc-services`.
 - Version milestones: `1.7.1`, `1.7.2`, `trusty-mpm 2.0.0`.
 - Epic milestones: `Issue management` (#94) — issue-management work and its
   follow-ups; `Instructional content` (#95).
@@ -116,32 +118,23 @@ Each crate maintains two types of patch-release milestones (owner convention 202
 
 **Rollover rule (PM default):** when an odd-patch release ships, bugs still open in its bugfix milestone move to the next odd patch's bugfix milestone.
 
-**Milestone closure on publish (owner ruling 2026-09-25):** when a release publishes, close its milestone the same day and move any issue still open in it to the next milestone of the same kind (bugfix or feature); the release report names the moved issues. An issue whose fix shipped in that release and only awaits live verification (`status:merged` or `status:tested`) stays in the closed milestone.
+**Milestone closure on publish (owner ruling 2026-09-25):** when a release publishes, close its milestone the same day and move any issue still open in it to the next milestone of the same kind (bugfix or feature); the release report names the moved issues. An issue whose fix shipped in that release and only awaits live verification (Merged, awaiting Deployed) stays in the closed milestone.
 
 ## Projects
 
-Live projects, by number, owner `bobmatnyc`:
+Status and membership live on project #45 (`trusty-tools-master`), owner `bobmatnyc`.
 
-| # | Project | # | Project |
-|---|---|---|---|
-| 22 | trusty-memory | 29 | trusty-console |
-| 23 | trusty-search | 38 | cross-crate + trusty-common |
-| 24 | trusty-analyze + trusty-review | 39 | tc-services |
-| 25 | trusty-mpm | 40 | tga |
-| 26 | trusty-code | 41 | trusty-audit |
-| 27 | trusty-agents | 42 | trusty-embedderd |
-| 28 | trusty-installer | 43 | trusty-mcp |
-| | | 44 | trusty-tools · CI & infra |
+**Selection rule:** all issues attach to project #45 (trusty-tools-master); the Crate field names the owner.
 
-**Selection rule:** the project of the owning crate. A change spanning crates,
-or one in `trusty-common`, goes to #38. A CI, workflow, or `scripts/` issue goes
-to #44.
+The per-crate projects (#22-#29, #38-#39, #42-#44) are superseded: their Todo/In Progress/Done values go
+stale once Status moves to #45. They are closed (`gh project close <n>`, reversible with `--undo`) after
+one release soak; until then no new issue is attached to them.
 
 **Attach by number and owner**, never by title (#7952 — the title form exits 0
 and attaches nothing):
 
 ```bash
-gh project item-add 25 --owner bobmatnyc --url https://github.com/bobmatnyc/trusty-tools/issues/N
+gh project item-add 45 --owner bobmatnyc --url https://github.com/bobmatnyc/trusty-tools/issues/N
 ```
 
 ## Relationships
@@ -157,47 +150,68 @@ gh project item-add 25 --owner bobmatnyc --url https://github.com/bobmatnyc/trus
 
 ## Lifecycle
 
-States, in order: `open` → `status:in-progress` → `status:coded` →
-`status:merged` → `status:tested` → `closed`. The four `status:*` labels are
-mutually exclusive.
+Status lives in the `Status` single-select field on project #45 (trusty-tools-master), not in labels.
+Seven values, in order: Backlog, Groomed, In development, Development complete, Merged, Deployed, Published.
+GitHub's open/closed state is separate. Two date fields, `Deployed on` and `Published on`, record those stages.
 
-| Label | Meaning |
-|---|---|
-| `status:in-progress` | A session/agent has claimed it and is actively working it |
-| `status:coded` | Implementation pushed on a branch; PR not yet merged |
-| `status:merged` | PR merged to main; rung 4–6 fixes await live verification |
-| `status:tested` | Verified live (installed binary / real run); eligible to close |
+**Hand-maintained period (owner ruling fc).** The migration and the tooling follow-ups (`tm issue
+transition`, `tm pr open`, `tm issue current/states/repair`, `tm issue standard/audit`, release tooling) are
+pending. Until they land, the `status:*` labels and the Status field are both maintained by hand, and the
+labels stay authoritative for the tools. `status:in-progress` maps to In development, `status:coded` to
+Development complete, `status:merged` to Merged, `status:tested` to Deployed. The labels are removed
+at migration and deleted after one release soak.
 
-- State model file: [`issue-state.yaml`](issue-state.yaml) at the repo root —
-  the authority on which edges exist and which require a note.
-- Transition command: `tm issue transition N <state>`. Never a hand-typed label
-  swap; the tool issues the add and the remove as one `gh issue edit`. On a host
-  with no `tm`, and only there: `gh issue edit N --add-label <new>
-  --remove-label <old>`, both flags in one call.
-- `tm issue states` lists the edges, `tm issue current N` reads a state back,
-  `tm issue repair N` drops a stale second `status:` label.
+| Status | Entry condition | Moved by | Evidence |
+|---|---|---|---|
+| Backlog | Issue created | auto-add workflow, ticketing agent | none |
+| Groomed | Selected for work | ticketing agent, on PM instruction | selecting session in a comment |
+| In development | Engineer session claimed it | PM at dispatch | claim comment, session and date |
+| Development complete | PR open, `Refs #N` | `tm pr open` | PR link |
+| Merged | PR squash-merged | version-control, after a `MERGED` read | squash SHA, main CI run |
+| Deployed | Runs in an installed binary | live-verifying session | what was run, what it printed |
+| Published | Version on crates.io | release tooling (`local-ops`) | crate, version, URL |
+
+A branch or path install counts as live proof but sets Deployed only once the change is Merged.
+
+**Order.** Status holds the furthest stage reached and moves forward only. A stage reached out of order
+sets Status only if it is further than the current value; the other stage is recorded in its date field
+and an evidence comment. A failed live check returns Status to In development (follow-up PR open) or
+Development complete. Crate class sets which stages exist: library skips Deployed; binary that publishes
+has all; `publish = false` binary stops at Deployed; docs, CI and scripts stop at Merged.
+
+**Crate class comes from Cargo.toml.** A crate with `publish = false` never reaches Published; a crate
+with no binary target never reaches Deployed. Read the manifest at the time; this file holds no copy of the
+table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-contracts`, `trusty-cto-db`,
+`trusty-kb`, `trusty-publish-guard`.
 
 **Close bar, by test-ladder rung** (`CLAUDE.md`, "Rust Test Ladder"):
 
-- Rung 1–3 — closes at merge, skipping `status:merged` and `status:tested`:
-  `tm issue transition N closed --note "PR #M squash <sha>"`.
-- Rung 4–6 — CLI, daemon, and hook fixes needing live proof — close only from
-  `status:tested`, with the live evidence in the note.
-- Docs-only — closes from `status:merged` on merged-text evidence: the squash
-  SHA plus confirmation the text is present on `origin/main` at the cited
-  file/symbol.
-- A merged fix that fails live verification stays open, at `status:merged`,
-  returning to `status:coded` only when a follow-up fix PR is open.
+- Rung 1-3, docs, CI: close at Merged, `--note "PR #M squash <sha>"`. Docs-only closes on merged-text
+  evidence: the squash SHA plus confirmation the text is present on `origin/main` at the cited file/symbol.
+- Rung 4-6: close at Deployed, with the live evidence in the note.
+- Published is set later, on the already-closed issue, by release tooling. It never reopens an issue.
+- A merged fix that fails live verification stays open, at Merged, until a follow-up PR is open.
+
+**Epics.** Required at 3 or more deliverables, 2 or more PRs, or 2 or more crates; single-PR,
+single-crate work stays a plain issue. Children are native sub-issues. The epic's Status is the lowest
+child Status, at least Groomed once selected, never set by hand. It closes when every child is closed.
+The ticketing agent recomputes it on each child transition. The tracker/phase pattern below applies on top
+of this when the work has a gate between stages.
+
+**Labels.** `status:*` labels are retired after the hand-maintained period. `ws/<session>`, type,
+component and priority labels stay. Target commands: `tm issue transition N <Status>` writes the field;
+`tm issue current N` reads it. `issue-state.yaml` is the state model until the tooling lands.
 
 ## Comment conventions
 
 | Event | Comment posted | It carries |
 |---|---|---|
-| Claim at dispatch | yes | `Claimed by session <name>, <YYYY-MM-DD> — <what is in flight>.` |
-| `status:coded` | yes | The PR link |
-| `status:merged` | yes | The squash SHA, and the post-merge CI run on main |
-| `status:tested` | yes | What was run against the installed binary and what it printed |
-| Close | yes, as `--note` | `PR #M squash <sha>` for rung 1–3; the live evidence for rung 4–6 |
+| In development (claim at dispatch) | yes | `Claimed by session <name>, <YYYY-MM-DD> — <what is in flight>.` |
+| Development complete | yes | The PR link |
+| Merged | yes | The squash SHA, and the post-merge CI run on main |
+| Deployed | yes | What was run against the installed binary and what it printed |
+| Published | yes | Crate, version, and crates.io URL |
+| Close | yes, as `--note` | `PR #M squash <sha>` for rung 1-3; the live evidence for rung 4-6 |
 | Blocked | yes | The blocker, its impact, and the unblock criteria |
 | No component label | yes | `no-component-label: <reason>` |
 | No milestone | yes | `no-milestone: <reason>` |
@@ -210,7 +224,7 @@ Every issue body and every comment ends with the attribution line below.
 
 | Setting | Value |
 |---|---|
-| `comment_on` | claim, `status:coded`, `status:merged`, `status:tested`, close, blocked, `no-component-label`, `no-milestone` |
+| `comment_on` | claim, Development complete, Merged, Deployed, Published, close, blocked, `no-component-label`, `no-milestone` |
 | `transitions` | automatic and event-driven — the agent that observed the event owes the label pass in that dispatch; nothing sweeps later |
 | `assign` | `--assignee @me` on creation |
 | `set_milestone` | yes, on the creating call |
@@ -220,11 +234,11 @@ Every issue body and every comment ends with the attribution line below.
 | `comment_verbosity` | pointer-first — links and the decisive line; evidence inline only where the reader cannot act without it |
 | `rollup_issue` | [#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021) |
 | `pr_issue_link` | `Refs #N` (fixed) |
-| `status_on_creation` | plain `open` — filing is not a dispatch; `status:in-progress` waits for a brief that says work starts now |
+| `status_on_creation` | Backlog — filing is not a dispatch; In development waits for a brief that says work starts now |
 | `audit_after_filing` | yes — run `tm issue audit <N>` and paste its output into the report |
 | `epics.title_format` | `[EPIC <epic#>] <outcome>` for the tracker (created `[EPIC]`, renamed once the number is known); phases `[EPIC_<epic#> PHASE_<n>] <what>` |
 | `epics.tracker_autoupdate` | `true` — `<!-- phases:start -->` regenerated wholesale, `<!-- deferred:start -->` amended, nothing outside the markers touched |
-| `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed, a phase's status label changes (`tm issue transition` on a phase regenerates the block itself, #8448) |
+| `epics.update_triggers` | phase opens, phase closes, phase blocks/unblocks, item deferred or landed, a phase's Status changes (`tm issue transition` on a phase regenerates the block itself, #8448) |
 | `research_docs_path` | `docs/research/<effort>/` — trackers link to the doc; no issue body carries findings |
 | `component_unit` | Cargo crate (`crates/<name>/`) |
 | `followups.budget_per_phase` | `2` |
@@ -264,7 +278,7 @@ the next starts. No gate means no tracker; one issue with a task list costs less
   Ordering section means the work did not need it.
 - Five update triggers, and only these: a phase opens, a phase closes, a phase
   blocks or unblocks, an item is deferred or a deferred item lands, a phase's
-  `status:*` label changes (the block's State cell shows it; `tm issue
+  Status changes (the block's State cell shows it; `tm issue
   transition` on a phase regenerates the block as a side effect, #8448). Not
   on PR open, merge, commit, or review.
 - Phase numbers are assigned once, never renumbered, never reused. A phase
@@ -368,9 +382,11 @@ on verification. A hit there is prior art worth reading.
   "Improvement recommendations" block.
 - A PM or agent "Prompt feedback" addendum item.
 
-Each is fixed in the surfacing PR, dropped, or logged as a dated comment on the
-rollup issue [#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021),
-deduplicated against earlier comments. HIGH+ or independently schedulable work
+Each one that meets the PM's Completion Standard fix bar (`tm-workflow`) is
+fixed in the surfacing PR. Any other is one comment on the PR or existing
+issue, dropped, or logged as a dated comment on the rollup issue
+[#8021](https://github.com/bobmatnyc/trusty-tools/issues/8021), deduplicated
+against earlier comments — never a fix round of its own. HIGH+ or independently schedulable work
 may still be filed — search first.
 
 ## Title and body

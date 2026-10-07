@@ -1,0 +1,16 @@
+diff --git a/crates/trusty-review/src/integrations/root_check.rs b/crates/trusty-review/src/integrations/root_check.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-review/src/integrations/root_check.rs
+@@ -0,0 +1,10 @@
++//! Keep file reads inside the repository root.
++
++use std::path::Path;
++
++/// Whether `candidate` lies inside `root`. Both are already canonical.
++pub fn is_inside_root(root: &Path, candidate: &Path) -> bool {
++    let root = root.to_string_lossy();
++    let candidate = candidate.to_string_lossy();
++    candidate.starts_with(root.as_ref())
++}

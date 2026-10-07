@@ -11046,7 +11046,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.8.6"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11238,7 +11238,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.53.4"
+version = "0.54.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11329,7 +11329,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -11501,7 +11501,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
@@ -11518,7 +11518,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.28.4"
+version = "0.29.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11559,7 +11559,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.7.10"
+version = "1.7.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11679,7 +11679,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.54.8"
+version = "0.57.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11735,6 +11735,7 @@ dependencies = [
  "serde_yaml",
  "serial_test",
  "sha2 0.10.9",
+ "strsim",
  "sysinfo",
  "tempfile",
  "thiserror 1.0.69",
@@ -11772,6 +11773,23 @@ dependencies = [
  "walkdir",
  "which 6.0.3",
  "zip 2.4.2",
+]
+
+[[package]]
+name = "trusty-secrets"
+version = "0.1.1"
+dependencies = [
+ "dirs 5.0.1",
+ "fd-lock",
+ "keyring",
+ "libc",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "trusty-common",
 ]
 
 [[package]]

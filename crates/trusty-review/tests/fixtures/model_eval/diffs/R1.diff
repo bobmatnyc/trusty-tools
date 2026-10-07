@@ -1,0 +1,199 @@
+diff --git a/crates/trusty-search/src/service/reindex/defer_embed_queue.rs b/crates/trusty-search/src/service/reindex/defer_embed_queue.rs
+index e78861811a..6fdc75c6ea 100644
+--- a/crates/trusty-search/src/service/reindex/defer_embed_queue.rs
++++ b/crates/trusty-search/src/service/reindex/defer_embed_queue.rs
+@@ -82,9 +82,9 @@
+ //! module's tests.
+ 
+ use std::cmp::Ordering as CmpOrdering;
+-use std::collections::BinaryHeap;
++use std::collections::{BinaryHeap, HashMap};
+ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+-use std::sync::{Arc, Mutex, OnceLock};
++use std::sync::{Arc, Mutex, OnceLock, Weak};
+ use std::time::{Duration, Instant};
+ 
+ use super::defer_embed::run_embed_catch_up;
+@@ -92,7 +92,8 @@ use super::progress::ReindexProgress;
+ use super::semaphore::{
+     acquire_index_teardown_read, background_reindex_semaphore, index_semaphore,
+ };
+-use crate::core::registry::IndexHandle;
++use crate::core::indexer::IndexDeleted;
++use crate::core::registry::{IndexHandle, IndexId};
+ 
+ /// One pending catch-up job: an index waiting for its C2 embed pass.
+ ///
+@@ -147,6 +148,76 @@ fn queue_heap() -> &'static Mutex<BinaryHeap<QueuedEmbedJob>> {
+ 
+ static SEQ: AtomicU64 = AtomicU64::new(0);
+ 
++/// Every job not yet finished — queued on the heap, or claimed and waiting on
++/// a pause or a permit — keyed by `seq`.
++///
++/// Why (#8664): a claimed job has left the heap but still holds its own
++/// `Arc<IndexHandle>`, and a cold-parked index has no registry handle at all,
++/// so a DELETE could not find the handle keeping `index.redb` and the HNSW
++/// mapping open. `Weak` so this map never extends a handle's life.
++/// What: written by [`push_job`], cleared by [`LiveJob`]'s `Drop`.
++/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`.
++fn live_jobs() -> &'static Mutex<HashMap<u64, Weak<IndexHandle>>> {
++    static LIVE: OnceLock<Mutex<HashMap<u64, Weak<IndexHandle>>>> = OnceLock::new();
++    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
++}
++
++/// The handles every unfinished deferred-embed job for `id` holds (#8664).
++///
++/// Why: the delete path closes each one's files, so no job keeps the deleted
++/// index's files open. See [`live_jobs`].
++/// What: upgrades each live entry for `id`, one handle per distinct indexer —
++/// several jobs on one index share it, and it is closed once. A job that
++/// already dropped its handle is skipped.
++/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`,
++/// `job_handles_for_yields_each_indexer_once_across_concurrent_jobs`.
++pub(crate) fn job_handles_for(id: &IndexId) -> Vec<Arc<IndexHandle>> {
++    let live = live_jobs()
++        .lock()
++        .expect("defer-embed live-job lock poisoned");
++    let mut handles: Vec<Arc<IndexHandle>> = Vec::new();
++    for handle in live.values().filter_map(Weak::upgrade) {
++        let seen = handles
++            .iter()
++            .any(|h| Arc::ptr_eq(&h.indexer, &handle.indexer));
++        if &handle.id == id && !seen {
++            handles.push(handle);
++        }
++    }
++    handles
++}
++
++/// Settles one job's bookkeeping however its task ends (#8664).
++///
++/// Why: the task has several exits — drained pause, closed semaphore, deleted
++/// index, a completed pass — and each must drop its [`live_jobs`] entry and
++/// its [`QUEUE_DEPTH`] count exactly once.
++struct LiveJob(u64);
++
++impl Drop for LiveJob {
++    fn drop(&mut self) {
++        live_jobs()
++            .lock()
++            .unwrap_or_else(|e| e.into_inner())
++            .remove(&self.0);
++        let remaining = QUEUE_DEPTH.fetch_sub(1, Ordering::AcqRel) - 1;
++        note_if_drained(remaining);
++    }
++}
++
++/// `Err(IndexDeleted)` once a DELETE has closed this handle's files (#8664).
++///
++/// Why: fail closed. A job that ran its embed pass against closed files would
++/// read a released mapping (#8232's SIGBUS) or write into a deleted index.
++async fn refuse_if_deleted(handle: &IndexHandle) -> Result<(), IndexDeleted> {
++    if handle.indexer.read().await.is_deleted() {
++        return Err(IndexDeleted {
++            index_id: handle.id.0.clone(),
++        });
++    }
++    Ok(())
++}
++
+ /// The minimum gap, between the OLDEST pending job's arrival and any OTHER
+ /// pending job's arrival, that counts as "a distinctly later wave" rather
+ /// than "the same burst" — see the module docs' "Anti-starvation" section.
+@@ -222,7 +293,29 @@ pub(super) fn enqueue(
+     progress: Arc<ReindexProgress>,
+     chunk_count: usize,
+ ) {
++    let seq = push_job(handle, progress, chunk_count);
++    tokio::spawn(async move {
++        // #8664: a job whose index was deleted ends here, with its handle
++        // released and nothing embedded.
++        if let Err(deleted) = wait_for_turn(seq).await {
++            tracing::warn!("deferred_embed: job abandoned — {deleted}");
++        }
++    });
++}
++
++/// Push one job onto the heap and record it in [`live_jobs`]; returns its
++/// `seq`. The half of [`enqueue`] that does not spawn, so a test can hold a
++/// job queued across a DELETE.
++pub(crate) fn push_job(
++    handle: Arc<IndexHandle>,
++    progress: Arc<ReindexProgress>,
++    chunk_count: usize,
++) -> u64 {
+     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
++    live_jobs()
++        .lock()
++        .expect("defer-embed live-job lock poisoned")
++        .insert(seq, Arc::downgrade(&handle));
+     let job = QueuedEmbedJob {
+         chunk_count,
+         seq,
+@@ -245,8 +338,7 @@ pub(super) fn enqueue(
+         plan.0,
+         plan.1
+     );
+-
+-    tokio::spawn(wait_for_turn(seq));
++    seq
+ }
+ 
+ /// Render the heap's current ascending-size order for logging, truncated to
+@@ -310,7 +402,12 @@ fn best_pending_seq(heap: &BinaryHeap<QueuedEmbedJob>) -> Option<u64> {
+ /// acquire `background_reindex_semaphore` + the per-index semaphore exactly
+ /// as the pre-#3748 code did, then runs [`run_embed_catch_up`]. If not yet
+ /// its turn, sleeps and re-checks.
+-async fn wait_for_turn(my_seq: u64) {
++///
++/// #8664: returns `Err(IndexDeleted)` without embedding anything when a DELETE
++/// closed the job's handle while it waited.
++/// Test: `delete_closes_the_files_a_queued_embed_job_holds_for_a_cold_index`.
++pub(crate) async fn wait_for_turn(my_seq: u64) -> Result<(), IndexDeleted> {
++    let _live = LiveJob(my_seq);
+     let job = loop {
+         let claimed = {
+             let mut heap = queue_heap()
+@@ -352,10 +449,11 @@ async fn wait_for_turn(my_seq: u64) {
+             "deferred_embed[{}]: abandoning a paused embed job — daemon is draining",
+             job.handle.id.0,
+         );
+-        let remaining = QUEUE_DEPTH.fetch_sub(1, Ordering::AcqRel) - 1;
+-        note_if_drained(remaining);
+-        return;
++        return Ok(());
+     }
++    // #8664: a DELETE may have closed this handle while the job was queued;
++    // refuse before taking the one background permit.
++    refuse_if_deleted(&job.handle).await?;
+ 
+     // Same concurrency guards `spawn_deferred_embed_pass` always used: the
+     // process-wide background-reindex permit, then this index's own
+@@ -367,9 +465,7 @@ async fn wait_for_turn(my_seq: u64) {
+                 "deferred_embed[{}]: background semaphore closed — skipping embed pass",
+                 job.handle.id.0,
+             );
+-            let remaining = QUEUE_DEPTH.fetch_sub(1, Ordering::AcqRel) - 1;
+-            note_if_drained(remaining);
+-            return;
++            return Ok(());
+         }
+     };
+     // Issue #2984 Phase 1 CRITICAL finding 2: also hold this index's
+@@ -389,11 +485,12 @@ async fn wait_for_turn(my_seq: u64) {
+     // landing here waits the full pass (or times out and refuses the data
+     // removal) rather than deleting underneath it.
+     let _teardown_guard = acquire_index_teardown_read(&job.handle.id).await;
++    // #8664: the authoritative re-check. A DELETE closes files under the
++    // exclusive side of this lock, so none can close them past this point.
++    refuse_if_deleted(&job.handle).await?;
+ 
+     run_embed_catch_up(job.handle, job.progress).await;
+-
+-    let remaining = QUEUE_DEPTH.fetch_sub(1, Ordering::AcqRel) - 1;
+-    note_if_drained(remaining);
++    Ok(())
+ }
+ 
+ /// When the queue depth reaches zero, bump the completion epoch and log the

@@ -10,10 +10,17 @@
 //! `finding_confidence_clamping`, and `finding_source_citation_roundtrip`
 //! in this module.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
+// #9192: the optional-context ledger `run_review_with` returns.
+pub mod context_source;
 pub mod status;
+pub mod verdict_status; // #9310
+pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use status::ReviewStatus;
+pub use verdict_status::VerdictStatus;
 
 use crate::config::constants::REVIEW_VERSION;
 
@@ -375,8 +382,10 @@ pub const UNKNOWN_FILE_PLACEHOLDER: &str = "unknown";
 /// What: a direct port of `FixSuggestion` from spec §07 REV-602.  The
 /// `verified` and `issue_eligible` fields are transient pipeline state; they
 /// are serialised for the review log but not required on deserialisation.
+/// `#[non_exhaustive]` (#9310): build one with `Finding::new`.
 /// Test: `finding_confidence_clamping`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Finding {
     /// Changed file path this finding refers to.
     pub file: String,
@@ -587,8 +596,10 @@ pub struct InlineCommentOut {
 /// What: a subset of spec §07 REV-600 fields covering the MVP verdict loop.
 /// The full field set (JIRA/Confluence context, multi-pass tokens, etc.)
 /// will be added in later stages.
+/// `#[non_exhaustive]` (#9310): build one with `ReviewResult::new`.
 /// Test: `review_result_serde_roundtrip`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ReviewResult {
     // ── PR identity ───────────────────────────────────────────────────────
     /// GitHub organisation.
@@ -676,6 +687,40 @@ pub struct ReviewResult {
     /// `run_review_withholds_an_unverifiable_finding`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub withheld_findings: Vec<WithheldFinding>,
+    /// How many findings any gate withheld: `withheld_findings.len()` (#9188).
+    ///
+    /// Why: a typed total, so a caller need not count an array to learn that
+    /// a review with no findings withheld some rather than found none.
+    /// What: synced at the same two exit points as `findings_count`. Absent
+    /// from the JSON when zero, so a review that withheld nothing serializes
+    /// as it did before #9188.
+    /// Test: `a_withheld_review_reports_typed_withheld_counts`,
+    /// `a_review_with_nothing_withheld_serializes_as_before`.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub withheld_count: usize,
+    /// `withheld_count` split by reason class (#9188), e.g. `refuted`,
+    /// `line_citation`, `citation_integrity`, `no_verifier`; see
+    /// `pipeline::withheld_contract::reason_class`. Absent when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub withheld_by_reason: BTreeMap<String, usize>,
+    /// What kind of outcome `verdict` reports (#9310): `parsed`,
+    /// `parse_failed`, `no_reviewer_output`, `all_withheld` or
+    /// `suppressed_reject`; see [`VerdictStatus`].
+    ///
+    /// Why: UNKNOWN used to mean both "no judgment" and "a suppressed
+    /// rejection", and AQ-7t keeps an all-withheld APPROVE as APPROVE, so the
+    /// verdict alone cannot tell a caller what happened; this field reaches
+    /// `run --json`, the MCP envelope and the PR comment heading alike.
+    /// What: set on every exit path — `abort_dry` (`no_reviewer_output`
+    /// unless already set) and `finalize_review` (`parsed` unless a stage set
+    /// another). `None` only on a record written before #9188 or a result
+    /// built by hand and never finalized.
+    /// Test: `a_clean_review_reads_parsed_approve`,
+    /// `an_unparsed_reply_reads_parse_failed`,
+    /// `no_reviewer_reply_reads_no_reviewer_output`,
+    /// `run_review_all_withheld_approve_stays_approve_and_exits_zero`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_status: Option<VerdictStatus>,
     /// Per-line inline review comments that were (or, in dry-run, would be)
     /// posted to the PR diff (#1414).
     ///
@@ -845,6 +890,9 @@ impl ReviewResult {
             unverified_count: 0,
             withheld_unverified_count: 0,
             withheld_findings: Vec::new(),
+            withheld_count: 0,
+            withheld_by_reason: BTreeMap::new(),
+            verdict_status: None,
             inline_comments: Vec::new(),
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,

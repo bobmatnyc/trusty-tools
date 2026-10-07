@@ -531,8 +531,10 @@ impl PalaceHandle {
         // without a recall log, leaving `analytics show` permanently reporting
         // "not configured". Wiring the log at open-time ensures every consumer
         // of `PalaceRegistry::open_palace` gets logging for free.
-        let recall_log = match RecallLog::open(&data_dir.join(RECALL_LOG_FILENAME)) {
-            Ok(log) => Some(Arc::new(log)),
+        // #9140 batch: shared, so a second open of a live palace in this
+        // process reuses the first handle's log instead of failing on redb's lock.
+        let recall_log = match RecallLog::open_shared(&data_dir.join(RECALL_LOG_FILENAME)) {
+            Ok(log) => Some(log),
             Err(e) => {
                 tracing::warn!(palace = %palace.id, "open recall log failed, analytics disabled: {e:#}");
                 None
@@ -868,6 +870,32 @@ impl PalaceHandle {
     /// about. Nothing else has been mutated at that point, so the drawer is
     /// left wholly intact rather than half-deleted.
     pub async fn forget(&self, id: Uuid) -> Result<ForgetOutcome> {
+        let (removed, l1_saved) = self.forget_removing(id).await?;
+        // #9283: every user forget is journalled, hash only (#9172: a dedup
+        // survivor keeps its copy).
+        if let Some(drawer) = &removed {
+            crate::memory_core::maintenance_log::record_user_forget(self, drawer);
+        }
+        // #8729: journalled before the L1 error surfaces; the row is gone.
+        l1_saved?;
+        Ok(if removed.is_some() {
+            ForgetOutcome::Deleted
+        } else {
+            ForgetOutcome::NotFound
+        })
+    }
+
+    /// [`Self::forget`] without the survivor journal; returns the removed row.
+    ///
+    /// Why (#9172): maintenance deletions journal their own record, and the
+    /// removed row is what a journal record copies.
+    /// What: the forget body; the row is `None` when no such drawer existed.
+    /// `Err` means nothing was deleted. #8729: the L1 snapshot save runs after
+    /// the redb delete, so its result comes back beside the row instead of
+    /// replacing it, and the caller can journal the copy before surfacing it.
+    /// Test: `dedup_survivor_tests::forgetting_a_dedup_survivor_writes_a_journal_record`,
+    /// `maintenance_log_tests::a_failed_snapshot_save_after_the_delete_still_journals_the_copy`.
+    pub(crate) async fn forget_removing(&self, id: Uuid) -> Result<(Option<Drawer>, Result<()>)> {
         // Idle-to-disk: a forget is a genuine user access. Suppressed during
         // dream cycles (which forget merged/pruned drawers) via `touch`.
         self.touch();
@@ -900,7 +928,8 @@ impl PalaceHandle {
         // #5231: settle the outcome from the drawer table before mutating
         // anything. Held under the write mutex acquired above, so no concurrent
         // remember/forget can change the answer underneath the removals below.
-        let existed = self.drawers.read().iter().any(|d| d.id == id);
+        let removed = self.drawers.read().iter().find(|d| d.id == id).cloned();
+        let existed = removed.is_some();
 
         // Drop persistent metadata first so cold restart doesn't resurrect this
         // drawer (issue #32). #5231: this runs before the other removals so a
@@ -938,16 +967,15 @@ impl PalaceHandle {
             drawers.retain(|d| d.id != id);
         }
 
-        if let Some(data_dir) = self.data_dir.as_ref() {
-            let snap = self.drawers.read().clone();
-            L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")?;
-        }
+        let l1_saved = match self.data_dir.as_ref() {
+            Some(data_dir) => {
+                let snap = self.drawers.read().clone();
+                L1Cache::save_l1_cache(&snap, data_dir).context("save L1 snapshot after forget")
+            }
+            None => Ok(()),
+        };
 
-        Ok(if existed {
-            ForgetOutcome::Deleted
-        } else {
-            ForgetOutcome::NotFound
-        })
+        Ok((removed, l1_saved))
     }
 
     /// List drawers with optional room/tag filters, most important first.
@@ -1049,45 +1077,47 @@ impl PalaceHandle {
     /// keeps logging off the critical path while still capturing every event.
     /// What: If `handle.recall_log` is set, spawns a task that records one event
     /// per non-L0 result, or a single miss event when `results` only contains the
-    /// L0 identity (no real recall hits).
-    /// Test: `recall_logs_events_when_log_present` confirms the log row appears.
+    /// L0 identity (no real recall hits). #9141: all of one recall's events go
+    /// in ONE `record_batch` commit, and a failed write is logged at `warn`
+    /// with the row count it lost — the recall itself still succeeds.
+    /// Test: `recall_logs_events_when_log_present`,
+    /// `log_recall_writes_every_hit_in_one_commit`,
+    /// `log_recall_reports_a_failed_write`.
     pub(super) fn log_recall(&self, query: &str, results: &[super::types::RecallResult]) {
         let Some(log) = self.recall_log.clone() else {
             return;
         };
         let palace_id = self.id.as_str().to_string();
-        let q_hash = query_hash(query);
+        let query_hash = query_hash(query);
+        let occurred_at = chrono::Utc::now();
         // Only count L1+ entries — the synthetic L0 identity is always present
         // and would otherwise drown out genuine miss signals.
-        let logged: Vec<super::types::RecallResult> =
-            results.iter().filter(|r| r.layer > 0).cloned().collect();
-
+        let mut events: Vec<RecallEvent> = results
+            .iter()
+            .filter(|r| r.layer > 0)
+            .map(|r| RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: r.layer,
+                drawer_id: Some(r.drawer.id),
+                score: r.score,
+                occurred_at,
+            })
+            .collect();
+        if events.is_empty() {
+            events.push(RecallEvent {
+                palace_id: palace_id.clone(),
+                query_hash,
+                layer: 3,
+                drawer_id: None,
+                score: 0.0,
+                occurred_at,
+            });
+        }
         tokio::spawn(async move {
-            let now = chrono::Utc::now();
-            if logged.is_empty() {
-                let _ = log
-                    .record(RecallEvent {
-                        palace_id,
-                        query_hash: q_hash,
-                        layer: 3,
-                        drawer_id: None,
-                        score: 0.0,
-                        occurred_at: now,
-                    })
-                    .await;
-            } else {
-                for r in &logged {
-                    let _ = log
-                        .record(RecallEvent {
-                            palace_id: palace_id.clone(),
-                            query_hash: q_hash,
-                            layer: r.layer,
-                            drawer_id: Some(r.drawer.id),
-                            score: r.score,
-                            occurred_at: now,
-                        })
-                        .await;
-                }
+            let rows = events.len();
+            if let Err(e) = log.record_batch(events).await {
+                tracing::warn!(palace = %palace_id, rows, "recall log write failed: {e:#}");
             }
         });
     }

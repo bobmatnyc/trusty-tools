@@ -223,6 +223,8 @@ pub(crate) async fn restore_index_on_demand(
     let defer_embed = entry.defer_embed;
     // #4390: read the marker before `entry` is consumed by the handle below.
     let deferred_embed_pending = entry.deferred_embed_pending;
+    // #8883: the operator's serve-only mark travels onto the handle.
+    let serve_only = entry.serve_only;
 
     // Issue #1158: read corpus_open_failed before chunk_count so a redb
     // incompatible-format failure surfaces as Failed instead of InProgress.
@@ -293,6 +295,7 @@ pub(crate) async fn restore_index_on_demand(
         lexical_only,
         skip_kg,
         skip_vector,
+        serve_only,
         defer_embed,
         stages: Arc::new(tokio::sync::RwLock::new(stages)),
         search_pressure: Arc::new(tokio::sync::Notify::new()),

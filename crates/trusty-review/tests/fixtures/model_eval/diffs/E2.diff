@@ -1,0 +1,34 @@
+diff --git a/crates/trusty-installer/src/download/fetch_retry.rs b/crates/trusty-installer/src/download/fetch_retry.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-installer/src/download/fetch_retry.rs
+@@ -0,0 +1,28 @@
++//! Fetch a release manifest with retries.
++
++use std::time::Duration;
++
++/// How many times a fetch is tried.
++pub const ATTEMPTS: u32 = 3;
++
++/// A single fetch; the caller supplies the transport.
++pub trait Fetch {
++    /// Fetch `url` once.
++    fn get(&self, url: &str) -> Result<String, String>;
++}
++
++/// Fetch `url`, retrying transient failures.
++pub fn fetch_manifest(client: &dyn Fetch, url: &str) -> Result<String, String> {
++    let mut last_err = None;
++    for attempt in 0..ATTEMPTS {
++        match client.get(url) {
++            Ok(body) => return Ok(body),
++            Err(e) => {
++                last_err = Some(e);
++                std::thread::sleep(Duration::from_millis(200 * u64::from(attempt + 1)));
++            }
++        }
++    }
++    let _ = last_err;
++    Ok(String::new())
++}

@@ -59,12 +59,16 @@ pub mod grade_reconcile;
 pub mod letter_grade;
 pub mod mapreduce;
 pub mod output;
+// #9192: optional review inputs and the `run_review_with` entry point.
+pub mod optional_context;
 pub mod parser;
 pub mod post;
 // #8651: the per-repo trusty-search index every GitHub-PR surface reviews
 // against, and each surface's degrade contract for an unreadable registry.
 pub mod pr_index;
 pub mod prompt;
+// #9310: the bounded reply shape a parse failure records.
+pub(crate) mod reply_shape;
 pub mod runner;
 // Why: the map-reduce branch of `run_review` (split → map → reduce → fold) is
 // extracted here to keep runner.rs under the 500-line cap (#610 / #1643).
@@ -85,6 +89,11 @@ pub mod verification_notice;
 // under the 500-line cap (#610).  Exposes `build_voice_config` for use by the
 // runner and for direct testing.
 pub mod voice_config;
+// #9188: the zero-hallucination result contract — what survives, what the
+// prose may say, and the typed withheld counts.
+pub mod withheld_contract;
+// #9310: the withheld-verdict mapping and the unparsed-reply status.
+pub(crate) mod verdict_status;
 // Why: coverage data loading extracted from runner.rs to keep that file under
 // the 500-line cap (#610) after adding coverage-gating pipeline (#1014).
 pub mod runner_coverage;
@@ -104,8 +113,9 @@ pub use grade::{derive_verdict, derive_verdict_with_grade};
 pub use letter_grade::{
     Grade, clamp_grade_to_verdict, default_grade_for_verdict, verdict_for_grade,
 };
+pub use optional_context::{OptionalContextRequest, ReviewOptions, ReviewOutcome};
 pub use output::{log_json_path, print_review_result, write_review_log};
-pub use parser::{ParsedReview, parse_review_response};
+pub use parser::{ParsedReview, parse_review_reply, parse_review_response};
 pub use post::{
     DryRunReason, FinalizeAction, PostContext, decide_action, finalize_review, surface_dry_run,
 };
@@ -114,7 +124,7 @@ pub use prompt::{
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,
     reviewer_system_prompt_with_coverage,
 };
-pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review};
+pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review, run_review_with};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};
 pub use verify_liveness::{LivenessDecision, enforce_verifier_liveness, probe_verifier_liveness};

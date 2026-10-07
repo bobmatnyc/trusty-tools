@@ -44,6 +44,8 @@ mod files;
 // #8266: grep's file set, read without rehydrating an evicted corpus.
 mod file_set;
 pub(crate) mod helpers;
+// #8959/#9179: single-file writes mark the symbol graph stale; a ticker rebuilds.
+pub(crate) mod graph_refresh;
 mod idle_evict;
 mod ingest;
 pub(crate) mod migration_state;
@@ -70,10 +72,14 @@ pub(crate) use ingest::deferred::VectorCoverage;
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
 pub(crate) use ingest::embed::resolve_embed_inflight;
+/// #8959: how a file removal treats a failed redb chunk delete.
+pub(crate) use ingest::supersede::RedbChunkDelete;
 /// Re-export for the reindex orchestrator's progress-interval gate.
 pub(crate) use ingest::PROGRESS_CHUNK_INTERVAL;
 #[cfg(test)]
 pub(crate) use search::KG_REFINE_THRESHOLD;
+#[cfg(test)]
+mod bm25_truncation_tests;
 #[cfg(test)]
 mod cost_scaled_threshold_tests;
 #[cfg(test)]
@@ -112,6 +118,12 @@ pub use ingest::outcome::IndexFileOutcome;
 // #8976: the failed-remove fault seam for `service::reindex::hash_withhold_tests`.
 #[cfg(test)]
 pub(crate) use files::TEST_FAIL_REMOVE;
+// #8959: the failed-redb-delete fault seam for `tests::file_lifecycle_8959`.
+#[cfg(test)]
+pub(crate) use ingest::supersede::TEST_FAIL_CHUNK_DELETE;
+// #9230: a real redb chunk-write failure for `service::reindex::hash_withhold_tests`.
+#[cfg(test)]
+pub(crate) use tests::incremental_stamp_9230::break_chunk_writes;
 // #8167: the delete-vs-rehydrate tests in `service::server::tests_8167`.
 #[cfg(test)]
 pub(crate) use idle_evict::TEST_REHYDRATE_DELAY_MS;
@@ -240,6 +252,12 @@ pub struct CodeIndexer {
 
     /// Call graph derived from the chunk corpus.
     pub(super) symbol_graph: Arc<RwLock<Arc<SymbolGraph>>>,
+
+    /// #8959/#9179: which writes `symbol_graph` misses, for the deferred rebuild.
+    pub(super) graph_refresh: graph_refresh::GraphRefresh,
+
+    /// #8959: serializes `index_file` writes to one path.
+    pub(super) path_write_locks: ingest::supersede::PathWriteLocks,
 
     /// Optional ONNX NER for `NaturalLanguagePhrase` extraction.
     pub(super) ner: crate::core::ner::NerExtractor,
@@ -720,6 +738,8 @@ impl CodeIndexer {
             bm25: Arc::new(RwLock::new(CodeBm25Index::new())),
             query_cache: Arc::new(Mutex::new(LruCache::new(cap))),
             symbol_graph: Arc::new(RwLock::new(Arc::new(SymbolGraph::new()))),
+            graph_refresh: graph_refresh::GraphRefresh::default(),
+            path_write_locks: ingest::supersede::PathWriteLocks::default(),
             ner: crate::core::ner::NerExtractor::try_load(),
             persist_state: Arc::new(PersistState::default()),
             domain_terms: Vec::new(),

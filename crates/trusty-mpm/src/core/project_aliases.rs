@@ -755,8 +755,9 @@ mod tests {
     #[test]
     fn find_git_root_returns_some_in_this_repo() {
         // The worktree itself is a git repo (has a .git file at the worktree
-        // root). We use CARGO_MANIFEST_DIR (crates/trusty-mpm/) as cwd.
-        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // root). We use crates/trusty-mpm/ of the running checkout as cwd
+        // (#9298: runtime, not the compile-time build path).
+        let cwd = &crate::core::content_source::test_support::repo_root().join("crates/trusty-mpm");
         let result = find_git_root(cwd);
         assert!(result.is_some(), "expected Some for cwd inside a git repo");
         let root = result.unwrap();
@@ -774,11 +775,12 @@ mod tests {
         // Why: proves that try_register_project_alias and ProjectAliasStore::load
         // use the same store_root, AND that worktree paths are correctly skipped
         // while normal project paths ARE registered.
-        // What: detects whether CARGO_MANIFEST_DIR is inside a worktree or a
-        // normal project root; asserts the correct outcome for each case.
+        // What: detects whether the running checkout's crates/trusty-mpm/ is
+        // inside a worktree or a normal project root (#9298: resolved at
+        // runtime); asserts the correct outcome for each case.
         // Test: this function IS the test.
         let store_root = TempDir::new().expect("tmpdir");
-        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cwd = &crate::core::content_source::test_support::repo_root().join("crates/trusty-mpm");
 
         let Some(git_root) = find_git_root(cwd) else {
             return; // not inside a git repo — skip (unusual CI env)

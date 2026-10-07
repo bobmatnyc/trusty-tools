@@ -1147,6 +1147,16 @@ pub mod palace_alias;
 /// github_path::tests`.
 pub mod github_path;
 
+/// Where a URL's userinfo ends, and the URL without it (#9124).
+///
+/// Why: a credential embedded in a git remote (`https://user:<token>@host/…`)
+/// must never become part of a derived owner, repo, palace id or path.
+/// What: [`url_userinfo::strip_userinfo`] and [`url_userinfo::userinfo_end`];
+/// [`url_userinfo::strip_url_secret`] for a URL that is stored (#9155).
+/// Test: `cargo test -p trusty-common --features unconditional-only --
+/// url_userinfo::tests`.
+pub mod url_userinfo;
+
 /// The one resolver for trusty-mpm's managed workspace layout (#5203, #5204).
 ///
 /// Why: the managed workspace root and the session-worktree base name are shared
@@ -1228,7 +1238,8 @@ pub mod private_dir;
 /// path that no feature flag governs.
 /// What: exposes [`test_harness::running_under_test_harness`] plus the
 /// [`test_harness::FORCE_ENV`] / [`test_harness::ALLOW_PRODUCTION_ENV`]
-/// override names.
+/// override names, and [`test_harness::test_repo_root`], the runtime
+/// checkout a test reads repo content from (#9298).
 /// Test: `cargo test -p trusty-common --features unconditional-only --
 /// test_harness::tests`.
 pub mod test_harness;

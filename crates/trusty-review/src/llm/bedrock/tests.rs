@@ -20,7 +20,7 @@ use super::{
     BedrockProvider, LlmRequest, describe_sdk_error, estimate_bedrock_cost_usd,
     normalize_model_family, resolve_bedrock_region, validate_model_id,
 };
-use crate::llm::bedrock::tool_use::build_tool_config;
+use crate::llm::bedrock::tool_use::{self, build_tool_config};
 use crate::llm::{ChatMessage, LlmError, LlmProvider, ResponseSchema};
 
 // ── Region resolution ─────────────────────────────────────────────────────
@@ -119,19 +119,59 @@ fn bedrock_empty_model_id_is_validation_error() {
 
 // ── Cost estimation ───────────────────────────────────────────────────────
 
+/// Per-million `(input, output)` rate the estimator applies to `model`.
+fn priced(model: &str) -> (f64, f64) {
+    (
+        estimate_bedrock_cost_usd(model, 1_000_000, 0),
+        estimate_bedrock_cost_usd(model, 0, 1_000_000),
+    )
+}
+
+/// Why: a `us.` profile bills at the AWS "Regional" rate (10% above global)
+/// and a `global.` profile at the global rate; pricing every id at one rate
+/// misreported the reviewer default's cost, and an unpriced Sonnet 5.5 id
+/// reported every review as $0.
+/// What: asserts the exact input and output rate for the four compare-set
+/// families under both prefixes, against the AWS Price List API values
+/// recorded in `pricing.rs` (retrieved 2026-10-05).
+/// Test: this test itself; no network calls.
+#[test]
+fn bedrock_cost_estimate_matches_price_list_per_profile() {
+    let cases: [(&str, (f64, f64)); 8] = [
+        ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
+        ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
+        ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
+        ("global.anthropic.claude-opus-5-5", (4.00, 20.00)),
+        ("us.anthropic.claude-sonnet-4-6", (3.30, 16.50)),
+        ("global.anthropic.claude-sonnet-4-6", (3.00, 15.00)),
+        ("us.anthropic.claude-haiku-4-5-20251001-v1:0", (1.10, 5.50)),
+        (
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            (1.00, 5.00),
+        ),
+    ];
+    for (model, expected) in cases {
+        assert_eq!(
+            priced(model),
+            expected,
+            "per-MTok (input, output) for {model}"
+        );
+    }
+}
+
 #[test]
 fn bedrock_cost_estimate_sonnet() {
-    // 1M input + 1M output at Sonnet pricing ($3/M + $15/M = $18/M).
+    // 1M input + 1M output on the us. profile: $3.30 + $16.50 = $19.80.
     let cost = estimate_bedrock_cost_usd("us.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00 for 1M+1M Sonnet tokens, got {cost}"
+        (cost - 19.8_f64).abs() < 1e-9,
+        "expected $19.80 for 1M+1M Sonnet 4.6 us. tokens, got {cost}"
     );
 }
 
 #[test]
 fn bedrock_cost_estimate_eu_prefix_normalized() {
-    // eu. prefix should resolve to the same pricing as us.
+    // eu. is a geographic profile, so it prices at the same geo rate as us.
     let eu_cost = estimate_bedrock_cost_usd("eu.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     let us_cost = estimate_bedrock_cost_usd("us.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
     assert!(
@@ -142,21 +182,20 @@ fn bedrock_cost_estimate_eu_prefix_normalized() {
 
 #[test]
 fn bedrock_cost_estimate_haiku() {
-    // Short-form id (no date suffix) must still price correctly.
+    // Short-form id (no date suffix) must price like the date-versioned one.
     let cost = estimate_bedrock_cost_usd("us.anthropic.claude-haiku-4-5", 1_000_000, 1_000_000);
     assert!(
-        (cost - 4.8_f64).abs() < 1e-9,
-        "expected $4.80 for 1M+1M Haiku tokens (short id), got {cost}"
+        (cost - 6.6_f64).abs() < 1e-9,
+        "expected $6.60 for 1M+1M Haiku us. tokens (short id), got {cost}"
     );
 }
 
 /// Regression test: the verified Haiku 4.5 date-versioned id must resolve
-/// to non-zero pricing (Bug 3 fix).
+/// to its geo price, not zero and not the retired 0.80/4.00 rate.
 ///
 /// Why: `anthropic.claude-haiku-4-5-20251001-v1:0` (after geo-prefix strip)
-/// did not match the pricing table's `anthropic.claude-haiku-4-5` entry,
-/// causing cost_usd to be $0.00 in all Haiku compare runs.
-/// What: asserts the real date-versioned id prices at $4.80 for 1M+1M tokens.
+/// once missed the `anthropic.claude-haiku-4-5` entry and priced at $0.00.
+/// What: asserts the real date-versioned id prices at $6.60 for 1M+1M tokens.
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_haiku_date_versioned() {
@@ -166,8 +205,8 @@ fn bedrock_cost_estimate_haiku_date_versioned() {
         1_000_000,
     );
     assert!(
-        (cost - 4.8_f64).abs() < 1e-9,
-        "expected $4.80 for 1M+1M Haiku tokens (date-versioned id), got {cost}. \
+        (cost - 6.6_f64).abs() < 1e-9,
+        "expected $6.60 for 1M+1M Haiku us. tokens (date-versioned id), got {cost}. \
          The normalize_model_family() function must strip -20251001-v1:0 to match \
          the pricing table entry."
     );
@@ -209,9 +248,10 @@ fn bedrock_normalize_model_family_strips_suffix() {
 
 /// Test that Sonnet 4.5 date-versioned id normalises to the pricing table entry.
 ///
-/// Why: Sonnet 4.5 is in the new compare set; its pricing must not be zero.
+/// Why: a `--models` override can still name Sonnet 4.5; its pricing must not
+/// be zero.
 /// What: asserts `us.anthropic.claude-sonnet-4-5-20250929-v1:0` prices at
-/// $18/M (same as Sonnet 4.6) after geo+date+version normalization.
+/// $19.80 for 1M+1M (geo rate, same as Sonnet 4.6) after normalization.
 /// Test: no network.
 #[test]
 fn bedrock_cost_estimate_sonnet_4_5_date_versioned() {
@@ -221,8 +261,8 @@ fn bedrock_cost_estimate_sonnet_4_5_date_versioned() {
         1_000_000,
     );
     assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00 for 1M+1M Sonnet 4.5 tokens (date-versioned id), got {cost}"
+        (cost - 19.8_f64).abs() < 1e-9,
+        "expected $19.80 for 1M+1M Sonnet 4.5 us. tokens (date-versioned id), got {cost}"
     );
 }
 
@@ -432,6 +472,429 @@ async fn bedrock_structured_no_credentials_returns_error() {
     );
 }
 
+// ── Per-model tool choice (#9292) ─────────────────────────────────────────
+
+/// The structured-output schema the #9292 tests send.
+fn review_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}},
+        "required": ["verdict"]
+    })
+}
+
+/// A structured review request with `system` as its system prompt.
+fn structured_request(system: &str) -> LlmRequest {
+    LlmRequest {
+        model: String::new(),
+        system: system.to_string(),
+        messages: vec![ChatMessage {
+            role: "user".to_string(),
+            content: "review diff".to_string(),
+        }],
+        temperature: 0.3,
+        max_tokens: 512,
+        response_schema: Some(ResponseSchema {
+            name: "review_output".to_string(),
+            schema: review_schema(),
+        }),
+    }
+}
+
+/// Model ids Bedrock rejects a forced `toolChoice` for, in each id shape.
+const AUTO_MODEL_IDS: &[&str] = &[
+    "anthropic.claude-sonnet-5-5",
+    "us.anthropic.claude-sonnet-5-5",
+    "global.anthropic.claude-sonnet-5-5",
+    "bedrock/us.anthropic.claude-sonnet-5-5",
+    "anthropic.claude-opus-5-5",
+    "us.anthropic.claude-opus-5-5",
+    "bedrock/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
+];
+
+/// Model ids that keep the forced `toolChoice`.
+const FORCED_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-4-6",
+    "bedrock/us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5",
+    "us.amazon.nova-pro-v1:0",
+];
+
+/// Sonnet 5.5 and Opus 5.5 get `auto`; Sonnet 4.6 and Haiku 4.5 get the
+/// exact forced configuration they had before #9292.
+///
+/// Why: Bedrock rejects `toolChoice = tool` for the 5.5 models, which broke the
+/// default reviewer (#9292); every other model must keep its request.
+/// What: builds the per-model config for each id shape and checks the choice;
+/// a forced model's config must equal `build_tool_config`'s output.
+/// Test: this test.
+#[test]
+fn build_tool_config_for_model_picks_choice_per_model() {
+    use aws_sdk_bedrockruntime::types::ToolChoice;
+    for model in AUTO_MODEL_IDS {
+        let config =
+            tool_use::build_tool_config_for_model(model, "review_output", &review_schema())
+                .expect("config builds");
+        assert!(
+            matches!(config.tool_choice(), Some(ToolChoice::Auto(_))),
+            "{model} must get toolChoice auto, got {:?}",
+            config.tool_choice()
+        );
+        assert_eq!(config.tools().len(), 1, "{model} keeps the tool definition");
+    }
+    let forced = build_tool_config("review_output", &review_schema()).expect("config builds");
+    for model in FORCED_MODEL_IDS {
+        let config =
+            tool_use::build_tool_config_for_model(model, "review_output", &review_schema())
+                .expect("config builds");
+        assert!(
+            matches!(config.tool_choice(), Some(ToolChoice::Tool(_))),
+            "{model} must keep the forced tool choice"
+        );
+        assert_eq!(config, forced, "{model} config must be unchanged");
+    }
+}
+
+/// The capability check reads every model-id shape the provider accepts.
+///
+/// Why: a model reaches the provider bare, prefixed, date-stamped or as an
+/// ARN; a shape the check misreads sends a forced request that fails (#9292).
+/// What: covers suffixes, regional prefixes and each ARN kind. An
+/// application-inference-profile ARN names no model, so it gets `auto`.
+/// Test: this test.
+#[test]
+fn forced_tool_choice_capability_per_model_id_shape() {
+    let cases = [
+        ("us.anthropic.claude-sonnet-5-5-20260901-v1:0", false),
+        ("eu.anthropic.claude-opus-5-5", false),
+        (
+            "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-sonnet-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-sonnet-4-6",
+            true,
+        ),
+        (
+            "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+            true,
+        ),
+        ("us.anthropic.claude-opus-4-8", true),
+        ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
+        // #9292: region prefixes absent from the shared prefix list.
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-5-5",
+            false,
+        ),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/au.anthropic.claude-opus-5-5",
+            false,
+        ),
+        ("jp.anthropic.claude-sonnet-5-5-20260901-v1:0", false),
+        ("us-gov.anthropic.claude-opus-5-5", false),
+        (
+            "arn:aws:bedrock:ap-southeast-2:111122223333:inference-profile/apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            true,
+        ),
+        ("au.anthropic.claude-sonnet-4-5", true),
+        ("us.amazon.nova-pro-v1:0", true),
+        ("claude-sonnet-5-5", false),
+    ];
+    for (model, expected) in cases {
+        assert_eq!(
+            tool_use::supports_forced_tool_choice(model),
+            expected,
+            "supports_forced_tool_choice({model})"
+        );
+    }
+    for model in AUTO_MODEL_IDS {
+        assert!(!tool_use::supports_forced_tool_choice(model), "{model}");
+    }
+    for model in FORCED_MODEL_IDS {
+        assert!(tool_use::supports_forced_tool_choice(model), "{model}");
+    }
+}
+
+/// Every compare-set candidate and the reviewer default has a stated answer.
+///
+/// Why: the compare set and the default reviewer are the ids operators run;
+/// the reviewer default is Sonnet 5.5, which forcing broke (#9292).
+/// What: pins the expected answer for each `COMPARE_CANDIDATE_MODELS` entry,
+/// in order, so an added candidate fails here until it gets one.
+/// Test: this test.
+#[test]
+fn forced_tool_choice_capability_covers_every_compare_candidate() {
+    use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
+    let expected = [
+        ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", true),
+        ("bedrock/us.anthropic.claude-sonnet-4-6", true),
+        ("bedrock/us.anthropic.claude-sonnet-5-5", false),
+        ("bedrock/us.anthropic.claude-opus-5-5", false),
+    ];
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids, COMPARE_CANDIDATE_MODELS,
+        "a compare candidate has no case"
+    );
+    for (model, forced) in expected {
+        assert_eq!(
+            tool_use::supports_forced_tool_choice(model),
+            forced,
+            "supports_forced_tool_choice({model})"
+        );
+    }
+    assert!(!tool_use::supports_forced_tool_choice(
+        DEFAULT_REVIEWER_MODEL
+    ));
+}
+
+/// Only an `auto` model's structured request gets the extra system line.
+///
+/// Why: `auto` alone does not require a tool call, so the request asks for
+/// one; a forced model's request must stay byte-identical (#9292).
+/// What: Sonnet 5.5 and Opus 5.5 get the request's system block plus the tool
+/// line; Sonnet 4.6, Haiku 4.5 and an unstructured request get only the
+/// system block.
+/// Test: this test.
+#[test]
+fn system_blocks_add_the_tool_line_only_for_auto_models() {
+    use aws_sdk_bedrockruntime::types::SystemContentBlock;
+    let req = structured_request("reviewer");
+    let base = SystemContentBlock::Text("reviewer".to_string());
+    let line = SystemContentBlock::Text(tool_use::auto_tool_instruction("review_output"));
+    for model in AUTO_MODEL_IDS {
+        assert_eq!(
+            super::system_blocks(&req, model),
+            vec![base.clone(), line.clone()],
+            "{model} must carry the tool line"
+        );
+    }
+    for model in FORCED_MODEL_IDS {
+        assert_eq!(
+            super::system_blocks(&req, model),
+            vec![base.clone()],
+            "{model} system blocks must be unchanged"
+        );
+    }
+    let unstructured = LlmRequest {
+        response_schema: None,
+        ..structured_request("reviewer")
+    };
+    assert_eq!(
+        super::system_blocks(&unstructured, "us.anthropic.claude-sonnet-5-5"),
+        vec![base],
+        "an unstructured request never gets the tool line"
+    );
+    assert!(
+        tool_use::auto_tool_instruction("review_output").contains("`review_output` tool"),
+        "the line names the tool"
+    );
+}
+
+// ── Per-model temperature (#9304) ─────────────────────────────────────────
+
+/// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
+const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "eu.anthropic.claude-opus-5-5",
+    "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
+    "us-gov.anthropic.claude-opus-5-5",
+    "claude-opus-5-5",
+    "arn:aws:bedrock:us-east-2:111122223333:inference-profile/us.anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5",
+    "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5-5-20260901-v1:0",
+];
+
+/// Ids that keep `temperature`: older Claude, Nova, and an id that names no
+/// model (an application-inference-profile ARN).
+const TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "bedrock/us.anthropic.claude-sonnet-4-5",
+    "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+    "amazon.nova-pro-v1:0",
+    "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+];
+
+/// The Converse request omits `temperature` for Sonnet 5.5 and Opus 5.5 in
+/// every id shape, and keeps it for every other model.
+///
+/// Why: Bedrock rejects `temperature` for Opus 5.5 with `ValidationException`
+/// ("`temperature` is deprecated for this model"), so every Opus 5.5 review
+/// failed (#9304); Sonnet 5.5 rejects non-default sampling values too.
+/// What: builds the inference configuration for each id and checks that
+/// `temperature` is absent or carries the request's value, and that
+/// `max_tokens` is unchanged either way.
+/// Test: this test.
+#[test]
+fn inference_config_omits_temperature_only_for_claude_5_5() {
+    let req = structured_request("reviewer");
+    let absent = AUTO_MODEL_IDS.iter().chain(NO_TEMPERATURE_MODEL_IDS);
+    for model in absent {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), None, "{model} must omit temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+    let present = FORCED_MODEL_IDS.iter().chain(TEMPERATURE_MODEL_IDS);
+    for model in present {
+        let config = super::inference_config(&req, model);
+        assert_eq!(config.temperature(), Some(0.3), "{model} keeps temperature");
+        assert_eq!(config.max_tokens(), Some(512), "{model} keeps max_tokens");
+    }
+}
+
+/// Every compare-set candidate and the reviewer default has a stated
+/// temperature answer.
+///
+/// Why: these are the ids the Q86 model eval runs; two of them are 5.5 models
+/// that reject `temperature` (#9304).
+/// What: pins the answer per `COMPARE_CANDIDATE_MODELS` entry, in order, so an
+/// added candidate fails here until it gets one.
+/// Test: this test.
+#[test]
+fn inference_config_temperature_covers_every_compare_candidate() {
+    use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
+    let req = structured_request("reviewer");
+    let expected = [
+        (
+            "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+            Some(0.3),
+        ),
+        ("bedrock/us.anthropic.claude-sonnet-4-6", Some(0.3)),
+        ("bedrock/us.anthropic.claude-sonnet-5-5", None),
+        ("bedrock/us.anthropic.claude-opus-5-5", None),
+    ];
+    let ids: Vec<&str> = expected.iter().map(|(id, _)| *id).collect();
+    assert_eq!(
+        ids, COMPARE_CANDIDATE_MODELS,
+        "a compare candidate has no case"
+    );
+    for (model, temperature) in expected {
+        assert_eq!(
+            super::inference_config(&req, model).temperature(),
+            temperature,
+            "temperature for {model}"
+        );
+    }
+    assert_eq!(
+        super::inference_config(&req, DEFAULT_REVIEWER_MODEL).temperature(),
+        None,
+        "the default reviewer must omit temperature"
+    );
+}
+
+/// A Converse reply holding one text block and no `toolUse` block.
+fn text_only_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![aws_sdk_bedrockruntime::types::ContentBlock::Text(
+        text.to_string(),
+    )])
+}
+
+/// A `toolUse` content block named `review_output` carrying `input`.
+fn tool_use_block(input: serde_json::Value) -> aws_sdk_bedrockruntime::types::ContentBlock {
+    let block = aws_sdk_bedrockruntime::types::ToolUseBlock::builder()
+        .tool_use_id("tooluse-1")
+        .name("review_output")
+        .input(tool_use::json_to_document(&input).expect("input is an object"))
+        .build()
+        .expect("tool use block builds");
+    aws_sdk_bedrockruntime::types::ContentBlock::ToolUse(block)
+}
+
+/// A Converse reply holding `blocks`, in order, with an `end_turn` stop.
+fn reply_with_blocks(
+    blocks: Vec<aws_sdk_bedrockruntime::types::ContentBlock>,
+) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    use aws_sdk_bedrockruntime::types::{
+        ConversationRole, ConverseMetrics, ConverseOutput as Output, Message, StopReason,
+        TokenUsage,
+    };
+    let message = Message::builder()
+        .role(ConversationRole::Assistant)
+        .set_content(Some(blocks))
+        .build()
+        .expect("message builds");
+    aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+        .output(Output::Message(message))
+        .stop_reason(StopReason::EndTurn)
+        .usage(
+            TokenUsage::builder()
+                .input_tokens(10)
+                .output_tokens(5)
+                .total_tokens(15)
+                .build()
+                .expect("usage builds"),
+        )
+        .metrics(
+            ConverseMetrics::builder()
+                .latency_ms(1)
+                .build()
+                .expect("metrics builds"),
+        )
+        .build()
+        .expect("output builds")
+}
+
+/// An `auto` reply in text, not `toolUse`, reaches the review parser, which
+/// parses JSON text or fails closed.
+///
+/// Why: an `auto` model may answer in prose (#9292); that reply must never
+/// read as a successful review unless it carries the review JSON.
+/// What: JSON text parses to its verdict; prose with a verdict keyword is
+/// the fail-safe UNKNOWN, as a Haiku free-text reply is today.
+/// Test: this test.
+#[test]
+fn auto_mode_free_text_reply_reaches_the_review_parser() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let json = r#"{"verdict":"APPROVE","summary":"Clean change.","findings":[]}"#;
+    let text = super::response_text(&text_only_reply(json), true);
+    assert_eq!(text, json, "the text block is the reply");
+    let parsed = parse_review_response(&text);
+    assert!(!parsed.is_fail_safe, "JSON text must parse");
+    assert_eq!(parsed.verdict, Verdict::Approve);
+
+    let prose = "The change looks fine to me. APPROVE";
+    let text = super::response_text(&text_only_reply(prose), true);
+    assert_eq!(text, prose);
+    let parsed = parse_review_response(&text);
+    assert!(parsed.is_fail_safe, "prose must fail closed");
+    assert_eq!(parsed.verdict, Verdict::Unknown);
+}
+
+/// The block kinds of a reply are named in order (#9310).
+///
+/// Why: the parse-failure record needs to say whether the model called the
+/// tool, which only the Converse blocks show.
+/// What: a text-only reply and a text-plus-tool reply.
+/// Test: this test.
+#[test]
+fn reply_block_kinds_name_each_block() {
+    assert_eq!(
+        tool_use::reply_block_kinds(&text_only_reply("prose")),
+        vec!["text"]
+    );
+    let reply = reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("prose".to_string()),
+        tool_use_block(serde_json::json!({"verdict": "APPROVE"})),
+    ]);
+    assert_eq!(
+        tool_use::reply_block_kinds(&reply),
+        vec!["text", "tool_use"]
+    );
+}
+
 // ── SDK error rendering (#6912) ───────────────────────────────────────────
 
 /// Build the `SdkError` a real Bedrock `ResourceNotFoundException` produces.
@@ -534,4 +997,196 @@ fn bedrock_timeout_error_keeps_sdk_rendering() {
         describe_sdk_error(&construction),
         "failed to construct request"
     );
+}
+
+// ── Opt-in raw reply capture (#9310) ──────────────────────────────────────
+
+/// The model id the capture tests send.
+const CAPTURE_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
+
+/// A reply holding a text block, then a `toolUse` block with an APPROVE input.
+fn text_and_tool_reply() -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+    reply_with_blocks(vec![
+        aws_sdk_bedrockruntime::types::ContentBlock::Text("Preamble.".to_string()),
+        tool_use_block(serde_json::json!({
+            "verdict": "APPROVE", "summary": "Clean.", "findings": []
+        })),
+    ])
+}
+
+/// The capture files in `dir`, sorted by name; empty when `dir` is absent.
+fn capture_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Capture is off unless the env var names a directory (#9310).
+///
+/// Why: the files hold raw replies, so capture must be an explicit opt-in.
+/// What: unset and blank values are off; a set value is the directory.
+/// Test: this test.
+#[test]
+fn capture_dir_is_off_unless_the_env_var_names_a_dir() {
+    use super::capture::{CAPTURE_DIR_ENV, capture_dir};
+    assert_eq!(capture_dir(&|_| None), None, "unset is off");
+    assert_eq!(
+        capture_dir(&|_| Some("  ".to_string())),
+        None,
+        "blank is off"
+    );
+    let on = capture_dir(&|key| (key == CAPTURE_DIR_ENV).then(|| "/tmp/cap".to_string()));
+    assert_eq!(on, Some(std::path::PathBuf::from("/tmp/cap")));
+}
+
+/// With capture off, a reviewer reply writes nothing (#9310).
+///
+/// What: the default environment gives no capture dir, and the response
+/// builder then leaves an empty directory empty.
+/// Test: this test.
+#[test]
+fn capture_off_by_default_writes_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let capture = super::capture::capture_dir(&|_| None);
+    let req = structured_request("reviewer");
+    super::llm_response(
+        &req,
+        CAPTURE_MODEL,
+        &text_and_tool_reply(),
+        1,
+        capture.as_deref(),
+    );
+    assert!(capture_files(tmp.path()).is_empty());
+}
+
+/// With capture on, each reviewer call writes one new private file holding
+/// the raw reply and its metadata (#9310).
+///
+/// Why: part 2 of #9310 needs the raw replies, joinable to a harness row.
+/// What: two calls into a missing directory; the directory is 0700, each file
+/// is 0600, neither overwrites the other, and the record carries every field.
+/// Test: this test.
+#[test]
+fn capture_on_writes_one_private_file_per_reviewer_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let first = super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    super::llm_response(&req, CAPTURE_MODEL, &reply, 7, Some(&dir));
+    let files = capture_files(&dir);
+    assert_eq!(files.len(), 2, "one file per call, none overwritten");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| {
+            std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&dir), 0o700, "the capture dir is private");
+        for file in &files {
+            assert_eq!(mode(file), 0o600, "{}", file.display());
+        }
+    }
+    let raw = std::fs::read_to_string(&files[0]).expect("capture file reads");
+    let record: serde_json::Value = serde_json::from_str(&raw).expect("capture is JSON");
+    assert_eq!(record["reply"], first.text.as_str(), "the parser's text");
+    assert_eq!(record["model"], CAPTURE_MODEL);
+    assert_eq!(record["stop_reason"], "end_turn");
+    assert_eq!(record["output_tokens"], 5);
+    assert_eq!(record["tool_use"], true);
+    assert_eq!(record["tool_use_input"]["verdict"], "APPROVE");
+    assert_eq!(record["text"], "Preamble.");
+    assert!(
+        record["captured_utc"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty())
+    );
+    let name = files[0].file_name().and_then(|n| n.to_str()).unwrap_or("");
+    assert_eq!(
+        format!("{}.json", record["id"].as_str().unwrap_or("")),
+        name,
+        "the id is the file stem"
+    );
+}
+
+/// Only reviewer calls are captured (#9310).
+///
+/// What: a verifier-schema call and an unstructured call write nothing and
+/// create no directory.
+/// Test: this test.
+#[test]
+fn capture_skips_non_reviewer_calls() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("capture");
+    let mut verifier = structured_request("verifier");
+    if let Some(schema) = verifier.response_schema.as_mut() {
+        schema.name = "finding_verification".to_string();
+    }
+    let mut plain = structured_request("plain");
+    plain.response_schema = None;
+    for req in [verifier, plain] {
+        super::llm_response(&req, CAPTURE_MODEL, &text_and_tool_reply(), 1, Some(&dir));
+    }
+    assert!(!dir.exists(), "no capture for a non-reviewer call");
+}
+
+/// A capture that cannot be written leaves the response identical (#9310).
+///
+/// Why: capture is diagnostic and fail-open; it must never fail or change a
+/// review.
+/// What: the capture dir sits under a regular file, so creating it fails; the
+/// response equals the one built with capture off.
+/// Test: this test.
+#[test]
+fn capture_write_failure_leaves_the_response_identical() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, "x").expect("blocker file");
+    let dir = blocker.join("capture");
+    let req = structured_request("reviewer");
+    let reply = text_and_tool_reply();
+    let off = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, None);
+    let failed = super::llm_response(&req, CAPTURE_MODEL, &reply, 3, Some(&dir));
+    assert_eq!(
+        serde_json::to_value(&failed).expect("serialises"),
+        serde_json::to_value(&off).expect("serialises"),
+        "a failed capture must not change the response"
+    );
+    assert!(!dir.exists());
+}
+
+/// A `toolUse` reply whose findings omit `title` parses with its verdict (#9310).
+///
+/// Why: in tool-choice auto, Claude on Bedrock calls `review_output` but may
+/// omit `title`; that reply was UNKNOWN before the title was derived.
+/// What: a structured reply with one untitled finding goes through
+/// `response_text` and `parse_review_response`.
+/// Test: this test.
+#[test]
+fn tool_use_reply_with_untitled_findings_parses() {
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    let input = serde_json::json!({
+        "verdict": "REQUEST_CHANGES",
+        "summary": "One defect.",
+        "findings": [{
+            "body": "The retry loop never backs off. It hammers the API.",
+            "severity": "medium",
+            "confidence": 0.7,
+            "file": "src/client.rs",
+            "line": 40
+        }]
+    });
+    let text = super::response_text(&reply_with_blocks(vec![tool_use_block(input)]), true);
+    let parsed = parse_review_response(&text);
+    assert!(
+        !parsed.is_fail_safe,
+        "reason: {:?}",
+        parsed.fail_safe_reason
+    );
+    assert_eq!(parsed.verdict, Verdict::RequestChanges);
+    assert_eq!(parsed.findings.len(), 1);
+    assert_eq!(parsed.findings[0].kind, "The retry loop never backs off");
 }

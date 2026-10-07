@@ -892,7 +892,10 @@ fn workflow_section_carries_the_opportunistic_fix_rule() {
     let section = workflow_section(rc());
     assert!(section.starts_with(rc().required("sections/workflow.md").trim()));
     assert!(section.contains("## Opportunistic Fixes"));
-    assert!(section.contains("noted on the CURRENT issue"));
+    // Ruling 35 (2026-10-05): the Completion Standard wins, so an easy fix is
+    // noted once and not made in the same work.
+    assert!(section.contains("noted in one comment on the CURRENT issue or PR"));
+    assert!(section.contains("not made in the same work"));
     assert!(
         !rc()
             .required("sections/workflow.md")

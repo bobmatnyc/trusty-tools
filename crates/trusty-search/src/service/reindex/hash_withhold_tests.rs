@@ -4,7 +4,8 @@
 //! over chunks that never landed, or an old hash left in place when the new
 //! one was withheld, kept a file out of search until a forced reindex.
 //! What: end-to-end reindex runs under a chunk cap, a commit that fails at the
-//! vector upsert, and the withhold pass's logging and keep rules.
+//! vector upsert or at the redb write (#9230), and the withhold pass's
+//! logging and keep rules.
 //! Test: `cargo test -p trusty-search -- hash_withhold_tests`.
 
 use std::fs;
@@ -20,7 +21,7 @@ use super::progress::ReindexProgress;
 use super::spawn_reindex_awaitable;
 use crate::core::chunker::{chunk_ast, json_exceeds_window_ceiling};
 use crate::core::embed::{Embedder, MockEmbedder};
-use crate::core::indexer::{CodeIndexer, ParsedBatch, TEST_FAIL_REMOVE};
+use crate::core::indexer::{CodeIndexer, ParsedBatch, TEST_FAIL_CHUNK_DELETE, TEST_FAIL_REMOVE};
 use crate::core::registry::{IndexHandle, IndexId};
 use crate::core::store::{VectorHit, VectorStore};
 use crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES;
@@ -388,6 +389,138 @@ async fn commit_error_clears_the_old_hash() {
     );
 }
 
+/// #9230: the redb-write-failure arm. `commit_parsed_batch` logs a failed
+/// redb write and answers `Ok`; the batch must still fail, as the error arm
+/// does, so it neither counts as indexed nor keeps a hash for chunks redb
+/// lacks. Fails against 8fe9e93737: no error, BRAVO's hash recorded.
+#[tokio::test]
+async fn a_failed_redb_write_fails_the_batch_and_withholds_its_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut indexer = CodeIndexer::new("redb-write-fail-9230", dir.path());
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
+    ));
+    crate::core::indexer::break_chunk_writes(&indexer);
+    let handle = handle_over("redb-write-fail-9230", dir.path(), indexer);
+    let ctx = ctx_for(&handle);
+    let key = PathBuf::from("a.rs");
+    ctx.hashes.insert(key.clone(), hash_content(ALPHA));
+
+    let (new, _) = chunk_ast("a.rs", BRAVO);
+    let ready = ParsedReadyBatch {
+        parsed: ParsedBatch {
+            embeddings: vec![None; new.len()],
+            chunks: new,
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        },
+        new_hashes: vec![(key.clone(), hash_content(BRAVO))],
+        batch_files: 1,
+        changed_corpus_paths: vec!["a.rs".to_string()],
+        final_chunkless_paths: Vec::new(),
+    };
+    commit_parsed_and_finalize(&ctx, ready).await;
+
+    assert_eq!(
+        ctx.progress.errors.load(Ordering::Acquire),
+        1,
+        "a batch whose redb write failed must be reported as failed"
+    );
+    assert_eq!(
+        ctx.progress.indexed_count(),
+        0,
+        "a failed batch indexed nothing"
+    );
+    assert_eq!(
+        ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "no hash may claim content the durable corpus lacks"
+    );
+}
+
+/// #9212: the batch's pre-commit remove fails closed. Why: it deleted
+/// warn-only, so a refused redb delete dropped ALPHA from memory, BRAVO
+/// committed over ALPHA's surviving rows and BRAVO's hash was recorded.
+/// What: seeds ALPHA, then commits BRAVO under the redb delete fault and
+/// asserts ALPHA's ids and rows are unchanged, BRAVO did not land, the hash
+/// is withheld and the failure is counted. Fails against d6529ca1f5.
+#[tokio::test]
+async fn a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash() {
+    let id = "refused-pre-commit-remove-9212";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut indexer = CodeIndexer::new(id, dir.path());
+    let corpus = Arc::new(
+        crate::core::corpus::CorpusStore::open(&dir.path().join("index.redb")).expect("open"),
+    );
+    indexer.set_corpus_store(corpus.clone());
+    indexer.index_file("a.rs", ALPHA).await.expect("seed ALPHA");
+    let handle = handle_over(id, dir.path(), indexer);
+    let ctx = ctx_for(&handle);
+    let key = PathBuf::from("a.rs");
+    ctx.hashes.insert(key.clone(), hash_content(ALPHA));
+    let rows = || -> Vec<(String, String)> {
+        let mut rows: Vec<(String, String)> = corpus
+            .load_all_chunks()
+            .expect("rows")
+            .into_iter()
+            .filter(|c| c.file == "a.rs")
+            .map(|c| (c.id, c.content))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let rows_before = rows();
+    let mut ids_before = handle.indexer.read().await.chunk_ids_for_file("a.rs").await;
+    ids_before.sort();
+    assert!(!rows_before.is_empty(), "setup: ALPHA landed in redb");
+
+    let (new, _) = chunk_ast("a.rs", BRAVO);
+    let ready = ParsedReadyBatch {
+        parsed: ParsedBatch {
+            embeddings: vec![None; new.len()],
+            chunks: new,
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 0,
+        },
+        new_hashes: vec![(key.clone(), hash_content(BRAVO))],
+        batch_files: 1,
+        changed_corpus_paths: vec!["a.rs".to_string()],
+        final_chunkless_paths: Vec::new(),
+    };
+    TEST_FAIL_CHUNK_DELETE.lock().unwrap().push(id.to_string());
+    commit_parsed_and_finalize(&ctx, ready).await;
+    TEST_FAIL_CHUNK_DELETE.lock().unwrap().retain(|f| f != id);
+
+    let mut ids_after = handle.indexer.read().await.chunk_ids_for_file("a.rs").await;
+    ids_after.sort();
+    assert_eq!(ids_after, ids_before, "a refused remove changed memory");
+    assert_eq!(
+        rows(),
+        rows_before,
+        "a refused remove changed the redb rows"
+    );
+    assert!(
+        !landed_text(&handle, "a.rs")
+            .await
+            .contains("bravo_one_8976"),
+        "BRAVO must not commit over ALPHA's surviving rows"
+    );
+    assert_eq!(
+        ctx.hashes.get(&key).map(|h| h.clone()).as_deref(),
+        Some(WITHHELD_HASH),
+        "BRAVO's hash must be withheld, so the next reindex retries"
+    );
+    assert_eq!(
+        ctx.progress.errors.load(Ordering::Acquire),
+        1,
+        "the refused remove is reported"
+    );
+}
+
 /// Counts WARN events on the current thread.
 struct WarnCounter(Arc<AtomicUsize>);
 
@@ -421,4 +554,158 @@ async fn withheld_hashes_log_one_summary_warn_per_batch() {
     assert_eq!(warns.load(Ordering::SeqCst), 1, "one WARN for seven files");
     assert_eq!(kept.len(), 7, "every hash is recorded, none dropped");
     assert!(kept.iter().all(|(_, h)| h == WITHHELD_HASH));
+}
+
+/// `remove-file` through the shared report every transport serves.
+async fn remove_over_report(
+    state: &Arc<crate::service::server::SearchAppState>,
+    id: &str,
+    rel: &str,
+) -> Result<serde_json::Value, (axum::http::StatusCode, serde_json::Value)> {
+    let req = crate::service::server::RemoveFileRequest {
+        path: rel.to_string(),
+    };
+    crate::service::server::remove_file_report(state, id, req).await
+}
+
+/// Why (#9236 review): `remove-file` dropped a file's chunks but kept its
+/// content hash, so the next reindex skipped the unchanged file
+/// (`indexed_new=0 skipped=N`) and it stayed out of search.
+/// What: a removed file comes back on the next reindex. A remove whose redb
+/// delete is refused answers 500 and keeps the hash, so the failure branch
+/// is not fail-open. Fails against 3b46800460: `a.rs` stays empty after the
+/// reindex.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_file_forgets_the_hash_so_a_reindex_restores_it_9236() {
+    let id = "remove-file-hash-9236";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::write(root.join("a.rs"), ALPHA).expect("a.rs");
+    fs::write(root.join("b.rs"), BRAVO).expect("b.rs");
+    let registry = crate::core::registry::IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(CodeIndexer::new(id, root.clone()))),
+        root.clone(),
+    ));
+    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
+    let hashes = hashes_for(&handle.id);
+    reindex(&handle).await;
+    assert!(landed_text(&handle, "a.rs").await.contains("alpha_8976"));
+
+    let reply = remove_over_report(&state, id, "a.rs")
+        .await
+        .expect("remove");
+    assert!(reply["removed_chunks"].as_u64() > Some(0), "{reply}");
+    assert!(landed_text(&handle, "a.rs").await.is_empty());
+    reindex(&handle).await;
+    assert!(
+        landed_text(&handle, "a.rs").await.contains("alpha_8976"),
+        "the reindex after remove-file must index a.rs again"
+    );
+
+    let fault = id.to_string();
+    crate::core::indexer::TEST_FAIL_CHUNK_DELETE
+        .lock()
+        .expect("seam")
+        .push(fault.clone());
+    let refused = remove_over_report(&state, id, "b.rs").await;
+    crate::core::indexer::TEST_FAIL_CHUNK_DELETE
+        .lock()
+        .expect("seam")
+        .retain(|f| *f != fault);
+    let (status, body) = refused.expect_err("a refused delete must not answer 200");
+    assert_eq!(
+        status,
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "{body}"
+    );
+    assert_eq!(
+        hashes.get(&PathBuf::from("b.rs")).map(|h| h.clone()),
+        Some(hash_content(BRAVO)),
+        "a refused delete must keep the hash"
+    );
+}
+
+/// Why (#9236 review): `remove_file_report`'s hash step runs after the delete
+/// commits, so its failure arm leaves the chunks gone and the hash row in
+/// place — and the reindex would then skip the file.
+/// What: on a corpus-backed indexer, under the forget fault, the remove
+/// answers 500 `remove_file_failed` with `a.rs`'s chunks gone and its
+/// persisted hash row kept. A retry answers 200 with 0 chunks, clears the
+/// row, and the next reindex indexes `a.rs` again.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
+    let id = "remove-file-forget-fail-9236";
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = tempfile::tempdir().expect("store dir");
+    let root = tmp.path().to_path_buf();
+    fs::write(root.join("a.rs"), ALPHA).expect("a.rs");
+    fs::write(root.join("b.rs"), BRAVO).expect("b.rs");
+    let mut indexer = CodeIndexer::new(id, root.clone());
+    indexer.set_corpus_store(Arc::new(
+        crate::core::corpus::CorpusStore::open(&store.path().join("index.redb"))
+            .expect("open corpus"),
+    ));
+    let registry = crate::core::registry::IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+    let state = Arc::new(crate::service::server::SearchAppState::new(registry));
+    // A reindex swaps in a new corpus store, so each check re-reads it.
+    async fn has_row(handle: &IndexHandle) -> bool {
+        let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
+        corpus
+            .load_file_hashes()
+            .expect("read hash rows")
+            .iter()
+            .any(|(file, _)| file == "a.rs")
+    }
+    reindex(&handle).await;
+    assert!(landed_text(&handle, "a.rs").await.contains("alpha_8976"));
+    assert!(
+        has_row(&handle).await,
+        "setup: the reindex must persist a.rs's hash"
+    );
+
+    let fault = id.to_string();
+    super::hash::TEST_FAIL_FORGET_HASH
+        .lock()
+        .expect("seam")
+        .push(fault.clone());
+    let refused = remove_over_report(&state, id, "a.rs").await;
+    super::hash::TEST_FAIL_FORGET_HASH
+        .lock()
+        .expect("seam")
+        .retain(|f| *f != fault);
+    let (status, body) = refused.expect_err("a failed hash forget must not answer 200");
+    assert_eq!(
+        status,
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "{body}"
+    );
+    assert_eq!(body["error"], "remove_file_failed", "{body}");
+    assert!(
+        landed_text(&handle, "a.rs").await.is_empty(),
+        "the delete committed before the hash step failed"
+    );
+    assert!(
+        has_row(&handle).await,
+        "the failed hash step must leave the row"
+    );
+
+    let reply = remove_over_report(&state, id, "a.rs")
+        .await
+        .expect("the retry must answer 200");
+    assert_eq!(reply["removed_chunks"], 0, "{reply}");
+    assert!(!has_row(&handle).await, "the retry must clear the hash row");
+    reindex(&handle).await;
+    assert!(
+        landed_text(&handle, "a.rs").await.contains("alpha_8976"),
+        "the reindex after the retry must index a.rs again"
+    );
 }

@@ -6,6 +6,113 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.54.2] — 2026-10-06
+
+### Added
+
+- `credentials::ExternalCliCommand`: the shared runner that hands a `Secret` to a vendor CLI (`op`, `keeper`, `vercel`, `gh`) on stdin only, never argv or env. Errors and `Debug` output never carry the value or the child's output, a missing binary fails closed as `ExternalCliError::NotInstalled`, and the child is killed and reaped when the stdin write fails ([#9311](https://github.com/bobmatnyc/trusty-tools/issues/9311))
+
+### Fixed
+
+- Vector search no longer re-reads every `VECTOR_KEYS` and `DELETED_VECTORS` row on each call. `HnswStore` caches the reverse map and tombstone set and rebuilds them only after a write commits; the cache is shared by every store open on the same palace file, so a write through one handle reaches the others (#9141).
+- A recall's hit-log rows are written in one redb commit instead of one commit per hit (`RecallLog::record_batch`). A failed hit-log write is now logged at `warn` with its row count instead of being discarded; the recall still answers (#9141).
+- `CredentialSandbox::enter` now removes `GIT_CONFIG_COUNT`, every `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` pair and `GIT_CONFIG_PARAMETERS` as one set, and restores them on drop. It used to remove only the keys, so git inside the sandbox failed with "missing config key GIT_CONFIG_KEY_0" in a shell that exports `GIT_CONFIG_COUNT`, such as a tm session (#9222).
+
+## [0.54.1] — 2026-10-06
+
+### Added
+
+- `test_harness::test_repo_root()` and the pure `resolve_repo_root()` name the Cargo workspace a test reads repository content from, at runtime: `TRUSTY_TEST_REPO_ROOT` (`test_harness::REPO_ROOT_ENV`) first, then the runtime `CARGO_MANIFEST_DIR`, then the current directory, each walked up to the `[workspace]` manifest. It never falls back to a compile-time path (#9298).
+
+### Fixed
+
+- Tests that read repository content outside this crate resolve the checkout at runtime through `trusty_common::test_harness::test_repo_root()`, so a test binary built in one worktree under a shared `CARGO_TARGET_DIR` no longer reads another worktree's files (#9298).
+
+### Changed
+
+- A user forget (`PalaceHandle::forget`: `memory_forget`, the HTTP/UDS drawer delete, and so `palace reclaim --apply`) now writes a `user_forget` record to `maintenance_deletions.jsonl` (#9283). The record carries the drawer id, time and a new optional `content_hash` field, and never a content copy, so forgotten text cannot be recovered from the journal. A forgotten dedup survivor is still recorded as `forget_of_merged_survivor` with its copy (#9172). Adds `DeletionReason::UserForget` and `MaintenanceDeletion::with_content_hash_of`.
+
+## [0.54.0] — 2026-10-06
+
+### Added
+
+- Each maintenance journal record written by a dream pass, a TTL purge through the handle, or a forget of a dedup survivor carries a `drawer` copy of the removed drawer: content, room, tags, importance, creation time and `fact_key`, so a wrongly removed drawer can be recreated. The copy is kept when the L1 snapshot save after the delete fails (the record is written before the error returns) and when the journal append fails (the `error` line that stands in for the record carries it as journal JSON) (#8729).
+- `PalaceRegistry::with_data_root` and `PalaceRegistry::data_root` name the root a registry's palaces live under; `PalaceRegistry::open` sets it. The trusty-memory dream scheduler uses it to reach palaces that are not open (#9173).
+
+### Fixed
+
+- Dream dedup writes the merged survivor to the palace store before it deletes the loser, so merged text survives a reopen; if that write fails, both drawers stay. The merge no longer cuts text at 500 bytes, and appends nothing when the survivor already holds the loser's text. A merge whose text would pass 4 KiB is skipped and both drawers are kept, so a recurring near-duplicate cannot grow one drawer without bound (#9172).
+- Dream dedup picks the current drawer as survivor: a `fact_key` slot holder, then a `ruling`-tagged drawer, then the newer `created_at`, then the higher importance. Two slot holders are never merged (#9172).
+- Forgetting a drawer that the maintenance journal names as a dedup survivor writes a `forget_of_merged_survivor` record (#9172).
+- One palace handle runs one dream cycle at a time. A cycle that starts while another runs on the same palace (the idle loop, the dream rotation, `dream_run`) returns empty stats without running a pass, so it can no longer delete a drawer the running cycle has just merged text into (#9172).
+- `memory_core`: in a palace above 4,096 vectors, the vector lane finds a drawer that the HNSW graph search cannot. `hnsw_rs` prunes and evicts neighbour edges so that a point next to many identical vectors can end with no incoming edge, and an outlier can sit outside the search budget; on a copy of the 6,931-drawer trusty-tools palace that left 7–8 drawers out of their own top 10. Each open now searches for every point's own vector and keeps the points that search misses, each upsert does the same for its point, and every graph-arm query scores those points exactly, one distance per distinct vector. A point that a later upsert strands is picked up at the next open. Drawers whose vector is shared by more than 10 others still cannot all rank in a top 10 (#9174).
+- `memory_core`: opening or growing a palace past 50,000 vectors no longer writes `hnsw_rs`'s insert-count line to stdout, which corrupted the JSON-RPC stream of a daemon serving MCP over stdio. The insert that `hnsw_rs` 0.3.4 prints from runs alone, with stdout pointed at `/dev/null` under Rust's stdout lock; every other insert, including the parallel replay, runs as before. If stdout cannot be silenced, that insert does not run and the open or upsert fails with the new `HnswStoreError::StdoutGuard` variant. The enum is public and not `#[non_exhaustive]`, so an exhaustive `match` on it must add an arm (#9187).
+
+## [0.53.5] — 2026-10-05
+
+### Added
+
+- `credentials::sandbox_flag_set` and `credentials::SANDBOX_ENV_VAR` are public, so a caller can require the `.env.local` opt-out on the same exact-`1` rule the loader uses (#9178).
+
+### Fixed
+
+- `parent_death`: the watchdog's graceful-shutdown window is now `shutdown::CLEANUP_RESERVE` plus 5 s (10 s), derived from the reserve rather than a separate 5 s literal. The old window equalled the reserve, so a daemon whose parent died could be force-exited during a full-budget exit flush, before it unlinked its socket (#7085).
+- The memory secret filter stores a bare Google Docs/Sheets/Drive document id when the same text names a Google document (`spreadsheet`, `sheet`, `doc`, `drive`, `folder`, …) and the token has Google's exact id shape. A bare id with no such word, and every credential shape tested beside those words, is still refused (#8589).
+- The catch-up digest's warning for a failed `memory_list` prints the whole cause chain (a timeout, a refused socket file, a dead socket) and no longer calls every failure "could not reach trusty-memory" (#9026).
+- `url_userinfo::strip_url_secret` no longer reads an `@` in the path or query as the end of the userinfo when the authority is a plain `host:port` or an IPv6 `[...]` host: `https://host:8080/@scope/pkg` and `ssh://h:2222/o/r@x` are stored unchanged instead of as `https://scope/pkg` and `ssh://h@x`, so `tm register` keeps the clone URL intact (#9124). The log redactor keeps its over-read.
+- `PalaceStore::load_palace` uses the directory it read `palace.json` from as the palace's `data_dir`, not the absolute path recorded at creation. A palace root copied elsewhere no longer opens the original palace's files.
+- A second in-process open of a live palace shares the first handle's recall log (`RecallLog::open_shared`) instead of failing with "Database already open" and running with recall analytics disabled.
+- A cold palace open replays its stored vectors into the HNSW graph in parallel, which was the largest cost of a cold open (#9141).
+- The HNSW graph `HnswStore::open` rebuilds is single-layer. `hnsw_rs` seeds its layer generator from OS entropy, so the 16-layer graph got a new hierarchy on every open and two opens of one palace ranked recalls differently above the 4,096-drawer exact-search limit (#9141). The replay stays parallel after a serial first insert, so no parallel insert can read an empty entry point and be stored with no neighbours, out of reach of every search. Identical results across opens hold while the search finds the exact top k, which `hnsw_rs` does not guarantee.
+- `TRUSTY_SANDBOX=1` in the process environment now stops `load_env_local_once` from loading the project `.env.local` or `$HOME/.env.local`. `env_local_value` and `read_var_from_env_local` answer `None` under the same flag, so no tool reports a tier that resolution skips. Only the exact value `1` opts out; empty, `0`, `true` and non-UTF-8 values do not. Before this, a daemon started under `env -i` still loaded the developer's credentials from `.env.local` (#9178).
+- `classify_model_shape` and `conclusive_shape_mismatch` classify a Bedrock model ARN (`arn:aws:bedrock:<region>:<account>:application-inference-profile/<id>`, `inference-profile/<id>`, or `arn:aws:bedrock:<region>::foundation-model/<id>`) as Bedrock with conclusive evidence. Before, the `/` in the ARN read as an OpenRouter slug and routed the id to OpenRouter. Malformed ARNs, other ARN services and partitions, and ids that only contain `arn:aws:bedrock:` past the start keep their old classification (#9200).
+
+### Security
+
+- `parse_github_path`, `parse_remote_url`, `owner_repo_from_git_remote` and `repo_slug_from_git_remote` strip a remote URL's userinfo before deriving anything, so a token embedded as `https://user:<token>@host/x.git` no longer becomes the owner of a managed-checkout path, a palace id, a log line or an error (#9124). New `url_userinfo::strip_userinfo` and `url_userinfo::userinfo_end`.
+- New `url_userinfo::strip_url_secret` removes only a URL's secret, for a URL that is stored and cloned: the `:password` on any scheme and the whole userinfo on `http(s)://`, keeping the `git@` ssh login. New `url_userinfo::scp_userinfo_end` locates the userinfo of an scp-style `user@host:path` (#9155).
+
+## [0.53.4] — 2026-10-05
+
+### Added
+
+- `SpawnSpec::stderr_to(path)` appends a detached child's stderr to an owner-only (`0600`) log file instead of inheriting the caller's. An existing file is set to `0600` as well, and a file past 8 MiB is moved to `<path>.1` at spawn so the log stays bounded. A file that cannot be opened fails the spawn with the new `SupervisorError::StderrLog` before any child starts. `OnDemandAnalyze::quiet()` uses it to send a probe-started analyze server's stderr to `trusty-analyze.stderr.log` beside its socket; `analyze_stderr_log` names that path (#8103).
+- `catchup::resolve` resolves a relaunched session's own snapshot by its tmux
+  session name when the window route misses, and reports it as
+  `ResolutionPath::TmuxSession` (`"tmux_session"`). A relaunch recreates the
+  tmux window, so the window id the caller holds afterwards never matched its
+  last pause. The route needs the caller's tmux `#{session_created}`
+  (`CallerIdentity::with_tmux_session_created`, used by the new
+  `resolve_snapshot_for_identity`) and matches only snapshots paused after it,
+  so a later session reusing the name never claims an earlier session's
+  snapshot. `resolve_snapshot_for_caller` carries no creation time and never
+  takes this route. A digits-only session name never matches.
+  `catchup::resolve::session_name_of` is the new parser.
+- `redact_sessions_not_owned_by` grants ownership by tmux session name only
+  to the one snapshot the resolver answered, never to every entry sharing the
+  name.
+- `credentials::test_sandbox` behind the new `credential-test-sandbox` feature
+  (dev-dependencies only): `CredentialSandbox::enter()` clears every
+  credential-shaped environment variable, points `HOME`, the XDG dirs,
+  `GH_CONFIG_DIR` and `TRUSTY_DATA_DIR_OVERRIDE` at a temp tree, sets
+  `GIT_CONFIG_NOSYSTEM=1` and `GIT_TERMINAL_PROMPT=0`, keeps the one-time
+  `.env.local` loader from reading a file, and panics when isolation does not
+  take. While a sandbox is live, `default_store()` skips the OS keychain and
+  `env_local_value()` returns `None`; a build without the feature cannot turn
+  either tier off. `assert_secret_eq` prints only a redacted preview on
+  mismatch. The crate's own unit tests use the sandbox too: the
+  `resolved_secret_values` scrub test now resolves one synthetic key instead
+  of every real secret on the machine (#9123).
+
+### Fixed
+
+- The catch-up digest treats a `memory_list` not-found refusal (a palace that was never created) as an empty palace. It no longer writes "could not reach trusty-memory" to stderr on every run for such a project, or renders the memory section as unreachable. Any other refusal still reports the daemon unreachable (#9026).
+
+### Changed
+
+- Every drawer a maintenance pass deletes (dream dedup, content prune, prune, room consolidation, TTL purge) is now logged on its own `warn` line naming the palace, drawer id and reason, beside its journal record. Before, the log showed only a per-pass count (#8729).
+- `content::DEV_CLASS_SOURCES` reads `skills`, `instructions`, `instructions/output-styles` and `instructions/sm_instructions` from `content/`, where #9012 moved them; every destination now lives under the checkout's `content/` tree.
+
 ## [0.53.1] — 2026-10-03
 
 ### Changed

@@ -84,8 +84,10 @@ fn mix_json(finding_1: Outcome) -> String {
                 ),
                 Outcome::Confirmed | Outcome::Unjudged => (confidence, format!("observation {n}")),
             };
-            // #8905: every finding quotes the code its line holds, or the gate drops it.
-            let body = format!("{body} at `compute()`");
+            // #8905: every finding quotes the code its line holds, or the gate
+            // drops it. #9188 E: a bare `compute()` names code without quoting
+            // it, so the quote is the line's code.
+            let body = format!("{body} at `value = compute()`");
             let line = if n == 18 { "" } else { r#","line":1"# };
             format!(
                 r#"{{"title":"finding {n}","body":"{body}","severity":"{severity}","confidence":{confidence},"file":"app/module.py"{line},"category":"{category}","code_provable":{}}}"#,
@@ -177,14 +179,19 @@ async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
 /// #4044 / cto-reports#731: the same mix with its one BLOCK-grade finding
 /// refuted. What remains is two confirmed Mediums below the 0.80 floor
 /// threshold and confirmed Lows, which alone would approve; the unverifiable
-/// advisories are withheld (#4044). #8904: the refuted findings are withheld, and a blocking review
-/// whose survivors alone approve is withheld as UNKNOWN (the #8905 policy) —
-/// the model's F must not stand, and neither may an approval.
+/// advisories are withheld (#4044). #8904: the refuted findings are withheld,
+/// and a blocking review whose survivors alone approve never approves — the
+/// model's F must not stand. #9310: it is REQUEST_CHANGES
+/// (`suppressed_reject`, formerly UNKNOWN), graded the band's best.
 #[tokio::test]
 async fn run_review_cto_reports_731_mix_without_finding_1_does_not_block() {
     let result = review_731(Outcome::Refuted).await;
 
     assert_matches_record(&result, Outcome::Refuted);
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
+    assert_eq!(result.grade.as_deref(), Some("D+"));
 }

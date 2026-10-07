@@ -880,9 +880,10 @@ fn every_advertised_override_file_maps_to_an_overridable_section() {
 fn the_delivered_prompt_teaches_sprint_then_harden() {
     // Owner content requirement on #4183: the composed instructions must teach a
     // sprint-then-harden workflow, not a blended one — including the causal
-    // claim (slow release CAUSES WIP), the hard line that survives going fast,
-    // and the close-and-fold rule. Asserted on the COMPOSED prompt, because a
-    // doctrine that lives in a file no composer emits teaches nobody.
+    // claim (slow release CAUSES WIP), and the hard line that survives going
+    // fast. The close-and-fold rule became the Completion Standard's round limit
+    // (asserted below). Asserted on the COMPOSED prompt, because a doctrine that
+    // lives in a file no composer emits teaches nobody.
     let composed =
         compose_bundled_fallback(FIXED_STACK, FIXED_ROSTER, None).expect("package composes");
 
@@ -895,11 +896,33 @@ fn the_delivered_prompt_teaches_sprint_then_harden() {
         "Publish only after those pass",
         "*causes* too many things in flight",
         "never turn red green by deleting coverage",
-        "3+ review rounds is evidence to close and fold",
     ] {
         assert!(
             composed.contains(marker),
             "the delivered prompt must carry the sprint/harden doctrine: {marker:?}"
+        );
+    }
+}
+
+#[test]
+fn the_delivered_prompt_carries_the_completion_standard() {
+    // Owner ruling 2026-10-04: the Completion Standard (Done, the fix bar, the
+    // round limit) binds every PM, so it must reach the composed prompt, not
+    // only the `tm-workflow` skill. One marker per part.
+    let composed =
+        compose_bundled_fallback(FIXED_STACK, FIXED_ROSTER, None).expect("package composes");
+
+    for marker in [
+        "## Completion Standard",
+        "**Done** (all four, then stop)",
+        "a finding blocks ONLY if it causes or leaves unguarded",
+        "All else is ONE comment on the PR or issue",
+        "at most one fix round and one delta",
+        "goes to the Architect",
+    ] {
+        assert!(
+            composed.contains(marker),
+            "the delivered prompt must carry the Completion Standard: {marker:?}"
         );
     }
 }

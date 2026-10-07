@@ -199,7 +199,7 @@ pub enum DaemonError {
     // #9124: the message reaches the HTTP body and the log; never a token.
     #[error(
         "no registered project matches repo_url {:?}; cannot scope deliverable",
-        crate::core::remote_url_redact::redact_url(.repo_url)
+        crate::core::remote_url_redact::redact_stored_url(.repo_url)
     )]
     ProjectNotFoundForRepoUrl {
         /// The `repo_url` that did not resolve to any registered project.
@@ -634,5 +634,13 @@ mod tests {
             msg.contains("https://***@github.com/acme/widget.git"),
             "{msg}"
         );
+        // #9259: a quote in the password does not end the userinfo.
+        let e = DaemonError::ProjectNotFoundForRepoUrl {
+            repo_url: "https://octo:pa'ss9259@github.com/acme/widget.git".into(),
+        };
+        for text in [e.to_string(), format!("{e:?}")] {
+            assert!(!text.contains("ss9259"), "the password reached {text}");
+            assert!(text.contains("https://***@github.com/acme/widget.git"));
+        }
     }
 }

@@ -10,7 +10,11 @@
 //! `handle_memory_recall_all`, and their private helpers, moved verbatim except
 //! for `recall_scope`, which widened to `pub(crate)` because `memory_list`
 //! shares it. Response shaping lives next door in
-//! [`super::recall_projection`].
+//! [`super::recall_projection`]. #8246/#9143: every handler fetches a
+//! [`ranking_window`] of candidates, demotes stale snapshots
+//! ([`super::recall_rank`]) and only then cuts to `top_k`; the single-palace
+//! handlers' ready path also merges user-scope rulings
+//! ([`super::recall_rulings`]) and reports failed rulings palaces.
 //! Test: `dispatch_recall_room_filter_scopes_results` in `tools::tests`;
 //! `stdio_serve_recall_all_bounded`; `tests/recall_query_discrimination.rs`.
 
@@ -20,7 +24,7 @@ use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
 use trusty_common::memory_core::retrieval::{
     recall_across_palaces, recall_deep_scoped, recall_scoped, scope_admits, PalaceHandle,
-    RecallScope,
+    RecallResult, RecallScope,
 };
 
 use crate::service::recall_stream::recall_streamed;
@@ -30,11 +34,15 @@ use super::helpers::open_palace_handle;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
 use super::palace_index::{resolve_palace_or_index, PalaceScope};
+// #8246 / #9143: typed temporal ranking and the user-scope rulings leg.
+use super::recall_rank::{demote_stale_snapshots, demote_stale_snapshots_across, ranking_window};
+use super::recall_rulings::{fetch_user_rulings, fold_rulings, RulingsFold};
+use super::recall_rulings_floor::apply_rulings_floor;
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
-    apply_score_floor, candidate_window, include_creator_tags_arg, min_score_arg, project_tags,
-    serialize_recall, RecallProjection,
+    apply_score_floor, include_creator_tags_arg, min_score_arg, project_tags, serialize_recall,
+    RecallProjection,
 };
 use super::wing_ops::resolve_wing_arg;
 
@@ -182,7 +190,9 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     let min_score = min_score_arg(&args, "memory_recall")?;
     // A floored recall asks the lanes for a wider candidate set, so hits the
     // floor removes are backfilled instead of leaving the caller short.
-    let fetch_k = candidate_window(top_k, min_score);
+    // #8246: and every recall fetches about 2 * top_k, so demotion can lift a
+    // hit from just past the cut.
+    let fetch_k = ranking_window(top_k, min_score);
 
     let handle = open_palace_handle(state, &palace)?;
     // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
@@ -198,17 +208,11 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // this fallback ignores the query, so entering it while the embedder is live
     // makes every query return the same drawers.
     if !vector_lane_available(state) {
-        let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
-        let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
-        return Ok(serialize_recall(
-            &palace,
-            query,
-            results,
-            &RecallProjection {
-                include_creator_tags,
-                dropped_below_floor,
-            },
-        ));
+        let results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
+        // #8246: stale snapshots rank below current facts on every path. No
+        // rulings leg here: it needs the embedder this path is waiting for.
+        let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
     }
 
     let embedder = state.embedder().await?;
@@ -228,26 +232,23 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // follows aliases, so the requested slug can address a different palace
     // than the vector lane just searched.
     let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, fetch_k);
-    let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+    // #9143: the rulings leg runs beside the project lanes, bounded.
+    let rulings_fut = fetch_user_rulings(state, &handle.id, embedder.clone(), query, &scope, top_k);
+    let (vector_res, bm25_res, rulings) = tokio::join!(vector_fut, bm25_fut, rulings_fut);
     let mut results = vector_res.context("recall")?;
     if let Some(bm25_hits) = bm25_res {
         // `fetch_k`, not `top_k`: this truncation feeds the floor, so cutting to
         // the caller's count here would undo the widened window.
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
+    // #9143: user-scope rulings join at L1, after fusion so they compete on
+    // the fused scale; failed rulings palaces are reported, never fatal.
+    let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
-    let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
-    Ok(serialize_recall(
-        &palace,
-        query,
-        results,
-        &RecallProjection {
-            include_creator_tags,
-            dropped_below_floor,
-        },
-    ))
+    let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+    Ok(cut.rank_and_serialize(&palace, query, results, fold))
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
@@ -266,7 +267,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // `room`/`wing` — two spellings of one option is how these two drift.
     let include_creator_tags = include_creator_tags_arg(&args);
     let min_score = min_score_arg(&args, "memory_recall_deep")?;
-    let fetch_k = candidate_window(top_k, min_score);
+    // #8246: same widened window as `memory_recall`.
+    let fetch_k = ranking_window(top_k, min_score);
 
     let handle = open_palace_handle(state, &palace)?;
     // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
@@ -277,17 +279,11 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // Issue #1970: same warming-fallback posture as memory_recall.
     // #4836: and the same embedder-state gate, for the same reason.
     if !vector_lane_available(state) {
-        let mut results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
-        let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
-        return Ok(serialize_recall(
-            &palace,
-            query,
-            results,
-            &RecallProjection {
-                include_creator_tags,
-                dropped_below_floor,
-            },
-        ));
+        let results = recall_without_embedder(state, &handle, query, &scope, fetch_k).await;
+        // #8246: stale snapshots rank below current facts on every path. No
+        // rulings leg here: it needs the embedder this path is waiting for.
+        let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+        return Ok(cut.rank_and_serialize(&palace, query, results, RulingsFold::default()));
     }
 
     let embedder = state.embedder().await?;
@@ -297,7 +293,9 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // by vector centroid alone.
     let vector_fut = recall_deep_scoped(&handle, embedder.as_ref(), query, &scope, fetch_k);
     let bm25_fut = bm25_search_optional(state, handle.id.as_str(), query, fetch_k);
-    let (vector_res, bm25_res) = tokio::join!(vector_fut, bm25_fut);
+    // #9143 / #8246: same rulings leg and demotion as `memory_recall`.
+    let rulings_fut = fetch_user_rulings(state, &handle.id, embedder.clone(), query, &scope, top_k);
+    let (vector_res, bm25_res, rulings) = tokio::join!(vector_fut, bm25_fut, rulings_fut);
     let mut results = vector_res.context("recall_deep")?;
     // ADR-0027 T7: no scope filter needed on the lexical side — the fusion only
     // boosts drawers already in the vector list, which is already scoped.
@@ -305,17 +303,58 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // `fetch_k`, not `top_k` — see the `memory_recall` sibling.
         fuse_bm25_into_recall(&mut results, &bm25_hits, fetch_k);
     }
+    let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
-    let dropped_below_floor = apply_score_floor(&mut results, min_score, top_k);
-    Ok(serialize_recall(
-        &palace,
-        query,
-        results,
-        &RecallProjection {
+    let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+    Ok(cut.rank_and_serialize(&palace, query, results, fold))
+}
+
+/// The caller's cut for a single-palace recall: count, floor and tag view.
+///
+/// Why: both single-palace handlers, on both their paths, end the same way;
+/// one tail keeps demotion ahead of the floor and the cut on all four.
+/// Test: `demotion_applies_on_every_recall_surface`.
+struct RecallCut {
+    top_k: usize,
+    min_score: Option<f32>,
+    include_creator_tags: bool,
+}
+
+impl RecallCut {
+    fn new(top_k: usize, min_score: Option<f32>, include_creator_tags: bool) -> Self {
+        Self {
+            top_k,
+            min_score,
             include_creator_tags,
-            dropped_below_floor,
-        },
-    ))
+        }
+    }
+
+    /// Demote stale snapshots (#8246), lift answering rulings into reserved
+    /// slots (#9143), apply the floor, cut to `top_k`, and serialize with any
+    /// failed rulings palaces (#9143).
+    fn rank_and_serialize(
+        &self,
+        palace: &str,
+        query: &str,
+        mut results: Vec<RecallResult>,
+        rulings: RulingsFold,
+    ) -> Value {
+        demote_stale_snapshots(&mut results, chrono::Utc::now());
+        // #9143 AC2: after the score sort, before the floor and the cut, so
+        // the reserved slots sit inside `top_k`.
+        apply_rulings_floor(&mut results, &rulings.floored, self.top_k);
+        let dropped_below_floor = apply_score_floor(&mut results, self.min_score, self.top_k);
+        serialize_recall(
+            palace,
+            query,
+            results,
+            &RecallProjection {
+                include_creator_tags: self.include_creator_tags,
+                dropped_below_floor,
+                rulings_degraded: rulings.degraded,
+            },
+        )
+    }
 }
 
 /// Cross-palace counterpart of `recall_without_embedder` (issue #1970).
@@ -371,25 +410,30 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // tool merges across palaces, where one floor over heterogeneous corpora
     // would mean different things per palace.
     let include_creator_tags = include_creator_tags_arg(&args);
+    // #8246: fetch about 2 * top_k so demotion can lift a hit past the cut.
+    let window = ranking_window(top_k, None);
 
     // List every palace on disk, then search them a batch at a time. Palaces
     // that fail to open are skipped with a warning so a single bad
     // namespace cannot fail the whole fan-out.
     let palaces = crate::service::helpers::list_palaces_blocking(state).await?;
+    // #9141: an empty palace is skipped without being opened.
+    let (palaces, palaces_skipped) =
+        crate::service::recall_stream::skip_empty_palaces(state, palaces).await;
 
     // #7125: `recall_streamed` still opens every palace — a cache-only answer
     // would silently drop most of the corpus — but holds only one batch at a
     // time and hands back everything the query itself brought in.
     // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
     // #4836: gated on the embedder's real state, as the per-palace paths are.
-    let results = if !vector_lane_available(state) {
+    let mut results = if !vector_lane_available(state) {
         recall_streamed(
             state,
             &palaces,
             "memory_recall_all",
-            top_k,
+            window,
             |handles| async move {
-                Ok(recall_all_without_embedder(state, &handles, query, top_k).await)
+                Ok(recall_all_without_embedder(state, &handles, query, window).await)
             },
         )
         .await?
@@ -397,13 +441,16 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         // #4836: `embedder()` now yields the type-erased shared embedder
         // directly, so the local re-erasure this used to need is gone.
         let embedder = state.embedder().await?;
-        recall_streamed(state, &palaces, "memory_recall_all", top_k, |handles| {
+        recall_streamed(state, &palaces, "memory_recall_all", window, |handles| {
             let embedder = embedder.clone();
-            async move { recall_across_palaces(&handles, &embedder, query, top_k, deep).await }
+            async move { recall_across_palaces(&handles, &embedder, query, window, deep).await }
         })
         .await
         .context("recall_across_palaces")?
     };
+    // #8246: the merged list gets the same snapshot demotion, then the cut.
+    demote_stale_snapshots_across(&mut results, chrono::Utc::now());
+    results.truncate(top_k);
 
     let payload: Vec<Value> = results
         .iter()
@@ -420,5 +467,11 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
             })
         })
         .collect();
-    Ok(json!({ "query": query, "results": payload }))
+    Ok(json!({
+        "query": query,
+        "results": payload,
+        // #9141 AC 2: how much of the estate the fan-out actually opened.
+        "palaces_searched": palaces.len(),
+        "palaces_skipped": palaces_skipped,
+    }))
 }

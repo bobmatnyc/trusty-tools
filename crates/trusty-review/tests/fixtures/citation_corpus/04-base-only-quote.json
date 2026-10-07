@@ -1,0 +1,27 @@
+{
+  "leak": "F",
+  "about": "The quote is on a removed line only, and the finding is about the head code.",
+  "diff": [
+    "diff --git a/src/load.rs b/src/load.rs",
+    "--- a/src/load.rs",
+    "+++ b/src/load.rs",
+    "@@ -10,3 +10,3 @@",
+    " fn load(x: &str) -> u32 {",
+    "-    let n = parse(x).unwrap();",
+    "+    let n = parse(x)?;",
+    "     n"
+  ],
+  "reviewer": {
+    "prose": "Load panics on bad input.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "panic", "body": "`parse(x).unwrap()` panics on bad input.", "severity": "medium", "confidence": 0.9, "file": "src/load.rs", "line": 11}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": ["panic"],
+  "forbidden_in_body": ["panics on bad input"],
+  "expect_survivors": 0,
+  "expect_verdict": "REQUEST_CHANGES"
+}

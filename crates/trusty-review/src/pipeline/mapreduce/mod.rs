@@ -68,6 +68,22 @@ pub async fn run_map_reduce(
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
 ) -> ReducedReview {
+    run_map_reduce_with_wiped(filtered, llm, ctx, config)
+        .await
+        .0
+}
+
+/// [`run_map_reduce`], also returning the strictest verdict a chunk reported
+/// before the pre-grade hygiene pass dropped all its findings and relaxed it
+/// to APPROVE; `None` when none was relaxed (#9188, Architect ruling option A).
+/// Test: `mapreduce_phantom_missing_file_finding_does_not_block`,
+/// `mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff`.
+pub(crate) async fn run_map_reduce_with_wiped(
+    filtered: &FilteredDiff,
+    llm: &Arc<dyn LlmProvider>,
+    ctx: &MapContext<'_>,
+    config: &MapReduceConfig,
+) -> (ReducedReview, Option<crate::models::Verdict>) {
     let units = split_into_units(filtered, config);
     info!(
         files = filtered.files.len(),
@@ -87,6 +103,7 @@ pub async fn run_map_reduce(
     // #4044: every finding these passes drop is kept for the review record.
     let cite_index = crate::pipeline::citation_check::DiffContentIndex::from_filtered(filtered);
     let mut withheld = Vec::new();
+    let mut wiped_model_verdict: Option<crate::models::Verdict> = None;
     for outcome in &mut outcomes {
         if let MapOutcome::Reviewed {
             findings, verdict, ..
@@ -112,17 +129,28 @@ pub async fn run_map_reduce(
             // cannot poison `reduce`'s stricter-of-all-chunks seed (#4042,
             // #4044).
             let mut grade_unused = None;
-            crate::pipeline::finding_hygiene::relax_verdict_if_evidence_wiped(
+            let wiped = crate::pipeline::finding_hygiene::relax_wiped_verdict(
                 verdict,
                 &mut grade_unused,
                 findings_before,
                 findings,
             );
+            // #9188 option A: keep the strictest verdict a chunk had relaxed.
+            if let Some(v) = wiped
+                && wiped_model_verdict
+                    .as_ref()
+                    .is_none_or(|w| v.ordinal() > w.ordinal())
+            {
+                wiped_model_verdict = Some(v);
+            }
         }
     }
 
     let mut reduced = reduce(outcomes, config);
     withheld.append(&mut reduced.withheld_findings);
     reduced.withheld_findings = withheld;
-    synthesize_review(reduced, llm, ctx, config).await
+    (
+        synthesize_review(reduced, llm, ctx, config).await,
+        wiped_model_verdict,
+    )
 }

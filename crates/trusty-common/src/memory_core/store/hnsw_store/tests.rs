@@ -793,18 +793,12 @@ fn reference_ranking(pool: &[Vec<f32>], query: &[f32]) -> Vec<usize> {
 /// Test: this test itself is the verification.
 #[test]
 fn exhaustive_scan_returns_every_point_the_graph_holds() {
-    use hnsw_rs::prelude::{DistCosine, Hnsw};
-
     let dim = 64;
     let n = 40usize;
     let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 900 + i as u64)).collect();
-    let index = Hnsw::<f32, DistCosine>::new(
-        HNSW_MAX_NB_CONNECTION,
-        HNSW_INITIAL_CAPACITY,
-        HNSW_MAX_LAYER,
-        HNSW_EF_CONSTRUCTION,
-        DistCosine,
-    );
+    // #9141: the store's own constructor, so the scan is tested on the graph
+    // shape `HnswStore::open` builds.
+    let index = replay::new_index();
     for (i, v) in pool.iter().enumerate() {
         index.insert((v.as_slice(), i));
     }
@@ -892,27 +886,24 @@ fn search_returns_the_exact_top_k_below_the_exhaustive_threshold() {
 fn search_uses_the_graph_above_the_exhaustive_threshold() {
     assert_eq!(
         exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
-        4096,
+        24_576,
         "changing this bound changes the cost profile of every recall; \
          update the measurement in exhaustive.rs before changing the number"
     );
 
     let dim = 16;
     let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 1;
-    let (_dir, store) = open_store(dim);
-    let mut uuids = Vec::with_capacity(n);
-    for i in 0..n {
-        let u = Uuid::new_v4().to_string();
-        store
-            .upsert(&u, &spread_vec(dim, 4_000 + i as u64))
-            .unwrap();
-        uuids.push(u);
-    }
+    // #9280: rows written directly and replayed by a reopen — one upsert
+    // transaction per drawer is minutes at this size in a debug build.
+    let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 4_000 + i as u64)).collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
     // The graph path is approximate by design, so assert only what it still
     // owes: an exact query returns its own drawer first.
     let hits = store.search(&spread_vec(dim, 4_000), 3).unwrap();
     assert_eq!(
-        hits[0].0, uuids[0],
+        hits[0].0, "drawer-00000",
         "above the threshold the graph path must still rank an exact match first"
     );
 }
@@ -1045,18 +1036,18 @@ fn search_drops_a_shadowed_candidate_whose_vector_row_is_gone() {
 fn deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path() {
     let dim = 16;
     let total = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 44;
-    let (_dir, store) = open_store(dim);
-    let uuids: Vec<String> = (0..total).map(|_| Uuid::new_v4().to_string()).collect();
     let vecs: Vec<Vec<f32>> = (0..total)
         .map(|i| spread_vec(dim, 8_000 + i as u64))
         .collect();
-    for (u, v) in uuids.iter().zip(&vecs) {
-        store.upsert(u, v).unwrap();
-    }
+    let uuids: Vec<String> = (0..total).map(|i| format!("drawer-{i:05}")).collect();
+    // #9280: written and tombstoned in one transaction each, then replayed —
+    // per-drawer transactions are minutes at this size in a debug build. The
+    // graph still holds every point, the state a long session's deletes leave.
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &vecs);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
     let keep = 6usize;
-    for u in &uuids[keep..] {
-        store.delete(u).unwrap();
-    }
+    tombstone_rows(&store.db, keep..total);
     assert_eq!(store.len().unwrap(), keep, "only the kept drawers are live");
 
     let query = spread_vec(dim, 99_001);
@@ -1221,11 +1212,11 @@ fn search_is_exact_at_the_exhaustive_threshold() {
         .map(|i| spread_vec(dim, 600_000 + i as u64))
         .collect();
 
-    let (_dir, store) = open_store(dim);
-    let uuids: Vec<String> = (0..n).map(|_| Uuid::new_v4().to_string()).collect();
-    for (u, v) in uuids.iter().zip(&pool) {
-        store.upsert(u, v).unwrap();
-    }
+    // #9280: rows written directly and replayed by a reopen.
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let uuids: Vec<String> = (0..n).map(|i| format!("drawer-{i:05}")).collect();
     assert_eq!(store.len().unwrap(), n, "every drawer is live");
 
     for q in 0..20u64 {
@@ -1373,18 +1364,17 @@ fn search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours() {
     let k = 5usize;
     let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 6;
     let dead_n = 60usize;
-    let (_dir, store) = open_store(dim);
+    // #9280: survivors written directly and replayed by a reopen; the doomed
+    // drawers are still upserted into the open graph last.
+    let live: Vec<Vec<f32>> = (0..live_n)
+        .map(|i| spread_vec(dim, 800_000 + i as u64))
+        .collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &live);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let survivors: Vec<String> = (0..live_n).map(|i| format!("drawer-{i:05}")).collect();
 
     let query = spread_vec(dim, 424_242);
-    let survivors: Vec<String> = (0..live_n)
-        .map(|i| {
-            let u = Uuid::new_v4().to_string();
-            store
-                .upsert(&u, &spread_vec(dim, 800_000 + i as u64))
-                .unwrap();
-            u
-        })
-        .collect();
     // Each doomed drawer is the query nudged by 1%, so it outranks every
     // isotropic live drawer by orders of magnitude.
     let doomed: Vec<String> = (0..dead_n)
@@ -1439,16 +1429,14 @@ fn search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours() {
 fn search_above_the_threshold_stops_widening_when_the_graph_is_exhausted() {
     let dim = 8;
     let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 3;
-    let (_dir, store) = open_store(dim);
-    let survivors: Vec<String> = (0..live_n)
-        .map(|i| {
-            let u = Uuid::new_v4().to_string();
-            store
-                .upsert(&u, &spread_vec(dim, 310_000 + i as u64))
-                .unwrap();
-            u
-        })
+    // #9280: rows written directly and replayed by a reopen.
+    let live: Vec<Vec<f32>> = (0..live_n)
+        .map(|i| spread_vec(dim, 310_000 + i as u64))
         .collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &live);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let survivors: Vec<String> = (0..live_n).map(|i| format!("drawer-{i:05}")).collect();
 
     // Ask for far more than the palace can supply; the loop must stop at the
     // graph's point count rather than doubling forever.
@@ -1462,3 +1450,453 @@ fn search_above_the_threshold_stops_widening_when_the_graph_is_exhausted() {
         assert!(survivors.contains(u), "{u} is not a live drawer");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #9141 — every open of the same rows builds the same graph.
+// ---------------------------------------------------------------------------
+
+/// Write `pool` straight into `VECTORS` / `VECTOR_KEYS` in one transaction, as
+/// drawers `drawer-00000`, `drawer-00001`, ... with vector ids from 1.
+///
+/// Why: thousands of `upsert` calls would each commit a transaction AND insert
+/// into the live graph, which this fixture does not need — the test builds its
+/// graphs by reopening.
+fn seed_rows(db: &Database, pool: &[Vec<f32>]) {
+    let wtx = db.begin_write().expect("begin_write");
+    {
+        let mut vectors = wtx.open_table(VECTORS).expect("vectors");
+        let mut keys = wtx.open_table(VECTOR_KEYS).expect("vector_keys");
+        for (i, v) in pool.iter().enumerate() {
+            let id = i as u64 + 1;
+            let encoded = postcard::to_allocvec(v).expect("encode");
+            vectors
+                .insert(id, encoded.as_slice())
+                .expect("insert vector");
+            keys.insert(format!("drawer-{i:05}").as_str(), id)
+                .expect("insert key");
+        }
+    }
+    wtx.commit().expect("commit");
+}
+
+/// Tombstone the `seed_rows` drawers at `rows` in one transaction, as `delete`
+/// does one drawer at a time. Call before the store's first search, which
+/// loads its key cache.
+fn tombstone_rows(db: &Database, rows: std::ops::Range<usize>) {
+    let wtx = db.begin_write().expect("begin_write");
+    {
+        let mut keys = wtx.open_table(VECTOR_KEYS).expect("vector_keys");
+        let mut dead = wtx.open_table(DELETED_VECTORS).expect("deleted_vectors");
+        for i in rows {
+            keys.remove(format!("drawer-{i:05}").as_str())
+                .expect("remove key");
+            dead.insert(i as u64 + 1, [].as_slice()).expect("tombstone");
+        }
+    }
+    wtx.commit().expect("commit");
+}
+
+/// Why (#9141): two opens of one palace ranked recalls differently — a query's
+/// correct drawer ranked 4 on one open and fell out of the top 10 on another.
+/// `hnsw_rs` seeds its layer RNG from OS entropy, so a 16-layer graph got a new
+/// hierarchy per open (see `replay`).
+/// What: seeds a palace past [`exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS`] (so
+/// `search` takes the graph arm) and one below it (the exact scan), and opens
+/// each twice over the same rows. It asserts two things:
+/// 1. Every point of both graphs sits on layer 0. This is what the fix
+///    guarantees. On a 16-layer graph each point lands above layer 0 with
+///    probability 1/16, so even the 300-row palace fails with probability
+///    above 1 - 1e-8.
+/// 2. Both opens return the same top-10 ids, order and distance bits for 24
+///    queries. The parallel replay does not guarantee this; it holds while
+///    both searches find the exact top 10, which held in 65 of 65 runs.
+///
+/// The threshold is the real constant: the fixture writes threshold + 404 rows
+/// directly instead of lowering it, because the store has no hook for the
+/// threshold.
+/// Test: this test itself is the verification.
+#[test]
+fn reopening_a_palace_answers_every_query_identically() {
+    let dim = 16;
+    for n in [300, exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 404] {
+        let (_dir, store) = open_store(dim);
+        let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 77_000 + i as u64)).collect();
+        seed_rows(&store.db, &pool);
+        let first = HnswStore::open(Arc::clone(&store.db), dim).expect("first open");
+        let second = HnswStore::open(Arc::clone(&store.db), dim).expect("second open");
+        for (name, open) in [("first", &first), ("second", &second)] {
+            let index = open.index.read();
+            assert_eq!(index.get_nb_point(), n, "n={n} {name} open: point count");
+            assert_eq!(
+                index.get_max_level_observed(),
+                0,
+                "n={n} {name} open: a point sits above layer 0, so the OS-seeded \
+                 layer RNG shapes the graph"
+            );
+        }
+        let bits = |hits: &[(String, f32)]| -> Vec<(String, u32)> {
+            hits.iter().map(|(u, d)| (u.clone(), d.to_bits())).collect()
+        };
+        for q in 0..24u64 {
+            let query = spread_vec(dim, 9_000_000 + q);
+            let a = first.search(&query, 10).expect("search first");
+            let b = second.search(&query, 10).expect("search second");
+            assert_eq!(a.len(), 10, "n={n} query {q}: expected a full top 10");
+            assert_eq!(
+                bits(&a),
+                bits(&b),
+                "n={n} query {q}: two opens of the same rows ranked differently"
+            );
+        }
+    }
+}
+
+/// Origin ids of the points in `index` whose layer-0 neighbour list is empty.
+fn points_without_neighbours(index: &Hnsw<'static, f32, DistCosine>) -> Vec<usize> {
+    index
+        .get_point_indexation()
+        .into_iter()
+        .filter(|p| p.get_neighborhood_id()[0].is_empty())
+        .map(|p| p.get_origin_id())
+        .collect()
+}
+
+/// Why (#9141): an `hnsw_rs` insert that reads no entry point sets one and
+/// returns with no neighbours. Under `parallel_insert_slice` several of the
+/// first inserts can read no entry point at once; every one but the winner is
+/// stored with no edges in or out, so the graph arm can never return it.
+/// What: 200 `replay` builds of 4,500 rows each; every point of every build
+/// must have a non-empty layer-0 neighbour list (only a 1-point graph may
+/// not). The race window is a few hundred nanoseconds: the fully parallel
+/// replay passed all 200 builds in this test, so the assertion's ability to
+/// fail was shown by building with zero connections per point.
+/// Test: this test itself is the verification.
+#[test]
+fn replay_leaves_no_point_without_neighbours() {
+    let dim = 16;
+    // #9280: a fixed size; this test is about the replay race, not the
+    // threshold, and 200 builds must stay affordable.
+    let n = 4_500;
+    let live: Vec<(Vec<f32>, usize)> = (0..n)
+        .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
+        .collect();
+    let mut bad_builds = Vec::new();
+    for build in 0..200 {
+        let index = replay::new_index();
+        replay::replay(&index, &live).expect("replay");
+        assert_eq!(index.get_nb_point(), n, "build {build}: point count");
+        let orphans = points_without_neighbours(&index);
+        if !orphans.is_empty() {
+            bad_builds.push((
+                build,
+                orphans.len(),
+                orphans[..orphans.len().min(10)].to_vec(),
+            ));
+        }
+    }
+    assert!(
+        bad_builds.is_empty(),
+        "{} of 200 builds left points with no layer-0 neighbours; first \
+         (build, count, first ids): {:?}",
+        bad_builds.len(),
+        bad_builds.first()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #9187 — no HNSW insert writes to stdout, the MCP stdio channel.
+// ---------------------------------------------------------------------------
+
+/// `hnsw_rs` 0.3.4 `println!`s at every insert that makes its point count a
+/// multiple of this (`hnsw.rs:519-520`).
+const HNSW_RS_PRINT_PERIOD: usize = 50_000;
+
+/// Set in the child process [`no_hnsw_insert_writes_to_stdout`] spawns.
+const STDOUT_CHILD_ENV: &str = "TRUSTY_HNSW_STDOUT_CHILD";
+
+/// Child half of [`no_hnsw_insert_writes_to_stdout`]; a no-op unless the
+/// parent spawned it.
+///
+/// What: drives both insert paths across `hnsw_rs`'s print point — a replay of
+/// exactly [`HNSW_RS_PRINT_PERIOD`] rows, and a replay of one fewer followed by
+/// one `upsert`. Dim 4 bounds the debug-profile cost; the print depends only
+/// on the point count.
+/// Test: run by `no_hnsw_insert_writes_to_stdout`.
+#[test]
+fn stdout_child_crosses_the_hnsw_print_period() {
+    if std::env::var_os(STDOUT_CHILD_ENV).is_none() {
+        return;
+    }
+    let dim = 4;
+    let pool: Vec<Vec<f32>> = (0..HNSW_RS_PRINT_PERIOD)
+        .map(|i| spread_vec(dim, 31_000 + i as u64))
+        .collect();
+
+    // Replay path: the last replayed row is the print point.
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("replay open");
+    assert_eq!(reopened.index.read().get_nb_point(), HNSW_RS_PRINT_PERIOD);
+    drop(reopened);
+
+    // Upsert path: the replay stops one short, and the upsert is the print point.
+    let (_dir2, store2) = open_store(dim);
+    seed_rows(&store2.db, &pool[..HNSW_RS_PRINT_PERIOD - 1]);
+    let reopened = HnswStore::open(Arc::clone(&store2.db), dim).expect("upsert open");
+    reopened
+        .upsert("drawer-print-point", &spread_vec(dim, 7))
+        .expect("upsert");
+    assert_eq!(reopened.index.read().get_nb_point(), HNSW_RS_PRINT_PERIOD);
+}
+
+/// Why (#9187): stdout is the JSON-RPC channel of a stdio MCP server, and
+/// `hnsw_rs` 0.3.4 prints to it once per 50,000 inserted points, so opening or
+/// growing a palace past that size corrupts the protocol stream.
+/// What: re-runs this test binary on [`stdout_child_crosses_the_hnsw_print_period`]
+/// with `--nocapture`, so a `println!` reaches the child's real fd 1, and
+/// asserts the child passed and its stdout carries no `hnsw_rs` line. The
+/// harness's own `running 1 test` lines are expected there; the assertion is on
+/// the library's text.
+/// Test: this test itself is the verification.
+#[test]
+fn no_hnsw_insert_writes_to_stdout() {
+    let exe = std::env::current_exe().expect("current_exe");
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "memory_core::store::hnsw_store::tests::stdout_child_crosses_the_hnsw_print_period",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STDOUT_CHILD_ENV, "1")
+        .output()
+        .expect("spawn child test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("1 passed"),
+        "child failed: status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
+    assert!(
+        !stdout.contains("setting number of points"),
+        "an hnsw_rs insert wrote to stdout:\n{stdout}"
+    );
+}
+
+/// `(st_dev, st_ino)` of whatever fd 1 points at now.
+#[cfg(unix)]
+fn stdout_identity() -> (u64, u64) {
+    // SAFETY: `fstat` writes into a zeroed, correctly sized `stat`.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::fstat(libc::STDOUT_FILENO, &mut st) };
+    assert_eq!(rc, 0, "fstat(1): {}", std::io::Error::last_os_error());
+    (st.st_dev as u64, st.st_ino as u64)
+}
+
+/// Why (#9187, fail-open check): a guard that cannot redirect stdout must not
+/// run the insert anyway, because that insert is the one `hnsw_rs` prints from.
+/// What: points the redirect at a sink that cannot be opened and asserts the
+/// guard returns `Err`, never ran the closure, and left fd 1 on the same file.
+/// Test: this test itself is the verification.
+#[cfg(unix)]
+#[test]
+fn a_failed_stdout_redirect_skips_the_closure_and_leaves_stdout_alone() {
+    let before = stdout_identity();
+    let mut ran = false;
+    let result = quiet_insert::with_stdout_redirected_to(
+        std::path::Path::new("/nonexistent-9187/sink"),
+        || ran = true,
+    );
+    assert!(
+        result.is_err(),
+        "the redirect cannot succeed, so the guard must fail"
+    );
+    assert!(!ran, "the guarded closure ran with stdout unsilenced");
+    assert_eq!(
+        stdout_identity(),
+        before,
+        "fd 1 moved after a failed redirect"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #9174 — a drawer the graph cannot reach is still found.
+// ---------------------------------------------------------------------------
+
+/// `anchor` moved by a small seeded offset and re-normalised: a unique vector
+/// whose nearest neighbours are all copies of `anchor`.
+fn near_anchor(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let offset = spread_vec(anchor.len(), seed);
+    let raw: Vec<f32> = anchor
+        .iter()
+        .zip(&offset)
+        .map(|(a, o)| a + 0.15 * o)
+        .collect();
+    let norm: f32 = raw.iter().map(|v| v * v).sum::<f32>().sqrt();
+    raw.into_iter().map(|v| v / norm).collect()
+}
+
+/// A seeded unit vector with a negative cosine to `anchor`.
+fn far_from(anchor: &[f32], seed: u64) -> Vec<f32> {
+    let v = spread_vec(anchor.len(), seed);
+    let dot: f32 = v.iter().zip(anchor).map(|(a, b)| a * b).sum();
+    let raw: Vec<f32> = v
+        .iter()
+        .zip(anchor)
+        .map(|(x, a)| x - (dot.max(0.0) + 0.5) * a)
+        .collect();
+    let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+    raw.into_iter().map(|x| x / norm).collect()
+}
+
+/// Why (#9174): above the exhaustive threshold the vector lane missed live
+/// drawers queried with their own vector. On a copy of the trusty-tools
+/// palace (6,931 live drawers), every miss that was not a tie between
+/// bit-identical vectors was a point no traversal from the entry point
+/// reaches, even with `ef` equal to the point count. `hnsw_rs` prunes a
+/// candidate that is no farther from an already-chosen neighbour than from
+/// the new point, so a point whose nearest neighbours are copies of one vector
+/// keeps one out-edge and no in-edge.
+/// What: seeds 1,000 copies of one vector, 40 unique drawers next to them, and
+/// enough spread drawers to pass the threshold. Asserts each unique drawer is
+/// in its own top 10 after a reopen (the replay path), and that 20 more
+/// unique drawers upserted into the open store are found too (the upsert
+/// path). The tie case — one of 1,000 identical drawers ranking in a top 10 —
+/// is not asserted; no index can rank it.
+/// Test: this test itself is the verification.
+#[test]
+fn search_finds_drawers_the_graph_cannot_reach() {
+    let dim = 16;
+    let anchor = spread_vec(dim, 424_242);
+    let (clump, probes) = (1_000usize, 40u64);
+    let mut pool = vec![anchor.clone(); clump];
+    pool.extend((0..probes).map(|i| near_anchor(&anchor, 600_000 + i)));
+    // Far side of the sphere, so no spread drawer links to a probe and gives
+    // it the in-edge the clump denies it; real embeddings near the clump of
+    // identical turns were just as sparse.
+    // #9280: sized from the threshold so the graph arm stays selected.
+    let far = (exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160 - pool.len()) as u64;
+    pool.extend((0..far).map(|i| far_from(&anchor, 700_000 + i)));
+    assert!(pool.len() > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS);
+
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
+    let found = |uuid: &str, v: &[f32]| {
+        reopened
+            .search(v, 10)
+            .expect("search")
+            .iter()
+            .any(|(u, _)| u == uuid)
+    };
+    let missed: Vec<usize> = (clump..clump + probes as usize)
+        .filter(|i| !found(&format!("drawer-{i:05}"), &pool[*i]))
+        .collect();
+
+    let late: Vec<(String, Vec<f32>)> = (0..20u64)
+        .map(|j| (format!("late-{j}"), near_anchor(&anchor, 800_000 + j)))
+        .collect();
+    for (uuid, v) in &late {
+        reopened.upsert(uuid, v).expect("upsert");
+    }
+    let missed_late: Vec<&str> = late
+        .iter()
+        .filter(|(uuid, v)| !found(uuid, v))
+        .map(|(uuid, _)| uuid.as_str())
+        .collect();
+    assert!(
+        missed.is_empty() && missed_late.is_empty(),
+        "replayed drawers missing from their own top 10: {missed:?}; \
+         upserted: {missed_late:?}"
+    );
+}
+
+/// Uuids of `store`'s top `k` hits for `query`, in rank order.
+fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
+    let hits = store.search(query, k).expect("search");
+    hits.into_iter().map(|(uuid, _)| uuid).collect()
+}
+
+/// Why (#9141): `search` re-read every `VECTOR_KEYS` and `DELETED_VECTORS` row
+/// on each call — on the ~7k-drawer trusty-tools palace, one `String` per
+/// drawer per recall. The map must come from a cache that only a store write
+/// refreshes.
+/// What: after a first search, removes a drawer's `VECTOR_KEYS` row straight
+/// through redb, behind every `HnswStore` writer. A second search must still
+/// resolve the drawer, because it reads the cached map, not the table. A store
+/// write then refreshes the map, and the raw removal shows.
+/// Test: this test.
+#[test]
+fn search_reads_vector_keys_once_until_a_store_write() {
+    let (_dir, store) = open_store(8);
+    let (a, b) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+    store.upsert(&a, &unit_vec(8, 1)).unwrap();
+    store.upsert(&b, &unit_vec(8, 100)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 1), vec![a.clone()]);
+
+    let wtx = store.db.begin_write().unwrap();
+    {
+        let mut keys = wtx.open_table(VECTOR_KEYS).unwrap();
+        keys.remove(a.as_str()).unwrap();
+    }
+    wtx.commit().unwrap();
+
+    assert_eq!(
+        hit_uuids(&store, &unit_vec(8, 1), 1),
+        vec![a.clone()],
+        "the second search re-read VECTOR_KEYS instead of its cached map"
+    );
+    store
+        .upsert(&Uuid::new_v4().to_string(), &unit_vec(8, 300))
+        .unwrap();
+    assert!(
+        !hit_uuids(&store, &unit_vec(8, 1), 3).contains(&a),
+        "a store write must refresh the cached map"
+    );
+}
+
+/// Why (#9141): the cached map replaces a per-search read, so every write that
+/// used to show on the next search still has to — including one made through
+/// a second store over the same file, a configuration
+/// `two_live_stores_over_one_file_never_alias_ids` exercises.
+/// What: builds the cache, then deletes, re-adds, deletes through a second
+/// store, and compacts, searching after each step.
+/// Test: this test.
+#[test]
+fn search_cache_follows_writes_from_every_store_on_the_file() {
+    let (_dir, store) = open_store(8);
+    let other = HnswStore::open(Arc::clone(&store.db), 8).expect("second store");
+    let (a, b, c) = (
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    store.upsert(&a, &unit_vec(8, 1)).unwrap();
+    store.upsert(&b, &unit_vec(8, 100)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 2).len(), 2);
+
+    assert!(store.delete(&a).unwrap());
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 1), 3), vec![b.clone()]);
+
+    store.upsert(&c, &unit_vec(8, 200)).unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 200), 1), vec![c.clone()]);
+
+    assert!(other.delete(&b).unwrap(), "delete through the second store");
+    assert_eq!(
+        hit_uuids(&store, &unit_vec(8, 100), 3),
+        vec![c.clone()],
+        "a delete through another store on the file must reach this store's map"
+    );
+
+    store.compact_orphans().unwrap();
+    assert_eq!(hit_uuids(&store, &unit_vec(8, 200), 3), vec![c]);
+}
+
+// #9280: opt-in latency profile behind the exact-scan threshold.
+#[path = "latency_profile_tests.rs"]
+mod latency_profile_tests;
+
+// #9280: reopen determinism at the exact-scan threshold, and id tiebreaks.
+#[path = "determinism_tests.rs"]
+mod determinism_tests;

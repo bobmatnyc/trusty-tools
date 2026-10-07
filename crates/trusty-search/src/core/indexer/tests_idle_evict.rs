@@ -232,7 +232,7 @@ async fn bm25_entities_idle_eviction_skips_indexers_without_corpus() {
 
 /// Regression test (QA follow-up on #2162): `rebuild_symbol_graph` must
 /// rehydrate an idle-evicted entity map BEFORE snapshotting it, or a rebuild
-/// triggered by an unrelated mutation (`remove_file`, `remove_chunk`, a
+/// triggered by an unrelated mutation (`remove_file`, a chunk-id removal, a
 /// prune-only reindex, contrib-graph ingest — none of which rehydrate first)
 /// would silently persist a graph missing every entity-derived KG edge
 /// (`Documents`, `ReferencesConcept`, ...) for the WHOLE corpus, not just the
@@ -325,7 +325,7 @@ async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
 
     // Trigger a graph rebuild via `remove_file` on an *unrelated* file — the
     // exact production path (`service/reconcile.rs`, the delete HTTP
-    // handler, and the FSEvents watcher's `remove_chunk`) that does NOT
+    // handler, and the FSEvents watcher's chunk-id removal) that does NOT
     // rehydrate entities before reaching `rebuild_symbol_graph`.
     idx.remove_file("src/unrelated.rs")
         .await
@@ -333,8 +333,9 @@ async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
 
     // The guard inside `rebuild_symbol_graph` must have rehydrated entities
     // before snapshotting, so the untouched owner/target Documents edge must
-    // still be present.
-    let g_after = idx.snapshot_symbol_graph().await;
+    // still be present. #8959: `remove_file` defers the rebuild; the flushing
+    // read runs it through the same `rebuild_symbol_graph` choke point.
+    let g_after = idx.fresh_symbol_graph().await;
     let docs_after = g_after.neighbors_by_edge("prose_owner", &[EdgeKind::Documents], 1);
     assert!(
         docs_after.iter().any(|(n, _, _)| n == "target"),

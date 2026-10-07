@@ -44,7 +44,7 @@ use trusty_memory::commands::{
     start::handle_start,
     stop::handle_stop,
 };
-use trusty_memory::{resolve_palace_registry_dir, serve, AppState};
+use trusty_memory::{resolve_palace_registry_dir, serve};
 
 /// Top-level CLI for `trusty-memory`.
 #[derive(Debug, Parser)]
@@ -257,6 +257,10 @@ enum Command {
         /// executed manually.
         #[arg(long, requires = "fix_palaces")]
         fix: bool,
+
+        /// #9283: `--drawer-report` and `--ack-drop` modes.
+        #[command(flatten)]
+        drawer: trusty_memory::commands::doctor::DrawerCountArgs,
     },
 
     /// Manage the macOS launchd LaunchAgent for the daemon.
@@ -767,12 +771,11 @@ async fn run() -> Result<()> {
         },
         Command::PromptContext => run_prompt_context_and_exit().await,
         Command::Service { action } => handle_service(&action),
-        Command::Doctor { fix_palaces, fix } => {
-            if fix_palaces {
-                trusty_memory::commands::doctor::handle_doctor_fix_palaces(fix).await?;
-            }
-            trusty_memory::commands::doctor::handle_doctor().await
-        }
+        Command::Doctor {
+            fix_palaces,
+            fix,
+            drawer,
+        } => trusty_memory::commands::doctor::run_doctor(fix_palaces, fix, &drawer).await,
         Command::Monitor { target } => run_monitor(target).await,
         Command::SendMessage {
             to,
@@ -1109,25 +1112,8 @@ async fn run_serve(
         tracing::warn!("default-palace name migration skipped: {e:#}");
     }
 
-    // Build the daemon AppState once — the builder chain is identical for the
-    // fixed-port and dynamic/foreground HTTP paths. Issue #1487:
-    // `with_writer_intent()` MUST come first (it replaces the registry) and
-    // run before `spawn_startup_tasks` hydration so palace redb files open as
-    // `Writer` — a second daemon instance then fails loud instead of silently
-    // degrading to read-only snapshot mode. Bug-reporting #478 wires the
-    // ErrorStore; #156/#193 opt into the BM25 lexical lane when enabled.
-    // Issue #2223: `with_multi_tenant_mode_from_env()` reads
-    // `TRUSTY_MEMORY_MULTI_TENANT=1` and was defined + unit-tested (issue
-    // #1714 / PR #2221) but never called here, so the opt-in authz seam was
-    // dead in the shipped binary. Wiring it here is additive-only: default
-    // (unset) preserves today's single-tenant behaviour exactly.
-    let state = AppState::new(data_root)
-        .with_writer_intent()
-        .with_default_palace(palace)
-        .with_log_buffer(log_buffer)
-        .with_error_store(error_store)
-        .with_bm25_lane_from_env()
-        .with_multi_tenant_mode_from_env();
+    // #9143: built in `startup_tasks`, which keeps this file under the cap.
+    let state = daemon_state(data_root, palace, log_buffer, error_store);
     spawn_startup_tasks(&state);
     // `foreground` is already spent: the background branch returned via
     // `handle_start` above, so anything reaching here runs inline.
@@ -1138,7 +1124,7 @@ async fn run_serve(
 // #4678: moved out of this file to keep it under the 500 SLOC cap.
 #[path = "startup_tasks.rs"]
 mod startup_tasks;
-use startup_tasks::spawn_startup_tasks;
+use startup_tasks::{daemon_state, spawn_startup_tasks};
 
 // CLI parse tests: `serve --http` / `--stdio` semantics (#914 PR4)
 #[cfg(test)]

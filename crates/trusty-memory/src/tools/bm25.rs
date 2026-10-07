@@ -269,8 +269,10 @@ pub(crate) async fn bm25_search_optional(
 /// default). Drawers that appear in BM25 but not in the vector list are
 /// appended with `layer = 4` so the caller knows they came from the lexical
 /// lane (L0/L1/L2/L3 are reserved). The combined list is re-sorted by score
-/// desc and truncated to `top_k`.
-/// Test: `tests/bm25_alias_recall.rs` plus
+/// desc, then layer, then drawer id (`recall_rank::by_score_desc`), and
+/// truncated to `top_k`.
+/// Test: `tests/bm25_alias_recall.rs`,
+/// `fusion_ranks_tied_drawers_by_id_whatever_the_input_order`, plus
 /// downstream RRF behaviour observed end-to-end.
 pub(crate) fn fuse_bm25_into_recall(
     results: &mut Vec<trusty_common::memory_core::retrieval::RecallResult>,
@@ -302,12 +304,8 @@ pub(crate) fn fuse_bm25_into_recall(
     }
     // Re-sort by score desc; preserve layer for tie-breaking (lower layer
     // wins because L0/L1 are pinned identity/essentials).
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.layer.cmp(&b.layer))
-    });
+    // #9280: then drawer id, so tied drawers rank the same on every open.
+    results.sort_by(super::recall_rank::by_score_desc);
     results.truncate(top_k);
 }
 

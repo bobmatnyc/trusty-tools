@@ -361,6 +361,13 @@ pub(crate) async fn reconcile_one_index(
 ) {
     let index_id = handle.id.0.clone();
 
+    // #8883: a serve-only index is never rebuilt here — no stuck-walk retry,
+    // full reindex, git delta or mtime catch-up. Its freshness is the indexer's.
+    if handle.serve_only {
+        tracing::info!("reconcile[{index_id}]: skipped, the index is serve-only (#8883)");
+        return;
+    }
+
     // #4680: a never-walked index is stuck, not up-to-date — re-drive the walk
     // before any staleness marker is consulted.
     //
@@ -685,24 +692,28 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// What: for each repo-relative path in `files`, asks
 /// `index_admission::admits` (#8922): an admitted file → `indexer.index_file`
 /// (which refuses sops content); an excluded or deleted file →
-/// `purge_file` (its chunks and content hash); an undetermined answer
+/// `purge_file_committed` (its chunks and content hash; a delete that left
+/// redb stamps `reindexed_unix` once, #9230; a delete redb refused counts as
+/// failed and leaves the file's chunks in place); an undetermined answer
 /// touches nothing and counts as failed.
 /// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
 /// reindex requests (which need a write lock) are not blocked for the entire
 /// batch duration. This mirrors the locking discipline in
 /// `service/watch_loop.rs::handle_modified` (acquire → single async call → drop).
-/// Stamps `indexed_head_sha = new_sha` and `last_indexed_at = now` only when at
-/// least one file operation succeeded (`indexed > 0 || removed > 0`). If the
-/// delta was non-empty but every operation errored, the SHA is left unstamped so
-/// the next boot retries reconciliation instead of silently marking it complete.
-/// Returns `true` if at least one operation succeeded (stamp happened), `false`
-/// on total failure.
+/// Stamps `indexed_head_sha = new_sha` and `last_indexed_at = now` only when no
+/// file operation failed (#9212). One failure — a refused delete, a failed
+/// `index_file`, an undetermined admission — leaves the SHA unstamped, so the
+/// next boot recomputes the delta from the old SHA and retries; the operations
+/// that did land are idempotent on that retry.
+/// Returns `true` when it stamped, `false` when any operation failed.
 ///
 /// Test: `reconcile_stale_index_stamps_new_sha`,
 ///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs,
+///       `a_partially_failed_reconcile_delta_does_not_stamp_the_sha`,
 ///       `boot_reconcile_delta_honours_the_walker_policy`,
-///       `boot_reconcile_delta_leaves_an_undetermined_file_alone` and
-///       `every_ingest_path_refuses_a_held_index`.
+///       `boot_reconcile_delta_leaves_an_undetermined_file_alone`,
+///       `every_ingest_path_refuses_a_held_index` and
+///       `a_delete_only_reconcile_after_the_others_full_reindex_resolves_to_it`.
 pub(super) async fn apply_delta(
     handle: &Arc<IndexHandle>,
     index_id: &str,
@@ -720,6 +731,8 @@ pub(super) async fn apply_delta(
     let mut removed = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
+    // #9230: a delete whose rows left redb stamps the corpus once, below.
+    let mut delete_committed = false;
 
     for rel_path_str in files {
         let abs_path = root.join(rel_path_str);
@@ -777,10 +790,13 @@ pub(super) async fn apply_delta(
                 let idx = handle.indexer.read().await;
                 // #8922: the content hash goes with the chunks, and the graph
                 // is rebuilt once after the loop rather than per file.
-                idx.purge_file(&handle.id, rel_path_str).await
+                idx.purge_file_committed(&handle.id, rel_path_str).await
             };
             match result {
-                Ok(n) if n > 0 => removed += n,
+                Ok((n, committed)) if n > 0 => {
+                    removed += n;
+                    delete_committed |= committed;
+                }
                 Ok(_) => skipped += 1,
                 Err(e) => {
                     failed += 1;
@@ -796,28 +812,24 @@ pub(super) async fn apply_delta(
     if removed > 0 {
         let _teardown_guard =
             crate::service::reindex::acquire_index_teardown_read(&handle.id).await;
-        handle.indexer.read().await.rebuild_symbol_graph_now().await;
+        let idx = handle.indexer.read().await;
+        idx.rebuild_symbol_graph_now().await;
+        if delete_committed {
+            idx.record_incremental_commit("reconcile delete").await;
+        }
     }
 
-    // Only stamp the new HEAD SHA when at least one operation succeeded.
-    // If every non-skipped file errored (total failure), leave the SHA
-    // unstamped so the next boot retries rather than silently marking the
-    // reconcile complete with a stale index.
-    if !files.is_empty() && indexed == 0 && removed == 0 && failed > 0 {
+    // #9212: any failure leaves the SHA unstamped. A partial failure used to
+    // stamp anyway, so a refused delete was never retried and its rows came
+    // back at the next boot.
+    if failed > 0 {
         tracing::warn!(
-            "reconcile[{index_id}]: total failure — {failed} error(s), \
-             {skipped} skipped — SHA NOT stamped; next boot will retry \
-             (new_sha={})",
+            "reconcile[{index_id}]: {failed} error(s) (indexed={indexed} \
+             removed_chunks={removed} skipped={skipped}) — SHA NOT stamped; \
+             next boot will retry (new_sha={})",
             &new_sha[..new_sha.len().min(12)],
         );
         return false;
-    }
-
-    if failed > 0 {
-        tracing::warn!(
-            "reconcile[{index_id}]: partial failure — {failed} error(s); \
-             stamping SHA anyway (indexed={indexed} removed_chunks={removed})"
-        );
     }
 
     // Stamp the new HEAD SHA and timestamp so the staleness signal clears.

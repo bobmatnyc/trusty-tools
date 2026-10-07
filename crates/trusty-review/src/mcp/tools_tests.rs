@@ -489,6 +489,117 @@ fn wrap_result_policy_skip_without_infra_flag_stays_is_error_false() {
     );
 }
 
+#[test]
+fn wrap_result_names_a_suppressed_reject_without_is_error() {
+    // #9188 K: a review whose every finding was withheld says so on the
+    // envelope with typed counts; `isError` stays false (Architect ruling
+    // 2026-10-05: isError is for real failures only). #9310: the blocking
+    // review is REQUEST_CHANGES with `suppressed_reject`, no longer UNKNOWN
+    // with `no_verified_findings`.
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::RequestChanges;
+    result.verdict_status = Some(crate::models::VerdictStatus::SuppressedReject);
+    result
+        .withheld_findings
+        .push(crate::models::WithheldFinding {
+            finding: crate::models::Finding::new(
+                "src/a.rs",
+                "overflow",
+                "`a + b` overflows",
+                "",
+                0.9,
+                crate::models::Effort::Medium,
+            ),
+            reason: "refuted by the verifier".to_string(),
+            missing_fragment: None,
+        });
+
+    let envelope = wrap_result(&result);
+
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(envelope["withheld"]["count"], 1, "{envelope}");
+    assert_eq!(
+        envelope["withheld"]["by_reason"]["refuted"], 1,
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["verdict_status"], "suppressed_reject",
+        "{envelope}"
+    );
+}
+
+/// AQ-7t (Bob 2026-10-05): an APPROVE whose every finding was withheld keeps
+/// APPROVE, and the envelope names it `all_withheld` (#9310, formerly
+/// `no_verified_findings`).
+#[test]
+fn wrap_result_names_an_all_withheld_approve() {
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::Approve;
+    result.verdict_status = Some(crate::models::VerdictStatus::AllWithheld);
+    result.grade = Some("A+".to_string());
+    result
+        .withheld_findings
+        .push(crate::models::WithheldFinding {
+            finding: crate::models::Finding::new(
+                "src/a.rs",
+                "style",
+                "`a + b` is slow",
+                "",
+                0.3,
+                crate::models::Effort::Low,
+            ),
+            reason: "unverifiable".to_string(),
+            missing_fragment: None,
+        });
+
+    let envelope = wrap_result(&result);
+
+    assert_eq!(envelope["isError"], false, "{envelope}");
+    assert_eq!(envelope["verdict_status"], "all_withheld", "{envelope}");
+    assert_eq!(envelope["withheld"]["by_reason"]["unverifiable"], 1);
+}
+
+/// #9310: every finalized result names its status on the envelope, a clean
+/// one included; nothing withheld still means no `withheld` key.
+#[test]
+fn wrap_result_names_the_status_of_a_clean_review() {
+    let mut result = ReviewResult::new("local", "diff", 0, "local diff", "");
+    result.verdict = Verdict::Approve;
+    result.verdict_status = Some(crate::models::VerdictStatus::Parsed);
+    let envelope = wrap_result(&result);
+    assert_eq!(envelope["verdict_status"], "parsed", "{envelope}");
+    assert!(envelope.get("withheld").is_none(), "{envelope}");
+}
+
+/// #9188 compatibility (Bob, 2026-10-05 02:48Z): a review that withheld
+/// nothing serializes byte-identically to the pre-#9188 envelope.
+#[test]
+fn a_review_with_nothing_withheld_serializes_as_before() {
+    let mut result = ReviewResult::new("acme", "api", 7, "Add X", "https://example/pr/7");
+    result.verdict = Verdict::Approve;
+    result.grade = Some("A".to_string());
+    result.review_body = "LGTM".to_string();
+    result.timestamp = "2026-10-05T00:00:00Z".to_string();
+    result.review_version = "tr-test".to_string();
+    let mut finding = crate::models::Finding::new(
+        "src/a.rs",
+        "overflow",
+        "`a + b` overflows",
+        "use checked_add",
+        0.5,
+        crate::models::Effort::Low,
+    );
+    finding.line = Some(3);
+    result.findings = vec![finding];
+    result.findings_count = 1;
+
+    assert_eq!(wrap_result(&result).to_string(), PRE_9188_ENVELOPE);
+}
+
+/// The envelope `a_review_with_nothing_withheld_serializes_as_before` built
+/// at 09721c7bbb, before #9188.
+const PRE_9188_ENVELOPE: &str = r#"{"content":[{"text":"{\n  \"cost_estimate_usd\": 0.0,\n  \"dry_run\": true,\n  \"findings\": [\n    {\n      \"category\": \"correctness\",\n      \"code_provable\": false,\n      \"confidence\": 0.5,\n      \"consequence\": \"\",\n      \"description\": \"`a + b` overflows\",\n      \"effort\": \"low\",\n      \"file\": \"src/a.rs\",\n      \"issue_eligible\": false,\n      \"kind\": \"overflow\",\n      \"line\": 3,\n      \"suggestion\": \"use checked_add\"\n    }\n  ],\n  \"findings_count\": 1,\n  \"grade\": \"A\",\n  \"head_sha\": \"\",\n  \"input_tokens\": 0,\n  \"latency_ms\": 0,\n  \"model\": \"\",\n  \"output_tokens\": 0,\n  \"owner\": \"acme\",\n  \"posted\": false,\n  \"pr_number\": 7,\n  \"pr_title\": \"Add X\",\n  \"pr_url\": \"https://example/pr/7\",\n  \"repo\": \"api\",\n  \"review_body\": \"LGTM\",\n  \"review_version\": \"tr-test\",\n  \"status\": \"completed\",\n  \"timestamp\": \"2026-10-05T00:00:00Z\",\n  \"unverified_count\": 0,\n  \"verdict\": \"APPROVE\",\n  \"withheld_unverified_count\": 0\n}","type":"text"}],"isError":false}"#;
+
 /// A `Degraded` review (real verdict, non-authoritative banner) must stay
 /// `isError: false` — it is a genuine (if loudly-labelled) result, not an
 /// infra failure the caller must special-case as an error.
@@ -680,5 +791,54 @@ async fn review_health_reports_the_dry_run_the_review_path_executes() {
             .expect("a reason accompanies a forced dry-run")
             .contains("never posts"),
         "the reason names the gate: {health}"
+    );
+}
+
+/// #9192: the envelope carries `context_sources` only when the outcome has
+/// records, and never changes the `ReviewResult` text it wraps.
+#[test]
+fn wrap_outcome_adds_context_sources_only_when_present() {
+    use crate::models::{ContextSourceRecord, SourceState};
+    use crate::pipeline::ReviewOutcome;
+
+    let result = ReviewResult::new("acme", "backend", 8, "Add Y", "https://example/pr/8");
+    let mut outcome = ReviewOutcome {
+        result: result.clone(),
+        context_sources: Vec::new(),
+    };
+    let off = super::wrap_outcome(&outcome);
+    assert_eq!(
+        off,
+        wrap_result(&result),
+        "no records: the envelope is unchanged"
+    );
+    assert!(off.get("context_sources").is_none());
+
+    outcome.context_sources = vec![ContextSourceRecord::new("pr_body", SourceState::Absent)];
+    let on = super::wrap_outcome(&outcome);
+    assert_eq!(
+        on["context_sources"],
+        json!([{"source": "pr_body", "state": "absent"}])
+    );
+    assert_eq!(on["content"], wrap_result(&result)["content"]);
+}
+
+/// #9192: `review_pr` lists the four optional context params, with the new
+/// boolean typed as one.
+#[test]
+fn review_pr_schema_lists_the_optional_context_params() {
+    let tools = tool_descriptors();
+    let review_pr = tools
+        .as_array()
+        .and_then(|a| a.iter().find(|t| t["name"] == "review_pr"))
+        .expect("review_pr descriptor");
+    let props = &review_pr["inputSchema"]["properties"];
+    assert_eq!(props["include_pr_body"]["type"], "boolean");
+    for name in ["pr_description", "pr_discussion", "referenced_code"] {
+        assert_eq!(props[name]["type"], "string", "{name}");
+    }
+    assert_eq!(
+        review_pr["inputSchema"]["required"],
+        json!(["owner", "repo", "pr"])
     );
 }

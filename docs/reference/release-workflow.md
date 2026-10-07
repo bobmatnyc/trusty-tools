@@ -157,7 +157,7 @@ Owner ruling: item 47, 2026-09-30.
    issue still open in it to the next milestone of the same kind (bugfix or
    feature) — the release report names the moved issues (owner ruling
    2026-09-25). An issue whose fix shipped in this release and only awaits
-   live verification (`status:merged` or `status:tested`) stays in the
+   live verification (Merged, awaiting Deployed) stays in the
    milestone that just closed.
 
 > **Site link (owner ruling):** every crate's `Cargo.toml` `homepage` field
@@ -1094,6 +1094,39 @@ evidence, `PPID == 1` is not evidence of supervision, and the orphan-listener
 check to run before `bootout`), see the FDA-grant restart playbook above under
 [One-Time FDA Grant](#one-time-fda-grant-after-first-signed-install) — the
 same verification steps apply regardless of which daemon you restarted.
+
+### launchd domain and restart sequence (verified 2026-10-05, AQ-9c release)
+
+**Domain.** Use the user's GUI domain, `gui/$(id -u)`, as the user who owns the
+LaunchAgents. On this machine that is `gui/502` (masa is uid 502), not
+`gui/501`. Against the wrong domain, `launchctl bootout` can return 0 and do
+nothing, and `launchctl bootstrap` fails with `5: Input/output error` or
+`125: Domain does not support specified action`.
+
+**Agent shells.** An agent shell may not be in the user's GUI launchd session.
+`launchctl managername` returns `Background`, not `Aqua`, in that case. Run the
+restart from the user's own Terminal, or from an unsandboxed session the owner
+authorises. Check `id -u` and `launchctl managername` before attempting it.
+
+**Sequence.** Run each step in order:
+
+1. `launchctl bootout gui/<uid>/<label>`
+2. Wait until the OLD pid has exited. Poll `kill -0 <pid>` with a cap.
+3. `launchctl bootstrap gui/<uid> ~/Library/LaunchAgents/<label>.plist`, exactly once.
+4. Verify the running daemon's own version, not the binary's `--version`:
+   `tm status` / `tm doctor` for `com.trusty.mpm`, `search_health` for
+   `com.trusty.search`.
+
+A bootstrap sent while the old process is still exiting fails with error 5.
+
+**Release order.** Restart the tm daemon first. Check `tm doctor`, the daemon
+version, and the session count; record the session count BEFORE the restart.
+Only then restart search. Record the registered index count before the search
+restart and compare it after. A cold-parked index reloads on first search.
+
+**Failed bootstrap.** If a bootstrap fails after a successful bootout, the
+daemon is down. Stop and report, with the tail of the `StandardErrorPath` log.
+Do not use `launchctl load` and do not start the daemon by hand.
 
 ## Version Management
 

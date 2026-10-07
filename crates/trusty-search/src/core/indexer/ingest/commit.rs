@@ -138,10 +138,11 @@ impl CodeIndexer {
         let bm25_ms = bm25_start.elapsed().as_millis() as u64;
 
         self.commit_embeddings_cache(&all_chunks, embeddings).await;
-        if self.corpus.is_some() {
-            self.commit_corpus_to_redb(&all_chunks, &entities_by_file)
+        // #9230: an incremental write stamps the corpus only when this landed.
+        let corpus_write_failed = self.corpus.is_some()
+            && !self
+                .commit_corpus_to_redb(&all_chunks, &entities_by_file)
                 .await;
-        }
         // The pre-filter above read the corpus under a READ lock and released
         // it; `commit_corpus` re-checks under the write lock. A concurrent
         // commit that filled the remaining headroom in that window makes the
@@ -169,6 +170,7 @@ impl CodeIndexer {
             vector_upsert_ms,
             kg_ms,
             chunks_dropped_by_cap: pre_filter_dropped.saturating_add(late_dropped),
+            corpus_write_failed,
         })
     }
 
@@ -385,7 +387,8 @@ impl CodeIndexer {
     /// `CorpusStore::upsert_batch` in a single redb transaction.
     /// What: clones the chunks plus entities, moves them onto a blocking worker,
     /// and writes both tables in one atomic transaction. Failures are logged at
-    /// `warn` and swallowed.
+    /// `warn`; the return is `false` for one, so an incremental write does not
+    /// stamp a corpus its rows never reached (#9230).
     ///
     /// Issue #4122: this is the single durable redb write, and the `None` arm
     /// below is what makes the UNGATED bulk-reindex path safe on a
@@ -399,9 +402,9 @@ impl CodeIndexer {
         &self,
         chunks: &[RawChunk],
         entities_by_file: &[(String, Vec<RawEntity>)],
-    ) {
+    ) -> bool {
         let Some(corpus) = self.corpus.clone() else {
-            return;
+            return true;
         };
         debug_assert!(
             !self.corpus_open_failed,
@@ -419,7 +422,7 @@ impl CodeIndexer {
         })
         .await;
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => return true,
             Ok(Err(e)) => tracing::warn!(
                 "index '{index_id}': redb corpus write failed ({e}) — \
                  in-memory commit succeeded; on-disk corpus will re-converge \
@@ -427,6 +430,7 @@ impl CodeIndexer {
             ),
             Err(e) => tracing::warn!("index '{index_id}': redb corpus write task panicked ({e})"),
         }
+        false
     }
 
     /// Insert each `(file_path, entities)` tuple into the per-file entity map.
@@ -449,6 +453,59 @@ impl CodeIndexer {
     /// Test: every test that tracks chunk counts uses this.
     pub fn chunk_count(&self) -> usize {
         self.chunks.try_read().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// How many resident chunks the BM25 lane is missing, and under which cap.
+    ///
+    /// Why: #9235 — the chunk cap exceeds the BM25 corpus cap at the top of
+    /// every memory tier, so a converged index can hold chunks BM25 refused.
+    /// Only the rehydrate path counted them, and only into a gauge;
+    /// `index_status` and the search `meta` block need the figure too.
+    /// What: resident, `chunks.len() - bm25.len()` (saturating). Evicted (either
+    /// map), or a reclaim caught between the two reads, there is nothing
+    /// settled to compare, so it reports what the next rehydrate admits: the
+    /// durable chunk count minus the cap, saturating. `None` when that durable
+    /// count cannot be read — unknown, never "not truncated".
+    /// Test: `ingest_over_the_bm25_cap_reports_truncation`,
+    /// `ingest_under_the_bm25_cap_reports_no_truncation`,
+    /// `rehydrate_over_the_bm25_cap_reports_truncation`,
+    /// `rehydrate_under_the_bm25_cap_reports_no_truncation`,
+    /// `a_reclaim_between_the_reads_does_not_report_truncation_under_the_cap`,
+    /// `status_reports_bm25_truncation_unavailable_when_the_durable_count_errors`.
+    pub async fn bm25_truncation(&self) -> Option<crate::core::bm25::Bm25Truncation> {
+        use crate::core::bm25::{Bm25Truncation, CodeBm25Index};
+        let cap = CodeBm25Index::corpus_cap();
+        let Some(corpus) = self.corpus.as_ref() else {
+            // Nothing evicts without a durable corpus: the maps are the index.
+            let (chunk_count, bm25_len) = self.resident_counts().await;
+            return Some(Bm25Truncation::from_counts(chunk_count, bm25_len, cap));
+        };
+        if !self.corpus_evicted() {
+            let (chunk_count, bm25_len) = self.resident_counts().await;
+            // #9235: a reclaim can land between the two reads. It flags the
+            // chunk map before releasing it, but empties BM25 before flagging
+            // it, so re-read the flags AND treat an empty BM25 beside resident
+            // chunks as a reclaim in flight — the cap is never 0, so the cap
+            // alone cannot leave BM25 empty.
+            let raced = self.corpus_evicted() || (bm25_len == 0 && chunk_count > 0);
+            if !raced {
+                return Some(Bm25Truncation::from_counts(chunk_count, bm25_len, cap));
+            }
+        }
+        // #9235: an unreadable count is unknown, not "nothing dropped".
+        let durable = corpus
+            .chunk_count()
+            .inspect_err(
+                |e| tracing::warn!(index = %self.index_id, "bm25_truncation: corpus count: {e:#}"),
+            )
+            .ok()?;
+        Some(Bm25Truncation::from_counts(durable, durable.min(cap), cap))
+    }
+
+    /// `(chunks.len(), bm25.len())`, each under its own read lock (#9235).
+    async fn resident_counts(&self) -> (usize, usize) {
+        let chunk_count = self.chunks.read().await.len();
+        (chunk_count, self.bm25.read().await.len())
     }
 
     /// Snapshot the current symbol graph. Cheap (`Arc::clone`); intended for

@@ -17,6 +17,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use super::catalog_url::urls_match;
+use crate::core::remote_url_redact::redact_stored_url;
 use crate::provisioner::GitBackend;
 
 /// Default TTL for the catalog cache: 24 hours.
@@ -230,7 +231,7 @@ impl<G: GitBackend> CatalogSync<G> {
         }
 
         // #9124: a remote URL may embed `user:token@`.
-        info!(repo = %crate::core::remote_url_redact::redact_url(&self.repo_url), git_ref = %self.git_ref, dir = %self.catalog_dir.display(), "syncing catalog");
+        info!(repo = %crate::core::remote_url_redact::redact_stored_url(&self.repo_url), git_ref = %self.git_ref, dir = %self.catalog_dir.display(), "syncing catalog");
 
         // Ensure the catalog parent directory exists before any git operation.
         std::fs::create_dir_all(&self.catalog_dir)?;
@@ -258,7 +259,7 @@ impl<G: GitBackend> CatalogSync<G> {
         // harness still provisions from the BUNDLED assets, the source of truth.
         if agent_count == 0 {
             warn!(
-                repo = %self.repo_url,
+                repo = %redact_stored_url(&self.repo_url),
                 git_ref = %self.git_ref,
                 dir = %self.catalog_dir.display(),
                 "catalog sync found 0 agents — the synced repo has no composable \
@@ -305,8 +306,8 @@ impl<G: GitBackend> CatalogSync<G> {
             }
             Ok(actual) => {
                 warn!(
-                    actual = %actual,
-                    expected = %self.repo_url,
+                    actual = %redact_stored_url(&actual),
+                    expected = %redact_stored_url(&self.repo_url),
                     "catalog repo has wrong remote; re-cloning"
                 );
                 guard_remove(target, &self.catalog_dir)?;

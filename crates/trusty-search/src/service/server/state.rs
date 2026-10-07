@@ -63,6 +63,27 @@ pub enum DaemonEvent {
     IndexRemoved { id: String },
 }
 
+/// The transports a daemon serves, as `search.health` and `GET /health` report
+/// them (#9030).
+///
+/// Why: ADR-0032 moves clients onto the Unix socket and #6285 retires the TCP
+/// listener, so a dashboard that hardcodes a port or URL goes stale. Only the
+/// daemon knows which listeners it bound.
+/// What: `socket_path` is the path the RPC socket bound; `http_addr` is the
+/// `host:port` the HTTP listener bound. `None` means that listener is not
+/// bound, never a guessed default. Both keys always serialise, as `null` when
+/// unset — the `{socket_path: string|null, http_addr: string|null}` shape
+/// trusty-console's `ui-search/src/lib/transport.js` reads.
+/// Test: `run_daemon_health_reports_the_transport_it_bound`,
+/// `health_reports_a_null_transport_when_no_listener_was_bound`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DaemonTransport {
+    /// Path of the bound Unix RPC socket.
+    pub socket_path: Option<String>,
+    /// Address of the bound HTTP listener, `host:port`.
+    pub http_addr: Option<String>,
+}
+
 /// Shared state injected into every axum handler.
 ///
 /// `#[non_exhaustive]` (#767): this struct gains fields regularly — `#767` added
@@ -110,6 +131,15 @@ pub struct SearchAppState {
     /// What: `QueryTimeoutConfig::from_env`, resolved once per state.
     /// Test: `a_query_that_outlasts_the_deadline_reports_the_same_refusal_on_both_transports`.
     pub query_timeout: Arc<crate::service::query_timeout::QueryTimeoutConfig>,
+    /// The `search.file.get` limiter (#9029), separate from
+    /// [`Self::query_limiter`] so file reads never take a search's slot.
+    ///
+    /// Why: each call can hold a blocking-pool thread through two git runs of
+    /// up to 10 s each; unbounded, a burst would drain that pool.
+    /// What: `FILE_GET_MAX_CONCURRENT` (8) permits, taken with `try_acquire`
+    /// so a full limiter refuses at once.
+    /// Test: `file_get_is_refused_busy_when_its_limiter_is_full`.
+    pub file_get_limiter: Arc<tokio::sync::Semaphore>,
     /// Cold index store for lazy warm-boot (issue #993).
     ///
     /// Why: when `TRUSTY_WARMBOOT_MAX_INDEXES` limits eager warm-boot, the
@@ -200,6 +230,9 @@ pub struct SearchAppState {
     /// `index.html` as `window.__DAEMON_PORT__` so the SPA knows which host
     /// to call when opened directly. `None` falls back to 7878 in the UI.
     pub daemon_port: Option<u16>,
+    /// The listeners this daemon bound, reported by `search.health` (#9030).
+    /// Default (both `None`) until `run_daemon` stamps it.
+    pub transport: DaemonTransport,
     /// Whether `OPENROUTER_API_KEY` is set when the daemon starts. Toggles
     /// the Chat panel in the SPA via `window.__OPENROUTER_ENABLED__`.
     pub openrouter_enabled: bool,

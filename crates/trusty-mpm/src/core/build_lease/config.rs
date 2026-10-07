@@ -8,7 +8,8 @@
 //! `BuildersConfig` nor `MpmConfig` changes shape.
 //!
 //! What: [`BuildLeaseConfig`] holds `memory_pressure_max`, `min_available_pct`,
-//! `lease_wait_secs`, `heavy_build_commands` and `count_foreign_builds`, each
+//! `lease_wait_secs`, `heavy_build_commands`, `count_foreign_builds` and
+//! `slot_pool_evict_pct` (#8451), each
 //! optional with a documented default. [`BuildLeaseConfig::from_toml`] reads
 //! them out of a whole config file; [`LEASE_KEYS`] names them for the
 //! unknown-key report in `core::config_keys`.
@@ -72,6 +73,8 @@ pub const LEASE_KEYS: &[&str] = &[
     "builders.lease_wait_secs",
     "builders.heavy_build_commands",
     "builders.count_foreign_builds",
+    // #8451: the slot-pool eviction threshold, read by `evict`.
+    "builders.slot_pool_evict_pct",
 ];
 
 /// The lease keys of `[builders]`.
@@ -91,6 +94,9 @@ pub struct BuildLeaseConfig {
     pub heavy_build_commands: Option<Vec<String>>,
     /// Whether foreign compiler groups reduce the slots; true.
     pub count_foreign_builds: Option<bool>,
+    /// #8451: percent of the pool's volume at which the daemon evicts
+    /// `slot-N` directories; 85, held below `disk.max_usage_pct`.
+    pub slot_pool_evict_pct: Option<u8>,
 }
 
 /// The file shape [`BuildLeaseConfig::from_toml`] reads: only `[builders]`.
@@ -159,6 +165,16 @@ impl BuildLeaseConfig {
                 "lease_wait_secs",
                 secs.to_string(),
                 "seconds in 1..=600 (the Bash tool's maximum timeout)",
+            ));
+        }
+        // #8451: 0 would evict on every sweep, 100 never.
+        if let Some(pct) = self.slot_pool_evict_pct
+            && !(1..=99).contains(&pct)
+        {
+            return Err(out_of_range(
+                "slot_pool_evict_pct",
+                pct.to_string(),
+                "a percentage in 1..=99",
             ));
         }
         Ok(())
@@ -286,6 +302,8 @@ mod tests {
         );
         assert_eq!(cfg.effective_memory_pressure_max(), PressureLevel::Warn);
         assert_eq!(cfg.effective_lease_wait().as_secs(), 30);
+        let evict = BuildLeaseConfig::from_toml("[builders]\nslot_pool_evict_pct = 80\n");
+        assert_eq!(evict.slot_pool_evict_pct, Some(80));
         assert_eq!(
             BuildLeaseConfig::from_toml("not toml ["),
             BuildLeaseConfig::default()
@@ -322,6 +340,20 @@ mod tests {
                     ..Default::default()
                 },
                 "lease_wait_secs",
+            ),
+            (
+                BuildLeaseConfig {
+                    slot_pool_evict_pct: Some(0),
+                    ..Default::default()
+                },
+                "slot_pool_evict_pct",
+            ),
+            (
+                BuildLeaseConfig {
+                    slot_pool_evict_pct: Some(100),
+                    ..Default::default()
+                },
+                "slot_pool_evict_pct",
             ),
         ] {
             let err = cfg.validate().expect_err("out of range");

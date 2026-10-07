@@ -116,7 +116,8 @@ fn summary_findings(result: &ReviewResult) -> Vec<&crate::models::Finding> {
 /// is NOT generated here — `finalize_review` appends it to `result.review_body`
 /// before this is called (single source of truth for #728 + #732).
 /// Test: `body_contains_prose_and_json_block`, `body_contains_signature`,
-/// `body_omits_inline_findings_from_summary`.
+/// `body_omits_inline_findings_from_summary`,
+/// `heading_names_a_non_parsed_verdict_status`.
 pub fn build_review_comment_body(result: &ReviewResult) -> String {
     let mut md = String::with_capacity(1024);
     md.push_str(REVIEW_SIGNATURE);
@@ -128,8 +129,14 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         .as_deref()
         .map(|g| format!("Grade: {g} | "))
         .unwrap_or_default();
+    // #9310: name any outcome other than a plain parsed verdict beside it.
+    let status = result
+        .verdict_status
+        .filter(|s| *s != crate::models::VerdictStatus::Parsed)
+        .map(|s| format!(" · `{s}`"))
+        .unwrap_or_default();
     md.push_str(&format!(
-        "## trusty-review: {}`{}`\n\n",
+        "## trusty-review: {}`{}`{status}\n\n",
         grade_prefix, result.verdict
     ));
 
@@ -283,9 +290,61 @@ pub async fn post_pr_review(
     token: &str,
     result: &ReviewResult,
 ) -> Result<PostedReview, GithubError> {
+    post_pr_review_at(GITHUB_API, client, owner, repo, pr, token, result)
+        .await
+        .map_err(|failure| failure.error)
+}
+
+/// The GitHub REST API root the review POST goes to.
+pub(crate) const GITHUB_API: &str = "https://api.github.com";
+
+/// A failed review POST, and whether its request reached the network (#9348).
+///
+/// Why: the caller releases its dedup claim only when no review can exist,
+/// and every `send()` error used to read as `Transport`, so a refused
+/// connection kept the claim for the whole stale window. Crate-private, so
+/// the public `GithubError` gains no variant.
+/// What: the error `post_pr_review` returns, plus `sent`: false only when
+/// `send()` failed in its connect phase (`reqwest::Error::is_connect`: DNS,
+/// connection refused, connect timeout), true for every later failure.
+/// Test: `post_review_to_a_closed_port_is_not_sent`,
+/// `connect_failure_releases_its_claim`.
+#[derive(Debug)]
+pub(crate) struct ReviewPostError {
+    /// The error `post_pr_review` reports.
+    pub(crate) error: GithubError,
+    /// Whether the request may have reached GitHub.
+    pub(crate) sent: bool,
+}
+
+impl ReviewPostError {
+    /// A failure on or after the sent request.
+    fn sent(error: GithubError) -> Self {
+        Self { error, sent: true }
+    }
+}
+
+/// [`post_pr_review`] against the API root `api`, saying whether a failure
+/// left the request unsent (#9348).
+///
+/// Why: `finalize_review` needs to know whether a comment can exist; a test
+/// aims `api` at a closed local port to drive a connect failure offline.
+/// What: the same POST as [`post_pr_review`]; a connect-phase `send()` error
+/// is `sent: false`, every other failure `sent: true`.
+/// Test: `post_review_to_a_closed_port_is_not_sent`,
+/// `connect_failure_releases_its_claim`.
+pub(crate) async fn post_pr_review_at(
+    api: &str,
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+    token: &str,
+    result: &ReviewResult,
+) -> Result<PostedReview, ReviewPostError> {
     let body = build_review_comment_body(result);
     let event = review_event(&result.verdict);
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr}/reviews");
+    let url = format!("{api}/repos/{owner}/{repo}/pulls/{pr}/reviews");
 
     let comments = build_inline_comments_payload(result);
     let mut payload = json!({
@@ -308,23 +367,29 @@ pub async fn post_pr_review(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| GithubError::Transport(format!("POST {url}: {e}")))?;
+        // #9348: a connect-phase error means no request reached GitHub.
+        .map_err(|e| ReviewPostError {
+            sent: !e.is_connect(),
+            error: GithubError::Transport(format!("POST {url}: {e}")),
+        })?;
 
     let status = resp.status();
-    let resp_body = resp
-        .text()
-        .await
-        .map_err(|e| GithubError::Transport(format!("read body of {url}: {e}")))?;
+    let resp_body = resp.text().await.map_err(|e| {
+        ReviewPostError::sent(GithubError::Transport(format!("read body of {url}: {e}")))
+    })?;
 
     if !status.is_success() {
-        return Err(GithubError::Api {
+        return Err(ReviewPostError::sent(GithubError::Api {
             status: status.as_u16(),
             body: resp_body,
-        });
+        }));
     }
 
-    serde_json::from_str(&resp_body)
-        .map_err(|e| GithubError::Transport(format!("parse review-post response from {url}: {e}")))
+    serde_json::from_str(&resp_body).map_err(|e| {
+        ReviewPostError::sent(GithubError::Transport(format!(
+            "parse review-post response from {url}: {e}"
+        )))
+    })
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -356,6 +421,22 @@ mod tests {
         f.line = Some(42);
         r.findings.push(f);
         r
+    }
+
+    /// #9310: the heading names a status other than `parsed` beside the
+    /// verdict, and a parsed review's heading is unchanged.
+    #[test]
+    fn heading_names_a_non_parsed_verdict_status() {
+        let mut result = sample_result();
+        result.verdict_status = Some(crate::models::VerdictStatus::Parsed);
+        let body = build_review_comment_body(&result);
+        assert!(body.contains("`REQUEST_CHANGES`\n"), "{body}");
+        result.verdict_status = Some(crate::models::VerdictStatus::SuppressedReject);
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains("`REQUEST_CHANGES` · `suppressed_reject`\n"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -565,6 +646,36 @@ mod tests {
             .send()
             .await;
         assert!(resp.is_err(), "connection to port 1 must fail");
+    }
+
+    /// #9348: a POST whose connection is refused never reached GitHub, so it
+    /// reports `sent: false` — the signal that lets the caller release its
+    /// dedup claim.
+    /// Test: this test.
+    #[tokio::test]
+    async fn post_review_to_a_closed_port_is_not_sent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let api = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener); // the port is now closed
+        let client = GithubClient::new().expect("TLS init should succeed in tests");
+
+        let failure = post_pr_review_at(
+            &api,
+            &client,
+            "acme",
+            "backend",
+            42,
+            "tok",
+            &sample_result(),
+        )
+        .await
+        .expect_err("a closed port must refuse the POST");
+
+        assert!(
+            !failure.sent,
+            "a refused connection sent nothing: {failure:?}"
+        );
+        assert!(matches!(failure.error, GithubError::Transport(_)));
     }
 
     /// Consolidated footer: exact-string regression for grade B+, thousands separators,

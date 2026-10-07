@@ -16,19 +16,15 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
-use trusty_common::memory_core::retrieval::{
-    recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
-    recall_with_default_embedder, RememberOptions,
-};
+use trusty_common::memory_core::retrieval::RememberOptions;
 use trusty_common::memory_core::store::PalaceStoreError;
 use trusty_common::memory_core::PalaceRegistry;
 use uuid::Uuid;
 
 use super::helpers::{
     collect_palace_stats, drawer_content_preview, drawer_snippet, is_reserved_system_palace,
-    list_palaces_blocking, palace_info_blocking, palace_info_from, recall_entry_json,
+    list_palaces_blocking, palace_info_blocking, palace_info_from,
 };
-use super::recall_stream::recall_streamed;
 use super::types::{
     CreateDrawerBody, CreatePalaceBody, ListDrawersQuery, PalaceInfo, ServiceError, ServiceResult,
     StatusPayload,
@@ -793,112 +789,5 @@ impl MemoryService {
         // Issue #228: skip the per-write `StatusChanged` emit — the
         // periodic ticker handles aggregate roll-ups.
         Ok(())
-    }
-
-    // -----------------------------------------------------------------
-    // Recall
-    // -----------------------------------------------------------------
-
-    /// Per-palace recall (semantic search), optionally with deep retrieval.
-    ///
-    /// Why: HTTP and chat tools both perform the same fan-out logic.
-    /// What: opens the palace handle and dispatches to the shallow or deep
-    /// recall helper. Returns a JSON array of flattened drawer rows (the
-    /// `recall_entry_json` shape from issue #69).
-    /// Test: `recall_entry_json_hoists_drawer_fields`.
-    pub async fn recall(
-        &self,
-        id: &str,
-        query: &str,
-        top_k: usize,
-        deep: bool,
-    ) -> ServiceResult<Value> {
-        let handle = self.open_handle(id)?;
-        let mut results = if deep {
-            recall_deep_with_default_embedder(&handle, query, top_k).await
-        } else {
-            recall_with_default_embedder(&handle, query, top_k).await
-        }
-        .map_err(|e| ServiceError::internal(format!("recall: {e:#}")))?;
-        // #5036: the lexical lane, on the path the UserPromptSubmit hook
-        // actually takes. `handle_memory_recall` has run vector and BM25 in
-        // parallel and RRF-fused them since #156; this route reached
-        // `retrieval::layers` directly and was vector-only, so a prompt with no
-        // lexical counterweight retrieved by vector centroid alone.
-        //
-        // Keyed on the RESOLVED palace id, never the caller's slug —
-        // `open_handle` follows aliases, and the corpus the backfill wrote
-        // belongs to the resolved palace.
-        //
-        // Reuses `fuse_bm25_into_recall` rather than deriving a second scorer:
-        // it only BOOSTS drawers the vector lane already returned and never
-        // promotes a BM25-only hit, so it has no scaling constant that can
-        // degenerate when the surviving set is empty — the failure that folded
-        // three earlier attempts at this wiring.
-        if let Some(hits) =
-            crate::tools::bm25::bm25_search_optional(&self.state, handle.id.as_str(), query, top_k)
-                .await
-        {
-            crate::tools::bm25::fuse_bm25_into_recall(&mut results, &hits, top_k);
-        }
-        let payload: Vec<Value> = results.into_iter().map(recall_entry_json).collect();
-        Ok(json!(payload))
-    }
-
-    /// Cross-palace recall.
-    ///
-    /// Why: shared between `/api/v1/recall` and the `memory_recall_all` chat
-    /// tool. Encapsulating the open-everything-fanout-merge dance avoids
-    /// drift.
-    /// What: lists every palace, then streams them through `recall_streamed`
-    /// in bounded batches, delegating each batch to
-    /// `recall_across_palaces_with_default_embedder`. Returns a JSON array.
-    /// Why (issue #4637): unlike `list_palaces`/`status`, this route is NOT
-    /// converted to `peek()`. A cross-palace recall that answered from
-    /// cache-resident palaces only would silently omit ~98.9% of the corpus —
-    /// a wrong answer that looks like a right one, which is strictly worse
-    /// than a slow correct one. Every palace is still opened and still
-    /// searched; what changed is when.
-    /// Why (issue #7125): opening all of them AT ONCE made peak residency and
-    /// the post-call LRU residue both scale with the palace count. The batch
-    /// walk bounds the peak at `RECALL_PALACE_BATCH` and hands back everything
-    /// the query itself brought in, so the daemon's steady state after a
-    /// recall-all matches its steady state before one.
-    /// Test: indirectly via `recall_across_palaces_merges_results` and the
-    /// MCP `memory_recall_all` integration paths;
-    /// `open_palaces_blocking_opens_every_palace` pins that uncached palaces
-    /// are still searched; `recall_all_returns_open_palaces_to_baseline` pins
-    /// the residency bound.
-    pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
-        let palaces = match list_palaces_blocking(&self.state).await {
-            Ok(v) => v,
-            Err(e) => return json!({ "error": format!("{e:#}") }),
-        };
-        // #7125: stream the estate in batches instead of opening all of it.
-        let streamed = recall_streamed(
-            &self.state,
-            &palaces,
-            "recall_all",
-            top_k,
-            |handles| async move {
-                recall_across_palaces_with_default_embedder(&handles, query, top_k, deep).await
-            },
-        )
-        .await;
-        match streamed {
-            Ok(results) => json!(results
-                .into_iter()
-                .map(|r| json!({
-                    "palace_id": r.palace_id,
-                    "drawer_id": r.result.drawer.id.to_string(),
-                    "content": r.result.drawer.content(),
-                    "importance": r.result.drawer.importance,
-                    "tags": r.result.drawer.tags,
-                    "score": r.result.score,
-                    "layer": r.result.layer,
-                }))
-                .collect::<Vec<_>>()),
-            Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
-        }
     }
 }

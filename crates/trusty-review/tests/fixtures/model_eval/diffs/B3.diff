@@ -1,0 +1,15 @@
+diff --git a/crates/trusty-code-tui/src/elide.rs b/crates/trusty-code-tui/src/elide.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-code-tui/src/elide.rs
+@@ -0,0 +1,9 @@
++//! Shorten labels for the status bar.
++
++/// `s` cut to at most `max` characters, with an ellipsis when cut.
++pub fn elide_chars(s: &str, max: usize) -> String {
++    if s.chars().count() <= max {
++        return s.to_string();
++    }
++    format!("{}…", &s[..max])
++}

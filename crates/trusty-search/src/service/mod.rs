@@ -19,6 +19,8 @@ pub mod embed_pool;
 pub mod embedder_supervisor;
 // #9059: hold an index whose exclude globs do not parse.
 pub(crate) mod exclude_hold;
+// #9029: one indexed file's content and its diff against HEAD.
+pub(crate) mod file_view;
 pub mod fs_discovery;
 pub mod grep;
 // #7674: glob normalization, matching and the zero-match diagnostic for `/grep`.
@@ -42,10 +44,14 @@ pub mod orphan_report;
 pub mod persistence;
 pub mod persistence_loader;
 pub mod persistence_timestamps;
+// #9169: project (name, owner/repo, path) → its one live index.
+pub mod project_resolve;
 pub mod query_timeout;
 pub mod reconcile;
 pub mod reindex;
 pub mod roots_registry;
+// #8883: indexes this daemon serves but never rebuilds.
+pub(crate) mod serve_only;
 pub mod server;
 pub mod shutdown_budget;
 pub mod shutdown_flush;
@@ -76,6 +82,10 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #9339: bounded OS-watcher start behind `FileWatcher::start`.
+pub(crate) mod watcher_start;
+// #9315: bounded OS-watcher teardown behind `WatcherTask`.
+pub(crate) mod watcher_teardown;
 // #8922: the walker's admission decision for a pushed `index_file` write.
 pub(crate) mod write_admission;
 
@@ -85,6 +95,9 @@ mod excludes_8922_tests;
 // #9059: every ingest path against an index held by an invalid exclude glob.
 #[cfg(test)]
 mod exclude_hold_9059_tests;
+// #9230: every delete path stamps the corpus only when its rows left redb.
+#[cfg(test)]
+mod delete_stamp_9230_tests;
 
 pub use mcp_descriptor::SearchMcpService;
 

@@ -89,7 +89,7 @@ impl LlmProvider for RecordingReviewer {
             // after an LLM synthesis pass.  A Medium finding might be holistically
             // softened by synthesis (the intended calibration); a High finding must
             // ALWAYS floor to BLOCK/REQUEST_CHANGES regardless of synthesis (#1663).
-            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
+            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"`pub fn build(a: i32, b: i32, c: i32, previous: Option<i32>)` changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1,"code_provable":true}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
@@ -504,9 +504,16 @@ async fn mapreduce_phantom_missing_file_finding_does_not_block() {
 
     let result = run_review(&config, input(source), deps(llm)).await;
 
+    // #9188 A: the phantom was the only finding and it was withheld, so the
+    // review has no verified finding: never BLOCK and never APPROVE. #9310: the
+    // reviewer rejected, so it is REQUEST_CHANGES (`suppressed_reject`).
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
+        Verdict::RequestChanges,
         "a claim the changeset itself refutes must not drive the verdict (#1873)"
     );
     assert!(
@@ -515,6 +522,64 @@ async fn mapreduce_phantom_missing_file_finding_does_not_block() {
             .iter()
             .any(|f| f.description.contains("not present in diff")),
         "the refuted finding must not reach the rendered review (#1873)"
+    );
+}
+
+/// Approves every chunk, with one low-severity finding on the chunk carrying
+/// `marker`; the synthesis call answers APPROVE graded F (#9310).
+struct GradedFSynthesisReviewer {
+    marker: String,
+}
+
+#[async_trait]
+impl LlmProvider for GradedFSynthesisReviewer {
+    fn name(&self) -> &str {
+        "graded-f-synthesis"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains("## PR under review") {
+            r#"{"verdict":"APPROVE","grade":"F","summary":"the build is unsound."}"#
+        } else if body.contains(self.marker.as_str()) {
+            r#"{"verdict":"APPROVE","summary":"one note","findings":[{"title":"slow build","body":"`build` recomputes the sum on every call.","severity":"low","confidence":0.9,"file":"src/big.rs","line":1}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// #9310: synthesis may answer APPROVE beside a failing grade, and its
+/// verdict is used as is. With every finding withheld (no verifier ran) the
+/// grade makes it a rejection: REQUEST_CHANGES / `suppressed_reject`, never
+/// APPROVE / `all_withheld`.
+#[tokio::test]
+async fn mapreduce_synthesis_approve_graded_f_all_withheld_is_suppressed_reject() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(GradedFSynthesisReviewer {
+        marker: tail_signature.to_string(),
+    });
+    let result = run_review(&ReviewConfig::load(None), input(source), deps(llm)).await;
+    assert!(!result.withheld_findings.is_empty(), "{result:?}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
     );
 }
 
@@ -1060,11 +1125,14 @@ async fn mapreduce_path_emits_no_finding_citing_a_path_outside_the_diff() {
         "a finding citing a file absent from the diff reached the merged review — the \
          citation check is not wired into the map-reduce path (#4042 / #4045): {leaked:?}"
     );
+    // #9188 A: every finding was withheld — the fabricated BLOCK does not
+    // survive, and nothing verified approves it either. #9310: the reviewer
+    // rejected, so it is REQUEST_CHANGES (`suppressed_reject`), not BLOCK.
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
+        Verdict::RequestChanges,
         "the only non-APPROVE chunk rested on the fabricated finding, so the merged \
-         verdict must relax to APPROVE rather than block a clean diff"
+         verdict must not block a clean diff"
     );
 }
 
@@ -1368,5 +1436,212 @@ async fn run_review_mapreduce_records_hygiene_withholds() {
             .all(|f| f.file != "src/mr0.rs" && f.file != "src/mr1.rs"),
         "a self-negated finding is never posted: {:?}",
         result.findings
+    );
+}
+
+// ── #9310: a reviewer's grade counts toward its verdict on map-reduce ───────
+
+/// Answers the synthesis prompt with `synthesis`, the chunk carrying `marker`
+/// with `chunk`, and every other chunk with a clean APPROVE (#9310). A
+/// `synthesis` reply that does not parse sends the run down the mechanical
+/// path, exactly as with synthesis disabled.
+struct ScriptedReviewer {
+    marker: &'static str,
+    chunk: &'static str,
+    synthesis: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for ScriptedReviewer {
+    fn name(&self) -> &str {
+        "scripted-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if body.contains("## PR under review") {
+            self.synthesis
+        } else if body.contains(self.marker) {
+            self.chunk
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// Run the over-cap diff through map-reduce with a [`ScriptedReviewer`]
+/// keyed on the tail file, and a verifier that confirms every finding.
+async fn run_scripted(chunk: &'static str, synthesis: &'static str) -> crate::models::ReviewResult {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedReviewer {
+        marker: tail_signature,
+        chunk,
+        synthesis,
+    });
+    run_review(
+        &ReviewConfig::load(None),
+        input(source),
+        confirmed_deps(llm),
+    )
+    .await
+}
+
+/// A clean chunk reply, and a synthesis reply that does not parse.
+const CLEAN_CHUNK: &str = r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#;
+const NO_SYNTHESIS: &str = "synthesis unavailable";
+
+/// #9310: synthesis APPROVE graded F, with no finding and nothing withheld,
+/// is BLOCK and keeps grade F. Before, the verdict was used as is and the
+/// grade was then reconciled up to the APPROVE band.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_approve_graded_f_is_block() {
+    let synthesis = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound."}"#;
+    let result = run_scripted(CLEAN_CHUNK, synthesis).await;
+    assert!(result.withheld_findings.is_empty(), "{result:?}");
+    assert_eq!(result.verdict, Verdict::Block, "{result:?}");
+    assert_eq!(result.grade.as_deref(), Some("F"));
+}
+
+/// #9310: synthesis APPROVE graded D is REQUEST_CHANGES.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_approve_graded_d_is_request_changes() {
+    let synthesis = r#"{"verdict":"APPROVE","grade":"D","summary":"needs work."}"#;
+    let result = run_scripted(CLEAN_CHUNK, synthesis).await;
+    assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
+    assert_eq!(result.grade.as_deref(), Some("D"));
+}
+
+/// Refutes every finding whose verifier section contains `refute`, and
+/// confirms the rest.
+struct RefutingVerifier {
+    refute: &'static str,
+}
+
+#[async_trait]
+impl LlmProvider for RefutingVerifier {
+    fn name(&self) -> &str {
+        "refuting-verifier"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let text = crate::pipeline::verify_batch::test_support::answer(&req, |section| {
+            if section.contains(self.refute) {
+                "REFUTED"
+            } else {
+                "CONFIRMED"
+            }
+            .to_string()
+        });
+        Ok(LlmResponse {
+            text,
+            model: req.model.clone(),
+            input_tokens: 5,
+            output_tokens: 3,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: None,
+        })
+    }
+}
+
+/// #9310 control: the synthesis grade floor is the grade alone, not
+/// `derive_verdict_with_grade`. Synthesis APPROVE graded B+ beside two
+/// confident Medium findings, one of which the verifier refutes, stays
+/// APPROVE. Re-adding the count-based Medium floor at the fold makes the
+/// pre-verification verdict REQUEST_CHANGES, which the withhold policy then
+/// never relaxes to APPROVE. With nothing refuted the verifier's own
+/// `rederive_verdict` re-applies the count floor on every implementation, so
+/// that shape cannot tell the two apart.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_two_mediums_not_refloored() {
+    let chunk = r#"{"verdict":"APPROVE","summary":"two notes","findings":[{"title":"slow build","body":"`pub fn build(a: i32` recomputes the sum on every call.","severity":"medium","confidence":0.9,"file":"src/big.rs","line":1},{"title":"repeated call","body":"`compute_value(some_argument_here)` repeats the same call on every line.","severity":"medium","confidence":0.9,"file":"src/file0.rs","line":2}]}"#;
+    let synthesis = r#"{"verdict":"APPROVE","grade":"B+","summary":"two minor notes."}"#;
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+    let llm: Arc<dyn LlmProvider> = Arc::new(ScriptedReviewer {
+        marker: tail_signature,
+        chunk,
+        synthesis,
+    });
+    let mut review_deps = deps(llm);
+    review_deps.verifier = Some(Arc::new(RefutingVerifier {
+        refute: "repeats the same call",
+    }));
+    let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
+    assert_eq!(result.findings.len(), 1, "{result:?}");
+    assert_eq!(result.withheld_findings.len(), 1, "{result:?}");
+    assert_eq!(result.verdict, Verdict::Approve, "{result:?}");
+}
+
+/// #9310: with synthesis not answering (the mechanical path), a chunk reply
+/// of APPROVE graded F rejects the review: BLOCK, grade F. Before, the chunk
+/// grade was dropped and the review read APPROVE.
+#[tokio::test]
+async fn mapreduce_mechanical_chunk_approve_graded_f_rejects() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[]}"#;
+    let result = run_scripted(chunk, NO_SYNTHESIS).await;
+    assert_eq!(result.verdict, Verdict::Block, "{result:?}");
+    assert_eq!(result.grade.as_deref(), Some("F"));
+}
+
+/// #9310: a chunk reply of APPROVE graded F whose one finding the map-stage
+/// citation pass withholds reads REQUEST_CHANGES / `suppressed_reject`, never
+/// APPROVE / `all_withheld` — the single-pass rule
+/// `run_review_all_withheld_approve_graded_f_is_suppressed_reject` pins.
+#[tokio::test]
+async fn mapreduce_chunk_approve_graded_f_with_wiped_finding_is_suppressed_reject() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[{"title":"bad import","body":"`helper` is never defined.","severity":"high","confidence":0.9,"file":"src/not_in_diff.rs","line":1,"code_provable":true}]}"#;
+    let result = run_scripted(chunk, NO_SYNTHESIS).await;
+    assert!(!result.withheld_findings.is_empty(), "{result:?}");
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
+}
+
+/// #9310: with synthesis on, a chunk reply of APPROVE graded F makes the
+/// mechanical verdict BLOCK, which `apply_synthesis_floor` Tier 2 floors to
+/// at least REQUEST_CHANGES even when synthesis answers APPROVE graded A.
+/// Before, the chunk grade was dropped and the review read APPROVE.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_on_chunk_approve_graded_f_is_at_least_request_changes() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[]}"#;
+    let synthesis = r#"{"verdict":"APPROVE","grade":"A","summary":"looks fine."}"#;
+    let result = run_scripted(chunk, synthesis).await;
+    assert!(
+        matches!(result.verdict, Verdict::RequestChanges | Verdict::Block),
+        "{result:?}"
+    );
+}
+
+/// #9310: with synthesis on, a chunk reply of APPROVE graded F whose one
+/// finding the map-stage citation pass withholds reads `suppressed_reject`,
+/// not APPROVE / `all_withheld`.
+#[tokio::test]
+async fn run_review_mapreduce_synthesis_on_wiped_f_chunk_is_suppressed_reject() {
+    let chunk = r#"{"verdict":"APPROVE","grade":"F","summary":"unsound","findings":[{"title":"bad import","body":"`helper` is never defined.","severity":"high","confidence":0.9,"file":"src/not_in_diff.rs","line":1,"code_provable":true}]}"#;
+    let synthesis = r#"{"verdict":"APPROVE","grade":"A","summary":"looks fine."}"#;
+    let result = run_scripted(chunk, synthesis).await;
+    assert!(result.findings.is_empty(), "{:?}", result.findings);
+    assert_ne!(result.verdict, Verdict::Approve, "{result:?}");
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject),
+        "{result:?}"
     );
 }

@@ -195,7 +195,7 @@ pub(super) fn spawn_managed_local(session_id: &ManagedSessionId, params: &SpawnP
         Ok(Some(url)) => url,
     };
     // #9124: the refusal reaches the daemon log and the client; never the token.
-    let shown = crate::core::remote_url_redact::redact_url(&origin_url);
+    let shown = crate::core::remote_url_redact::redact_stored_url(&origin_url);
 
     if trusty_common::github_path::parse_github_path(&origin_url).is_none() {
         return format!(

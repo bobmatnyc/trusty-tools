@@ -26,8 +26,10 @@ use tracing::{debug, warn};
 use crate::{
     llm::{LlmProvider, LlmRequest},
     pipeline::{
-        parser::parse_review_response,
+        parser::parse_review_reply, // #9310: tool-call replies parse their input only
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
+        reply_shape::describe_reply,
+        verdict_status::judged_verdict, // #9310: a chunk's grade floors its verdict
     },
     voice::VoiceConfig,
 };
@@ -190,8 +192,10 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
 /// so it holds no borrows across the LLM await.
 /// What: `Resolved` returns its outcome directly; `Call` issues the LLM request,
 /// parses the response (stamping the unit's file onto file-less findings so
-/// inline anchoring is preserved), and fail-OPENs a transport error to `Failed`.
-/// Test: covered by all `map_*` tests.
+/// inline anchoring is preserved, and folding the chunk's grade into its
+/// verdict), and fail-OPENs a transport error to `Failed`.
+/// Test: covered by all `map_*` tests; the grade fold by
+/// `map_chunk_approve_graded_f_reads_block`.
 async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
     let (file, req) = match task {
         MapTask::Resolved(outcome) => return outcome,
@@ -200,7 +204,16 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
 
     match llm.complete(req).await {
         Ok(resp) => {
-            let parsed = parse_review_response(&resp.text);
+            let parsed = parse_review_reply(&resp);
+            if parsed.is_fail_safe {
+                // #9310: record the unparsed chunk reply's shape; the raw text is not kept.
+                warn!(
+                    file = %file,
+                    reason = ?parsed.fail_safe_reason,
+                    shape = %describe_reply(&resp),
+                    "map stage: chunk review not parsed — fail-safe UNKNOWN"
+                );
+            }
             debug!(
                 file = %file,
                 verdict = %parsed.verdict,
@@ -217,9 +230,12 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
                     f
                 })
                 .collect();
+            // #9310: fold the chunk grade into its verdict before hygiene runs,
+            // so a wiped chunk carries the grade-floored verdict.
+            let verdict = judged_verdict(parsed.verdict, parsed.grade.as_deref(), None);
             MapOutcome::Reviewed {
                 file,
-                verdict: parsed.verdict,
+                verdict,
                 findings,
                 // Capture this chunk's token/cost telemetry so the reduce stage
                 // can sum it into the aggregate the shallow-review heuristic

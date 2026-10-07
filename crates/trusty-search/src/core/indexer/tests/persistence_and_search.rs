@@ -486,7 +486,7 @@ async fn test_search_with_no_embedder_falls_back_to_bm25() {
 }
 
 #[tokio::test]
-async fn test_remove_chunk_removes_from_results() {
+async fn test_remove_chunk_ids_removes_from_results() {
     let idx = make_indexer();
     idx.add_chunk(raw("a:1:1", "a.rs", "fn authenticate() {}"))
         .await
@@ -494,7 +494,11 @@ async fn test_remove_chunk_removes_from_results() {
     idx.add_chunk(raw("b:1:1", "b.rs", "fn other_thing() {}"))
         .await
         .unwrap();
-    idx.remove_chunk("a:1:1").await.unwrap();
+    // #9212: `remove_chunk` is gone; the fail-closed id removal replaces it.
+    assert!(idx
+        .remove_chunk_ids_committed(&["a:1:1".to_string()])
+        .await
+        .unwrap());
 
     let q = SearchQuery {
         text: "authenticate".to_string(),
@@ -816,7 +820,8 @@ async fn test_symbol_graph_rebuilds_after_indexing() {
     idx.index_file("a.rs", "fn alpha() { beta(); }\nfn beta() {}\n")
         .await
         .unwrap();
-    let g = idx.symbol_graph().await;
+    // #8959: `index_file` defers the rebuild; the flushing read runs it.
+    let g = idx.fresh_symbol_graph().await;
     assert!(g.node_count() >= 2, "graph should hold alpha + beta");
     assert!(
         !g.callees_of("alpha", 1).is_empty(),

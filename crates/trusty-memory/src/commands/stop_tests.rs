@@ -239,6 +239,11 @@ fn find_daemon_pids_finds_a_live_serve_foreground_process() {
     );
 }
 
+// #9140: `stop` under TRUSTY_DATA_DIR_OVERRIDE.
+#[cfg(unix)]
+#[path = "stop_sandbox_tests.rs"]
+mod sandbox_tests;
+
 // launchd exists only on macOS, so its `stop` and `service start` tests do too.
 #[cfg(target_os = "macos")]
 #[path = "stop_launchd_tests.rs"]

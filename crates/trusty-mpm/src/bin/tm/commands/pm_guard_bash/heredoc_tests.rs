@@ -147,6 +147,57 @@ fn data_bodies_record_whether_the_delimiter_was_quoted() {
     }
 }
 
+/// #9155: every unquoted-delimiter body is recorded as expanding, a body a
+/// shell runs included; a quoted one is not.
+#[test]
+fn heredoc_bodies_record_every_expanding_body_9155() {
+    for (command, expanding) in [
+        ("cat <<EOF\n$(date)\nEOF", 1),
+        ("bash <<X\necho '$(date)'\nX", 1),
+        ("python3 - <<PY\nprint('$(date)')\nPY", 1),
+        ("bash <<'X'\necho '$(date)'\nX", 0),
+        ("cat <<'EOF'\n$(date)\nEOF", 0),
+    ] {
+        let bodies = HeredocBodies::scan(command);
+        assert_eq!(bodies.expanding().len(), expanding, "{command:?}");
+    }
+    let command = "bash <<X\necho '$(date)'\nX";
+    let (start, end) = HeredocBodies::scan(command).expanding()[0];
+    assert_eq!(&command[start..end], "echo '$(date)'\n");
+}
+
+/// #9155: bash runs an unterminated body to the end of input, so an unquoted
+/// one — no terminator, or one with a trailing space — expands there while
+/// every byte stays live. A quoted one and an arithmetic `<<` record nothing,
+/// and a terminated body before it is still recorded.
+#[test]
+fn heredoc_bodies_expand_an_unterminated_unquoted_body_9155() {
+    for (command, want) in [
+        ("cat <<X\n'$(date)'", vec!["'$(date)'"]),
+        ("cat <<X\n'$(date)'\nX ", vec!["'$(date)'\nX "]),
+        (
+            "cat <<A\n$(a)\nA\ncat <<B\n'$(b)'",
+            vec!["$(a)\n", "'$(b)'"],
+        ),
+        ("cat <<A\n$(a)\nA\ncat <<'B'\n$(b)", vec!["$(a)\n"]),
+        ("cat <<'X'\n'$(date)'", vec![]),
+        ("echo $((1 << 3))\n'$(date)'", vec![]),
+    ] {
+        let bodies = HeredocBodies::scan(command);
+        let found: Vec<&str> = bodies
+            .expanding()
+            .iter()
+            .map(|&(s, e)| &command[s..e])
+            .collect();
+        assert_eq!(found, want, "{command:?}");
+        assert!(bodies.data().is_empty(), "{command:?} claims no body");
+        assert!(
+            !bodies.contains(command.len() - 1),
+            "{command:?} stays live"
+        );
+    }
+}
+
 /// #9150: a delimiter word outside the `[A-Za-z0-9_.-]` allowlist — a
 /// quoted or escaped break byte, a substitution, a `\` the shell keeps, a
 /// quote or `\` left open — makes the scan unscannable and claim nothing,
@@ -320,4 +371,79 @@ fn heredoc_bodies_read_a_crlf_heredoc_as_the_shell_does() {
     let bodies = HeredocBodies::scan(decoy);
     assert!(bodies.contains(decoy.find("cat <<'X'").expect("inner")));
     assert!(!bodies.contains(decoy.find("$(").expect("$(")), "live");
+}
+
+/// #9180: an operator line runs on across a continuation, so the body starts
+/// after the last joined line and the joined line keeps its live syntax; a
+/// shell glued to the operator is not framed.
+#[test]
+fn heredoc_bodies_follow_a_continued_operator_line_9180() {
+    let command = "cat <<'X' \\\n; rm -rf /\nbody > here\nX";
+    let bodies = HeredocBodies::scan(command);
+    assert!(!bodies.is_unscannable());
+    assert!(
+        !bodies.contains(command.find("rm").expect("rm")),
+        "joined line is live"
+    );
+    assert!(
+        bodies.contains(command.find('>').expect(">")),
+        "body claimed"
+    );
+    let glued = "bash<<'O'\nbody\nO";
+    let newline = glued.find('\n').expect("operator line ends");
+    assert!(!HeredocBodies::scan(glued).suppresses_separator(newline));
+}
+
+/// #9180: a continuation the scan cannot place refuses the command: one that
+/// joins two `<`, one after a `#` on an operator line, and an unquoted body
+/// whose joined lines end it somewhere other than its physical lines do. A
+/// quoted body keeps its `\` literally, as the shell does.
+#[test]
+fn heredoc_bodies_refuse_a_continuation_they_cannot_place_9180() {
+    for command in [
+        "cat <\\\n<X\nbody\nX",
+        "cat <<'X' # c \\\nX\nbody\nX",
+        "cat <<X\na\\\nX\nb\nX",
+    ] {
+        assert!(HeredocBodies::scan(command).is_unscannable(), "{command:?}");
+    }
+    let quoted = "cat <<'X'\na\\\nX\necho done";
+    let bodies = HeredocBodies::scan(quoted);
+    assert!(!bodies.is_unscannable());
+    assert!(!bodies.contains(quoted.find("echo").expect("echo")), "live");
+}
+
+/// #9180: an abandoned scan claims nothing but keeps every body it found —
+/// the unterminated one to the end of input — and reports the lost
+/// confidence; a terminated scan reports none.
+#[test]
+fn heredoc_bodies_keep_every_body_when_abandoned_9180() {
+    let command = "bash <<'O'\ncat <<X\nx\nX";
+    let bodies = HeredocBodies::scan(command);
+    assert!(bodies.lost_confidence());
+    assert!(bodies.spans().is_empty());
+    let [body] = bodies.bodies() else {
+        panic!("one body expected");
+    };
+    assert_eq!(&command[body.span.0..body.span.1], "cat <<X\nx\nX");
+    let unbalanced = "bash <<'O'\nx\nO\necho \"open";
+    let bodies = HeredocBodies::scan(unbalanced);
+    assert!(bodies.lost_confidence() && bodies.spans().is_empty());
+    assert_eq!(bodies.bodies().len(), 1);
+    assert!(!HeredocBodies::scan("cat <<'X'\nx\nX").lost_confidence());
+}
+
+/// #9180 critic: a body of a million continued lines (~3 MB) scans in linear
+/// time; the logical line was copied on every continued line, O(L^2), which
+/// the critic's 200 000-line (~600 KB) shape already spent seconds on.
+#[test]
+fn heredoc_bodies_scan_a_long_continued_body_in_linear_time_9180() {
+    let command = format!("cat <<X\n{}b\nX", "a\\\n".repeat(1_000_000));
+    let (send, recv) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let found = HeredocBodies::scan(&command);
+        send.send(found.spans().len()).ok();
+    });
+    let spans = recv.recv_timeout(std::time::Duration::from_secs(2));
+    assert_eq!(spans, Ok(1), "no scan within 2 s");
 }

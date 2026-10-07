@@ -49,6 +49,11 @@ pub mod palace_ops;
 // at the 500-SLOC cap, plus the projection that shapes what a hit shows.
 pub mod recall_ops;
 pub mod recall_projection;
+// #8246 / #9143: stale-snapshot demotion and the user-scope rulings leg.
+pub(crate) mod recall_rank;
+pub mod recall_rulings;
+// #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
+pub(crate) mod recall_rulings_floor;
 pub mod room_definitions;
 pub mod room_ops;
 pub mod task_definitions;

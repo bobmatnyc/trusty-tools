@@ -334,8 +334,8 @@ impl CodeIndexer {
     /// Why: `retain_live_snapshot` reads the corpus before the upsert, so a
     /// removal that lands between the two finds no vector to remove and the
     /// upsert then inserts an orphan. Both removal paths —
-    /// `drop_chunk_ids_from_memory` (`remove_file`) and `remove_chunk` (the
-    /// file watcher) — drop the map entry before the vector, so a removal this
+    /// `drop_chunk_ids_from_memory` (`remove_file`) and `remove_chunk_ids_committed`
+    /// (the file watcher) — drop the map entry before the vector, so a removal this
     /// check misses removes the vector itself.
     /// What: removes the vector and cached embedding of every committed chunk
     /// the corpus no longer holds, and returns how many it removed. Every id

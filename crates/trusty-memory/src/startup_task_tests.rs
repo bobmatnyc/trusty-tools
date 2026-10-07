@@ -20,6 +20,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::time::Duration;
 use trusty_memory::project_root::{write_project_pin, ProjectPin};
+use trusty_memory::AppState;
 
 /// RAII guard that pins one environment variable for the duration of a test
 /// and restores the prior value on drop, including on panic.

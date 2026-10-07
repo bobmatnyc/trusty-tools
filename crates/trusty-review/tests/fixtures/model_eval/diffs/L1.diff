@@ -1,0 +1,28 @@
+diff --git a/crates/trusty-review/src/pipeline/verdict_floor.rs b/crates/trusty-review/src/pipeline/verdict_floor.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/trusty-review/src/pipeline/verdict_floor.rs
+@@ -0,0 +1,22 @@
++//! The verdict floor across verified findings.
++
++use crate::models::Verdict;
++
++/// Rank used to order verdicts, least severe first.
++fn rank(v: &Verdict) -> u8 {
++    match v {
++        Verdict::Approve => 0,
++        Verdict::ApproveWithReservations => 1,
++        Verdict::RequestChanges => 2,
++        Verdict::Block => 3,
++        Verdict::Unknown => 4,
++    }
++}
++
++/// The floor: the least severe verdict any confirmed finding supports.
++pub fn verdict_floor(verdicts: &[Verdict]) -> Option<Verdict> {
++    verdicts
++        .iter()
++        .max_by_key(|v| rank(v))
++        .cloned()
++}

@@ -740,6 +740,39 @@ async fn open_attaches_recall_log_automatically() {
     );
 }
 
+/// Why (#9140 batch): the live daemon logged "open recall log failed …
+/// Database already open" whenever a palace was opened a second time while an
+/// earlier handle was alive. The KG and vector stores share their database
+/// in-process; the recall log did not, so the second handle ran with analytics
+/// disabled for its whole life.
+/// What: opens the same palace twice with the first handle alive, asserts both
+/// carry a recall log and that it is the same instance (one `next_id` counter).
+/// Test: itself.
+#[test]
+fn second_open_of_a_live_palace_shares_its_recall_log() {
+    let dir = tempdir().unwrap();
+    let palace = Palace {
+        id: PalaceId::new("recall-shared"),
+        name: "RecallShared".into(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: dir.path().join("recall-shared"),
+    };
+    let first = PalaceHandle::open(&palace).unwrap();
+    let second = PalaceHandle::open(&palace).unwrap();
+    let (Some(a), Some(b)) = (first.recall_log.as_ref(), second.recall_log.as_ref()) else {
+        panic!(
+            "both handles must carry a recall log; first={} second={}",
+            first.recall_log.is_some(),
+            second.recall_log.is_some()
+        );
+    };
+    assert!(
+        Arc::ptr_eq(a, b),
+        "the two handles must share one RecallLog"
+    );
+}
+
 /// Why: After `remember`, L2 tag-boosting depends on the closet index being
 /// up-to-date without waiting for a dream cycle.
 /// What: Remember a drawer with a distinctive keyword, then read the closet
@@ -2697,3 +2730,7 @@ async fn compact_vector_orphans_still_reclaims_true_orphans() {
         "the orphan vector must not be retrievable after compaction"
     );
 }
+
+// #9280: L2/L3 id tiebreak.
+#[path = "rank_tie_tests.rs"]
+mod rank_tie_tests;

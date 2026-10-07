@@ -997,3 +997,125 @@ async fn an_incremental_reindex_of_only_a_chunkless_file_completes() {
         second.events.lock().await
     );
 }
+
+// ── #9212: a refused prune delete keeps the file and withholds the stamps ──
+
+/// `file`'s chunk ids in the warm map, sorted so two reads compare equal.
+async fn warm_ids_for(handle: &IndexHandle, file: &str) -> Vec<String> {
+    let mut ids = handle.indexer.read().await.chunk_ids_for_file(file).await;
+    ids.sort();
+    ids
+}
+
+/// `file`'s content hash in the installed corpus's redb hash table.
+async fn durable_hash_for(handle: &IndexHandle, file: &str) -> Option<String> {
+    let corpus = handle.indexer.read().await.corpus_store().unwrap();
+    let hash = corpus
+        .load_file_hashes()
+        .unwrap()
+        .into_iter()
+        .find(|(f, _)| f == file)
+        .map(|(_, h)| h);
+    drop(corpus);
+    hash
+}
+
+/// Why: #9212 — the prune deleted warn-only, so a refused redb delete dropped
+/// the file from memory and from the hash table while its rows stayed, and the
+/// run stamped the HEAD SHA over them; the rows came back at the next boot and
+/// nothing retried.
+/// What: indexes `a.rs` + `b.rs`, deletes `b.rs`, reindexes under the redb
+/// delete fault, then asserts the warm ids, redb rows and hashes are
+/// unchanged, the error is counted and neither stamp moved; a clean retry
+/// then prunes it and stamps. Fails against d6529ca1f5: the warm ids left.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps() {
+    let (root, handle, _vectors) = colocated_fixture("x9212-prune");
+    std::fs::write(root.path().join("a.rs"), "pub fn alpha_9212() {}\n").unwrap();
+    std::fs::write(root.path().join("b.rs"), "pub fn beta_9212() {}\n").unwrap();
+    let first = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), first.clone(), false)
+        .await
+        .unwrap();
+    assert_eq!(first.status.load(), ReindexStatus::Complete);
+
+    let warm = warm_ids_for(&handle, "b.rs").await;
+    let mut rows = corpus_ids_for(&handle, "b.rs").await;
+    rows.sort();
+    let hash = durable_hash_for(&handle, "b.rs").await;
+    let hashes = super::super::hash::hashes_for(&handle.id);
+    let cached = hashes
+        .get(&std::path::PathBuf::from("b.rs"))
+        .map(|h| h.clone());
+    assert!(
+        !warm.is_empty() && !rows.is_empty(),
+        "setup: b.rs has chunks"
+    );
+    assert!(hash.is_some() && cached.is_some(), "setup: b.rs has a hash");
+    const SENTINEL: &str = "sentinel-9212";
+    *handle.indexed_head_sha.write().await = Some(SENTINEL.into());
+    *handle.last_indexed_at.write().await = Some(SENTINEL.into());
+
+    std::fs::remove_file(root.path().join("b.rs")).unwrap();
+    let id = handle.id.0.clone();
+    crate::core::indexer::TEST_FAIL_CHUNK_DELETE
+        .lock()
+        .unwrap()
+        .push(id.clone());
+    let faulted = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), faulted.clone(), false)
+        .await
+        .unwrap();
+    crate::core::indexer::TEST_FAIL_CHUNK_DELETE
+        .lock()
+        .unwrap()
+        .retain(|f| *f != id);
+
+    assert_eq!(
+        warm_ids_for(&handle, "b.rs").await,
+        warm,
+        "warm ids changed"
+    );
+    let mut left = corpus_ids_for(&handle, "b.rs").await;
+    left.sort();
+    assert_eq!(left, rows, "redb rows changed");
+    assert_eq!(durable_hash_for(&handle, "b.rs").await, hash, "redb hash");
+    assert_eq!(
+        hashes
+            .get(&std::path::PathBuf::from("b.rs"))
+            .map(|h| h.clone()),
+        cached,
+        "cached hash"
+    );
+    assert!(
+        faulted.errors.load(std::sync::atomic::Ordering::Acquire) >= 1,
+        "a refused prune delete is reported"
+    );
+    assert_eq!(
+        handle.indexed_head_sha.read().await.as_deref(),
+        Some(SENTINEL),
+        "a refused prune delete must not stamp the HEAD SHA"
+    );
+    assert_eq!(
+        handle.last_indexed_at.read().await.as_deref(),
+        Some(SENTINEL),
+        "a refused prune delete must not stamp last_indexed_at"
+    );
+
+    let retry = Arc::new(ReindexProgress::new());
+    spawn_reindex_awaitable(handle.clone(), retry.clone(), false)
+        .await
+        .unwrap();
+    assert!(
+        warm_ids_for(&handle, "b.rs").await.is_empty(),
+        "retry prunes"
+    );
+    assert!(corpus_ids_for(&handle, "b.rs").await.is_empty());
+    assert_eq!(durable_hash_for(&handle, "b.rs").await, None);
+    assert_ne!(
+        handle.last_indexed_at.read().await.as_deref(),
+        Some(SENTINEL),
+        "the clean retry stamps"
+    );
+    assert!(!warm_ids_for(&handle, "a.rs").await.is_empty());
+}

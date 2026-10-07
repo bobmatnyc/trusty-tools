@@ -3,11 +3,11 @@
 //! Why: chunk removal (single id or whole file) and entity lookups are
 //! orthogonal to the search/ingest hot paths. Lifting them out keeps each
 //! `impl` block focused on a single concern.
-//! What: `remove_file`, `remove_chunk`, the shared `remove_chunks_from_stores`
-//! and `drop_chunk_ids_from_memory` helpers, the #7004 force-reconciliation
+//! What: `remove_file`, the shared `drop_chunk_ids_from_memory`
+//! helper (`remove_chunks_from_stores` lives in `ingest::supersede`), the #7004 force-reconciliation
 //! pair `warm_chunk_ids_absent_from` / `drop_warm_chunks`, `find_chunk_id`,
 //! `entities_for`, and `entity_exact_match`.
-//! Test: covered by `test_remove_chunk_removes_from_results`,
+//! Test: covered by `test_remove_chunk_ids_removes_from_results`,
 //! `test_entity_exact_match_*` in `indexer::tests`.
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use crate::core::chunker::RawChunk;
 use crate::core::entity::EntityType;
 
-use super::{build_compact_snippet, raw_to_code_chunk, CodeChunk, CodeIndexer};
+use super::{build_compact_snippet, raw_to_code_chunk, CodeChunk, CodeIndexer, RedbChunkDelete};
 
 /// #8976: test-only fault seam. `remove_file_no_kg_rebuild` fails, before it
 /// removes anything, for each `(index_id, file)` pair listed here. Keyed by
@@ -580,14 +580,29 @@ impl CodeIndexer {
     /// in a loop. Calling `remove_file` per file would trigger O(deleted_files)
     /// full KG rebuilds, which is expensive. The reindex orchestrator already
     /// rebuilds the KG once at the end of Phase 3, so the per-file rebuild is
-    /// redundant. This method is identical to `remove_file` except it skips the
-    /// `rebuild_symbol_graph` call, leaving the graph stale until the orchestrator's
-    /// Phase 3 rebuild corrects it.
+    /// redundant. This method is identical to `remove_file` except it does not
+    /// mark the graph stale (#9179); the caller's own rebuild corrects it.
     /// What: removes chunk rows, entity row, and in-memory entity map entry for
-    /// `file_path`. Returns the number of chunks removed.
-    /// Test: covered by `prune_deleted_files_cleans_staging_corpus` in
-    /// `service::reindex::tests`.
+    /// `file_path`. Returns the number of chunks removed. A refused redb
+    /// delete is an `Err` with every store unchanged (#9212).
+    /// Test: `prune_deleted_files_cleans_staging_corpus` in
+    /// `service::reindex::tests`; the refused arm by
+    /// `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps` and
+    /// `a_refused_pre_commit_remove_skips_the_insert_and_withholds_the_hash`.
     pub(crate) async fn remove_file_no_kg_rebuild(&self, file_path: &str) -> Result<usize> {
+        // #9212: fail closed, so prune and the batch pre-commit remove keep
+        // the rows and the hash for a retry instead of dropping memory only.
+        self.remove_file_no_kg_rebuild_with(file_path, RedbChunkDelete::FailClosed)
+            .await
+    }
+
+    /// [`Self::remove_file_no_kg_rebuild`] with the redb-delete failure mode
+    /// chosen by the caller; `index_file`'s sops arm uses `FailClosed` (#8959).
+    pub(crate) async fn remove_file_no_kg_rebuild_with(
+        &self,
+        file_path: &str,
+        mode: RedbChunkDelete,
+    ) -> Result<usize> {
         #[cfg(test)]
         if TEST_FAIL_REMOVE
             .lock()
@@ -597,7 +612,7 @@ impl CodeIndexer {
         }
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
-        self.remove_chunks_from_stores(&ids).await;
+        self.remove_chunks_from_stores(&ids, mode).await?;
         self.entities.write().await.remove(file_path);
         self.delete_entities_from_redb(file_path).await;
         // NOTE: deliberately omits `self.rebuild_symbol_graph().await` —
@@ -610,17 +625,43 @@ impl CodeIndexer {
     /// Why: `index-file` re-indexes a file in place, but file deletion (and
     /// `FileWatcher` rename/remove events) needs to drop all of a file's
     /// chunks at once. Returns the number of chunks removed.
+    /// What: when anything will leave, stamps the durable stale mark first
+    /// (#8959), removes the chunks and the entity list, then marks the graph
+    /// stale in memory (#9179) rather than rebuilding it. A refused redb
+    /// delete is an `Err` with the chunks still in memory (#9212).
+    /// Test: `index_file_and_remove_file_defer_the_symbol_graph_rebuild`,
+    /// `a_deferred_rebuild_survives_a_reopen`; the refused arm by
+    /// `remove_file_fails_closed_on_a_refused_redb_delete`.
     pub async fn remove_file(&self, file_path: &str) -> Result<usize> {
+        // #9212: fail closed by default; `WarnOnly` is an explicit option only.
+        self.remove_file_with(file_path, RedbChunkDelete::FailClosed)
+            .await
+    }
+
+    /// [`Self::remove_file`] with the redb-delete failure mode chosen by the
+    /// caller; `index_file`'s tombstone arm uses `FailClosed` (#8959).
+    pub(crate) async fn remove_file_with(
+        &self,
+        file_path: &str,
+        mode: RedbChunkDelete,
+    ) -> Result<usize> {
         // `chunk_ids_for_file` rehydrates an idle-evicted map first, so the
         // redb delete below still sees the ids it is keyed by.
         let ids = self.chunk_ids_for_file(file_path).await;
         let removed = ids.len();
-        self.remove_chunks_from_stores(&ids).await;
+        // #9179: was a whole-corpus `rebuild_symbol_graph` per call (60 s and
+        // ~1.2 GB on a 315K-chunk index); the ticker now rebuilds once per
+        // burst. #8959: the guard's durable mark precedes every removal.
+        let _graph_write = if removed > 0 || self.entities.read().await.contains_key(file_path) {
+            Some(self.begin_graph_write().await?)
+        } else {
+            None
+        };
+        self.remove_chunks_from_stores(&ids, mode).await?;
         self.entities.write().await.remove(file_path);
         // Issue #28: evict the file's entity list from the durable redb store
         // too, or a restart would resurrect it into the symbol graph.
         self.delete_entities_from_redb(file_path).await;
-        self.rebuild_symbol_graph().await;
         Ok(removed)
     }
 
@@ -650,47 +691,17 @@ impl CodeIndexer {
         }
     }
 
-    /// Delete a set of chunk ids from the durable redb corpus (issue #28).
+    /// Delete a set of chunk ids from the durable redb corpus, warn-only.
     ///
-    /// Why: `remove_chunk` / `remove_file` evict chunks from every in-memory
-    /// structure; the redb store must follow or a restart resurrects them.
-    /// What: runs `CorpusStore::delete_chunks` on a blocking worker. Errors are
-    /// logged, never propagated.
-    /// Test: covered by `tests::test_corpus_store_roundtrip` deletion paths.
-    async fn delete_chunks_from_redb(&self, ids: &[String]) {
-        let Some(corpus) = self.corpus.clone() else {
-            return;
-        };
-        if ids.is_empty() {
-            return;
+    /// Why: the test-only `RedbChunkDelete::WarnOnly` mode; every production
+    /// delete uses the fallible [`Self::try_delete_chunks_from_redb`] (#9212).
+    /// What: that call with the error logged, never propagated.
+    /// Test: `remove_file_fails_closed_on_a_refused_redb_delete`.
+    #[cfg(test)]
+    pub(super) async fn delete_chunks_from_redb(&self, ids: &[String]) {
+        if let Err(e) = self.try_delete_chunks_from_redb(ids).await {
+            tracing::warn!("index '{}': {e:#}", self.index_id);
         }
-        let ids = ids.to_vec();
-        let index_id = self.index_id.clone();
-        match tokio::task::spawn_blocking(move || corpus.delete_chunks(&ids)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                tracing::warn!("index '{index_id}': redb chunk delete failed ({e})")
-            }
-            Err(e) => {
-                tracing::warn!("index '{index_id}': redb chunk delete task panicked ({e})")
-            }
-        }
-    }
-
-    /// Remove every chunk id from the HNSW store, corpus, embedding cache,
-    /// and BM25 index.
-    ///
-    /// Why: shared between `remove_file` (bulk per-file deletion) and could
-    /// be reused for future bulk-deletion paths. Each lock is acquired once
-    /// for the whole batch to bound write-lock contention.
-    /// What: best-effort `store.remove` per id (swallows store errors —
-    /// HNSW deletion is non-fatal in this codebase), then drops the id from
-    /// each in-memory structure under a single write lock per structure.
-    /// Test: covered indirectly by `test_remove_chunk_removes_from_results`.
-    async fn remove_chunks_from_stores(&self, ids: &[String]) {
-        self.drop_chunk_ids_from_memory(ids).await;
-        // Issue #28: mirror the deletion into the durable redb corpus.
-        self.delete_chunks_from_redb(ids).await;
     }
 
     /// Drop `ids` from the vector store and every in-memory chunk-keyed
@@ -706,7 +717,7 @@ impl CodeIndexer {
     /// remaining in-memory structure for the whole batch.
     /// Test: `service::reindex::prune_tests::force_rebuild_drops_chunks_for_a_deleted_file`,
     /// `a_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
-    async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
+    pub(super) async fn drop_chunk_ids_from_memory(&self, ids: &[String]) {
         // #8761: map before vector. A deferred-embed commit that upserts one of
         // these ids either finds it gone on its post-upsert check or upserted
         // before the `store.remove` below.
@@ -871,21 +882,5 @@ impl CodeIndexer {
         *self.symbol_graph.write().await =
             std::sync::Arc::new(crate::core::symbol_graph::SymbolGraph::default());
         Ok(ids.len())
-    }
-
-    /// Remove a chunk from the corpus and its vector from the HNSW store.
-    /// Test: `a_chunk_removal_racing_a_deferred_commit_leaves_no_orphan_vector`.
-    pub async fn remove_chunk(&self, chunk_id: &str) -> Result<()> {
-        // #8761: map before vector, as in `drop_chunk_ids_from_memory`.
-        self.chunks.write().await.remove(chunk_id);
-        if let Some(store) = &self.store {
-            store.remove(chunk_id).await.ok();
-        }
-        self.chunk_embeddings.write().await.pop(chunk_id);
-        self.bm25.write().await.remove_document(chunk_id);
-        // Issue #28: mirror the deletion into the durable redb corpus.
-        self.delete_chunks_from_redb(&[chunk_id.to_string()]).await;
-        self.rebuild_symbol_graph().await;
-        Ok(())
     }
 }

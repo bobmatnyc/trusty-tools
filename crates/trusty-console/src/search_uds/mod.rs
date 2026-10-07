@@ -649,8 +649,9 @@ mod tests {
     /// Test: this is the test.
     #[test]
     fn the_frame_budget_is_at_least_the_listeners() {
-        let socket_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../trusty-search/src/service/socket.rs");
+        let socket_rs = trusty_common::test_harness::test_repo_root()
+            .expect("the running checkout's workspace root")
+            .join("crates/trusty-search/src/service/socket.rs"); // #9298
         let source = std::fs::read_to_string(&socket_rs)
             .unwrap_or_else(|e| panic!("read {}: {e}", socket_rs.display()));
 

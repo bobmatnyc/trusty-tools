@@ -78,6 +78,10 @@ pub enum ReindexClaimError {
         invalid_exclude_globs: Vec<String>,
         message: String,
     },
+    /// #8883: the index is serve-only on this daemon, so it takes no reindex.
+    /// `message` names the index and both remedies.
+    #[error("{message}")]
+    ServeOnly { index_id: String, message: String },
 }
 
 type Slot = Arc<Mutex<Option<RunningReindex>>>;

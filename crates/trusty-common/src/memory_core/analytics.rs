@@ -125,6 +125,12 @@ pub struct RecallLog {
     /// Monotonic event-id source — guarantees unique keys even when multiple
     /// `record` calls land inside the same millisecond.
     next_id: AtomicU64,
+    /// #9141 test seam: commits `record_batch` completed.
+    #[cfg(test)]
+    commits: AtomicU64,
+    /// #9141 test seam: when set, `record_batch` fails before its commit.
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
 }
 
 impl RecallLog {
@@ -190,7 +196,82 @@ impl RecallLog {
             db: Arc::new(db),
             path: redb_path,
             next_id: AtomicU64::new(max_seen),
+            #[cfg(test)]
+            commits: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_writes: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// #9141 test seam: commits `record_batch` has completed on this log.
+    #[cfg(test)]
+    pub(crate) fn commit_count(&self) -> u64 {
+        self.commits.load(Ordering::Acquire)
+    }
+
+    /// #9141 test seam: make every later `record_batch` fail before commit.
+    #[cfg(test)]
+    pub(crate) fn fail_writes(&self, fail: bool) {
+        self.fail_writes.store(fail, Ordering::Release);
+    }
+
+    /// Open the recall log at `path`, sharing the instance this process
+    /// already holds for the same file.
+    ///
+    /// Why (#9140 batch, live 2026-10-04T14:31:51Z): redb's exclusive lock
+    /// refuses a second same-process open with `DatabaseAlreadyOpen`. The KG
+    /// and vector stores share their open database through a process-wide
+    /// weak cache, so a second `PalaceHandle::open` of a live palace succeeded
+    /// for them while its recall log failed and the handle ran with analytics
+    /// disabled for its whole life. The whole `RecallLog` is shared, not just
+    /// the `Database`, because `next_id` must be one counter per file or two
+    /// instances mint the same key and overwrite each other's rows.
+    /// What: resolves the redb path, canonicalises its parent, and returns the
+    /// live `Arc` from a `Weak` slot keyed by that path, or opens a new log
+    /// and caches it. The process-wide map lock covers only the slot lookup;
+    /// the open runs under that file's own slot lock, so two racing callers
+    /// cannot both open one file and an open of one file never waits on
+    /// another's.
+    /// Test: `second_open_of_a_live_palace_shares_its_recall_log`.
+    pub fn open_shared(path: &Path) -> Result<Arc<Self>> {
+        use std::collections::HashMap;
+        use std::sync::{Mutex, OnceLock, Weak};
+        type Slot = Arc<Mutex<Weak<RecallLog>>>;
+        static CACHE: OnceLock<Mutex<HashMap<PathBuf, Slot>>> = OnceLock::new();
+        let redb_path = resolve_redb_path(path);
+        let key = match (redb_path.parent(), redb_path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                std::fs::create_dir_all(parent).ok();
+                std::fs::canonicalize(parent)
+                    .map(|p| p.join(name))
+                    .unwrap_or_else(|_| redb_path.clone())
+            }
+            _ => redb_path.clone(),
+        };
+        // #9140: holding the map lock across `Self::open` (a redb create plus a
+        // write commit) serialised every palace's open process-wide; trusty-
+        // memory's `perf_palace_cold_open_within_budget` took 0.8-4 s against
+        // its 750 ms budget under a concurrent run.
+        let slot = {
+            let mut cache = CACHE
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Prune a slot only when no caller holds it (the map's Arc is the
+            // only one) and its log is gone; `try_lock` then never contends.
+            cache.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot.try_lock().map_or(true, |weak| weak.strong_count() > 0)
+            });
+            Arc::clone(cache.entry(key.clone()).or_default())
+        };
+        let mut weak = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(live) = weak.upgrade() {
+            return Ok(live);
+        }
+        let log = Arc::new(Self::open(&key)?);
+        *weak = Arc::downgrade(&log);
+        Ok(log)
     }
 
     /// Allocate the next monotonic event id.
@@ -229,9 +310,32 @@ impl RecallLog {
     /// writes one row into the RECALL_LOG table under a single write txn.
     /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
     pub async fn record(&self, event: RecallEvent) -> Result<()> {
-        let id = self.alloc_id();
-        let bytes =
-            postcard::to_allocvec(&event).context("failed to postcard-encode RecallEvent")?;
+        self.record_batch(vec![event]).await
+    }
+
+    /// Record every event of one recall in a single write transaction.
+    ///
+    /// Why (#9141): `record` per hit cost one redb commit — one fsync — per
+    /// hit, so a recall-all over 40 palaces paid hundreds of them.
+    /// What: allocates one id per event, encodes them all, and inserts every
+    /// row under ONE write transaction and commit. All rows land or none do.
+    /// An empty batch writes nothing.
+    /// Test: `log_recall_writes_every_hit_in_one_commit`,
+    /// `log_recall_reports_a_failed_write`.
+    pub async fn record_batch(&self, events: Vec<RecallEvent>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Vec::with_capacity(events.len());
+        for event in &events {
+            let bytes =
+                postcard::to_allocvec(event).context("failed to postcard-encode RecallEvent")?;
+            rows.push((self.alloc_id(), bytes));
+        }
+        #[cfg(test)]
+        let fail = self.fail_writes.load(Ordering::Acquire);
+        #[cfg(not(test))]
+        let fail = false;
         let db = self.db.clone();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -242,15 +346,22 @@ impl RecallLog {
                 let mut table = wtx
                     .open_table(RECALL_LOG)
                     .context("open RECALL_LOG table")?;
-                table
-                    .insert(id, bytes.as_slice())
-                    .context("insert RecallEvent row")?;
+                for (id, bytes) in &rows {
+                    table
+                        .insert(*id, bytes.as_slice())
+                        .context("insert RecallEvent row")?;
+                }
+            }
+            if fail {
+                anyhow::bail!("injected recall-log write failure (test seam)");
             }
             wtx.commit().context("commit RecallEvent write")?;
             Ok(())
         })
         .await
         .context("record task join error")??;
+        #[cfg(test)]
+        self.commits.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 

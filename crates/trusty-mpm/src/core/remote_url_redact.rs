@@ -9,13 +9,17 @@
 //! authority in its input with [`REDACTED`], and the value of every
 //! token-bearing query key ([`TOKEN_KEYS`]); text with neither is returned
 //! borrowed and unchanged. An scp-style `git@host:o/r` carries no secret and
-//! is left alone.
+//! is left alone. [`redact_stored_url`] is the variant for one stored URL,
+//! whose authority a quote or whitespace does not end (#9227); every site that
+//! prints one known URL uses it, and free text keeps [`redact_url`] (#9259).
 //! Test: `redact_url_strips_user_and_token` and its siblings in
 //! `remote_url_redact_tests.rs`;
 //! `a_credentialed_origin_never_reaches_the_log_or_the_error` for the clone
 //! log line.
 
 use std::borrow::Cow;
+
+use trusty_common::url_userinfo::{ends_authority, ends_url, userinfo_end};
 
 /// What a URL's userinfo is replaced with.
 pub const REDACTED: &str = "***";
@@ -26,7 +30,8 @@ pub const TOKEN_KEYS: &[&str] = &["access_token", "private_token", "oauth_token"
 
 /// A `repo_url` that keeps its raw value but prints redacted under `Debug`
 /// (#9124): a derived `Debug` on an error variant would otherwise show it.
-/// Test: `daemon::error::tests::project_not_found_message_redacts_the_url_credentials`.
+/// Test: `daemon::error::tests::project_not_found_message_redacts_the_url_credentials`,
+/// `every_single_url_type_masks_a_quoted_or_spaced_password`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedUrl(pub String);
 
@@ -51,18 +56,9 @@ impl From<&str> for RedactedUrl {
 
 impl std::fmt::Debug for RedactedUrl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&redact_url(&self.0), f)
+        // #9259: one stored URL, whose password may hold a quote or space.
+        std::fmt::Debug::fmt(&redact_stored_url(&self.0), f)
     }
-}
-
-/// Characters that end a URL when it sits inside free text.
-fn ends_url(c: char) -> bool {
-    matches!(c, '\'' | '"' | '<' | '>' | '`') || c.is_whitespace()
-}
-
-/// Characters that end a URL authority when it sits inside free text.
-fn ends_authority(c: char) -> bool {
-    matches!(c, '/' | '?' | '#') || ends_url(c)
 }
 
 /// `text` with every URL credential replaced by [`REDACTED`]: the userinfo of
@@ -87,15 +83,79 @@ pub fn redact_url(text: &str) -> Cow<'_, str> {
     query.map_or(userinfo, Cow::Owned)
 }
 
+/// [`redact_url`] for one stored URL, such as a registry entry, rather than
+/// free text (#9227).
+///
+/// Why: [`redact_url`] ends an authority at a quote or whitespace, so a
+/// pre-#9124 entry `https://u:pa'ss@host/o/r` came back unchanged and
+/// `tm list` printed the password.
+/// What: masks the userinfo [`authority_userinfo_end`] finds after a git
+/// scheme's `://`, or the `user:password` of an scp-style `user:pw@host:path`
+/// (a bare `git@` is kept), then runs [`redact_url`] over the result for the
+/// query tokens and any nested URL. A clean URL comes back borrowed.
+/// Test: `redact_stored_url_masks_a_quoted_or_spaced_password`,
+/// `redact_stored_url_keeps_a_clean_url_as_redact_url_shows_it`.
+pub fn redact_stored_url(url: &str) -> Cow<'_, str> {
+    match mask_stored_userinfo(url) {
+        Some(masked) => Cow::Owned(redact_url(&masked).into_owned()),
+        None => redact_url(url),
+    }
+}
+
+/// `url` with its stored userinfo replaced by [`REDACTED`]; `None` when the
+/// stored-URL boundaries find none.
+fn mask_stored_userinfo(url: &str) -> Option<String> {
+    if let Some(at) = url.find("://").filter(|&at| is_git_scheme(&url[..at])) {
+        let tail = &url[at + 3..];
+        let cut = authority_userinfo_end(tail)?;
+        return Some(format!("{}{REDACTED}{}", &url[..at + 3], &tail[cut..]));
+    }
+    // git reads `u:T@h:o/r://x` as scp-style; a bare login such as `git@` is
+    // no secret and stays.
+    let head = &url[..url.find('/').unwrap_or(url.len())];
+    let at = head.rfind('@').filter(|&at| head[at..].contains(':'))?;
+    url[..at]
+        .contains(':')
+        .then(|| format!("{REDACTED}{}", &url[at..]))
+}
+
+/// [`userinfo_end`] for a stored URL, which is not free text (#9227).
+///
+/// What: the authority runs to the first `/`, `?` or `#` only, so a quote or
+/// whitespace cannot end it; its last `@` ends the userinfo. With no `@` but a
+/// `:`, the search runs to the end of the URL, as `userinfo_end`'s over-read
+/// does. The result is never before [`userinfo_end`]'s cut: the larger of the
+/// two is returned, so an early end fails closed at runtime.
+/// Test: `clone_url_strips_or_refuses`,
+/// `redact_stored_url_masks_a_quoted_or_spaced_password`.
+pub(crate) fn authority_userinfo_end(tail: &str) -> Option<usize> {
+    let authority = &tail[..tail.find(['/', '?', '#']).unwrap_or(tail.len())];
+    let cut = match authority.rfind('@') {
+        Some(at) => Some(at),
+        None => authority
+            .find(':')
+            .and_then(|colon| tail[colon..].rfind('@').map(|i| colon + i)),
+    };
+    // `None < Some(_)`, so a free-text cut can only push this one later.
+    cut.max(userinfo_end(tail))
+}
+
+/// Whether git reads `scheme` as a URL scheme: an alphanumeric, then
+/// alphanumerics, `+`, `-` or `.` (git's `is_urlschemechar`).
+pub(crate) fn is_git_scheme(scheme: &str) -> bool {
+    scheme.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
 /// The userinfo pass of [`redact_url`].
 ///
-/// What: for each `://`, the authority runs to the first [`ends_authority`]
-/// char; when it holds an `@`, everything before the LAST `@` (the userinfo,
-/// as a URL parser splits it) is replaced. When it holds none but has a `:`,
-/// the userinfo may be `user:pa/ss` — git accepts a raw `/`, `?` or `#` in a
-/// password, which ends the authority early — so it runs to the last `@` in
-/// the rest of the URL. That over-redacts `host:port/path@x`, which is the
-/// safe direction.
+/// What: for each `://`, the userinfo is everything before the `@` that
+/// [`userinfo_end`] finds, and is replaced. That boundary is trusty-common's,
+/// shared with the stripper that runs before identity derivation (#9124), so
+/// the two cannot disagree on where a credential ends; see its docs for the
+/// raw-`/` password rule.
 fn redact_userinfo(text: &str) -> Cow<'_, str> {
     if !text.contains("://") || !text.contains('@') {
         return Cow::Borrowed(text);
@@ -106,19 +166,15 @@ fn redact_userinfo(text: &str) -> Cow<'_, str> {
     while let Some(at) = rest.find("://") {
         let (head, tail) = rest.split_at(at + 3);
         out.push_str(head);
-        let end = tail.find(ends_authority).unwrap_or(tail.len());
-        let authority = &tail[..end];
-        let cut = authority
-            .rfind('@')
-            .or_else(|| slashed_userinfo_end(tail, authority));
-        match cut {
+        match userinfo_end(tail) {
             Some(cut) => {
                 out.push_str(REDACTED);
                 rest = &tail[cut..];
                 changed = true;
             }
             None => {
-                out.push_str(authority);
+                let end = tail.find(ends_authority).unwrap_or(tail.len());
+                out.push_str(&tail[..end]);
                 rest = &tail[end..];
             }
         }
@@ -129,19 +185,6 @@ fn redact_userinfo(text: &str) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(text)
     }
-}
-
-/// Where a `user:pa/ss@host` userinfo ends in `tail`, when `authority` (the
-/// prefix of `tail` up to its first `/`, `?` or `#`) holds a `:` and no `@`.
-///
-/// #9124 delta critic: a raw `?` or `#` in the password ends the authority as
-/// a raw `/` does, so the search runs to the end of the URL, not to its query
-/// or fragment, and takes the LAST `@`. That over-redacts a path, query or
-/// fragment holding an `@`, which is the safe direction.
-fn slashed_userinfo_end(tail: &str, authority: &str) -> Option<usize> {
-    let colon = authority.find(':')?;
-    let url_end = tail.find(ends_url).unwrap_or(tail.len());
-    tail.get(colon..url_end)?.rfind('@').map(|i| colon + i)
 }
 
 /// The query pass of [`redact_url`]: the value after each `?key=` / `&key=`

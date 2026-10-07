@@ -929,6 +929,8 @@ pub(crate) async fn search_report(
     // `WarmBootSummary.warm_boot_degraded` surfaces warm-boot degradation
     // on `/health`, just scoped to a single query instead of a boot.
     let bm25_lane_degraded = indexer.lane_degraded();
+    // #9235: converged-but-truncated, the steady-state sibling of the above.
+    let bm25 = indexer.bm25_truncation().await;
     if filtered_out > 0 {
         // Issue #541: increment the process-wide Prometheus counter so operators
         // can alert on a rising drop rate without log scraping.
@@ -1017,6 +1019,13 @@ pub(crate) async fn search_report(
             // provisional and may retry shortly; the background rehydrate
             // keeps running regardless and the next query is warm.
             "bm25_lane_degraded": bm25_lane_degraded,
+            // #9235: `true` when the BM25 corpus cap kept resident chunks out
+            // of the lexical lane; those chunks can only match semantically.
+            "bm25_truncated": bm25.map(|b| b.truncated),
+            "bm25_docs_dropped": bm25.map(|b| b.docs_dropped),
+            "bm25_corpus_cap": bm25.map(|b| b.corpus_cap),
+            "bm25_truncation_unavailable_reason":
+                bm25.is_none().then_some(crate::core::bm25::Bm25Truncation::UNAVAILABLE_REASON),
             // #5068: the counterpart flag to `bm25_lane_degraded` for the OTHER
             // lane. `true` means this hybrid query ran with no vector
             // contribution at all — the results are lexical, however
