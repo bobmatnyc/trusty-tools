@@ -14,6 +14,9 @@
 //!   [`store::mask_secret`], config resolution, and the in-process
 //!   `secret://` resolver, env map and `.env` parser `tm secrets exec` uses
 //!   ([`store::resolve`], [`store::parse_dotenv`]).
+//! - `cli-backends` — `store::cli`, the blocking runner and template-file
+//!   guard the 1Password and Keeper backends share (#7519; Unix only). It
+//!   adds no dependency beyond `store`'s.
 //! - `server` — the `secrets.*` methods on an on-demand Unix socket, the
 //!   `trusty-secrets` binary that serves them, and the client helper that
 //!   spawns it ([`server`]; Unix only).

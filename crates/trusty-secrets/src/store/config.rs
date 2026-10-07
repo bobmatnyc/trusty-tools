@@ -85,6 +85,34 @@ pub struct ProjectSecretsConfig {
     /// may never turn the credential access audit off (#4567).
     #[serde(default)]
     pub audit: Option<bool>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub account: Option<String>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
+    /// DOC-74 §6.2's 1Password section; read only to refuse it (#7519).
+    #[serde(default)]
+    pub onepassword: Option<CliSettings>,
+    /// DOC-74 §6.2's Keeper section; read only to refuse it (#7519).
+    #[serde(default)]
+    pub keeper: Option<CliSettings>,
+}
+
+/// The CLI settings DOC-74 §6.2 nests under a backend's own key.
+///
+/// Why: #7519 — a tracked project file must not set these in either the
+/// top-level or the per-backend shape, so both are parsed to be refused.
+/// What: parse-only; unknown keys beside them are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CliSettings {
+    /// The vendor CLI's account, e.g. `op --account`.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The vendor CLI's config file or directory.
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
@@ -127,18 +155,27 @@ pub fn resolve(
     }
 }
 
-/// Refuse a tracked project config that selects `file` on a Keychain build.
+/// Refuse a tracked project config that selects `file` on a Keychain build,
+/// or that sets a vendor CLI's `account` or `config_path` on any build.
 ///
 /// Why: #9326, Architect ruling (basis ruling 06 R2, the #9328 class) — the
 /// project file is tracked, so anyone who lands a change in the repository
 /// could move every value to plaintext files. Where a Keychain is compiled
-/// in, only the untracked machine config may select `file`.
+/// in, only the untracked machine config may select `file`. #7519, owner
+/// ruling 2026-10-07: for the same reason it may not aim a vendor CLI at an
+/// account or config directory of its choosing.
 /// What: on a Keychain build, project `secrets.backend: file` is
 /// [`SecretsError::TrackedBackendRefused`] naming `path` (the project file)
 /// and the machine key to set, never the file's content. Any other project
 /// backend, and every project backend on a build without a Keychain, passes.
+/// Then, on every build, an `account` or `config_path` at the top level or
+/// under `onepassword`/`keeper` is [`SecretsError::TrackedCliSettingRefused`]
+/// naming the key, never its value.
 /// Test: `config_tracked_file_backend_is_refused_on_a_keychain_build`,
-/// `server_tracked_file_backend_is_refused_on_a_keychain_build`.
+/// `server_tracked_file_backend_is_refused_on_a_keychain_build`,
+/// `config_tracked_cli_settings_are_refused_on_every_build`,
+/// `config_untracked_cli_settings_are_accepted`,
+/// `server_tracked_cli_setting_is_refused_on_every_build`.
 pub fn check_project_backend(
     project: Option<&ProjectSecretsConfig>,
     path: &Path,
@@ -160,7 +197,41 @@ pub(crate) fn check_project_backend_for(
             path: path.to_path_buf(),
         });
     }
-    Ok(())
+    // #7519: owner ruling 2026-10-07 — not Keychain-gated.
+    match project.and_then(tracked_cli_setting) {
+        Some(key) => Err(SecretsError::TrackedCliSettingRefused {
+            path: path.to_path_buf(),
+            key,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The first CLI setting `project` sets, as the key the refusal names.
+fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
+    let flags = |s: Option<&CliSettings>| {
+        s.map_or([false, false], |s| {
+            [s.account.is_some(), s.config_path.is_some()]
+        })
+    };
+    let sections = [
+        (
+            [project.account.is_some(), project.config_path.is_some()],
+            ["account", "config_path"],
+        ),
+        (
+            flags(project.onepassword.as_ref()),
+            ["onepassword.account", "onepassword.config_path"],
+        ),
+        (
+            flags(project.keeper.as_ref()),
+            ["keeper.account", "keeper.config_path"],
+        ),
+    ];
+    sections
+        .into_iter()
+        .flat_map(|(set, keys)| set.into_iter().zip(keys))
+        .find_map(|(set, key)| set.then_some(key))
 }
 
 /// The machine config path under the real `$HOME`.

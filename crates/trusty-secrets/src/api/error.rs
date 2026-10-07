@@ -252,6 +252,43 @@ pub enum SecretsError {
         path: PathBuf,
     },
 
+    /// A tracked project config set a vendor CLI's `account` or
+    /// `config_path`, which only the untracked machine config may. Raised
+    /// before any backend is opened, on every build.
+    // #7519: owner ruling 2026-10-07; names the key, never its value.
+    #[error(
+        "secrets config {path} is tracked and may not set `{key}`: a repository could \
+         point the CLI at an account or config directory of its choosing; remove it \
+         and set it in the machine config instead"
+    )]
+    TrackedCliSettingRefused {
+        /// The tracked project config file.
+        path: PathBuf,
+        /// The refused setting, e.g. `account` or `onepassword.account`.
+        key: &'static str,
+    },
+
+    /// A CLI-backed backend's program is not installed or not on `PATH`.
+    /// Fails closed: no fallback to another backend.
+    // #7519: A4 — the error names the CLI and the fix.
+    #[error("`{program}` is not installed or not on PATH; {hint}")]
+    CliNotInstalled {
+        /// The program as configured, e.g. `op`.
+        program: String,
+        /// The backend's fixed install instruction.
+        hint: &'static str,
+    },
+
+    /// A CLI-backed backend is locked or signed out. Never read as a miss.
+    // #7519: A3/A4 — distinct from `Backend`, so a caller can prompt an unlock.
+    #[error("the {backend} backend is locked or signed out; {hint}")]
+    BackendLocked {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The backend's fixed unlock instruction.
+        hint: &'static str,
+    },
+
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,
