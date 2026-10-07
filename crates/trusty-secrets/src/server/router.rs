@@ -34,7 +34,7 @@ use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at,
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at_in,
     platform,
 };
 
@@ -57,31 +57,32 @@ pub fn default_backends() -> BackendFactory {
 /// sweep looks and get the service-account token the binary took out of its
 /// own environment. Ruling 74: whether it opens at all, and which `op` runs,
 /// is the account's own machine config's to say, never a file the spawner
-/// chose through `--machine-config` or `$HOME`.
+/// chose through `--machine-config` or `$HOME`. #7524 P2-M2: nor the
+/// spawner's `PATH`; `op` comes from the pin or the fixed system directories.
 /// What: `backends_with` on `account_machine_config`, the file #7524
-/// reads `file` consent from; with no account home, every CLI backend is
-/// off.
+/// reads `file` consent from, and the production 1Password directories; with
+/// no account home, every CLI backend is off.
 /// Test: `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
 pub fn backends_for(
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
-    search_path: Option<OsString>,
 ) -> BackendFactory {
     backends_with(
         account_machine_config(),
         settings,
         onepassword_token,
-        search_path,
+        crate::store::program::onepassword_dirs(),
     )
 }
 
 /// [`backends_for`] with the account's machine config given.
 ///
-/// What: a CLI backend opens through [`open_backend_at`] with
+/// What: a CLI backend opens through `open_backend_at_in` with
 /// `account_config`, [`ServerSettings::template_root`], `onepassword_token`
-/// and `search_path` (the `PATH` the binary read at start), only when
-/// [`account_machine`] enables it; else [`SecretsError::BackendNotEnabled`].
+/// and `op_dirs`, the directories searched for `op` when the account
+/// config pins no `program` (#7524 P2-M2), only when [`account_machine`]
+/// enables it; else [`SecretsError::BackendNotEnabled`].
 /// The file is read on each open, so a change is seen on the next request.
 /// `keychain` and `file` open through [`open_local`].
 /// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
@@ -91,7 +92,7 @@ pub(crate) fn backends_with(
     account_config: Option<PathBuf>,
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
-    search_path: Option<OsString>,
+    op_dirs: Vec<PathBuf>,
 ) -> BackendFactory {
     let template_root = settings.template_root.clone();
     Arc::new(move |id: &BackendId| {
@@ -109,12 +110,12 @@ pub(crate) fn backends_with(
                 backend: id.to_string(),
             });
         };
-        open_backend_at(
+        open_backend_at_in(
             id,
             config,
             &template_root,
             onepassword_token.clone(),
-            search_path.as_deref(),
+            &op_dirs,
         )
     })
 }

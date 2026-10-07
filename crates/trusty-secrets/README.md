@@ -196,11 +196,13 @@ it with `secrets.backend: onepassword`. It may not set `account`,
 
 The backend runs `op` by absolute path only, found once when the backend
 opens. `program` names it as given: it must be an absolute path to an
-executable file. Without `program`, the backend takes the first executable
-`op` in an absolute directory on the server's `PATH`. Empty, `.` and other
-relative `PATH` entries are skipped, because they name the working directory
-of whatever started the server. With no such `op`, calls fail with
-`cli_not_installed`; install `op` in an absolute directory or set `program`.
+executable file, and it overrides everything else. Without `program`, the
+backend takes the first executable `op` in a fixed list of system
+directories: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` on macOS, and
+`/usr/local/bin`, `/usr/bin` elsewhere. It never searches the server's
+`PATH`, which is whatever the spawning process had. With no such `op`, calls
+fail with `cli_not_installed`; install `op` in one of those directories or set
+`program`.
 
 - The trusty vault name is the 1Password vault's name, for example
   `trusty/acme/web`. Create that vault first.

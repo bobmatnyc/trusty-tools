@@ -29,8 +29,9 @@
 //!   index, so the capabilities are `READ | WRITE` only (A6).
 //!
 //! `op` runs by absolute path only: a machine `program` pin as given, or
-//! the first `op` in an absolute `PATH` entry, found once at open (`program.rs`).
-//! Nothing is spawned by bare name.
+//! the first `op` in a fixed list of system directories, found once at open
+//! (`program.rs`, #7524 P2-M2). No `PATH` is read, and nothing is spawned
+//! by bare name.
 //!
 //! The key never reaches argv: it is the item's title, compared with listed
 //! rows and written inside the template. Only the validated vault name,
@@ -63,8 +64,7 @@ mod onepassword_tests;
 #[cfg(test)]
 mod path_tests;
 
-use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::cli::{CliCommand, CliRun, CliSpec, TemplateFile, Verdict};
@@ -80,9 +80,8 @@ pub use settings::{
 /// The runner's facts about `op`: id, program, hints and markers.
 const SPEC: CliSpec = CliSpec::new(BackendId::ONEPASSWORD, "op", DEFAULT_TIMEOUT)
     .with_hints(
-        "install the 1Password CLI (https://developer.1password.com/docs/cli/get-started/) \
-         in an absolute PATH directory, set `secrets.onepassword.program` in the machine \
-         config to its absolute path, or select another secrets backend",
+        // #7524 P2-M2: names the system directories searched and the pin.
+        program::INSTALL_HINT,
         "unlock the 1Password app with its CLI integration on, run `op signin`, or set \
          OP_SERVICE_ACCOUNT_TOKEN for a headless run",
     )
@@ -126,7 +125,7 @@ impl OnePasswordBackend {
     ///
     /// What: a `program` that is not absolute is
     /// [`SecretsError::CliNotInstalled`], and nothing is spawned.
-    /// Test: `onepassword_path_without_an_absolute_op_is_cli_not_installed`.
+    /// Test: `onepassword_without_op_in_the_system_dirs_names_the_program_pin`.
     fn command(&self, vault: &VaultName, key: &SecretKey) -> Result<CliCommand, SecretsError> {
         let s = &self.settings;
         // #7519: a bare or relative name would resolve at spawn, through
@@ -340,17 +339,36 @@ impl SecretBackend for OnePasswordBackend {
 /// What: reads `machine_config`; unless [`MachineSecretsConfig::enables`]
 /// the backend, [`SecretsError::BackendNotEnabled`]. Then
 /// [`OnePasswordSettings::from_machine`] with `template_root` and `token`,
-/// and #7519: `OnePasswordSettings::resolve_program` against
-/// `search_path`, a `PATH` value the caller read — once, here, never per
-/// call. No `op` is [`SecretsError::CliNotInstalled`]. Spawns nothing, so
-/// `secrets.doctor` can call it (A9).
+/// then `op` from the machine `program` pin or the first system directory
+/// in `crate::store::program::ONEPASSWORD_DIRS` that holds one — once,
+/// here, never per call. No `PATH` is read (#7524 P2-M2). No `op` is
+/// [`SecretsError::CliNotInstalled`]. Spawns nothing, so `secrets.doctor`
+/// can call it (A9).
 /// Test: `onepassword_open_requires_machine_enablement`,
-/// `onepassword_path_search_skips_relative_empty_and_dot_entries`.
+/// `onepassword_op_on_the_spawner_path_is_never_chosen`.
 pub fn open(
     machine_config: &Path,
     template_root: &Path,
     token: Option<SecretValue>,
-    search_path: Option<&OsStr>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    open_in(
+        machine_config,
+        template_root,
+        token,
+        &crate::store::program::onepassword_dirs(),
+    )
+}
+
+/// [`open`], searching `dirs` for `op` instead of the production list.
+///
+/// Why: a test cannot rely on the host having, or lacking, a real `op` in a
+/// system directory, and must never run one.
+/// Test: `onepassword_resolves_op_from_the_system_dirs_in_order`.
+pub(crate) fn open_in(
+    machine_config: &Path,
+    template_root: &Path,
+    token: Option<SecretValue>,
+    dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     let id = BackendId::onepassword();
     let machine: Option<MachineSecretsConfig> = config::load_machine_at(machine_config)?;
@@ -365,6 +383,6 @@ pub fn open(
         template_root.to_path_buf(),
         token,
     )?
-    .resolve_program(search_path)?;
+    .resolve_program(dirs)?;
     Ok(Arc::new(OnePasswordBackend::new(settings)))
 }

@@ -282,10 +282,11 @@ pub enum SecretsError {
         key: &'static str,
     },
 
-    /// A CLI-backed backend's program is not installed or not on `PATH`.
+    /// A CLI-backed backend's program was not found where the backend looks.
     /// Fails closed: no fallback to another backend.
-    // #7519: A4 — the error names the CLI and the fix.
-    #[error("`{program}` is not installed or not on PATH; {hint}")]
+    // #7519: A4 — the error names the CLI and the fix. #7524 P2-M2: no
+    // backend searches `PATH`, so the text no longer names it.
+    #[error("`{program}` was not found; {hint}")]
     CliNotInstalled {
         /// The program as configured, e.g. `op`.
         program: String,

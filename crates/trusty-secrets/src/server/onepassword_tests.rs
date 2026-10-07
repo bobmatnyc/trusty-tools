@@ -293,21 +293,21 @@ async fn server_tracked_onepassword_program_is_refused_before_any_spawn() {
 /// only when the machine config enables it, so a tracked `backend:
 /// onepassword` alone cannot aim the server at an account, and nothing is
 /// written where the delete sweep does not reach. Opening spawns nothing;
-/// #7519: it finds `op` in a `PATH` value handed in, never the process's own.
+/// #7524 P2-M2: it finds `op` in the directory list handed in, never a `PATH`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_backends_for_opens_onepassword_only_when_enabled() {
     let fx = fixture();
     let op_dir = fx.tmp.path().join("op-bin");
     install_op(&op_dir, "exit 1");
-    let search = Some(op_dir.into_os_string());
+    let op_dirs = vec![op_dir];
     // The fixture's machine config is also the account's own file here.
     let account = Some(fx.settings.machine_config.clone());
     let factory = router::backends_with(
         account.clone(),
         &fx.settings,
         Some(SecretValue::new(TOKEN)),
-        search.clone(),
+        op_dirs.clone(),
     );
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
@@ -319,7 +319,7 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "secrets:\n  backend: onepassword\n").unwrap();
     let server = fx
-        .start_with(router::backends_with(account, &fx.settings, None, search))
+        .start_with(router::backends_with(account, &fx.settings, None, op_dirs))
         .await;
     let response = set(&fx, "A").await;
     assert_eq!(
@@ -355,7 +355,7 @@ fn spawner_enables_planted_op(fx: &Fixture, marker: &Path) {
 /// `account` as the account's own machine config, and whose other backends
 /// are the fixture's in-memory doubles.
 async fn start_with_account(fx: &Fixture, account: Option<PathBuf>) -> Running {
-    let production = router::backends_with(account.clone(), &fx.settings, None, None);
+    let production = router::backends_with(account.clone(), &fx.settings, None, Vec::new());
     let base = fx.backends();
     let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
         BackendId::ONEPASSWORD => production(id),
@@ -385,7 +385,7 @@ async fn server_onepassword_enablement_ignores_a_spawner_chosen_machine_config()
         Some(account.clone()),
         &fx.settings,
         Some(SecretValue::new(TOKEN)),
-        None,
+        Vec::new(),
     );
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
@@ -418,7 +418,7 @@ async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
     assert!(crate::store::config::load_machine_at(&account).is_err());
 
     for config in [Some(account.clone()), None] {
-        let factory = router::backends_with(config.clone(), &fx.settings, None, None);
+        let factory = router::backends_with(config.clone(), &fx.settings, None, Vec::new());
         let err = factory(&BackendId::onepassword()).unwrap_err();
         assert!(
             matches!(err, SecretsError::BackendNotEnabled { .. }),

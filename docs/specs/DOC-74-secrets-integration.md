@@ -245,7 +245,8 @@ able to steer the server to a CLI backend, and enablement makes the delete
 sweep complete, because the sweep visits every enabled backend. The `program`,
 `account` and `config_path` settings are machine-config only; a tracked file
 that sets one is refused. `program` must be an absolute path; otherwise `op` is
-resolved from absolute `PATH` entries only.
+looked up in a fixed list of system directories (§6.2), never on a `PATH`
+(#7524 P2-M2).
 
 This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
@@ -284,6 +285,23 @@ secrets:
     program: /usr/local/bin/keeper           # required; absolute path to Keeper Commander
     config_path: /Users/me/.keeper/config.json   # required; Commander's config file, absolute, mode 0600
 ```
+
+**Where `op` comes from (#7524 P2-M2, Architect Decision A).** The machine
+config's `secrets.onepassword.program`, when set, is the program and
+overrides everything else. Without it, the backend takes the first executable
+`op` in this fixed list, in order:
+
+| OS | Directories searched |
+|---|---|
+| macOS | `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
+| Linux and other Unix | `/usr/local/bin`, `/usr/bin` |
+
+The `PATH` of whichever process spawned the server is never consulted: any
+directory on it is the spawner's choice, and a planted `op` there would
+receive item templates, values inside. With no pin and no `op` in the list,
+the backend fails with `cli_not_installed`, and the message names the
+`secrets.onepassword.program` setting. Keeper has no list: its `program` pin
+is required.
 
 These sections belong to the untracked machine config only (§6.1,
 [#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)). Neither
@@ -458,6 +476,8 @@ commands must never call the equivalent for a value-carrying argument).
 
 **1Password (#7519 P2; #7524 part 2).**
 
+- *Program.* `op` runs by absolute path: the machine `program` pin, or the
+  first `op` in the system directories of §6.2. No `PATH` is read.
 - *Lookup.* Every operation first runs `op item list --vault <vault>`. `op`
   answers "isn't a vault" both for a vault the account lacks and for one the
   current identity cannot see, so that answer never proves a key absent.

@@ -243,8 +243,9 @@ impl ErrorKind {
             Self::TrackedCliSettingRefused => {
                 "the project's tracked config may not set a backend `account` or `config_path`; set it in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
             }
+            // #7524 P2-M2: names the `program` pin; no backend searches PATH.
             Self::CliNotInstalled => {
-                "the secrets backend's command-line tool is not installed or not on PATH"
+                "the secrets backend's command-line tool was not found; set `secrets.<backend>.program` in the machine config ~/.trusty-tools/trusty-common/config.yaml to its absolute path (1Password also looks in fixed system directories, never PATH)"
             }
             // #7519 P3: ruling 6 — the wire text names Keeper's one-time step.
             Self::BackendLocked => {

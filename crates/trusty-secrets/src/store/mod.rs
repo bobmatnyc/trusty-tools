@@ -43,6 +43,9 @@ mod secret_store;
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;
+// #7524 P2-M2: the server's factory names the 1Password directories itself.
+#[cfg(feature = "server")]
+pub(crate) use backend::open_backend_at_in;
 pub use backend::{
     Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
     open_backend_at, swept_backends,
