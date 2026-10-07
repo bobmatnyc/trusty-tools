@@ -283,3 +283,47 @@ fn build_query_long_body_stays_under_256() {
         q
     );
 }
+
+/// A search transport that counts its calls (#9194).
+struct CountingSearch(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+#[async_trait]
+impl IssueSearchTransport for CountingSearch {
+    async fn search(&self, _t: &str, _q: &str, _n: u32) -> Result<String, ContextSourceError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(r#"{"items":[]}"#.to_string())
+    }
+}
+
+/// GitHub search calls one `gather` over `subject` makes.
+async fn search_calls(subject: &ReviewSubject) -> usize {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source = GithubIssuesSource::new(
+        true,
+        RetrievalMode::Live,
+        Box::new(FakeToken(Ok("t".into()))),
+        Box::new(CountingSearch(calls.clone())),
+    );
+    source
+        .gather(subject)
+        .await
+        .expect("an empty section, not an error");
+    calls.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// #9194 E5 (owner comment 2026-10-07): a local diff has no repository, so
+/// `github_issues` makes no GitHub search call for the local owner.
+#[tokio::test]
+async fn github_issues_makes_no_search_call_for_the_local_owner() {
+    let local = ReviewSubject {
+        owner: crate::config::constants::LOCAL_OWNER.to_string(),
+        repo: "stdin".to_string(),
+        ..subject()
+    };
+    assert_eq!(search_calls(&local).await, 0);
+}
+
+/// #9194: a real owner still searches, once.
+#[tokio::test]
+async fn github_issues_still_searches_for_a_real_owner() {
+    assert_eq!(search_calls(&subject()).await, 1);
+}

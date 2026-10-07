@@ -41,6 +41,20 @@ async fn subprocess_client_health_check_fails_gracefully() {
     );
 }
 
+/// #9194: `analysis_status` carries the health probe's own error, which
+/// `has_analysis` reduces to `false`.
+#[tokio::test]
+async fn subprocess_client_analysis_status_carries_the_health_error() {
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1")
+        .expect("TLS init should succeed");
+    let health = client.health().await.expect_err("port 1 is refused");
+    let status = client
+        .analysis_status("main")
+        .await
+        .expect_err("no analysis when search is down");
+    assert_eq!(status.to_string(), health.to_string());
+}
+
 /// has_analysis must return false (not panic) on transport error.
 #[tokio::test]
 async fn subprocess_client_has_analysis_returns_false_on_error() {
@@ -259,6 +273,19 @@ async fn subprocess_client_has_no_analysis_for_an_unknown_index() {
         "#6687: trusty-search has no `no-such-index`, so trusty-analyze has nothing to analyse \
          for it — has_analysis must not answer true for any index name whatsoever"
     );
+}
+
+/// #9194: `analysis_status` names an index trusty-search does not know.
+#[tokio::test]
+async fn subprocess_client_analysis_status_names_an_unknown_index() {
+    let base_url = stub_search_server(LIVE_DEGRADED_HEALTH, "trusty-tools").await;
+    let client = SubprocessAnalyzeClient::new("echo", base_url).expect("TLS init should succeed");
+    assert!(client.analysis_status("trusty-tools").await.is_ok());
+    let err = client
+        .analysis_status("no-such-index")
+        .await
+        .expect_err("unknown index");
+    assert!(err.to_string().contains("`no-such-index`"), "{err}");
 }
 
 /// The degraded status string must survive the probe unaltered.

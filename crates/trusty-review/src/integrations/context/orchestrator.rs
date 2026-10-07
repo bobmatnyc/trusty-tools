@@ -29,7 +29,7 @@ use futures_util::future::join_all;
 use tracing::{debug, warn};
 
 use super::{ContextSection, ContextSource, ReviewSubject};
-use crate::models::SourceState;
+use crate::{config::constants::LOCAL_OWNER, models::SourceState};
 
 /// Max number of context sources to query concurrently.
 ///
@@ -53,7 +53,7 @@ const PER_SOURCE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `unavailable`), the rendered characters it contributed, and the raw
 /// reason for an `absent` or `unavailable` state.
 /// Test: `failed_external_source_is_unavailable_with_its_error`.
-#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
+#[allow(dead_code)] // #9194: the runner reads it from the next commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceOutcome {
     /// `ContextSource::name()`.
@@ -66,29 +66,26 @@ pub(crate) struct SourceOutcome {
     pub(crate) detail: Option<String>,
 }
 
+impl SourceOutcome {
+    /// An outcome for `name`; an empty `detail` is none.
+    fn of(name: &'static str, state: SourceState, chars: usize, detail: &str) -> Self {
+        Self {
+            name,
+            state,
+            chars,
+            detail: (!detail.is_empty()).then(|| detail.to_string()),
+        }
+    }
+}
+
 /// A gather's sections plus one [`SourceOutcome`] per enabled source (#9194).
-#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
+#[allow(dead_code)] // #9194: the runner reads `outcomes` from the next commit.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ExternalGather {
     /// The non-empty sections, in source order.
     pub(crate) sections: Vec<ContextSection>,
     /// One outcome per enabled source, in source order.
     pub(crate) outcomes: Vec<SourceOutcome>,
-}
-
-/// [`gather_external_context`] plus what each enabled source did (#9194).
-///
-/// Test: `failed_external_source_is_unavailable_with_its_error`,
-/// `timed_out_external_source_is_unavailable`, `empty_external_source_is_absent`.
-#[allow(dead_code)] // #9194: stub; outcomes are recorded from the next commit.
-pub(crate) async fn gather_external_context_detailed(
-    sources: &[Box<dyn ContextSource>],
-    subject: &ReviewSubject,
-) -> ExternalGather {
-    ExternalGather {
-        sections: gather_external_context(sources, subject).await,
-        outcomes: Vec::new(),
-    }
 }
 
 /// Gather context from all enabled sources, fail-open, bounded-concurrent.
@@ -98,15 +95,40 @@ pub(crate) async fn gather_external_context_detailed(
 /// What: filters to `is_enabled()` sources, runs them in concurrency-bounded
 /// chunks (each under `PER_SOURCE_TIMEOUT`), logs and drops any error/timeout,
 /// drops empty sections, and returns the surviving sections in source order.
+/// #9194: the sections of [`gather_external_context_detailed`].
 /// Test: `gathers_enabled_only`, `fail_open_on_source_error`,
 /// `fail_open_on_timeout`, `sections_stable_order`.
 pub async fn gather_external_context(
     sources: &[Box<dyn ContextSource>],
     subject: &ReviewSubject,
 ) -> Vec<ContextSection> {
+    gather_external_context_detailed(sources, subject)
+        .await
+        .sections
+}
+
+/// [`gather_external_context`] plus what each enabled source did (#9194).
+///
+/// Why: the owner comment of 2026-10-07 requires a failed source to show in
+/// the context-source ledger; the fail-open gather only logged it.
+/// What: the same gather, recording one [`SourceOutcome`] per enabled source
+/// in source order: `used` with its rendered length, `absent` ("no results",
+/// or "local diff has no repository" for `github_issues` on a local diff,
+/// amendment 7), or `unavailable` with the error or "timed out after 20s".
+/// Disabled sources get no outcome. The sections are unchanged.
+/// Test: `failed_external_source_is_unavailable_with_its_error`,
+/// `timed_out_external_source_is_unavailable`, `empty_external_source_is_absent`,
+/// `contributing_external_source_is_used_with_chars`,
+/// `gather_external_context_still_fails_open_for_the_prompt`,
+/// `local_diff_github_issues_is_absent_with_no_repository`.
+pub(crate) async fn gather_external_context_detailed(
+    sources: &[Box<dyn ContextSource>],
+    subject: &ReviewSubject,
+) -> ExternalGather {
     // Index-tagged sections so we can restore source (registration) order after
     // the concurrent gather (which yields in completion order, not input order).
     let mut collected: Vec<(usize, ContextSection)> = Vec::new();
+    let mut outcomes: Vec<(usize, SourceOutcome)> = Vec::new(); // #9194
 
     // Enabled sources, tagged with their original index.
     let enabled: Vec<(usize, &Box<dyn ContextSource>)> = sources
@@ -117,7 +139,7 @@ pub async fn gather_external_context(
 
     if enabled.is_empty() {
         debug!("no enabled external context sources");
-        return Vec::new();
+        return ExternalGather::default();
     }
 
     for chunk in enabled.chunks(MAX_CONCURRENCY) {
@@ -126,21 +148,24 @@ pub async fn gather_external_context(
             let result = tokio::time::timeout(PER_SOURCE_TIMEOUT, source.gather(subject)).await;
             (*idx, name, result)
         });
-        let outcomes = join_all(futs).await;
-        for (idx, name, result) in outcomes {
-            match result {
+        for (idx, name, result) in join_all(futs).await {
+            let outcome = match result {
                 // Completed within the timeout.
+                Ok(Ok(section)) if section.snippets.is_empty() => {
+                    debug!(source = name, "context source returned no results");
+                    SourceOutcome::of(name, SourceState::Absent, 0, empty_detail(name, subject))
+                }
                 Ok(Ok(section)) => {
-                    if section.snippets.is_empty() {
-                        debug!(source = name, "context source returned no results");
-                    } else {
-                        debug!(
-                            source = name,
-                            count = section.snippets.len(),
-                            "context source contributed"
-                        );
-                        collected.push((idx, section));
-                    }
+                    debug!(
+                        source = name,
+                        count = section.snippets.len(),
+                        "context source contributed"
+                    );
+                    let chars = render_sections(std::slice::from_ref(&section))
+                        .chars()
+                        .count();
+                    collected.push((idx, section));
+                    SourceOutcome::of(name, SourceState::Used, chars, "")
                 }
                 // The source errored — log + continue (FAIL-OPEN, supplementary).
                 Ok(Err(e)) => {
@@ -148,6 +173,7 @@ pub async fn gather_external_context(
                         source = name,
                         "context source failed (continuing without it): {e}"
                     );
+                    SourceOutcome::of(name, SourceState::Unavailable, 0, &e.to_string())
                 }
                 // The source timed out — log + continue (FAIL-OPEN).
                 Err(_) => {
@@ -156,14 +182,30 @@ pub async fn gather_external_context(
                         timeout_secs = PER_SOURCE_TIMEOUT.as_secs(),
                         "context source timed out (continuing without it)"
                     );
+                    let detail = format!("timed out after {}s", PER_SOURCE_TIMEOUT.as_secs());
+                    SourceOutcome::of(name, SourceState::Unavailable, 0, &detail)
                 }
-            }
+            };
+            outcomes.push((idx, outcome));
         }
     }
 
     // Restore stable source order (sort by original index) and strip the tag.
     collected.sort_by_key(|(idx, _)| *idx);
-    collected.into_iter().map(|(_, section)| section).collect()
+    outcomes.sort_by_key(|(idx, _)| *idx);
+    ExternalGather {
+        sections: collected.into_iter().map(|(_, section)| section).collect(),
+        outcomes: outcomes.into_iter().map(|(_, outcome)| outcome).collect(),
+    }
+}
+
+/// Why an enabled source that answered had nothing (#9194 amendment 7).
+fn empty_detail(name: &str, subject: &ReviewSubject) -> &'static str {
+    if name == super::github_issues::SOURCE_NAME && subject.owner == LOCAL_OWNER {
+        "local diff has no repository"
+    } else {
+        "no results"
+    }
 }
 
 /// Render collected sections into the markdown block for the user message.
@@ -423,3 +465,8 @@ mod tests {
         assert!(md.contains("  second line"));
     }
 }
+
+// #9194: per-source outcomes for the context-source ledger.
+#[cfg(test)]
+#[path = "orchestrator_outcome_tests.rs"]
+pub(crate) mod outcome_tests;
