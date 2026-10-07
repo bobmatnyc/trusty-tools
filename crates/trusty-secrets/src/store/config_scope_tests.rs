@@ -309,6 +309,27 @@ fn config_oversized_file_is_refused_and_a_normal_one_loads() {
     assert_config_refusal(&load_machine_at(&over).unwrap_err(), &over);
 }
 
+/// Why: #7524 M2 — a project config that is not UTF-8 is a config refusal,
+/// not an I/O error, and the refusal never carries the file's bytes.
+/// Test: itself.
+#[test]
+fn config_non_utf8_file_is_refused_without_echoing_its_bytes() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("trusty-secrets.yaml");
+    let marker = "ghp_marker7524";
+    let mut body = format!("secrets:\n  backend: keychain\n  token: {marker}").into_bytes();
+    body.push(0xff);
+    body.push(b'\n');
+    std::fs::write(&path, &body).unwrap();
+    let err = load_project_at(&path).unwrap_err();
+    assert_config_refusal(&err, &path);
+    for shown in [err.to_string(), format!("{err:?}")] {
+        for leaked in [marker, "keychain", "\u{fffd}", "\u{ff}", "\\xff", "\\u{ff}"] {
+            assert!(!shown.contains(leaked), "{leaked:?} in {shown}");
+        }
+    }
+}
+
 /// Why: the owner and repository come from the remote URL; every common form
 /// must parse, and a failure must never echo the URL, which can carry a token.
 /// Test: itself.
