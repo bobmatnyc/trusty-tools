@@ -11,9 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use trusty_common::uds::UdsRpcError;
-use trusty_common::uds::server::RpcError;
 use trusty_secrets::api::methods::ScopeKind;
-use trusty_secrets::server::ClientError;
+use trusty_secrets::server::{ClientError, ErrorKind, RpcFailure};
 use trusty_secrets::{BackendId, SecretKey, VaultName};
 
 use super::*;
@@ -34,10 +33,11 @@ fn with_project_folds_the_directory_into_the_params() {
 #[test]
 fn describe_keeps_the_cli_text_and_drops_transport_detail() {
     let socket = Path::new("/run/s.sock");
-    let rpc = ClientError::Rpc(
-        RpcError::new(-32054, "secrets.list: the key is not in that vault")
-            .with_data(json!({ "kind": "not_found" })),
-    );
+    let rpc = ClientError::Rpc(RpcFailure::new(
+        -32054,
+        "secrets.list: the key is not in that vault",
+        Some(ErrorKind::NotFound),
+    ));
     assert_eq!(
         describe("tm secrets", &rpc, socket),
         "tm secrets: secrets.list: the key is not in that vault"
@@ -51,10 +51,10 @@ fn describe_keeps_the_cli_text_and_drops_transport_detail() {
         describe("tm secrets", &ClientError::EmptyResponse, socket),
         "tm secrets: trusty-secrets at /run/s.sock answered without a result"
     );
-    let transport = ClientError::Transport(UdsRpcError::Encode {
+    let transport = ClientError::Transport(Box::new(UdsRpcError::Encode {
         path: PathBuf::from("/detail/DETAIL-SENTINEL"),
         source: serde_json::from_str::<Value>("{").expect_err("bad json"),
-    });
+    }));
     let text = describe("secrets_get_ref", &transport, socket);
     assert_eq!(
         text,
@@ -162,12 +162,12 @@ mod tool {
             &repo,
             &["remote", "add", "origin", "git@github.com:Acme/Web.git"],
         );
-        let settings = ServerSettings {
-            socket: tmp.path().join("run").join("s.sock"),
-            index_root: tmp.path().join("index"),
-            machine_config: tmp.path().join("machine.yaml"),
-            idle_timeout: Duration::from_secs(60),
-        };
+        let settings = ServerSettings::new(
+            tmp.path().join("run").join("s.sock"),
+            tmp.path().join("index"),
+            tmp.path().join("machine.yaml"),
+            Duration::from_secs(60),
+        );
         let keychain = Arc::new(MemoryBackend::new());
         let backends: BackendFactory = Arc::new(move |id: &BackendId| {
             if id.as_str() != BackendId::KEYCHAIN {

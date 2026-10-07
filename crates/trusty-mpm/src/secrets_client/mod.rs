@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
-use trusty_secrets::server::{ClientError, OnDemandSecrets, PROJECT_FIELD};
+use trusty_secrets::server::{ClientError, ErrorKind, OnDemandSecrets, PROJECT_FIELD};
 
 mod get_ref;
 
@@ -62,13 +62,16 @@ pub fn describe(prefix: &str, error: &ClientError, socket: &Path) -> String {
         ClientError::EmptyResponse => {
             format!("{prefix}: trusty-secrets at {socket} answered without a result")
         }
+        // #7521: `ClientError` is `#[non_exhaustive]`; a later variant gets
+        // fixed text, never its own detail.
+        _ => format!("{prefix}: trusty-secrets at {socket} failed"),
     }
 }
 
 /// The machine-readable kind of a server refusal, e.g. `project_unresolved`.
-pub fn rpc_kind(error: &ClientError) -> Option<&str> {
+pub fn rpc_kind(error: &ClientError) -> Option<&'static str> {
     match error {
-        ClientError::Rpc(e) => e.data.as_ref()?.get("kind")?.as_str(),
+        ClientError::Rpc(e) => e.kind.map(ErrorKind::as_str),
         _ => None,
     }
 }
