@@ -493,6 +493,40 @@ async fn dream_cycle_toggles_is_compacting() {
     );
 }
 
+/// Why (#8246): trusty-memory learns that a cycle changed drawer text only
+/// through this hook, so it must fire for every cycle that ran and never for
+/// one that was skipped.
+/// What: a hooked dreamer runs one cycle, then one while the palace's
+/// compaction claim is held elsewhere. The hook saw the first cycle's palace
+/// and stats, and nothing for the skipped one. The failed-cycle case is
+/// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
+/// Test: This test itself.
+#[tokio::test]
+async fn the_after_cycle_hook_sees_every_cycle_that_ran() {
+    let handle = open_test_handle("dream-after-cycle").await;
+    let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let dreamer = Dreamer::new(dedup_only_config()).with_after_cycle(Arc::new(
+        move |id: &PalaceId, stats: Option<&DreamStats>| {
+            sink.lock()
+                .push((id.clone(), stats.map(|s| s.drawers_after)))
+        },
+    ));
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        *seen.lock(),
+        vec![(handle.id.clone(), Some(stats.drawers_after))]
+    );
+
+    let _claim = CompactionGuard::try_claim(handle.is_compacting.clone()).expect("free flag");
+    dreamer.dream_cycle(&handle).await.unwrap();
+    assert_eq!(
+        seen.lock().len(),
+        1,
+        "a skipped cycle does not call the hook"
+    );
+}
+
 /// Why: Drawers captured before the write-path blocklist landed (PR #221)
 /// still pollute existing palaces with `Tool use: Bash`-style noise. The
 /// dream cycle's content-prune pass must drop them retroactively so the

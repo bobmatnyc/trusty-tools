@@ -428,7 +428,11 @@ impl MemoryService {
         let palaces = list_palaces_blocking(&self.state)
             .await
             .map_err(|e| ServiceError::internal(format!("{e:#}")))?;
-        let dreamer = Dreamer::new(DreamConfig::default());
+        // #8246: a merge here stales BM25 exactly as a scheduled one does.
+        let dreamer = crate::dream_scheduler::with_after_cycle(
+            Dreamer::new(DreamConfig::default()),
+            &crate::bm25_repair::dream_repair_hook(&self.state),
+        );
         let mut out = DreamStatusPayload::default();
         for p in palaces {
             // #4637: open_palace (not peek) is deliberate — a dream cycle must

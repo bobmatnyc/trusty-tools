@@ -460,8 +460,9 @@ impl HnswStore {
     /// vector_id under one write txn, writes the postcard-encoded vector to
     /// `VECTORS`, writes the UUID→id mapping to `VECTOR_KEYS`, and removes
     /// any prior tombstone for this id. Then inserts the vector into the
-    /// in-memory graph, and records it for an exact scan if a search for its
-    /// own vector does not reach it (#9174).
+    /// in-memory graph, and records it — and any point the insert evicted
+    /// from a neighbour list — for an exact scan if a search for its own
+    /// vector does not reach it (#9174).
     ///
     /// #5005: allocation for a NEW uuid reads and bumps the persisted
     /// `VECTOR_ID_SEQ` counter inside this same write transaction, so two live
@@ -532,12 +533,16 @@ impl HnswStore {
         // replays it.
         let _gate = self.insert_gate.lock();
         let index = self.index.read();
+        // #9174: the lists this insert can evict from, read before it runs.
+        let before = stranded::neighbourhoods_before_insert(&index, vector);
         quiet_insert::insert_quietly(&index, vector, vector_id as usize)
             .map_err(HnswStoreError::StdoutGuard)?;
-        // #9174: a point its own search misses is scanned exactly instead.
-        if !stranded::newest_is_reachable(&index, vector, vector_id) {
+        // #9174: a point its own search misses is scanned exactly instead —
+        // the new one, and every one this insert evicted from a list.
+        if !stranded::reachable(&index, vector, vector_id) {
             stranded::add_stranded(&mut self.stranded.write(), vector, vector_id);
         }
+        stranded::restrand_evicted(&index, before, vector_id, &self.stranded);
 
         Ok(vector_id)
     }

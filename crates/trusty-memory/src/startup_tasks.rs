@@ -168,10 +168,12 @@ pub(crate) fn spawn_startup_tasks(state: &AppState) {
         // eviction ticker) and the shutdown bridge in one call — see
         // `spawn_background_maintenance` for the #1529 ordering guarantee and the
         // idle-to-disk RAM-reclaim rationale.
+        // #8246: a dream merge rewrites drawer text; queue its palace for BM25 repair.
         let n = trusty_memory::dream_scheduler::spawn_background_maintenance(
             &bg_state.registry,
             dream_shutdown_rx,
             dtx,
+            trusty_memory::bm25_repair::dream_repair_hook(&bg_state),
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
 

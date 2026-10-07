@@ -27,6 +27,18 @@ use std::time::Duration;
 
 use super::helpers::now_secs;
 
+/// A callback run after each dream cycle that claimed its palace.
+///
+/// Why (#8246): a cycle rewrites drawer text (dedup merges) and adds drawers
+/// (semantic consolidation), but indexes this crate does not own — trusty-
+/// memory's BM25 lane — learn of it only if the cycle says so. A failed cycle
+/// must say so too: dedup persists each merge as it goes, so a cycle that
+/// errors later has still changed text.
+/// What: `Arc<dyn Fn(&PalaceId, Option<&DreamStats>)>`, installed with
+/// [`Dreamer::with_after_cycle`]. `Some(stats)` for a cycle that completed;
+/// `None` for one that failed, whose persisted changes are unknown.
+pub type AfterCycle = Arc<dyn Fn(&PalaceId, Option<&DreamStats>) + Send + Sync>;
+
 /// Background memory consolidator.
 ///
 /// Why: We need a small, testable unit that owns the idle clock and the
@@ -50,6 +62,8 @@ pub struct Dreamer {
     /// config forever. Only cleared by constructing a fresh `Dreamer` (i.e.
     /// a config reload), matching "disabled until the config is fixed".
     pub(super) semantic_consolidation_disabled: AtomicBool,
+    /// #8246: run after every cycle that claimed its palace; see [`AfterCycle`].
+    pub(super) after_cycle: Option<AfterCycle>,
 }
 
 impl Dreamer {
@@ -66,6 +80,7 @@ impl Dreamer {
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: None,
             semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
         }
     }
 
@@ -85,7 +100,21 @@ impl Dreamer {
             last_activity: Arc::new(AtomicU64::new(now_secs())),
             consolidator: Some(consolidator),
             semantic_consolidation_disabled: AtomicBool::new(false),
+            after_cycle: None,
         }
+    }
+
+    /// This dreamer, calling `hook` after every cycle that claims its palace.
+    ///
+    /// Why (#8246): see [`AfterCycle`].
+    /// What: replaces any earlier hook. A cycle that completes calls it with
+    /// `Some(stats)`; one that fails calls it with `None`. Only a cycle skipped
+    /// because another holds the palace does not call it.
+    /// Test: `the_after_cycle_hook_sees_every_cycle_that_ran`,
+    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
+    pub fn with_after_cycle(mut self, hook: AfterCycle) -> Self {
+        self.after_cycle = Some(hook);
+        self
     }
 
     /// Record activity (call from recall / remember paths).
@@ -204,11 +233,15 @@ impl Dreamer {
     /// #9172: a cycle that finds another one running on `handle` returns
     /// `DreamStats::default()` without running any pass.
     ///
+    /// #8246: every cycle that claims `handle` then calls the
+    /// [`AfterCycle`] hook, whether it returns `Ok` or `Err`.
+    ///
     /// Test: `dream_cycle_merges_duplicates`, `dream_cycle_prunes_low_importance`,
     /// `closet_refresh_builds_index`, `dream_cycle_semantic_consolidation_with_mock`,
     /// `dream_cycle_semantic_consolidation_no_inference`,
     /// `concurrency_tests::ten_palaces_never_exceed_the_concurrency_cap`,
-    /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`.
+    /// `dedup_survivor_tests::a_second_dream_cycle_on_a_dreaming_palace_loses_no_text`,
+    /// `dedup_survivor_tests::a_cycle_that_fails_after_a_merge_still_calls_the_hook`.
     pub async fn dream_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         // #7106: wait for a slot in the process-wide bound before doing any
         // work. The daemon runs one loop per resident palace and they all woke
@@ -230,6 +263,17 @@ impl Dreamer {
         };
         // Counted independently of the permit on purpose — see `DreamCycleGauge`.
         let _in_flight = DreamCycleGauge::enter();
+        let outcome = self.run_claimed_cycle(handle).await;
+        // #8246: report failed cycles too — dedup persists each merge before a
+        // later pass can fail, so an `Err` cycle may still have changed text.
+        if let Some(hook) = &self.after_cycle {
+            hook(&handle.id, outcome.as_ref().ok());
+        }
+        outcome
+    }
+
+    /// The passes of [`Self::dream_cycle`], run once the palace is claimed.
+    async fn run_claimed_cycle(&self, handle: &Arc<PalaceHandle>) -> Result<DreamStats> {
         let started = std::time::Instant::now();
         let budget = Duration::from_millis(self.config.max_cycle_ms);
 
@@ -361,7 +405,6 @@ impl Dreamer {
                 tracing::warn!(palace = %handle.id, "persist dream_stats.json failed: {e:#}");
             }
         }
-
         Ok(stats)
     }
 }

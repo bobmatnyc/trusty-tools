@@ -44,7 +44,7 @@ pub use concurrency::{
 };
 pub use config::{COMPACT_MIN_RECLAIM_PERCENT, MIN_PRUNE_HISTORY_DAYS};
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
-pub use dreamer::Dreamer;
+pub use dreamer::{AfterCycle, Dreamer};
 pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
 pub use helpers::extract_keywords;
 pub use kg_compact::{KgCompactReport, kg_compact_pass, kg_compact_pass_with_hook};

@@ -41,7 +41,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{info, warn};
 use trusty_common::memory_core::dream::{
-    dream_max_concurrent, stagger_offset, Dreamer, PersistedDreamStats,
+    dream_max_concurrent, stagger_offset, AfterCycle, Dreamer, PersistedDreamStats,
 };
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::PalaceRegistry;
@@ -87,10 +87,14 @@ pub const DREAM_DISABLED_ENV: &str = "TRUSTY_DREAM_DISABLED";
 ///
 /// Returns the number of dream loops spawned.
 ///
+/// `after_cycle` (#8246) is installed on every dreamer, loops and rotation
+/// alike; the daemon passes `bm25_repair::dream_repair_hook`.
+///
 /// Test: `dream_scheduler_spawns_per_palace_loop`.
 pub fn spawn_dream_scheduler(
     registry: &PalaceRegistry,
     shutdown_rx: watch::Receiver<bool>,
+    after_cycle: Option<AfterCycle>,
 ) -> usize {
     if std::env::var(DREAM_DISABLED_ENV).is_ok_and(|v| !v.is_empty()) {
         info!(
@@ -123,7 +127,7 @@ pub fn spawn_dream_scheduler(
         // order — that decides only which palace draws which slot, and this is
         // a one-shot startup call, so the assignment never shifts afterwards.
         let stagger = stagger_offset(index, total, interval);
-        let dreamer = Arc::new(Dreamer::new(config));
+        let dreamer = Arc::new(with_after_cycle(Dreamer::new(config), &after_cycle));
         // Unpin (idle-to-disk): the loop takes the registry + id and resolves
         // the handle each cycle via `peek` (no reopen), so it never captures an
         // `Arc<PalaceHandle>` for the process lifetime. A palace idle-evicted to
@@ -153,7 +157,10 @@ pub fn spawn_dream_scheduler(
             Rotation {
                 registry: registry.clone(),
                 data_root: root.to_path_buf(),
-                dreamer: Arc::new(Dreamer::new(config_template)),
+                dreamer: Arc::new(with_after_cycle(
+                    Dreamer::new(config_template),
+                    &after_cycle,
+                )),
                 looped,
             },
             interval,
@@ -167,6 +174,14 @@ pub fn spawn_dream_scheduler(
         "dream_scheduler: all per-palace loops running"
     );
     spawned
+}
+
+/// `dreamer` with `hook` installed, when there is one (#8246).
+pub(crate) fn with_after_cycle(dreamer: Dreamer, hook: &Option<AfterCycle>) -> Dreamer {
+    match hook {
+        Some(hook) => dreamer.with_after_cycle(Arc::clone(hook)),
+        None => dreamer,
+    }
 }
 
 /// A palace whose last dream is older than this is due for the rotation.
@@ -313,15 +328,17 @@ fn dream_is_due(data_dir: &Path) -> bool {
 /// per-palace dream loops, spawns the idle-evict ticker
 /// (`TRUSTY_MEMORY_IDLE_EVICT_SECS`-gated), then spawns the shutdown bridge on
 /// `dtx`. Returns the number of dream loops spawned (for the caller's log line).
+/// `after_cycle` goes to every dreamer (#8246).
 /// Test: exercised end-to-end by the daemon startup path; the ticker and
 /// scheduler are unit-tested in their own modules.
 pub fn spawn_background_maintenance(
     registry: &Arc<PalaceRegistry>,
     dream_shutdown_rx: watch::Receiver<bool>,
     dtx: watch::Sender<bool>,
+    after_cycle: Option<AfterCycle>,
 ) -> usize {
     let idle_evict_rx = dream_shutdown_rx.clone();
-    let loops = spawn_dream_scheduler(registry, dream_shutdown_rx);
+    let loops = spawn_dream_scheduler(registry, dream_shutdown_rx, after_cycle);
     // #9283: the daily drawer-count snapshot rides the same shutdown watch,
     // and shares a gate with the idle-evict sweep so a sweep never pulls a
     // resident handle out from under a count.
@@ -439,7 +456,7 @@ mod tests {
             std::env::set_var(DREAM_DISABLED_ENV, "1");
         }
         let (_tx, rx) = make_shutdown_watch();
-        let spawned = spawn_dream_scheduler(&registry, rx);
+        let spawned = spawn_dream_scheduler(&registry, rx, None);
         unsafe {
             std::env::remove_var(DREAM_DISABLED_ENV);
         }
@@ -474,7 +491,7 @@ mod tests {
         register_temp_palace(&registry, tmp2.path());
 
         let (tx, rx) = make_shutdown_watch();
-        let spawned = spawn_dream_scheduler(&registry, rx);
+        let spawned = spawn_dream_scheduler(&registry, rx, None);
 
         // Stop the loops.
         let _ = tx.send(true);
@@ -535,7 +552,7 @@ mod tests {
         }
         let registry = PalaceRegistry::new();
         let (_tx, rx) = make_shutdown_watch();
-        let count = spawn_dream_scheduler(&registry, rx);
+        let count = spawn_dream_scheduler(&registry, rx, None);
         assert_eq!(count, 0, "empty registry should produce 0 loops");
     }
 
@@ -570,7 +587,7 @@ mod tests {
         );
 
         let (tx, rx) = make_shutdown_watch();
-        spawn_dream_scheduler(&state.registry, rx);
+        spawn_dream_scheduler(&state.registry, rx, None);
         let cold_dir = root.path().join(cold.as_str());
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         let mut dreamed = false;

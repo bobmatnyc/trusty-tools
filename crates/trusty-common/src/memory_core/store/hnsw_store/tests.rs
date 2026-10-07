@@ -1812,6 +1812,155 @@ fn search_finds_drawers_the_graph_cannot_reach() {
     );
 }
 
+/// Origin ids whose layer-0 list names `id`: its in-edges.
+fn in_edges(index: &Hnsw<'static, f32, DistCosine>, id: u64) -> Vec<u64> {
+    index
+        .get_point_indexation()
+        .get_layer_iterator(0)
+        .filter(|p| {
+            p.get_neighborhood_id()[0]
+                .iter()
+                .any(|n| n.d_id as u64 == id)
+        })
+        .map(|p| p.get_origin_id() as u64)
+        .collect()
+}
+
+/// `count` unit vectors at cosine distance about `delta^2 / 2` from `centre`,
+/// along `+-` an orthonormal basis of the complement of `centre` and `avoid`.
+/// Each is nearer `centre` than `centre`'s existing neighbours are, and
+/// farther from `avoid` than `centre` is, so an insert of one picks `centre`
+/// and prunes `avoid` (`hnsw.rs:1361-1363`).
+fn around(centre: &[f32], avoid: &[f32], delta: f32, count: usize) -> Vec<Vec<f32>> {
+    let dim = centre.len();
+    let mut span: Vec<Vec<f32>> = Vec::new();
+    let mut excluded = 0;
+    let axes = (0..dim).map(|axis| {
+        let mut v = vec![0.0f32; dim];
+        v[axis] = 1.0;
+        v
+    });
+    for (i, mut v) in [centre.to_vec(), avoid.to_vec()]
+        .into_iter()
+        .chain(axes)
+        .enumerate()
+    {
+        for b in &span {
+            let dot: f32 = v.iter().zip(b).map(|(x, y)| x * y).sum();
+            v.iter_mut().zip(b).for_each(|(x, y)| *x -= dot * y);
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 1e-3 {
+            span.push(v.into_iter().map(|x| x / norm).collect());
+            if i < 2 {
+                excluded += 1;
+            }
+        }
+    }
+    span[excluded..]
+        .iter()
+        .flat_map(|b| [1.0f32, -1.0].map(|sign| (b, sign)))
+        .take(count)
+        .map(|(b, sign)| {
+            let raw: Vec<f32> = centre
+                .iter()
+                .zip(b)
+                .map(|(c, x)| c + sign * delta * x)
+                .collect();
+            let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+            raw.into_iter().map(|x| x / norm).collect()
+        })
+        .collect()
+}
+
+/// Whether `store` records `id` for the exact scan.
+fn is_stranded(store: &HnswStore, id: u64) -> bool {
+    store
+        .stranded
+        .read()
+        .iter()
+        .any(|(_, ids)| ids.contains(&id))
+}
+
+/// Why (#9174): an upsert adds a reverse edge to each neighbour it picks, and
+/// a full neighbour list evicts its farthest entry. A drawer whose only
+/// in-edge sat at the end of that list loses it, after the check that found
+/// the drawer reachable, and stayed unscanned until the next reopen.
+/// What: a palace above the exhaustive threshold, so the graph arm answers.
+/// Row 0 is the graph's entry point, because the replay inserts it first and
+/// alone. Every other row has a zero last coordinate and a non-negative
+/// cosine to row 0, so a probe one step off row 0 along that last axis prunes
+/// every candidate but row 0: its one out-edge and one in-edge are row 0,
+/// whatever the parallel replay built. Then 32 drawers (one full layer-0
+/// list) around row 0, each nearer it than the probe and pruning the probe,
+/// push the probe out of row 0's list. Asserts the graph alone no longer
+/// reaches the probe (the precondition: the defect happened), and that the
+/// store, with no reopen, still finds it with its own vector.
+/// Test: this test itself is the verification.
+#[test]
+fn an_upsert_that_strands_an_existing_drawer_still_finds_it() {
+    let dim = 20;
+    let flat = |seed: u64| {
+        let mut v = spread_vec(dim - 1, seed);
+        v.push(0.0);
+        v
+    };
+    let entry = flat(424_242);
+    let mut pool = vec![entry.clone()];
+    // #9280: sized from the threshold so the graph arm stays selected.
+    pool.extend((0..exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160).map(|i| {
+        let v = flat(700_000 + i as u64);
+        let dot: f32 = v.iter().zip(&entry).map(|(a, b)| a * b).sum();
+        let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+        v.into_iter().map(|x| sign * x).collect()
+    }));
+    let (_dir, store) = open_store(dim);
+    seed_rows(&store.db, &pool);
+    let reopened = HnswStore::open(Arc::clone(&store.db), dim).expect("reopen");
+    let graph_finds = |id: u64, v: &[f32]| {
+        let live = reopened.keys.get(&reopened.db).expect("keys").reverse.len();
+        let index = reopened.index.read();
+        graph_nearest(&index, v, &Default::default(), 10, live)
+            .iter()
+            .any(|(hit, _)| *hit == id)
+    };
+
+    let mut probe = entry.clone();
+    probe[dim - 1] = 0.1;
+    let norm: f32 = probe.iter().map(|x| x * x).sum::<f32>().sqrt();
+    probe.iter_mut().for_each(|x| *x /= norm);
+    let uuid = "probe".to_string();
+    let id = reopened.upsert(&uuid, &probe).expect("upsert probe");
+    assert!(
+        graph_finds(id, &probe) && !is_stranded(&reopened, id),
+        "precondition: the graph reaches the probe and the store did not \
+         record it as stranded"
+    );
+    assert_eq!(
+        in_edges(&reopened.index.read(), id),
+        vec![1],
+        "precondition: row 0, the entry point, is the probe's one in-neighbour"
+    );
+    for (j, v) in around(&entry, &probe, 0.02, 2 * HNSW_MAX_NB_CONNECTION)
+        .iter()
+        .enumerate()
+    {
+        reopened.upsert(&format!("near-{j}"), v).expect("upsert");
+    }
+
+    assert!(
+        !graph_finds(id, &probe),
+        "precondition: the upserts must leave {uuid} without an in-edge; \
+         in-neighbours left: {:?}",
+        in_edges(&reopened.index.read(), id)
+    );
+    assert!(
+        hit_uuids(&reopened, &probe, 10).contains(&uuid),
+        "{uuid}, stranded by a later upsert, is missing from its own top 10 \
+         with no reopen"
+    );
+}
+
 /// Uuids of `store`'s top `k` hits for `query`, in rank order.
 fn hit_uuids(store: &HnswStore, query: &[f32], k: usize) -> Vec<String> {
     let hits = store.search(query, k).expect("search");
