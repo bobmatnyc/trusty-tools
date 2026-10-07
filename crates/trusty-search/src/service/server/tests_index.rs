@@ -8,6 +8,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 #[test]
+#[serial_test::parallel]
 fn index_disk_and_mtime_handles_missing_dir() {
     let id = format!("nonexistent-index-{}", std::process::id());
     // #4706: a root with no `.trusty-search/` either — neither layout exists.
@@ -45,6 +46,7 @@ fn colocated_root_with(bytes: usize) -> tempfile::TempDir {
 /// id with no global dir, must report at least that payload's size.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn disk_bytes_sums_colocated_storage_not_just_the_legacy_dir() {
     const PAYLOAD: usize = 4096;
     let tmp = colocated_root_with(PAYLOAD);
@@ -72,6 +74,7 @@ fn disk_bytes_sums_colocated_storage_not_just_the_legacy_dir() {
 /// for a never-written index — trading a misleading `0` for a misleading `0`.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn disk_bytes_is_none_only_when_neither_layout_exists() {
     let empty = tempfile::tempdir().expect("tempdir");
     let id = format!("neither-4706-{}", std::process::id());
@@ -154,6 +157,7 @@ fn last_indexed_takes_the_newer_of_the_two_layouts() {
 /// name alone is a coincidence; `index.redb` is what makes it storage.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn colocated_dir_without_a_redb_is_not_counted_as_a_corpus() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp
@@ -181,6 +185,7 @@ fn colocated_dir_without_a_redb_is_not_counted_as_a_corpus() {
 /// two cannot drift.
 /// Test: this test.
 #[test]
+#[serial_test::parallel]
 fn last_indexed_only_matches_the_mtime_from_the_full_helper() {
     let tmp = colocated_root_with(256);
     let id = format!("split-4706-{}", std::process::id());
@@ -456,6 +461,7 @@ async fn create_index_rejects_nonexistent_root_path() {
 /// panic, ensuring no leaked directories.
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_canonicalizes_symlinked_root_path() {
     use crate::core::registry::IndexId;
     use crate::core::registry::IndexRegistry;
@@ -508,7 +514,7 @@ async fn create_index_canonicalizes_symlinked_root_path() {
     )
     .await;
     let _ = std::fs::remove_file(&link_path); // cleanup symlink (TempDir drops real_dir)
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_create_ok(resp).await;
 
     let handle = state_arc
         .registry
@@ -531,6 +537,7 @@ async fn create_index_canonicalizes_symlinked_root_path() {
 /// sensitive-root denylist). `TempDir` provides RAII cleanup even on panic
 /// — no leaked directories.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_accepts_valid_absolute_root_path() {
     use crate::core::registry::IndexRegistry;
 
@@ -567,6 +574,21 @@ async fn create_index_accepts_valid_absolute_root_path() {
     )
     .await;
     // _test_dir is dropped here → RAII cleanup
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_create_ok(resp).await;
+}
+
+/// #9233: a non-200 from `create_index_handler` panics with the response
+/// body, so a recurrence names the failing step instead of a bare
+/// `500 != 200`.
+async fn assert_create_ok(resp: axum::response::Response) {
+    let status = resp.status();
+    if status == StatusCode::OK {
+        return;
+    }
+    let body = match axum::body::to_bytes(resp.into_body(), 1 << 20).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => format!("<body unreadable: {e}>"),
+    };
+    panic!("create_index returned {status}, expected 200 OK; body: {body}");
 }
 // Denylist tests live in `tests_denylist.rs` (split to keep this file ≤ 500 lines).

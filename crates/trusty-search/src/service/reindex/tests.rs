@@ -18,6 +18,7 @@ use std::sync::Arc;
 /// assert only the api file was indexed.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_honours_include_paths_filter() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -103,6 +104,7 @@ async fn reindex_honours_include_paths_filter() {
 /// must include files inside `common-utils/` but exclude `other-repo/`.
 /// Uses the BM25-only path (no embedder needed) for hermetic execution.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_honours_path_filter() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -183,6 +185,7 @@ async fn reindex_honours_path_filter() {
 }
 
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_walks_directory_and_emits_events() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -252,6 +255,7 @@ async fn reindex_walks_directory_and_emits_events() {
 /// walk + stages + kg + other reconstructs `elapsed_ms`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_emits_per_stage_timings() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -337,6 +341,7 @@ async fn reindex_emits_per_stage_timings() {
 ///      walker regression).
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_persists_chunks_end_to_end() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -503,6 +508,7 @@ async fn reindex_persists_chunks_end_to_end() {
 /// recognised metadata files exist in `root_path`. Uses a `MockEmbedder`
 /// so the test is fully hermetic.
 #[tokio::test]
+#[serial_test::parallel]
 async fn context_embedding_populated_after_reindex() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::core::store::{UsearchStore, VectorStore};
@@ -564,6 +570,7 @@ async fn context_embedding_populated_after_reindex() {
 /// Test: this test (daemon-free; the real-embedder spawn path is exercised
 /// only by the ignore-tagged ONNX integration tests).
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_marks_failed_on_zero_vectors_and_preserves_corpus() {
     use crate::core::embed::Embedder;
     use crate::core::store::{UsearchStore, VectorStore};
@@ -694,6 +701,7 @@ async fn reindex_marks_failed_on_zero_vectors_and_preserves_corpus() {
 /// does become `Ready` once the deferred pass finishes.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn defer_embed_semantic_stage_not_ready_before_background_pass_completes() {
     use crate::core::embed::Embedder;
     use crate::core::store::{UsearchStore, VectorStore};
@@ -800,6 +808,7 @@ async fn defer_embed_semantic_stage_not_ready_before_background_pass_completes()
 /// embedding stays `None` so the router falls back to a neutral 1.0
 /// weight for this index.
 #[tokio::test]
+#[serial_test::parallel]
 async fn context_embedding_none_when_no_metadata() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -977,6 +986,7 @@ fn make_handle_with_skip_vector(
 /// that `search_capabilities` advertises bm25/literal/exact_match.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn stage_1_completes_and_search_works_before_embedding() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1031,6 +1041,7 @@ async fn stage_1_completes_and_search_works_before_embedding() {
 /// The CLI `--lexical-only` flag and the `POST /indexes` `lexical_only`
 /// field both end up here.
 #[tokio::test]
+#[serial_test::parallel]
 async fn lexical_only_index_never_runs_stage_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1115,6 +1126,7 @@ async fn lexical_only_index_never_runs_stage_2() {
 /// are all zero.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_index_never_runs_phase3() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1177,6 +1189,7 @@ async fn skip_kg_index_never_runs_phase3() {
 /// reflects exactly that split.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_vector_index_never_embeds() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1291,6 +1304,7 @@ async fn search_capabilities_grows_as_stages_complete() {
 /// and assert all three fields are correct.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn walk_diagnostics_populated_after_reindex() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -1331,6 +1345,7 @@ async fn walk_diagnostics_populated_after_reindex() {
 /// that `last_walk_files_seen == 0` and `last_walk_error.is_some()`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn walk_diagnostics_error_set_when_zero_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -2000,6 +2015,7 @@ fn incremental_reindex_carryover_failure_aborts() {
 /// `handle.last_indexed_at` is `Some` and parseable as RFC-3339.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn last_indexed_stamped_after_reindex() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -2039,6 +2055,7 @@ async fn last_indexed_stamped_after_reindex() {
 /// corpus total both after the first and after the second pass.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn lexical_chunks_reports_corpus_total_not_pass_count() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -2274,6 +2291,7 @@ fn write_minimal_xlsx(path: &std::path::Path, cell_text: &str) {
 /// per document's distinctive term and asserts each returns a hit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn office_documents_are_indexed_and_lexically_searchable() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
@@ -2516,6 +2534,7 @@ async fn reindex_producer_panic_does_not_report_complete() {
 /// that file may keep a hash; the other must be retried next time.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reindex_withholds_the_hash_of_a_file_whose_chunks_did_not_land() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();

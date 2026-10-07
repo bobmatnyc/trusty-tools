@@ -73,6 +73,7 @@ fn minimal_raw_chunk(id: &str) -> RawChunk {
 /// indexer's symbol graph is empty.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn skip_kg_true_entry_never_loads_persisted_graph_via_build_indexer_from_entry() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -144,6 +145,7 @@ async fn skip_kg_true_entry_never_loads_persisted_graph_via_build_indexer_from_e
 /// Test: this IS the test; exercises the exact call path used by the fixed
 /// `create_index_handler`.
 #[tokio::test]
+#[serial_test::parallel]
 async fn colocated_create_handler_path_survives_simulated_reload() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -220,6 +222,7 @@ async fn colocated_create_handler_path_survives_simulated_reload() {
 /// state).
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn build_store_for_entry_flags_load_failure_on_corrupt_snapshot() {
     use crate::core::store::{UsearchStore, VectorStore};
 
@@ -278,6 +281,7 @@ async fn build_store_for_entry_flags_load_failure_on_corrupt_snapshot() {
 /// all and asserts `hnsw_load_failed` stays `false`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn build_store_for_entry_does_not_flag_first_boot_as_failure() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -306,6 +310,7 @@ async fn build_store_for_entry_does_not_flag_first_boot_as_failure() {
 /// `has_corpus_store` and that the corpus path is inside the project root.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn colocated_create_path_wires_corpus_store_for_schema_version() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -345,6 +350,7 @@ async fn colocated_create_path_wires_corpus_store_for_schema_version() {
 /// app-data corpus exists.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn legacy_non_colocated_path_does_not_panic() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -383,6 +389,7 @@ async fn legacy_non_colocated_path_does_not_panic() {
 /// selection by `dedup_by_corpus_path_keeps_most_recent`.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn warm_boot_shared_root_double_open_is_prevented_by_dedup() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -717,6 +724,7 @@ async fn build_store_for_entry_flags_load_failure_when_legacy_storage_path_unres
 /// asserts both flags stay `false` despite 0 chunks / no snapshot.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn build_indexer_from_entry_does_not_flag_legitimately_empty_index_as_failed() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -762,6 +770,7 @@ async fn build_indexer_from_entry_does_not_flag_legitimately_empty_index_as_fail
 /// are held; asserts both are healthy and dedup returns both entries.
 /// Test: this IS the test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn distinct_roots_open_independent_corpora() {
     let a = tempdir().unwrap();
     let b = tempdir().unwrap();

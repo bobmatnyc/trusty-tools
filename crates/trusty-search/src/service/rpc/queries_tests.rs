@@ -300,6 +300,7 @@ fn assert_non_trivial(body: &serde_json::Value, field: &str, what: &str) {
 /// shape.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn search_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
     let query = serde_json::json!({ "text": TERM, "top_k": 5, "expand_graph": false });

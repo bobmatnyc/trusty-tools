@@ -125,6 +125,7 @@ async fn detail_entry(state: Arc<SearchAppState>) -> serde_json::Value {
 /// and values beside the additions.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_reports_zero_vectors() {
     let entry = detail_entry(state_with("empty-store", 17, 0).await).await;
 
@@ -176,6 +177,7 @@ async fn list_indexes_details_reports_zero_vectors() {
 /// per-boot value unchanged, so the wire meaning of neither field shifts.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_reports_embed_lag() {
     let entry = detail_entry(state_with("lagging", 20, 8).await).await;
 
@@ -239,6 +241,7 @@ async fn list_indexes_without_details_is_unchanged() {
 /// report that string.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_indexes_details_reports_last_indexed() {
     let state = state_with("stamped", 3, 3).await;
     {
@@ -274,6 +277,7 @@ async fn list_indexes_details_reports_last_indexed() {
 /// What: drives both handlers over one fixture and compares the six shared keys.
 /// Test: this function.
 #[tokio::test]
+#[serial_test::parallel]
 async fn list_and_status_agree_on_vector_lane_health() {
     let state = state_with("agreement", 12, 5).await;
     let entry = detail_entry(Arc::clone(&state)).await;

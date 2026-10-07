@@ -76,6 +76,7 @@ async fn seeded(
 /// `TRUSTY_VECTOR_QUANT` instead would name what the NEXT index gets, which is
 /// the opposite of the truth on every index the backfill exists for.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_reports_the_live_vector_quantization() {
     let (state, _root, _snap, _store) = seeded("q-status").await;
     let Json(body) = index_status_handler(State(state), Path("q-status".to_string()))

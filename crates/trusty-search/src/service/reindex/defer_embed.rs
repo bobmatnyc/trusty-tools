@@ -623,6 +623,7 @@ mod tests {
     /// clobbered to `Ready`).
     /// Test: this IS the test.
     #[tokio::test]
+    #[serial_test::parallel]
     async fn embed_catch_up_completion_never_clobbers_a_disable_that_landed_first() {
         use crate::core::registry::StageState;
 

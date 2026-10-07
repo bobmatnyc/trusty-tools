@@ -296,6 +296,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
 /// temp-dir root.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn create_index_allows_sensitive_path_when_opted_in() {
     use crate::core::registry::{IndexId, IndexRegistry};
 

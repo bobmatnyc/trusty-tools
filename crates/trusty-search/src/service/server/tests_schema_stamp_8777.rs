@@ -48,6 +48,7 @@ async fn a_created_index_is_stamped_at_the_current_schema() {
 /// #8777 control: a corpus that already holds unstamped rows came from an
 /// older daemon, so stamping it would skip migrations it still needs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_restored_unstamped_corpus_is_not_stamped() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut entry =

@@ -522,6 +522,7 @@ async fn completed_reindex_leaves_no_checkpoint() {
 ///
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn resume_kill_switch_disables_adoption() {
     if !crate::service::test_isolation::run_isolated(
         "service::reindex::resume_tests::resume_kill_switch_disables_adoption",

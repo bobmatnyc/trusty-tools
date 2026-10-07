@@ -233,6 +233,7 @@ async fn reindex_status_aborted_memory_serializes_lowercase() {
 /// field flips from `"indexing"` to `"ready"`.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn index_status_reports_indexing_then_ready() {
     use crate::core::{
         indexer::CodeIndexer,

@@ -77,6 +77,7 @@ async fn only_kept_is_indexed(path_name: &str, indexer: &Arc<RwLock<CodeIndexer>
 /// Fails with the #8922 fixes disabled on the watcher, rescan and boot arms (the sops
 /// file and, for boot, the excluded file are indexed) and on the pushed arm.
 #[tokio::test]
+#[serial_test::parallel]
 async fn every_ingest_path_skips_a_file_the_walker_excludes() {
     let (_temp, root) = tree();
     let roots = WatchRoots {
@@ -140,6 +141,7 @@ async fn every_ingest_path_skips_a_file_the_walker_excludes() {
 /// Fails with the #8922 fixes disabled: the old skip-dir check let `secrets/` through to
 /// `index_file`, and nothing removed the sops file's plaintext chunks.
 #[tokio::test]
+#[serial_test::parallel]
 async fn boot_reconcile_delta_honours_the_walker_policy() {
     let (_temp, root) = tree();
     let booted = Arc::new(handle("x8922-purge", &root, true));
@@ -260,6 +262,7 @@ async fn open_rescan(
 /// arm's purge reverted to `remove_file_no_kg_rebuild`: the second open rescan
 /// reports the file unchanged and it stays empty.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_purged_file_is_reindexed_once_readmitted() {
     for arm in ["sweep", "boot", "gate", "sops", "indexer"] {
         let (_temp, root) = tree();
@@ -334,6 +337,7 @@ async fn a_purged_file_is_reindexed_once_readmitted() {
 /// cfa841fc78, where that glob matched every path and the rescan purged the
 /// whole index.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_restored_invalid_glob_neither_purges_nor_hides() {
     use crate::core::embed::{Embedder, MockEmbedder};
     use crate::service::persistence::PersistedIndex;

@@ -160,6 +160,7 @@ async fn a_pinned_semantic_query_with_a_failed_embed_is_503_not_500() {
 /// again, so the count read 2.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn one_failed_query_embed_counts_once_against_the_embedder() {
     let id = "fail-embed-count-8348";
     let (state, _tmp) = state_with_failing_embedder(id).await;
