@@ -1,5 +1,5 @@
 {
-  "about": "Gate floor for tests/recall_eval.rs (#9281). Measured 2026-10-07 on main e225efc32e with the real all-MiniLM-L6-v2 fp32 model, macOS arm64, CPU. hit@1 may rise in a reviewed diff; lowering it is a release decision. superseded_above_current is pinned at 0 in code and a file that says otherwise is refused.",
+  "about": "Gate floor for tests/recall_eval.rs (#9281). Measured 2026-10-07 on main e225efc32e and re-measured after merging origin/main 7728a3248b (27/30, unchanged) with the real all-MiniLM-L6-v2 fp32 model, macOS arm64, CPU. hit@1 may rise in a reviewed diff; lowering it is a release decision. superseded_above_current is pinned at 0 in code and a file that says otherwise is refused.",
   "model": "all-MiniLM-L6-v2",
   "queries": 30,
   "hit_at_1": 27,

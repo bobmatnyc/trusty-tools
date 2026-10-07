@@ -208,9 +208,11 @@ struct Baseline {
 ///
 /// Why (#9281 criterion 2): a gate that reads a missing floor as zero passes
 /// every regression. What: a missing, unreadable, unparseable or
-/// unknown-field file is an error, and so is one with no queries, a hit@1
-/// above its query count, or a superseded count other than the code pin.
-/// Test: `a_missing_baseline_fails_the_gate`, `a_corrupt_baseline_fails_the_gate`.
+/// unknown-field file is an error, and so is one with no queries, a zero
+/// hit@1 floor, a hit@1 above its query count, or a superseded count other
+/// than the code pin.
+/// Test: `a_missing_baseline_fails_the_gate`, `a_corrupt_baseline_fails_the_gate`,
+/// `a_zero_floor_never_reaches_the_gate`.
 fn load_baseline(path: &Path) -> Result<Baseline> {
     // See #9281: fail closed — never a default baseline.
     let raw = std::fs::read_to_string(path).with_context(|| {
@@ -224,6 +226,12 @@ fn load_baseline(path: &Path) -> Result<Baseline> {
     ensure!(
         b.queries > 0 && b.groups > 0,
         "baseline records no queries or groups"
+    );
+    // #9281: a zero floor is `Baseline::default()`'s, the red-proof's floor;
+    // it passes every hit@1 regression, so the shipped gate refuses it.
+    ensure!(
+        b.hit_at_1 > 0,
+        "baseline hit@1 floor is zero — a zero floor passes every regression"
     );
     ensure!(
         b.hit_at_1 <= b.queries,
@@ -361,12 +369,16 @@ struct GroupOutcome {
 }
 
 impl GroupOutcome {
-    /// The superseded drawer was recalled and outranks (or replaces) the current one.
+    /// The group fails: the superseded drawer outranks the current one, or the
+    /// current drawer was not recalled at all.
+    /// Test: `an_unrecalled_drawer_counts_against_the_gate`.
     fn superseded_above(&self) -> bool {
-        match (self.superseded, self.current) {
-            (Some(s), Some(c)) => s < c,
-            (Some(_), None) => true,
-            (None, _) => false,
+        match (self.current, self.superseded) {
+            (Some(c), Some(s)) => s < c,
+            (Some(_), None) => false,
+            // #9281: a missing `rank_of` for the current drawer is a failure,
+            // never a skip — a group that recalls neither drawer proves nothing.
+            (None, _) => true,
         }
     }
 }
@@ -788,4 +800,75 @@ fn the_verdict_fails_below_baseline_or_on_any_superseded_hit() {
         assert!(verdict(&r, &baseline, "m").is_err());
     }
     assert!(verdict(&pass, &baseline, "other-model").is_err());
+}
+
+/// Why (#9281 Fail-Open Check): `Baseline::default()` is the red-proof's zero
+/// floor and must never become the shipped gate's floor.
+/// What: a baseline file carrying a zero hit@1 floor is refused at load, and
+/// the default baseline itself fails the verdict on a perfect report.
+#[test]
+fn a_zero_floor_never_reaches_the_gate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("baseline.json");
+    let zero = r#"{"model":"m","queries":1,"groups":1,"hit_at_1":0,"superseded_above_current":0}"#;
+    std::fs::write(&path, zero).expect("write");
+    let err = load_baseline(&path).expect_err("a zero floor must fail the gate");
+    assert!(format!("{err:#}").contains("floor is zero"), "{err:#}");
+    let perfect = Report {
+        queries: vec![QueryOutcome {
+            id: "q".into(),
+            expected: "d".into(),
+            rank: Some(0),
+            top: None,
+        }],
+        groups: vec![GroupOutcome {
+            id: "g".into(),
+            mechanism: Mechanism::FactKey,
+            current: Some(0),
+            superseded: Some(1),
+            scores: [None, None],
+        }],
+    };
+    assert!(verdict(&perfect, &Baseline::default(), "m").is_err());
+}
+
+/// Why (#9281 Fail-Open Check): a drawer `rank_of` cannot find must count
+/// against the gate, never be skipped.
+/// What: an unrecalled expected drawer is a hit@1 miss, and a group whose
+/// current drawer is unrecalled fails the pin even when the superseded one is
+/// unrecalled too.
+#[test]
+fn an_unrecalled_drawer_counts_against_the_gate() {
+    let report = Report {
+        queries: vec![QueryOutcome {
+            id: "q".into(),
+            expected: "d".into(),
+            rank: None,
+            top: None,
+        }],
+        groups: vec![GroupOutcome {
+            id: "g".into(),
+            mechanism: Mechanism::Demotion,
+            current: None,
+            superseded: None,
+            scores: [None, None],
+        }],
+    };
+    assert_eq!(report.hit_at_1(), 0, "an unrecalled drawer is a miss");
+    assert_eq!(
+        report.superseded_above().len(),
+        1,
+        "an unrecalled current drawer fails its group"
+    );
+    let floor_only = Baseline {
+        model: "m".into(),
+        queries: 1,
+        groups: 1,
+        ..Baseline::default()
+    };
+    let err = verdict(&report, &floor_only, "m").expect_err("the gate must fail");
+    assert!(
+        format!("{err:#}").contains("superseded-above-current"),
+        "{err:#}"
+    );
 }
