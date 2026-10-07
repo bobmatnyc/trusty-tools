@@ -12,7 +12,7 @@ use tempfile::TempDir;
 use super::shim::{OpShim, install_op};
 use super::{
     OnePasswordBackend, OnePasswordSettings, SERVICE_ACCOUNT_TOKEN_ENV, inherited_op_vars, item,
-    markers, open, token_from,
+    markers, open_in, token_from,
 };
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 use crate::store::config::{CliSettings, MachineSecretsConfig, load_machine_at};
@@ -571,8 +571,8 @@ fn onepassword_machine_program_pin_is_used_and_must_be_absolute() {
 
 /// Why: #7519 P1 carry-over (a) — 1Password opens only when the untracked
 /// machine config enables it, so every value this server writes there is
-/// one the delete sweep reaches. Opening spawns nothing; #7519: it finds
-/// `op` in a `PATH` value handed in, never the process's own.
+/// one the delete sweep reaches. Opening spawns nothing; #7524 P2-M2: it
+/// finds `op` in the directory list handed in, never a `PATH`.
 /// Test: itself.
 #[test]
 fn onepassword_open_requires_machine_enablement() {
@@ -585,7 +585,7 @@ fn onepassword_open_requires_machine_enablement() {
         if let Some(yaml) = yaml {
             std::fs::write(&path, yaml).unwrap();
         }
-        open(&path, &templates, None, Some(op_dir.as_os_str()))
+        open_in(&path, &templates, None, std::slice::from_ref(&op_dir))
     };
     for yaml in [None, Some("secrets:\n  default_backend: keychain\n")] {
         let err = open_with(yaml).unwrap_err();
