@@ -144,6 +144,14 @@ fn config_tracked_cli_settings_are_refused_on_every_build() {
             assert_eq!(err.to_string(), expected, "{key}");
             let debug = format!("{err:?}");
             assert!(!debug.contains("SENTINEL-7519"), "{key}: {debug}");
+            assert!(
+                matches!(
+                    &err,
+                    SecretsError::TrackedCliSettingRefused { path: p, key: k }
+                        if p == &path && *k == key
+                ),
+                "{debug}"
+            );
         }
         check_project_backend(Some(&tracked), &path).expect_err(key);
     }

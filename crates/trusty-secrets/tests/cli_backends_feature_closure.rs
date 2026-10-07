@@ -90,7 +90,7 @@ fn cli_backends_feature_closure_never_reaches_trusty_common() {
     let cli = table
         .get("cli-backends")
         .expect("the `cli-backends` feature exists");
-    assert_eq!(cli, &vec!["store".to_string()]);
+    assert_eq!(cli, &["store"]);
 
     let reached = reached_deps(&table, "cli-backends");
     assert!(!reached.contains("trusty-common"), "{reached:?}");
