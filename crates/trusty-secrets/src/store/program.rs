@@ -44,6 +44,7 @@ pub(crate) fn onepassword_dirs() -> Vec<PathBuf> {
 
 /// The first regular, executable `name` in an absolute directory of
 /// `dirs`, in order; a relative entry is skipped (#7524 P2-M2).
+#[cfg(feature = "cli-backends")]
 pub(crate) fn find_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter()
         .filter(|dir| dir.is_absolute())
