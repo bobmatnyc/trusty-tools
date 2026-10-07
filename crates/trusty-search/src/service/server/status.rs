@@ -435,6 +435,11 @@ pub(crate) async fn index_status_report(
     Ok(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
+        // #7434: the full root table, primary first — what a consumer such as
+        // trusty-agents' `covers()` (#7429) reads to learn every tree.
+        "roots": handle.roots().all(),
+        // #7434: additional roots absent at the last walk, so not covered.
+        "missing_index_roots": walk_diag.missing_index_roots,
         "chunk_count": chunk_count,
         "corpus_open_failure": corpus_open_failure,
         // #7979: every outstanding migration fault, or null.
@@ -485,6 +490,8 @@ pub(crate) async fn index_status_report(
             "active": watcher_active,
             "network_mount_degraded": watcher_degraded_reason.is_some(),
             "degraded_reason": watcher_degraded_reason,
+            // #7434: each root's own watch — `watching`, `degraded`, `failed`.
+            "roots": state.watcher_manager.root_watch_states(&index_id).await,
         },
     }))
 }

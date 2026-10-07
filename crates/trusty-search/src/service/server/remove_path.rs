@@ -3,8 +3,9 @@
 //! Why: chunk keys are index-relative, but search answers carry absolute
 //! paths. `remove-file` matched the path exactly, so an absolute path removed
 //! nothing and answered `200 removed_chunks: 0`.
-//! What: [`remove_keys`] relativizes an absolute path against the root by
-//! text and refuses any path that names no file under the root with a 400
+//! What: [`remove_keys`] relativizes an absolute path against the index's
+//! roots by text (#7434: every root, keyed `@root<n>/…` under an additional
+//! one) and refuses any path that names no file under a root with a 400
 //! naming the accepted forms.
 //! Test: `remove_file_takes_an_absolute_in_root_path_9236` and its siblings
 //! in `crate::service::rpc::writes`'s tests.
@@ -14,6 +15,7 @@ use std::path::{Component, Path};
 use axum::http::StatusCode;
 
 use super::helpers::file_is_within_root;
+use crate::core::index_roots::{stored_path_for_slot, IndexRoots};
 
 /// The stored keys one `remove-file` path names, normalized key first.
 ///
@@ -29,25 +31,44 @@ use super::helpers::file_is_within_root;
 /// `remove_file_refuses_a_path_outside_the_root_9236`,
 /// `remove_file_refuses_a_relative_path_outside_the_root_9236`,
 /// `remove_file_by_a_symlinked_path_removes_the_link_key_9236`,
-/// `remove_file_still_removes_a_pushed_absolute_key_9236`.
+/// `remove_file_still_removes_a_pushed_absolute_key_9236`,
+/// `remove_file_maps_an_additional_root_path_to_its_stored_key`.
 pub(super) fn remove_keys(
     index_id: &str,
-    root: &Path,
+    roots: &IndexRoots,
     path: &str,
 ) -> Result<Vec<String>, (StatusCode, serde_json::Value)> {
+    let root = roots.primary();
     // #9236: a relative path is checked too, with no syscall — `""`, `.` and a
     // `..` climb used to reach the store and answer `200 removed_chunks: 0`.
     if !Path::new(path).is_absolute() {
         if !names_an_in_root_file(path, root) {
-            return Err(outside_root(index_id, root, path));
+            return Err(outside_root(index_id, roots, path));
         }
         return Ok(vec![path.to_string()]);
     }
     // #9236: relativized by text first, so an in-root symlink keeps its key.
-    match absolute_key(root, Path::new(path)) {
-        Some(key) if names_an_in_root_file(&key, root) => Ok(vec![key, path.to_string()]),
-        _ => Err(outside_root(index_id, root, path)),
+    // #7434: against every root, deepest first; a file under additional slot
+    // `n` maps to its stored `@root<n+1>/…` key, the one the hash forget uses.
+    let mut table: Vec<(Option<usize>, &Path)> = std::iter::once((None, root))
+        .chain(
+            roots
+                .additional()
+                .iter()
+                .enumerate()
+                .map(|(n, r)| (Some(n), r.as_path())),
+        )
+        .collect();
+    table.sort_by_key(|(_, r)| std::cmp::Reverse(r.components().count()));
+    for (slot, r) in table {
+        if let Some(rel) = absolute_key(r, Path::new(path)) {
+            if !names_an_in_root_file(&rel, r) {
+                break;
+            }
+            return Ok(vec![stored_path_for_slot(slot, &rel), path.to_string()]);
+        }
     }
+    Err(outside_root(index_id, roots, path))
 }
 
 /// True when the relative `key` names a file under the root.
@@ -91,8 +112,14 @@ fn absolute_key(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The 400 a path naming no file under the index root answers.
-fn outside_root(index_id: &str, root: &Path, path: &str) -> (StatusCode, serde_json::Value) {
-    let root = root.display();
+fn outside_root(index_id: &str, roots: &IndexRoots, path: &str) -> (StatusCode, serde_json::Value) {
+    // #7434: name every root the path could have been under.
+    let root = roots
+        .all()
+        .iter()
+        .map(|r| r.display().to_string())
+        .collect::<Vec<_>>()
+        .join("`, `");
     (
         StatusCode::BAD_REQUEST,
         serde_json::json!({

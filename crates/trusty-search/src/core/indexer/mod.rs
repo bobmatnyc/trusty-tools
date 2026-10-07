@@ -193,6 +193,11 @@ pub(crate) const HNSW_SNAPSHOT_BATCH_INTERVAL: u32 = 16;
 pub struct CodeIndexer {
     pub index_id: String,
     pub root_path: std::path::PathBuf,
+    /// #7434: mirror of `IndexHandle::additional_roots`, so a stored
+    /// `@root<n>/…` chunk path resolves to its own root at materialisation.
+    /// Kept in sync by [`CodeIndexer::set_additional_roots`] wherever a handle
+    /// is built or its root table changes; empty for single-root indexes.
+    pub additional_roots: Vec<std::path::PathBuf>,
 
     pub(super) embedder: Option<Arc<dyn Embedder>>,
     pub(super) store: Option<Arc<dyn VectorStore>>,
@@ -719,6 +724,20 @@ impl CodeIndexer {
         self.root_path = root_path.into();
     }
 
+    /// #7434: replace the additional-root table stored `@root<n>/…` paths
+    /// resolve against — the multi-root twin of [`Self::set_root_path`].
+    pub fn set_additional_roots(&mut self, roots: Vec<std::path::PathBuf>) {
+        self.additional_roots = roots;
+    }
+
+    /// #7434: this indexer's root table, used to resolve stored chunk paths.
+    pub(crate) fn chunk_roots(&self) -> crate::core::index_roots::IndexRoots {
+        crate::core::index_roots::IndexRoots::new(
+            self.root_path.clone(),
+            self.additional_roots.clone(),
+        )
+    }
+
     pub fn new(index_id: impl Into<String>, root_path: impl Into<std::path::PathBuf>) -> Self {
         let cap =
             NonZeroUsize::new(QUERY_CACHE_CAPACITY).expect("QUERY_CACHE_CAPACITY must be non-zero");
@@ -727,6 +746,7 @@ impl CodeIndexer {
         Self {
             index_id: index_id.into(),
             root_path: root_path.into(),
+            additional_roots: Vec::new(),
             embedder: None,
             store: None,
             embed_pool: arc_swap::ArcSwapOption::empty(),

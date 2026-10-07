@@ -110,6 +110,20 @@ pub(super) struct IndexDetailEntry {
 pub struct CreateIndexRequest {
     pub id: String,
     pub root_path: std::path::PathBuf,
+    /// #7434: additional index roots, beyond `root_path`. Absent ⇒ a
+    /// single-root index.
+    ///
+    /// Why: an index spanning an OKG tree plus one tree per project (#7429)
+    /// is created whole, so its first reindex walks the full table.
+    /// What: absolute directories, run through the same gate as
+    /// `POST /indexes/:id/roots` (`indexes_roots::resolve_added_roots`).
+    /// Naming `root_path` again is a no-op. On an id that is already
+    /// registered, roots it does not hold are refused `409` — add them with
+    /// `POST /indexes/:id/roots`.
+    /// Test: `create_index_accepts_additional_roots`,
+    /// `create_index_refuses_a_root_another_index_owns`.
+    #[serde(default)]
+    pub roots: Option<Vec<std::path::PathBuf>>,
     /// Subtrees (relative to `root_path`) to restrict indexing to. Forwarded
     /// from `trusty-search.yaml`'s `paths:` field by `trusty-search index`.
     /// Empty / missing = walk the entire `root_path`.

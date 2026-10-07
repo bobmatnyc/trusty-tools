@@ -652,6 +652,7 @@ fn teardown_lock_waiters(lock: &Arc<tokio::sync::RwLock<()>>) -> usize {
 /// its helper `pub(super)`.
 fn create_req(id: &str, root_path: std::path::PathBuf) -> super::router::CreateIndexRequest {
     super::router::CreateIndexRequest {
+        roots: None,
         id: id.to_string(),
         root_path,
         include_paths: None,

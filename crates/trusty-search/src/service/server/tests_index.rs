@@ -366,6 +366,7 @@ async fn create_index_rejects_relative_root_path() {
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
+            roots: None,
             id: "rel-bad".into(),
             root_path: std::path::PathBuf::from("claude-mpm"),
             include_paths: None,
@@ -410,6 +411,7 @@ async fn create_index_rejects_nonexistent_root_path() {
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
+            roots: None,
             id: "ghost".into(),
             root_path: std::path::PathBuf::from(
                 "/this/path/should/never/exist/trusty-search-test-xyz",
@@ -483,6 +485,7 @@ async fn create_index_canonicalizes_symlinked_root_path() {
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "symlinked".into(),
             // Register via the SYMLINK path — the registry should still
             // store the CANONICAL path so search queries from either
@@ -545,6 +548,7 @@ async fn create_index_accepts_valid_absolute_root_path() {
     let resp = create_index_handler(
         State(Arc::clone(&state_arc)),
         Json(CreateIndexRequest {
+            roots: None,
             id: "valid-abs".into(),
             root_path: test_root,
             include_paths: None,

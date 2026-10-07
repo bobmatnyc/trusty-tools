@@ -308,6 +308,8 @@ pub(crate) async fn reindex_report(
                     id: index_id.clone(),
                     indexer,
                     root_path: new_root,
+                    // #7434: only the primary root is overridden here.
+                    additional_roots: handle.additional_roots.clone(),
                     include_paths: handle.include_paths.clone(),
                     exclude_globs: handle.exclude_globs.clone(),
                     extensions: handle.extensions.clone(),
@@ -505,7 +507,7 @@ pub(crate) async fn start_release_catch_up(
 /// `a_reindex_whose_guard_is_poisoned_is_refused_and_queues_nothing`,
 /// `every_ingest_path_refuses_a_held_index`,
 /// `reindex_of_a_serve_only_index_is_refused_with_403`.
-fn claim_refusal(
+pub(super) fn claim_refusal(
     index_id: &IndexId,
     refused: ReindexClaimError,
 ) -> (StatusCode, serde_json::Value) {

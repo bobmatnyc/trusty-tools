@@ -260,6 +260,18 @@ pub struct IndexHandle {
     pub indexer: Arc<RwLock<CodeIndexer>>,
     pub root_path: std::path::PathBuf,
 
+    /// #7434: additional index roots this index also covers, beyond
+    /// [`Self::root_path`]. Empty for every single-root index.
+    ///
+    /// Why: one index can span an OKG tree plus one tree per project (#7429).
+    /// What: absolute, canonical directories, append-only — slot `n` is the
+    /// `@root<n+1>/` prefix of every stored path under it
+    /// ([`crate::core::index_roots`]). `root_path` stays the identity anchor:
+    /// id derivation, storage placement and the #402/#2178 hijack gate read it
+    /// alone.
+    /// Test: `walk_covers_every_index_root` in `service::reindex::multi_root_tests`.
+    pub additional_roots: Vec<std::path::PathBuf>,
+
     /// Subtrees (absolute paths) to restrict indexing to. Empty = walk the
     /// entire `root_path`. Sourced from `trusty-search.yaml`'s `paths:` field.
     ///
@@ -579,6 +591,15 @@ pub struct WalkDiagnostics {
     /// error.  `None` on a clean walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_walk_error: Option<String>,
+    /// #7434: index roots absent (or not directories) at the last walk.
+    ///
+    /// Why: a multi-root index whose additional root is unmounted still walks
+    /// its other roots and reports success; naming the absent root makes the
+    /// gap visible on `GET /indexes/:id/status`. An absent PRIMARY root keeps
+    /// the existing zero-file failure path.
+    /// Test: `walk_records_a_missing_additional_root`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_index_roots: Vec<String>,
 }
 
 impl IndexHandle {
@@ -598,6 +619,8 @@ impl IndexHandle {
             id,
             indexer,
             root_path,
+            // #7434: a bare handle is single-root.
+            additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
             extensions: Vec::new(),
@@ -627,6 +650,15 @@ impl IndexHandle {
             embedding_pause: Arc::new(crate::core::embed_pause::EmbeddingPause::new()),
             file_events: Arc::new(crate::core::file_events::FileEventFeed::new()),
         }
+    }
+
+    /// #7434: this index's root table — primary first, then the additional
+    /// roots in the order the corpus-path encoding numbers them.
+    pub fn roots(&self) -> crate::core::index_roots::IndexRoots {
+        crate::core::index_roots::IndexRoots::new(
+            self.root_path.clone(),
+            self.additional_roots.clone(),
+        )
     }
 }
 

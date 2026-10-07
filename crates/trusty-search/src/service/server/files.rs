@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::core::registry::{IndexHandle, IndexId};
 
-use super::helpers::file_is_within_root;
+use super::helpers::file_is_within_any_root;
 use super::router::{IndexFileRequest, RemoveFileRequest};
 use super::state::SearchAppState;
 
@@ -175,7 +175,7 @@ pub(crate) async fn remove_file_report(
         .map_err(|(status, body)| (status, body.0))?;
     // #9236: an absolute in-root path is removed under its stored key; one
     // outside the root is a 400 naming the accepted forms, not a silent 0.
-    let keys = super::remove_path::remove_keys(&index_id.0, &handle.root_path, &req.path)?;
+    let keys = super::remove_path::remove_keys(&index_id.0, &handle.roots(), &req.path)?;
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
@@ -480,14 +480,11 @@ async fn grep_one_index(
             continue;
         }
         counts.glob_matched_files += 1;
-        if !file_is_within_root(&rel, &handle.root_path) {
+        // #7434: any-of-N containment; `@root<n>/…` opens under its own root.
+        if !file_is_within_any_root(&rel, &handle.root_path, &handle.additional_roots) {
             continue;
         }
-        let abs = if std::path::Path::new(&rel).is_absolute() {
-            std::path::PathBuf::from(&rel)
-        } else {
-            handle.root_path.join(&rel)
-        };
+        let abs = handle.roots().resolve_absolute(&rel);
         match tokio::fs::read_to_string(&abs).await {
             Ok(content) => {
                 crate::service::grep::grep_file_content(&rel, &content, compiled, out, max_results);

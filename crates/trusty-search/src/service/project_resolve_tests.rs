@@ -27,6 +27,7 @@ fn cand(
     corpus: Option<u64>,
 ) -> Candidate {
     Candidate {
+        additional_roots: Vec::new(),
         index_id: id.to_string(),
         root_path: PathBuf::from(root),
         repo_identity: identity.map(str::to_string),
@@ -916,4 +917,36 @@ fn parse_classifies_paths_identities_and_names() {
     );
     assert!(ProjectQuery::parse("./rel/path").is_err());
     assert!(ProjectQuery::parse("   ").is_err());
+}
+
+/// Why (#7434): a path under an index's ADDITIONAL root belongs to that index;
+/// matched against primary roots only, it fell through to identity derivation
+/// (here a test failure) or to another index.
+/// What: a persisted row with an additional root, gathered the way the socket
+/// method gathers it; the longest prefix across every root still wins, so a
+/// deeper primary root of another index takes a path nested under it.
+/// Test: this test.
+#[test]
+fn a_path_under_an_additional_root_resolves_to_its_index() {
+    let row = |id: &str, root: &str, extra: &[&str]| PersistedIndex {
+        id: id.to_string(),
+        root_path: PathBuf::from(root),
+        additional_roots: extra.iter().map(PathBuf::from).collect(),
+        colocated: true,
+        ..Default::default()
+    };
+    let rows = vec![
+        row("assistant", "/w/okg", &["/w/projects/alpha"]),
+        row("deeper", "/w/projects/alpha/vendor", &[]),
+    ];
+    let candidates = gather_candidates(&rows, &[]);
+    let resolve_path = |p: &str| {
+        resolve(&ProjectQuery::Path(p.into()), &candidates, &NO_DERIVE)
+            .expect("resolves")
+            .index
+            .index_id
+    };
+    assert_eq!(resolve_path("/w/projects/alpha/src/lib.rs"), "assistant");
+    assert_eq!(resolve_path("/w/okg/notes.md"), "assistant");
+    assert_eq!(resolve_path("/w/projects/alpha/vendor/x.rs"), "deeper");
 }

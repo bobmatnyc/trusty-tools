@@ -66,6 +66,7 @@ fn fixture(dir: &Path, approved: &[&Path]) -> AllowlistPaths {
 
 fn create_req(id: &str, root_path: PathBuf) -> super::router::CreateIndexRequest {
     super::router::CreateIndexRequest {
+        roots: None,
         id: id.to_string(),
         root_path,
         include_paths: None,

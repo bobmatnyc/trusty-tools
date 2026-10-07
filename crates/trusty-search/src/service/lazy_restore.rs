@@ -276,6 +276,8 @@ pub(crate) async fn restore_index_on_demand(
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: entry.root_path,
+        // #7434: a multi-root index comes back multi-root.
+        additional_roots: entry.additional_roots,
         include_paths,
         exclude_globs: entry.exclude_globs,
         extensions,

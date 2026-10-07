@@ -1091,3 +1091,52 @@ fn patch_entry_for_a_missing_id_is_a_no_op() {
         "a no-op patch must not rewrite the file"
     );
 }
+
+/// #7434: `additional_roots` defaults to empty, round-trips in order, and
+/// stays out of the TOML when empty.
+///
+/// Why: the list's order is the `@root<n>/…` ordinal space, so a reordering
+/// round-trip re-points every stored path; and the no-migration claim rests
+/// on a legacy file still loading and a single-root index writing no key.
+/// Test: this test.
+#[test]
+fn additional_roots_round_trip() {
+    assert!(PersistedIndex::default().additional_roots.is_empty());
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        "[[index]]\nid = \"legacy\"\nroot_path = \"/tmp/legacy\"\n",
+    )
+    .unwrap();
+    let entries = load_index_registry_at(tmp.path()).unwrap();
+    assert!(entries[0].additional_roots.is_empty(), "a legacy row loads");
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let (a, b) = (PathBuf::from("/x/a"), PathBuf::from("/x/b"));
+    save_index_registry_at(
+        tmp.path(),
+        &[PersistedIndex {
+            id: "multi".into(),
+            root_path: PathBuf::from("/x/primary"),
+            additional_roots: vec![b.clone(), a.clone()],
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let entries = load_index_registry_at(tmp.path()).unwrap();
+    assert_eq!(
+        entries[0].additional_roots,
+        vec![b, a],
+        "order is the ordinal space"
+    );
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    save_index_registry_at(
+        tmp.path(),
+        &[PersistedIndex::new("single", PathBuf::from("/x/s"))],
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(tmp.path()).unwrap();
+    assert!(!text.contains("additional_roots"), "{text}");
+}

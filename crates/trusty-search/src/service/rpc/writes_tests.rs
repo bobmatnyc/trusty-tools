@@ -1641,3 +1641,7 @@ async fn remove_file_refuses_a_relative_path_outside_the_root_9236() {
     assert!(reply["removed_chunks"].as_u64() > Some(0), "{reply}");
     assert!(chunks_for(&state, "rp", FILE).await.is_empty());
 }
+
+// #7434: multi-root writes, a child module so it reuses this harness.
+#[path = "writes_7434_tests.rs"]
+mod roots_7434;

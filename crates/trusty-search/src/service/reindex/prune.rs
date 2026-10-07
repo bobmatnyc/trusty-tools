@@ -40,13 +40,14 @@ use std::sync::Arc;
 /// `strip_prefix` fails (e.g. a symlink whose target escapes the root);
 /// the batch loop has the same fallback, so the strings still match.
 ///
-/// Test: `to_corpus_relative_path_agrees_with_batch_loop` and
+/// Test: `additional_root_file_is_stored_root_relative`,
+/// `to_corpus_relative_path_agrees_with_batch_loop` and
 /// `disk_existence_guard_skips_live_file` in `prune_tests.rs`.
-pub(super) fn to_corpus_relative_path(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+pub(super) fn to_corpus_relative_path(root: &Path, additional: &[PathBuf], path: &Path) -> String {
+    // #7434: relative to the root that owns `path` — bare under the primary
+    // root (byte-identical to the single-root form), `@root<n>/…` under an
+    // additional one, absolute under none.
+    crate::core::index_roots::relative_path(root, additional, path)
 }
 
 /// What one prune pass did (#9212): files pruned, and files it could not prune.
@@ -96,7 +97,8 @@ pub(super) struct PruneOutcome {
 /// Test: `prune_pass_removes_deleted_file_from_staged_corpus`,
 /// `disk_existence_guard_skips_live_file` and
 /// `reindex_prunes_a_file_that_became_excluded_and_sops_content` in `prune_tests.rs`;
-/// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`.
+/// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`;
+/// an absent additional root by `a_missing_additional_root_keeps_its_chunks`.
 pub(super) async fn prune_deleted_files_from_staging(
     handle: &IndexHandle,
     walked_files: &[PathBuf],
@@ -108,7 +110,7 @@ pub(super) async fn prune_deleted_files_from_staging(
     // are guaranteed identical to those stored by the batch loop.
     let walked_set: std::collections::HashSet<String> = walked_files
         .iter()
-        .map(|p| to_corpus_relative_path(canonical_root, p))
+        .map(|p| to_corpus_relative_path(canonical_root, &handle.additional_roots, p))
         .collect();
 
     // Query the staging corpus for all file paths currently stored.
@@ -175,6 +177,18 @@ pub(super) async fn prune_deleted_files_from_staging(
     let mut pruned_paths_for_hash: Vec<String> = Vec::new();
     let mut failed_count: usize = 0;
 
+    // #7434: an additional root absent at walk time contributed no files, so
+    // every one of its keys is "unwalked". That is the same evidence an absent
+    // primary root gives, and that one fails closed; so does this — its chunks
+    // are kept until the root is back.
+    let missing_roots: Vec<PathBuf> = handle
+        .walk_diagnostics
+        .read()
+        .await
+        .missing_index_roots
+        .iter()
+        .map(PathBuf::from)
+        .collect();
     for file_path in &deleted_files {
         // SAFETY GUARD (fix 1): before removing anything, confirm the file
         // is genuinely absent from disk.  Reconstruct the absolute path from
@@ -185,7 +199,21 @@ pub(super) async fn prune_deleted_files_from_staging(
         // it — log a warn and skip.  This guard can never fire on a truly
         // deleted file because `PathBuf::exists` returns false for any path
         // that has no corresponding directory entry (including ENOENT).
-        let absolute = canonical_root.join(file_path);
+        // #7434: decoded through the root table, so an `@root<n>/…` key is
+        // stat'd and admitted at its own root, not under the primary.
+        let absolute = crate::core::index_roots::resolve_absolute(
+            canonical_root,
+            &handle.additional_roots,
+            file_path,
+        );
+        if missing_roots.iter().any(|m| absolute.starts_with(m)) {
+            tracing::warn!(
+                "reindex[{}]: prune: keeping {file_path} — its index root is absent, so the \
+                 walk is no evidence it was deleted (#7434)",
+                index_id.0,
+            );
+            continue;
+        }
         // #8922: a file still on disk that the walker now excludes is not a
         // normalisation mismatch — its chunks are pruned. Only an admitted or
         // undetermined file is kept (#7396: never delete on an uncertain answer).

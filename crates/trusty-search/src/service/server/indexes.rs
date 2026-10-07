@@ -420,6 +420,8 @@ pub(crate) async fn create_index_report(
         }
         // #8147: `colocated: false` never silently joins a colocated index.
         super::create_layout::refuse_layout_change(&req, Some(&*registered)).await?;
+        // #7434: `roots` the index does not hold are refused, never dropped.
+        super::indexes_roots::refuse_unapplied_roots(&req, &registered)?;
         return Ok(serde_json::json!({
             "id": req.id,
             "created": false,
@@ -499,6 +501,10 @@ pub(crate) async fn create_index_report(
             return Err(super::root_overlap::overlap_check_failed_response(&failure));
         }
     }
+    // #7434: create-time additional roots pass the add-roots gate; the
+    // registration claims are held to the registry insert.
+    let (additional_roots, _roots_claims) =
+        super::indexes_roots::admit_create_roots(state, &id, &req).await?;
     // #8147: before the embedder check, so a warming embedder's `503` never
     // hides a layout `409` the caller cannot retry past.
     super::create_layout::refuse_layout_change(&req, None).await?;
@@ -572,6 +578,7 @@ pub(crate) async fn create_index_report(
     let init_entry = crate::service::persistence::PersistedIndex {
         id: req.id.clone(),
         root_path: req.root_path.clone(),
+        additional_roots: additional_roots.clone(),
         colocated,
         skip_kg,
         skip_vector,
@@ -722,6 +729,7 @@ pub(crate) async fn create_index_report(
         crate::service::persistence::PersistedIndex {
             id: req.id.clone(),
             root_path: req.root_path.clone(),
+            additional_roots: additional_roots.clone(),
             include_paths: req.include_paths.clone().unwrap_or_default(),
             exclude_globs: exclude_globs.clone(),
             extensions: extensions.clone(),
@@ -854,6 +862,7 @@ pub(crate) async fn create_index_report(
         id: id.clone(),
         indexer: Arc::new(tokio::sync::RwLock::new(indexer)),
         root_path: req.root_path,
+        additional_roots,
         include_paths,
         exclude_globs,
         extensions,

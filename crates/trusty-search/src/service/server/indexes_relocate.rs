@@ -280,6 +280,9 @@ pub(crate) async fn relocate_index_report(
     let existing_entry = crate::service::persistence::PersistedIndex {
         id: id.to_string(),
         root_path: new_root.clone(),
+        // #7434: relocation moves the primary root only; the additional roots
+        // are other trees and carry forward unchanged.
+        additional_roots: existing.additional_roots.clone(),
         include_paths: existing
             .include_paths
             .iter()
@@ -416,6 +419,7 @@ pub(crate) async fn relocate_index_report(
         id: index_id.clone(),
         indexer,
         root_path: new_root.clone(),
+        additional_roots: existing.additional_roots.clone(),
         include_paths: existing.include_paths.clone(),
         exclude_globs: existing.exclude_globs.clone(),
         extensions: existing.extensions.clone(),

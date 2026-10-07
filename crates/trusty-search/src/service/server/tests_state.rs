@@ -46,6 +46,7 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
     let resp = create_index_handler(
         State(state_arc),
         Json(CreateIndexRequest {
+            roots: None,
             id: "demo".to_string(),
             root_path: test_root,
             include_paths: None,

@@ -35,6 +35,15 @@ use std::path::{Path, PathBuf};
 pub struct PersistedIndex {
     pub id: String,
     pub root_path: PathBuf,
+    /// #7434: additional index roots, in `@root<n>/` ordinal order.
+    ///
+    /// Why: a multi-root index must come back multi-root after a restart, or
+    /// the next reindex prunes every additional-root file. Append-only:
+    /// reordering re-points every stored `@root<n>/…` path. `serde(default)`
+    /// loads every older `indexes.toml`; an empty list is not written.
+    /// Test: `additional_roots_round_trip` in `persistence_tests.rs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_roots: Vec<PathBuf>,
     /// Subtrees (relative to `root_path`) to restrict indexing to. Sourced
     /// from `trusty-search.yaml`'s `paths:` field. `#[serde(default)]` so
     /// older `indexes.toml` files without these fields keep loading.
@@ -413,6 +422,7 @@ impl Default for PersistedIndex {
         Self {
             id: String::new(),
             root_path: PathBuf::new(),
+            additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
             extensions: Vec::new(),

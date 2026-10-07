@@ -32,10 +32,25 @@ fn canonical_or_raw(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// #7434: the index's root table with every root canonicalised, so a pushed
+/// `@root<n>/<rel>` resolves under its own root and an absolute push maps back
+/// to its stored key.
+fn canonical_roots(handle: &IndexHandle) -> crate::core::index_roots::IndexRoots {
+    crate::core::index_roots::IndexRoots::new(
+        canonical_or_raw(&handle.root_path),
+        handle
+            .additional_roots
+            .iter()
+            .map(|r| canonical_or_raw(r))
+            .collect(),
+    )
+}
+
 /// Whether the walker would admit the file a pushed write names.
 ///
 /// Why: a pushed write must not reach a file the reindex walk skips (#8922).
-/// What: `path` resolves against the index root. A `..` segment, or content
+/// What: `path` resolves against the index's root table (#7434: `@root<n>/…`
+/// under its own root). A `..` segment, or content
 /// over the walker's size caps, is excluded. A path on disk gets
 /// [`index_admission::admits`], the walker's own answer with ignore files. A
 /// path that is not on disk — a network-mounted root the caller reads for the
@@ -45,7 +60,8 @@ fn canonical_or_raw(path: &Path) -> PathBuf {
 /// cannot be read is undetermined, never admitted.
 /// Test: `pushed_write_to_an_excluded_path_is_refused_and_purged`,
 /// `pushed_write_over_a_size_cap_is_refused`,
-/// `pushed_write_the_filesystem_cannot_resolve_is_refused`.
+/// `pushed_write_the_filesystem_cannot_resolve_is_refused`,
+/// `a_gitignored_push_under_an_additional_root_is_refused`.
 pub(crate) fn admits_pushed(handle: &IndexHandle, path: &str, content_len: usize) -> Admission {
     let given = Path::new(path);
     if given
@@ -58,10 +74,12 @@ pub(crate) fn admits_pushed(handle: &IndexHandle, path: &str, content_len: usize
     if walker::len_exceeds_caps(given, content_len as u64, opts.data_file_max_bytes) {
         return Admission::Excluded;
     }
+    // #7434: a relative `@root<n>/…` push is checked at its own root; joined
+    // to the primary it named no file, so the ignore rules never ran (#8922).
     let abs = if given.is_absolute() {
         given.to_path_buf()
     } else {
-        canonical_or_raw(&handle.root_path).join(given)
+        canonical_roots(handle).resolve_absolute(path)
     };
     match abs.symlink_metadata() {
         Ok(_) => return index_admission::admits(handle, &abs),
@@ -155,8 +173,13 @@ async fn purge_pushed(
     if committed {
         indexer.record_incremental_commit(path).await;
     }
-    if let Ok(rel) = Path::new(path).strip_prefix(canonical_or_raw(&handle.root_path)) {
-        forget_file_hash(&handle.id, indexer, &rel.to_string_lossy()).await?;
+    // #7434: an absolute push under any root forgets its stored key —
+    // `@root<n>/…` under an additional root.
+    if Path::new(path).is_absolute() {
+        let key = canonical_roots(handle).relative_path(Path::new(path));
+        if !Path::new(&key).is_absolute() {
+            forget_file_hash(&handle.id, indexer, &key).await?;
+        }
     }
     Ok(removed)
 }

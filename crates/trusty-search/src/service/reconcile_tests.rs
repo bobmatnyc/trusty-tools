@@ -84,6 +84,7 @@ async fn stamp_handle_produces_valid_rfc3339_date() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("ts-validity"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "ts-validity",
@@ -282,6 +283,7 @@ async fn reconcile_stamps_head_sha_after_delta() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("test-stamp"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "test-stamp",
@@ -394,6 +396,7 @@ async fn reconcile_up_to_date_index_is_noop() {
     let (_dir, first_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
 
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("test-up-to-date"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "test-up-to-date",
@@ -473,6 +476,7 @@ async fn reconcile_stale_index_stamps_new_sha() {
     let current_sha = crate::core::git::head_sha(&root).expect("head sha");
 
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("test-stale"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "test-stale",
@@ -616,6 +620,7 @@ async fn apply_delta_total_failure_does_not_stamp() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("ts-guard"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "ts-guard",
@@ -841,6 +846,7 @@ async fn mtime_reconcile_skips_never_indexed_non_git_index() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("ts-mtime-never-indexed"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "ts-mtime-never-indexed",
@@ -920,6 +926,7 @@ async fn reconcile_in_progress_clears_after_tasks_complete() {
     let (_dir, first_sha, root) = init_git_repo_with_file("lifecycle.rs", "fn life() {}");
 
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("ts-lifecycle"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "ts-lifecycle",
@@ -1011,6 +1018,7 @@ async fn reconcile_summary_counts_up_to_date() {
     let (_dir, first_sha, root) = init_git_repo_with_file("main.rs", "fn main() {}");
 
     let handle = Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new("ts-summary-uptodate"),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
             "ts-summary-uptodate",
@@ -1090,6 +1098,7 @@ fn stuck_unwalked_handle(
     use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
 
     Arc::new(IndexHandle {
+        additional_roots: Vec::new(),
         id: IndexId::new(id),
         indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(id, root))),
         root_path: root.to_path_buf(),

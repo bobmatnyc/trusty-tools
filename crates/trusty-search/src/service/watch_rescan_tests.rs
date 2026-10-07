@@ -573,8 +573,9 @@ async fn rescan_without_a_registered_handle_schedules_a_retry() {
     let registry = crate::core::registry::IndexRegistry::new();
     let failure = crate::service::watch_rescan::reconcile_registered(
         &index_id,
-        &root,
-        &root,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
         &indexer,
         &tracker,
         Some(&registry),
@@ -603,7 +604,13 @@ async fn rescan_without_a_registered_handle_schedules_a_retry() {
 
     // No registry at all is the pre-#7379 unfiltered mode and still reconciles.
     let stats = crate::service::watch_rescan::reconcile_registered(
-        &index_id, &root, &root, &indexer, &tracker, None,
+        &index_id,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
+        &indexer,
+        &tracker,
+        None,
     )
     .await
     .expect("a loop started without a registry reconciles the whole root");

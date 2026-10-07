@@ -105,8 +105,9 @@ impl Fixture {
     async fn rescan(&self) -> crate::service::watch_rescan::RescanStats {
         reconcile_with_policy(
             &self.id,
-            &self.root,
-            &self.root,
+            &[crate::service::watch_roots::WatchedRoot::from_pair(
+                &self.root, &self.root,
+            )],
             &self.indexer,
             &self.files,
             None,

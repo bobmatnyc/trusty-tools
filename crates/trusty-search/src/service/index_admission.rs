@@ -4,13 +4,20 @@ use crate::service::walker::{self, walk_source_files_with_options, WalkOptions};
 use crate::service::watch_rescan::RescanGate;
 use std::path::{Path, PathBuf};
 
-/// The subtrees an index walks: its `include_paths`, or its whole root.
+/// The subtrees an index walks: its `include_paths`, or its whole primary
+/// root, plus every additional root (#7434).
+///
+/// `include_paths` narrow WITHIN the primary root only; an additional root is
+/// always walked whole. One list, so the reindex walk, live admission, the
+/// rescan and pushed-write admission cannot disagree about which roots count.
 pub(crate) fn configured_roots(handle: &IndexHandle) -> Vec<PathBuf> {
-    if handle.include_paths.is_empty() {
+    let mut roots = if handle.include_paths.is_empty() {
         vec![handle.root_path.clone()]
     } else {
         handle.include_paths.clone()
-    }
+    };
+    roots.extend(handle.additional_roots.iter().cloned());
+    roots
 }
 
 /// The walker options an index's hygiene knobs resolve to.
@@ -28,7 +35,29 @@ pub(crate) fn walk_options(handle: &IndexHandle) -> WalkOptions {
 }
 
 pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
-    let include_paths = configured_roots(handle);
+    walk_roots(handle).0
+}
+
+/// Walk every root of `handle`, and name the additional roots that are absent.
+///
+/// Why (#7434): an index can span several trees, and a missing additional
+/// root must degrade that root's coverage visibly rather than contribute
+/// nothing silently. An absent PRIMARY root keeps the existing empty-walk
+/// failure in `reindex::runner`, so it is not listed here.
+/// What: the merged, filtered, sorted and de-duplicated walk of
+/// [`configured_roots`], plus each additional root that is not a directory.
+/// Test: `walk_covers_every_index_root`, `walk_records_a_missing_additional_root`.
+pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathBuf>) {
+    let missing: Vec<PathBuf> = handle
+        .additional_roots
+        .iter()
+        .filter(|r| !r.is_dir())
+        .cloned()
+        .collect();
+    let include_paths: Vec<PathBuf> = configured_roots(handle)
+        .into_iter()
+        .filter(|r| !missing.contains(r))
+        .collect();
     let mut walked_files: Vec<PathBuf> = Vec::new();
     let mut total_skipped_dirs: usize = 0;
     let walk_opts = walk_options(handle);
@@ -44,10 +73,11 @@ pub(crate) fn walk(handle: &IndexHandle) -> walker::WalkResult {
     walked_files.sort();
     walked_files.dedup();
 
-    crate::service::walker::WalkResult {
+    let walked = crate::service::walker::WalkResult {
         files: walked_files,
         skipped_dirs: total_skipped_dirs,
-    }
+    };
+    (walked, missing)
 }
 /// The per-index filters the walker applies after the walk: tombstones,
 /// `exclude_globs`, `extensions` and `path_filter`.
@@ -64,15 +94,30 @@ pub(crate) fn configured_file(handle: &IndexHandle, path: &Path) -> bool {
                         .iter()
                         .any(|e| e.eq_ignore_ascii_case(ext))
                 }))
-        && (handle.path_filter.is_empty()
-            || crate::core::registry::path_matches_filter(
-                path,
-                &handle
-                    .root_path
-                    .canonicalize()
-                    .unwrap_or_else(|_| handle.root_path.clone()),
-                &handle.path_filter,
-            ))
+        && (handle.path_filter.is_empty() || path_filter_admits(handle, path))
+}
+
+/// Issue #111's `path_filter`, evaluated against the root that OWNS `path`.
+///
+/// Why (#7434): against the primary root alone the filter drops every
+/// additional-root file, since none has the primary root as a prefix.
+/// What: canonicalises the root table, picks the owning root by longest
+/// match, and applies the filter relative to it; a path under no root is not
+/// admitted.
+/// Test: `walk_covers_every_index_root`.
+fn path_filter_admits(handle: &IndexHandle, path: &Path) -> bool {
+    let canonical = |r: &Path| r.canonicalize().unwrap_or_else(|_| r.to_path_buf());
+    let roots = crate::core::index_roots::IndexRoots::new(
+        canonical(&handle.root_path),
+        handle
+            .additional_roots
+            .iter()
+            .map(|r| canonical(r))
+            .collect(),
+    );
+    roots.owning_root(path).is_some_and(|root| {
+        crate::core::registry::path_matches_filter(path, root, &handle.path_filter)
+    })
 }
 fn tombstone_file(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -237,23 +282,13 @@ fn defer_to_rescan(
     );
 }
 
-/// The watched root in the two forms the relative-path fallback needs.
-///
-/// Why: `canonical` is what the reindex walker keys on; `raw` is the root as
-/// configured, which a deleted file's path must also be stripped against
-/// because canonicalizing a gone path fails (see `watch_loop`). They always
-/// travel together, so they travel as one argument.
-#[derive(Clone, Copy)]
-pub(crate) struct WatchRoots<'a> {
-    pub(crate) canonical: &'a Path,
-    pub(crate) raw: &'a Path,
-}
-
 /// Read live policy for each delivered modification, including updates after watcher startup.
 ///
 /// Why (#7396): an undecidable admission must not reach `handle_removed`.
 /// What: the three [`Admission`] states map to index, remove, and defer; only
-/// the third leaves the index untouched and re-arms a rescan.
+/// the third leaves the index untouched and re-arms a rescan. #7434: `watched`
+/// carries the watch's root slot, so an event under an additional root is
+/// keyed `@root<n>/…`, the encoding the reindex walk uses.
 /// Test: `a_transient_canonicalize_failure_keeps_chunks_and_schedules_a_rescan`,
 /// `live_admission_observes_registry_replacement`,
 /// `three_undecidable_events_schedule_exactly_one_rescan`.
@@ -261,7 +296,7 @@ pub(crate) async fn apply_modified(
     registry: &crate::core::registry::IndexRegistry,
     index_id: &crate::core::registry::IndexId,
     path: &Path,
-    roots: WatchRoots<'_>,
+    watched: &crate::service::watch_roots::WatchedRoot,
     indexer: &std::sync::Arc<tokio::sync::RwLock<crate::core::CodeIndexer>>,
     indexed_files: &crate::service::IndexedFiles,
     rescan: Option<&RescanGate>,
@@ -274,22 +309,20 @@ pub(crate) async fn apply_modified(
     };
     match admits(&handle, path) {
         Admission::Included => {
-            crate::service::watch_loop::handle_modified(
+            crate::service::watch_loop::handle_modified_in_root(
                 path,
                 index_id,
-                roots.canonical,
-                roots.raw,
+                watched,
                 indexer,
                 indexed_files,
             )
             .await;
         }
         Admission::Excluded => {
-            crate::service::watch_loop::handle_removed(
+            crate::service::watch_loop::handle_removed_in_root(
                 path,
                 index_id,
-                roots.canonical,
-                roots.raw,
+                watched,
                 indexer,
                 indexed_files,
             )
@@ -341,10 +374,7 @@ mod tests {
         let expected = vec![root.join("notes/maya.md")];
         assert_eq!(walk(&handle).files, expected);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
         for path in [
             "notes/maya.md",
             "notes/private.md",
@@ -355,7 +385,7 @@ mod tests {
                 &registry,
                 &id,
                 &root.join(path),
-                roots,
+                &roots,
                 &indexer,
                 &files,
                 None,
@@ -381,7 +411,7 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            roots,
+            &roots,
             &indexer,
             &files,
             None,
@@ -396,8 +426,7 @@ mod tests {
         let handle = registry.register(make(vec!["md".into()], vec![]));
         crate::service::watch_rescan::reconcile_with_policy(
             &id,
-            &root,
-            &root,
+            std::slice::from_ref(&roots),
             &indexer,
             &files,
             Some(&handle),
@@ -428,7 +457,7 @@ mod tests {
             &registry,
             &id,
             &root.join("notes/maya.md"),
-            roots,
+            &roots,
             &indexer,
             &files,
             None,
@@ -455,8 +484,7 @@ mod tests {
             .is_empty());
         crate::service::watch_rescan::reconcile_with_policy(
             &id,
-            &root,
-            &root,
+            std::slice::from_ref(&roots),
             &indexer,
             &files,
             Some(&handle),
@@ -517,12 +545,9 @@ mod tests {
         handle.extensions = vec!["md".into()];
         registry.register(handle);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
 
-        apply_modified(&registry, &id, &target, roots, &indexer, &files, None).await;
+        apply_modified(&registry, &id, &target, &roots, &indexer, &files, None).await;
         assert!(
             !indexer
                 .read()
@@ -557,7 +582,7 @@ mod tests {
             &registry,
             &id,
             &target,
-            roots,
+            &roots,
             &indexer,
             &files,
             Some(&gate),
@@ -629,10 +654,7 @@ mod tests {
         handle.extensions = vec!["md".into()];
         registry.register(handle);
         let files = crate::service::IndexedFiles::new();
-        let roots = WatchRoots {
-            canonical: &root,
-            raw: &root,
-        };
+        let roots = crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
 
         let targets: Vec<PathBuf> = ["maya.md", "atlas.md", "orion.md"]
             .iter()
@@ -651,7 +673,16 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WatchEvent>();
         let gate = RescanGate::new(tx);
         for target in &targets {
-            apply_modified(&registry, &id, target, roots, &indexer, &files, Some(&gate)).await;
+            apply_modified(
+                &registry,
+                &id,
+                target,
+                &roots,
+                &indexer,
+                &files,
+                Some(&gate),
+            )
+            .await;
         }
 
         // Sleeping past the base backoff on a paused clock auto-advances to each
@@ -676,7 +707,7 @@ mod tests {
             &registry,
             &id,
             &targets[0],
-            roots,
+            &roots,
             &indexer,
             &files,
             Some(&gate),

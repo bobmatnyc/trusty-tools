@@ -644,7 +644,8 @@ fn raw_to_code_chunk_populates_path_for_relative_file() {
 
     let raw = make_raw_chunk("src/lib.rs", "pub fn hello() {}\n");
     let root = std::path::Path::new("/home/alice/proj");
-    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+    let roots = crate::core::index_roots::IndexRoots::new(root.to_path_buf(), Vec::new());
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, &roots);
 
     // `file` must be absolute.
     assert!(
@@ -674,7 +675,8 @@ fn raw_to_code_chunk_path_is_none_for_absolute_file() {
 
     let raw = make_raw_chunk("/mnt/efs/data/repos/proj/src/lib.rs", "pub fn hello() {}\n");
     let root = std::path::Path::new("/mnt/efs/data/repos/proj");
-    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, root);
+    let roots = crate::core::index_roots::IndexRoots::new(root.to_path_buf(), Vec::new());
+    let chunk = raw_to_code_chunk(&raw, 0.9, "bm25", None, &roots);
 
     // `file` must pass through unchanged (absolute input → absolute output).
     assert_eq!(chunk.file, "/mnt/efs/data/repos/proj/src/lib.rs");

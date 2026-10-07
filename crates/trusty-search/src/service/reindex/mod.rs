@@ -306,6 +306,9 @@ mod embed_pause_tests;
 // test-file cap; see the module doc comment there for the incident writeup.
 #[cfg(test)]
 mod root_hijack_tests;
+// #7434: the multi-root walk and the per-root corpus-path encoding.
+#[cfg(test)]
+mod multi_root_tests;
 // #8438: the swap and staging paths honour the registry's layout.
 #[cfg(test)]
 mod registry_layout_8438_tests;

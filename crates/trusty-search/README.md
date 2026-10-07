@@ -585,11 +585,12 @@ trusty-search reindex [path]                         # alias for index --force
 ## MCP tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **20 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **21 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
 |---|---|---|
+| `add_root` | `index_id`, `roots` | Add one or more directory trees to an existing index, so one index covers several roots. |
 | `chat` | `index_id`, `api_key?`, `history?`, `message?`, `model?`, `question?`, `top_k?` | Ask a natural-language question about the indexed codebase. |
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |

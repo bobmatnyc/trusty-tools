@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::core::embed::{Embedder, MockEmbedder};
 use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
-use crate::service::index_admission::{apply_modified, WatchRoots};
+use crate::service::index_admission::apply_modified;
 use crate::service::persistence::PersistedIndex;
 use crate::service::server::{PatchIndexConfigRequest, SearchAppState};
 use crate::service::watch_rescan::reconcile_with_policy;
@@ -93,10 +93,7 @@ async fn run_arm(arm: &str) -> Result<(), String> {
     let secret = root.join(SECRET);
     match arm {
         "watcher" => {
-            let roots = WatchRoots {
-                canonical: &root,
-                raw: &root,
-            };
+            let roots = &crate::service::watch_roots::WatchedRoot::from_pair(&root, &root);
             apply_modified(
                 &state.registry,
                 &handle.id,
@@ -126,8 +123,9 @@ async fn run_arm(arm: &str) -> Result<(), String> {
         "rescan" => {
             let outcome = reconcile_with_policy(
                 &handle.id,
-                &root,
-                &root,
+                &[crate::service::watch_roots::WatchedRoot::from_pair(
+                    &root, &root,
+                )],
                 &handle.indexer,
                 &files,
                 Some(&handle),
@@ -254,8 +252,9 @@ async fn a_held_index_reports_held_serves_reads_and_a_valid_patch_releases_it() 
     std::fs::write(root.join("src/new.rs"), "pub fn added() {}\n").unwrap();
     let stats = reconcile_with_policy(
         &released.id,
-        &root,
-        &root,
+        &[crate::service::watch_roots::WatchedRoot::from_pair(
+            &root, &root,
+        )],
         &released.indexer,
         &files,
         Some(&released),
