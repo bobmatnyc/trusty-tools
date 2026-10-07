@@ -48,6 +48,20 @@ fn bm25_corpus_cap() -> usize {
         .unwrap_or(DEFAULT_BM25_CORPUS_CAP)
 }
 
+/// The corpus cap every [`BM25Index`] upsert enforces right now (#9235).
+///
+/// Why: a consumer that reports BM25 truncation must name the cap that
+/// actually dropped documents. That cap is resolved from
+/// `TRUSTY_BM25_CORPUS_CAP` (trusty-search's `MemoryPolicy` exports a
+/// per-tier value there), so the private default constant is not it.
+/// What: returns the same value [`BM25Index::upsert_document_reporting`]
+/// compares `len()` against — the env override when it is a positive
+/// integer, otherwise the 50 000 default.
+/// Test: `effective_corpus_cap_is_the_cap_upserts_enforce`.
+pub fn effective_corpus_cap() -> usize {
+    bm25_corpus_cap()
+}
+
 /// Latch so we only log "BM25 corpus cap reached" once per process — repeated
 /// indexing of a large repo would otherwise drown the daemon log in warnings.
 static BM25_CAP_LOGGED: AtomicBool = AtomicBool::new(false);

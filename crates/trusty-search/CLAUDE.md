@@ -545,6 +545,16 @@ Per-index stats.
     is driving it any more, so `status: "indexing"` and
     `stages.lexical: in_progress` above are a frozen claim rather than live
     work. `POST /indexes/:id/reindex` clears it.
+  - `bm25_truncated` / `bm25_docs_dropped` / `bm25_corpus_cap` (#9235): the
+    BM25 corpus cap (`TRUSTY_BM25_CORPUS_CAP`) kept `bm25_docs_dropped`
+    resident chunks out of the lexical lane; only the vector lane can find
+    them. `bm25_docs_dropped` is the resident chunk-map length minus
+    `bm25.len()`, saturating at `0` — not the durable `chunk_count` above.
+    While the index is evicted, or a memory-pressure reclaim is clearing it,
+    it is the durable chunk count minus the cap. When that durable count
+    cannot be read, all three are `null` and
+    `bm25_truncation_unavailable_reason` is `"corpus_count_unreadable"`; it
+    is `null` otherwise. The search `meta` block carries the same four fields.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
@@ -612,6 +622,11 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
+  - `meta.bm25_truncated` / `meta.bm25_docs_dropped` / `meta.bm25_corpus_cap`
+    / `meta.bm25_truncation_unavailable_reason` (#9235): the
+    converged-but-truncated signal, the same four fields
+    `GET /indexes/:id/status` reports. `bm25_lane_degraded` means the lane has
+    not converged; these mean it converged without some chunks.
   - `meta.exact_match_floor` / `meta.exact_match_literal` (#7675): `true` when
     the query named a literal that occurs verbatim in the corpus, and every
     chunk carrying it was ranked above every chunk that does not, declaration

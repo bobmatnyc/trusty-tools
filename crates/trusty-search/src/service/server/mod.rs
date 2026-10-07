@@ -228,6 +228,9 @@ mod tests_8348;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;
+// #9235: status and search meta report BM25 corpus-cap truncation.
+#[cfg(test)]
+mod tests_9235;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]
