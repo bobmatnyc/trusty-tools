@@ -1,7 +1,8 @@
-# 0068. recall_all searches resident palaces by default and reports what it skipped
+# 0071. recall_all searches resident palaces by default and reports what it skipped
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-07
+- **Accepted:** 2026-10-07 (Bob, "Accept with my recs", 08:20Z)
 - **Scope:** crates `trusty-memory` (all three recall_all surfaces),
   `trusty-common` (`memory_core`); consumer `trusty-agents`
 - **Reversibility Cost:** Medium before 1.0.0, High after — the default scope
@@ -95,9 +96,23 @@ open and 4 concurrent opens, a call still takes about 0.8 s.
 
 ## Decision
 
-**Proposed for Bob's approval.** We will adopt Option 1 as the default and
+Accepted by Bob on 2026-10-07. We will adopt Option 1 as the default and
 Option 4's `scope: "all"` as the explicit full search, with a completeness
 report on every response. Option 5 stays separate work under #6802.
+
+**Owner rulings (Bob, 2026-10-07):**
+
+1. **Partial default accepted.** The default searches resident palaces only,
+   and coverage is always reported (D4). This reverses the
+   [#4637](https://github.com/bobmatnyc/trusty-tools/issues/4637) rule that a
+   cross-palace recall must open every palace.
+2. **`scope: "all"` stays unbounded.** It has no time budget; it reports
+   coverage like the default.
+3. **recall_all must not reset a palace's idle clock** (D2).
+4. **`palaces: [...]` is deferred.** It ships later as an additive 1.x param.
+5. **#9141 AC3 is restated** as: "`scope: "all"` returns the same top 5 as
+   before the fix for a fixed query; the default-scope top 5 equals the
+   `scope: "all"` top 5 restricted to resident palaces."
 
 **D1. Default scope is resident.** With no `scope`, `memory_recall_all`
 searches the palaces the registry holds at call start, minus provably empty
@@ -113,8 +128,8 @@ idle clock. Today `recall_scoped` and `recall_deep_scoped` call `touch()`
 recall_all every few minutes would keep the whole resident set alive.
 
 **D3. `scope: "all"` keeps today's behaviour.** It runs the streamed path:
-batches of 8, release after each batch, the same ranking. It has no latency
-target. Its transient peak is about 8 × 90 MB plus open scratch.
+batches of 8, release after each batch, the same ranking. It has no time
+budget and no latency target (ruling 2). Its transient peak is about 8 × 90 MB plus open scratch.
 
 **D4. Completeness contract.** Every recall_all response, on all three
 surfaces, carries:
@@ -184,18 +199,9 @@ default-scope change after 1.0.0 changes what results mean (ADR-0066 D1.1).
 - `trusty-agents` cross-palace queries (`assistant_memory.rs:219`) get
   partial answers unless they opt in to `scope: "all"`.
 
-## Open questions for Bob
-
-1. Accept a partial default (D1) that reverses the #4637 rule, given D4?
-2. Should `scope: "all"` gain a time budget (Option 3) or stay unbounded?
-3. Confirm D2: a recall_all search does not reset the idle clock.
-4. Add `palaces: [...]` now, or later as an additive 1.x param?
-5. Restate #9141 AC3 as: `scope: "all"` top 5 unchanged; default top 5
-   equals the `scope: "all"` top 5 restricted to resident palaces.
-
 ## Related Decisions
 
-Vetted against `docs/adr/INDEX.md` on 2026-10-07:
+Vetted against `docs/adr/INDEX.md` and PR #9176 on 2026-10-07:
 
 - **ADR-0066 (trusty-memory 1.x contract):** Consistent. `scope` and the D4
   fields are additive; D5 lands the default change before 1.0.0.
@@ -204,10 +210,9 @@ Vetted against `docs/adr/INDEX.md` on 2026-10-07:
 - **ADR-0028 (Memory recall tiers):** Consistent. Tiers and demotion apply
   unchanged to whatever palaces are searched.
 - **#4637 / #7125 rule in `helpers.rs:240-243`:** Conflict, resolved by this
-  ADR on acceptance. The rule becomes the `scope: "all"` behaviour.
-- **PR #9176 (memory-sync ADRs, unmerged):** ADR-0066 names them 0068-0070.
-  This ADR takes 0068, the next free number on `main`; whichever merges
-  second renumbers.
+  ADR (ruling 1). The rule becomes the `scope: "all"` behaviour.
+- **ADR-0068 / 0069 / 0070 (memory sync, PR #9176):** Consistent. This ADR
+  is numbered after them and merges after PR #9176.
 
 ## References
 
