@@ -82,12 +82,27 @@ impl DocFetcher for FakeFetcher {
     }
 }
 
+/// How [`DocSearch::list_indexes`] answers.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Lookup {
+    /// Lists index `main`, rooted at `/srv/repo`.
+    #[default]
+    Listed,
+    /// Never answers.
+    Hangs,
+    /// Fails.
+    Fails,
+    /// Lists another index only.
+    Omits,
+}
+
 /// A search client whose `search` returns `hits` (or fails), and whose index
-/// `main` is rooted at `/srv/repo`.
+/// `main` is rooted at `/srv/repo` unless `lookup` says otherwise.
 #[derive(Default)]
 struct DocSearch {
     hits: Vec<(String, String)>,
     fail: bool,
+    lookup: Lookup,
 }
 
 #[async_trait]
@@ -101,8 +116,16 @@ impl SearchClient for DocSearch {
     }
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        let id = match self.lookup {
+            Lookup::Listed => "main",
+            Lookup::Hangs => std::future::pending().await,
+            Lookup::Fails => {
+                return Err(SearchClientError::Transport("fixture: list down".into()));
+            }
+            Lookup::Omits => "other",
+        };
         Ok(vec![IndexInfo {
-            id: "main".to_string(),
+            id: id.to_string(),
             name: None,
             root_path: Some("/srv/repo".to_string()),
         }])
@@ -567,6 +590,53 @@ async fn search_hit_outside_allowlist_is_ignored() {
     .collect();
     run(setup).await;
     assert_eq!(fetcher.paths(), [ADR]);
+}
+
+/// #9193 amendment 7, Fail-Open Check: when the index root cannot be looked
+/// up, an absolute search hit cannot be made repository-relative, so
+/// discovery is `unavailable` with the cause; the PR-body doc is still read.
+/// Paused clock: the `Hangs` arm reaches the read timeout without a real wait.
+#[serial_test::serial]
+#[tokio::test(start_paused = true)]
+async fn index_root_lookup_failure_marks_discovery_unavailable() {
+    let arms = [
+        (Lookup::Hangs, "index root lookup timed out".to_string()),
+        (
+            Lookup::Fails,
+            "index root lookup failed: trusty-search transport error: fixture: list down"
+                .to_string(),
+        ),
+        (Lookup::Omits, "index main not in list_indexes".to_string()),
+    ];
+    let mut seen_arms = Vec::new();
+    let mut want_arms = Vec::new();
+    for (lookup, detail) in arms {
+        let fetcher = FakeFetcher::adr();
+        let mut setup = Setup::new(spec_docs(), fetcher.clone());
+        setup.search.hits = vec![("/srv/repo/docs/specs/abs.md".into(), String::new())];
+        setup.search.lookup = lookup;
+        let seen = run(setup).await;
+        let row = seen.row("spec_docs");
+        let discovery = row.items.iter().find(|i| i.id == "discovery");
+        seen_arms.push((
+            lookup,
+            discovery.map(|i| i.state),
+            discovery.and_then(|i| i.detail.clone()),
+            row.state,
+            seen.item("spec_docs", ADR),
+            fetcher.paths(),
+        ));
+        want_arms.push((
+            lookup,
+            Some(SourceState::Unavailable),
+            Some(detail),
+            SourceState::Unavailable,
+            SourceState::Used,
+            vec![ADR.to_string()],
+        ));
+        assert_completed(&seen);
+    }
+    assert_eq!(seen_arms, want_arms);
 }
 
 // ── Head SHA and fork arms (Fail-Open Check) ─────────────────────────────────
