@@ -1703,3 +1703,7 @@ async fn mapreduce_mechanical_summary_never_contains_model_prose() {
     assert!(!result.findings.is_empty(), "{result:?}");
     assert_template_body(&result);
 }
+
+// #9310 ruling 50: a chunk or synthesis D/F grade is a hard verdict floor.
+#[path = "runner_mapreduce_grade_floor_tests.rs"]
+mod grade_floor;

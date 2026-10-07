@@ -222,6 +222,24 @@ pub fn verdict_for_grade(grade: Grade) -> Verdict {
     }
 }
 
+/// The verdict a reviewer's grade holds the review at, whatever relaxes it
+/// later (#9310, owner ruling 50).
+///
+/// Why: a confirmed low-confidence finding, an advisory-only finding set, or
+/// the verifier round could relax a D-graded review below REQUEST_CHANGES and
+/// an F below BLOCK. The floor is the grade alone, so grades A to C, which
+/// those passes may relax, map to APPROVE: `stricter_of` with it is a no-op.
+/// What: D+, D, D- → REQUEST_CHANGES; F → BLOCK; any other grade, an absent
+/// one, or one that does not parse → APPROVE.
+/// Test: `grade_floor_maps_every_grade`.
+pub(crate) fn grade_floor(grade: Option<&str>) -> Verdict {
+    match grade.and_then(|g| g.parse::<Grade>().ok()) {
+        Some(Grade::DPlus | Grade::D | Grade::DMinus) => Verdict::RequestChanges,
+        Some(Grade::F) => Verdict::Block,
+        _ => Verdict::Approve,
+    }
+}
+
 /// Return the default (mildest representative) grade for a verdict.
 ///
 /// Why: when the LLM omits or emits an unparseable grade, the pipeline must

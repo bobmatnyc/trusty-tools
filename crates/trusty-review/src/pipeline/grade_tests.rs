@@ -1646,6 +1646,16 @@ fn pr84_author_gated_framework_risk_does_not_block() {
 // the REAL self-report shape through `derive_verdict_with_grade`, the entry
 // point `runner_helpers.rs` actually calls.
 
+/// The review verdict once ruling 50's grade floor runs on `derived` for a
+/// reviewer `grade` (#9310 owner answer Q3).
+fn review_verdict_after_floor(derived: Verdict, grade: &str) -> Verdict {
+    let mut result = crate::models::ReviewResult::new("o", "r", 1, "t", "u");
+    result.verdict = derived;
+    let floor = crate::pipeline::letter_grade::grade_floor(Some(grade));
+    crate::pipeline::verdict_status::apply_grade_floor(&mut result, &floor);
+    result.verdict
+}
+
 /// The exact PR #84 self-report (`verdict: BLOCK`, `grade: F`) on a single
 /// uncited, non-diff-provable High@0.65 finding must not survive the real
 /// entry point — and (adversarial-review MEDIUM fix) the returned GRADE must
@@ -1659,6 +1669,10 @@ fn pr84_author_gated_framework_risk_does_not_block() {
 /// pairing. `letter_grade::reconcile_grade_with_verdict` now also handles the
 /// "too severe" direction, raising the grade to the floor of the ACTUAL
 /// verdict's band.
+///
+/// #9310 owner answer Q3: ruling 50 beats RULE 2 at the review level. This
+/// entry point still relaxes the F; the grade floor at the end of the gates
+/// (`verdict_status::apply_grade_floor`) makes the review BLOCK.
 #[test]
 fn pr84_real_entry_point_self_reported_block_does_not_survive() {
     let findings = vec![speculative_finding(Effort::High, 0.65)];
@@ -1683,6 +1697,8 @@ fn pr84_real_entry_point_self_reported_block_does_not_survive() {
          actual verdict ({verdict:?})",
         verdict_for_grade(g)
     );
+    // #9310 owner answer Q3: ruling 50 beats RULE 2; the review reads BLOCK.
+    assert_eq!(review_verdict_after_floor(verdict, "F"), Verdict::Block);
 }
 
 /// THE CRUX FIX (item 3 acceptance criterion): at a confidence ABOVE the
@@ -1699,6 +1715,9 @@ fn pr84_real_entry_point_self_reported_block_does_not_survive() {
 /// Also asserts the returned GRADE (adversarial-review MEDIUM fix): the
 /// original test ignored `_grade`, which is how the "Grade: F — Request
 /// Changes" contradiction slipped through review.
+///
+/// #9310 owner answer Q3: the review-level outcome is now BLOCK; see
+/// `rule_2_f_with_a_lone_uncited_high_reads_block` for the end-to-end run.
 #[test]
 fn pr84_real_entry_point_self_reported_block_confident_uncited_downgrades() {
     let findings = vec![speculative_finding(Effort::High, 0.85)];
@@ -1725,6 +1744,8 @@ fn pr84_real_entry_point_self_reported_block_confident_uncited_downgrades() {
          actual verdict ({verdict:?})",
         verdict_for_grade(g)
     );
+    // #9310 owner answer Q3: ruling 50 beats RULE 2; the review reads BLOCK.
+    assert_eq!(review_verdict_after_floor(verdict, "F"), Verdict::Block);
 }
 
 /// Control: a citable/diff-provable High finding STILL forces BLOCK through the

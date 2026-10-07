@@ -158,6 +158,38 @@ fn grade_all_approve_bands() {
     }
 }
 
+// ── grade_floor (#9310, owner ruling 50) ─────────────────────────────────────
+
+/// #9310 ruling 50: a D-range grade floors at REQUEST_CHANGES and an F at
+/// BLOCK; every A-to-C grade, an absent grade and an unparseable one floor at
+/// APPROVE, so grades A to C keep today's behaviour. A floor that reads
+/// `verdict_for_grade` for every grade fails on the C band (APPROVE*).
+#[test]
+fn grade_floor_maps_every_grade() {
+    let cases = [
+        ("A+", Verdict::Approve),
+        ("A", Verdict::Approve),
+        ("A-", Verdict::Approve),
+        ("B+", Verdict::Approve),
+        ("B", Verdict::Approve),
+        ("B-", Verdict::Approve),
+        ("C+", Verdict::Approve),
+        ("C", Verdict::Approve),
+        ("C-", Verdict::Approve),
+        ("D+", Verdict::RequestChanges),
+        ("D", Verdict::RequestChanges),
+        ("D-", Verdict::RequestChanges),
+        ("F", Verdict::Block),
+        (" F ", Verdict::Block),
+        ("E", Verdict::Approve),
+        ("f", Verdict::Approve),
+    ];
+    for (grade, floor) in cases {
+        assert_eq!(grade_floor(Some(grade)), floor, "grade {grade:?}");
+    }
+    assert_eq!(grade_floor(None), Verdict::Approve);
+}
+
 // ── default_grade_for_verdict ─────────────────────────────────────────────────
 
 /// The default grade for a verdict must be consistent with that verdict.

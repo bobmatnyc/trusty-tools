@@ -55,7 +55,7 @@ use crate::{
         runner_context::{gather_context, gather_external_context_md},
         runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
-        verdict_status::judged_verdict, // #9310
+        verdict_status::judged_review, // #9310: verdict and ruling-50 grade floor
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors, // #9188 J
@@ -755,7 +755,7 @@ async fn run_pipeline(
         refs: &refs,
         narrative: &narrative,
         wiped_model_verdict,
-        model_verdict: judged_verdict(
+        judged: judged_review(
             model_verdict,
             model_grade.as_deref(),
             coverage_contrib.as_ref(),
