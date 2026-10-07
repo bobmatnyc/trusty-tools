@@ -151,9 +151,11 @@ impl CliCommand {
     /// Run with a null stdin — for a read whose stdout is the value.
     ///
     /// What: refuses an overlay value in argv, then runs; a non-zero exit is
-    /// classified by stderr markers. Errors are spawn, timeout and I/O only;
+    /// classified by stderr markers, or is `Other` when stderr overflowed
+    /// [`OUTPUT_CAP`]. Errors are spawn, timeout and I/O only;
     /// [`CliRun::into_value`] turns a verdict into a result.
     /// Test: `runner_stderr_markers_map_to_verdicts`,
+    /// `runner_stderr_over_the_cap_on_failure_is_other`,
     /// `runner_missing_program_is_cli_not_installed`,
     /// `runner_timeout_kills_the_process_group`,
     /// `runner_grandchild_holding_a_pipe_is_killed_after_the_leader_exits`,
@@ -313,8 +315,9 @@ impl CliCommand {
         if got.stdout.overflow {
             return Err(self.failure(TOO_LARGE));
         }
-        // #7519: a value the child did not fully read is never stored.
-        let verdict = if got.stdin_short {
+        // #7519: a value the child did not fully read is never stored, and a
+        // failure whose stderr was cut at the cap is never read for meaning.
+        let verdict = if got.stdin_short || (got.stderr.overflow && !status.success()) {
             Verdict::Other
         } else {
             classify(status.success(), &got.stderr.bytes, had_stdin, &self.spec)

@@ -405,3 +405,21 @@ fn runner_grandchild_holding_a_pipe_is_killed_after_the_leader_exits() {
         "grandchild {pid} outlived its reaped leader"
     );
 }
+
+/// Why: #7519 — stderr cut at the 1 MiB cap is not read for meaning: a
+/// failed run whose stderr overflowed is `Other`, never a miss or locked,
+/// even with a marker inside the kept bytes.
+/// Test: itself.
+#[test]
+fn runner_stderr_over_the_cap_on_failure_is_other() {
+    let shim = Shim::new(
+        "printf '%s\\n' \"$1\" >&2\n\
+         { dd if=/dev/zero bs=1024 count=1100 2>/dev/null; } >&2\n\
+         exit 1\n",
+    );
+    for marker in ["item not found", "not currently signed in"] {
+        let run = shim.command().arg(marker).run().unwrap();
+        assert_eq!(run.verdict, Verdict::Other, "{marker}");
+        assert_eq!(run.code, Some(1), "{marker}");
+    }
+}
