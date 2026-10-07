@@ -198,7 +198,11 @@ async fn mapreduce_chunk_f_with_its_only_finding_withheld_is_suppressed_reject()
         let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
         assert!(result.findings.is_empty(), "{case}: {:?}", result.findings);
         assert_eq!(result.withheld_findings.len(), 1, "{case}: {result:?}");
-        assert_eq!(result.verdict, Verdict::RequestChanges, "{case}: {result:?}");
+        assert_eq!(
+            result.verdict,
+            Verdict::RequestChanges,
+            "{case}: {result:?}"
+        );
         assert_eq!(
             result.verdict_status,
             Some(crate::models::VerdictStatus::SuppressedReject),
