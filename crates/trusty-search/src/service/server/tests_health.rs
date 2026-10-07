@@ -68,6 +68,27 @@ async fn health_handler_reports_indexes_and_uptime() {
     assert_eq!(resp.embedder, "initializing");
 }
 
+/// #9030: a state no listener was stamped onto reports both transport fields
+/// as `null`, never a default port or path.
+///
+/// Why: once #6285 retires the TCP listener, `http_addr` must read `null`
+/// rather than a guessed `127.0.0.1:7878`. `run_daemon` binds HTTP fatally
+/// today, so no running daemon reaches that state yet; this pins the wire
+/// shape the console reads (keys present, values `null`).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn health_reports_a_null_transport_when_no_listener_was_bound() {
+    let state = std::sync::Arc::new(SearchAppState::new(
+        crate::core::registry::IndexRegistry::new(),
+    ));
+    let body = health_report(state).await;
+    assert_eq!(
+        body["transport"],
+        serde_json::json!({ "socket_path": null, "http_addr": null }),
+        "an unbound transport must serialise both keys as null: {body}"
+    );
+}
+
 /// Issue #3408 — a network-mounted index root must surface through
 /// `/health`: `indexes_watcher_network_degraded` counts it and the top-level
 /// `status` flips to `"degraded"`, mirroring the existing

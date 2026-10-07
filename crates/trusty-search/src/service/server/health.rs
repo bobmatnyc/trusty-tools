@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::core::embed::Embedder as _;
 use crate::service::embedder_supervisor::{BackendKind, BootstrapState};
 
-use super::state::{ReconcileSummary, SearchAppState, WarmBootSummary};
+use super::state::{DaemonTransport, ReconcileSummary, SearchAppState, WarmBootSummary};
 
 /// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537 +
 /// #1003).
@@ -321,6 +321,16 @@ pub(super) struct HealthResponse {
     /// Test: `health_reports_embedder_bootstrap_state`,
     /// `health_is_degraded_when_the_embedder_backend_permanently_downgraded`.
     pub(super) embedder_bootstrap: &'static str,
+    /// #9030: the listeners this daemon bound, `{socket_path, http_addr}`.
+    ///
+    /// Why: trusty-console's search dashboard showed a hardcoded port and URL
+    /// after ADR-0032; it needs the transport the daemon actually serves.
+    /// What: [`DaemonTransport`] as `run_daemon` stamped it. Always present;
+    /// a field is `null` when that listener is not bound (`http_addr` once
+    /// #6285 retires the TCP listener). Additive — no existing key changes.
+    /// Test: `run_daemon_health_reports_the_transport_it_bound`,
+    /// `health_reports_a_null_transport_when_no_listener_was_bound`.
+    pub(super) transport: DaemonTransport,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38; reworked
@@ -973,6 +983,8 @@ pub(super) async fn health_handler(
         boot_reconcile,
         indexes_watcher_network_degraded,
         embedder_bootstrap,
+        // #9030: report the listeners bound, never a guessed default.
+        transport: state.transport.clone(),
     })
 }
 

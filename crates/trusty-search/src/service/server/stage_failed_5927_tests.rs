@@ -404,6 +404,8 @@ async fn health_counter_wire_shape_is_unchanged_by_the_id_field() {
         ("total_chunks", "number"),
         ("indexes_watcher_network_degraded", "number"),
         ("embedder_bootstrap", "string"),
+        // #9030: additive `{socket_path, http_addr}`; always present.
+        ("transport", "object"),
     ];
     for (key, kind) in expected {
         let value = obj

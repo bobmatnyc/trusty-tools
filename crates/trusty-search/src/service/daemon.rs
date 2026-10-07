@@ -688,6 +688,12 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
 
     // Stamp port into state so the SPA knows window.__DAEMON_PORT__.
     let state = state.with_daemon_port(port);
+    // #9030: `search.health` reports the listeners actually bound — the
+    // socket's own path and the HTTP listener's resolved address.
+    let state = state.with_transport(crate::service::server::DaemonTransport {
+        socket_path: Some(rpc.path.to_string_lossy().into_owned()),
+        http_addr: Some(addr_string),
+    });
     // Issue #85: clone before moving into build_router for post-shutdown flush.
     let flush_state = state.clone();
     // Issue #829: subscribe before moving state into build_router.
