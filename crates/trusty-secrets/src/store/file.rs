@@ -452,7 +452,8 @@ fn sweep_orphans(dir: &Path) -> Result<(), SecretsError> {
 }
 
 /// Whether the writer named by a temp file's `<pid>.…` suffix may still run.
-fn writer_alive(rest: &str) -> bool {
+// #7519: crate-visible so the CLI template sweep judges liveness the same way.
+pub(crate) fn writer_alive(rest: &str) -> bool {
     let Some(pid) = rest
         .split('.')
         .next()

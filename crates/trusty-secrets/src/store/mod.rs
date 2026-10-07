@@ -10,6 +10,10 @@
 //! Test: the `*_tests.rs` files beside this module.
 
 mod backend;
+// #7519: the runner the CLI-backed backends share; Unix only, because it
+// kills the child's process group.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod cli;
 pub mod config;
 mod dotenv;
 // #9326: the 0600 value-file backend needs Unix modes and owners. #4567: the

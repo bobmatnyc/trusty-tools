@@ -182,7 +182,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 26] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 29] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -809,6 +809,34 @@ async fn server_tracked_file_backend_is_refused_on_a_keychain_build() {
     server.stop().await;
 }
 
+/// Why: #7519, owner ruling 2026-10-07 — a tracked project config may not
+/// set a CLI `account` or `config_path`, on any build. The refusal is a fixed
+/// kind that echoes nothing from the repository, and nothing is written.
+/// Red when `check_project_backend` lets the setting through.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_cli_setting_is_refused_on_every_build() {
+    let fx = fixture();
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, format!("secrets:\n  account: {SENTINEL}\n")).unwrap();
+    let server = fx.start().await;
+    let set = call(
+        &fx.settings.socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A", "value": VALUE}),
+    )
+    .await;
+    let text = wire(&set);
+    assert!(!text.contains(SENTINEL) && !text.contains(VALUE), "{text}");
+    assert_eq!(
+        fixed_error(&set, method::SET),
+        ErrorKind::TrackedCliSettingRefused
+    );
+    assert_eq!(fx.keychain.len(), 0, "nothing is written");
+    server.stop().await;
+}
+
 /// Why: DOC-74 §6.1 — the project's tracked config may name a backend and a
 /// vault override; both take effect.
 /// Test: itself.
@@ -1084,7 +1112,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 26;
+    const ARMS: usize = 29;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1112,7 +1140,11 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::TrackedBackendRefused => 22,
             ErrorKind::AuditUnavailable => 23,
             ErrorKind::TrackedAuditRefused => 24,
-            ErrorKind::Internal => 25,
+            // #7519: the tracked CLI-setting refusal and the CLI backends' kinds.
+            ErrorKind::TrackedCliSettingRefused => 25,
+            ErrorKind::CliNotInstalled => 26,
+            ErrorKind::BackendLocked => 27,
+            ErrorKind::Internal => 28,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
