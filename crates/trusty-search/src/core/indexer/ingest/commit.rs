@@ -455,6 +455,59 @@ impl CodeIndexer {
         self.chunks.try_read().map(|g| g.len()).unwrap_or(0)
     }
 
+    /// How many resident chunks the BM25 lane is missing, and under which cap.
+    ///
+    /// Why: #9235 — the chunk cap exceeds the BM25 corpus cap at the top of
+    /// every memory tier, so a converged index can hold chunks BM25 refused.
+    /// Only the rehydrate path counted them, and only into a gauge;
+    /// `index_status` and the search `meta` block need the figure too.
+    /// What: resident, `chunks.len() - bm25.len()` (saturating). Evicted (either
+    /// map), or a reclaim caught between the two reads, there is nothing
+    /// settled to compare, so it reports what the next rehydrate admits: the
+    /// durable chunk count minus the cap, saturating. `None` when that durable
+    /// count cannot be read — unknown, never "not truncated".
+    /// Test: `ingest_over_the_bm25_cap_reports_truncation`,
+    /// `ingest_under_the_bm25_cap_reports_no_truncation`,
+    /// `rehydrate_over_the_bm25_cap_reports_truncation`,
+    /// `rehydrate_under_the_bm25_cap_reports_no_truncation`,
+    /// `a_reclaim_between_the_reads_does_not_report_truncation_under_the_cap`,
+    /// `status_reports_bm25_truncation_unavailable_when_the_durable_count_errors`.
+    pub async fn bm25_truncation(&self) -> Option<crate::core::bm25::Bm25Truncation> {
+        use crate::core::bm25::{Bm25Truncation, CodeBm25Index};
+        let cap = CodeBm25Index::corpus_cap();
+        let Some(corpus) = self.corpus.as_ref() else {
+            // Nothing evicts without a durable corpus: the maps are the index.
+            let (chunk_count, bm25_len) = self.resident_counts().await;
+            return Some(Bm25Truncation::from_counts(chunk_count, bm25_len, cap));
+        };
+        if !self.corpus_evicted() {
+            let (chunk_count, bm25_len) = self.resident_counts().await;
+            // #9235: a reclaim can land between the two reads. It flags the
+            // chunk map before releasing it, but empties BM25 before flagging
+            // it, so re-read the flags AND treat an empty BM25 beside resident
+            // chunks as a reclaim in flight — the cap is never 0, so the cap
+            // alone cannot leave BM25 empty.
+            let raced = self.corpus_evicted() || (bm25_len == 0 && chunk_count > 0);
+            if !raced {
+                return Some(Bm25Truncation::from_counts(chunk_count, bm25_len, cap));
+            }
+        }
+        // #9235: an unreadable count is unknown, not "nothing dropped".
+        let durable = corpus
+            .chunk_count()
+            .inspect_err(
+                |e| tracing::warn!(index = %self.index_id, "bm25_truncation: corpus count: {e:#}"),
+            )
+            .ok()?;
+        Some(Bm25Truncation::from_counts(durable, durable.min(cap), cap))
+    }
+
+    /// `(chunks.len(), bm25.len())`, each under its own read lock (#9235).
+    async fn resident_counts(&self) -> (usize, usize) {
+        let chunk_count = self.chunks.read().await.len();
+        (chunk_count, self.bm25.read().await.len())
+    }
+
     /// Snapshot the current symbol graph. Cheap (`Arc::clone`); intended for
     /// read-only KG queries from concurrent search handlers.
     ///

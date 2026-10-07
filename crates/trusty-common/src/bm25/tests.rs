@@ -317,3 +317,34 @@ fn docs_containing_all_is_none_for_no_terms() {
     idx.upsert_document("a", "fn render() {}");
     assert!(idx.docs_containing_all(&[]).is_none());
 }
+
+/// #9235: the public cap getter must name the cap upserts actually enforce,
+/// so a truncation report never cites a cap other than the one that dropped
+/// documents.
+/// What: caps at 3 through the env, then fills past it; `len()` stops at the
+/// getter's value. Unset, the getter is the 50 000 default.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn effective_corpus_cap_is_the_cap_upserts_enforce() {
+    let prev = std::env::var("TRUSTY_BM25_CORPUS_CAP").ok();
+    unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", "3") };
+    assert_eq!(effective_corpus_cap(), 3);
+    let mut idx = BM25Index::new();
+    for i in 0..5 {
+        idx.upsert_document(&format!("doc{i}"), "shared probe text");
+    }
+    assert_eq!(
+        idx.len(),
+        effective_corpus_cap(),
+        "len stops at the reported cap"
+    );
+
+    unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") };
+    assert_eq!(effective_corpus_cap(), DEFAULT_BM25_CORPUS_CAP);
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var("TRUSTY_BM25_CORPUS_CAP", v) },
+        None => unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") },
+    }
+}

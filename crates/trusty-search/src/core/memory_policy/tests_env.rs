@@ -341,3 +341,42 @@ fn test_ram_detection_returns_nonzero() {
         );
     }
 }
+
+/// #9235 tier coupling: the cap the truncation report names is the cap the
+/// memory tier set. Applying each tier's `MemoryPolicy` must move
+/// `CodeBm25Index::corpus_cap()` to that policy's `bm25_corpus_cap`.
+/// What: in an isolated child (`apply_to_env` writes process-global env,
+/// #6369), resolves the policy at one RAM size per tier, applies it, and
+/// compares. The tiers' caps differ, so a cap that ignores the policy fails.
+/// Test: this test.
+#[test]
+fn applying_a_tier_policy_sets_the_cap_the_bm25_lane_reports() {
+    use crate::core::bm25::CodeBm25Index;
+    if !crate::service::test_isolation::run_isolated(
+        "core::memory_policy::tests_env::applying_a_tier_policy_sets_the_cap_the_bm25_lane_reports",
+        &[] as &[(&str, &str)],
+    ) {
+        return;
+    }
+    let mut caps = std::collections::BTreeSet::new();
+    for (ram_mb, tier) in [
+        (12 * 1024, MemoryTier::Degraded),
+        (24 * 1024, MemoryTier::Medium),
+        (48 * 1024, MemoryTier::Large),
+        (128 * 1024, MemoryTier::XLarge),
+    ] {
+        // SAFETY: this isolated child runs one test on one thread. Clearing the
+        // override keeps the previous tier's applied cap out of this policy.
+        unsafe { std::env::remove_var("TRUSTY_BM25_CORPUS_CAP") };
+        let policy = MemoryPolicy::from_total_ram_mb(ram_mb);
+        assert_eq!(policy.tier, tier);
+        policy.apply_to_env();
+        assert_eq!(
+            CodeBm25Index::corpus_cap(),
+            policy.bm25_corpus_cap,
+            "{tier}: the BM25 lane reports a cap the tier did not set"
+        );
+        caps.insert(policy.bm25_corpus_cap);
+    }
+    assert_eq!(caps.len(), 4, "every tier must set its own cap: {caps:?}");
+}
