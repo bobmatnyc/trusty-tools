@@ -626,8 +626,9 @@ async fn run_memory_pressure_tick_resets_hysteresis_baseline_on_early_stop() {
     let _ = memguard::current_rss_mb();
     let rss = memguard::enforcement_rss_mb()
         .expect("sample this test process's own enforcement-measure RSS");
-    let limit = rss.saturating_sub(RSS_SLACK_MB).max(1); // target_freed_mb == RSS_SLACK_MB at pct=100
-                                                         // #9368 diag: the enforcement measure is RssAnon on Linux, total on macOS.
+    // target_freed_mb == RSS_SLACK_MB at pct=100.
+    let limit = rss.saturating_sub(RSS_SLACK_MB).max(1);
+    // #9368 diag: the enforcement measure is RssAnon on Linux, total on macOS.
     eprintln!(
         "#9368 diag: enforce_rss_mb before_presample={rss_before_presample:?} \
          after_presample={rss} limit_mb={limit} target_freed_mb={} cold_estimate_mb={}",
