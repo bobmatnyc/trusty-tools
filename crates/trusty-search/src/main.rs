@@ -441,6 +441,7 @@ enum Commands {
     ///   trusty-search start --port 7878
     ///   trusty-search start --foreground --port 7878   # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
+    ///   trusty-search start --no-http                  # rpc socket only, no TCP port
     ///
     /// #8176: an isolated instance started against an explicit data directory
     /// (`--data-dir` or `TRUSTY_DATA_DIR`) does NOT auto-discover, on its first
@@ -452,117 +453,8 @@ enum Commands {
     /// default data directory (or a symlink to it) is not explicit.
     #[command(display_order = 20)]
     Start {
-        /// Port to listen on (default: 7878, auto-selects next if busy)
-        #[arg(long, default_value_t = trusty_search::service::DEFAULT_PORT)]
-        port: u16,
-
-        /// Run in the foreground instead of forking a background daemon.
-        ///
-        /// Default (`trusty-search start`): self-spawns a detached child with
-        /// `--foreground` and returns immediately, so the daemon survives the
-        /// caller's terminal closing (e.g. tmux pane SIGHUP). Use this flag
-        /// when the process is managed by launchd, systemd, or Docker — those
-        /// supervisors require the managed binary to stay in the foreground.
-        #[arg(long, default_value_t = false)]
-        foreground: bool,
-
-        /// Embedding execution device: `auto` (default), `cpu`, or `gpu`.
-        ///
-        /// - `auto`: prefer CUDA on Linux/Windows (binary must be built with
-        ///   `--features cuda`), then CoreML on Apple Silicon, otherwise CPU.
-        /// - `cpu`: force CPU even when a GPU is available — useful for A/B
-        ///   benchmarking or freeing the GPU for another workload.
-        /// - `gpu`: require GPU acceleration; exit 1 if no GPU EP can be
-        ///   initialised. Useful on a dedicated GPU indexing node where
-        ///   silent CPU fallback would mean a 10× slower reindex.
-        ///
-        /// Implemented as the `TRUSTY_DEVICE` env var, which the embedder
-        /// reads at session-init time. Set explicitly to override the daemon
-        /// default.
-        #[arg(long, value_parser = ["auto", "cpu", "gpu"], default_value = "auto")]
-        device: String,
-
-        /// Override the data directory used by the daemon (lockfile, port file,
-        /// indexes.toml, per-index data).
-        ///
-        /// Equivalent to setting `TRUSTY_DATA_DIR` in the environment.
-        /// This flag takes precedence over an inherited `TRUSTY_DATA_DIR` when
-        /// both are set (#8149 — the old precedence was the reverse, so a
-        /// second daemon bound the first daemon's RPC socket). The directory is
-        /// created automatically if it does not exist.
-        /// Must be an absolute path.
-        ///
-        /// Use this to run an isolated daemon (e.g. for cert/benchmark work)
-        /// alongside the production daemon without lockfile conflicts:
-        ///   trusty-search start --data-dir /tmp/ts-cert --port 7879
-        #[arg(long, env = "TRUSTY_DATA_DIR")]
-        data_dir: Option<std::path::PathBuf>,
-
-        /// Suppress the auto-discovery scan at startup.
-        ///
-        /// By default the daemon walks `scan_paths` (from
-        /// `~/.config/trusty-search/config.yaml`) after hydrating its registry
-        /// from `indexes.toml` and indexes any project not yet registered.
-        /// Pass this flag (or set `TRUSTY_NO_AUTO_DISCOVER=1`) to skip that
-        /// scan entirely — the daemon will only serve indexes that are already
-        /// present in `indexes.toml` or registered manually at runtime.
-        ///
-        /// Useful when the scan-paths tree is very large, when the daemon is
-        /// started in a CI/CD environment that should not discover arbitrary
-        /// repositories, or when reproducible startup behaviour is required.
-        ///
-        /// Precedence: CLI flag > `TRUSTY_NO_AUTO_DISCOVER` env var > default
-        /// (auto-discover enabled on the default data directory, disabled on an
-        /// explicit `--data-dir` / `TRUSTY_DATA_DIR` — #8176).
-        ///
-        /// Accepted env values: `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`
-        /// (case-insensitive). Before #4823 this was a bare `bool`, which under
-        /// clap means the CLI flag is a presence flag but the env var goes
-        /// through strict `FromStr<bool>` — so the `=1` spelling documented
-        /// everywhere else was rejected and the daemon refused to boot.
-        // #4823: accept the documented `=1` spelling instead of only
-        // `true`/`false`, which aborted startup from a launchd unit.
-        #[arg(long, env = "TRUSTY_NO_AUTO_DISCOVER", num_args = 0..=1, require_equals = true, default_value_t = false, default_missing_value = "true", value_parser = commands::service_unit::parse_truthy_bool)]
-        no_auto_discover: bool,
-
-        /// Run the auto-discovery scan even on an explicit data directory.
-        ///
-        /// #8176: a daemon started against an explicit `--data-dir` (or
-        /// `TRUSTY_DATA_DIR`) no longer auto-discovers, on any start. A throwaway
-        /// instance used to walk `scan_paths` and force-reindex the colocated
-        /// `.trusty-search/` stores of every unrelated repository it found,
-        /// which is the opposite of what an isolated data directory asks for.
-        /// Pass this flag to opt that scan back in; it has no effect on the
-        /// machine's default data directory, which still auto-discovers, and
-        /// `--no-auto-discover` still wins over it.
-        #[arg(long, conflicts_with = "no_auto_discover")]
-        auto_discover: bool,
-
-        /// Cap on how many per-index searches run concurrently within a single
-        /// cross-project (`search_all` / `POST /search`) fan-out (issue #2845).
-        ///
-        /// An unbounded fan-out over ~150+ indexes issued every per-index
-        /// query near-simultaneously and overran the daemon's admission
-        /// limiter (503 `server_busy` storm). This caps in-flight per-index
-        /// work so a large fan-out degrades gracefully instead of tripping the
-        /// limiter. Default 8. Clamped to `>= 1`.
-        ///
-        /// Implemented as the `TRUSTY_SEARCH_FANOUT_CONCURRENCY` env var, read
-        /// by the daemon per request. A per-request `max_fanout_concurrency`
-        /// body field overrides this for a single call. Ignored when
-        /// `--serial` is set.
-        #[arg(long, value_name = "N")]
-        fanout_concurrency: Option<usize>,
-
-        /// Force cross-project fan-out searches to run strictly one index at a
-        /// time (issue #2845) — equivalent to `--fanout-concurrency 1`.
-        ///
-        /// A safety valve that trades fan-out latency for guaranteed
-        /// non-overload; useful on memory/CPU-constrained hosts or when the
-        /// concurrency limiter is being tripped. Takes precedence over
-        /// `--fanout-concurrency`.
-        #[arg(long, default_value_t = false)]
-        serial: bool,
+        #[command(flatten)]
+        args: commands::start::StartArgs,
     },
 
     /// Stop the running background daemon
@@ -1346,31 +1238,8 @@ async fn run() -> Result<()> {
         // for backward-compat with any scripts that invoke it directly.
         Commands::Health => commands::status::handle_status(cli.json).await?,
 
-        Commands::Start {
-            port,
-            foreground,
-            device,
-            data_dir,
-            no_auto_discover,
-            // #8176: the explicit opt-in that grants auto-discovery on a fresh
-            // isolated data dir, which no longer scans by default.
-            auto_discover,
-            fanout_concurrency,
-            serial,
-        } => {
-            commands::start::handle_start(
-                port,
-                foreground,
-                &device,
-                data_dir.as_deref(),
-                cli.verbose,
-                no_auto_discover,
-                auto_discover,
-                fanout_concurrency,
-                serial,
-            )
-            .await?;
-        }
+        // #9214: the flags live in `commands::start::StartArgs`.
+        Commands::Start { args } => commands::start::handle_start(args, cli.verbose).await?,
 
         Commands::Stop => commands::stop::handle_stop().await?,
 

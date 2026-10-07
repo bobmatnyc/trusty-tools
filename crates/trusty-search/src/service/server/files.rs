@@ -146,11 +146,22 @@ pub(super) async fn remove_file_handler(
 ///
 /// Why and What: the delete half of [`index_file_report`]'s contract — same
 /// callers, same lazy load, same residency verdict, and the same rule that a
-/// removal which failed never reports a chunk count.
+/// removal which failed never reports a chunk count. #9236: the path goes
+/// through [`super::remove_path::remove_keys`] first, so an absolute in-root
+/// path removes its stored keys and one outside the root answers 400. A
+/// successful delete then forgets the key's content hash, so the next
+/// reindex indexes the file again. A 500 from the delete keeps both the
+/// chunks and the hash. A 500 from the hash step comes after the chunks are
+/// gone, and the request is safe to retry.
 /// Test: `remove_file_over_the_socket_matches_the_http_body`,
 /// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
 /// `crate::service::rpc::writes`;
-/// the #9230 stamp by `remove_file_report_stamps_only_a_committed_delete`.
+/// the #9230 stamp by `remove_file_report_stamps_only_a_committed_delete`;
+/// the #9236 paths by `remove_file_takes_an_absolute_in_root_path_9236`,
+/// `remove_file_refuses_a_path_outside_the_root_9236` and
+/// `remove_file_refuses_a_relative_path_outside_the_root_9236`; the hash by
+/// `remove_file_forgets_the_hash_so_a_reindex_restores_it_9236` and
+/// `remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236`.
 pub(crate) async fn remove_file_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -162,36 +173,48 @@ pub(crate) async fn remove_file_report(
     let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
         .await
         .map_err(|(status, body)| (status, body.0))?;
+    // #9236: an absolute in-root path is removed under its stored key; one
+    // outside the root is a 400 naming the accepted forms, not a silent 0.
+    let keys = super::remove_path::remove_keys(&index_id.0, &handle.root_path, &req.path)?;
     // #3049: see the sibling handler — same guard, same reason.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
-    // #9230: fail-closed. A delete redb refused answers 500
-    // `remove_file_failed` with the file's chunks still indexed.
-    let (removed, committed) = indexer
-        .remove_file_committed(&req.path)
-        .await
-        .map_err(|e| {
-            // #5061: see the sibling handler — a silent 500 leaves the caller
-            // believing a deletion landed when it did not.
-            tracing::warn!(
-                index_id = %index_id,
-                path = %req.path,
-                error = %e,
-                "remove-file failed"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({
-                    "error": "remove_file_failed",
-                    "index_id": index_id.0,
-                    "path": req.path,
-                    "message": e.to_string(),
-                }),
-            )
-        })?;
-    // #9230: only a delete whose rows left redb moves `reindexed_unix`.
-    if committed {
-        indexer.record_incremental_commit(&req.path).await;
+    // #5061: see the sibling handler — a silent 500 leaves the caller
+    // believing a deletion landed when it did not.
+    let failed = |e: anyhow::Error| {
+        tracing::warn!(
+            index_id = %index_id,
+            path = %req.path,
+            error = %e,
+            "remove-file failed"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({
+                "error": "remove_file_failed",
+                "index_id": index_id.0,
+                "path": req.path,
+                "message": e.to_string(),
+            }),
+        )
+    };
+    let mut removed = 0;
+    for key in &keys {
+        // #9230: fail-closed. A delete redb refused answers 500
+        // `remove_file_failed` with the file's chunks and hash still indexed.
+        let (count, committed) = indexer.remove_file_committed(key).await.map_err(failed)?;
+        // #9230: only a delete whose rows left redb moves `reindexed_unix`.
+        if committed {
+            indexer.record_incremental_commit(key).await;
+        }
+        // #9236: forget the content hash only once the delete is through, or
+        // the next reindex skips the unchanged file and it never comes back.
+        // A 500 here comes after the chunks are gone, and is safe to retry:
+        // every successful delete forgets, so the retry (0 chunks) clears it.
+        crate::service::reindex::hash::forget_file_hash(&index_id, &indexer, key)
+            .await
+            .map_err(failed)?;
+        removed += count;
     }
     Ok(serde_json::json!({
         "index_id": index_id.0,

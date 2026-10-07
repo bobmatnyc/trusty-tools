@@ -1119,3 +1119,109 @@ fn parse_review_reply_reads_only_the_tool_input() {
     assert!(!valid.is_fail_safe);
     assert_eq!(valid.verdict, Verdict::Block);
 }
+
+// ── #9310: reviewer severity, null fields, one decode position ───────────
+
+/// #9310 item 2.2: the reviewer's severity is kept on the finding and maps to
+/// effort as before, with one change: a severity padded with whitespace now
+/// counts at its level (`" high "` is High effort; it was Low).
+#[test]
+fn parse_finding_carries_reviewer_severity() {
+    for (raw, severity, effort) in [
+        ("critical", Some(Severity::Critical), Effort::High),
+        ("HIGH", Some(Severity::High), Effort::High),
+        (" high ", Some(Severity::High), Effort::High),
+        ("medium", Some(Severity::Medium), Effort::Medium),
+        ("low", Some(Severity::Low), Effort::Low),
+        ("urgent", None, Effort::Low),
+        ("", None, Effort::Low),
+    ] {
+        let mut f = untitled_finding("Body.");
+        f["severity"] = serde_json::json!(raw);
+        let result = parse_review_response(&review_with("REQUEST_CHANGES", vec![f]));
+        assert!(!result.is_fail_safe, "{raw}: {:?}", result.fail_safe_reason);
+        assert_eq!(result.findings[0].severity, severity, "{raw}");
+        assert_eq!(result.findings[0].effort, effort, "{raw}");
+    }
+}
+
+/// #9310 item 4a: `"title": null` parses and the title is derived from the
+/// body. serde's `default` covers only a missing key, so a fix for an absent
+/// title alone still fails this reply to UNKNOWN.
+#[test]
+fn parse_null_title_derives_title() {
+    let mut f = untitled_finding("Null titles are derived. Second sentence.");
+    f["title"] = serde_json::Value::Null;
+    let title = only_title(&review_with("REQUEST_CHANGES", vec![f]));
+    assert_eq!(title, "Null titles are derived");
+}
+
+/// #9310 item 4a: `"severity": null` parses; the finding carries no reviewer
+/// severity, so the pipeline derives one, and its effort is Low as for an
+/// absent severity.
+#[test]
+fn parse_null_severity_derives_severity() {
+    let mut f = untitled_finding("Body.");
+    f["severity"] = serde_json::Value::Null;
+    let result = parse_review_response(&review_with("REQUEST_CHANGES", vec![f]));
+    assert!(!result.is_fail_safe, "{:?}", result.fail_safe_reason);
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(result.findings[0].severity, None);
+    assert_eq!(result.findings[0].effort, Effort::Low);
+}
+
+/// #9310 item 4b: a double-encoded findings string that does not decode names
+/// one position, the findings string's own place in the reply. Before, the
+/// inner error's position, counted inside the decoded string, was the one
+/// reported: serde_json reads a trailing ` at line L column C` out of a custom
+/// error message and keeps it as the error's position.
+#[test]
+fn double_encoded_findings_error_reports_one_position() {
+    let inner = serde_json::json!([{ "title": "no body" }]).to_string();
+    let body = serde_json::json!({ "verdict": "REQUEST_CHANGES", "findings": inner }).to_string();
+    let reason = assert_fail_safe_unknown(&body);
+    assert!(reason.contains(FINDINGS_DECODE_ERROR), "{reason}");
+    assert!(reason.contains("missing field `body`"), "{reason}");
+    assert_eq!(reason.matches(" at line ").count(), 1, "{reason}");
+    // The closing quote of the findings string, 1-based, in the reply.
+    let column = body
+        .find("\",\"verdict\"")
+        .expect("findings precede verdict")
+        + 1;
+    assert!(
+        reason.ends_with(&format!(" at line 1 column {column}")),
+        "{reason}"
+    );
+}
+
+/// #9310 item 4c: a pin of which serde data messages may reach the fail-safe
+/// reason. Only a schema field name or the decode error passes; a message
+/// that can quote the reply is `None`.
+#[test]
+fn safe_data_message_keeps_only_schema_names() {
+    let decode = format!("{FINDINGS_DECODE_ERROR}: missing field `body`");
+    for (message, want) in [
+        ("missing field `body`", Some("missing field `body`")),
+        ("duplicate field `title`", Some("duplicate field `title`")),
+        (
+            "missing field `body` and more",
+            Some("missing field `body`"),
+        ),
+        ("missing field `a b`", None),
+        ("missing field ``", None),
+        ("invalid type: string \"secret\", expected a boolean", None),
+        ("unknown variant `SECRET`, expected one of `style`", None),
+        (decode.as_str(), Some(decode.as_str())),
+        ("", None),
+    ] {
+        assert_eq!(safe_data_message(message), want, "{message:?}");
+    }
+}
+
+/// #9310: a field name with no closing backtick is rejected. Before, the cut
+/// ran one byte past the end of the message and panicked.
+#[test]
+fn safe_data_message_rejects_an_unterminated_field_name() {
+    assert_eq!(safe_data_message("missing field `body"), None);
+    assert_eq!(safe_data_message("duplicate field `title"), None);
+}

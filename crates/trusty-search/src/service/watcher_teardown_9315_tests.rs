@@ -46,15 +46,16 @@ fn counter_settles_at(expected: usize) -> bool {
 }
 
 /// Records the message of every WARN event seen by its dispatcher.
+/// #9339: shared with `watcher_start_9339_tests`.
 #[derive(Clone, Default)]
-struct WarnCapture(Arc<Mutex<Vec<String>>>);
+pub(crate) struct WarnCapture(Arc<Mutex<Vec<String>>>);
 
 impl WarnCapture {
-    fn dispatch(&self) -> tracing::Dispatch {
+    pub(crate) fn dispatch(&self) -> tracing::Dispatch {
         tracing::Dispatch::new(tracing_subscriber::registry().with(self.clone()))
     }
 
-    fn warnings(&self) -> Vec<String> {
+    pub(crate) fn warnings(&self) -> Vec<String> {
         self.0.lock().expect("capture lock").clone()
     }
 }

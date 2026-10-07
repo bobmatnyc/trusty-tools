@@ -192,6 +192,7 @@ pub(super) async fn run_mapreduce_branch(
 
     // Narrative body: use the synthesis prose summary when available (#1663);
     // fall back to the deterministic stats string when synthesis is disabled.
+    // #9310 D2: `gate_then_verify` replaces the summary with the verified one.
     let stats_body = format!(
         "Map-reduce review: {} file(s) reviewed across {} unit(s), \
          {} skipped, {} failed; {} finding(s) surfaced.",
@@ -373,14 +374,17 @@ fn reviewer_verdict(
 /// the synthesis pass has already applied the High-severity safety floor and we
 /// MUST NOT re-apply `apply_grade_and_floor` (which would re-add the count-based
 /// `≥2 Medium → REQUEST_CHANGES` floor that synthesis is calibrating away).
-/// Instead we use the already-floored `parsed.verdict` directly and parse the
-/// grade from `parsed.grade`, bypassing `derive_verdict_with_grade`.
+/// Instead we take the already-floored `parsed.verdict`, tightened only by the
+/// verdict its own grade implies (#9310), bypassing `derive_verdict_with_grade`.
 /// What: mirrors `run_review` steps 7b–7e against the `parsed` input.
 ///
 ///   - `synthesis_active=false` → full `apply_grade_and_floor` (mechanical path).
-///   - `synthesis_active=true`  → synthesis-floored verdict + grade used directly.
+///   - `synthesis_active=true`  → stricter of the synthesis-floored verdict and
+///     its grade's verdict; the grade is used directly.
 ///
-/// Test: covered by the map-reduce runner integration tests.
+/// Test: `run_review_mapreduce_synthesis_approve_graded_f_is_block`,
+/// `run_review_mapreduce_synthesis_two_mediums_not_refloored`, and the other
+/// map-reduce runner integration tests.
 async fn fold_reduced_into_result(
     config: &ReviewConfig,
     input: &ReviewInput,
@@ -406,7 +410,7 @@ async fn fold_reduced_into_result(
     let (final_verdict, final_grade, original_llm_grade) = if facts.synthesis_active {
         // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
-        // floor.  Use the synthesis verdict + grade directly instead.
+        // floor, so only the synthesis grade's own implied verdict applies.
         let final_grade: Grade = parsed
             .grade
             .as_deref()
@@ -419,11 +423,9 @@ async fn fold_reduced_into_result(
             .as_deref()
             .and_then(|s| s.parse().ok())
             .unwrap_or(final_grade);
-        (
-            parsed.verdict.clone(),
-            Some(final_grade),
-            Some(pre_floor_grade),
-        )
+        // #9310: the grade floors the verdict (stricter-of only, no count floor).
+        let verdict = judged_verdict(parsed.verdict.clone(), parsed.grade.as_deref(), None);
+        (verdict, Some(final_grade), Some(pre_floor_grade))
     } else {
         // Mechanical path: apply the full severity floor via apply_grade_and_floor.
         // Returns Option<Grade> for each — None when the verdict is UNKNOWN (#1474).

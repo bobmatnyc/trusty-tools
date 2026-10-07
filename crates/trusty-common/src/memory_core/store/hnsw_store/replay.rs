@@ -31,7 +31,9 @@
 //! finds the exact top k both times. That held in every measurement above,
 //! but `hnsw_rs` cannot promise it. Owner ruling 25 (#9141) accepted this
 //! trade for the open cost: ~0.45 s parallel against ~4.2–5.2 s serial for
-//! 6,661 384-dim rows in the dev profile.
+//! 6,661 384-dim rows in the dev profile. #9280: at or below
+//! `EXHAUSTIVE_SCAN_MAX_POINTS` the exact scan answers instead of the graph,
+//! so this caveat applies only above it.
 //! Test: `reopening_a_palace_answers_every_query_identically`,
 //! `replay_leaves_no_point_without_neighbours`.
 

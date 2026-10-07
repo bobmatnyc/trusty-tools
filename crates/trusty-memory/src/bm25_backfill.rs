@@ -21,16 +21,23 @@
 //! land". Nothing can be dropped because nothing is ever offered to a full
 //! queue.
 //!
-//! Coverage is established by IDENTITY, never by counting. `stats.doc_count`
-//! is a count over the palace's whole corpus, and trusty-memory issues no BM25
-//! `delete` on the forget path (#5053), so the corpus accumulates documents
-//! for drawers the palace no longer has. Once those stale documents outnumber
-//! the ones still missing, `doc_count >= drawer_count` is satisfied by a
-//! corpus that shares no ids with the palace at all. Every coverage decision
-//! here — the pre-flight skip, the post-run verdict, and
+//! Coverage is established by IDENTITY AND CONTENT, never by counting.
+//! `stats.doc_count` is a count over the palace's whole corpus, which a
+//! deletion this daemon never saw — a drawer dropped while the lane was off,
+//! or removed by a path that does not run `memory_forget` — leaves holding
+//! documents for drawers the palace no longer has. Once those stale documents
+//! outnumber the ones still missing, `doc_count >= drawer_count` is satisfied
+//! by a corpus that shares no ids with the palace at all. (`memory_forget`
+//! itself does delete, inline and fail-loud, via
+//! `tools::bm25::bm25_delete_document` — #5053.)
+//!
+//! Identity alone is not enough either: a drawer edited in place keeps its id,
+//! so an index still holding the pre-edit text answers "present" for an entry
+//! whose text the palace no longer has (#8246). Every coverage decision here —
+//! the pre-flight skip, the post-run verdict, and
 //! [`BackfillReport::fully_indexed`] — therefore goes through
-//! `Bm25Lane::missing_docs`, which answers about the exact set of drawer ids
-//! being asked about. A coverage question that could not be asked reports
+//! `Bm25Lane::outdated_docs`, which answers about the exact `(drawer id, text)`
+//! pairs being asked about. A coverage question that could not be asked reports
 //! `None`, never `covered`.
 //!
 //! What: [`backfill_palace`] drives the feeder against a
@@ -148,9 +155,9 @@ pub struct BackfillReport {
     pub indexed: usize,
     /// Documents that errored or timed out.
     pub failed: usize,
-    /// How many of this palace's drawer ids the daemon still does NOT hold,
-    /// asked by id after the run. `None` when the question could not be
-    /// answered at all.
+    /// How many of this palace's drawers the index still does NOT hold at their
+    /// current text, asked by `(id, text)` after the run (#8246). `None` when
+    /// the question could not be answered at all.
     pub missing_after: Option<usize>,
     /// `doc_count` the daemon reported after the run — observability only.
     /// Larger than `drawers_total - skipped_empty` means stale documents for
@@ -185,13 +192,15 @@ impl BackfillReport {
     ///
     /// Why: this is the question the whole module exists to answer, and it is
     /// the alarm the design rests on — so it must be a SET statement, not an
-    /// arithmetic one. The previous version compared the daemon's `doc_count`
-    /// against the palace's drawer count; because trusty-memory issues no BM25
-    /// `delete`, stale documents accumulate and that comparison eventually
-    /// returns `true` over a palace the daemon has never indexed.
-    /// What: `true` only when a post-run probe asked the daemon about every one
-    /// of this palace's drawer ids and it named none as missing. A probe that
-    /// failed, timed out, or was never run leaves `None` and reports `false`.
+    /// arithmetic one. The original version compared the daemon's `doc_count`
+    /// against the palace's drawer count; stale documents accumulate whenever a
+    /// drawer leaves the palace without this daemon deleting its document, and
+    /// that comparison eventually returns `true` over a palace the daemon has
+    /// never indexed.
+    /// What: `true` only when a post-run probe asked the index about every one
+    /// of this palace's drawers, BY id and text, and it named none as missing
+    /// or edited (#8246). A probe that failed, timed out, or was never run
+    /// leaves `None` and reports `false`.
     /// No status alone can satisfy it.
     /// Test: `fully_indexed_requires_a_verified_empty_missing_set`.
     pub fn fully_indexed(&self) -> bool {
@@ -299,22 +308,25 @@ pub fn docs_from_drawers(drawers: &[Drawer]) -> PalaceDocs {
 /// Test: `coverage_probe_classifies_an_unreadable_index_as_unreachable`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Coverage {
-    /// The index answered: this many of the ids asked about are absent.
+    /// The index answered: this many of the drawers asked about are absent, or
+    /// held at text the palace no longer has (#8246).
     Missing(usize),
     /// The palace's index could not be opened, so nothing was established.
     Unreachable,
 }
 
-/// Ask the lane which of `ids` a palace does not hold.
+/// Ask the lane which of `docs` a palace does not hold at the text given.
 ///
 /// Why: the coverage claim must never be inferred. This is the only place that
 /// produces one, so every caller — pre-flight skip, post-run verdict — reaches
 /// the same answer through the same failure classification.
-/// What: one `missing_docs` call. A load failure reports `Unreachable`, never a
-/// partial or empty missing set.
-/// Test: `coverage_probe_classifies_an_unreadable_index_as_unreachable`.
-async fn probe_coverage(lane: &Bm25Lane, palace: &str, ids: &[String]) -> Coverage {
-    match lane.missing_docs(palace, ids).await {
+/// What: one `outdated_docs` call, which is content-aware: an id held at
+/// pre-edit text counts as missing (#8246). A load failure reports
+/// `Unreachable`, never a partial or empty missing set.
+/// Test: `coverage_probe_classifies_an_unreadable_index_as_unreachable`,
+/// `coverage_probe_counts_an_edited_drawer_as_missing`.
+async fn probe_coverage(lane: &Bm25Lane, palace: &str, docs: &[(String, String)]) -> Coverage {
+    match lane.outdated_docs(palace, docs).await {
         Ok(cov) => Coverage::Missing(cov.missing.len()),
         Err(e) => {
             tracing::warn!(palace = %palace, "bm25 backfill: coverage probe failed: {e:#}");
@@ -330,11 +342,11 @@ async fn probe_coverage(lane: &Bm25Lane, palace: &str, ids: &[String]) -> Covera
 /// because it never offers work to a queue at all: each `index` call is awaited
 /// before the next is issued.
 /// What: submits `docs` one at a time, stopping early if [`PALACE_BUDGET`]
-/// expires. Skips the run only when a pre-flight probe named zero missing
-/// drawer ids — a verified set statement, not a count comparison — unless
-/// `force`. Probes again afterwards so the report's coverage claim is the
-/// index's own answer about this palace's ids, then flushes so a hard kill
-/// straight after a sweep cannot lose it.
+/// expires. Skips the run only when a pre-flight probe named zero drawers
+/// absent-or-edited — a verified set statement over `(id, text)`, not a count
+/// comparison — unless `force`. Probes again afterwards so the report's
+/// coverage claim is the index's own answer about this palace's drawers, then
+/// flushes so a hard kill straight after a sweep cannot lose it.
 /// Failure handling is deliberately asymmetric: a failed pre-flight probe
 /// proceeds with the full run (doing redundant work is safe; skipping work we
 /// cannot prove is done is not), while a failed post-run probe leaves
@@ -364,17 +376,15 @@ pub async fn backfill_palace(
         return report;
     }
 
-    let ids: Vec<String> = docs.iter().map(|(id, _)| id.clone()).collect();
-
     // Pre-flight. A failure here is NOT a reason to skip — it is a reason to
     // do the work, because we cannot show the work is already done.
     if !force {
-        match probe_coverage(lane, palace, &ids).await {
+        match probe_coverage(lane, palace, &docs).await {
             Coverage::Missing(0) => {
                 tracing::debug!(
                     palace = %palace,
                     drawers = total,
-                    "bm25 backfill: every drawer id already present — skipping"
+                    "bm25 backfill: every drawer already indexed at its current text — skipping"
                 );
                 let mut report = BackfillReport::short_circuit(
                     palace,
@@ -433,9 +443,9 @@ pub async fn backfill_palace(
         }
     }
 
-    // Read the coverage back BY ID. Our own success count is what we believe
-    // happened; this is what the index says it holds.
-    let missing_after = match probe_coverage(lane, palace, &ids).await {
+    // Read the coverage back BY ID AND TEXT. Our own success count is what we
+    // believe happened; this is what the index says it holds.
+    let missing_after = match probe_coverage(lane, palace, &docs).await {
         Coverage::Missing(n) => Some(n),
         Coverage::Unreachable => None,
     };

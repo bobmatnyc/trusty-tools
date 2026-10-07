@@ -11238,7 +11238,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.54.2"
+version = "0.54.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11778,7 +11778,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

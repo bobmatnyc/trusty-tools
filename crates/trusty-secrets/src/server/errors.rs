@@ -83,13 +83,28 @@ pub enum ErrorKind {
     /// The tracked project config selected `file` on a Keychain build.
     // #9326: Architect ruling, basis ruling 06 R2.
     TrackedBackendRefused,
+    /// The credential access audit record could not be guaranteed.
+    // #4567: fail-closed on an allowed set, delete or copy (DOC-45 C-7.12).
+    AuditUnavailable,
+    /// The tracked project config tried to turn the audit off.
+    // #4567: DOC-45 C-7.10 — only the untracked machine config may.
+    TrackedAuditRefused,
+    /// The tracked project config set a CLI `account` or `config_path`.
+    // #7519: owner ruling 2026-10-07 — only the machine config may.
+    TrackedCliSettingRefused,
+    /// A CLI-backed backend's program is not installed.
+    // #7519: A4 — fails closed with its own kind, never a generic failure.
+    CliNotInstalled,
+    /// A CLI-backed backend is locked or signed out; never a miss.
+    // #7519: A3/A4.
+    BackendLocked,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 29] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -113,6 +128,11 @@ impl ErrorKind {
         Self::RemoteHostUnsupported,
         Self::StorageRefused,
         Self::TrackedBackendRefused,
+        Self::AuditUnavailable,
+        Self::TrackedAuditRefused,
+        Self::TrackedCliSettingRefused,
+        Self::CliNotInstalled,
+        Self::BackendLocked,
         Self::Internal,
     ];
 
@@ -149,6 +169,11 @@ impl ErrorKind {
             Self::RemoteHostUnsupported => "remote_host_unsupported",
             Self::StorageRefused => "storage_refused",
             Self::TrackedBackendRefused => "tracked_backend_refused",
+            Self::AuditUnavailable => "audit_unavailable",
+            Self::TrackedAuditRefused => "tracked_audit_refused",
+            Self::TrackedCliSettingRefused => "tracked_cli_setting_refused",
+            Self::CliNotInstalled => "cli_not_installed",
+            Self::BackendLocked => "backend_locked",
             Self::Internal => "internal",
         }
     }
@@ -191,6 +216,23 @@ impl ErrorKind {
             Self::TrackedBackendRefused => {
                 "the project's tracked config may not select the `file` backend on a build with a Keychain; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
             }
+            // #4567: fixed text, no path or value. Usually returned before the
+            // backend call; after a completed one the change stands (DOC-45 C-7.7a).
+            Self::AuditUnavailable => {
+                "the credential access audit log could not be written; the requested change may already have been applied"
+            }
+            Self::TrackedAuditRefused => {
+                "the project's tracked config may not turn the credential audit off; set `secrets.audit: false` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
+            }
+            Self::TrackedCliSettingRefused => {
+                "the project's tracked config may not set a backend `account` or `config_path`; set it in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
+            }
+            Self::CliNotInstalled => {
+                "the secrets backend's command-line tool is not installed or not on PATH"
+            }
+            Self::BackendLocked => {
+                "the secrets backend is locked or signed out; unlock or sign in to it and retry"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -225,6 +267,13 @@ impl ErrorKind {
             // #9326: the next unused code.
             Self::StorageRefused => -32070,
             Self::TrackedBackendRefused => -32071,
+            // #4567: the next unused codes.
+            Self::AuditUnavailable => -32072,
+            Self::TrackedAuditRefused => -32073,
+            // #7519: the next unused codes.
+            Self::TrackedCliSettingRefused => -32074,
+            Self::CliNotInstalled => -32075,
+            Self::BackendLocked => -32076,
         }
     }
 
@@ -265,6 +314,10 @@ impl From<SecretsError> for ErrorKind {
             // #9326: the file backend's mode, owner or symlink refusal.
             SecretsError::StorageRefused { .. } => Self::StorageRefused,
             SecretsError::TrackedBackendRefused { .. } => Self::TrackedBackendRefused,
+            // #7519: the tracked CLI-setting refusal and the CLI backends' failures.
+            SecretsError::TrackedCliSettingRefused { .. } => Self::TrackedCliSettingRefused,
+            SecretsError::CliNotInstalled { .. } => Self::CliNotInstalled,
+            SecretsError::BackendLocked { .. } => Self::BackendLocked,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-secrets"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -26,6 +26,11 @@ default = ["api", "store", "server"]
 api = ["dep:serde", "dep:thiserror"]
 store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc"]
 server = ["store", "dep:tokio", "dep:trusty-common"]
+# #7519: the blocking runner and template-file guard the CLI-backed backends
+# (1Password, Keeper) share. std plus `store`'s libc only — owner ruling
+# 2026-10-07, "no common dependencies"; pinned by
+# tests/cli_backends_feature_closure.rs.
+cli-backends = ["store"]
 # Exposes the in-memory `MemoryBackend` test double to downstream test suites.
 test-support = ["store"]
 
@@ -48,6 +53,12 @@ required-features = ["server"]
 [[test]]
 name = "on_demand_server"
 path = "tests/on_demand_server.rs"
+required-features = ["server"]
+
+# #4567: sets RLIMIT_FSIZE for its whole process, so it is its own binary.
+[[test]]
+name = "audit_post_success"
+path = "tests/audit_post_success.rs"
 required-features = ["server"]
 
 # #9328: imports `store`, so an `api`-only test run must skip it.
