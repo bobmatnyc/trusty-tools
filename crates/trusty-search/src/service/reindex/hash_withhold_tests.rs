@@ -656,17 +656,21 @@ async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
         root.clone(),
     ));
     let state = Arc::new(crate::service::server::SearchAppState::new(registry));
-    let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
-    let has_row = || {
+    // A reindex swaps in a new corpus store, so each check re-reads it.
+    async fn has_row(handle: &IndexHandle) -> bool {
+        let corpus = handle.indexer.read().await.corpus_store().expect("corpus");
         corpus
             .load_file_hashes()
             .expect("read hash rows")
             .iter()
             .any(|(file, _)| file == "a.rs")
-    };
+    }
     reindex(&handle).await;
     assert!(landed_text(&handle, "a.rs").await.contains("alpha_8976"));
-    assert!(has_row(), "setup: the reindex must persist a.rs's hash");
+    assert!(
+        has_row(&handle).await,
+        "setup: the reindex must persist a.rs's hash"
+    );
 
     let fault = id.to_string();
     super::hash::TEST_FAIL_FORGET_HASH
@@ -689,13 +693,16 @@ async fn remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236() {
         landed_text(&handle, "a.rs").await.is_empty(),
         "the delete committed before the hash step failed"
     );
-    assert!(has_row(), "the failed hash step must leave the row");
+    assert!(
+        has_row(&handle).await,
+        "the failed hash step must leave the row"
+    );
 
     let reply = remove_over_report(&state, id, "a.rs")
         .await
         .expect("the retry must answer 200");
     assert_eq!(reply["removed_chunks"], 0, "{reply}");
-    assert!(!has_row(), "the retry must clear the hash row");
+    assert!(!has_row(&handle).await, "the retry must clear the hash row");
     reindex(&handle).await;
     assert!(
         landed_text(&handle, "a.rs").await.contains("alpha_8976"),
