@@ -1137,3 +1137,37 @@ fn github_source_reports_an_unreachable_host() {
     let err = src.asset(A, "x", 64).expect_err("unreachable");
     assert!(err.url.starts_with(&base), "{err:?}");
 }
+
+/// #9396: a pin written by another writer while a first use waited on the
+/// update lock is kept: the first use fetches nothing and writes nothing.
+#[test]
+fn install_if_missing_keeps_a_lock_written_while_it_waited() {
+    let cache = tempfile::tempdir().unwrap();
+    let mut src = FakeSource::default();
+    src.publish(B);
+    let a = bundle(A, 1, A.as_bytes());
+    let holder = UpdateGuard::acquire(cache.path()).expect("hold the update lock");
+    std::thread::scope(|s| {
+        let waiter = s.spawn(|| install_if_missing(cache.path(), &src));
+        // Give the waiter time to block on the lock; the outcome does not
+        // depend on it, because the check runs under the lock either way.
+        std::thread::sleep(Duration::from_millis(200));
+        commit(
+            cache.path(),
+            A,
+            &a,
+            &Sha256Digest::of_bytes(&a),
+            None,
+            "the other writer",
+        )
+        .expect("the other writer pins A");
+        drop(holder);
+        let out = waiter.join().expect("join").expect("no error");
+        assert_eq!(out, None, "the first use must not replace a present pin");
+    });
+    assert_eq!(pinned(cache.path()).tag(), A, "the present pin wins");
+    resolves_to(cache.path(), A);
+}
+
+#[path = "first_use_tests.rs"]
+mod first_use_tests;

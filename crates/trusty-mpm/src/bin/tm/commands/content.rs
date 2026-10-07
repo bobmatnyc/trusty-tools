@@ -119,4 +119,20 @@ mod tests {
         assert!(help.contains("Only the current pin is checked"), "{help}");
         assert!(!help.contains("tag republished"), "{help}");
     }
+
+    /// #9396: `update --help` documents the `TRUSTY_CONTENT_OFFLINE=1` switch
+    /// that turns the first-use fetch off.
+    #[test]
+    fn update_help_names_the_offline_switch() {
+        use clap::CommandFactory as _;
+        let mut root = crate::cli::Cli::command();
+        let help = root
+            .find_subcommand_mut("content")
+            .and_then(|c| c.find_subcommand_mut("update"))
+            .expect("content update")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("TRUSTY_CONTENT_OFFLINE=1"), "{help}");
+        assert!(help.contains("first use"), "{help}");
+    }
 }
