@@ -906,6 +906,65 @@ exit 1
         (dir, path)
     }
 
+    /// Ceiling on every wait in this module that ends when a mock answers or
+    /// a supervisor state is observed. Each wait returns as soon as its
+    /// condition holds; the ceiling only bounds a genuinely stuck run (#9240).
+    const MOCK_WAIT_CEILING_SECS: u64 = 60;
+
+    /// Wait until a freshly written mock script answers one probe line.
+    ///
+    /// Why: the first exec of a newly written script is the slow one. On macOS
+    /// it took 110-200 ms here against 7 ms for the second exec, and under
+    /// load it exceeded the supervisor's 5 s startup probe (#9240). Spending
+    /// that cost here, on a wait that ends at the answer, leaves the
+    /// supervisor's own probe a warm exec.
+    /// What: spawns the script (retrying ETXTBSY like the supervisor does),
+    /// writes one JSON-RPC line, closes stdin and reads the answer, all under
+    /// [`MOCK_WAIT_CEILING_SECS`]. Panics if the answer never arrives or does
+    /// not echo the probe id.
+    /// Test: every spawning test in `shutdown_tests`.
+    async fn wait_until_mock_answers(script: &std::path::Path) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let answer = tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
+            let mut child = trusty_common::spawn_retry::retry_on_etxtbsy_async(|| {
+                tokio::process::Command::new(script)
+                    .arg("--stdio")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+            })
+            .await
+            .expect("spawn the mock for its readiness probe");
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            stdin
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"embed\",\"id\":1}\n")
+                .await
+                .expect("write the readiness probe");
+            drop(stdin);
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().expect("piped stdout"))
+                .read_line(&mut line)
+                .await
+                .expect("read the readiness answer");
+            let _ = child.wait().await;
+            line
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "mock {} never answered within {MOCK_WAIT_CEILING_SECS}s",
+                script.display()
+            )
+        });
+        assert!(
+            answer.contains("\"id\":1"),
+            "mock {} answered {answer:?}",
+            script.display()
+        );
+    }
+
     /// Best-effort liveness check via `kill -0 <pid>` (no signal sent, just
     /// an existence probe).
     fn process_alive(pid: u32) -> bool {
@@ -952,10 +1011,12 @@ exit 1
     #[tokio::test]
     async fn lazy_handle_shutdown_kills_spawned_child() {
         let (_dir, binary) = write_mock_embedderd();
+        wait_until_mock_answers(&binary).await;
         let handle = LazyEmbedderHandle::new(
             binary,
             SupervisorConfig {
-                startup_timeout_secs: 5,
+                // #9240: a ceiling, not a budget — the probe returns on the answer.
+                startup_timeout_secs: MOCK_WAIT_CEILING_SECS,
                 idle_shutdown_secs: 0, // no watchdog racing this test
                 ..SupervisorConfig::default()
             },
@@ -992,10 +1053,11 @@ exit 1
     #[tokio::test]
     async fn lazy_handle_pid_forwarder_survives_restart_gap() {
         let (_dir, binary) = write_mock_embedderd();
+        wait_until_mock_answers(&binary).await;
         let handle = LazyEmbedderHandle::new(
             binary,
             SupervisorConfig {
-                startup_timeout_secs: 5,
+                startup_timeout_secs: MOCK_WAIT_CEILING_SECS,
                 backoff_max_secs: 2,
                 max_restarts: 3,
                 idle_shutdown_secs: 0,
@@ -1018,7 +1080,7 @@ exit 1
             .status()
             .expect("send SIGKILL to owned fixture child");
         assert!(killed.success());
-        let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        let observed = tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
             while actual.load(Ordering::Acquire) != 0 || public.load(Ordering::Acquire) != 0 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -1052,10 +1114,11 @@ exit 1
     #[tokio::test]
     async fn lazy_handle_pid_forwarder_retires_on_shutdown_and_respawn() {
         let (_dir, binary) = write_mock_embedderd();
+        wait_until_mock_answers(&binary).await;
         let handle = LazyEmbedderHandle::new(
             binary,
             SupervisorConfig {
-                startup_timeout_secs: 5,
+                startup_timeout_secs: MOCK_WAIT_CEILING_SECS,
                 idle_shutdown_secs: 0,
                 ..SupervisorConfig::default()
             },
@@ -1074,21 +1137,23 @@ exit 1
             .expect("replacement fixture embed");
         let new_task = handle.pid_forwarder_handle.lock().await.clone().unwrap();
         let new_pid = handle.app_pid_slot().load(Ordering::Acquire);
-        let old_finished = tokio::time::timeout(Duration::from_secs(5), async {
-            while !old_task.is_finished() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await;
+        let old_finished =
+            tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
+                while !old_task.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
         let observed_pid = handle.app_pid_slot().load(Ordering::Acquire);
         let new_running = !new_task.is_finished();
         handle.shutdown().await;
-        let new_finished = tokio::time::timeout(Duration::from_secs(5), async {
-            while !new_task.is_finished() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await;
+        let new_finished =
+            tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
+                while !new_task.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
         assert!(old_finished.is_ok(), "old forwarder survived replacement");
         assert!(new_pid > 0 && new_pid != old_pid);
         assert_eq!(observed_pid, new_pid, "old forwarder overwrote replacement");
@@ -1130,10 +1195,11 @@ exit 1
     #[tokio::test]
     async fn lazy_handle_is_confirmed_terminated_reflects_supervisor_signal() {
         let (_dir, binary) = write_mock_embedderd_crash_once();
+        wait_until_mock_answers(&binary).await;
         let handle = LazyEmbedderHandle::new(
             binary,
             SupervisorConfig {
-                startup_timeout_secs: 5,
+                startup_timeout_secs: MOCK_WAIT_CEILING_SECS,
                 // Zero backoff so the crash -> respawn -> exhaustion sequence
                 // completes as fast as possible; this test asserts on the
                 // give-up signal, not on backoff timing.
@@ -1155,11 +1221,10 @@ exit 1
             .embed_via(|client| async move { client.embed_batch(vec!["probe".to_string()]).await })
             .await;
 
-        // Generous ceiling (45s) so a loaded CI runner cannot false-fail —
-        // the poll interval is short (20ms) so a passing run still returns
+        // The poll interval is short (20ms) so a passing run still returns
         // in milliseconds; only a genuinely stuck supervisor eats the full
-        // budget.
-        let gave_up = tokio::time::timeout(Duration::from_secs(45), async {
+        // ceiling.
+        let gave_up = tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
             loop {
                 if handle.is_confirmed_terminated().await {
                     return;
@@ -1168,19 +1233,25 @@ exit 1
             }
         })
         .await;
-        let forwarder = handle.pid_forwarder_handle.lock().await.clone().unwrap();
-        let forwarding_stopped = tokio::time::timeout(Duration::from_secs(5), async {
-            while !forwarder.is_finished() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await;
+        let forwarder = handle
+            .pid_forwarder_handle
+            .lock()
+            .await
+            .clone()
+            .expect("no pid forwarder: the first spawn failed before the supervisor started");
+        let forwarding_stopped =
+            tokio::time::timeout(Duration::from_secs(MOCK_WAIT_CEILING_SECS), async {
+                while !forwarder.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
         let final_public_pid = handle.app_pid_slot().load(Ordering::Acquire);
         handle.shutdown().await;
         assert!(
             gave_up.is_ok(),
-            "is_confirmed_terminated() never flipped true within 45s of \
-             exhausting max_restarts=1 against an always-crashing mock child"
+            "is_confirmed_terminated() never flipped true within {MOCK_WAIT_CEILING_SECS}s \
+             of exhausting max_restarts=1 against an always-crashing mock child"
         );
         assert!(
             forwarding_stopped.is_ok(),
