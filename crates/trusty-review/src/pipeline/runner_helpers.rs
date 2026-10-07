@@ -25,7 +25,7 @@ use crate::{
         grade::derive_verdict_with_grade,
         letter_grade::default_grade_for_verdict,
         output::{print_review_result, write_review_log},
-        post::{PostContext, finalize_review},
+        post::{FinalizeAction, PostContext, decide_action, finalize_review},
         prompt::ReviewPrMeta,
     },
     store::{ClaimOutcome, DedupError, DedupStore},
@@ -276,12 +276,14 @@ pub(super) fn mark_no_head_sha_abort(result: &mut ReviewResult, meta_error: Opti
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
 /// What: syncs `findings_count` to `findings.len()` (#1877), sets a missing
 /// `verdict_status` to `no_reviewer_output` (#9310), releases the
-/// in-progress dedup claim when `claim` is `Held` (fail-safe on error), writes
+/// in-progress dedup claim when `claim` is `Held` and the run could post (the
+/// only runs that claim, #9348; fail-safe on error), writes
 /// the dry-run log so the failure is inspectable, prints when requested, and
 /// returns the result flagged `dry_run = true`.
 /// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
 /// `findings_count_matches_len_on_abort`,
 /// `failed_claim_abort_does_not_delete_another_processes_record`,
+/// `dry_run_abort_keeps_a_completed_record`,
 /// `no_reviewer_reply_reads_no_reviewer_output`.
 pub(super) async fn abort_dry(
     mut result: ReviewResult,
@@ -305,7 +307,9 @@ pub(super) async fn abort_dry(
     crate::pipeline::withheld_contract::sync_withheld_counts(&mut result); // #9188
     // Release the in-progress claim so a retry can re-run this head SHA.
     // #5064: only when this review actually acquired it — see `DedupClaim`.
+    // #9348: a run that cannot post never claimed, so its `Held` means nothing.
     if claim == DedupClaim::Held
+        && claims_dedup_slot(config, input)
         && !result.head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()
         && let Err(e) = store
@@ -509,18 +513,36 @@ pub(super) fn classify_claim(outcome: Result<ClaimOutcome, DedupError>) -> Claim
     }
 }
 
+/// Whether this review takes a dedup claim at all (#9348).
+///
+/// Why: the claim exists to make a live post idempotent (#5113). A run that
+/// cannot post took it anyway and released it only on an abort, so a dry run
+/// left an `InProgress` record that blocked a live review of the same head for
+/// the whole `DEDUP_STALE_SECS` window.
+/// What: true exactly when `decide_action` lets this input reach
+/// `FinalizeAction::Post` on a GitHub source — the same question the runner's
+/// #5113 and #6062 guards ask, and the same inputs `finalize_review` decides
+/// on, so a run that claims is the only run that can post.
+/// Test: `dry_run_leaves_no_in_progress_claim`,
+/// `dry_run_never_claims_over_another_holder`.
+pub(super) fn claims_dedup_slot(config: &ReviewConfig, input: &ReviewInput) -> bool {
+    decide_action(config.dry_run, input.trigger, input.allow_posting, true) == FinalizeAction::Post
+}
+
 /// Take the dedup claim for this review's head SHA, or end the review (#582).
 ///
-/// Why: moved out of `run_review` for `runner.rs`'s SLOC cap (#9192); the
-/// logic is unchanged. A completed claim for the same head SHA short-circuits
-/// the whole pipeline, and a store error aborts without posting (#5064).
-/// What: on a GitHub source with a head SHA and a wired store, claims
-/// `(owner, repo, pr, head_sha)` and maps the outcome through
-/// [`classify_claim`]: `Continue(result)` proceeds, `Break(result)` is the
-/// finished result the runner returns. Every other case is `Continue`.
-/// Test: `run_review_live_post_and_dedup_skip_integration`,
+/// Why: moved out of `run_review` for `runner.rs`'s SLOC cap (#9192). A
+/// completed claim for the same head SHA short-circuits the whole pipeline,
+/// and a store error aborts without posting (#5064).
+/// What: on a GitHub source with a head SHA, a wired store, and a run that can
+/// post ([`claims_dedup_slot`], #9348), claims `(owner, repo, pr, head_sha)`
+/// and maps the outcome through [`classify_claim`]: `Continue(result)`
+/// proceeds, `Break(result)` is the finished result the runner returns. Every
+/// other case is `Continue` with no claim taken.
+/// Test: `live_run_on_a_completed_head_is_still_skipped`,
 /// `stranded_in_progress_claim_is_not_a_duplicate_skip`,
-/// `failed_claim_abort_does_not_delete_another_processes_record`.
+/// `failed_claim_abort_does_not_delete_another_processes_record`,
+/// `dry_run_leaves_no_in_progress_claim`.
 pub(super) async fn claim_slot(
     config: &ReviewConfig,
     input: &ReviewInput,
@@ -530,10 +552,11 @@ pub(super) async fn claim_slot(
 ) -> ControlFlow<ReviewResult, ReviewResult> {
     let (owner, repo, pr_number) = (result.owner.clone(), result.repo.clone(), result.pr_number);
     let head_sha = result.head_sha.clone();
+    // #9348: a run that cannot post holds no claim, so it strands none.
     let Some(store) = deps
         .dedup
         .as_ref()
-        .filter(|_| !is_local && !head_sha.is_empty())
+        .filter(|_| !is_local && !head_sha.is_empty() && claims_dedup_slot(config, input))
     else {
         return ControlFlow::Continue(result);
     };

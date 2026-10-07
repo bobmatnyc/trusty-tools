@@ -29,7 +29,10 @@ use tracing::{error, info, warn};
 
 use crate::{
     config::ReviewConfig,
-    integrations::github::{AuthStrategy, GithubClient, RunMode, post_pr_review},
+    integrations::github::{
+        AuthStrategy, GithubClient, GithubError, RunMode,
+        posting::{GITHUB_API, ReviewPostError, post_pr_review_at},
+    },
     models::{Finding, ReviewResult},
     pipeline::{
         output::{print_review_result, write_review_log},
@@ -300,15 +303,47 @@ pub struct PostContext<'a> {
 /// re-run (#6062). On `Post`, resolves a token
 /// through the auth abstraction and posts a PR review comment (setting
 /// `posted=true`, `dry_run=false` and marking the dedup claim complete on
-/// success); on `LogOnly` (or any post failure) writes the dry-run log.  Prints
+/// success); on `LogOnly` (or any post failure) writes the dry-run log. A
+/// failed post releases the claim when no comment can exist (#9348).  Prints
 /// the result to STDOUT when `print_result` is set.  Never returns an error —
 /// failures degrade to a logged dry-run.  Also syncs `findings_count` to
 /// `findings.len()` (#1877) so every completed review (unified or map-reduce)
 /// carries the authoritative count regardless of exit path.
 /// Test: `decide_action_*` cover the branch; the live post is `#[ignore]`;
 /// `findings_count_matches_len_on_completed_review`,
-/// `finalize_review_does_not_post_without_a_head_sha`.
+/// `finalize_review_does_not_post_without_a_head_sha`,
+/// `failed_post_releases_its_claim`, `connect_failure_releases_its_claim`.
 pub async fn finalize_review(
+    result: ReviewResult,
+    config: &ReviewConfig,
+    trigger: TriggerDecision,
+    allow_posting: bool,
+    write_log: bool,
+    print_result: bool,
+    post_ctx: PostContext<'_>,
+) -> ReviewResult {
+    finalize_review_at(
+        GITHUB_API,
+        result,
+        config,
+        trigger,
+        allow_posting,
+        write_log,
+        print_result,
+        post_ctx,
+    )
+    .await
+}
+
+/// [`finalize_review`] posting to the GitHub API root `api` (#9348).
+///
+/// Why: a test aims `api` at a closed local port to drive a connect failure
+/// through the whole finalise path with no network.
+/// What: the body of [`finalize_review`]; production passes `GITHUB_API`.
+/// Test: `connect_failure_releases_its_claim`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_review_at(
+    api: &str,
     mut result: ReviewResult,
     config: &ReviewConfig,
     trigger: TriggerDecision,
@@ -381,7 +416,7 @@ pub async fn finalize_review(
 
     match action {
         FinalizeAction::Post => {
-            match post_live(&mut result, config, &post_ctx).await {
+            match post_live(api, &mut result, config, &post_ctx).await {
                 Ok(()) => {
                     result.posted = true;
                     result.dry_run = false;
@@ -411,14 +446,18 @@ pub async fn finalize_review(
                         error!("dedup complete() failed after a live post: {e}");
                     }
                 }
-                Err(e) => {
+                Err(failure) => {
                     // Fail-safe: posting failed → fall back to a dry-run log so
                     // the review is still inspectable, and surface the error.
+                    let e = failure.error();
                     warn!("live post failed (falling back to dry-run log): {e}");
                     result.dry_run = true;
                     if result.error.is_none() {
                         result.error = Some(format!("post failed: {e}"));
                     }
+                    // #9348: release so a retry can run — but only when no
+                    // comment can exist; see `PostFailure::may_have_landed`.
+                    release_after_failed_post(&failure, &post_ctx).await;
                     write_review_log(&result, &config.log_dir);
                 }
             }
@@ -438,23 +477,113 @@ pub async fn finalize_review(
     result
 }
 
+/// A failed live post, split by whether the review POST was sent (#9348).
+///
+/// Why: a failed post must release its dedup claim so a retry can run, but
+/// only when no comment can exist — releasing after a comment landed lets the
+/// retry post a second one (#5113).
+/// What: `NotSent` failed before the POST left (client build, token
+/// resolution) or in its connect phase (DNS, refused, connect timeout);
+/// `Sent` failed after the request may have reached GitHub.
+/// Test: `post_failure_releases_only_when_no_comment_can_exist`.
+#[derive(Debug)]
+enum PostFailure {
+    /// No request reached GitHub.
+    NotSent(GithubError),
+    /// The review POST was sent; GitHub may or may not have created it.
+    Sent(GithubError),
+}
+
+impl From<ReviewPostError> for PostFailure {
+    // #9348: a connect-phase failure reached no one, so it is `NotSent`.
+    fn from(failure: ReviewPostError) -> Self {
+        if failure.sent {
+            Self::Sent(failure.error)
+        } else {
+            Self::NotSent(failure.error)
+        }
+    }
+}
+
+impl PostFailure {
+    /// The underlying GitHub error.
+    fn error(&self) -> &GithubError {
+        match self {
+            Self::NotSent(e) | Self::Sent(e) => e,
+        }
+    }
+
+    /// Whether GitHub may have created the review despite the error (#9348).
+    ///
+    /// Why: `post_pr_review` is one POST, so a review exists only if that POST
+    /// reached GitHub and GitHub accepted it.
+    /// What: `NotSent` → false. A 4xx answer → false: GitHub rejected the
+    /// request (bad token, unknown PR, invalid inline line) and the review
+    /// endpoint creates nothing on a rejection. Anything else → true: a 5xx
+    /// can follow a write that committed, a transport error once connected
+    /// can be a timeout on a request GitHub processed, and a body-read or parse
+    /// failure follows a 2xx that created the review.
+    /// Test: `post_failure_releases_only_when_no_comment_can_exist`.
+    fn may_have_landed(&self) -> bool {
+        match self {
+            Self::NotSent(_) => false,
+            Self::Sent(GithubError::Api { status, .. }) => !(400..500).contains(status),
+            Self::Sent(_) => true,
+        }
+    }
+}
+
+/// Release the dedup claim after a live post that failed (#9348).
+///
+/// Why: before #9348 a failed post kept its `InProgress` claim, so a retry of
+/// the same head failed with `InProgressElsewhere` for `DEDUP_STALE_SECS`.
+/// What: releases when [`PostFailure::may_have_landed`] is false. When it is
+/// true the claim stays `InProgress`: a retry inside the stale window reports
+/// "not reviewed" rather than risk a duplicate comment, and the claim still
+/// ages out, so it never blocks forever. A release error is logged; the
+/// record then ages out the same way.
+/// Test: `failed_post_releases_its_claim`,
+/// `post_failure_releases_only_when_no_comment_can_exist`.
+async fn release_after_failed_post(failure: &PostFailure, ctx: &PostContext<'_>) {
+    if failure.may_have_landed() {
+        warn!("live post may have reached GitHub — keeping the dedup claim until it ages out");
+        return;
+    }
+    if let Some(store) = ctx.dedup
+        && !ctx.head_sha.is_empty()
+        && let Err(e) = store
+            .release(ctx.owner, ctx.repo, ctx.pr, ctx.head_sha)
+            .await
+    {
+        warn!("dedup release() after a failed post failed (non-fatal): {e}");
+    }
+}
+
 /// Resolve a token via the auth abstraction and post the PR review comment.
 ///
 /// Why: the live side effect, isolated so its `?`-based error flow stays clean
 /// while `finalize_review` owns the fail-safe swallowing.
 /// What: selects the auth strategy from the run mode, resolves a token for the
 /// owner, and POSTs the review comment; on success copies the posted-review
-/// HTML URL into the result.
-/// Test: network-bound; covered by `#[ignore]` integration tests.
+/// HTML URL into the result. A failure says whether the POST was sent (#9348).
+/// Test: network-bound; covered by `#[ignore]` integration tests;
+/// `failed_post_releases_its_claim` and `connect_failure_releases_its_claim`
+/// cover the not-sent failures.
 async fn post_live(
+    api: &str,
     result: &mut ReviewResult,
     config: &ReviewConfig,
     ctx: &PostContext<'_>,
-) -> Result<(), crate::integrations::github::GithubError> {
-    let client = GithubClient::new()?;
+) -> Result<(), PostFailure> {
+    let client = GithubClient::new().map_err(PostFailure::NotSent)?;
     let strategy = AuthStrategy::select(ctx.run_mode, None);
-    let token = strategy.resolve_token(&client, config, ctx.owner).await?;
-    let posted = post_pr_review(&client, ctx.owner, ctx.repo, ctx.pr, &token, result).await?;
+    let token = strategy
+        .resolve_token(&client, config, ctx.owner)
+        .await
+        .map_err(PostFailure::NotSent)?;
+    let posted = post_pr_review_at(api, &client, ctx.owner, ctx.repo, ctx.pr, &token, result)
+        .await
+        .map_err(PostFailure::from)?;
     if !posted.html_url.is_empty() {
         // Stash the posted-review URL on the result for the log / future updates.
         info!(review_url = %posted.html_url, "posted review URL");
@@ -544,6 +673,42 @@ mod tests {
             error.contains("head SHA"),
             "the error must name the missing dedup key: {error}"
         );
+    }
+
+    /// #9348: a failed post releases its claim only when no comment can
+    /// exist. Releasing after a comment landed would let the retry post a
+    /// second one (#5113), so every sent failure but a 4xx keeps the claim
+    /// until it ages out.
+    /// Test: this test.
+    #[test]
+    fn post_failure_releases_only_when_no_comment_can_exist() {
+        let api = |status| GithubError::Api {
+            status,
+            body: String::new(),
+        };
+        let transport = || GithubError::Transport("timed out".to_string());
+        // #9348: what `post_pr_review_at` reports for a refused connection.
+        let refused = ReviewPostError {
+            error: GithubError::Transport("connection refused".to_string()),
+            sent: false,
+        };
+        let timed_out = ReviewPostError {
+            error: transport(),
+            sent: true,
+        };
+        let cases = [
+            (PostFailure::from(refused), false),
+            (PostFailure::from(timed_out), true),
+            (PostFailure::NotSent(GithubError::MissingToken), false),
+            (PostFailure::NotSent(transport()), false),
+            (PostFailure::Sent(api(401)), false),
+            (PostFailure::Sent(api(422)), false),
+            (PostFailure::Sent(api(502)), true),
+            (PostFailure::Sent(transport()), true),
+        ];
+        for (failure, landed) in cases {
+            assert_eq!(failure.may_have_landed(), landed, "{failure:?}");
+        }
     }
 
     // ── Footer rendering ──────────────────────────────────────────────────────

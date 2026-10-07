@@ -2339,7 +2339,8 @@ async fn held_claim_abort_still_releases() {
         reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
         write_log: false,
         print_result: false,
-        trigger: TriggerDecision::None,
+        // #9348: only a run that can post holds a claim, so the owner posts live.
+        trigger: TriggerDecision::ForceLive,
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
@@ -2806,3 +2807,7 @@ mod pr_body;
 // #9310: `verdict_status`, the withheld headline, and tool-call-only parsing.
 #[path = "runner_verdict_status_tests.rs"]
 mod verdict_status;
+
+// #9348: a review that does not post leaves no in-progress dedup claim.
+#[path = "runner_dedup_claim_tests.rs"]
+mod dedup_claim;
