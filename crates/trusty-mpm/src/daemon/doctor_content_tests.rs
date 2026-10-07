@@ -93,8 +93,10 @@ fn content_row_fails_when_the_pm_package_does_not_parse() {
 /// A first-use fetch that panics: the doctor row must never reach it.
 fn fetch_panics(
     _: &Path,
-) -> Result<Option<crate::content::bundle_cache::UpdateOutcome>, crate::content::bundle_cache::CacheError>
-{
+) -> Result<
+    Option<crate::content::bundle_cache::UpdateOutcome>,
+    crate::content::bundle_cache::CacheError,
+> {
     panic!("tm doctor fetched the content release")
 }
 
@@ -118,5 +120,8 @@ fn the_content_row_never_fetches() {
         "{}",
         row.message
     );
-    assert!(!cache.path().join(LOCK_FILE_NAME).exists(), "nothing pinned");
+    assert!(
+        !cache.path().join(LOCK_FILE_NAME).exists(),
+        "nothing pinned"
+    );
 }

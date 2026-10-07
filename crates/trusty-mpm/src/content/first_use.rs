@@ -27,9 +27,7 @@ use trusty_agents_common::agent_content::{
     AgentContentError, DevOverride, ResolvedContent, resolve_content_in,
 };
 
-use super::bundle_cache::{
-    CacheError, Fallback, UpdateOutcome, github_source, install_if_missing,
-};
+use super::bundle_cache::{CacheError, Fallback, UpdateOutcome, github_source, install_if_missing};
 
 /// Set to anything but `0` or empty to skip the first-use fetch: a missing
 /// lock is then an error naming this switch and the remedies. Test harnesses

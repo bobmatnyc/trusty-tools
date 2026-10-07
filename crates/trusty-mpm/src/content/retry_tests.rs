@@ -124,7 +124,9 @@ fn a_persistent_5xx_names_the_manual_install() {
     let err = super::fetch(&fails_assets, A, "x", 8, &Fallback::None).expect_err("503");
     let msg = err.to_string();
     assert!(
-        msg.contains(&format!("gh release download {A} --repo bobmatnyc/trusty-tools")),
+        msg.contains(&format!(
+            "gh release download {A} --repo bobmatnyc/trusty-tools"
+        )),
         "{msg}"
     );
     assert!(
@@ -214,7 +216,10 @@ fn a_rate_limited_answer_names_the_limit_and_the_token() {
     }
     // Without headers the rate limit and the token are still named.
     let bare = rate_limited_reason("403 Forbidden", None, None, None);
-    assert!(bare.contains("rate limit") && bare.contains("GITHUB_TOKEN"), "{bare}");
+    assert!(
+        bare.contains("rate limit") && bare.contains("GITHUB_TOKEN"),
+        "{bare}"
+    );
 }
 
 /// #9396: with no token variable set, `gh auth token` supplies one; a `gh`

@@ -230,7 +230,10 @@ fn a_failed_fetch_is_not_retried_within_the_window() {
     };
     let first = resolve_or_fetch_with(cache.path(), DevOverride::Off, failing, &memo, t0)
         .expect_err("unreachable");
-    assert!(first.to_string().contains("network is unreachable"), "{first}");
+    assert!(
+        first.to_string().contains("network is unreachable"),
+        "{first}"
+    );
     let again = resolve_or_fetch_with(
         cache.path(),
         DevOverride::Off,
@@ -299,7 +302,10 @@ fn a_fetch_inside_a_runtime_leaves_the_worker_free() {
         });
         fetching.await.expect("fetch task")
     });
-    assert!(released, "the releasing task never ran while the fetch blocked");
+    assert!(
+        released,
+        "the releasing task never ran while the fetch blocked"
+    );
 }
 
 /// Lays out a tm-managed workspace `<home>/trusty-mpm-projects/<owner>/<repo>`
@@ -338,8 +344,8 @@ fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
     let project = managed_workspace(home.path(), "acme", "widget");
     let stale = managed_workspace(home.path(), "bobmatnyc", "trusty-tools");
 
-    let err = resolve_for_in(Some(&project), None, Some(&cache), Fetch::Never)
-        .expect_err("empty cache");
+    let err =
+        resolve_for_in(Some(&project), None, Some(&cache), Fetch::Never).expect_err("empty cache");
     assert!(err.is_not_installed(), "{err:?}");
     assert!(err.to_string().contains(REMEDY), "{err}");
     FETCH_OVERRIDE.with(|f| f.set(Some(unreachable_fetch)));

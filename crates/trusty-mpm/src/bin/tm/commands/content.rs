@@ -11,10 +11,10 @@
 //! the verbs' behaviour is covered in `trusty_mpm::content::bundle_cache::tests`.
 
 use anyhow::Context;
+use trusty_agents_common::agent_content::REMEDY;
 use trusty_mpm::content::bundle_cache::{
     UpdateAction, UpdateOutcome, github_source, install_from_file, update,
 };
-use trusty_agents_common::agent_content::REMEDY;
 use trusty_mpm::content::status::{ContentStatus, content_status};
 
 use crate::cli::ContentAction;
@@ -66,9 +66,7 @@ fn status_report(status: &ContentStatus) -> (Vec<String>, anyhow::Result<()>) {
     let verdict = if status.exits_ok() {
         Ok(())
     } else {
-        Err(anyhow::anyhow!(
-            "no verified content source; {REMEDY}"
-        ))
+        Err(anyhow::anyhow!("no verified content source; {REMEDY}"))
     };
     (lines, verdict)
 }
