@@ -436,7 +436,10 @@ async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
         ErrorKind::ConfigInvalid
     );
     assert_eq!(listed(&fx).await[0]["name"], json!("A"));
-    assert!(!fx.keychain.is_empty(), "the refused delete touched a backend");
+    assert!(
+        !fx.keychain.is_empty(),
+        "the refused delete touched a backend"
+    );
     server.stop().await;
     assert!(!marker.exists(), "the spawner-pinned program ran");
 }
@@ -462,7 +465,10 @@ async fn server_delete_refuses_when_the_account_config_does_not_parse() {
         ErrorKind::ConfigInvalid
     );
     assert_eq!(listed(&fx).await[0]["name"], json!("A"));
-    assert!(!fx.keychain.is_empty(), "the refused delete touched a backend");
+    assert!(
+        !fx.keychain.is_empty(),
+        "the refused delete touched a backend"
+    );
 
     std::fs::remove_file(&account).unwrap();
     assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
