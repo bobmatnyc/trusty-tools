@@ -224,6 +224,31 @@ fn onepassword_missing_is_none_and_failures_are_errors() {
     assert!(matches!(err, SecretsError::BackendLocked { .. }), "{err:?}");
 }
 
+/// Why: #7519 A3 — an item that vanished between the listing and the
+/// delete is nothing to clear, so `delete` is `Ok(false)`; a delete failure
+/// whose stderr matches no marker is an error and leaves the item in place.
+/// Test: itself.
+#[test]
+fn onepassword_delete_of_a_vanished_item_is_false_and_unknown_failure_errs() {
+    let (v, k) = (vault(), key("API_KEY"));
+    let fx = new_fx();
+    fx.shim.seed("item1", "API_KEY", VALUE, "PASSWORD");
+    fx.shim.fail("delete", "[ERROR] \"item1\" isn't an item");
+    assert!(!fx.backend.delete(&v, &k).unwrap(), "vanished mid-delete");
+    assert!(fx.shim.calls().contains("item delete item1"));
+
+    let fx = new_fx();
+    fx.shim.seed("item1", "API_KEY", VALUE, "PASSWORD");
+    fx.shim
+        .fail("delete", "[ERROR] 2026/10/07 an unexpected failure");
+    let err = fx.backend.delete(&v, &k).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(!shown(&err).contains(VALUE), "{}", shown(&err));
+    let items = fx.shim.items();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].0, "item1");
+}
+
 /// Why: A4 — a missing `op` is a typed error naming the program and the fix.
 /// Test: itself.
 #[test]

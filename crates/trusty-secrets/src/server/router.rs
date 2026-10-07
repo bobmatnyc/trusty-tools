@@ -236,9 +236,13 @@ pub enum ServeError {
 ///
 /// Why: see the module docs.
 /// What: first, on a `cli-backends` build, sweeps template files a crashed
-/// server left under [`ServerSettings::template_root`] (#7519); a sweep
-/// failure is reported on stderr and serving goes on, because the next
-/// template write refuses the same directory. Then `prepare_socket_dir` on
+/// server left under [`ServerSettings::template_root`] (#7519). An entry the
+/// sweep cannot remove does not stop it: every other stale directory is
+/// still removed, and the first failure is reported on stderr. A refused
+/// root (symlink, too wide, another user's) stops the sweep before any
+/// entry. Either way serving goes on; the failed entry stays on disk until
+/// a later start removes it, and a refused root also refuses every template
+/// write. Then `prepare_socket_dir` on
 /// the socket's parent, then
 /// `bind_singleton_hardened`, which takes over only a socket the kernel
 /// proves nobody serves and refuses a live one, so a second instance never
@@ -305,7 +309,8 @@ pub(crate) async fn serve_state(
 /// Remove stale template directories under `root`, reporting on stderr.
 ///
 /// What: [`crate::store::cli::sweep_stale_templates`]; the report names the
-/// directory and a count, or the error, which names a path, never content.
+/// directory and a count, or the first error, which names a path, never
+/// content. The sweep has already visited every other entry by then.
 #[cfg(all(unix, feature = "cli-backends"))]
 fn sweep_templates(root: &Path) {
     match crate::store::cli::sweep_stale_templates(root) {
@@ -315,7 +320,7 @@ fn sweep_templates(root: &Path) {
             if removed == 1 { "y" } else { "ies" },
             root.display()
         ),
-        Err(e) => eprintln!("trusty-secrets: template sweep skipped: {e}"),
+        Err(e) => eprintln!("trusty-secrets: template sweep incomplete: {e}"),
     }
 }
 
