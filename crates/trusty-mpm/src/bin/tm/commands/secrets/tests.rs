@@ -395,8 +395,8 @@ async fn set_slower_than_the_old_client_wait_reports_the_real_outcome() {
     let h = harness_slowed(Duration::from_secs(31)).await;
     let started = Instant::now();
     let outcome = run(&h, VALUE, &["set", "API_KEY"]).await;
-    assert!(started.elapsed() >= Duration::from_secs(31));
     assert_eq!(outcome.err, None, "tm gave up before the server answered");
+    assert!(started.elapsed() >= Duration::from_secs(31));
     assert_eq!(
         outcome.out,
         format!("(new) secret set API_KEY: {HEAD}… [24 chars]\n")

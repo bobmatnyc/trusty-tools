@@ -599,8 +599,8 @@ async fn server_onepassword_set_slower_than_the_old_client_wait_reports_its_outc
 
     let started = std::time::Instant::now();
     let answer = client.call(method::SET, params).await;
-    assert!(started.elapsed() >= Duration::from_secs(31));
     let result = answer.expect("the client gave up before the server answered");
+    assert!(started.elapsed() >= Duration::from_secs(31));
     assert_eq!(result["outcome"], json!("new"), "{result}");
     assert!(!result.to_string().contains(VALUE));
     assert_eq!(shim.items().len(), 1);
