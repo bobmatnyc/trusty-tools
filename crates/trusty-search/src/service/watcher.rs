@@ -29,6 +29,8 @@ use notify_debouncer_mini::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::service::watcher_start::{start_bounded, WATCHER_START_BOUND};
+
 /// Debounce window for filesystem change coalescing. Long enough to absorb
 /// editor save-storms, short enough to feel "live" to the indexer.
 const DEBOUNCE_MS: u64 = 500;
@@ -170,11 +172,28 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// Begin watching `root_path` recursively. Each debounced event is mapped
-    /// into a [`WatchEvent`] and pushed to `tx`. If the receiver has been
-    /// dropped the send is silently ignored (the watcher will simply continue
-    /// firing into the void until `self` is dropped).
+    /// Begin watching `root_path` recursively, within a time bound.
+    ///
+    /// Why: `FSEventStreamStart` can block forever when fseventsd does not
+    /// answer; the caller must get control back (#9339).
+    /// What: each debounced event is mapped into a [`WatchEvent`] and pushed
+    /// to `tx`; a dropped receiver makes the send a no-op. The start itself
+    /// runs through `start_bounded` with `WATCHER_START_BOUND` (5 s): one that
+    /// outlives the bound returns an error, never a watcher, and the late
+    /// watcher is shut down on its own thread when it arrives.
+    /// Test: `a_root_whose_start_timed_out_is_not_reported_as_watched`,
+    /// `modified_event_emitted_within_one_second`.
     pub fn start(root_path: PathBuf, tx: UnboundedSender<WatchEvent>) -> Result<Self> {
+        // #9339: bound the start; an unanswered FSEventStreamStart is a
+        // reported error, not a hang.
+        let root = root_path.clone();
+        start_bounded(&root, WATCHER_START_BOUND, move || {
+            Self::start_unbounded(root_path, tx)
+        })
+    }
+
+    /// The start itself; may block on fseventsd (#9339).
+    fn start_unbounded(root_path: PathBuf, tx: UnboundedSender<WatchEvent>) -> Result<Self> {
         let mut debouncer: Debouncer<RescanTapWatcher> = new_debouncer_opt(
             DebouncerConfig::default().with_timeout(Duration::from_millis(DEBOUNCE_MS)),
             move |res: DebounceEventResult| match res {
