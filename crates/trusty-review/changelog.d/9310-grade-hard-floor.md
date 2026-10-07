@@ -9,8 +9,10 @@ Changed
   behave as before. With synthesis off or not answering, the strictest chunk
   grade floors a map-reduce review; when synthesis answers, only its grade
   does. One case stays REQUEST_CHANGES: a review whose every finding was
-  withheld (`suppressed_reject`) (#9310).
-- What changes is the `verdict` field of the JSON and MCP result and the
-  verdict in the PR comment heading. The `trusty-review run` exit code does
+  withheld (`suppressed_reject`). A review the floor raises reads
+  `verdict_status` `parsed`, so an F review that still posts a finding reads
+  BLOCK / `parsed`, not REQUEST_CHANGES / `suppressed_reject` (#9310).
+- What changes is the `verdict` and `verdict_status` fields of the JSON and
+  MCP result and the verdict in the PR comment heading. The `trusty-review run` exit code does
   not change: it reads only a skipped run or a recorded error, never the
   verdict (#9310).

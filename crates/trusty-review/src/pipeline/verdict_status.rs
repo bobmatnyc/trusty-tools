@@ -106,17 +106,26 @@ pub(crate) fn judged_review(
 /// D-graded review below REQUEST_CHANGES or an F below BLOCK. One choke point
 /// after them all repairs every path.
 /// What: the stricter of the verdict and `floor`. UNKNOWN stays UNKNOWN
-/// (`stricter_of` ranks it last). A `suppressed_reject` review is left at
-/// REQUEST_CHANGES (owner answer Q1): its rejection rests only on withheld
-/// findings.
+/// (`stricter_of` ranks it last). A `suppressed_reject` review with no
+/// surviving finding is left at REQUEST_CHANGES (owner answer Q1). When the
+/// floor raises the verdict, the status becomes `parsed`, so a withheld label
+/// never names a verdict the review no longer has.
 /// Test: `apply_grade_floor_raises_a_relaxed_verdict`,
 /// `apply_grade_floor_keeps_a_suppressed_reject`,
-/// `f_with_one_confirmed_low_confidence_finding_reads_block`.
+/// `apply_grade_floor_lifts_a_suppressed_reject_with_survivors`,
+/// `f_with_one_confirmed_low_confidence_finding_reads_block`,
+/// `f_with_a_withheld_blocker_and_a_surviving_finding_reads_block`.
 pub(crate) fn apply_grade_floor(result: &mut ReviewResult, floor: &Verdict) {
-    if result.verdict_status == Some(VerdictStatus::SuppressedReject) {
+    // #9310 Q1: only an all-withheld rejection stays REQUEST_CHANGES.
+    if result.verdict_status == Some(VerdictStatus::SuppressedReject) && result.findings.is_empty()
+    {
         return;
     }
-    result.verdict = stricter_of(result.verdict.clone(), floor.clone());
+    let floored = stricter_of(result.verdict.clone(), floor.clone());
+    if floored != result.verdict {
+        result.verdict = floored;
+        result.verdict_status = Some(VerdictStatus::Parsed); // #9310: the label follows the verdict
+    }
 }
 
 /// The verdict and status a review takes once the gates withheld findings,

@@ -173,3 +173,36 @@ async fn synthesis_rc_graded_b_still_relaxes() {
     assert_eq!(result.findings.len(), 1, "{:?}", result.withheld_findings);
     assert_eq!(result.verdict, Verdict::Approve, "{result:?}");
 }
+
+/// #9310 fix round 1 (HIGH 2): a chunk APPROVE graded F whose only finding is
+/// withheld, synthesis off. The aggregate relaxed to APPROVE, so the withheld
+/// mapping read APPROVE / `all_withheld` and the floor then raised it to
+/// BLOCK beside that label. The chunk floor now folds into the reviewers'
+/// verdict, so the review reads Q1's REQUEST_CHANGES / `suppressed_reject`,
+/// whether no verifier ran or the verifier refuted the finding.
+#[tokio::test]
+async fn mapreduce_chunk_f_with_its_only_finding_withheld_is_suppressed_reject() {
+    let unverified = deps(Arc::new(ChunkScript {
+        chunks: vec![(0, chunk_reply(0, "F", 0.60))],
+        synthesis: NO_SYNTHESIS,
+    }));
+    let mut refuted = deps(Arc::new(ChunkScript {
+        chunks: vec![(0, chunk_reply(0, "F", 0.60))],
+        synthesis: NO_SYNTHESIS,
+    }));
+    refuted.verifier = Some(Arc::new(RefutingVerifier {
+        refute: "discards an error",
+    }));
+    for (case, review_deps) in [("no verifier", unverified), ("refuted", refuted)] {
+        let (source, _tmp) = local_source(&chunked_diff());
+        let result = run_review(&ReviewConfig::load(None), input(source), review_deps).await;
+        assert!(result.findings.is_empty(), "{case}: {:?}", result.findings);
+        assert_eq!(result.withheld_findings.len(), 1, "{case}: {result:?}");
+        assert_eq!(result.verdict, Verdict::RequestChanges, "{case}: {result:?}");
+        assert_eq!(
+            result.verdict_status,
+            Some(crate::models::VerdictStatus::SuppressedReject),
+            "{case}"
+        );
+    }
+}

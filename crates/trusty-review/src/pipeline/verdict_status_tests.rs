@@ -259,3 +259,18 @@ fn apply_grade_floor_keeps_a_suppressed_reject() {
     assert_eq!(result.verdict, Verdict::RequestChanges);
     assert_eq!(result.verdict_status, Some(VerdictStatus::SuppressedReject));
 }
+
+/// #9310 fix round 1 (HIGH 1): a `suppressed_reject` review that still posts a
+/// finding is not Q1's all-withheld case, so the floor lifts it and the
+/// status follows the verdict.
+#[test]
+fn apply_grade_floor_lifts_a_suppressed_reject_with_survivors() {
+    let mut result = settled(
+        Verdict::RequestChanges,
+        Some(VerdictStatus::SuppressedReject),
+    );
+    result.findings.push(finding(Effort::Low, false));
+    apply_grade_floor(&mut result, &Verdict::Block);
+    assert_eq!(result.verdict, Verdict::Block);
+    assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
+}

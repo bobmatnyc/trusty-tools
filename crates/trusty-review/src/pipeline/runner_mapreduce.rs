@@ -161,11 +161,16 @@ pub(super) async fn run_mapreduce_branch(
     }
     let model_verdict = reviewer_verdict(&reduced.verdict, wiped_model_verdict.as_ref());
     // #9310: the synthesis grade floors the reviewers' verdict, as in `run_review`.
+    // Ruling 50: so does a chunk floor, so the withheld mapping reads a chunk F
+    // as the rejection it is (Q1), not the relaxed aggregate.
     let judged = Judged {
-        verdict: judged_verdict(
-            model_verdict,
-            reduced.grade.as_deref(),
-            run.coverage_contrib.as_ref(),
+        verdict: crate::pipeline::grade::stricter_of(
+            judged_verdict(
+                model_verdict,
+                reduced.grade.as_deref(),
+                run.coverage_contrib.as_ref(),
+            ),
+            grade_floor.clone(),
         ),
         grade_floor,
     };

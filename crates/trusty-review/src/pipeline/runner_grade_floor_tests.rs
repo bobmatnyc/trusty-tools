@@ -239,3 +239,33 @@ async fn f_with_every_finding_withheld_stays_suppressed_reject() {
     assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
     assert_eq!(result.verdict_status, Some(VerdictStatus::SuppressedReject));
 }
+
+/// #9310 fix round 1 (HIGH 1): a BLOCK graded F whose High finding the line
+/// gate withholds (the quoted code is not on line 30), beside a confirmed Low
+/// finding that survives. The survivors alone would approve, so the gates
+/// settled UNKNOWN and the withheld mapping read REQUEST_CHANGES /
+/// `suppressed_reject` with a finding posted. A finding survives, so Q1 does
+/// not apply: the review reads BLOCK / `parsed`.
+#[tokio::test]
+async fn f_with_a_withheld_blocker_and_a_surviving_finding_reads_block() {
+    let low = "`amounts.iter().sum::<u64>()` could use a named binding.";
+    let result = review(
+        "BLOCK",
+        "F",
+        serde_json::json!([
+            finding("`flush_all()` loses the total.", "high", 0.9, "correctness"),
+            finding(low, "low", 0.9, "correctness"),
+        ]),
+    )
+    .await;
+    assert_one_confirmed(&result);
+    assert_eq!(
+        result.withheld_by_reason.get("line_citation"),
+        Some(&1),
+        "the line gate withholds the blocker: {:?}",
+        result.withheld_findings
+    );
+    assert_eq!(result.verdict, Verdict::Block, "{result:?}");
+    assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
+    assert_eq!(result.grade.as_deref(), Some("F"));
+}

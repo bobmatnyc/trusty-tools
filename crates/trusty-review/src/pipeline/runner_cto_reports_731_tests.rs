@@ -10,7 +10,7 @@
 //! finding's recorded outcome. Two cases: the mix as recorded, and the same
 //! mix with finding 1 refuted instead of confirmed.
 //! Test: `run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding`,
-//! `run_review_cto_reports_731_mix_without_finding_1_does_not_block`.
+//! `run_review_cto_reports_731_mix_without_finding_1_blocks_on_its_f_grade`.
 
 use super::*;
 
@@ -181,17 +181,20 @@ async fn run_review_cto_reports_731_mix_blocks_on_its_confirmed_high_finding() {
 /// threshold and confirmed Lows, which alone would approve; the unverifiable
 /// advisories are withheld (#4044). #8904: the refuted findings are withheld,
 /// and a blocking review whose survivors alone approve never approves — the
-/// model's F must not stand. #9310: it is REQUEST_CHANGES
-/// (`suppressed_reject`, formerly UNKNOWN), graded the band's best.
+/// model's F must not stand on them. #9310: the withheld mapping reads
+/// REQUEST_CHANGES (`suppressed_reject`, formerly UNKNOWN); then owner ruling
+/// 50 holds the reviewer's F at BLOCK, since findings survive and Q1 covers
+/// only an all-withheld review. The status follows the verdict: `parsed`.
 #[tokio::test]
-async fn run_review_cto_reports_731_mix_without_finding_1_does_not_block() {
+async fn run_review_cto_reports_731_mix_without_finding_1_blocks_on_its_f_grade() {
     let result = review_731(Outcome::Refuted).await;
 
     assert_matches_record(&result, Outcome::Refuted);
-    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert!(!result.findings.is_empty(), "findings survive");
+    assert_eq!(result.verdict, Verdict::Block);
     assert_eq!(
         result.verdict_status,
-        Some(crate::models::VerdictStatus::SuppressedReject)
+        Some(crate::models::VerdictStatus::Parsed)
     );
-    assert_eq!(result.grade.as_deref(), Some("D+"));
+    assert_eq!(result.grade.as_deref(), Some("F"));
 }
