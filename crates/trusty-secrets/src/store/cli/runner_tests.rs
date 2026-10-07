@@ -379,3 +379,26 @@ fn runner_stdin_closed_early_is_never_ok_and_kills_the_group() {
         "grandchild {pid} outlived a short stdin write"
     );
 }
+
+/// Why: #7519 — once the leader exits and is reaped, a grandchild still
+/// holding stdout would keep the run waiting; the runner kills the group at
+/// the deadline, so the call returns and the grandchild is gone.
+/// Test: itself.
+#[test]
+fn runner_grandchild_holding_a_pipe_is_killed_after_the_leader_exits() {
+    let shim = Shim::new("sleep 60 &\necho $! > '@LOG@/pid'\nexit 0\n");
+    let started = Instant::now();
+    let err = shim
+        .command()
+        .timeout(Duration::from_millis(300))
+        .run()
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    assert!(
+        matches!(&err, SecretsError::Backend { reason, .. } if reason.contains("timeout")),
+        "{err:?}"
+    );
+    let pid = shim.logged_pid();
+    assert!(gone_soon(pid), "grandchild {pid} outlived its reaped leader");
+}

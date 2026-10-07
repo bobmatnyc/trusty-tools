@@ -156,6 +156,7 @@ impl CliCommand {
     /// Test: `runner_stderr_markers_map_to_verdicts`,
     /// `runner_missing_program_is_cli_not_installed`,
     /// `runner_timeout_kills_the_process_group`,
+    /// `runner_grandchild_holding_a_pipe_is_killed_after_the_leader_exits`,
     /// `runner_stdout_over_the_cap_is_an_error`.
     pub fn run(&self) -> Result<CliRun, SecretsError> {
         self.refuse_leaks(None)?;
