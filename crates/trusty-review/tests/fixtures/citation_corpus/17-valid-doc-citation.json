@@ -1,0 +1,22 @@
+{
+  "leak": "-",
+  "about": "Control (#9193): a finding whose only long quote is a [doc:] excerpt of an ADR read at the PR head survives. Its code quote is under the 12-character generic-quote floor, so before [doc:] existed the excerpt was scanned as a code quote absent from the diff and the finding was withheld.",
+  "diff_file": "billing.diff",
+  "pr_body": "Adds an invoice total. Implements docs/adr/0001-totals.md.",
+  "docs": {
+    "docs/adr/0001-totals.md": "# Totals\n\nInvoice totals must use checked_add so a sum never wraps.\n"
+  },
+  "reviewer": {
+    "prose": "Overflow risk.",
+    "verdict": "REQUEST_CHANGES",
+    "grade": "C",
+    "findings": [
+      {"title": "unchecked-total", "body": "`sum::<u64>` wraps on overflow, against the ADR [doc: docs/adr/0001-totals.md@0123456 — \"Invoice totals must use checked_add\"].", "severity": "medium", "confidence": 0.9, "file": "src/billing.rs", "line": 10}
+    ]
+  },
+  "verifier": "CONFIRMED",
+  "hallucinated": [],
+  "forbidden_in_body": [],
+  "expect_survivors": 1,
+  "expect_verdict": "REQUEST_CHANGES"
+}

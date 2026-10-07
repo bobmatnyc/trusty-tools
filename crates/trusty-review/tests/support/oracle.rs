@@ -9,7 +9,9 @@
 //! `tests/model_eval.rs` use one copy.
 //! What: [`diff_lines`] reads a diff's new-side and removed text by line;
 //! [`resolves`] decides whether one finding's `file`, `line` and quoted code
-//! hold there. Plain `std` only, so it compiles in both crates.
+//! hold there, and (#9193) whether each `[doc: path@sha — "excerpt"]` quotes
+//! the [`Docs`] text at the head. Plain `std` only, so it compiles in both
+//! crates.
 //! Test: `hallucination_count_is_zero`, `bad_recording_scores_hallucinations`.
 
 use std::collections::HashMap;
@@ -17,6 +19,51 @@ use std::collections::HashMap;
 /// Collapse every whitespace run to one space.
 pub fn norm(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Doc text a `[doc:]` citation may quote: by path, at commit `head` (#9193).
+#[derive(Debug, Default, Clone)]
+pub struct Docs {
+    /// The full head SHA the docs were read at.
+    pub head: String,
+    /// Doc text by repository path.
+    pub text: HashMap<String, String>,
+}
+
+/// Whether every `[doc: path@sha — "excerpt"]` in `description` names a doc
+/// in `docs`, a 7+ character hex prefix of `docs.head`, and excerpts that
+/// occur in that doc. Written apart from the gate's parser (#9193).
+fn docs_resolve(description: &str, docs: &Docs) -> bool {
+    let mut rest = description;
+    while let Some(at) = rest.find("[doc:") {
+        let after = &rest[at + 5..];
+        let Some(end) = after.find(']') else {
+            return false;
+        };
+        let body = &after[..end];
+        rest = &after[end..];
+        let token = body.split('"').next().unwrap_or("");
+        let token = token.trim().trim_end_matches(['—', '–', '-']).trim();
+        let Some((path, sha)) = token.rsplit_once('@') else {
+            return false;
+        };
+        let sha = sha.to_lowercase();
+        let quotes: Vec<String> = body.split('"').skip(1).step_by(2).map(norm).collect();
+        let Some(text) = docs.text.get(path).map(|t| norm(t)) else {
+            return false;
+        };
+        let at_head = sha.len() >= 7
+            && sha.chars().all(|c| c.is_ascii_hexdigit())
+            && docs.head.starts_with(&sha);
+        if !at_head
+            || !body.matches('"').count().is_multiple_of(2)
+            || quotes.is_empty()
+            || !quotes.iter().all(|q| text.contains(q.as_str()))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Line-numbered text of every file in a diff, by new-side line number.
@@ -76,13 +123,18 @@ pub fn file_lines<'a>(lines: &'a Lines, file: &str) -> Option<&'a HashMap<u32, S
 /// of them is on the cited line. A finding that quotes no code never resolves.
 /// A finding about a removal (`removal`, by ground truth) also resolves its
 /// quotes against the removed lines, placed at their deletion's position.
+/// #9193: every `[doc:]` citation must also resolve in `docs`.
 pub fn resolves(
     file: &str,
     line: Option<u32>,
     description: &str,
     (head, base): &(Lines, Lines),
     removal: bool,
+    docs: &Docs,
 ) -> bool {
+    if !docs_resolve(description, docs) {
+        return false;
+    }
     let Some(lines) = file_lines(head, file) else {
         return false;
     };
