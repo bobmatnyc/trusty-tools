@@ -2390,9 +2390,12 @@ fn rank_score_keeps_importance_a_tiebreaker() {
         "importance stopped breaking ties between equally-similar candidates"
     );
 
-    // The closet boost and the 1.0 clamp are unchanged.
+    // The closet boost is unchanged.
     assert!(rank_score(0.70, 0.5, 0.15) > rank_score(0.70, 0.5, 0.0));
-    assert_eq!(rank_score(1.0, 1.0, 0.15), 1.0);
+    // #9279: a soft cap replaced the 1.0 clamp; scores stay below 1.0 and keep
+    // their order above it.
+    let top = rank_score(1.0, 1.0, 0.15);
+    assert!(top < 1.0 && top > rank_score(0.95, 1.0, 0.15), "{top}");
 }
 
 /// Why (#4904): the hook injected ~1,211 tokens per prompt while missing
@@ -2734,3 +2737,7 @@ async fn compact_vector_orphans_still_reclaims_true_orphans() {
 // #9280: L2/L3 id tiebreak.
 #[path = "rank_tie_tests.rs"]
 mod rank_tie_tests;
+
+// #9279: short id tokens in keywords and recall.
+#[path = "id_token_tests.rs"]
+mod id_token_tests;
