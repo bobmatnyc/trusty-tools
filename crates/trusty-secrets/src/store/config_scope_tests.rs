@@ -648,3 +648,45 @@ fn scope_tracked_override_outside_the_owner_is_refused() {
         "{err:?}"
     );
 }
+
+/// Why: #7524 H1, Architect ruling on item 74 — on a Keychain build a value
+/// write into `file` needs consent from the account's own machine config,
+/// and every way that config can fail to say `file` refuses: no path (the
+/// account home is unknown), a missing file, a file that does not parse, no
+/// `secrets:` section, or a `default_backend` other than `file`. A write
+/// into any other backend, and any write on a build without a Keychain,
+/// never reads the consent config.
+/// Test: itself.
+#[cfg(feature = "server")]
+#[test]
+fn config_value_write_into_file_needs_the_consent_config() {
+    use super::config::check_value_write_for;
+    let tmp = TempDir::new().unwrap();
+    let consenting = write(
+        tmp.path(),
+        "file.yaml",
+        "secrets:\n  default_backend: file\n",
+    );
+    let refusing = [
+        None,
+        Some(tmp.path().join("missing.yaml")),
+        Some(write(tmp.path(), "corrupt.yaml", "secrets: [unclosed\n")),
+        Some(write(tmp.path(), "bare.yaml", "other: 1\n")),
+        Some(write(
+            tmp.path(),
+            "keychain.yaml",
+            "secrets:\n  default_backend: keychain\n",
+        )),
+    ];
+    let file = BackendId::file();
+    check_value_write_for(&file, Some(&consenting), true).unwrap();
+    for consent in &refusing {
+        let err = check_value_write_for(&file, consent.as_deref(), true).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::FileBackendNotSelected),
+            "{consent:?}: {err:?}"
+        );
+        check_value_write_for(&file, consent.as_deref(), false).unwrap();
+        check_value_write_for(&BackendId::keychain(), consent.as_deref(), true).unwrap();
+    }
+}
