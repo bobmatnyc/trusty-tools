@@ -368,3 +368,55 @@ async fn server_startup_sweeps_stale_template_dirs() {
     );
     server.stop().await;
 }
+
+/// Why: #7519 Fail-Open Check — a startup sweep failure is only reported,
+/// and the server keeps serving, because the next template write refuses
+/// the same directory. With a symlinked template root the server answers,
+/// the leftover behind the link is not followed, and an edit through 1Password
+/// is `StorageRefused` with no template written and no `op item edit` run.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_template_sweep_failure_keeps_serving_and_refuses_the_edit() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let elsewhere = fx.tmp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = fx.settings.template_root.clone();
+    std::fs::create_dir_all(root.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let stale = elsewhere.join(format!("tpl.{dead}.1.0"));
+    std::fs::create_dir(&stale).unwrap();
+    std::fs::write(stale.join("template.json"), VALUE).unwrap();
+
+    let shim = OpShim::new();
+    shim.seed("item1", "A", "old-value", "PASSWORD");
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    assert_eq!(listed(&fx).await, json!([]), "the server stopped serving");
+    assert!(stale.exists(), "the sweep followed the symlinked root");
+
+    let response = set(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::StorageRefused
+    );
+    assert!(!shim.calls().contains("item edit"), "{}", shim.calls());
+    assert_eq!(shim.template_log(), "");
+    let made: Vec<_> = std::fs::read_dir(&elsewhere)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(
+        made,
+        vec![stale.clone()],
+        "a template landed behind the link"
+    );
+    server.stop().await;
+}
