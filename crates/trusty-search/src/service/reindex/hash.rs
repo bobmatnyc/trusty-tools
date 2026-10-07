@@ -104,6 +104,14 @@ pub(crate) fn hash_content(content: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// #9236: test-only fault seam. For each index id listed here, the durable
+/// hash-row delete in [`forget_file_hash`] fails after the cache entry is
+/// dropped — the state a refused redb write leaves. Keyed by index id so
+/// concurrent tests never see each other's faults.
+#[cfg(test)]
+pub(crate) static TEST_FAIL_FORGET_HASH: std::sync::Mutex<Vec<String>> =
+    std::sync::Mutex::new(Vec::new());
+
 /// Drop a file's content hash from the in-process cache and the durable corpus.
 ///
 /// Why (#8922): a purge that leaves the hash behind makes the next reindex or
@@ -122,6 +130,13 @@ pub(crate) async fn forget_file_hash(
     let Some(corpus) = indexer.corpus_store() else {
         return Ok(());
     };
+    #[cfg(test)]
+    if TEST_FAIL_FORGET_HASH
+        .lock()
+        .is_ok_and(|f| f.contains(&index_id.0))
+    {
+        anyhow::bail!("injected file-hash delete failure (#9236 test seam)");
+    }
     let rows = vec![rel.to_string()];
     tokio::task::spawn_blocking(move || corpus.delete_file_hash_entries(&rows))
         .await

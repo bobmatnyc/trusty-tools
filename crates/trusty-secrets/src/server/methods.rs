@@ -10,22 +10,28 @@
 //! `{"project": "/repo", "vault": "trusty/o/r", "key": "K", "value": "…"}`.
 //! No function returns a value: `set` returns S1's masked confirmation,
 //! `list` names and metadata, `copy` names, `doctor` ids and paths.
-//! Test: `server_tests.rs` beside this module.
+//! #4567: `set`, `delete`, `copy` and `list` run under [`audited`], which
+//! records them on the credential access audit trail; `scopes` and `doctor`
+//! read no credential and leave no record.
+//! Test: `server_tests.rs` and `audit_tests.rs` beside this module.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::audit::AuditMethod;
 use super::errors::ErrorKind;
+use super::gate::{Recording, audited};
 use super::project::ProjectContext;
 use super::router::State;
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
-use crate::store::{Capabilities, SecretStore};
+use crate::store::{Capabilities, SecretBackend, SecretStore, local_backends};
 
 /// `secrets.doctor` — not among S1's method names.
 pub const DOCTOR: &str = "secrets.doctor";
@@ -76,18 +82,24 @@ pub(crate) fn scopes(state: &State, params: Value) -> Result<Value, ErrorKind> {
 
 /// `secrets.list`: names, lengths, `updated_at`, and the agents flag.
 ///
-/// What: reads the names-only index only; never opens a backend.
+/// What: reads the names-only index only; never opens a backend. A denied
+/// call leaves one audit record; an allowed one leaves none (#4567).
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
-/// `server_corrupt_index_is_a_fixed_error`.
+/// `server_corrupt_index_is_a_fixed_error`,
+/// `audit_list_records_only_denials_and_scopes_doctor_none`.
 pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let (dir, rest) = split_project(params)?;
-    let request: ListRequest = decode(rest)?;
-    let project = ProjectContext::resolve(state, &dir)?;
-    project.require_in_scope(&request.vault)?;
-    let keys = state.index.list(&request.vault)?;
-    to_json(&ListResponse {
-        vault: request.vault,
-        keys,
+    audited(state, AuditMethod::List, Recording::DenyOnly, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: ListRequest = decode(rest)?;
+        gate.name(&request.vault, None);
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        project.require_in_scope(&request.vault)?;
+        let keys = state.index.list(&request.vault)?;
+        to_json(&ListResponse {
+            vault: request.vault,
+            keys,
+        })
     })
 }
 
@@ -95,29 +107,79 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 ///
 /// What: the value goes to the project's backend through [`SecretStore`]
 /// and is dropped with the request. Neither the request nor the response is
-/// logged or formatted here.
+/// logged or formatted here. #4567: one audit record per call; the audit log
+/// is opened before the backend is touched (see `gate`).
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
-/// `server_malformed_set_never_echoes_its_value`.
+/// `server_malformed_set_never_echoes_its_value`,
+/// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let (dir, rest) = split_project(params)?;
-    let request: SetRequest = decode(rest)?;
-    let project = ProjectContext::resolve(state, &dir)?;
-    project.require_in_scope(&request.vault)?;
-    let store = SecretStore::new(project.backend(state)?, state.index.clone());
-    let response = store.set(&request.vault, &request.key, &request.value)?;
-    to_json(&response)
+    audited(state, AuditMethod::Set, Recording::Once, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: SetRequest = decode(rest)?;
+        gate.name(&request.vault, Some(&request.key));
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        project.require_in_scope(&request.vault)?;
+        let store = SecretStore::new(project.backend(state)?, state.index.clone());
+        gate.admit()?;
+        let response = store.set(&request.vault, &request.key, &request.value)?;
+        to_json(&response)
+    })
 }
 
-/// `secrets.delete`: remove one key from the backend and the index.
+/// `secrets.delete`: remove one key from every backend and the index.
 ///
-/// Test: `server_set_list_delete_round_trip_over_a_real_socket`.
+/// What: the scope check runs before any backend is opened. The key is
+/// then deleted from the configured backend and from [`other_backends`]
+/// through [`SecretStore::delete_across`] (#7519). #4567 — audited like
+/// [`set`].
+/// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
+/// `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
+/// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let (dir, rest) = split_project(params)?;
-    let request: DeleteRequest = decode(rest)?;
-    let project = ProjectContext::resolve(state, &dir)?;
-    project.require_in_scope(&request.vault)?;
-    let store = SecretStore::new(project.backend(state)?, state.index.clone());
-    to_json(&store.delete(&request.vault, &request.key)?)
+    audited(state, AuditMethod::Delete, Recording::Once, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: DeleteRequest = decode(rest)?;
+        gate.name(&request.vault, Some(&request.key));
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        project.require_in_scope(&request.vault)?;
+        let store = SecretStore::new(project.backend(state)?, state.index.clone());
+        // #7519: a backend switch or a copy leaves values in other backends.
+        let others = other_backends(state, &project.resolved_config().backend)?;
+        gate.admit()?;
+        let response = store.delete_across(&request.vault, &request.key, &others)?;
+        to_json(&response)
+    })
+}
+
+/// Every backend but `configured` that may hold a key (#7519).
+///
+/// Why: A5 — a delete must clear the backend a key was set under before a
+/// switch, not only the one configured now.
+/// What: [`local_backends`] minus `configured`, each opened through the
+/// factory. A factory that answers [`SecretsError::UnknownBackend`] has no
+/// such backend, so it holds nothing and is skipped. Any other open failure
+/// is returned: that backend may still hold a value.
+/// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
+/// `server_delete_fails_closed_when_an_old_backend_cannot_open`.
+fn other_backends(
+    state: &State,
+    configured: &BackendId,
+) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
+    let mut others = Vec::new();
+    for id in local_backends() {
+        if id == *configured {
+            continue;
+        }
+        match (state.backends)(&id) {
+            Ok(backend) => others.push(backend),
+            Err(SecretsError::UnknownBackend { .. }) => {}
+            Err(e) => return Err(ErrorKind::from(e)),
+        }
+    }
+    Ok(others)
 }
 
 /// Which keys a `copy` moves: every indexed key, or the ones named.
@@ -154,54 +216,73 @@ impl CopySelection {
 /// and the copy continues. An entry that compensation could not delete
 /// aborts the copy with [`ErrorKind::OrphanedBackendEntry`] and no copied
 /// list; keys copied before it stay visible through `secrets.list`. Values
-/// are never returned.
+/// are never returned. #4567: a refusal before the loop is one deny record;
+/// then the audit log is opened before the first key, and each key leaves
+/// one record — allow when copied, deny with its kind when it lands in
+/// `failed` or orphans. A record that cannot be written stops the copy
+/// before its next key with [`ErrorKind::AuditUnavailable`].
 /// Test: `server_copy_moves_keys_between_backends_in_one_project`,
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
-/// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`.
+/// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
+/// `audit_copy_writes_one_record_per_key`.
 pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let (dir, rest) = split_project(params)?;
-    let request: CopyRequest = decode(rest)?;
-    if request.from_backend == request.to_backend {
-        return Err(ErrorKind::SameBackend);
-    }
-    let project = ProjectContext::resolve(state, &dir)?;
-    let vault = project.scopes().project().clone();
-    let source = (state.backends)(&request.from_backend)?;
-    let destination = (state.backends)(&request.to_backend)?;
-    if !source.capabilities().contains(Capabilities::READ)
-        || !destination.capabilities().contains(Capabilities::WRITE)
-    {
-        return Err(ErrorKind::Unsupported);
-    }
-    let keys = match CopySelection::of(&request) {
-        CopySelection::Keys(keys) => keys,
-        CopySelection::All => state
-            .index
-            .list(&vault)?
-            .into_iter()
-            .map(|meta| meta.name)
-            .collect(),
-    };
-    // #9065: write through `set`'s index lock and compensation, never around it.
-    let store = SecretStore::new(destination, state.index.clone());
-    let mut response = CopyResponse {
-        copied: Vec::new(),
-        failed: Vec::new(),
-    };
-    for key in keys {
-        let Ok(Some(value)) = source.get(&vault, &key) else {
-            response.failed.push(key);
-            continue;
-        };
-        match store.set(&vault, &key, &value) {
-            Ok(_) => response.copied.push(key),
-            // #9065: an orphan is never folded into `failed`; it aborts the copy.
-            Err(orphan @ SecretsError::OrphanedBackendEntry { .. }) => return Err(orphan.into()),
-            Err(_) => response.failed.push(key),
+    audited(state, AuditMethod::Copy, Recording::PerKey, |gate| {
+        let (dir, rest) = split_project(params)?;
+        let request: CopyRequest = decode(rest)?;
+        gate.backend(&request.to_backend);
+        if request.from_backend == request.to_backend {
+            return Err(ErrorKind::SameBackend);
         }
-    }
-    to_json(&response)
+        let project = ProjectContext::resolve(state, &dir)?;
+        gate.project(&project);
+        let vault = project.scopes().project().clone();
+        gate.name(&vault, None);
+        let source = (state.backends)(&request.from_backend)?;
+        let destination = (state.backends)(&request.to_backend)?;
+        if !source.capabilities().contains(Capabilities::READ)
+            || !destination.capabilities().contains(Capabilities::WRITE)
+        {
+            return Err(ErrorKind::Unsupported);
+        }
+        let keys = match CopySelection::of(&request) {
+            CopySelection::Keys(keys) => keys,
+            CopySelection::All => state
+                .index
+                .list(&vault)?
+                .into_iter()
+                .map(|meta| meta.name)
+                .collect(),
+        };
+        // #9065: write through `set`'s index lock and compensation, never around it.
+        let store = SecretStore::new(destination, state.index.clone());
+        let mut response = CopyResponse {
+            copied: Vec::new(),
+            failed: Vec::new(),
+        };
+        gate.admit()?;
+        for key in keys {
+            gate.ready()?;
+            let outcome = match source.get(&vault, &key) {
+                Ok(Some(value)) => store
+                    .set(&vault, &key, &value)
+                    .map(drop)
+                    .map_err(ErrorKind::from),
+                Ok(None) => Err(ErrorKind::NotFound),
+                Err(e) => Err(ErrorKind::from(e)),
+            };
+            gate.record_key(&key, outcome)?;
+            match outcome {
+                Ok(()) => response.copied.push(key),
+                // #9065: an orphan is never folded into `failed`; it aborts the copy.
+                Err(ErrorKind::OrphanedBackendEntry) => {
+                    return Err(ErrorKind::OrphanedBackendEntry);
+                }
+                Err(_) => response.failed.push(key),
+            }
+        }
+        to_json(&response)
+    })
 }
 
 /// `secrets.doctor` params: an optional project.

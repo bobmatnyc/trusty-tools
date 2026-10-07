@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::platform;
+use super::platform::{self, Symlinks};
 use crate::api::{BackendId, OwnerName, RepoName, SecretsError, VaultName};
 
 /// Machine config file, relative to `$HOME` (DOC-74 §6.1).
@@ -49,6 +49,10 @@ pub struct MachineSecretsConfig {
     // remote's owner may be chosen, because this file is not tracked.
     #[serde(default)]
     pub project_vaults: BTreeMap<String, VaultName>,
+    /// `false` turns the credential access audit off on this machine.
+    // #4567: DOC-45 C-7.10 — only this untracked file may suppress the audit.
+    #[serde(default)]
+    pub audit: Option<bool>,
 }
 
 impl MachineSecretsConfig {
@@ -77,6 +81,38 @@ pub struct ProjectSecretsConfig {
     /// be `trusty/<owner>/<name>` under the remote's owner (#9328).
     #[serde(default)]
     pub vault: Option<VaultName>,
+    /// Read only so the server can refuse `audit: false` here: a tracked file
+    /// may never turn the credential access audit off (#4567).
+    #[serde(default)]
+    pub audit: Option<bool>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub account: Option<String>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
+    /// DOC-74 §6.2's 1Password section; read only to refuse it (#7519).
+    #[serde(default)]
+    pub onepassword: Option<CliSettings>,
+    /// DOC-74 §6.2's Keeper section; read only to refuse it (#7519).
+    #[serde(default)]
+    pub keeper: Option<CliSettings>,
+}
+
+/// The CLI settings DOC-74 §6.2 nests under a backend's own key.
+///
+/// Why: #7519 — a tracked project file must not set these in either the
+/// top-level or the per-backend shape, so both are parsed to be refused.
+/// What: parse-only; unknown keys beside them are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CliSettings {
+    /// The vendor CLI's account, e.g. `op --account`.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The vendor CLI's config file or directory.
+    #[serde(default)]
+    pub config_path: Option<PathBuf>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
@@ -119,18 +155,27 @@ pub fn resolve(
     }
 }
 
-/// Refuse a tracked project config that selects `file` on a Keychain build.
+/// Refuse a tracked project config that selects `file` on a Keychain build,
+/// or that sets a vendor CLI's `account` or `config_path` on any build.
 ///
 /// Why: #9326, Architect ruling (basis ruling 06 R2, the #9328 class) — the
 /// project file is tracked, so anyone who lands a change in the repository
 /// could move every value to plaintext files. Where a Keychain is compiled
-/// in, only the untracked machine config may select `file`.
+/// in, only the untracked machine config may select `file`. #7519, owner
+/// ruling 2026-10-07: for the same reason it may not aim a vendor CLI at an
+/// account or config directory of its choosing.
 /// What: on a Keychain build, project `secrets.backend: file` is
 /// [`SecretsError::TrackedBackendRefused`] naming `path` (the project file)
 /// and the machine key to set, never the file's content. Any other project
 /// backend, and every project backend on a build without a Keychain, passes.
+/// Then, on every build, an `account` or `config_path` at the top level or
+/// under `onepassword`/`keeper` is [`SecretsError::TrackedCliSettingRefused`]
+/// naming the key, never its value.
 /// Test: `config_tracked_file_backend_is_refused_on_a_keychain_build`,
-/// `server_tracked_file_backend_is_refused_on_a_keychain_build`.
+/// `server_tracked_file_backend_is_refused_on_a_keychain_build`,
+/// `config_tracked_cli_settings_are_refused_on_every_build`,
+/// `config_untracked_cli_settings_are_accepted`,
+/// `server_tracked_cli_setting_is_refused_on_every_build`.
 pub fn check_project_backend(
     project: Option<&ProjectSecretsConfig>,
     path: &Path,
@@ -152,7 +197,41 @@ pub(crate) fn check_project_backend_for(
             path: path.to_path_buf(),
         });
     }
-    Ok(())
+    // #7519: owner ruling 2026-10-07 — not Keychain-gated.
+    match project.and_then(tracked_cli_setting) {
+        Some(key) => Err(SecretsError::TrackedCliSettingRefused {
+            path: path.to_path_buf(),
+            key,
+        }),
+        None => Ok(()),
+    }
+}
+
+/// The first CLI setting `project` sets, as the key the refusal names.
+fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
+    let flags = |s: Option<&CliSettings>| {
+        s.map_or([false, false], |s| {
+            [s.account.is_some(), s.config_path.is_some()]
+        })
+    };
+    let sections = [
+        (
+            [project.account.is_some(), project.config_path.is_some()],
+            ["account", "config_path"],
+        ),
+        (
+            flags(project.onepassword.as_ref()),
+            ["onepassword.account", "onepassword.config_path"],
+        ),
+        (
+            flags(project.keeper.as_ref()),
+            ["keeper.account", "keeper.config_path"],
+        ),
+    ];
+    sections
+        .into_iter()
+        .flat_map(|(set, keys)| set.into_iter().zip(keys))
+        .find_map(|(set, key)| set.then_some(key))
 }
 
 /// The machine config path under the real `$HOME`.
@@ -160,38 +239,55 @@ pub fn machine_config_path() -> Result<PathBuf, SecretsError> {
     Ok(platform::home_dir()?.join(MACHINE_CONFIG_SUBPATH))
 }
 
+/// Largest project or machine config file the loaders read, in bytes.
+///
+/// What: 64 KiB, far above any real `secrets:` config. A larger file is
+/// refused before it is read (#7524).
+pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+
 /// Load the machine `secrets:` section from `path`.
 ///
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
+/// What: the file may be a symlink — it is untracked, and dotfile managers
+/// link it — but its target must be a regular file within
+/// [`MAX_CONFIG_BYTES`].
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_non_regular_and_linked_files_are_refused`.
 pub fn load_machine_at(path: &Path) -> Result<Option<MachineSecretsConfig>, SecretsError> {
-    load_section_at(path)
+    load_section_at(path, Symlinks::Follow)
 }
 
 /// Load a project `secrets:` section from `path`.
 ///
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
+/// What: the file must be a regular file within [`MAX_CONFIG_BYTES`], and
+/// not a symlink, even to a file in the same checkout (#7524): the file is
+/// tracked, so a symlink's target is the repository's choice, and one
+/// project config has no use for a link.
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_symlink_to_dev_zero_is_refused_promptly`,
+/// `config_fifo_is_refused_without_blocking`,
+/// `config_non_regular_and_linked_files_are_refused`.
 pub fn load_project_at(path: &Path) -> Result<Option<ProjectSecretsConfig>, SecretsError> {
-    load_section_at(path)
+    load_section_at(path, Symlinks::Refuse)
 }
 
 /// Read the top-level `secrets:` key of a YAML file.
 ///
 /// What: a missing file, an empty file, no `secrets:` key, or `secrets: null`
-/// is `Ok(None)`. A read failure, a YAML syntax error, a non-mapping top
-/// level, or a section that does not decode is [`SecretsError::Config`] (or
-/// [`SecretsError::Io`] for the read), reported by position only — a
-/// serde message can quote the offending scalar.
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
-fn load_section_at<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, SecretsError> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(SecretsError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+/// is `Ok(None)`. A file refused by [`platform::read_config`] (wrong type,
+/// over [`MAX_CONFIG_BYTES`], not UTF-8, a refused symlink), a YAML syntax
+/// error, a non-mapping top level, or a section that does not decode is
+/// [`SecretsError::Config`]; another read failure is [`SecretsError::Io`].
+/// Both report by position or rule only — a serde message can quote the
+/// offending scalar.
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_oversized_file_is_refused_and_a_normal_one_loads`.
+fn load_section_at<T: DeserializeOwned>(
+    path: &Path,
+    symlinks: Symlinks,
+) -> Result<Option<T>, SecretsError> {
+    // #7524: bounded, type-checked read; a tracked symlink to /dev/zero hung here.
+    let Some(raw) = platform::read_config(path, MAX_CONFIG_BYTES, symlinks)? else {
+        return Ok(None);
     };
     if raw.trim().is_empty() {
         return Ok(None);

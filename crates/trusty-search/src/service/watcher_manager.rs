@@ -36,6 +36,7 @@ use crate::core::registry::{IndexHandle, IndexId};
 use crate::service::indexed_files::IndexedFiles;
 use crate::service::network_fs::{classify_root, MountKind};
 use crate::service::watch_loop::WatcherTask;
+use crate::service::watcher_start::StartInFlight;
 
 /// Human-readable, actionable message logged (and surfaced via `/health` +
 /// `GET /indexes/:id/status`) when an index root is detected as
@@ -181,9 +182,12 @@ impl WatcherManager {
     /// CI (issue #3408).
     /// What: (1) refuses to spawn and records the actionable degraded reason
     /// when `mount_kind` is `Network`; (2) otherwise proceeds with the
-    /// existing idempotent build-then-insert spawn path unchanged.
+    /// existing idempotent build-then-insert spawn path. The build runs on the
+    /// blocking pool, bounded by `WATCHER_START_BOUND` (#9339); a start that
+    /// times out or is already in flight records no watcher.
     /// Test: `network_mount_root_is_refused_and_reported`,
-    /// `local_root_is_unaffected_by_network_check`.
+    /// `local_root_is_unaffected_by_network_check`,
+    /// `a_root_whose_start_timed_out_is_not_reported_as_watched`.
     ///
     /// `pub(crate)` rather than private: `server::tests_health` also injects a
     /// `MountKind` directly to cover the `/health` JSON surface end-to-end
@@ -233,18 +237,44 @@ impl WatcherManager {
         // limit exhaustion) so `stop_for_index`/`stop_all` can never block on a
         // spawn — and (b) keeps the critical section to a bare insert.
         let indexed_files = IndexedFiles::new();
-        let task = match crate::service::watch_loop::spawn_watch_loop_with_registry(
-            &handle.root_path,
-            // #3049: the watcher takes this index's teardown-lock read side.
-            handle.id.clone(),
-            Arc::clone(&handle.indexer),
-            indexed_files,
-            // #6524: the watcher populates this index's file-change feed.
-            Arc::clone(&handle.file_events),
-            self.registry.clone(),
-        ) {
-            Ok(task) => task,
+        let root_path = handle.root_path.clone();
+        // #3049: the watcher takes this index's teardown-lock read side.
+        let index_id = handle.id.clone();
+        let indexer = Arc::clone(&handle.indexer);
+        // #6524: the watcher populates this index's file-change feed.
+        let file_events = Arc::clone(&handle.file_events);
+        let registry = self.registry.clone();
+        // #9339: the OS-watch start waits up to `WATCHER_START_BOUND`; run the
+        // build on the blocking pool so no tokio worker waits with it. The
+        // consumer task it spawns still lands on this runtime.
+        let built = tokio::task::spawn_blocking(move || {
+            crate::service::watch_loop::spawn_watch_loop_with_registry(
+                &root_path,
+                index_id,
+                indexer,
+                indexed_files,
+                file_events,
+                registry,
+            )
+        })
+        .await;
+        let task = match built {
+            Ok(Ok(task)) => task,
+            Ok(Err(e)) if e.downcast_ref::<StartInFlight>().is_some() => {
+                // #9339: another start for this root is running and decides
+                // the outcome; a stuck one already logged its WARN.
+                tracing::debug!(index_id = %handle.id, "{e:#}");
+                return;
+            }
             Err(e) => {
+                tracing::warn!(
+                    index_id = %handle.id,
+                    root = %handle.root_path.display(),
+                    "file watcher build task failed (incremental indexing disabled for this index): {e}",
+                );
+                return;
+            }
+            Ok(Err(e)) => {
                 tracing::warn!(
                     index_id = %handle.id,
                     root = %handle.root_path.display(),

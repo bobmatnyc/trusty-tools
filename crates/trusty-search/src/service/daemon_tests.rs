@@ -354,6 +354,98 @@ async fn run_daemon_isolated_instance_never_pollutes_shared_discovery() {
     );
 }
 
+/// #9030: `search.health` over the socket and `GET /health` over HTTP both
+/// report the transport `run_daemon` actually bound.
+///
+/// Why: the console's search dashboard reads `health.transport` to show the
+/// live transport instead of a hardcoded port. A value the daemon did not bind
+/// would mislead it as badly as the hardcoded one did.
+/// What: runs a real isolated `run_daemon` (same isolation as
+/// `run_daemon_isolated_instance_never_pollutes_shared_discovery`), reads the
+/// bound HTTP address from its `http_addr` file, then asks each transport for
+/// its health body. Both must carry `socket_path` equal to the resolved socket
+/// path and `http_addr` equal to the published address.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_health_reports_the_transport_it_bound() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+
+    let override_tmp = tempfile::tempdir().unwrap();
+    let data_dir_tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
+    }
+    let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+
+    let state = SearchAppState::new(IndexRegistry::new());
+    let shutdown_tx = state.shutdown_tx.clone();
+    let handle = tokio::spawn(run_daemon(state, 0));
+
+    // `http_addr` is written after both binds, so its presence means both
+    // listeners are up.
+    let addr_file = data_dir_tmp.path().join("http_addr");
+    let mut http_addr = None;
+    for _ in 0..250 {
+        if let Ok(s) = std::fs::read_to_string(&addr_file) {
+            if !s.trim().is_empty() {
+                http_addr = Some(s.trim().to_string());
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let mut over_socket = None;
+    let mut over_http = None;
+    if let Some(addr) = &http_addr {
+        let frame: Result<serde_json::Value, _> = trusty_common::uds::send_framed_request(
+            &socket_path,
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": socket::METHOD_HEALTH }),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
+        over_socket = frame.ok().map(|f| f["result"]["transport"].clone());
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/health"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        if let Ok(resp) = resp {
+            over_http = resp
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .map(|b| b["transport"].clone());
+        }
+    }
+
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    unsafe {
+        std::env::remove_var("TRUSTY_DATA_DIR");
+        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+    }
+
+    let http_addr = http_addr.expect("the isolated daemon must publish its http_addr");
+    let expected = serde_json::json!({
+        "socket_path": socket_path.to_string_lossy(),
+        "http_addr": http_addr,
+    });
+    assert_eq!(
+        over_socket,
+        Some(expected.clone()),
+        "search.health over the socket must report the bound transport"
+    );
+    assert_eq!(
+        over_http,
+        Some(expected),
+        "GET /health must report the bound transport"
+    );
+}
+
 /// The Fail-Open Check, driven through `run_daemon()` itself (#6285).
 ///
 /// Why: `socket_tests::bind_refuses_a_socket_another_process_is_serving` proves
@@ -619,4 +711,195 @@ fn argv_selects_daemon_start_for_the_daemon_path() {
     assert!(!super::argv_selects_daemon_start(&argv(&[
         "--index", "start", "status"
     ])));
+}
+
+/// Point every per-instance daemon path at fresh tempdirs (the isolation
+/// `run_daemon_isolated_instance_never_pollutes_shared_discovery` uses) and run
+/// `body`. The environment is restored on drop, so a failed assertion inside
+/// `body` cannot leak `TRUSTY_DATA_DIR` into the next `#[serial]` test.
+async fn with_isolated_daemon_paths<F, Fut>(body: F)
+where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    struct RestoreEnv;
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            // SAFETY: every caller is `#[serial]` with the other env mutators.
+            unsafe {
+                std::env::remove_var("TRUSTY_DATA_DIR");
+                std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
+            }
+        }
+    }
+    let override_tmp = tempfile::tempdir().unwrap();
+    let data_dir_tmp = tempfile::tempdir().unwrap();
+    // SAFETY: as above.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
+        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
+    }
+    let _restore = RestoreEnv;
+    body(data_dir_tmp.path().to_path_buf()).await;
+}
+
+/// Wait up to 5 s for the isolated daemon's socket to answer.
+async fn wait_for_socket(path: &Path) -> bool {
+    for _ in 0..250 {
+        if trusty_common::uds::socket_is_serving(path, std::time::Duration::from_millis(50)).await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// #9214: `run_daemon_with(.., HttpListener::Off)` is a real socket-only daemon.
+///
+/// Why: `--no-http` is the first step of retiring TCP :7878 (ADR-0032). A
+/// daemon that still published an HTTP address, or that skipped the
+/// background tickers along with the router, would pass for socket-only while
+/// misleading every client.
+/// What: runs a real isolated daemon with the listener off and asserts: the
+/// socket answers `search.health` with `transport.http_addr: null`; no port
+/// file, no `http_addr` file and no shared registry entry exist; the lockfile
+/// names this process, which is what `trusty-search stop` signals; the status
+/// ticker emits, so the tickers run without a router; and a graceful stop
+/// returns `Ok` and unlinks the socket.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_without_http_serves_only_the_socket() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::server::DaemonEvent;
+    use crate::service::socket;
+
+    with_isolated_daemon_paths(|data_dir| async move {
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let mut events = state.events.subscribe();
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+
+        let serving = wait_for_socket(&socket_path).await;
+        let health: Option<serde_json::Value> = trusty_common::uds::send_framed_request(
+            &socket_path,
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": socket::METHOD_HEALTH }),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .ok();
+        let port_file = daemon_port_path().map(|p| p.exists()).unwrap_or(true);
+        let addr_file = data_dir.join("http_addr").exists();
+        let shared = trusty_common::read_daemon_addr("trusty-search").unwrap();
+        let lock_pid = read_lockfile_pid(&daemon_lock_path().unwrap());
+        let ticked = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                match events.recv().await {
+                    Ok(DaemonEvent::StatusChanged { .. }) => return true,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+
+        let _ = shutdown_tx.send(true);
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+
+        assert!(serving, "the socket must serve with the HTTP listener off");
+        let health = health.expect("search.health must answer over the socket");
+        assert_eq!(
+            health["result"]["transport"],
+            serde_json::json!({
+                "socket_path": socket_path.to_string_lossy(),
+                "http_addr": null,
+            }),
+            "a socket-only daemon reports no HTTP address"
+        );
+        assert!(!port_file, "no port file may announce an unbound HTTP port");
+        assert!(
+            !addr_file,
+            "no http_addr file may announce an unbound listener"
+        );
+        assert!(shared.is_none(), "nothing may enter the shared registry");
+        assert_eq!(
+            lock_pid,
+            Some(std::process::id()),
+            "`stop` finds the daemon by the lockfile pid, not by a port"
+        );
+        assert!(ticked, "the background tickers must run without a router");
+        assert!(
+            matches!(exit, Ok(Ok(Ok(())))),
+            "a graceful stop must return Ok: {exit:?}"
+        );
+        assert!(!socket_path.exists(), "the socket is unlinked on shutdown");
+    })
+    .await;
+}
+
+/// #9214: a socket-only start withdraws an earlier run's HTTP announcement.
+///
+/// Why: clients read `http_addr`, then `daemon.port`. Left in place after a
+/// switch to `--no-http`, either would send them to a port this daemon no
+/// longer holds — possibly one another process now owns.
+/// What: seeds both files with the live daemon's address, starts the daemon
+/// with the listener off, and asserts both are gone once the socket serves.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn run_daemon_without_http_removes_a_stale_http_addr() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
+
+    with_isolated_daemon_paths(|data_dir| async move {
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let stale_addr = data_dir.join("http_addr");
+        let stale_port = daemon_port_path().expect("isolated port path");
+        std::fs::write(&stale_addr, "127.0.0.1:7878\n").unwrap();
+        std::fs::write(&stale_port, "7878\n").unwrap();
+
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let serving = wait_for_socket(&socket_path).await;
+        let addr_left = stale_addr.exists();
+        let port_left = stale_port.exists();
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+
+        assert!(serving, "the socket must serve with the HTTP listener off");
+        assert!(!addr_left, "the stale http_addr file must be removed");
+        assert!(!port_left, "the stale port file must be removed");
+    })
+    .await;
+}
+
+/// #9214: a clean stop of a socket-only daemon returns `Ok`, every time.
+///
+/// Why: a normal stop cancels the drain AND ends the rpc serve loop, so both
+/// arms of the stop wait can be ready together. An unbiased `select!` picked
+/// the serve-loop arm about half the time and reported "the rpc socket stopped
+/// serving", so a clean stop exited non-zero and
+/// `run_daemon_without_http_serves_only_the_socket` flaked.
+/// What: forces both inputs ready — the drain cancelled and the serve task
+/// already finished — and calls the wait 50 times. Each call must return `Ok`.
+/// With either arm free to win, 50 straight `Ok`s has odds of 2^-50.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_socket_only_stop_returns_ok_when_the_serve_loop_also_ended() {
+    for attempt in 0..50 {
+        let drain = tokio_util::sync::CancellationToken::new();
+        let mut rpc_task = tokio::spawn(async {});
+        while !rpc_task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        drain.cancel();
+        let (result, _) = super::socket_only::await_socket_only_stop(&drain, &mut rpc_task).await;
+        assert!(
+            result.is_ok(),
+            "attempt {attempt}: a clean stop must not read as a dead socket: {result:?}"
+        );
+    }
 }

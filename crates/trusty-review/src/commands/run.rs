@@ -34,6 +34,7 @@ use trusty_review::{
     pipeline::{
         CallerContext, DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
         TriggerDecision, log_json_path,
+        post::{FinalizeAction, decide_action},
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
         run_review_with,
     },
@@ -307,7 +308,8 @@ pub async fn cmd_run(
         &config_with_overrides,
         &reviewer_model,
         &default_provider,
-        dedup_need_for(&diff_source, ALLOW_POSTING),
+        // #9348: a dry run cannot post, so it never opens or claims the store.
+        dedup_need_for(&diff_source, run_can_post(args.live)),
     )
     .await?;
     apply_source_root_fallback(&mut deps, source_root_notice.as_deref());
@@ -426,6 +428,20 @@ pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
 /// #5113: `run` may post a GitHub-PR review, so it must carry the claim gate
 /// that keeps a re-run from posting a second comment.
 const ALLOW_POSTING: bool = true;
+
+/// Whether one `run` invocation can reach the post path (#9348).
+///
+/// Why: `run` opened the dedup store and claimed the head on every GitHub run,
+/// `--dry-run` included, and a dry run never completes or releases that claim,
+/// so it blocked a live review of the same head for `DEDUP_STALE_SECS`.
+/// What: asks `decide_action` with the trigger `run_input` builds from `--live`
+/// and `ALLOW_POSTING`. The config flag is passed as live so a trigger that
+/// deferred to it would open the store rather than skip it.
+/// Test: `dry_run_does_not_need_the_dedup_store`,
+/// `dedup_need_for_github_posting_is_required`.
+pub(crate) fn run_can_post(live: bool) -> bool {
+    decide_action(false, trigger_for_live_flag(live), ALLOW_POSTING, true) == FinalizeAction::Post
+}
 
 /// The `ReviewInput` one `run` invocation hands the pipeline.
 ///
@@ -1180,6 +1196,30 @@ mod tests {
             token: "tok".to_string(),
         };
         assert_eq!(dedup_need_for(&source, true), DedupNeed::Required);
+    }
+
+    /// REGRESSION (#9348): `run` without `--live` cannot post, so it must not
+    /// open — or claim in — the per-user dedup store a live run and the
+    /// `webhook-listen` worker share.
+    /// What: the need `cmd_run` computes for a GitHub source, with and without
+    /// `--live`.
+    /// Test: this test.
+    #[test]
+    fn dry_run_does_not_need_the_dedup_store() {
+        let source = DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "backend".to_string(),
+            pr: 42,
+            token: "tok".to_string(),
+        };
+        assert_eq!(
+            dedup_need_for(&source, run_can_post(false)),
+            DedupNeed::NotNeeded
+        );
+        assert_eq!(
+            dedup_need_for(&source, run_can_post(true)),
+            DedupNeed::Required
+        );
     }
 
     /// A GitHub source that cannot post (`compare`, the MCP tools) has nothing

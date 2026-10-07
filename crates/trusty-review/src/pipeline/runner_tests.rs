@@ -600,8 +600,9 @@ async fn run_review_flags_shallow_clean_review_on_large_diff() {
 /// "B+" across PRs #1879/#1883/#1884).
 /// What: runs a large-diff zero-findings APPROVE whose JSON self-grades "A+" with
 /// an implausibly small token spend, so the shallow cap lowers the top-level grade
-/// to "B-"; then re-parses the embedded grade out of the returned `review_body`
-/// and asserts it equals the top-level grade (and is no longer the stale "A+").
+/// to "B-". #9310 D2: the body no longer embeds the reviewer's object at all,
+/// so it holds no second grade to disagree; the footer's grade is the
+/// top-level one, and the stale "A+" appears nowhere.
 /// Test: this test itself (no network).
 #[tokio::test]
 async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
@@ -647,18 +648,22 @@ async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
         "shallow cap must lower the top-level grade (#1877)"
     );
 
-    // Re-parse the grade embedded in the returned review_body: it must now mirror
-    // the authoritative top-level grade, NOT the model's original "A+" (#1886).
-    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body)
-        .grade
-        .expect("review_body must still embed a parseable grade");
-    assert_eq!(
-        embedded, top_level,
-        "embedded review_body grade must equal the top-level grade (#1886)"
+    // #9310 D2: no embedded review object, so no embedded grade (#1886).
+    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body);
+    assert!(
+        embedded.is_fail_safe && embedded.grade.is_none(),
+        "review_body must embed no review object: {}",
+        result.review_body
     );
-    assert_ne!(
-        embedded, "A+",
-        "the stale model self-grade must have been reconciled away (#1886)"
+    assert!(
+        result.review_body.contains(&format!("Grade: {top_level} ")),
+        "the footer carries the top-level grade: {}",
+        result.review_body
+    );
+    assert!(
+        !result.review_body.contains("A+"),
+        "the stale model self-grade must not reach the body (#1886): {}",
+        result.review_body
     );
 }
 
@@ -670,9 +675,9 @@ async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
 /// correctly refused on the `BLOCK`, and the human reading the review saw an
 /// approval. #1886 fixed this class for `grade` and left `verdict` behind.
 /// What: runs a review whose model self-assesses APPROVE while reporting a
-/// High-severity finding, so the floor escalates the top-level verdict; then
-/// re-parses `review_body` and asserts the embedded verdict equals the
-/// top-level one and is no longer the stale APPROVE.
+/// High-severity finding, so the floor escalates the top-level verdict.
+/// #9310 D2: the body no longer embeds the reviewer's object, so it holds no
+/// stale APPROVE to disagree with the top-level verdict.
 /// Test: this test itself (no network).
 #[tokio::test]
 async fn run_review_outer_and_embedded_verdict_agree_after_severity_floor() {
@@ -708,15 +713,17 @@ async fn run_review_outer_and_embedded_verdict_agree_after_severity_floor() {
         Verdict::Approve,
         "a High-severity finding must move the top-level verdict off the model's APPROVE"
     );
-    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body).verdict;
-    assert_eq!(
-        embedded, result.verdict,
-        "the verdict embedded in review_body must equal the authoritative one (#1902)"
+    // #9310 D2: no embedded review object, so no embedded verdict (#1902).
+    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body);
+    assert!(
+        embedded.is_fail_safe,
+        "review_body must embed no review object: {}",
+        result.review_body
     );
-    assert_ne!(
-        embedded,
-        Verdict::Approve,
-        "the model's stale pre-floor APPROVE must have been reconciled away (#1902)"
+    assert!(
+        !result.review_body.contains("APPROVE"),
+        "the model's stale pre-floor APPROVE must not reach the body (#1902): {}",
+        result.review_body
     );
 }
 
@@ -2339,7 +2346,8 @@ async fn held_claim_abort_still_releases() {
         reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
         write_log: false,
         print_result: false,
-        trigger: TriggerDecision::None,
+        // #9348: only a run that can post holds a claim, so the owner posts live.
+        trigger: TriggerDecision::ForceLive,
         run_mode: RunMode::Serve,
         allow_posting: true,
         caller_context: CallerContext::default(),
@@ -2806,3 +2814,7 @@ mod pr_body;
 // #9310: `verdict_status`, the withheld headline, and tool-call-only parsing.
 #[path = "runner_verdict_status_tests.rs"]
 mod verdict_status;
+
+// #9348: a review that does not post leaves no in-progress dedup claim.
+#[path = "runner_dedup_claim_tests.rs"]
+mod dedup_claim;

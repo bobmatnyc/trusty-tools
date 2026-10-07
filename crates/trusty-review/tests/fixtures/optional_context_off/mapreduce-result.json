@@ -13,6 +13,7 @@
       "issue_eligible": false,
       "kind": "overflow",
       "line": 10,
+      "severity": "medium",
       "suggestion": "",
       "verified": "confirmed"
     }
@@ -40,7 +41,7 @@
   "pr_title": "Add an invoice total",
   "pr_url": "https://github.com/acme/billing/pull/7",
   "repo": "billing",
-  "review_body": "ok\n\nMap-reduce review: 13 file(s) reviewed across 13 unit(s), 0 skipped, 0 failed; 1 finding(s) surfaced.\n---\nGrade: D+ · 🤖 Reviewed by Trusty-Review (`stub/golden-reviewer`) · tokens ↑1,400 ↓5,600 · est. $0.001",
+  "review_body": "Verified findings (1), highest severity first:\n- **medium** `src/billing.rs:10` — overflow\n\nMap-reduce review: 13 file(s) reviewed across 13 unit(s), 0 skipped, 0 failed; 1 finding(s) surfaced.\n---\nGrade: D+ · 🤖 Reviewed by Trusty-Review (`stub/golden-reviewer`) · tokens ↑1,400 ↓5,600 · est. $0.001",
   "review_version": "<review_version>",
   "status": "completed",
   "timestamp": "<timestamp>",

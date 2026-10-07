@@ -429,6 +429,9 @@ pub(crate) async fn index_status_report(
     let semantic_coverage =
         super::vector_health::semantic_coverage(&indexer, stages_snapshot.semantic.embedded).await;
     let chunk_count = semantic_coverage.chunk_count;
+    // #9235: BM25 corpus-cap truncation, distinct from `chunks_dropped_by_cap`
+    // (the chunk cap) and from the search meta's `bm25_lane_degraded`.
+    let bm25 = indexer.bm25_truncation().await;
     Ok(serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -462,6 +465,12 @@ pub(crate) async fn index_status_report(
         "respect_gitignore": handle.respect_gitignore,
         "walk_truncated_by_budget": walk_truncated_by_budget,
         "chunks_dropped_by_cap": chunks_dropped_by_cap,
+        // #9235: all three `null` when the evicted durable count errored.
+        "bm25_truncated": bm25.map(|b| b.truncated),
+        "bm25_docs_dropped": bm25.map(|b| b.docs_dropped),
+        "bm25_corpus_cap": bm25.map(|b| b.corpus_cap),
+        "bm25_truncation_unavailable_reason":
+            bm25.is_none().then_some(crate::core::bm25::Bm25Truncation::UNAVAILABLE_REASON),
         // Issue #280: walk diagnostic fields.
         "last_walk_started_at": walk_diag.last_walk_started_at,
         "last_walk_files_seen": walk_diag.last_walk_files_seen,

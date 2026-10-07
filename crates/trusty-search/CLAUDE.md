@@ -545,6 +545,16 @@ Per-index stats.
     is driving it any more, so `status: "indexing"` and
     `stages.lexical: in_progress` above are a frozen claim rather than live
     work. `POST /indexes/:id/reindex` clears it.
+  - `bm25_truncated` / `bm25_docs_dropped` / `bm25_corpus_cap` (#9235): the
+    BM25 corpus cap (`TRUSTY_BM25_CORPUS_CAP`) kept `bm25_docs_dropped`
+    resident chunks out of the lexical lane; only the vector lane can find
+    them. `bm25_docs_dropped` is the resident chunk-map length minus
+    `bm25.len()`, saturating at `0` — not the durable `chunk_count` above.
+    While the index is evicted, or a memory-pressure reclaim is clearing it,
+    it is the durable chunk count minus the cap. When that durable count
+    cannot be read, all three are `null` and
+    `bm25_truncation_unavailable_reason` is `"corpus_count_unreadable"`; it
+    is `null` otherwise. The search `meta` block carries the same four fields.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
 ##### `POST /indexes/:id/search`
@@ -612,6 +622,11 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     lexical however conceptual the query was. The second field separates "off
     for this index" from "not built yet". Counterparts to the existing
     `meta.bm25_lane_degraded`.
+  - `meta.bm25_truncated` / `meta.bm25_docs_dropped` / `meta.bm25_corpus_cap`
+    / `meta.bm25_truncation_unavailable_reason` (#9235): the
+    converged-but-truncated signal, the same four fields
+    `GET /indexes/:id/status` reports. `bm25_lane_degraded` means the lane has
+    not converged; these mean it converged without some chunks.
   - `meta.exact_match_floor` / `meta.exact_match_literal` (#7675): `true` when
     the query named a literal that occurs verbatim in the corpus, and every
     chunk carrying it was ranked above every chunk that does not, declaration
@@ -776,6 +791,23 @@ Remove a file (and all its chunks) from the index.
   ```json
   { "index_id": "my-project", "path": "src/auth.rs", "removed_chunks": 4 }
   ```
+  - `path` (#9236) is index-relative, or absolute under the index root. An
+    absolute path is mapped to its index-relative key by text against the raw
+    and the canonical root; only when both fail is its parent directory
+    canonicalized. The last component is never resolved, so an in-root
+    symlink removes its own key, not its target's. A key stored verbatim by
+    an absolute `index-file` write is removed too. `path` in the reply echoes
+    the request.
+  - A successful removal also drops the file's content hash, so the next
+    reindex indexes the file again.
+- **Response 500** `remove_file_failed`: a 500 from the delete itself keeps
+  the file's chunks and its hash. A 500 from the hash step comes after the
+  chunks are gone; the request is safe to retry, and the retry answers 200
+  with `removed_chunks: 0` and clears the hash.
+- **Response 400** `remove_file_path_outside_root` (#9236): an absolute path
+  outside the root, the root itself, or a path, relative or absolute, that is
+  empty, `.`, or holds a `..` segment. Nothing is removed (`removed_chunks: 0`);
+  `message` names both accepted forms.
 
 ###### Supported network-mount pattern (EFS/NFS/SMB) — issue #3408
 
@@ -1373,6 +1405,7 @@ Additional internal caps (not env-tunable):
 
 ```bash
 trusty-search start                                  # start HTTP daemon (background)
+trusty-search start --no-http                        # socket-only daemon (see below)
 trusty-search stop                                   # stop daemon (SIGTERM via PID lockfile)
 trusty-search index [path] [--name <id>] [--force]  # register + index (primary command)
                                                      # auto-detects ./trusty-search.yaml for multi-index repos
@@ -1387,6 +1420,29 @@ trusty-search serve [--http <addr>]                  # MCP stdio (default) or HT
 trusty-search init [path]                            # alias for index
 trusty-search reindex [path]                         # alias for index --force
 ```
+
+### Socket-only daemon (`--no-http`, #9214)
+
+`trusty-search start --no-http`, or `TRUSTY_SEARCH_NO_HTTP=1` in the daemon's
+environment, serves every socket method and binds no TCP port. It is off by
+default; ADR-0032 flips it once the in-tree clients use the socket. With it set
+the daemon:
+
+- writes no `daemon.port` or `http_addr` file, and removes any an earlier run
+  of the same data dir left;
+- registers no address in the shared discovery registry;
+- reports `transport.http_addr: null` from `search.health`;
+- still runs every background ticker, and `trusty-search stop` still finds it
+  through the lockfile pid;
+- skips auto-discovery and logs why, because auto-discovery registers
+  projects over HTTP.
+
+The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
+`/upgrade`, `/metrics`, `/api/chat/providers`. The CLI subcommands
+still resolve the daemon over HTTP; against a `--no-http` daemon they fall back
+to `127.0.0.1:7878`, so use them only once they move to the socket.
+`--no-http` on `trusty-search serve` is a different, older flag and is still a
+no-op there.
 
 ## Crate Layout
 

@@ -37,6 +37,7 @@ const COMMAND_STARTS: &[u8] = b";&|(`";
 /// list of what runs. Each name here is one the allowed shapes use — a commit
 /// message (`git commit -F -`, `gh pr create --body-file -`, `tm … -`), a
 /// file written with `cat`/`tee`, or `$(cat <<'EOF')` under `echo`/`printf`.
+/// #9344: git, gh and tm keep the trust only per [`reader_keeps_trust`].
 const DATA_READERS: &[&str] = &["cat", "tee", "git", "gh", "tm", "echo", "printf", "true"];
 
 /// Programs that run a here-document body as shell source though no
@@ -56,12 +57,21 @@ pub(crate) const SHADOWED_READER_REASON: &str = "this command defines a shell fu
 struct Word {
     /// Quotes, backslashes and a `NAME=` prefix removed, basename kept.
     text: String,
+    /// #9344: quotes and backslashes removed, nothing else.
+    raw: String,
     /// Whether the word sits where the shell reads a program name.
     program: bool,
     /// Whether the word was a `NAME=value` assignment.
     assignment: bool,
     /// `false` when a `$`, a substitution or a glued close builds the word.
     literal: bool,
+    /// #9344: how many substitutions opened in assignment values hold the word.
+    depth: usize,
+    /// #9344: an assignment whose value substitution closed on the line.
+    closed: bool,
+    /// #9344: a `closed` assignment whose value held a quote or `\`, so
+    /// the `)` or backtick read as its close may be quoted text.
+    quoted: bool,
 }
 
 /// Whether a here-document operator line hands its body to a shell.
@@ -76,10 +86,14 @@ struct Word {
 /// positive only restores the pre-#6946 splitting.
 /// Test: `heredoc_frames_are_empty_for_a_shell_operator_line`,
 /// `operator_lines_name_a_glued_or_grouped_shell_9180`.
+/// #9344: a git word that injects config (`git -c alias.x='!sh' x`) runs one too.
 pub(super) fn line_runs_a_shell(line: &str) -> bool {
-    operator_words(line).iter().any(|word| {
+    let words = operator_words(line);
+    words.iter().enumerate().any(|(at, word)| {
         is_shell(&word.text)
             || (word.program && (is_parameter(&word.text) || OTHER_SHELLS.contains(&&*word.text)))
+            // #9344: a `!`-alias or a config-made program runs through `sh`.
+            || (word.program && git_injects_config(&words, at))
     })
 }
 
@@ -92,12 +106,150 @@ pub(super) fn line_runs_a_shell(line: &str) -> bool {
 /// assignment is a literal [`DATA_READERS`] name. Anything else — a word with
 /// a `$` or built by a substitution, a program read from a substitution, any
 /// other name — is shell-run.
-/// Test: `operator_lines_read_as_data_only_for_a_literal_reader_9180`.
+/// #9344: and every git, gh or tm among them keeps its trust
+/// ([`reader_keeps_trust`]), and no word is `quoted`: the shell may not have
+/// closed that substitution where the scan did.
+/// Test: `operator_lines_read_as_data_only_for_a_literal_reader_9180`,
+/// `injected_reader_lines_are_not_data_9344`.
 pub(super) fn line_reads_as_data(line: &str) -> bool {
-    operator_words(line)
+    let words = operator_words(line);
+    !words.iter().any(|word| word.quoted)
+        && words
+            .iter()
+            .enumerate()
+            .filter(|(_, word)| word.program && !word.assignment)
+            .all(|(at, word)| {
+                word.literal
+                    && DATA_READERS.contains(&&*word.text)
+                    && reader_keeps_trust(&words, at)
+            })
+}
+
+/// git global options whose value is the next word (#9344).
+const GIT_VALUE_OPTIONS: &[&str] = &[
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--attr-source",
+];
+
+/// git builtins a here-document body is fed to as data (#9344). git ignores
+/// an alias that would hide a builtin, so only these names are sure to be no
+/// alias and no `git-<name>` program on `PATH`.
+const GIT_DATA_SUBCOMMANDS: &[&str] = &[
+    "commit",
+    "tag",
+    "notes",
+    "apply",
+    "am",
+    "hash-object",
+    "update-ref",
+    "update-index",
+    "cat-file",
+    "mktree",
+    "mktag",
+    "check-ignore",
+    "check-attr",
+    "check-mailmap",
+    "interpret-trailers",
+    "stripspace",
+    "fast-import",
+    "patch-id",
+    "mailinfo",
+];
+
+/// gh core commands a here-document body is fed to as data (#9344). gh
+/// refuses an alias or an extension named like a core command.
+const GH_DATA_SUBCOMMANDS: &[&str] = &[
+    "api", "gist", "issue", "label", "pr", "project", "release", "repo", "run", "search", "secret",
+    "variable", "workflow",
+];
+
+/// Whether data reader `words[at]` still reads its body as data (#9344).
+///
+/// Why: `git -c alias.x='!sh' x <<'O'` runs the body through `sh`, which
+/// reads git's stdin, so trusting the word `git` let `rm -rf` through unjudged.
+/// A gh alias or extension, or a git alias set earlier, does the same.
+/// What: git, gh and tm lose trust behind a prefix assignment other than the
+/// `x=` a substitution opens; git also on [`git_injects_config`] or a
+/// subcommand outside [`GIT_DATA_SUBCOMMANDS`], gh on a first argument
+/// outside [`GH_DATA_SUBCOMMANDS`]. tm has no config or alias form. Every
+/// other reader keeps its trust. Fail-closed: no subcommand is no trust.
+/// Test: `injected_reader_lines_are_not_data_9344`,
+/// `commit_and_pr_body_shapes_stay_allowed_9344`.
+fn reader_keeps_trust(words: &[Word], at: usize) -> bool {
+    // #9344: a value substitution closed before the reader is no bare `x=`.
+    let bare =
+        |w: &Word| !w.closed && matches!(w.raw.split_once('=').map(|(_, v)| v), Some("" | "$"));
+    let prefix_ok = prefix(words, at).all(bare);
+    let mut args = arguments(words, at);
+    match words[at].text.as_str() {
+        "git" => {
+            prefix_ok
+                && !git_injects_config(words, at)
+                && git_subcommand(words, at).is_some_and(|s| GIT_DATA_SUBCOMMANDS.contains(&s))
+        }
+        "gh" => {
+            prefix_ok
+                && args
+                    .next()
+                    .is_some_and(|w| GH_DATA_SUBCOMMANDS.contains(&&*w.raw))
+        }
+        "tm" => prefix_ok,
+        _ => true,
+    }
+}
+
+/// Whether git word `words[at]` injects config (#9344).
+///
+/// Why: git's `-c`/`--config-env` and the `GIT_CONFIG_*` variables make an
+/// alias or a program out of nothing, so the line needs no earlier state.
+/// What: `true` for a git word with a `GIT_CONFIG*` or `GIT_EXEC_PATH`
+/// prefix assignment, or an argument starting `-c`, `--config` or
+/// `--exec-path`, or naming an `alias.` key in any case.
+/// Test: `injected_reader_lines_are_not_data_9344`.
+fn git_injects_config(words: &[Word], at: usize) -> bool {
+    words[at].text == "git"
+        && (prefix(words, at)
+            .any(|w| w.raw.starts_with("GIT_CONFIG") || w.raw.starts_with("GIT_EXEC_PATH"))
+            || arguments(words, at).any(|w| {
+                ["-c", "--config", "--exec-path"]
+                    .iter()
+                    .any(|p| w.raw.starts_with(p))
+                    || w.raw.to_ascii_lowercase().contains("alias.")
+            }))
+}
+
+/// The first git argument past the global options, or `None` (#9344).
+fn git_subcommand(words: &[Word], at: usize) -> Option<&str> {
+    let mut args = arguments(words, at);
+    while let Some(word) = args.next() {
+        if GIT_VALUE_OPTIONS.contains(&&*word.raw) {
+            args.next();
+        } else if !word.raw.starts_with('-') {
+            return Some(&word.raw);
+        }
+    }
+    None
+}
+
+/// The prefix assignments of program word `words[at]`, nearest first; #9344:
+/// the words of a value substitution deeper than `words[at]` are skipped, so
+/// `X=$(GIT_EXEC_PATH=… git` keeps git's own prefix.
+fn prefix(words: &[Word], at: usize) -> impl Iterator<Item = &Word> {
+    let depth = words[at].depth;
+    words[..at]
         .iter()
-        .filter(|word| word.program && !word.assignment)
-        .all(|word| word.literal && DATA_READERS.contains(&&*word.text))
+        .rev()
+        .filter(move |w| w.depth <= depth)
+        .take_while(|w| w.program && w.assignment)
+}
+
+/// The words after program word `words[at]` up to the next program word.
+fn arguments(words: &[Word], at: usize) -> impl Iterator<Item = &Word> {
+    words[at + 1..].iter().take_while(|w| !w.program)
 }
 
 /// Whether any [`operator_words`] word of `line` satisfies `names` (#9180).
@@ -127,7 +279,13 @@ fn is_shell(word: &str) -> bool {
 /// when it holds a `$`, starts right after a `)` or a closing backtick, or
 /// runs into an opening backtick; a backtick opened in program position
 /// yields a non-literal program word of its own, since the substitution's
-/// output is then the program.
+/// output is then the program. #9344: the `)` or backtick that closes a
+/// substitution opened in a prefix assignment's value (`X=$(…) git`) puts
+/// the next word back in program position, marks that assignment closed,
+/// and records each word's value-substitution depth, so [`prefix`] reaches
+/// the assignment. Quotes are not tracked, so a close after a quote or `\`
+/// inside the value marks the assignment `quoted`.
+/// Test: `injected_reader_lines_are_not_data_9344`.
 fn operator_words(line: &str) -> Vec<Word> {
     let mut words = Vec::new();
     let mut word = Vec::new();
@@ -137,7 +295,21 @@ fn operator_words(line: &str) -> Vec<Word> {
     // Whether the last byte closed a `)` or a backtick.
     let mut after_close = false;
     let mut in_tick = false;
-    let mut flush = |word: &mut Vec<u8>, program: &mut bool, glued: &mut bool| {
+    // #9344: per open `(`, and for the open backtick, the index of the
+    // prefix assignment whose value it opened and the `quotes` count then,
+    // so its close restores program position and marks that assignment
+    // closed, and `quoted` when a quote or `\` came between.
+    let mut parens: Vec<Option<(usize, usize)>> = Vec::new();
+    let mut tick_value: Option<(usize, usize)> = None;
+    let mut quotes = 0usize;
+    let in_value = |word: &[u8], program: bool| {
+        program && strip_assignment(&String::from_utf8_lossy(word)).is_some()
+    };
+    let flush = |words: &mut Vec<Word>,
+                 word: &mut Vec<u8>,
+                 program: &mut bool,
+                 glued: &mut bool,
+                 depth: usize| {
         if word.is_empty() {
             return;
         }
@@ -148,9 +320,13 @@ fn operator_words(line: &str) -> Vec<Word> {
         let base = value.rsplit('/').next().unwrap_or(value).to_string();
         words.push(Word {
             literal: !*glued && !text.contains('$'),
+            raw: text.clone(),
             text: base,
             program: *program,
             assignment: assignment.is_some(),
+            depth,
+            closed: false,
+            quoted: false,
         });
         *glued = false;
         if assignment.is_none() {
@@ -158,10 +334,11 @@ fn operator_words(line: &str) -> Vec<Word> {
         }
     };
     for &byte in line.as_bytes() {
+        let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
         match byte {
-            b'\'' | b'"' | b'\\' => {}
+            b'\'' | b'"' | b'\\' => quotes += 1,
             b' ' | b'\t' | b'\n' | b'\r' => {
-                flush(&mut word, &mut program, &mut glued);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
                 after_close = false;
             }
             b'`' if !in_tick => {
@@ -169,19 +346,39 @@ fn operator_words(line: &str) -> Vec<Word> {
                 // `x=` takes the substitution as its value; any other word
                 // the backtick runs into is built by it.
                 let takes_value = strip_assignment(&String::from_utf8_lossy(&word)) == Some("");
+                let opens_value = in_value(&word, program);
                 glued |= !word.is_empty() && !takes_value;
                 if word.is_empty() && program && !after_close {
                     word.push(b'`');
                     glued = true;
                 }
-                flush(&mut word, &mut program, &mut glued);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
+                tick_value = opens_value.then(|| (words.len() - 1, quotes));
                 program = true;
                 after_close = false;
             }
             _ if BREAKS.contains(&byte) => {
-                flush(&mut word, &mut program, &mut glued);
-                if byte == b'`' {
-                    in_tick = false;
+                let opens_value = byte == b'(' && in_value(&word, program);
+                flush(&mut words, &mut word, &mut program, &mut glued, depth);
+                // #9344: `X=$(…) git`, `X=`…` git` — the close hands back
+                // program position and marks the assignment closed.
+                let closes = match byte {
+                    b'`' => {
+                        in_tick = false;
+                        tick_value.take()
+                    }
+                    b'(' => {
+                        parens.push(opens_value.then(|| (words.len() - 1, quotes)));
+                        None
+                    }
+                    b')' => parens.pop().flatten(),
+                    _ => None,
+                };
+                if let Some((at, seen)) = closes {
+                    words[at].closed = true;
+                    // #9344: `X=$(echo ')' cat) f` — a quoted `)` closed it.
+                    words[at].quoted = quotes != seen;
+                    program = true;
                 }
                 after_close = matches!(byte, b')' | b'`');
                 if COMMAND_STARTS.contains(&byte) && byte != b'`' {
@@ -195,7 +392,8 @@ fn operator_words(line: &str) -> Vec<Word> {
             }
         }
     }
-    flush(&mut word, &mut program, &mut glued);
+    let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
+    flush(&mut words, &mut word, &mut program, &mut glued, depth);
     words
 }
 
@@ -293,6 +491,11 @@ fn defined_names(command: &str) -> Vec<String> {
         })
         .collect()
 }
+
+// #9344: config/alias-injected readers and the data-body floor.
+#[cfg(test)]
+#[path = "data_reader_tests.rs"]
+mod data_reader_tests;
 
 #[cfg(test)]
 mod tests {

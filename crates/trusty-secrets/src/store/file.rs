@@ -260,7 +260,7 @@ fn current_uid() -> u32 {
 }
 
 /// Refuse `path` unless `meta` passes [`verdict`] as `kind`.
-fn judge(path: &Path, meta: &fs::Metadata, kind: Kind) -> Result<(), SecretsError> {
+pub(crate) fn judge(path: &Path, meta: &fs::Metadata, kind: Kind) -> Result<(), SecretsError> {
     let ft = meta.file_type();
     let observed = Observed {
         symlink: ft.is_symlink(),
@@ -302,7 +302,7 @@ fn check_dir(dir: &Path) -> Result<bool, SecretsError> {
 }
 
 /// Create `dir` at 0700 (with missing parents when `parents`), then judge it.
-fn create_dir(dir: &Path, parents: bool) -> Result<(), SecretsError> {
+pub(crate) fn create_dir(dir: &Path, parents: bool) -> Result<(), SecretsError> {
     match fs::DirBuilder::new()
         .recursive(parents)
         .mode(0o700)
@@ -337,7 +337,7 @@ fn open_value(path: &Path) -> std::io::Result<File> {
 }
 
 /// Map an open failure: a symlink at the value path is a refusal.
-fn open_failure(path: &Path, source: std::io::Error) -> SecretsError {
+pub(crate) fn open_failure(path: &Path, source: std::io::Error) -> SecretsError {
     if source.raw_os_error() == Some(libc::ELOOP) {
         refused(path, "is a symbolic link")
     } else {
@@ -391,7 +391,7 @@ fn write_value(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), SecretsError
 /// What: opens `dir` `O_DIRECTORY | O_NOFOLLOW` and calls `fsync(2)`; any
 /// failure is [`SecretsError::Io`] naming `dir`. Not unit-tested: the effect
 /// is observable only across a power loss.
-fn sync_dir(dir: &Path) -> Result<(), SecretsError> {
+pub(crate) fn sync_dir(dir: &Path) -> Result<(), SecretsError> {
     let handle = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -452,7 +452,8 @@ fn sweep_orphans(dir: &Path) -> Result<(), SecretsError> {
 }
 
 /// Whether the writer named by a temp file's `<pid>.…` suffix may still run.
-fn writer_alive(rest: &str) -> bool {
+// #7519: crate-visible so the CLI template sweep judges liveness the same way.
+pub(crate) fn writer_alive(rest: &str) -> bool {
     let Some(pid) = rest
         .split('.')
         .next()

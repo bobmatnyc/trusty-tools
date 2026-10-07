@@ -63,6 +63,29 @@ pub enum DaemonEvent {
     IndexRemoved { id: String },
 }
 
+/// The transports a daemon serves, as `search.health` and `GET /health` report
+/// them (#9030).
+///
+/// Why: ADR-0032 moves clients onto the Unix socket and #6285 retires the TCP
+/// listener, so a dashboard that hardcodes a port or URL goes stale. Only the
+/// daemon knows which listeners it bound.
+/// What: `socket_path` is the path the RPC socket bound; `http_addr` is the
+/// `host:port` the HTTP listener bound. `None` means that listener is not
+/// bound, never a guessed default. Both keys always serialise, as `null` when
+/// unset — the `{socket_path: string|null, http_addr: string|null}` shape
+/// trusty-console's `ui-search/src/lib/transport.js` reads. #9214:
+/// `http_addr` is `None` on a daemon started with `--no-http`.
+/// Test: `run_daemon_health_reports_the_transport_it_bound`,
+/// `run_daemon_without_http_serves_only_the_socket`,
+/// `health_reports_a_null_transport_when_no_listener_was_bound`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct DaemonTransport {
+    /// Path of the bound Unix RPC socket.
+    pub socket_path: Option<String>,
+    /// Address of the bound HTTP listener, `host:port`.
+    pub http_addr: Option<String>,
+}
+
 /// Shared state injected into every axum handler.
 ///
 /// `#[non_exhaustive]` (#767): this struct gains fields regularly — `#767` added
@@ -209,6 +232,9 @@ pub struct SearchAppState {
     /// `index.html` as `window.__DAEMON_PORT__` so the SPA knows which host
     /// to call when opened directly. `None` falls back to 7878 in the UI.
     pub daemon_port: Option<u16>,
+    /// The listeners this daemon bound, reported by `search.health` (#9030).
+    /// Default (both `None`) until `run_daemon` stamps it.
+    pub transport: DaemonTransport,
     /// Whether `OPENROUTER_API_KEY` is set when the daemon starts. Toggles
     /// the Chat panel in the SPA via `window.__OPENROUTER_ENABLED__`.
     pub openrouter_enabled: bool,

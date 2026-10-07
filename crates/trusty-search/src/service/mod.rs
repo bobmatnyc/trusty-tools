@@ -82,6 +82,8 @@ pub mod watch_rescan;
 pub(crate) mod watch_test_support;
 pub mod watcher;
 pub mod watcher_manager;
+// #9339: bounded OS-watcher start behind `FileWatcher::start`.
+pub(crate) mod watcher_start;
 // #9315: bounded OS-watcher teardown behind `WatcherTask`.
 pub(crate) mod watcher_teardown;
 // #8922: the walker's admission decision for a pushed `index_file` write.
@@ -104,9 +106,9 @@ pub use constants::DEFAULT_PORT;
 pub use daemon::{
     bootstrap_process_env, daemon_env_path, daemon_lock_path, daemon_port_path, http_addr_path,
     is_already_running, load_daemon_env, load_daemon_env_early, load_daemon_env_early_for,
-    parse_daemon_env, remove_daemon_files_if_unheld, run_daemon, running_daemon_pid,
-    save_daemon_env, write_http_addr_file, DaemonEnvPair, DaemonEnvReject, DaemonError,
-    DaemonHandle, StaleLockRemoval, PERSISTED_ENV_VARS,
+    parse_daemon_env, remove_daemon_files_if_unheld, run_daemon, run_daemon_with,
+    running_daemon_pid, save_daemon_env, write_http_addr_file, DaemonEnvPair, DaemonEnvReject,
+    DaemonError, DaemonHandle, HttpListener, StaleLockRemoval, PERSISTED_ENV_VARS,
 };
 pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;
