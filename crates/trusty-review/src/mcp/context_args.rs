@@ -156,7 +156,10 @@ pub(crate) fn issue_docs_schema() -> Value {
                 "id": { "type": "string", "description": "GitHub issue number, \"#42\" or \"42\"" },
                 "title": { "type": "string", "description": "One line, at most 512 characters" },
                 "body": { "type": "string", "description": "The issue text" },
-                "url": { "type": "string", "description": "One line, at most 512 characters" }
+                "url": {
+                    "type": "string",
+                    "description": "An http:// or https:// link, no whitespace, at most 512 characters"
+                }
             }
         }
     })

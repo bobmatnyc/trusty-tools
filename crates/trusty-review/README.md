@@ -199,7 +199,8 @@ empty result.
   numbers only. Each body is capped at 16,000 characters with a visible
   marker; at most 8 docs and 48,000 body characters are shown, and a doc past
   either limit is left out whole and recorded `omitted`. The docs render as
-  `## Linked issues`, each body fenced as data. A `[gh: #N — "excerpt"]`
+  `## Linked issues` under a note marking them as data; a `url` must be an
+  `http(s)://` link and renders as `URL: <url>`. A `[gh: #N — "excerpt"]`
   citation resolves only against text the reviewer saw. The verifier never
   sees issue text. Works on a local diff.
 

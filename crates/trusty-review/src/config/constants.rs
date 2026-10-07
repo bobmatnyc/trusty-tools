@@ -135,6 +135,12 @@ pub const MAX_ISSUE_DOCS: usize = 8;
 /// fetched issues (B2b). See the drop order above.
 pub const MAX_ISSUE_SECTION_CHARS: usize = 48_000;
 
+/// Issue docs past which the dropped tail is one ledger item (#9197).
+///
+/// Why: `issue_docs` is an unbounded MCP array; one ledger item per dropped
+/// doc would grow the response with the input.
+pub const MAX_ISSUE_DOCS_LISTED: usize = 64;
+
 /// Maximum characters of an issue doc's `title` or `url` line (#9197).
 ///
 /// Why: both sit outside the data fence, so each must be one bounded line.

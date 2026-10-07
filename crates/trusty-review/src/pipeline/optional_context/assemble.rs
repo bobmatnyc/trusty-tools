@@ -150,18 +150,18 @@ pub(crate) const PR_BODY_NOTE: &str =
 /// longest backtick run in `text`.
 /// Test: `a_hostile_body_stays_inside_its_fence`.
 fn fence_as_data(text: &str) -> String {
-    fence_with_note(PR_BODY_NOTE, text)
+    format!("{PR_BODY_NOTE}\n\n{}", fence_text(text))
 }
 
-/// `text` inside a `text` fence it cannot close, under `note` (#9192, #9197).
+/// `text` inside a `text` fence it cannot close (#9192, #9197).
 ///
 /// Test: `a_hostile_body_stays_inside_its_fence`,
 /// `a_body_with_a_triple_backtick_cannot_close_the_fence`.
-pub(crate) fn fence_with_note(note: &str, text: &str) -> String {
+pub(crate) fn fence_text(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat((longest + 1).max(3));
     let body = text.strip_suffix('\n').unwrap_or(text);
-    format!("{note}\n\n{fence}text\n{body}\n{fence}")
+    format!("{fence}text\n{body}\n{fence}")
 }
 
 /// The `caller_context` row, read before the cap so a cut has its size.
