@@ -121,17 +121,27 @@ pub(crate) fn temporal_weight(drawer: &Drawer, now: DateTime<Utc>) -> f32 {
     weight
 }
 
-/// Descending score order under IEEE 754 `total_cmp`.
+/// Recall rank order: score descending, then layer, then drawer id.
 ///
 /// Why: `partial_cmp(..).unwrap_or(Equal)` makes NaN equal to every score,
 /// which is not a total order — the sort may then leave finite scores out of
-/// order, or panic on newer std sorts that detect the violation.
-/// What: `b.total_cmp(&a)`: a consistent total order; a positive NaN sorts
-/// first, finite scores stay descending.
-/// Test: `a_nan_score_never_unorders_the_finite_scores`.
-fn by_score_desc(a: f32, b: f32) -> std::cmp::Ordering {
+/// order, or panic on newer std sorts that detect the violation. #9280: equal
+/// scores kept the lane's order, which a rebuilt vector index can change, so
+/// two opens of one palace could rank tied drawers differently.
+/// What: `b.score.total_cmp(&a.score)`, so a positive NaN sorts first and
+/// finite scores stay descending; ties go to the lower layer (L0/L1 are pinned
+/// identity/essentials), then the lower drawer id. A total order over distinct
+/// drawers, so the result depends on the set of hits, not their input order.
+/// Shared with the BM25 fusion sort.
+/// Test: `a_nan_score_never_unorders_the_finite_scores`,
+/// `tied_scores_rank_by_drawer_id_whatever_the_input_order`.
+pub(crate) fn by_score_desc(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering {
     // #8246: total order, so a NaN cannot make the comparator inconsistent.
-    b.total_cmp(&a)
+    b.score
+        .total_cmp(&a.score)
+        .then(a.layer.cmp(&b.layer))
+        // #9280: id tiebreak, so tied scores rank the same on every open.
+        .then_with(|| a.drawer.id.cmp(&b.drawer.id))
 }
 
 /// Candidates a recall lane fetches before demotion re-ranks them.
@@ -155,7 +165,7 @@ pub(crate) fn ranking_window(top_k: usize, min_score: Option<f32>) -> usize {
 /// Why: the handlers sort by score once the lanes are fused; a weight applied
 /// after that sort must re-sort or it changes numbers without changing order.
 /// What: multiplies every result's score by [`temporal_weight`], then
-/// stable-sorts descending, so equal scores keep the lane's order. The list
+/// sorts by [`by_score_desc`], so equal scores rank by layer, then id. The list
 /// length is unchanged; the caller's floor and `top_k` cut run after this.
 /// Demotion can only lift what the lane fetched: callers fetch a
 /// [`ranking_window`] (about `2 * top_k`) so a hit just past `top_k` can rise.
@@ -164,7 +174,7 @@ pub(crate) fn demote_stale_snapshots(results: &mut [RecallResult], now: DateTime
     for r in results.iter_mut() {
         r.score *= temporal_weight(&r.drawer, now);
     }
-    results.sort_by(|a, b| by_score_desc(a.score, b.score));
+    results.sort_by(by_score_desc);
 }
 
 /// Cross-palace counterpart of [`demote_stale_snapshots`].
@@ -177,7 +187,7 @@ pub(crate) fn demote_stale_snapshots_across(results: &mut [CrossPalaceResult], n
     for r in results.iter_mut() {
         r.result.score *= temporal_weight(&r.result.drawer, now);
     }
-    results.sort_by(|a, b| by_score_desc(a.result.score, b.result.score));
+    results.sort_by(|a, b| by_score_desc(&a.result, &b.result));
 }
 
 #[cfg(test)]

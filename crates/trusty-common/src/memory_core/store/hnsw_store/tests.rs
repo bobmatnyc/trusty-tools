@@ -886,27 +886,24 @@ fn search_returns_the_exact_top_k_below_the_exhaustive_threshold() {
 fn search_uses_the_graph_above_the_exhaustive_threshold() {
     assert_eq!(
         exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
-        4096,
+        24_576,
         "changing this bound changes the cost profile of every recall; \
          update the measurement in exhaustive.rs before changing the number"
     );
 
     let dim = 16;
     let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 1;
-    let (_dir, store) = open_store(dim);
-    let mut uuids = Vec::with_capacity(n);
-    for i in 0..n {
-        let u = Uuid::new_v4().to_string();
-        store
-            .upsert(&u, &spread_vec(dim, 4_000 + i as u64))
-            .unwrap();
-        uuids.push(u);
-    }
+    // #9280: rows written directly and replayed by a reopen — one upsert
+    // transaction per drawer is minutes at this size in a debug build.
+    let pool: Vec<Vec<f32>> = (0..n).map(|i| spread_vec(dim, 4_000 + i as u64)).collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
     // The graph path is approximate by design, so assert only what it still
     // owes: an exact query returns its own drawer first.
     let hits = store.search(&spread_vec(dim, 4_000), 3).unwrap();
     assert_eq!(
-        hits[0].0, uuids[0],
+        hits[0].0, "drawer-00000",
         "above the threshold the graph path must still rank an exact match first"
     );
 }
@@ -1039,18 +1036,18 @@ fn search_drops_a_shadowed_candidate_whose_vector_row_is_gone() {
 fn deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path() {
     let dim = 16;
     let total = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 44;
-    let (_dir, store) = open_store(dim);
-    let uuids: Vec<String> = (0..total).map(|_| Uuid::new_v4().to_string()).collect();
     let vecs: Vec<Vec<f32>> = (0..total)
         .map(|i| spread_vec(dim, 8_000 + i as u64))
         .collect();
-    for (u, v) in uuids.iter().zip(&vecs) {
-        store.upsert(u, v).unwrap();
-    }
+    let uuids: Vec<String> = (0..total).map(|i| format!("drawer-{i:05}")).collect();
+    // #9280: written and tombstoned in one transaction each, then replayed —
+    // per-drawer transactions are minutes at this size in a debug build. The
+    // graph still holds every point, the state a long session's deletes leave.
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &vecs);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
     let keep = 6usize;
-    for u in &uuids[keep..] {
-        store.delete(u).unwrap();
-    }
+    tombstone_rows(&store.db, keep..total);
     assert_eq!(store.len().unwrap(), keep, "only the kept drawers are live");
 
     let query = spread_vec(dim, 99_001);
@@ -1215,11 +1212,11 @@ fn search_is_exact_at_the_exhaustive_threshold() {
         .map(|i| spread_vec(dim, 600_000 + i as u64))
         .collect();
 
-    let (_dir, store) = open_store(dim);
-    let uuids: Vec<String> = (0..n).map(|_| Uuid::new_v4().to_string()).collect();
-    for (u, v) in uuids.iter().zip(&pool) {
-        store.upsert(u, v).unwrap();
-    }
+    // #9280: rows written directly and replayed by a reopen.
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let uuids: Vec<String> = (0..n).map(|i| format!("drawer-{i:05}")).collect();
     assert_eq!(store.len().unwrap(), n, "every drawer is live");
 
     for q in 0..20u64 {
@@ -1367,18 +1364,17 @@ fn search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours() {
     let k = 5usize;
     let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 6;
     let dead_n = 60usize;
-    let (_dir, store) = open_store(dim);
+    // #9280: survivors written directly and replayed by a reopen; the doomed
+    // drawers are still upserted into the open graph last.
+    let live: Vec<Vec<f32>> = (0..live_n)
+        .map(|i| spread_vec(dim, 800_000 + i as u64))
+        .collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &live);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let survivors: Vec<String> = (0..live_n).map(|i| format!("drawer-{i:05}")).collect();
 
     let query = spread_vec(dim, 424_242);
-    let survivors: Vec<String> = (0..live_n)
-        .map(|i| {
-            let u = Uuid::new_v4().to_string();
-            store
-                .upsert(&u, &spread_vec(dim, 800_000 + i as u64))
-                .unwrap();
-            u
-        })
-        .collect();
     // Each doomed drawer is the query nudged by 1%, so it outranks every
     // isotropic live drawer by orders of magnitude.
     let doomed: Vec<String> = (0..dead_n)
@@ -1433,16 +1429,14 @@ fn search_above_the_threshold_fills_k_despite_tombstoned_nearest_neighbours() {
 fn search_above_the_threshold_stops_widening_when_the_graph_is_exhausted() {
     let dim = 8;
     let live_n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 3;
-    let (_dir, store) = open_store(dim);
-    let survivors: Vec<String> = (0..live_n)
-        .map(|i| {
-            let u = Uuid::new_v4().to_string();
-            store
-                .upsert(&u, &spread_vec(dim, 310_000 + i as u64))
-                .unwrap();
-            u
-        })
+    // #9280: rows written directly and replayed by a reopen.
+    let live: Vec<Vec<f32>> = (0..live_n)
+        .map(|i| spread_vec(dim, 310_000 + i as u64))
         .collect();
+    let (_dir, seed) = open_store(dim);
+    seed_rows(&seed.db, &live);
+    let store = HnswStore::open(Arc::clone(&seed.db), dim).expect("reopen");
+    let survivors: Vec<String> = (0..live_n).map(|i| format!("drawer-{i:05}")).collect();
 
     // Ask for far more than the palace can supply; the loop must stop at the
     // graph's point count rather than doubling forever.
@@ -1485,6 +1479,23 @@ fn seed_rows(db: &Database, pool: &[Vec<f32>]) {
     wtx.commit().expect("commit");
 }
 
+/// Tombstone the `seed_rows` drawers at `rows` in one transaction, as `delete`
+/// does one drawer at a time. Call before the store's first search, which
+/// loads its key cache.
+fn tombstone_rows(db: &Database, rows: std::ops::Range<usize>) {
+    let wtx = db.begin_write().expect("begin_write");
+    {
+        let mut keys = wtx.open_table(VECTOR_KEYS).expect("vector_keys");
+        let mut dead = wtx.open_table(DELETED_VECTORS).expect("deleted_vectors");
+        for i in rows {
+            keys.remove(format!("drawer-{i:05}").as_str())
+                .expect("remove key");
+            dead.insert(i as u64 + 1, [].as_slice()).expect("tombstone");
+        }
+    }
+    wtx.commit().expect("commit");
+}
+
 /// Why (#9141): two opens of one palace ranked recalls differently — a query's
 /// correct drawer ranked 4 on one open and fell out of the top 10 on another.
 /// `hnsw_rs` seeds its layer RNG from OS entropy, so a 16-layer graph got a new
@@ -1500,8 +1511,9 @@ fn seed_rows(db: &Database, pool: &[Vec<f32>]) {
 ///    queries. The parallel replay does not guarantee this; it holds while
 ///    both searches find the exact top 10, which held in 65 of 65 runs.
 ///
-/// The threshold is the real constant: the fixture writes 4,500 rows directly
-/// instead of lowering it, because the store has no hook for the threshold.
+/// The threshold is the real constant: the fixture writes threshold + 404 rows
+/// directly instead of lowering it, because the store has no hook for the
+/// threshold.
 /// Test: this test itself is the verification.
 #[test]
 fn reopening_a_palace_answers_every_query_identically() {
@@ -1562,7 +1574,9 @@ fn points_without_neighbours(index: &Hnsw<'static, f32, DistCosine>) -> Vec<usiz
 #[test]
 fn replay_leaves_no_point_without_neighbours() {
     let dim = 16;
-    let n = exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 404;
+    // #9280: a fixed size; this test is about the replay race, not the
+    // threshold, and 200 builds must stay affordable.
+    let n = 4_500;
     let live: Vec<(Vec<f32>, usize)> = (0..n)
         .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
         .collect();
@@ -1761,7 +1775,9 @@ fn search_finds_drawers_the_graph_cannot_reach() {
     // Far side of the sphere, so no spread drawer links to a probe and gives
     // it the in-edge the clump denies it; real embeddings near the clump of
     // identical turns were just as sparse.
-    pool.extend((0..3_200u64).map(|i| far_from(&anchor, 700_000 + i)));
+    // #9280: sized from the threshold so the graph arm stays selected.
+    let far = (exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS + 160 - pool.len()) as u64;
+    pool.extend((0..far).map(|i| far_from(&anchor, 700_000 + i)));
     assert!(pool.len() > exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS);
 
     let (_dir, store) = open_store(dim);
@@ -1876,3 +1892,11 @@ fn search_cache_follows_writes_from_every_store_on_the_file() {
     store.compact_orphans().unwrap();
     assert_eq!(hit_uuids(&store, &unit_vec(8, 200), 3), vec![c]);
 }
+
+// #9280: opt-in latency profile behind the exact-scan threshold.
+#[path = "latency_profile_tests.rs"]
+mod latency_profile_tests;
+
+// #9280: reopen determinism at the exact-scan threshold, and id tiebreaks.
+#[path = "determinism_tests.rs"]
+mod determinism_tests;

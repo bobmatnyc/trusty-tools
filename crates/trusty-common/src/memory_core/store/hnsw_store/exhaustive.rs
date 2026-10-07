@@ -49,6 +49,15 @@ use redb::ReadableTable;
 /// 4096, where a linear scan is no longer repayable and HNSW's sublinear cost is
 /// worth its approximation; that is the trade the algorithm exists to make.
 ///
+/// #9280 raised it to 24,576 for determinism: the scan ranks the same way on
+/// every open, while the parallel replay gives each open a different graph.
+/// The Architect's budget is p95 at or under the graph arm's p95 + 5 ms at
+/// 20k rows. `hnsw_latency_profile` (release, clustered 384-dim, k = 30, 300
+/// queries, host load 21–43 on 16 cores) measured `search` p95 at 20,000 rows
+/// at 3.62 ms on the graph arm before the raise and 6.19 ms on the scan after
+/// it (+2.57 ms). The scan's p95 was 7.15 ms at 24,576 and 8.40 ms at 28,672,
+/// against the 8.62 ms ceiling; 24,576 keeps a 1.1 ms margin for load noise.
+///
 /// Nothing migrates when this number changes: no graph is persisted, and
 /// `HnswStore::open_with_mode` rebuilds the index from the raw `VECTORS` rows on
 /// every open.
@@ -63,10 +72,10 @@ use redb::ReadableTable;
 /// vector — so a bulk `palace_reembed` at most doubles it.
 /// Test: `search_uses_the_graph_above_the_exhaustive_threshold`,
 /// `search_is_exact_at_the_exhaustive_threshold`,
-/// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`.
-// #5179: raised to 4096 so every palace on the fleet — the largest holds ~2900
-// live vectors — is answered exactly rather than approximately.
-pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 4096;
+/// `deleting_drawers_does_not_push_a_small_palace_off_the_exhaustive_path`,
+/// `reopening_a_palace_at_the_exact_scan_threshold_ranks_identically`.
+// #9280: raised from 4096 so two opens rank identically up to 24,576 drawers.
+pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 24_576;
 
 /// Every live point in `index`, ranked by exact distance to `query`, best
 /// first — the whole ranking, not a prefix of it.

@@ -60,8 +60,10 @@ const SELF_SEARCH_BATCH: usize = 4096;
 /// Why (#9174): see the module header.
 /// What: copies the layer-0 points' vectors in batches, runs `hnsw_rs`'s
 /// `parallel_search` for each with `k = 1` and [`SELF_SEARCH_EF`], and groups
-/// the points missing from their own answer by the bits of their vector.
-/// Test: `search_finds_drawers_the_graph_cannot_reach`.
+/// the points missing from their own answer by the bits of their vector. Ids
+/// ascend within a group, and groups are ordered by their first id.
+/// Test: `search_finds_drawers_the_graph_cannot_reach`,
+/// `stranded_points_are_grouped_in_id_order`.
 pub(super) fn stranded_points(index: &Hnsw<'static, f32, DistCosine>) -> Vec<StrandedGroup> {
     let points: Vec<_> = index.get_point_indexation().get_layer_iterator(0).collect();
     let mut groups: HashMap<Vec<u32>, StrandedGroup> = HashMap::new();
@@ -80,7 +82,14 @@ pub(super) fn stranded_points(index: &Hnsw<'static, f32, DistCosine>) -> Vec<Str
                 .push(id as u64);
         }
     }
-    groups.into_values().collect()
+    // #9280: `HashMap` order and the parallel replay's point order both vary
+    // per open; sort so the stranded set is the same structure every time.
+    let mut groups: Vec<StrandedGroup> = groups.into_values().collect();
+    for (_, ids) in &mut groups {
+        ids.sort_unstable();
+    }
+    groups.sort_unstable_by_key(|(_, ids)| ids.first().copied());
+    groups
 }
 
 /// Whether a search for the vector just inserted under `id` returns it.
@@ -114,9 +123,10 @@ pub(super) fn add_stranded(groups: &mut Vec<StrandedGroup>, vector: &[f32], id: 
 ///
 /// Why (#9174): the graph search does not return these points.
 /// What: one distance per group, then `(vector_id, distance)` for each id not
-/// in `tombstoned`; re-sorts `hits` by ascending distance. The sort is stable,
-/// so the graph's order among equal distances survives.
-/// Test: `search_finds_drawers_the_graph_cannot_reach`.
+/// in `tombstoned`; re-sorts `hits` by ascending distance, then id (#9280), so
+/// equal distances rank the same whatever order the groups were found in.
+/// Test: `search_finds_drawers_the_graph_cannot_reach`,
+/// `merge_stranded_orders_equal_distances_by_id`.
 pub(super) fn merge_stranded(
     hits: &mut Vec<(u64, f32)>,
     stranded: &[StrandedGroup],
@@ -134,5 +144,6 @@ pub(super) fn merge_stranded(
                 .map(|id| (*id, distance)),
         );
     }
-    hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+    // #9280: id tiebreak — a total order over the merged candidates.
+    hits.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
 }

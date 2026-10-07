@@ -2730,3 +2730,7 @@ async fn compact_vector_orphans_still_reclaims_true_orphans() {
         "the orphan vector must not be retrievable after compaction"
     );
 }
+
+// #9280: L2/L3 id tiebreak.
+#[path = "rank_tie_tests.rs"]
+mod rank_tie_tests;

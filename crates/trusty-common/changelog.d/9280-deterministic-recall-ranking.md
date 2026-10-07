@@ -1,0 +1,2 @@
+Fixed
+- Two opens of one palace rank every recall query identically up to 24,576 live drawers. The exact-scan threshold rises from 4,096 to 24,576, and the graph-arm sort, the stranded-point merge, and the L2 and L3 recall sorts all break ties by id, so tied drawers no longer change order between opens. Above 24,576 drawers the graph arm still answers, and its order is measured but not guaranteed (#9280).
