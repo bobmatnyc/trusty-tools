@@ -7,7 +7,8 @@
 //! What: the two `secrets:` section shapes, a loader that extracts the
 //! top-level `secrets:` key from a YAML file, and [`resolve`].
 //! - backend: project `secrets.backend`, else machine
-//!   `secrets.default_backend`, else `keychain`.
+//!   `secrets.default_backend`, else [`super::default_backend`] — `keychain`
+//!   where a Keychain backend is compiled in, `file` elsewhere (#9326).
 //! - vault: the machine `secrets.project_vaults` entry for the checkout's
 //!   `<owner>/<repo>`; else project `secrets.vault`, which must sit under the
 //!   remote's owner; otherwise the remote-derived project vault
@@ -48,6 +49,10 @@ pub struct MachineSecretsConfig {
     // remote's owner may be chosen, because this file is not tracked.
     #[serde(default)]
     pub project_vaults: BTreeMap<String, VaultName>,
+    /// `false` turns the credential access audit off on this machine.
+    // #4567: DOC-45 C-7.10 — only this untracked file may suppress the audit.
+    #[serde(default)]
+    pub audit: Option<bool>,
 }
 
 impl MachineSecretsConfig {
@@ -76,6 +81,10 @@ pub struct ProjectSecretsConfig {
     /// be `trusty/<owner>/<name>` under the remote's owner (#9328).
     #[serde(default)]
     pub vault: Option<VaultName>,
+    /// Read only so the server can refuse `audit: false` here: a tracked file
+    /// may never turn the credential access audit off (#4567).
+    #[serde(default)]
+    pub audit: Option<bool>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
@@ -89,7 +98,7 @@ pub struct ResolvedConfig {
     pub vault_override: Option<VaultName>,
 }
 
-/// `resolve(None, None)`: the Keychain backend and no vault override.
+/// `resolve(None, None)`: [`super::default_backend`] and no vault override.
 /// Test: `config_backend_precedence_table`.
 // #9328: `#[non_exhaustive]` blocks a literal, so other crates start here.
 impl Default for ResolvedConfig {
@@ -100,6 +109,8 @@ impl Default for ResolvedConfig {
 
 /// Apply the DOC-74 §6.1 precedence.
 ///
+/// What: an explicit backend always wins, whether or not this build can open
+/// it; only the absence of any config falls to [`super::default_backend`].
 /// Test: `config_backend_precedence_table`.
 pub fn resolve(
     project: Option<&ProjectSecretsConfig>,
@@ -108,11 +119,48 @@ pub fn resolve(
     let backend = project
         .and_then(|p| p.backend.clone())
         .or_else(|| machine.and_then(|m| m.default_backend.clone()))
-        .unwrap_or_else(BackendId::keychain);
+        // #9326: the build's default — `file` only where no Keychain is compiled.
+        .unwrap_or_else(super::default_backend);
     ResolvedConfig {
         backend,
         vault_override: project.and_then(|p| p.vault.clone()),
     }
+}
+
+/// Refuse a tracked project config that selects `file` on a Keychain build.
+///
+/// Why: #9326, Architect ruling (basis ruling 06 R2, the #9328 class) — the
+/// project file is tracked, so anyone who lands a change in the repository
+/// could move every value to plaintext files. Where a Keychain is compiled
+/// in, only the untracked machine config may select `file`.
+/// What: on a Keychain build, project `secrets.backend: file` is
+/// [`SecretsError::TrackedBackendRefused`] naming `path` (the project file)
+/// and the machine key to set, never the file's content. Any other project
+/// backend, and every project backend on a build without a Keychain, passes.
+/// Test: `config_tracked_file_backend_is_refused_on_a_keychain_build`,
+/// `server_tracked_file_backend_is_refused_on_a_keychain_build`.
+pub fn check_project_backend(
+    project: Option<&ProjectSecretsConfig>,
+    path: &Path,
+) -> Result<(), SecretsError> {
+    check_project_backend_for(project, path, super::backend::KEYCHAIN_COMPILED)
+}
+
+/// [`check_project_backend`] for a build that does or does not link a Keychain.
+pub(crate) fn check_project_backend_for(
+    project: Option<&ProjectSecretsConfig>,
+    path: &Path,
+    keychain_compiled: bool,
+) -> Result<(), SecretsError> {
+    let names_file = project
+        .and_then(|p| p.backend.as_ref())
+        .is_some_and(|b| b.as_str() == BackendId::FILE);
+    if keychain_compiled && names_file {
+        return Err(SecretsError::TrackedBackendRefused {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 /// The machine config path under the real `$HOME`.

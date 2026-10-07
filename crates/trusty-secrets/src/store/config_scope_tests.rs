@@ -8,8 +8,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::config::{
-    MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig, load_machine_at, load_project_at,
-    resolve,
+    MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig, check_project_backend,
+    check_project_backend_for, load_machine_at, load_project_at, resolve,
 };
 use super::*;
 use crate::api::methods::ScopeKind;
@@ -31,11 +31,15 @@ fn config_backend_precedence_table() {
     let project = ProjectSecretsConfig {
         backend: Some(backend("keeper")),
         vault: Some(VaultName::new("trusty/acme/shared").unwrap()),
+        ..ProjectSecretsConfig::default()
     };
     let bare_project = ProjectSecretsConfig::default();
 
-    assert_eq!(resolve(None, None).backend.as_str(), "keychain");
+    // #9326: the build default — `keychain` on macOS, `file` elsewhere.
+    assert_eq!(resolve(None, None).backend, crate::store::default_backend());
     let default = ResolvedConfig::default();
+    assert_eq!(default.backend, crate::store::default_backend());
+    #[cfg(target_os = "macos")]
     assert_eq!(default.backend.as_str(), "keychain");
     assert!(default.vault_override.is_none());
     assert_eq!(
@@ -56,6 +60,49 @@ fn config_backend_precedence_table() {
     assert_eq!(backend("KeyChain").as_str(), "keychain");
     assert!(BackendId::new("").is_err());
     assert!(BackendId::new("one password").is_err());
+}
+
+/// Why: #9326, Architect ruling (basis ruling 06 R2) — on a Keychain build
+/// only the untracked machine config may select `file`; the refusal names
+/// the machine key and never echoes the tracked file.
+/// Red when `check_project_backend_for` lets the project `file` through.
+/// Test: itself.
+#[test]
+fn config_tracked_file_backend_is_refused_on_a_keychain_build() {
+    let tmp = TempDir::new().unwrap();
+    let path = write(
+        tmp.path(),
+        "trusty-secrets.yaml",
+        "# SENTINEL-9326-repo-content\nsecrets:\n  backend: file\n",
+    );
+    let tracked = load_project_at(&path).unwrap().unwrap();
+    let err = check_project_backend_for(Some(&tracked), &path, true).unwrap_err();
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains("SENTINEL-9326"), "{shown}");
+    assert!(shown.contains("secrets.default_backend"), "{shown}");
+    match err {
+        SecretsError::TrackedBackendRefused { path: refused } => assert_eq!(refused, path),
+        other => panic!("expected TrackedBackendRefused: {other:?}"),
+    }
+
+    // Off a Keychain build `file` stays allowed; `keychain` is allowed on both.
+    check_project_backend_for(Some(&tracked), &path, false).unwrap();
+    let keychain = ProjectSecretsConfig {
+        backend: Some(backend("keychain")),
+        ..ProjectSecretsConfig::default()
+    };
+    check_project_backend_for(Some(&keychain), &path, true).unwrap();
+    check_project_backend_for(None, &path, true).unwrap();
+    // The machine config is never checked: it may select `file` anywhere.
+    let machine = MachineSecretsConfig {
+        default_backend: Some(backend("file")),
+        ..MachineSecretsConfig::default()
+    };
+    assert_eq!(resolve(None, Some(&machine)).backend.as_str(), "file");
+    #[cfg(target_os = "macos")]
+    check_project_backend(Some(&tracked), &path).unwrap_err();
+    #[cfg(not(target_os = "macos"))]
+    check_project_backend(Some(&tracked), &path).unwrap();
 }
 
 fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {

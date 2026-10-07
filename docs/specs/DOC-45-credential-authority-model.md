@@ -50,7 +50,7 @@ blocked where they are.
 | 4 | What a sub-agent inherits | §6 — **nothing.** Non-transitive, fail-closed, and secret-passing across a hop is forbidden |
 | 5 | The four (five) diagnostics | §7 — `Missing` / `Denied` / `Expired` / `ZeroScope`, plus `ScopeUnavailable` as a distinct honest answer |
 | 6 | Revocation as a signal, not an inference | §8 — authority-held state, checked before the network call, with a consumer report channel for upstream revocation |
-| 7 | The audit record | §9 — field set, prohibitions, and unrepresentability-by-construction are settled; **cadence and stream topology are PROVISIONAL** pending owner Q-A |
+| 7 | The audit record | §9 — field set, prohibitions, and unrepresentability-by-construction are settled; cadence and stream topology settled by owner Q2 (per call, one stream, discriminator `credential_access`); implemented by #4567 in `trusty-secrets` |
 | 8 | Delivery without leaking | §10 — subprocess env, HTTP header, remote session; and the assistant-home prohibition as a construction-time path check |
 | 9 | Where secrets live at rest | §11 — keyring by default, `0600` file store as the fallback, **and the fallback logs loudly** |
 | 10 | The sub-agent / project-trust boundary | §12 — project scope, cross-project audit, confirmation classes — the property #4417 / #4479 / #4439(2b–d) each asked for |
@@ -591,7 +591,9 @@ edited.
 ## 9. SPEC-CREDAUTH-07 — The Audit Trail {#SPEC-CREDAUTH-07~draft}
 
 **ID:** `SPEC-CREDAUTH-07~draft`
-**Status:** Draft — **§9.3 and §9.5 are PROVISIONAL pending owner Q-A.**
+**Status:** Draft — §9.3 and §9.5 settled by owner Q2 (= Q-A); implemented for
+credential access by #4567 in `crates/trusty-secrets` (`server::audit`,
+`server::gate`).
 
 Without this section #4040's "Done when" clause *"access is attributable and
 revocable"* cannot be satisfied: *revocable* arrives with §8, *attributable*
@@ -640,30 +642,57 @@ unreliable, so the type must not accept arbitrary text.
 **C-7.6** A test SHALL assert that a resolved secret's bytes never appear in a
 captured audit stream.
 
-### 9.3 PROVISIONAL — cadence (owner Q-A)
+### 9.3 Cadence — settled by owner Q2
 
-**C-7.7 — PROVISIONAL.** The default is **one record per resolution call**.
-Aggregation (per session, or per grant) is the alternative the owner has not ruled
-on. Per-call is the fail-safe default — it cannot lose an event — and it is what
-`C-7.2` reads most naturally. It is also the one with a real cost: a tight
-resolution loop produces a high-volume stream.
+**C-7.7** One record **per call**; no aggregation (owner Q2). In the
+`trusty-secrets` socket (#4567): `secrets.set` and `secrets.delete` write exactly
+one record per call, allow or deny; `secrets.copy` writes one per key moved, plus
+one deny for a refusal before any key moves; `secrets.list` writes one only when
+denied; `secrets.scopes` and `secrets.doctor` read no credential and write none.
+Each record is appended and synced before the reply, because the on-demand server
+exits when idle and holds nothing to flush later.
 
-**Do not implement aggregation, and do not implement a retention policy that
-assumes aggregation, until Q-A is answered.** #4567's acceptance criteria depend
-on this answer.
+**C-7.7a — fail-closed.** An allowed `set`, `delete` or `copy` opens and checks
+the sink **before** the backend call; if it cannot, the call returns
+`audit_unavailable` (`-32072`) and changes nothing. If the append fails **after**
+a successful backend call, the change stands and the reply is still
+`audit_unavailable`, so no success reply is sent without its record; `copy` stops
+before its next key. A deny path is best-effort: its reply is returned whether or
+not the record was written. A log whose last line was torn by a partial write
+gets a `\n` before the next record, and the directory is synced after the log is
+created or rotated. The policy is one constant (`FAIL_CLOSED_ON_ALLOW` in
+`server/gate.rs`), set by owner ruling 2b, "Fail closed on allow" (2026-10-06).
+The error text says the requested change may already have been applied, because
+after a completed backend call it has.
 
 ### 9.4 Routability — settled
 
-**C-7.8** The stream SHALL be emitted on its own `tracing` target (e.g.
-`trusty_common::credential_audit`) so an operator can route it to appropriate
-retention and access, **or suppress it, without silencing the rest of the crate's
-logging.** A test SHALL assert that suppressing it does not suppress the crate's
-other logging.
+**C-7.8** The stream SHALL be routable and suppressible on its own, **without
+silencing the rest of the crate's logging.** As built (#4567) the credential
+access stream is its own file, written by `trusty-secrets` (`server::audit`);
+there is no `tracing` target and no `trusty_common::credential_audit`. Only the
+untracked machine config can suppress it (`secrets.audit: false` in
+`~/.trusty-tools/trusty-common/config.yaml`); a tracked project config that sets
+`secrets.audit: false` is refused with `tracked_audit_refused` (`-32073`), the
+#9326 `tracked_backend_refused` precedent.
 
-### 9.5 PROVISIONAL — topology and retention (owner Q-A)
+### 9.5 Topology and retention — settled by owner Q2
 
-**C-7.9 — PROVISIONAL.** Three audit streams are now in play and **none of them
-exists yet**:
+**C-7.9** One stream with a discriminator (owner Q2). Every record carries
+`"stream": "credential_access"` for the first category; the other two join the
+same stream under their own discriminators when they ship. The credential access
+records are JSON lines in
+`~/.trusty-tools/trusty-secrets/audit/audit.jsonl`. Only a server flag moves
+it: `--audit-log <path>`, or `--index-dir <dir>`, which puts it at
+`audit/audit.jsonl` in the index directory's parent. No environment variable
+moves it — not `TRUSTY_SECRETS_INDEX_DIR` either, which moves only the index —
+because the on-demand client passes the caller's environment through and a
+tracked `.envrc` must not move the trail into a project tree. It is a 0600 file
+in a 0700 directory, created with
+its mode, opened without following a symlink, and refused on a wrong mode or
+another owner. A record carries typed fields only: `ts`, `stream`, `method`,
+`decision`, `reason` (an error-kind wire string), `vault`, `key`, `backend`,
+`project_root`, and `caller_pid` (`null` until S8). The three categories:
 
 | Stream | Records | Owner |
 |---|---|---|
@@ -671,9 +700,8 @@ exists yet**:
 | shell execution | command, cwd, exit code | #4521 |
 | permission decision | allow / ask / deny outcome | #4550 |
 
-Whether these are **one stream with a discriminator** or **three independently
-routable ones** is owner Q-A and is not decided here. What this document does fix,
-so the three cannot drift whichever way Q-A goes:
+Owner Q2 chose one stream with a discriminator. What this document also fixes,
+so the three cannot drift:
 
 **C-7.10** Every one of the three SHALL obey `C-7.3`–`C-7.5`. Whatever the
 topology, no stream may accept arbitrary text where a typed, non-secret value
@@ -683,11 +711,13 @@ would do.
 A single-stream answer therefore requires per-category filtering, not a single
 on/off switch.
 
-**C-7.12 — PROVISIONAL.** Retention defaults to a **bounded local sink** — capped
-by size and age, written under `~/.trusty-tools/`, never under the assistant home
-(`C-8.6`) and never under a project tree. Consistent with the loopback-only
-doctrine (ADR-0018), records are **not shipped off-host** by default. The exact
-cap and the shipping question are part of Q-A.
+**C-7.12** Retention is a **bounded local sink** written under `~/.trusty-tools/`,
+never under the assistant home (`C-8.6`) and never under a project tree.
+Consistent with the loopback-only doctrine (ADR-0018), records are **not shipped
+off-host**. As built (#4567) the cap is by size: when the log has reached 8 MiB
+it is renamed to `audit.jsonl.1` the next time it is opened (nothing is resident
+to rotate on a timer), so at most two generations are kept. It is never
+truncated, and a second server instance appends. An age cap is not set.
 
 ---
 
@@ -993,8 +1023,12 @@ suppressible without collateral, which matters because the three have genuinely
 different sensitivity profiles (shell command text is the riskiest, credential refs
 the least).
 
-**What stays blocked.** `C-7.7`, `C-7.9`, and `C-7.12` are PROVISIONAL and MUST
-NOT be implemented as written. #4567's acceptance criteria cannot be finalised.
+**Answered (owner Q2):** per call, one stream, discriminator `credential_access`;
+`C-7.7`, `C-7.9` and `C-7.12` are settled and implemented by #4567. The text
+below records what was blocked before the answer.
+
+**What stayed blocked.** `C-7.7`, `C-7.9`, and `C-7.12` were PROVISIONAL and were
+not to be implemented as written. #4567's acceptance criteria cannot be finalised.
 #4521 and #4550 cannot settle their own record shapes without knowing whether they
 share a stream. `C-7.1`–`C-7.6`, `C-7.8`, `C-7.10`, and `C-7.11` are settled
 regardless and may proceed.
@@ -1095,4 +1129,5 @@ proceed on everything else.
 
 | Date | Change |
 |---|---|
+| 2026-10-06 | #4567: owner Q2 answers Q-A — per call, one stream, discriminator `credential_access`. §9.3 and §9.5 settled; `C-7.7a` adds the fail-closed ordering; `C-7.8` points at `trusty-secrets` (`server::audit`) instead of a `trusty_common::credential_audit` tracing target; `C-7.9` names the sink path; `C-7.12` records the size cap. |
 | 2026-08-01 | Initial draft (#4563). Encodes four owner decisions: a grant does not survive delegation (§6, #4040 Q4); keyring default with loud plaintext fallback (§11, #4040 Q1); cross-product scope, trusty-agents **and** trusty-code (§2.1); `trusty-common` as the home, from the dependency graph (§1.3). Adds `ScopeUnavailable` as a fifth diagnostic distinct from `ZeroScope` (`C-5.6`) and flags it as an addition to #4040's stated four. Records that #4566's "delegation narrows" acceptance bullet describes the rejected inherit-narrowed model (`C-4.5`). Surfaces owner Q-A (audit granularity/topology, blocking #4567), Q-B (per-instance credential namespace, blocking #4566), and Q-C (non-blocking, the reading of "any registered project"). Corrects the spec catalog's note that `DOC-45` was claimed by the `spec-twin-lead-architecture` branch — that branch claims `DOC-44` only. |

@@ -20,11 +20,24 @@ Tracking: [#9073](https://github.com/bobmatnyc/trusty-tools/issues/9073).
 - **macOS:** the Keychain. A secret is one Keychain entry: the service is
   `trusty/<owner>/<repo>` (or `trusty/<owner>` for an owner secret) and the
   account is the key name. Nothing is cached. Every read goes to the OS.
-- **Any other OS:** there is no value store. The Keychain backend is not
-  built, and every operation fails with `SecretsError::UnknownBackend`. The
-  crate does not fall back to a file or an in-memory store.
+- **Any other Unix:** the file backend (`file`). The Keychain backend is not
+  built here, so `file` is the default. Each value is a plaintext file at
+  `~/.trusty-tools/trusty-secrets/values/<vault>/<key>`, mode 0600 in 0700
+  directories, created with that mode and never widened. Every operation
+  refuses a value file or directory that is a symlink, grants more than
+  0600/0700, or belongs to another user (`SecretsError::StorageRefused`).
+  `secrets.doctor` reports this posture as `file_degraded`.
+- **macOS with `secrets.default_backend: file`:** the file backend is used
+  only when the untracked machine config
+  (`~/.trusty-tools/trusty-common/config.yaml`) names it. A tracked project
+  config naming `backend: file` is refused with
+  `SecretsError::TrackedBackendRefused`. A failing Keychain never falls back
+  to files.
 
-The only files the crate writes are the names-only index at
+An explicitly configured `keychain` stays the Keychain on every host; off
+macOS it fails with `SecretsError::UnknownBackend`.
+
+Apart from value files, the crate writes only the names-only index at
 `~/.trusty-tools/trusty-secrets/index/`. Each file is mode 0600 in a 0700
 directory. It lists key names, value lengths, update times and the "agents may
 use" flag. It never holds a value.
@@ -68,7 +81,7 @@ digit or `_`.
 | Feature | Default | What it adds |
 |---|---|---|
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`. No store code. |
-| `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
+| `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
@@ -95,13 +108,48 @@ call. It exits after 60 seconds with no answered request and removes its
 socket. No launchd job runs it.
 
 ```
-trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--idle-timeout-secs N]
+trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--audit-log P] [--idle-timeout-secs N]
 ```
 
 The environment variables `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR`
-and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values. No method returns
+and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values. Only flags move the
+audit log: `--audit-log`, or `--index-dir`, which puts it beside the index. No
+environment variable moves it, including `TRUSTY_SECRETS_INDEX_DIR`. No method returns
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
+
+## Audit trail
+
+The server records each credential access in
+`~/.trusty-tools/trusty-secrets/audit/audit.jsonl`, one JSON line per record
+(DOC-45 §9). Every record has `"stream": "credential_access"`.
+
+| Method | Records |
+|---|---|
+| `set`, `delete` | One per call, allowed or denied |
+| `copy` | One per key, plus one denial for a refusal before any key moves |
+| `list` | One per denied call only |
+| `scopes`, `doctor` | None |
+
+A record holds `ts`, `stream`, `method`, `decision` (`allow` or `deny`),
+`reason` (the error kind, such as `vault_out_of_scope`), `vault`, `key`,
+`backend`, `project_root` and `caller_pid`. It never holds a value or any text
+the caller sent.
+
+The log is a 0600 file in a 0700 directory. The server refuses it if it is a
+symlink, has a wider mode, or belongs to another user. Each record is synced
+before the reply. When the log reaches 8 MiB it is renamed to `audit.jsonl.1`
+the next time it is opened.
+
+The server opens the log before an allowed `set`, `delete` or `copy` touches
+a backend. If the log cannot be opened, the call fails with `audit_unavailable`
+and changes nothing. If the record cannot be written after the backend call
+succeeded, the change stands and the call still fails with
+`audit_unavailable`, so no success is reported without its record; `copy` stops
+before its next key. A refusal is still answered with its own error. To turn the audit off on one machine, set `secrets.audit: false` in
+the machine config `~/.trusty-tools/trusty-common/config.yaml`. A project's
+tracked `.trusty-tools/trusty-secrets.yaml` cannot do this: `audit: false`
+there is refused with `tracked_audit_refused`.
 
 ## Library example
 

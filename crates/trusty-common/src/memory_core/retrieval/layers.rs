@@ -108,6 +108,20 @@ pub(super) fn rank_score(similarity: f32, eff_importance: f32, tag_boost: f32) -
     (tilted + tag_boost).min(1.0)
 }
 
+/// L2/L3 rank order: score descending, then drawer id ascending.
+///
+/// Why (#9280): a stable score-only sort kept the vector lane's order among
+/// equal scores, and above the exact-scan threshold that order comes from a
+/// graph the parallel replay reshapes on every open.
+/// What: `total_cmp` on the scores, then the drawer id — a total order, so the
+/// ranking depends on the set of candidates, not on their input order.
+/// Test: `l2_and_l3_rank_tied_drawers_by_id`.
+fn rank_order(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering {
+    b.score
+        .total_cmp(&a.score)
+        .then_with(|| a.drawer.id.cmp(&b.drawer.id))
+}
+
 /// Tracing target for per-candidate L2 ranking traces (#4904).
 ///
 /// Why: a missed fact looks identical whether it never entered the candidate
@@ -384,11 +398,8 @@ pub async fn retrieve_l2_scoped(
     drop(closets);
     drop(drawers);
 
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // #9280: id tiebreak, so tied drawers rank the same on every open.
+    results.sort_by(rank_order);
     results.truncate(top_k);
     Ok(results)
 }
@@ -406,7 +417,7 @@ pub async fn retrieve_l2_scoped(
 /// when a room filter is active, since filtered-out hits would otherwise eat
 /// the budget), joins each hit to its drawer via UUID-prefix match, drops
 /// drawers outside the requested room, scores each candidate with
-/// [`rank_score`], sorts descending, and returns at most `top_k`
+/// [`rank_score`], sorts by `rank_order`, and returns at most `top_k`
 /// `RecallResult`s.
 /// Test: Symmetric with `l2_returns_relevant_drawer`; same join logic.
 /// `l3_room_filter_excludes_other_rooms` covers the filter.
@@ -505,11 +516,8 @@ pub async fn retrieve_l3_scoped(
     drop(closets);
     drop(drawers);
 
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // #9280: id tiebreak, so tied drawers rank the same on every open.
+    results.sort_by(rank_order);
     results.truncate(top_k);
     Ok(results)
 }

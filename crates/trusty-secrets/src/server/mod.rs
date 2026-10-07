@@ -11,6 +11,8 @@
 //! - `router` — bind, uid-checked serve loop, unlink on exit.
 //! - [`project`] — a request's project directory to scopes and a backend.
 //! - `methods` — the six method bodies. None returns a secret value.
+//! - [`audit`] and `gate` — the credential access audit trail (#4567):
+//!   one record per `set`/`delete` call, per `copy` key, per denied `list`.
 //! - [`errors`] — the fixed error text every failure is reported with.
 //! - [`client`] — the minimal spawn-on-first-call helper.
 //!
@@ -24,21 +26,24 @@
 //! Governing document: DOC-74 §15.2, §15.6
 //! (`docs/specs/DOC-74-secrets-integration.md`).
 
+pub mod audit;
 pub mod client;
 pub mod errors;
+mod gate;
 mod methods;
 pub mod project;
 mod router;
 pub mod settings;
 
+pub use audit::{AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditStream};
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use errors::ErrorKind;
-pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD};
+pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD, StoragePosture};
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{BackendFactory, ServeError, ServeExit, State, default_backends, serve};
 pub use settings::{
-    DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
-    ServerSettings, SettingsError,
+    AUDIT_LOG_SUBPATH, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV,
+    INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH, ServerSettings, SettingsError,
 };
 
 #[cfg(test)]
