@@ -276,12 +276,11 @@ async fn main() -> anyhow::Result<()> {
         return commands::env_file::run(action);
     }
     // #7521: `tm secrets` talks to the trusty-secrets socket, not the daemon.
-    if let Some(Command::Secrets { action }) = cli.command {
-        return commands::secrets::run(action).await;
-    }
     // #8378 PR-C: `tm content` is daemon-less as well.
-    if let Some(Command::Content { action }) = cli.command {
-        return commands::content::run(action).await;
+    match cli.command {
+        Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
+        Some(Command::Content { action }) => return commands::content::run(action).await,
+        _ => {}
     }
 
     // #2997: the internal disclaim-exec shim is the lightweight leaf a managed
