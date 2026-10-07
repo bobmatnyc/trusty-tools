@@ -105,7 +105,8 @@ enum RepoAssets {
 pub(super) fn check_bundled_asset_lag(project_dir: Option<&Path>) -> DoctorCheck {
     let identity = project_dir.and_then(trusty_common::github_path::derive_github_path);
     report(identity.as_ref(), &|| match project_dir {
-        Some(dir) => match crate::core::content_source::framework_content_for(dir) {
+        // #9396: read-only; never fetches the content release.
+        Some(dir) => match crate::core::content_source::framework_content_local(Some(dir)) {
             // #9012: the deployed side is the content tm resolves for `dir`.
             Ok(content) => (read_repo_assets(dir), Some(content)),
             Err(err) => (

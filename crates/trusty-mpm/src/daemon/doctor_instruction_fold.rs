@@ -53,7 +53,8 @@ pub(super) fn check_instruction_fold(project_dir: Option<&Path>) -> DoctorCheck 
     };
 
     // #9012: the section sizes come from content; none leaves nothing to measure.
-    let content = match crate::core::content_source::framework_content_for(project) {
+    // #9396: read-only; never fetches the content release.
+    let content = match crate::core::content_source::framework_content_local(Some(project)) {
         Ok(content) => content,
         Err(err) => {
             return DoctorCheck::new(

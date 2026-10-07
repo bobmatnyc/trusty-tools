@@ -29,13 +29,33 @@ use trusty_common::content::{
 };
 use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
-pub use super::release_source::{FetchError, GithubReleases, Release, ReleaseSource};
+pub use super::release_source::{
+    CONTENT_REPO, FetchError, GithubReleases, Release, ReleaseSource, Retrying, github_source,
+};
 
 /// The file every writer locks exclusively, inside the cache directory.
 pub const UPDATE_LOCK_FILE: &str = ".update.lock";
 
 /// The command an operator runs when no network is reachable.
-pub const INSTALL_HINT: &str = "tm content install --from <bundle.tar.gz>";
+pub const INSTALL_HINT: &str = "tm content install --from <dir>/<tag>.tar.gz";
+
+/// The manual install, for `tag` when known (#9396).
+///
+/// Why: `gh release download` reads the release assets without the GitHub
+/// API calls that a rate limit or an API outage refuses, so it is the path
+/// that still works when `tm content update` does not.
+/// What: `gh release download <tag> --repo` [`CONTENT_REPO`], then
+/// `tm content install --from <dir>/<tag>.tar.gz`; `<tag>` stays a
+/// placeholder when the tag is unknown.
+/// Test: `a_persistent_5xx_names_the_manual_install`,
+/// `a_missing_sidecar_names_the_manual_install`.
+pub fn manual_install(tag: Option<&str>) -> String {
+    let tag = tag.unwrap_or("<tag>");
+    format!(
+        "install by hand: `gh release download {tag} --repo {CONTENT_REPO}`, then \
+         `tm content install --from <dir>/{tag}.tar.gz`"
+    )
+}
 
 /// Suffix of the sha256 sidecar the release ships beside each bundle.
 pub const SIDECAR_SUFFIX: &str = ".sha256";
@@ -56,10 +76,8 @@ impl std::fmt::Display for Fallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cached(tag) => write!(f, "the installed {tag} is verified and stays in use"),
-            Self::None => write!(
-                f,
-                "no verified content bundle is installed; offline, run `{INSTALL_HINT}`"
-            ),
+            // #9396: the error that carries this names the manual install.
+            Self::None => write!(f, "no verified content bundle is installed"),
         }
     }
 }
@@ -116,7 +134,8 @@ pub enum CacheError {
     /// The release carries a bundle but no sha256 sidecar; the sidecar is required.
     #[error(
         "refusing {tag}: the release has no sha256 sidecar at {url}, and a bundle is never \
-         pinned without one; {fallback}"
+         pinned without one; {fallback}; retry `tm content update` later, or {}",
+        manual_install(Some(tag))
     )]
     SidecarNotPublished {
         /// The release tag.
@@ -127,7 +146,11 @@ pub enum CacheError {
         fallback: Fallback,
     },
     /// The release, or its bundle, does not exist upstream.
-    #[error("content release {tag} was not found upstream ({url}); {fallback}")]
+    #[error(
+        "content release {tag} was not found upstream ({url}); {fallback}; run \
+         `tm content update` for the newest release, or {}",
+        manual_install(None)
+    )]
     TagNotFound {
         /// The requested tag.
         tag: String,
@@ -137,12 +160,17 @@ pub enum CacheError {
         fallback: Fallback,
     },
     /// The release could not be reached.
-    #[error("could not reach {url}: {reason}; {fallback}")]
+    #[error(
+        "could not reach {url}: {reason}; {fallback}; retry `tm content update`, or {}",
+        manual_install(tag.as_deref())
+    )]
     Network {
         /// The URL that failed.
         url: String,
         /// The transport failure.
         reason: String,
+        /// The release being fetched, once known (#9396).
+        tag: Option<String>,
         /// What stays in use.
         fallback: Fallback,
     },
@@ -514,6 +542,7 @@ fn latest_tag<S: ReleaseSource + ?Sized>(
     let network = |e: FetchError| CacheError::Network {
         url: e.url,
         reason: e.reason,
+        tag: None,
         fallback: fallback.clone(),
     };
     let mut stable = Vec::new();
@@ -554,6 +583,7 @@ fn fetch<S: ReleaseSource + ?Sized>(
         .map_err(|e| CacheError::Network {
             url: e.url,
             reason: e.reason,
+            tag: Some(tag.to_owned()),
             fallback: fallback.clone(),
         })
 }
