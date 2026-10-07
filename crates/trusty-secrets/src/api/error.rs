@@ -202,6 +202,56 @@ pub enum SecretsError {
         reason: &'static str,
     },
 
+    /// A pinned reference or a tracked `secrets.vault` override named a vault
+    /// outside the caller's own scopes. Raised before any index or backend
+    /// read, so it says nothing about what that vault holds.
+    // #9328: owner ruling 06 R1 and R2.
+    #[error("vault {vault} is outside this project's scopes: {reason}")]
+    VaultOutOfScope {
+        /// The vault named, already validated.
+        vault: String,
+        /// Which rule refused it.
+        reason: &'static str,
+    },
+
+    /// The `origin` remote is not on github.com.
+    // #9328: owner ruling 06 R3 — GHES and other hosts come later.
+    #[error(
+        "cannot determine the secrets scope for {dir}: the `origin` remote is not on \
+         github.com, and only github.com remotes are supported"
+    )]
+    UnsupportedRemoteHost {
+        /// The directory probed.
+        dir: PathBuf,
+    },
+
+    /// A value file or directory failed its safety check: a symlink, the
+    /// wrong file type, permissions beyond 0600/0700, or another owner.
+    /// Raised before any value is read; the operation does not proceed.
+    // #9326: the file backend's refusal; names the path, never the value.
+    #[error("secrets storage {path} is refused: it {reason}")]
+    StorageRefused {
+        /// The file or directory refused.
+        path: PathBuf,
+        /// Which rule it broke.
+        reason: &'static str,
+    },
+
+    /// A tracked project config selected the `file` backend on a build with a
+    /// Keychain, where only the untracked machine config may. Raised before
+    /// any backend is opened.
+    // #9326: Architect ruling, basis ruling 06 R2; never echoes the file.
+    #[error(
+        "secrets config {path} is tracked and may not select the `file` backend \
+         on a build with a Keychain; remove `backend: file` from it and set \
+         `secrets.default_backend: file` in the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml instead"
+    )]
+    TrackedBackendRefused {
+        /// The tracked project config file.
+        path: PathBuf,
+    },
+
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,

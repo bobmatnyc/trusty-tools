@@ -158,7 +158,10 @@ pub(super) struct FinishCtx {
 /// Why: extracted from `runner.rs` to bring it under the 500-SLOC cap.
 /// What: runs all work that follows the pipelined batch loop and emits the
 /// terminal SSE `complete` event. Returns after scheduling progress GC.
-/// Test: `reindex_walks_directory_and_emits_events` (primary integration test).
+/// A prune that left files behind adds them to `errors` and withholds the
+/// HEAD-SHA and `last_indexed_at` stamps (#9212).
+/// Test: `reindex_walks_directory_and_emits_events` (primary integration test);
+/// the withheld stamps by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`.
 ///
 /// `stage_timings` arrives pre-populated by the runner (hash cache, carryover,
 /// pipeline) and is completed here with the prune and swap-commit costs before
@@ -216,9 +219,10 @@ pub(super) async fn finish_reindex(
 
     // Issue #848 — prune pass: remove stale chunks from files deleted on disk.
     // #5024: scales with the walked-file set, so it is measured separately.
+    let mut prune = super::prune::PruneOutcome::default();
     if corpus_swap_tmp.is_some() && !force && !memory_aborted {
         let prune_started = Instant::now();
-        super::prune::prune_deleted_files_from_staging(
+        prune = super::prune::prune_deleted_files_from_staging(
             &handle,
             &walked_files,
             &canonical_root,
@@ -227,6 +231,10 @@ pub(super) async fn finish_reindex(
         )
         .await;
         stage_timings.prune_ms = prune_started.elapsed().as_millis() as u64;
+        // #9212: a refused prune delete is a run error, reported on `complete`.
+        progress
+            .errors
+            .fetch_add(prune.failed, AtomicOrdering::Release);
     }
 
     let embedder_present = handle.indexer.read().await.has_embedder();
@@ -461,6 +469,18 @@ pub(super) async fn finish_reindex(
         // #7991 / #7920: nothing landed, so no `last_indexed_at` stamp and no
         // HEAD-SHA marker — either would claim the live corpus is current.
         unsettled
+    } else if prune.failed > 0 {
+        // #9212: a refused prune delete left rows the walk said are gone, so
+        // the corpus is not current; no HEAD-SHA or `last_indexed_at` stamp,
+        // and the next reindex retries the prune.
+        tracing::warn!(
+            "reindex[{}]: prune left {} deleted file(s) in the corpus ({} pruned) — \
+             HEAD SHA and last_indexed_at not stamped",
+            index_id.0,
+            prune.failed,
+            prune.pruned,
+        );
+        ReindexStatus::Complete
     } else {
         // Issue #75: refresh the captured HEAD SHA.
         let new_sha = crate::core::git::head_sha(&handle.root_path);

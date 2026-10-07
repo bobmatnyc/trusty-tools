@@ -343,6 +343,75 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     ParsedReview::fail_safe(reason)
 }
 
+/// Bedrock's stop reason for a reply that ended in a tool call (#9310).
+const TOOL_USE_STOP_REASON: &str = "tool_use";
+
+/// Whether `resp` is a structured tool-call reply (#9310).
+///
+/// Why: the Bedrock provider hands the parser the `toolUse.input` JSON as the
+/// reply text, and the stop reason it records is the only per-reply mark that
+/// the text came from the tool call rather than prose.
+/// What: `finish_reason == "tool_use"`, the lowercase Converse stop reason
+/// (#1357). OpenRouter and Fireworks answer through `json_schema`, never a
+/// tool call, so their replies read `false`.
+/// Test: `a_tool_call_reply_never_parses_a_json_fence`,
+/// `parse_review_reply_reads_only_the_tool_input`.
+pub(crate) fn is_tool_call_reply(resp: &crate::llm::LlmResponse) -> bool {
+    resp.finish_reason.as_deref() == Some(TOOL_USE_STOP_REASON)
+}
+
+/// Parse one reviewer reply, choosing the strategies its kind allows (#9310).
+///
+/// Why: the verdict must come only from the reviewer's own tool call or
+/// structured output, never from text it quoted. A tool-call reply's text IS
+/// the tool input, so a ```json fence or a verdict keyword found in it is
+/// quoted text, not the reviewer's answer.
+/// What: a tool-call reply ([`is_tool_call_reply`]) is parsed by
+/// [`parse_tool_input`] alone; any other reply by [`parse_review_response`],
+/// unchanged.
+/// Fail-open check: a tool input that does not deserialize is fail-safe
+/// UNKNOWN, with the serde cause in the reason; no fallback can produce a
+/// verdict from it.
+/// Test: `parse_review_reply_reads_only_the_tool_input`,
+/// `a_tool_call_parse_failure_runs_no_keyword_scan`,
+/// `a_valid_tool_call_reply_parses`.
+pub fn parse_review_reply(resp: &crate::llm::LlmResponse) -> ParsedReview {
+    if is_tool_call_reply(resp) {
+        parse_tool_input(&resp.text)
+    } else {
+        parse_review_response(&resp.text)
+    }
+}
+
+/// Parse a tool call's input as the review object, and nothing else (#9310).
+///
+/// What: strategy 1 only. A blank input, an input that is not a JSON object,
+/// and an object that does not deserialize are each fail-safe UNKNOWN; the
+/// last names the serde cause and position, never the input text.
+/// Test: `parse_review_reply_reads_only_the_tool_input`.
+fn parse_tool_input(body: &str) -> ParsedReview {
+    if body.trim().is_empty() {
+        warn!("reviewer tool call carried no input — applying fail-safe UNKNOWN (#9310)");
+        return ParsedReview::fail_safe("the reviewer's tool call carried no input (#9310)");
+    }
+    let reason = match try_parse_direct_json(body) {
+        Some(Ok(parsed)) => {
+            debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed the reviewer's tool input");
+            return parsed;
+        }
+        Some(Err(e)) => format!(
+            "the reviewer's tool input did not deserialize (#9310): {}",
+            describe_block_error(&e)
+        ),
+        None => "the reviewer's tool input is not a JSON object (#9310)".to_string(),
+    };
+    warn!(
+        body_len = body.len(),
+        reason, "reviewer tool input not parsed — applying fail-safe UNKNOWN (#9310)"
+    );
+    ParsedReview::fail_safe(reason)
+}
+
 // ─── Strategy 1: Direct JSON parse (structured output) ───────────────────────
 
 /// Try to deserialize the entire response body as a `LlmOutputBlock`.

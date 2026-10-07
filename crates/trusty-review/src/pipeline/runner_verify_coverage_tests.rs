@@ -100,7 +100,7 @@ async fn run_review_posts_no_refuted_advisory_finding() {
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: not verified (1 refuted by the verifier)"),
+            .starts_with("1 findings withheld:\n- 1 refuted by the verifier"),
         "{}",
         result.review_body
     );
@@ -127,7 +127,8 @@ async fn run_review_unjudged_finding_is_counted_as_withheld_unverified() {
 /// #4044 ("withhold all", 2026-09-30): verification enabled but no verifier
 /// provider (its build failed) posts nothing. The finding is withheld with
 /// reason "no verifier", marked `Unverifiable` so the #4459 alarm counts it,
-/// and the blocking review is UNKNOWN with no grade (AQ-7t).
+/// and the blocking review is REQUEST_CHANGES (`suppressed_reject`, #9310;
+/// UNKNOWN before).
 #[tokio::test]
 async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
     let config = default_config();
@@ -147,14 +148,21 @@ async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
         "{:?}",
         result.withheld_findings[0].finding.verified
     );
+    // #9310: the outage stays visible in `unverified_count`; the reviewer
+    // asked for changes, so the review is REQUEST_CHANGES (`suppressed_reject`)
+    // with no error, no longer UNKNOWN.
     assert_eq!(result.unverified_count, 1);
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
-    assert!(crate::run_output::run_is_failure(&result));
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::SuppressedReject)
+    );
+    assert_eq!(result.grade.as_deref(), Some("D+"));
+    assert!(!crate::run_output::run_is_failure(&result));
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: no verifier (no verifier provider could be built)"),
+            .starts_with("1 findings withheld:\n- 1 no verifier ran"),
         "{}",
         result.review_body
     );
@@ -162,9 +170,9 @@ async fn run_review_enabled_without_a_verifier_withholds_every_finding() {
 
 /// #4044 ("withhold all", 2026-09-30; supersedes #8904's 09-29 rule):
 /// verification disabled by config posts nothing. Every finding is withheld
-/// with reason "no verifier" and the blocking review is UNKNOWN with no grade
-/// (AQ-7t). Disabling is an operator choice, so nothing is counted as an
-/// outage.
+/// with reason "no verifier"; the blocking review is REQUEST_CHANGES
+/// (`suppressed_reject`, #9310; UNKNOWN before). Disabling is an operator
+/// choice, so nothing is counted as an outage.
 #[tokio::test]
 async fn run_review_disabled_verification_withholds_every_finding() {
     let mut config = default_config();
@@ -186,15 +194,15 @@ async fn run_review_disabled_verification_withholds_every_finding() {
             .iter()
             .all(|w| w.finding.verified.is_none())
     );
-    assert_eq!(result.verdict, Verdict::Unknown);
-    assert_eq!(result.grade, None);
-    assert!(result.error.is_some());
+    assert_eq!(result.verdict, Verdict::RequestChanges);
+    assert_eq!(result.grade.as_deref(), Some("D+"));
+    assert!(result.error.is_none(), "{:?}", result.error);
     assert_eq!(result.unverified_count, 0, "disabled is not an outage");
     assert_eq!(result.withheld_unverified_count, 0);
     assert!(
         result
             .review_body
-            .starts_with("2 findings withheld: no verifier (verification is disabled)"),
+            .starts_with("2 findings withheld:\n- 2 no verifier ran"),
         "{}",
         result.review_body
     );
@@ -228,10 +236,7 @@ async fn run_review_no_verifier_all_withheld_approve_stays_approve_and_exits_zer
         );
         assert!(result.findings.is_empty(), "{why}: {:?}", result.findings);
         assert_eq!(json["verdict"], "APPROVE", "{why}: {json}");
-        assert_eq!(
-            json["verdict_status"], "no_verified_findings",
-            "{why}: {json}"
-        );
+        assert_eq!(json["verdict_status"], "all_withheld", "{why}: {json}"); // #9310
         assert_eq!(json["withheld_count"], 1, "{why}: {json}");
         assert_eq!(
             json["withheld_by_reason"]["no_verifier"], 1,
@@ -241,7 +246,7 @@ async fn run_review_no_verifier_all_withheld_approve_stays_approve_and_exits_zer
         assert!(
             result
                 .review_body
-                .starts_with(&format!("1 findings withheld: no verifier ({why})")),
+                .starts_with("1 findings withheld:\n- 1 no verifier ran"),
             "{}",
             result.review_body
         );
@@ -399,14 +404,15 @@ async fn run_review_withholds_an_unverifiable_finding() {
     assert_eq!(result.withheld_unverified_count, 1);
     assert_eq!(result.unverified_count, 1);
     assert_eq!(result.verdict, Verdict::Approve, "{:?}", result.error);
+    // #9310: `all_withheld` replaces `no_verified_findings`; one headline.
     assert_eq!(
-        result.verdict_status.as_deref(),
-        Some("no_verified_findings")
+        result.verdict_status,
+        Some(crate::models::VerdictStatus::AllWithheld)
     );
     assert!(
         result
             .review_body
-            .starts_with("1 findings withheld: not verified (1 unverifiable)"),
+            .starts_with("1 findings withheld:\n- 1 unverifiable"),
         "{}",
         result.review_body
     );

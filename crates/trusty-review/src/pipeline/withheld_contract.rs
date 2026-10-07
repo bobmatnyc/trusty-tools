@@ -17,7 +17,9 @@
 //!    when nothing was withheld and every location it cites is backed by a
 //!    survivor, and otherwise rebuild it from the survivors (leak C);
 //!  - [`sync_withheld_counts`] fills the typed `withheld_count`,
-//!    `withheld_by_reason` and `verdict_status` (leak K, AQ-7t);
+//!    `withheld_by_reason` and a missing `verdict_status` (leak K, #9310);
+//!  - [`withheld_headline`] is the one "N findings withheld" headline, its
+//!    total read from `withheld_findings` (#9310);
 //!  - [`unresolvable_survivors`] counts survivors that do not resolve, for
 //!    `calibrate` and the offline corpus.
 //!
@@ -30,7 +32,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 use tracing::warn;
 
-use crate::models::{Finding, ReviewResult, Verdict, WithheldFinding};
+use crate::models::{Finding, ReviewResult, Verdict, VerdictStatus, WithheldFinding};
 use crate::pipeline::{
     absence_claim::ABSENCE_REASON,
     citation_check::{CITATION_REASON, CODE_CITATION_RE},
@@ -95,33 +97,71 @@ pub fn withheld_by_reason(withheld: &[WithheldFinding]) -> BTreeMap<String, usiz
     by_reason
 }
 
-/// `verdict_status` of a review with no survivor and anything withheld
-/// (#9188 K): "no verified findings, N withheld", not a clean review.
-pub const VERDICT_STATUS_NO_VERIFIED_FINDINGS: &str = "no_verified_findings";
-
-/// The review's `verdict_status`, or `None` when it needs none (#9188 K).
-///
-/// Why: AQ-7t (Bob 2026-10-05) keeps an all-withheld APPROVE as APPROVE, so
-/// the verdict alone no longer tells a caller that nothing was verified.
-/// What: [`VERDICT_STATUS_NO_VERIFIED_FINDINGS`] when no finding survived and
-/// at least one was withheld, whatever the verdict; `None` otherwise.
-/// Test: `verdict_status_names_a_review_with_no_verified_finding`.
-pub fn verdict_status(result: &ReviewResult) -> Option<&'static str> {
-    (result.findings.is_empty() && !result.withheld_findings.is_empty())
-        .then_some(VERDICT_STATUS_NO_VERIFIED_FINDINGS)
+/// The phrase a withheld-headline line gives a [`reason_class`] (#9310).
+fn class_phrase(class: &str) -> &str {
+    match class {
+        "line_citation" => "citation unverifiable",
+        "citation_integrity" => "cited code not in the diff",
+        "self_negated" => "self-negated",
+        "absence_claim" => "refuted absence claim",
+        "unresolved_at_head" => "citation does not resolve at the head",
+        "duplicate" => "duplicate",
+        "over_max_findings" => "over the findings cap",
+        "refuted" => "refuted by the verifier",
+        "unjudged" => "the verifier could not judge",
+        "over_cap" => "past the verifier-call cap",
+        "unverifiable" => "unverifiable",
+        "unconfirmed" => "not confirmed by the verifier",
+        "no_verifier" => "no verifier ran",
+        other => other,
+    }
 }
 
-/// Fill `withheld_count`, `withheld_by_reason` and `verdict_status` from
-/// `withheld_findings`.
+/// The body headline naming what was withheld, or `None` when nothing was
+/// (#9310).
 ///
-/// What: called at the two canonical exit points, beside `findings_count`;
-/// all three stay absent from the JSON when nothing was withheld.
+/// Why: each gate used to prepend its own "N findings withheld" line with its
+/// own count, so the top line could read 6 while `withheld_findings` held 10.
+/// What: "N findings withheld:" with N = `withheld.len()`, then one
+/// "- n <phrase>" line per reason class from [`withheld_by_reason`], in class
+/// order, so the lines sum to N.
+/// Test: `withheld_headline_counts_every_reason_class`,
+/// `the_withheld_headline_counts_the_whole_array`.
+pub fn withheld_headline(withheld: &[WithheldFinding]) -> Option<String> {
+    if withheld.is_empty() {
+        return None;
+    }
+    let mut out = format!("{} findings withheld:", withheld.len());
+    for (class, n) in withheld_by_reason(withheld) {
+        out.push_str(&format!("\n- {n} {}", class_phrase(&class)));
+    }
+    Some(out)
+}
+
+/// Lead `review_body` with [`withheld_headline`] (#9310).
+///
+/// What: called once, after every gate ran; a no-op when nothing was withheld.
+/// Test: `the_withheld_headline_counts_the_whole_array`.
+pub(crate) fn prepend_withheld_headline(result: &mut ReviewResult) {
+    if let Some(headline) = withheld_headline(&result.withheld_findings) {
+        result.review_body = format!("{headline}\n\n{}", result.review_body);
+    }
+}
+
+/// Fill `withheld_count`, `withheld_by_reason` and a missing `verdict_status`
+/// from the result.
+///
+/// What: called at the completed-review exit point, beside `findings_count`;
+/// the two counts stay absent from the JSON when nothing was withheld. A
+/// status a stage set (`parse_failed`, `all_withheld`, `suppressed_reject`,
+/// or `no_reviewer_output` from `abort_dry`) is kept; otherwise the review is
+/// `parsed` (#9310).
 /// Test: `a_withheld_review_reports_typed_withheld_counts`,
-/// `verdict_status_names_a_review_with_no_verified_finding`.
+/// `sync_withheld_counts_keeps_a_stage_status_and_defaults_to_parsed`.
 pub fn sync_withheld_counts(result: &mut ReviewResult) {
     result.withheld_count = result.withheld_findings.len();
     result.withheld_by_reason = withheld_by_reason(&result.withheld_findings);
-    result.verdict_status = verdict_status(result).map(str::to_string);
+    result.verdict_status.get_or_insert(VerdictStatus::Parsed); // #9310
 }
 
 /// Withhold every survivor that does not resolve at the head (#9188 L).
@@ -131,8 +171,9 @@ pub fn sync_withheld_counts(result: &mut ReviewResult) {
 /// What: runs `citation_gate::resolves_at_head` on each finding; a failure,
 /// including an error reading the file, moves the finding to
 /// `withheld_findings` (fail closed). When any was withheld, settles the
-/// verdict with `settle_withheld`, prepends a note, and on `Unknown` clears
-/// the grade and records the note as the error. Returns the number withheld.
+/// verdict with `settle_withheld`, and on `Unknown` clears the grade and
+/// records a note as the error (the body headline is written once, #9310).
+/// Returns the number withheld.
 /// L is defense in depth: the gate already ran on every survivor, and nothing
 /// edits a finding between the gate and here, so in `run_review` L catches
 /// only a gate pass that is not idempotent. The one such shape known is a
@@ -161,7 +202,7 @@ pub(crate) fn withhold_unresolved(result: &mut ReviewResult, index: &LineIndex) 
     if withheld > 0 && result.verdict != Verdict::Unknown {
         result.verdict = settle_withheld(result.verdict.clone(), &result.findings);
         let note = format!("{withheld} findings withheld: citation does not resolve at the head");
-        result.review_body = format!("{note}\n\n{}", result.review_body);
+        // #9310: no per-stage headline; `prepend_withheld_headline` counts the array.
         if result.verdict == Verdict::Unknown {
             result.grade = None;
             result.error.get_or_insert(note);
@@ -178,7 +219,9 @@ pub(crate) fn withhold_unresolved(result: &mut ReviewResult, index: &LineIndex) 
 /// approving verdict is not settled here. A withheld finding is unverified, so
 /// it cannot un-approve a review; the review keeps APPROVE / APPROVE* and
 /// exits 0, `regrade_from_survivors` grades it from the survivors (none), and
-/// `verdict_status` says no finding was verified.
+/// `verdict_status` says no finding was verified. #9310: this `Unknown` is an
+/// intermediate state; `verdict_status::apply_withheld_outcome` runs after it
+/// and maps it to REQUEST_CHANGES (`suppressed_reject`).
 /// What: decides from `wiped_model_verdict` when the pre-grade hygiene pass
 /// relaxed the model's verdict to APPROVE, else from `result.verdict`
 /// (#9188, Architect ruling option A: a blocking model verdict whose findings
@@ -192,8 +235,8 @@ pub(crate) fn withhold_unresolved(result: &mut ReviewResult, index: &LineIndex) 
 /// `hallucination_count_is_zero`,
 /// `mapreduce_phantom_missing_file_finding_does_not_block`,
 /// `run_review_all_withheld_approve_stays_approve_and_exits_zero`,
-/// `run_review_all_withheld_request_changes_is_unknown`,
-/// `run_review_blocking_review_wiped_before_grading_is_unknown`.
+/// `run_review_all_withheld_request_changes_is_suppressed_reject`,
+/// `run_review_blocking_review_wiped_before_grading_is_suppressed_reject`.
 pub(crate) fn settle_no_survivors(
     result: &mut ReviewResult,
     wiped_model_verdict: Option<&Verdict>,

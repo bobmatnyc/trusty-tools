@@ -290,16 +290,80 @@ fn store_capabilities_gate_operations() {
 }
 
 /// Why: a configured backend this build does not implement must fail closed,
-/// never fall back to the Keychain.
+/// never fall back to the Keychain or to files.
 /// Test: itself.
 #[test]
-fn store_open_backend_knows_only_keychain() {
+fn store_open_backend_knows_keychain_and_file() {
     let keychain = open_backend(&BackendId::keychain()).unwrap();
     assert_eq!(keychain.id().as_str(), "keychain");
+    // #9326: opening resolves `$HOME` only; no file is touched.
+    #[cfg(unix)]
+    {
+        let file = open_backend(&BackendId::file()).unwrap();
+        assert_eq!(file.id().as_str(), "file");
+    }
     let err = open_backend(&BackendId::new("onepassword").unwrap()).unwrap_err();
     assert!(
         matches!(err, SecretsError::UnknownBackend { .. }),
         "{err:?}"
+    );
+}
+
+/// Why: #9326, owner ruling f5 — a Keychain error must surface as itself.
+/// Falling through to the file backend would move secrets to plaintext
+/// files with no one asking (Fail-Open Check).
+/// Red when the `keychain` arm of `open_backend_from` falls back to `file`.
+/// Test: itself.
+#[test]
+fn store_keychain_failure_never_falls_through_to_file() {
+    let file_opened = std::cell::Cell::new(false);
+    let result = backend::open_backend_from(
+        &BackendId::keychain(),
+        || {
+            Err(SecretsError::Backend {
+                backend: BackendId::KEYCHAIN.to_string(),
+                vault: project().to_string(),
+                key: "API_KEY".to_string(),
+                reason: "secure storage is not accessible".to_string(),
+            })
+        },
+        || {
+            file_opened.set(true);
+            Ok(Arc::new(MemoryBackend::new()) as Arc<dyn SecretBackend>)
+        },
+    );
+    assert!(
+        !file_opened.get(),
+        "a failing Keychain opened the file backend"
+    );
+    match result {
+        Err(SecretsError::Backend { backend, .. }) => assert_eq!(backend, "keychain"),
+        Err(other) => panic!("the Keychain error was replaced: {other:?}"),
+        Ok(opened) => panic!("a failing Keychain still opened {:?}", opened.id()),
+    }
+}
+
+/// Why: #9326 AC3, owner ruling f5 — the Keychain is the default wherever
+/// one is compiled in; `file` is the default only where none is. An
+/// explicit `keychain` stays `keychain` on every host.
+/// Test: itself.
+#[test]
+fn store_default_backend_is_keychain_unless_none_is_compiled() {
+    assert_eq!(backend::default_backend_for(true), BackendId::keychain());
+    assert_eq!(backend::default_backend_for(false), BackendId::file());
+    assert_eq!(config::resolve(None, None).backend, default_backend());
+    #[cfg(target_os = "macos")]
+    assert_eq!(default_backend(), BackendId::keychain());
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(default_backend(), BackendId::file());
+
+    let explicit = config::ProjectSecretsConfig {
+        backend: Some(BackendId::keychain()),
+        ..config::ProjectSecretsConfig::default()
+    };
+    assert_eq!(
+        config::resolve(Some(&explicit), None).backend,
+        BackendId::keychain()
     );
 }
 

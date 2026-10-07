@@ -24,8 +24,10 @@ use crate::api::SecretsError;
 /// [`ErrorKind::text`] the human sentence, [`ErrorKind::code`] the JSON-RPC
 /// code. `#[non_exhaustive]` binds other crates only: the matches in this
 /// file stay exhaustive, so a new kind fails the build until it has a kind
-/// string, a sentence and a code.
-/// Test: `server_error_text_is_fixed_per_method_and_kind`.
+/// string, a sentence and a code. A new kind must also join
+/// `ErrorKind::ALL`, or the client reads it from the wire as `None`.
+/// Test: `server_error_text_is_fixed_per_method_and_kind`,
+/// `error_kind_all_lists_every_variant_once`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
@@ -72,13 +74,22 @@ pub enum ErrorKind {
     EnvResolutionFailed,
     /// A `.env` line is outside the supported subset.
     DotenvSyntax,
+    /// The project's `origin` remote is not on github.com.
+    // #9328: owner ruling 06 R3, its own kind so it never reads as a guess.
+    RemoteHostUnsupported,
+    /// A value file or directory failed its mode, owner or symlink check.
+    // #9326: its own kind so a refusal never reads as an I/O failure.
+    StorageRefused,
+    /// The tracked project config selected `file` on a Keychain build.
+    // #9326: Architect ruling, basis ruling 06 R2.
+    TrackedBackendRefused,
     /// A server-side fault, e.g. a handler task that did not finish.
     Internal,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -99,6 +110,9 @@ impl ErrorKind {
         Self::InvalidEnvEntry,
         Self::EnvResolutionFailed,
         Self::DotenvSyntax,
+        Self::RemoteHostUnsupported,
+        Self::StorageRefused,
+        Self::TrackedBackendRefused,
         Self::Internal,
     ];
 
@@ -132,6 +146,9 @@ impl ErrorKind {
             Self::InvalidEnvEntry => "invalid_env_entry",
             Self::EnvResolutionFailed => "env_resolution_failed",
             Self::DotenvSyntax => "dotenv_syntax",
+            Self::RemoteHostUnsupported => "remote_host_unsupported",
+            Self::StorageRefused => "storage_refused",
+            Self::TrackedBackendRefused => "tracked_backend_refused",
             Self::Internal => "internal",
         }
     }
@@ -165,6 +182,15 @@ impl ErrorKind {
             Self::InvalidEnvEntry => "an env-map entry is invalid",
             Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",
             Self::DotenvSyntax => "a `.env` line is outside the supported syntax",
+            Self::RemoteHostUnsupported => {
+                "the project's `origin` remote is not on github.com; only github.com remotes are supported"
+            }
+            Self::StorageRefused => {
+                "a secrets file or directory failed its permission, owner or symlink check; it was refused"
+            }
+            Self::TrackedBackendRefused => {
+                "the project's tracked config may not select the `file` backend on a build with a Keychain; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -195,6 +221,10 @@ impl ErrorKind {
             Self::InvalidEnvEntry => -32066,
             Self::EnvResolutionFailed => -32067,
             Self::DotenvSyntax => -32068,
+            Self::RemoteHostUnsupported => -32069,
+            // #9326: the next unused code.
+            Self::StorageRefused => -32070,
+            Self::TrackedBackendRefused => -32071,
         }
     }
 
@@ -229,6 +259,12 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::LockTimeout { .. } => Self::IndexBusy,
             SecretsError::Config { .. } => Self::ConfigInvalid,
             SecretsError::ScopeUndetermined { .. } => Self::ProjectUnresolved,
+            // #9328: ruling 06 — out-of-scope vaults and non-github.com remotes.
+            SecretsError::VaultOutOfScope { .. } => Self::VaultOutOfScope,
+            SecretsError::UnsupportedRemoteHost { .. } => Self::RemoteHostUnsupported,
+            // #9326: the file backend's mode, owner or symlink refusal.
+            SecretsError::StorageRefused { .. } => Self::StorageRefused,
+            SecretsError::TrackedBackendRefused { .. } => Self::TrackedBackendRefused,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.
@@ -236,6 +272,12 @@ impl From<SecretsError> for ErrorKind {
                 if matches!(*source, SecretsError::AgentUseRefused { .. }) =>
             {
                 Self::AgentUseRefused
+            }
+            // #9328: likewise an out-of-scope pinned reference.
+            SecretsError::EnvResolution { source, .. }
+                if matches!(*source, SecretsError::VaultOutOfScope { .. }) =>
+            {
+                Self::VaultOutOfScope
             }
             SecretsError::EnvResolution { .. } => Self::EnvResolutionFailed,
             SecretsError::InvalidEnvEntry { .. } => Self::InvalidEnvEntry,

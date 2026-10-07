@@ -210,30 +210,43 @@ fn settle_no_survivors_decides_from_a_wiped_blocking_verdict() {
     assert_eq!(result.error, None);
 }
 
-/// #9188 K with AQ-7t: `verdict_status` names a review with no survivor and
-/// anything withheld, approving or not; it is absent when nothing was withheld
-/// or a finding survived.
+/// #9310: `sync_withheld_counts` keeps a status a stage set and otherwise
+/// reads `parsed`; the retired `no_verified_findings` is never written. It
+/// replaces #9188's `verdict_status_names_a_review_with_no_verified_finding`.
 #[test]
-fn verdict_status_names_a_review_with_no_verified_finding() {
+fn sync_withheld_counts_keeps_a_stage_status_and_defaults_to_parsed() {
     let mut result = ReviewResult::new("acme", "api", 7, "t", "u");
     result.verdict = Verdict::Approve;
     sync_withheld_counts(&mut result);
-    assert_eq!(result.verdict_status, None);
+    assert_eq!(result.verdict_status, Some(VerdictStatus::Parsed));
     let json = serde_json::to_value(&result).expect("serialize");
-    assert!(json.get("verdict_status").is_none(), "{json}");
+    assert_eq!(json["verdict_status"], "parsed", "{json}");
 
     result.withheld_findings.push(withheld(UNVERIFIABLE_REASON));
+    result.verdict_status = Some(VerdictStatus::AllWithheld);
     sync_withheld_counts(&mut result);
-    assert_eq!(
-        result.verdict_status.as_deref(),
-        Some(VERDICT_STATUS_NO_VERIFIED_FINDINGS)
-    );
     let json = serde_json::to_value(&result).expect("serialize");
-    assert_eq!(json["verdict_status"], "no_verified_findings");
+    assert_eq!(json["verdict_status"], "all_withheld", "{json}");
+}
 
-    result.findings.push(finding(10, "`x`"));
-    sync_withheld_counts(&mut result);
-    assert_eq!(result.verdict_status, None);
+/// #9310: the headline total is the array length, and its reason-class lines
+/// sum to it — the #9306 shape read 6 while the array held 10.
+#[test]
+fn withheld_headline_counts_every_reason_class() {
+    assert_eq!(withheld_headline(&[]), None);
+    let mut all = Vec::new();
+    for _ in 0..6 {
+        all.push(withheld("cited line 30 does not hold `flush()`"));
+    }
+    for _ in 0..3 {
+        all.push(withheld(REFUTED_REASON));
+    }
+    all.push(withheld(NO_VERIFIER_REASON));
+    let headline = withheld_headline(&all).expect("headline");
+    assert_eq!(
+        headline,
+        "10 findings withheld:\n- 6 citation unverifiable\n- 1 no verifier ran\n- 3 refuted by the verifier"
+    );
 }
 
 /// Restore `prose` over a review whose one survivor is `survivor`, with

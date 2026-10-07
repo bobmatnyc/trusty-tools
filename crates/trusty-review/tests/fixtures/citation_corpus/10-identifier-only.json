@@ -14,5 +14,5 @@
   "hallucinated": ["discarded-error"],
   "forbidden_in_body": ["error is discarded"],
   "expect_survivors": 0,
-  "expect_verdict": "UNKNOWN"
+  "expect_verdict": "REQUEST_CHANGES"
 }

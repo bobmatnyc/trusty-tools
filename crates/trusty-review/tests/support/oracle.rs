@@ -114,20 +114,25 @@ pub fn resolves(
 
 /// Whether a review with no survivor let a withheld finding block it or shape
 /// its grade. AQ-7t (Bob 2026-10-05): an approving verdict keeps the grade its
-/// band gives an empty survivor set; UNKNOWN carries none. `verdict` is the
-/// verdict as `run --json` prints it.
+/// band gives an empty survivor set; UNKNOWN carries none. #9310 (Architect
+/// ruling 2026-10-06 16:50Z): a `suppressed_reject` review is REQUEST_CHANGES
+/// on the reviewer's own rejection, not on a withheld finding, and carries the
+/// best grade of that band. `verdict` and `status` are as `run --json` prints
+/// them.
 pub fn withheld_shapes_verdict(
     survivors: usize,
     withheld: usize,
     verdict: &str,
+    status: Option<&str>,
     grade: Option<&str>,
 ) -> bool {
+    let suppressed = status == Some("suppressed_reject") && verdict == "REQUEST_CHANGES";
     let survivorless_grade = match verdict {
         "APPROVE" => Some("A+"),
         "APPROVE*" => Some("C+"),
+        "REQUEST_CHANGES" if suppressed => Some("D+"),
         _ => None,
     };
-    survivors == 0
-        && withheld > 0
-        && (matches!(verdict, "REQUEST_CHANGES" | "BLOCK") || grade != survivorless_grade)
+    let blocks = matches!(verdict, "REQUEST_CHANGES" | "BLOCK") && !suppressed;
+    survivors == 0 && withheld > 0 && (blocks || grade != survivorless_grade)
 }

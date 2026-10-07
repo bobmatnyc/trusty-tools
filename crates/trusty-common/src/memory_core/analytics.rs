@@ -125,6 +125,12 @@ pub struct RecallLog {
     /// Monotonic event-id source — guarantees unique keys even when multiple
     /// `record` calls land inside the same millisecond.
     next_id: AtomicU64,
+    /// #9141 test seam: commits `record_batch` completed.
+    #[cfg(test)]
+    commits: AtomicU64,
+    /// #9141 test seam: when set, `record_batch` fails before its commit.
+    #[cfg(test)]
+    fail_writes: std::sync::atomic::AtomicBool,
 }
 
 impl RecallLog {
@@ -190,7 +196,23 @@ impl RecallLog {
             db: Arc::new(db),
             path: redb_path,
             next_id: AtomicU64::new(max_seen),
+            #[cfg(test)]
+            commits: AtomicU64::new(0),
+            #[cfg(test)]
+            fail_writes: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// #9141 test seam: commits `record_batch` has completed on this log.
+    #[cfg(test)]
+    pub(crate) fn commit_count(&self) -> u64 {
+        self.commits.load(Ordering::Acquire)
+    }
+
+    /// #9141 test seam: make every later `record_batch` fail before commit.
+    #[cfg(test)]
+    pub(crate) fn fail_writes(&self, fail: bool) {
+        self.fail_writes.store(fail, Ordering::Release);
     }
 
     /// Open the recall log at `path`, sharing the instance this process
@@ -288,9 +310,32 @@ impl RecallLog {
     /// writes one row into the RECALL_LOG table under a single write txn.
     /// Test: `record_then_hit_count`, `roundtrip_persists_across_reopen`.
     pub async fn record(&self, event: RecallEvent) -> Result<()> {
-        let id = self.alloc_id();
-        let bytes =
-            postcard::to_allocvec(&event).context("failed to postcard-encode RecallEvent")?;
+        self.record_batch(vec![event]).await
+    }
+
+    /// Record every event of one recall in a single write transaction.
+    ///
+    /// Why (#9141): `record` per hit cost one redb commit — one fsync — per
+    /// hit, so a recall-all over 40 palaces paid hundreds of them.
+    /// What: allocates one id per event, encodes them all, and inserts every
+    /// row under ONE write transaction and commit. All rows land or none do.
+    /// An empty batch writes nothing.
+    /// Test: `log_recall_writes_every_hit_in_one_commit`,
+    /// `log_recall_reports_a_failed_write`.
+    pub async fn record_batch(&self, events: Vec<RecallEvent>) -> Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut rows = Vec::with_capacity(events.len());
+        for event in &events {
+            let bytes =
+                postcard::to_allocvec(event).context("failed to postcard-encode RecallEvent")?;
+            rows.push((self.alloc_id(), bytes));
+        }
+        #[cfg(test)]
+        let fail = self.fail_writes.load(Ordering::Acquire);
+        #[cfg(not(test))]
+        let fail = false;
         let db = self.db.clone();
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
@@ -301,15 +346,22 @@ impl RecallLog {
                 let mut table = wtx
                     .open_table(RECALL_LOG)
                     .context("open RECALL_LOG table")?;
-                table
-                    .insert(id, bytes.as_slice())
-                    .context("insert RecallEvent row")?;
+                for (id, bytes) in &rows {
+                    table
+                        .insert(*id, bytes.as_slice())
+                        .context("insert RecallEvent row")?;
+                }
+            }
+            if fail {
+                anyhow::bail!("injected recall-log write failure (test seam)");
             }
             wtx.commit().context("commit RecallEvent write")?;
             Ok(())
         })
         .await
         .context("record task join error")??;
+        #[cfg(test)]
+        self.commits.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 

@@ -2,8 +2,8 @@
 //! config resolution (DOC-74 §15.2).
 //!
 //! Why: this is the half of the crate that touches the OS — the keychain,
-//! the index directory, the git remote — so callers that only name keys can
-//! leave it out.
+//! the value files, the index directory, the git remote — so callers that
+//! only name keys can leave it out.
 //! What: re-exports of the submodules below, including [`resolve`], the
 //! in-process `secret://` resolver behind `tm secrets exec`. Every OS
 //! touchpoint sits in the private `platform` module.
@@ -12,6 +12,9 @@
 mod backend;
 pub mod config;
 mod dotenv;
+// #9326: the 0600 value-file backend needs Unix modes and owners.
+#[cfg(unix)]
+mod file;
 mod index;
 mod keychain;
 mod mask;
@@ -22,8 +25,10 @@ pub mod resolve;
 mod scope;
 mod secret_store;
 
-pub use backend::{Capabilities, SecretBackend, open_backend};
+pub use backend::{Capabilities, SecretBackend, default_backend, open_backend};
 pub use dotenv::parse_dotenv;
+#[cfg(unix)]
+pub use file::{FileBackend, VALUES_SUBDIR};
 pub use index::{DEFAULT_LOCK_TIMEOUT, INDEX_SUBDIR, NamesIndex};
 pub use keychain::KeychainBackend;
 pub use mask::{MASK_HEAD_CHARS, mask_secret};
@@ -31,7 +36,9 @@ pub use mask::{MASK_HEAD_CHARS, mask_secret};
 pub use memory::MemoryBackend;
 pub use platform::{GIT_ENV_REDIRECTS, git_redirect_vars};
 pub use resolve::{EnvEntry, ResolvedVar, VarSource, resolve_env, resolve_reference};
-pub use scope::{ScopeSet, parse_remote_identity};
+pub use scope::{
+    RemoteRefusal, SUPPORTED_REMOTE_HOST, ScopeSet, VaultOverride, parse_remote_identity,
+};
 pub use secret_store::SecretStore;
 
 #[cfg(test)]

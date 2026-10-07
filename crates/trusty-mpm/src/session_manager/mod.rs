@@ -34,6 +34,8 @@ mod numbering;
 // #9101: the ownership gate every pane operation runs first.
 mod pane_gate;
 pub mod pane_identity;
+// #9313: re-bind a record to its live pane after a tmux server replacement.
+pub mod pane_rebind;
 pub mod prune;
 pub mod reactivate;
 mod reconcile;

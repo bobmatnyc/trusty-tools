@@ -20,6 +20,6 @@
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "jsdom": "^25.0.0",
     "vite": "^6.4.3",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.11"
   }
 }

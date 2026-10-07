@@ -21,7 +21,7 @@ use trusty_common::uds::{UdsSecurityError, send_framed_request, socket_is_servin
 use super::*;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
-use crate::store::{MemoryBackend, NamesIndex, SecretBackend, mask_secret};
+use crate::store::{MemoryBackend, NamesIndex, SecretBackend, SecretStore, mask_secret};
 
 const VALUE: &str = "sk-fake-server-0123456789abcdef";
 const SENTINEL: &str = "SENTINEL-c0ffee-9065";
@@ -64,6 +64,13 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         machine_config: tmp.path().join("machine.yaml"),
         idle_timeout,
     };
+    // #9326: the build default is `file` where no Keychain is compiled; pin
+    // `keychain` (the in-memory double here) so every host runs one path.
+    std::fs::write(
+        &settings.machine_config,
+        "secrets:\n  default_backend: keychain\n",
+    )
+    .unwrap();
     Fixture {
         tmp,
         settings,
@@ -172,7 +179,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 21] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 24] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -566,12 +573,21 @@ async fn server_doctor_reports_backends_and_paths_only() {
     assert_eq!(bare.selected_backend, BackendId::keychain());
     assert_eq!(
         bare.backends,
-        [BackendStatus {
-            id: BackendId::keychain(),
-            available: true,
-            capabilities: vec!["READ".to_string(), "WRITE".to_string()],
-        }]
+        [
+            BackendStatus {
+                id: BackendId::keychain(),
+                available: true,
+                capabilities: vec!["READ".to_string(), "WRITE".to_string()],
+            },
+            // #9326: listed beside the Keychain; this fixture maps no `file`.
+            BackendStatus {
+                id: BackendId::file(),
+                available: false,
+                capabilities: Vec::new(),
+            },
+        ]
     );
+    assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
     let with_project: DoctorResponse = serde_json::from_value(ok(call(
         &fx.settings.socket,
@@ -585,6 +601,208 @@ async fn server_doctor_reports_backends_and_paths_only() {
         with_project.project_config,
         Some(root.join(PROJECT_CONFIG_SUBPATH))
     );
+    server.stop().await;
+}
+
+/// A factory for `fx` that also maps `file` to a value-file backend under
+/// the fixture's temp dir.
+fn with_file_backend(fx: &Fixture) -> (BackendFactory, crate::store::FileBackend) {
+    let file = crate::store::FileBackend::at(fx.tmp.path().join("values"));
+    let base = fx.backends();
+    let shared = file.clone();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "file" => Ok(Arc::new(shared.clone()) as Arc<dyn SecretBackend>),
+        _ => base(id),
+    });
+    (factory, file)
+}
+
+/// Why: #9326 AC4, owner ruling f5 — doctor reports the file backend as a
+/// degraded posture whether config chose it or the build default did.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_doctor_reports_the_file_posture() {
+    let fx = fixture();
+    let (factory, _file) = with_file_backend(&fx);
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: file\n",
+    )
+    .unwrap();
+    let server = fx.start_with(factory).await;
+    let doctor: DoctorResponse =
+        serde_json::from_value(ok(call(&fx.settings.socket, DOCTOR, Value::Null).await)).unwrap();
+    assert_eq!(doctor.selected_backend, BackendId::file());
+    assert_eq!(doctor.posture, Some(StoragePosture::FileDegraded));
+    let file_row = doctor
+        .backends
+        .iter()
+        .find(|row| row.id == BackendId::file())
+        .unwrap();
+    assert!(file_row.available);
+    assert_eq!(file_row.capabilities, ["READ", "WRITE", "LIST_NAMES"]);
+
+    // No config at all: the build default, which is `file` off macOS.
+    std::fs::remove_file(&fx.settings.machine_config).unwrap();
+    let bare: DoctorResponse =
+        serde_json::from_value(ok(call(&fx.settings.socket, DOCTOR, Value::Null).await)).unwrap();
+    let default = crate::store::default_backend();
+    assert_eq!(bare.selected_backend, default);
+    assert_eq!(bare.posture, Some(StoragePosture::of(&default)));
+    #[cfg(not(target_os = "macos"))]
+    assert_eq!(bare.posture, Some(StoragePosture::FileDegraded));
+    #[cfg(target_os = "macos")]
+    assert_eq!(bare.posture, Some(StoragePosture::Keychain));
+    server.stop().await;
+}
+
+/// Why: #9326 — a client older than a new posture variant still decodes the
+/// doctor answer, reading the unknown posture as `Other`.
+/// Red without `#[serde(other)]` on `StoragePosture::Other`.
+/// Test: itself.
+#[test]
+fn server_unknown_posture_decodes_as_other() {
+    let posture: StoragePosture = serde_json::from_value(json!("hsm_sealed")).unwrap();
+    assert_eq!(posture, StoragePosture::Other);
+    let known: StoragePosture = serde_json::from_value(json!("file_degraded")).unwrap();
+    assert_eq!(known, StoragePosture::FileDegraded);
+}
+
+/// Why: #9326 AC1 — set, list, delete and copy work through the file
+/// backend, and neither the index nor any answer carries a value.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_file_backend_set_list_delete_and_copy() {
+    let fx = fixture();
+    // #9326: only the untracked machine config may select `file` everywhere.
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  default_backend: file\n",
+    )
+    .unwrap();
+    let (factory, file) = with_file_backend(&fx);
+    let server = fx.start_with(factory).await;
+    let socket = &fx.settings.socket;
+    let project = vault("trusty/acme/web");
+
+    let set = call(
+        socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A", "value": VALUE}),
+    )
+    .await;
+    assert!(!wire(&set).contains(VALUE));
+    ok(set);
+    assert_eq!(fx.keychain.len(), 0, "the machine config chose `file`");
+    assert_eq!(
+        file.get(&project, &key("A")).unwrap().unwrap().expose(),
+        VALUE
+    );
+    let list = call(
+        socket,
+        method::LIST,
+        json!({"project": fx.project(), "vault": "trusty/acme/web"}),
+    )
+    .await;
+    assert!(!wire(&list).contains(VALUE));
+    assert_eq!(ok(list)["keys"][0]["name"], "A");
+
+    // file -> keychain, then keychain -> file for a key only the Keychain has.
+    let out = ok(call(
+        socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "file", "to_backend": "keychain"}),
+    )
+    .await);
+    assert_eq!(out, json!({"copied": ["A"], "failed": []}));
+    assert_eq!(
+        fx.keychain
+            .get(&project, &key("A"))
+            .unwrap()
+            .unwrap()
+            .expose(),
+        VALUE
+    );
+    fx.keychain
+        .set(&project, &key("B"), &SecretValue::new(SENTINEL))
+        .unwrap();
+    let back = call(
+        socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain", "to_backend": "file",
+               "keys": ["B"]}),
+    )
+    .await;
+    assert!(!wire(&back).contains(SENTINEL));
+    assert_eq!(ok(back), json!({"copied": ["B"], "failed": []}));
+    assert_eq!(
+        file.get(&project, &key("B")).unwrap().unwrap().expose(),
+        SENTINEL
+    );
+
+    for entry in std::fs::read_dir(&fx.settings.index_root).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(VALUE) && !text.contains(SENTINEL), "{text}");
+    }
+
+    ok(call(
+        socket,
+        method::DELETE,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A"}),
+    )
+    .await);
+    assert!(file.get(&project, &key("A")).unwrap().is_none());
+    assert_eq!(file.list_names(&project).unwrap(), [key("B")]);
+    server.stop().await;
+}
+
+/// Why: #9326, Architect ruling (basis ruling 06 R2) — on a Keychain build a
+/// tracked project config may not move values to plaintext files. The
+/// refusal is a fixed kind that names the machine key and echoes nothing
+/// from the repository; nothing is written. Off macOS `file` stays allowed.
+/// Red when `check_project_backend` lets the project `file` through.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_file_backend_is_refused_on_a_keychain_build() {
+    let fx = fixture();
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        format!("# {SENTINEL}\nsecrets:\n  backend: file\n"),
+    )
+    .unwrap();
+    let (factory, file) = with_file_backend(&fx);
+    let server = fx.start_with(factory).await;
+    let set = call(
+        &fx.settings.socket,
+        method::SET,
+        json!({"project": fx.project(), "vault": "trusty/acme/web", "key": "A", "value": VALUE}),
+    )
+    .await;
+    let project = vault("trusty/acme/web");
+    if cfg!(target_os = "macos") {
+        let text = wire(&set);
+        assert!(!text.contains(SENTINEL) && !text.contains(VALUE), "{text}");
+        assert!(text.contains("secrets.default_backend"), "{text}");
+        assert_eq!(
+            fixed_error(&set, method::SET),
+            ErrorKind::TrackedBackendRefused
+        );
+        assert!(file.get(&project, &key("A")).unwrap().is_none());
+        assert_eq!(
+            fx.keychain.len(),
+            0,
+            "never a silent switch to the Keychain"
+        );
+    } else {
+        ok(set);
+        assert_eq!(
+            file.get(&project, &key("A")).unwrap().unwrap().expose(),
+            VALUE
+        );
+    }
     server.stop().await;
 }
 
@@ -637,8 +855,14 @@ async fn server_project_config_overrides_the_project_vault() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_vault_outside_the_project_is_refused() {
     let fx = fixture();
+    seed_victim(&fx);
     let server = fx.start().await;
     for (name, params) in [
+        // #9328: R1 — the same check a pinned `secret://` reference passes.
+        (
+            method::LIST,
+            json!({"project": fx.project(), "vault": "trusty/victim/prod-repo"}),
+        ),
         (
             method::SET,
             json!({"project": fx.project(), "vault": "trusty/acme/other", "key": "K", "value": VALUE}),
@@ -654,8 +878,148 @@ async fn server_vault_outside_the_project_is_refused() {
     ] {
         let response = call(&fx.settings.socket, name, params).await;
         assert_eq!(fixed_error(&response, name), ErrorKind::VaultOutOfScope);
+        assert!(!wire(&response).contains("DB_URL"));
     }
-    assert!(fx.keychain.is_empty());
+    assert_eq!(fx.keychain.len(), 1, "only the seeded victim entry");
+    server.stop().await;
+}
+
+/// Index and store one key in another project's vault, `trusty/victim/prod-repo`.
+fn seed_victim(fx: &Fixture) {
+    let store = SecretStore::new(
+        Arc::clone(&fx.keychain) as Arc<dyn SecretBackend>,
+        NamesIndex::at(&fx.settings.index_root),
+    );
+    store
+        .set(
+            &vault("trusty/victim/prod-repo"),
+            &key("DB_URL"),
+            &SecretValue::new(SENTINEL),
+        )
+        .unwrap();
+}
+
+/// Why: #9328 vector (b), owner ruling 06 R2 — a tracked
+/// `secrets.vault: trusty/victim/prod-repo` made the victim vault this
+/// project's own, so list, set and delete reached it. Every method now
+/// answers `vault_out_of_scope` in fixed text and the victim entry is left
+/// alone; the same vault named in the untracked machine config is honoured.
+/// Red on the unfixed code: `secrets.scopes` answers the victim vault.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_tracked_vault_override_outside_the_owner_is_refused() {
+    let fx = fixture();
+    seed_victim(&fx);
+    let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "secrets:\n  vault: trusty/victim/prod-repo\n").unwrap();
+    let server = fx.start().await;
+    let victim = "trusty/victim/prod-repo";
+    for (name, params) in [
+        (method::SCOPES, json!({"project": fx.project()})),
+        (
+            method::LIST,
+            json!({"project": fx.project(), "vault": victim}),
+        ),
+        (
+            method::SET,
+            json!({"project": fx.project(), "vault": victim, "key": "DB_URL", "value": VALUE}),
+        ),
+        (
+            method::DELETE,
+            json!({"project": fx.project(), "vault": victim, "key": "DB_URL"}),
+        ),
+    ] {
+        let response = call(&fx.settings.socket, name, params).await;
+        assert_eq!(fixed_error(&response, name), ErrorKind::VaultOutOfScope);
+        let text = wire(&response);
+        assert!(
+            !text.contains(SENTINEL) && !text.contains("victim"),
+            "{text}"
+        );
+    }
+    let victim_vault = vault(victim);
+    assert_eq!(
+        fx.keychain
+            .get(&victim_vault, &key("DB_URL"))
+            .unwrap()
+            .map(|v| v.expose().to_string()),
+        Some(SENTINEL.to_string()),
+        "the victim entry is untouched"
+    );
+
+    std::fs::write(
+        &fx.settings.machine_config,
+        "secrets:\n  project_vaults:\n    acme/web: trusty/victim/prod-repo\n",
+    )
+    .unwrap();
+    let scopes = ok(call(
+        &fx.settings.socket,
+        method::SCOPES,
+        json!({"project": fx.project()}),
+    )
+    .await);
+    assert_eq!(scopes["scopes"][0]["vault"], victim);
+    assert_eq!(scopes["scopes"][1]["vault"], "trusty/acme");
+    server.stop().await;
+}
+
+/// Why: #9328 vector (c), owner ruling 06 R3 — a non-github.com remote is a
+/// fixed `remote_host_unsupported` error that names neither the host nor the
+/// path; github.com in https and ssh forms still resolves, and github.com
+/// over any other scheme or a `<helper>::` prefix is the same error.
+/// Red on the unfixed code: `secrets.scopes` answers `trusty/acme/web` for
+/// the `evil.example` remote.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_non_github_remote_is_a_fixed_error() {
+    let fx = fixture();
+    let server = fx.start().await;
+    let checkout = |name: &str, url: &str| {
+        let dir = fx.tmp.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["remote", "add", "origin", url]);
+        dir.display().to_string()
+    };
+    let evil = checkout("evil", "https://evil.example/Acme/Web.git");
+    let response = call(
+        &fx.settings.socket,
+        method::SCOPES,
+        json!({"project": evil}),
+    )
+    .await;
+    assert_eq!(
+        fixed_error(&response, method::SCOPES),
+        ErrorKind::RemoteHostUnsupported
+    );
+    assert!(!wire(&response).contains("evil"), "{}", wire(&response));
+
+    // #9328: github.com over a scheme DOC-74 §15.3 does not accept.
+    for (name, url) in [
+        ("file", "file://github.com/acme/app"),
+        ("git", "git://github.com/acme/app"),
+        ("http", "http://github.com/acme/app"),
+        ("helper", "x::https://github.com/acme/app"),
+    ] {
+        let dir = checkout(name, url);
+        let response = call(&fx.settings.socket, method::SCOPES, json!({"project": dir})).await;
+        assert_eq!(
+            fixed_error(&response, method::SCOPES),
+            ErrorKind::RemoteHostUnsupported,
+            "{url}"
+        );
+        assert!(!wire(&response).contains("acme/app"), "{}", wire(&response));
+    }
+
+    for (name, url) in [
+        ("https", "https://github.com/Acme/Web.git"),
+        ("ssh", "ssh://git@github.com/acme/web.git"),
+    ] {
+        let dir = checkout(name, url);
+        let scopes = ok(call(&fx.settings.socket, method::SCOPES, json!({"project": dir})).await);
+        assert_eq!(scopes["scopes"][0]["vault"], "trusty/acme/web", "{url}");
+    }
     server.stop().await;
 }
 
@@ -709,6 +1073,48 @@ async fn server_project_path_must_be_an_absolute_directory() {
         );
     }
     server.stop().await;
+}
+
+/// Why: #9328 — a kind missing from `ErrorKind::ALL` reads as `None` on the
+/// client. The match below is exhaustive, so a new variant fails to compile
+/// until it gets the next index; `ARMS` is that index plus one.
+/// Test: itself.
+#[test]
+fn error_kind_all_lists_every_variant_once() {
+    const ARMS: usize = 24;
+    fn index(kind: ErrorKind) -> usize {
+        match kind {
+            ErrorKind::InvalidParams => 0,
+            ErrorKind::ProjectInvalid => 1,
+            ErrorKind::ProjectUnresolved => 2,
+            ErrorKind::VaultOutOfScope => 3,
+            ErrorKind::InvalidValue => 4,
+            ErrorKind::NotFound => 5,
+            ErrorKind::Unsupported => 6,
+            ErrorKind::UnknownBackend => 7,
+            ErrorKind::BackendFailed => 8,
+            ErrorKind::OrphanedBackendEntry => 9,
+            ErrorKind::IndexCorrupt => 10,
+            ErrorKind::IndexBusy => 11,
+            ErrorKind::StorageUnavailable => 12,
+            ErrorKind::ConfigInvalid => 13,
+            ErrorKind::HomeUnavailable => 14,
+            ErrorKind::SameBackend => 15,
+            ErrorKind::AgentUseRefused => 16,
+            ErrorKind::InvalidEnvEntry => 17,
+            ErrorKind::EnvResolutionFailed => 18,
+            ErrorKind::DotenvSyntax => 19,
+            ErrorKind::RemoteHostUnsupported => 20,
+            ErrorKind::StorageRefused => 21,
+            ErrorKind::TrackedBackendRefused => 22,
+            ErrorKind::Internal => 23,
+        }
+    }
+    assert_eq!(ErrorKind::ALL.len(), ARMS);
+    for (i, kind) in ErrorKind::ALL.into_iter().enumerate() {
+        assert_eq!(index(kind), i, "{kind:?} is out of place in ErrorKind::ALL");
+        assert_eq!(ErrorKind::from_wire(kind.as_str()), Some(kind));
+    }
 }
 
 /// Why: DOC-74 §15.6 — every failure is fixed text per method and kind,
@@ -825,6 +1231,10 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
         key: SENTINEL.into(),
         searched: SENTINEL.into(),
     };
+    let out_of_scope = || SecretsError::VaultOutOfScope {
+        vault: SENTINEL.into(),
+        reason: SENTINEL,
+    };
     let cases = [
         (refused(), ErrorKind::AgentUseRefused),
         (wrapped(refused()), ErrorKind::AgentUseRefused),
@@ -842,6 +1252,15 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
                 reason: SENTINEL,
             },
             ErrorKind::DotenvSyntax,
+        ),
+        // #9328: out-of-scope stays a refusal even when `resolve_env` wraps it.
+        (out_of_scope(), ErrorKind::VaultOutOfScope),
+        (wrapped(out_of_scope()), ErrorKind::VaultOutOfScope),
+        (
+            SecretsError::UnsupportedRemoteHost {
+                dir: SENTINEL.into(),
+            },
+            ErrorKind::RemoteHostUnsupported,
         ),
     ];
     for (error, expected) in cases {
@@ -974,7 +1393,25 @@ async fn server_exits_when_idle_and_removes_its_socket() {
 async fn server_second_instance_is_refused_and_the_first_keeps_serving() {
     let fx = fixture();
     let first = fx.start().await;
-    let second = serve(fx.settings.clone(), fx.backends(), std::future::ready(())).await;
+    // #9326: the socket accepts before the first binder drops its bind lock,
+    // so under load the second binder can meet `BindInProgress`, a transient
+    // refusal (#8759). Retry inside a bound; the assertion below is unchanged.
+    let started = std::time::Instant::now();
+    let second = loop {
+        let attempt = serve(fx.settings.clone(), fx.backends(), std::future::ready(())).await;
+        let in_progress = matches!(
+            &attempt,
+            Err(ServeError::Bind { source, .. })
+                if matches!(
+                    source.downcast_ref::<UdsSecurityError>(),
+                    Some(UdsSecurityError::BindInProgress { .. })
+                )
+        );
+        if !in_progress || started.elapsed() > Duration::from_secs(5) {
+            break attempt;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert!(
         matches!(
             second,
@@ -1066,12 +1503,12 @@ fn settings_flags_beat_env_beat_defaults() {
     .unwrap();
     assert_eq!(
         flags,
-        ServerSettings {
-            socket: "/f/s.sock".into(),
-            index_root: "/f/index".into(),
-            machine_config: "/f/m.yaml".into(),
-            idle_timeout: Duration::from_secs(2),
-        }
+        ServerSettings::new(
+            "/f/s.sock".into(),
+            "/f/index".into(),
+            "/f/m.yaml".into(),
+            Duration::from_secs(2),
+        )
     );
 
     if let Some(home) = dirs::home_dir() {

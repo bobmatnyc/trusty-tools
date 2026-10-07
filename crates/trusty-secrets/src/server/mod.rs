@@ -33,7 +33,7 @@ pub mod settings;
 
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use errors::ErrorKind;
-pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD};
+pub use methods::{BackendStatus, DOCTOR, DoctorResponse, PROJECT_FIELD, StoragePosture};
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{BackendFactory, ServeError, ServeExit, State, default_backends, serve};
 pub use settings::{

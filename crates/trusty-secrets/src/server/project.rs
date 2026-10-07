@@ -9,12 +9,19 @@
 //! `<repo>/.trusty-tools/<crate>.yaml` (`.trusty-tools/trusty-memory.yaml`).
 //! What: [`PROJECT_CONFIG_SUBPATH`] (`.trusty-tools/trusty-secrets.yaml`, read
 //! through S1's `load_project_at`), and [`ProjectContext`]: the checkout
-//! root, its config, its [`ScopeSet`], and the backend resolved by the §6.1
-//! precedence.
+//! root, its config, the machine config, its [`ScopeSet`], and the backend
+//! resolved by the §6.1 precedence. #9328 (owner ruling 06 R2): the project
+//! file is tracked, so its `vault` may only pick a vault under the remote's
+//! owner; a wider override comes only from the untracked machine config.
+//! #9326: likewise, on a Keychain build the project file may not select the
+//! `file` backend; only the machine config may.
 //! Test: `server_scopes_round_trip_over_a_real_socket`,
 //! `server_project_without_a_remote_is_a_fixed_error`,
 //! `server_project_config_overrides_the_project_vault`,
-//! `server_vault_outside_the_project_is_refused`.
+//! `server_vault_outside_the_project_is_refused`,
+//! `server_tracked_vault_override_outside_the_owner_is_refused`,
+//! `server_non_github_remote_is_a_fixed_error`,
+//! `server_tracked_file_backend_is_refused_on_a_keychain_build`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +29,7 @@ use std::sync::Arc;
 use super::errors::ErrorKind;
 use super::router::State;
 use crate::api::{SecretsError, VaultName};
-use crate::store::config::{self, ProjectSecretsConfig, ResolvedConfig};
+use crate::store::config::{self, MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig};
 use crate::store::{ScopeSet, SecretBackend, platform};
 
 /// The project's `secrets:` config file, relative to the checkout root.
@@ -38,6 +45,7 @@ pub const PROJECT_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-secrets.yaml";
 pub struct ProjectContext {
     root: PathBuf,
     config: Option<ProjectSecretsConfig>,
+    machine: Option<MachineSecretsConfig>,
     scopes: ScopeSet,
 }
 
@@ -47,12 +55,16 @@ impl ProjectContext {
     /// What: `dir` must be absolute and a directory
     /// ([`ErrorKind::ProjectInvalid`]). The checkout root comes from
     /// `git rev-parse --show-toplevel`; outside a checkout the scopes are
-    /// undetermined. The project config is read from the root, then
-    /// [`ScopeSet::derive`] runs on the root with its `vault` override. Every
-    /// failure folds to a fixed [`ErrorKind`].
+    /// undetermined. The project config is read from the root and the
+    /// machine config from `state`, then [`ScopeSet::derive`] runs on the
+    /// root with both (machine `project_vaults` first, then the tracked
+    /// `vault`, which must sit under the remote's owner). A config that does
+    /// not parse fails closed. Every failure folds to a fixed [`ErrorKind`].
     /// Test: `server_project_without_a_remote_is_a_fixed_error`,
-    /// `server_project_path_must_be_an_absolute_directory`.
-    pub fn resolve(dir: &Path) -> Result<Self, ErrorKind> {
+    /// `server_project_path_must_be_an_absolute_directory`,
+    /// `server_tracked_vault_override_outside_the_owner_is_refused`,
+    /// `server_tracked_file_backend_is_refused_on_a_keychain_build`.
+    pub fn resolve(state: &State, dir: &Path) -> Result<Self, ErrorKind> {
         if !dir.is_absolute() || !dir.is_dir() {
             return Err(ErrorKind::ProjectInvalid);
         }
@@ -60,12 +72,19 @@ impl ProjectContext {
             dir: dir.to_path_buf(),
             reason: "not inside a git checkout",
         })?;
-        let config = config::load_project_at(&root.join(PROJECT_CONFIG_SUBPATH))?;
-        let vault_override = config.as_ref().and_then(|c| c.vault.clone());
-        let scopes = ScopeSet::derive(&root, vault_override)?;
+        let config_path = root.join(PROJECT_CONFIG_SUBPATH);
+        let config = config::load_project_at(&config_path)?;
+        // #9326: on a Keychain build only the machine config may pick `file`.
+        config::check_project_backend(config.as_ref(), &config_path)?;
+        let machine = config::load_machine_at(&state.settings.machine_config)?;
+        // #9328: the tracked `vault` is checked against the remote's owner;
+        // only the machine config may pick a vault outside it.
+        let tracked = config.as_ref().and_then(|c| c.vault.clone());
+        let scopes = ScopeSet::derive(&root, tracked, machine.as_ref())?;
         Ok(Self {
             root,
             config,
+            machine,
             scopes,
         })
     }
@@ -87,29 +106,25 @@ impl ProjectContext {
 
     /// Refuse a vault that is neither this project's vault nor its owner's.
     ///
+    /// What: [`ScopeSet::require_in_scope`], the same check a pinned
+    /// `secret://` reference passes (#9328).
     /// Test: `server_vault_outside_the_project_is_refused`.
     pub fn require_in_scope(&self, vault: &VaultName) -> Result<(), ErrorKind> {
-        if self.scopes.lookup_order().any(|v| v == vault) {
-            Ok(())
-        } else {
-            Err(ErrorKind::VaultOutOfScope)
-        }
+        Ok(self.scopes.require_in_scope(vault)?)
     }
 
     /// The backend this project uses (DOC-74 §6.1).
     ///
     /// What: project `secrets.backend`, else machine `default_backend`, else
-    /// `keychain`; a machine config that does not parse fails closed.
+    /// `keychain`, from the configs read by [`Self::resolve`].
     /// Test: `server_set_list_delete_round_trip_over_a_real_socket`.
     pub fn backend(&self, state: &State) -> Result<Arc<dyn SecretBackend>, ErrorKind> {
-        let resolved = self.resolved_config(state)?;
-        Ok((state.backends)(&resolved.backend)?)
+        Ok((state.backends)(&self.resolved_config().backend)?)
     }
 
     /// The §6.1 resolution for this project and the server's machine config.
-    pub fn resolved_config(&self, state: &State) -> Result<ResolvedConfig, ErrorKind> {
-        let machine = config::load_machine_at(&state.settings.machine_config)?;
-        Ok(config::resolve(self.config.as_ref(), machine.as_ref()))
+    pub fn resolved_config(&self) -> ResolvedConfig {
+        config::resolve(self.config.as_ref(), self.machine.as_ref())
     }
 }
 

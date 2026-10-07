@@ -1006,7 +1006,8 @@ impl TmuxDriver {
     /// by the mock-only unit tests.
     /// What: runs `list-panes -s -t <name> -F` and returns each row verbatim.
     /// Test: argv shape covered by `core::tmux::list_panes_argv`.
-    fn list_panes(&self, name: &str) -> Result<Vec<String>> {
+    /// #9313: crate-visible for `RealTmuxDriver::session_pane_ids`.
+    pub(crate) fn list_panes(&self, name: &str) -> Result<Vec<String>> {
         let raw = self.run(&TmuxCommand::ListPanes {
             name: name.to_string(),
         })?;
