@@ -184,7 +184,8 @@ pub enum SecretsError {
         waited: Duration,
     },
 
-    /// A config file exists but its `secrets:` section does not parse.
+    /// A config file exists but was refused unread (#7524: wrong type, too
+    /// large, a tracked symlink) or its `secrets:` section does not parse.
     #[error("secrets config {path} is invalid: {reason}")]
     Config {
         /// The config file.

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use super::platform;
+use super::platform::{self, Symlinks};
 use crate::api::{BackendId, OwnerName, RepoName, SecretsError, VaultName};
 
 /// Machine config file, relative to `$HOME` (DOC-74 §6.1).
@@ -168,38 +168,55 @@ pub fn machine_config_path() -> Result<PathBuf, SecretsError> {
     Ok(platform::home_dir()?.join(MACHINE_CONFIG_SUBPATH))
 }
 
+/// Largest project or machine config file the loaders read, in bytes.
+///
+/// What: 64 KiB, far above any real `secrets:` config. A larger file is
+/// refused before it is read (#7524).
+pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
+
 /// Load the machine `secrets:` section from `path`.
 ///
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
+/// What: the file may be a symlink — it is untracked, and dotfile managers
+/// link it — but its target must be a regular file within
+/// [`MAX_CONFIG_BYTES`].
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_non_regular_and_linked_files_are_refused`.
 pub fn load_machine_at(path: &Path) -> Result<Option<MachineSecretsConfig>, SecretsError> {
-    load_section_at(path)
+    load_section_at(path, Symlinks::Follow)
 }
 
 /// Load a project `secrets:` section from `path`.
 ///
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
+/// What: the file must be a regular file within [`MAX_CONFIG_BYTES`], and
+/// not a symlink, even to a file in the same checkout (#7524): the file is
+/// tracked, so a symlink's target is the repository's choice, and one
+/// project config has no use for a link.
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_symlink_to_dev_zero_is_refused_promptly`,
+/// `config_fifo_is_refused_without_blocking`,
+/// `config_non_regular_and_linked_files_are_refused`.
 pub fn load_project_at(path: &Path) -> Result<Option<ProjectSecretsConfig>, SecretsError> {
-    load_section_at(path)
+    load_section_at(path, Symlinks::Refuse)
 }
 
 /// Read the top-level `secrets:` key of a YAML file.
 ///
 /// What: a missing file, an empty file, no `secrets:` key, or `secrets: null`
-/// is `Ok(None)`. A read failure, a YAML syntax error, a non-mapping top
-/// level, or a section that does not decode is [`SecretsError::Config`] (or
-/// [`SecretsError::Io`] for the read), reported by position only — a
-/// serde message can quote the offending scalar.
-/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`.
-fn load_section_at<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, SecretsError> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(SecretsError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+/// is `Ok(None)`. A file refused by [`platform::read_config`] (wrong type,
+/// over [`MAX_CONFIG_BYTES`], not UTF-8, a refused symlink), a YAML syntax
+/// error, a non-mapping top level, or a section that does not decode is
+/// [`SecretsError::Config`]; another read failure is [`SecretsError::Io`].
+/// Both report by position or rule only — a serde message can quote the
+/// offending scalar.
+/// Test: `config_corrupt_file_fails_closed`, `config_absent_section_is_none`,
+/// `config_oversized_file_is_refused_and_a_normal_one_loads`.
+fn load_section_at<T: DeserializeOwned>(
+    path: &Path,
+    symlinks: Symlinks,
+) -> Result<Option<T>, SecretsError> {
+    // #7524: bounded, type-checked read; a tracked symlink to /dev/zero hung here.
+    let Some(raw) = platform::read_config(path, MAX_CONFIG_BYTES, symlinks)? else {
+        return Ok(None);
     };
     if raw.trim().is_empty() {
         return Ok(None);

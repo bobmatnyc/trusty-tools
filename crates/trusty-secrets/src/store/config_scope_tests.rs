@@ -299,6 +299,7 @@ fn config_oversized_file_is_refused_and_a_normal_one_loads() {
 
     let at_limit = format!("{header}#{}", "x".repeat(CONFIG_LIMIT - header.len() - 1));
     assert_eq!(at_limit.len(), CONFIG_LIMIT);
+    assert_eq!(super::config::MAX_CONFIG_BYTES, CONFIG_LIMIT as u64);
     let path = write(tmp.path(), "at-limit.yaml", &at_limit);
     let loaded = load_project_at(&path).unwrap().unwrap();
     assert_eq!(loaded.backend.unwrap().as_str(), "keychain");
