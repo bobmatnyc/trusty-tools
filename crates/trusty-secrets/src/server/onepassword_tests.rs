@@ -12,7 +12,7 @@
 use super::*;
 use crate::store::Capabilities;
 use crate::store::onepassword::OnePasswordBackend;
-use crate::store::onepassword::shim::{OpShim, plant_op};
+use crate::store::onepassword::shim::{OpShim, install_op, plant_op};
 
 const TOKEN: &str = "ops_token_canary_7519_server_0123456789";
 
@@ -292,12 +292,16 @@ async fn server_tracked_onepassword_program_is_refused_before_any_spawn() {
 /// Why: #7519 P1 carry-over (a) — the production factory opens 1Password
 /// only when the machine config enables it, so a tracked `backend:
 /// onepassword` alone cannot aim the server at an account, and nothing is
-/// written where the delete sweep does not reach. Opening spawns nothing.
+/// written where the delete sweep does not reach. Opening spawns nothing;
+/// #7519: it finds `op` in a `PATH` value handed in, never the process's own.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_backends_for_opens_onepassword_only_when_enabled() {
     let fx = fixture();
-    let factory = backends_for(&fx.settings, Some(SecretValue::new(TOKEN)));
+    let op_dir = fx.tmp.path().join("op-bin");
+    install_op(&op_dir, "exit 1");
+    let search = Some(op_dir.into_os_string());
+    let factory = backends_for(&fx.settings, Some(SecretValue::new(TOKEN)), search.clone());
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
         matches!(err, SecretsError::BackendNotEnabled { .. }),
@@ -307,7 +311,9 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
     let config = fx.repo.join(PROJECT_CONFIG_SUBPATH);
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "secrets:\n  backend: onepassword\n").unwrap();
-    let server = fx.start_with(backends_for(&fx.settings, None)).await;
+    let server = fx
+        .start_with(backends_for(&fx.settings, None, search))
+        .await;
     let response = set(&fx, "A").await;
     assert_eq!(
         fixed_error(&response, method::SET),

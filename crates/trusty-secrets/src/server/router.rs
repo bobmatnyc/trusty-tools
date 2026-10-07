@@ -13,6 +13,7 @@
 //! `server_second_instance_is_refused_and_the_first_keeps_serving`,
 //! `server_bind_failure_is_reported_and_the_occupant_kept`.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -54,12 +55,15 @@ pub fn default_backends() -> BackendFactory {
 /// use, write its template files where the startup sweep looks, and get the
 /// service-account token the binary took out of its own environment.
 /// What: [`open_backend_at`] with [`ServerSettings::machine_config`],
-/// [`ServerSettings::template_root`] and `onepassword_token`. The machine
-/// config is read on each open, so a change is seen on the next request.
+/// [`ServerSettings::template_root`], `onepassword_token`, and
+/// `search_path`, the `PATH` the binary read at start, which each open
+/// searches for `op`. The machine config is read on each open, so a change
+/// is seen on the next request.
 /// Test: `server_backends_for_opens_onepassword_only_when_enabled`.
 pub fn backends_for(
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
+    search_path: Option<OsString>,
 ) -> BackendFactory {
     let machine_config = settings.machine_config.clone();
     let template_root = settings.template_root.clone();
@@ -69,6 +73,7 @@ pub fn backends_for(
             &machine_config,
             &template_root,
             onepassword_token.clone(),
+            search_path.as_deref(),
         )
     })
 }

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use super::shim::OpShim;
+use super::shim::{OpShim, install_op};
 use super::{
     OnePasswordBackend, OnePasswordSettings, SERVICE_ACCOUNT_TOKEN_ENV, inherited_op_vars, item,
     markers, open, token_from,
@@ -400,6 +400,7 @@ fn onepassword_machine_settings_reach_argv() {
         onepassword: Some(CliSettings {
             account: Some(account.to_string()),
             config_path: Some(PathBuf::from(config)),
+            ..CliSettings::default()
         }),
         ..MachineSecretsConfig::default()
     };
@@ -499,18 +500,21 @@ fn onepassword_machine_program_pin_is_used_and_must_be_absolute() {
 
 /// Why: #7519 P1 carry-over (a) — 1Password opens only when the untracked
 /// machine config enables it, so every value this server writes there is
-/// one the delete sweep reaches. Opening spawns nothing.
+/// one the delete sweep reaches. Opening spawns nothing; #7519: it finds
+/// `op` in a `PATH` value handed in, never the process's own.
 /// Test: itself.
 #[test]
 fn onepassword_open_requires_machine_enablement() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("machine.yaml");
     let templates = tmp.path().join("tmp");
+    let op_dir = tmp.path().join("op-bin");
+    install_op(&op_dir, "exit 1");
     let open_with = |yaml: Option<&str>| {
         if let Some(yaml) = yaml {
             std::fs::write(&path, yaml).unwrap();
         }
-        open(&path, &templates, None)
+        open(&path, &templates, None, Some(op_dir.as_os_str()))
     };
     for yaml in [None, Some("secrets:\n  default_backend: keychain\n")] {
         let err = open_with(yaml).unwrap_err();

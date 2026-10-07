@@ -266,14 +266,14 @@ pub enum SecretsError {
     )]
     FileBackendNotSelected,
 
-    /// A tracked project config set a vendor CLI's `account` or
-    /// `config_path`, which only the untracked machine config may. Raised
+    /// A tracked project config set a vendor CLI's `account`, `config_path`
+    /// or `program`, which only the untracked machine config may. Raised
     /// before any backend is opened, on every build.
     // #7519: owner ruling 2026-10-07; names the key, never its value.
     #[error(
         "secrets config {path} is tracked and may not set `{key}`: a repository could \
-         point the CLI at an account or config directory of its choosing; remove it \
-         and set it in the machine config instead"
+         point the CLI at an account, config directory or program of its choosing; \
+         remove it and set it in the machine config instead"
     )]
     TrackedCliSettingRefused {
         /// The tracked project config file.

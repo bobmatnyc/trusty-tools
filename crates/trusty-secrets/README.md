@@ -157,11 +157,20 @@ secrets:
   onepassword:
     account: my.1password.com    # optional: `op --account`
     config_path: /abs/op/config  # optional: `op --config`, an absolute path
+    program: /opt/homebrew/bin/op  # optional: `op` itself, an absolute path
 ```
 
 `onepassword: {}` enables it with no settings. A project file may then select
-it with `secrets.backend: onepassword`. It may not set `account` or
-`config_path`.
+it with `secrets.backend: onepassword`. It may not set `account`,
+`config_path` or `program`.
+
+The backend runs `op` by absolute path only, found once when the backend
+opens. `program` names it as given: it must be an absolute path to an
+executable file. Without `program`, the backend takes the first executable
+`op` in an absolute directory on the server's `PATH`. Empty, `.` and other
+relative `PATH` entries are skipped, because they name the working directory
+of whatever started the server. With no such `op`, calls fail with
+`cli_not_installed`; install `op` in an absolute directory or set `program`.
 
 - The trusty vault name is the 1Password vault's name, for example
   `trusty/acme/web`. Create that vault first.

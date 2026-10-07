@@ -1,11 +1,11 @@
 //! [`OnePasswordSettings`]: how the 1Password backend invokes `op`, and
 //! which of `op`'s environment variables the server keeps.
 //!
-//! Why: #7519 A4/A10 and owner ruling 2026-10-07 — `account` and
-//! `config_path` come only from the untracked machine config, and the
-//! service-account token reaches `op` only through the runner's environment
-//! overlay. A caller's inherited `OP_*` variables must not choose the
-//! account, the config directory, or a Connect server for it.
+//! Why: #7519 A4/A10 and owner ruling 2026-10-07 — `account`,
+//! `config_path` and a `program` pin come only from the untracked machine
+//! config, and the service-account token reaches `op` only through the
+//! runner's environment overlay. A caller's inherited `OP_*` variables must
+//! not choose the account, the config directory, or a Connect server for it.
 //! What: [`OnePasswordSettings`] (program, flags, token, template
 //! directory, timeout), built from the machine config by
 //! [`OnePasswordSettings::from_machine`]; [`inherited_op_vars`], the
@@ -37,8 +37,10 @@ const SESSION_PREFIX: &str = "OP_SESSION_";
 /// How the backend invokes `op`.
 ///
 /// Why: see the module docs.
-/// What: `program` plus `leading_args` is the command (`op` and nothing in
-/// production; tests name `/bin/sh` and a shim script by absolute path).
+/// What: `program` plus `leading_args` is the command (the absolute `op`
+/// and nothing in production; tests name `/bin/sh` and a shim script by
+/// absolute path). A backend refuses to spawn a `program` that is not
+/// absolute (#7519).
 /// `account` and `config_dir` become `--account` and `--config` in argv;
 /// `token` becomes [`SERVICE_ACCOUNT_TOKEN_ENV`] in the child's environment
 /// only. Template files for `op item edit` go under `template_root`.
@@ -47,7 +49,7 @@ const SESSION_PREFIX: &str = "OP_SESSION_";
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct OnePasswordSettings {
-    /// The program to run.
+    /// The program to run; absolute by the time a backend spawns it.
     pub program: OsString,
     /// Arguments placed before every `op` argument.
     pub leading_args: Vec<OsString>,
@@ -78,7 +80,10 @@ impl fmt::Debug for OnePasswordSettings {
 }
 
 impl OnePasswordSettings {
-    /// `op` on `PATH`, no account, no config directory, no token.
+    /// Bare `op`, no account, no config directory, no token.
+    ///
+    /// What: a backend refuses to spawn bare `op`; `open` resolves it with
+    /// `resolve_program`, and a test sets `program` by absolute path.
     pub fn new(template_root: PathBuf) -> Self {
         Self {
             program: OsString::from("op"),
@@ -93,12 +98,15 @@ impl OnePasswordSettings {
 
     /// Settings from the machine config's `secrets.onepassword` section.
     ///
-    /// What: [`Self::new`] with `token`, plus the section's `account` and
-    /// `config_path`. An account outside `[A-Za-z0-9._@:-]`, or starting
-    /// with `-`, and a relative config path are [`SecretsError::Config`]
-    /// naming `machine_path`, never the value. The project file is never
-    /// read here; P0 refuses these keys in it.
-    /// Test: `onepassword_machine_settings_reach_argv`.
+    /// What: [`Self::new`] with `token`, plus the section's `account`,
+    /// `config_path` and `program`. An account outside `[A-Za-z0-9._@:-]`,
+    /// or starting with `-`, and a relative config path or program are
+    /// [`SecretsError::Config`] naming `machine_path`, never the value. A
+    /// `program` that is not a regular executable file is
+    /// [`SecretsError::CliNotInstalled`]. The project file is never read
+    /// here; P0 refuses these keys in it.
+    /// Test: `onepassword_machine_settings_reach_argv`,
+    /// `onepassword_machine_program_pin_is_used_and_must_be_absolute`.
     pub fn from_machine(
         machine: &MachineSecretsConfig,
         machine_path: &Path,
@@ -127,6 +135,19 @@ impl OnePasswordSettings {
                     ));
                 }
                 settings.config_dir = Some(dir.clone());
+            }
+            // #7519: a pin runs as given, so only an absolute path; no
+            // working directory or `PATH` entry can choose it.
+            if let Some(program) = &section.program {
+                if !program.is_absolute() {
+                    return Err(invalid(
+                        "`secrets.onepassword.program` must be an absolute path",
+                    ));
+                }
+                if !super::program::is_executable_file(program) {
+                    return Err(super::program::not_installed(program.as_os_str()));
+                }
+                settings.program = program.clone().into_os_string();
             }
         }
         Ok(settings)

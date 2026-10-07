@@ -112,6 +112,9 @@ pub struct ProjectSecretsConfig {
     /// Read only so [`check_project_backend`] can refuse it here (#7519).
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub program: Option<PathBuf>,
     /// DOC-74 §6.2's 1Password section; read only to refuse it (#7519).
     #[serde(default)]
     pub onepassword: Option<CliSettings>,
@@ -134,6 +137,10 @@ pub struct CliSettings {
     /// The vendor CLI's config file or directory.
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// The vendor CLI's executable, by absolute path (machine config only).
+    // #7519: a pin skips the `PATH` search; a repository must not choose it.
+    #[serde(default)]
+    pub program: Option<PathBuf>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
@@ -177,20 +184,23 @@ pub fn resolve(
 }
 
 /// Refuse a tracked project config that selects `file` on a Keychain build,
-/// or that sets a vendor CLI's `account` or `config_path` on any build.
+/// or that sets a vendor CLI's `account`, `config_path` or `program` on any
+/// build.
 ///
 /// Why: #9326, Architect ruling (basis ruling 06 R2, the #9328 class) — the
 /// project file is tracked, so anyone who lands a change in the repository
 /// could move every value to plaintext files. Where a Keychain is compiled
 /// in, only the untracked machine config may select `file`. #7519, owner
 /// ruling 2026-10-07: for the same reason it may not aim a vendor CLI at an
-/// account or config directory of its choosing.
+/// account or config directory of its choosing, nor choose the program run
+/// as the CLI.
 /// What: on a Keychain build, project `secrets.backend: file` is
 /// [`SecretsError::TrackedBackendRefused`] naming `path` (the project file)
 /// and the machine key to set, never the file's content. Any other project
 /// backend, and every project backend on a build without a Keychain, passes.
-/// Then, on every build, an `account` or `config_path` at the top level or
-/// under `onepassword`/`keeper` is [`SecretsError::TrackedCliSettingRefused`]
+/// Then, on every build, an `account`, `config_path` or `program` at the top
+/// level or under `onepassword`/`keeper` is
+/// [`SecretsError::TrackedCliSettingRefused`]
 /// naming the key, never its value.
 /// Test: `config_tracked_file_backend_is_refused_on_a_keychain_build`,
 /// `server_tracked_file_backend_is_refused_on_a_keychain_build`,
@@ -273,23 +283,34 @@ pub(crate) fn check_value_write_for(
 
 /// The first CLI setting `project` sets, as the key the refusal names.
 fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
+    // #7519: `program` too — a tracked pin would choose what runs as the CLI.
     let flags = |s: Option<&CliSettings>| {
-        s.map_or([false, false], |s| {
-            [s.account.is_some(), s.config_path.is_some()]
+        s.map_or([false; 3], |s| {
+            [
+                s.account.is_some(),
+                s.config_path.is_some(),
+                s.program.is_some(),
+            ]
         })
     };
+    let top = [
+        project.account.is_some(),
+        project.config_path.is_some(),
+        project.program.is_some(),
+    ];
     let sections = [
-        (
-            [project.account.is_some(), project.config_path.is_some()],
-            ["account", "config_path"],
-        ),
+        (top, ["account", "config_path", "program"]),
         (
             flags(project.onepassword.as_ref()),
-            ["onepassword.account", "onepassword.config_path"],
+            [
+                "onepassword.account",
+                "onepassword.config_path",
+                "onepassword.program",
+            ],
         ),
         (
             flags(project.keeper.as_ref()),
-            ["keeper.account", "keeper.config_path"],
+            ["keeper.account", "keeper.config_path", "keeper.program"],
         ),
     ];
     sections

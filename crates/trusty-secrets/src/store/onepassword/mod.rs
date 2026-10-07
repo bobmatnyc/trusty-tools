@@ -25,6 +25,10 @@
 //! - `list_names` is not implemented: listing goes through the names-only
 //!   index, so the capabilities are `READ | WRITE` only (A6).
 //!
+//! `op` runs by absolute path only: a machine `program` pin as given, or
+//! the first `op` in an absolute `PATH` entry, found once at open (`program.rs`).
+//! Nothing is spawned by bare name.
+//!
 //! The key never reaches argv: it is the item's title, compared with listed
 //! rows and written inside the template. Only the validated vault name,
 //! listed ids that pass `checked_id`, and fixed flags do. `--account`
@@ -46,13 +50,17 @@
 
 mod item;
 mod markers;
+mod program;
 mod settings;
 #[cfg(test)]
 pub(crate) mod shim;
 
 #[cfg(test)]
 mod onepassword_tests;
+#[cfg(test)]
+mod path_tests;
 
+use std::ffi::OsStr;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -70,7 +78,8 @@ pub use settings::{
 const SPEC: CliSpec = CliSpec::new(BackendId::ONEPASSWORD, "op", DEFAULT_TIMEOUT)
     .with_hints(
         "install the 1Password CLI (https://developer.1password.com/docs/cli/get-started/) \
-         or select another secrets backend",
+         in an absolute PATH directory, set `secrets.onepassword.program` in the machine \
+         config to its absolute path, or select another secrets backend",
         "unlock the 1Password app with its CLI integration on, run `op signin`, or set \
          OP_SERVICE_ACCOUNT_TOKEN for a headless run",
     )
@@ -108,8 +117,17 @@ impl OnePasswordBackend {
     }
 
     /// One `op` invocation for `vault` and `key`, global flags first.
-    fn command(&self, vault: &VaultName, key: &SecretKey) -> CliCommand {
+    ///
+    /// What: a `program` that is not absolute is
+    /// [`SecretsError::CliNotInstalled`], and nothing is spawned.
+    /// Test: `onepassword_path_without_an_absolute_op_is_cli_not_installed`.
+    fn command(&self, vault: &VaultName, key: &SecretKey) -> Result<CliCommand, SecretsError> {
         let s = &self.settings;
+        // #7519: a bare or relative name would resolve at spawn, through
+        // `PATH` or the working directory, where a planted `op` answers.
+        if !Path::new(&s.program).is_absolute() {
+            return Err(program::not_installed(&s.program));
+        }
         let mut command = CliCommand::new(SPEC)
             .program(&s.program)
             .args(&s.leading_args)
@@ -126,7 +144,7 @@ impl OnePasswordBackend {
         if let Some(token) = &s.token {
             command = command.env(SERVICE_ACCOUNT_TOKEN_ENV, token.expose());
         }
-        command
+        Ok(command)
     }
 
     fn failed(&self, vault: &VaultName, key: &SecretKey, reason: &'static str) -> SecretsError {
@@ -149,7 +167,7 @@ impl OnePasswordBackend {
     /// The `PASSWORD` rows titled `key` in `vault`, or [`Lookup::NoVault`].
     fn lookup(&self, vault: &VaultName, key: &SecretKey) -> Result<Lookup, SecretsError> {
         let run = self
-            .command(vault, key)
+            .command(vault, key)?
             .args([
                 "item",
                 "list",
@@ -196,7 +214,7 @@ impl OnePasswordBackend {
     ) -> Result<(), SecretsError> {
         // #7519: owner ruling — the value reaches `op` on stdin only.
         let run = self
-            .command(vault, key)
+            .command(vault, key)?
             .args(["item", "create", "--vault", vault.as_str(), "-"])
             .run_with_stdin(template)?;
         let verdict = run.verdict;
@@ -215,11 +233,12 @@ impl OnePasswordBackend {
         template: &SecretValue,
     ) -> Result<(), SecretsError> {
         let id = item::checked_id(&row.id).map_err(|reason| self.failed(vault, key, reason))?;
+        // #7519: the command first, so a refused program writes no file.
+        let command = self.command(vault, key)?;
         // #7519: owner ruling — `op item edit` reads a template only from a
         // file; the guard removes it on every return path.
         let file = TemplateFile::create(&self.settings.template_root, template)?;
-        let run = self
-            .command(vault, key)
+        let run = command
             .args(["item", "edit", id, "--vault", vault.as_str(), "--template"])
             .arg(file.path())
             .run();
@@ -255,7 +274,7 @@ impl SecretBackend for OnePasswordBackend {
         let reference = item::op_reference(&row.vault.id, &row.id)
             .map_err(|reason| self.failed(vault, key, reason))?;
         // #7519: A3 — a missing item is `Ok(None)`; locked or unknown is `Err`.
-        self.command(vault, key)
+        self.command(vault, key)?
             .args(["read", "--no-newline", reference.as_str()])
             .run()?
             .into_value()
@@ -290,7 +309,7 @@ impl SecretBackend for OnePasswordBackend {
         for row in rows {
             let id = item::checked_id(&row.id).map_err(|reason| self.failed(vault, key, reason))?;
             let run = self
-                .command(vault, key)
+                .command(vault, key)?
                 .args(["item", "delete", id, "--vault", vault.as_str()])
                 .run()?;
             let verdict = run.verdict;
@@ -312,13 +331,18 @@ impl SecretBackend for OnePasswordBackend {
 /// file alone cannot point the server at a 1Password account.
 /// What: reads `machine_config`; unless [`MachineSecretsConfig::enables`]
 /// the backend, [`SecretsError::BackendNotEnabled`]. Then
-/// [`OnePasswordSettings::from_machine`] with `template_root` and `token`.
-/// Spawns nothing, so `secrets.doctor` can call it (A9).
-/// Test: `onepassword_open_requires_machine_enablement`.
+/// [`OnePasswordSettings::from_machine`] with `template_root` and `token`,
+/// and #7519: `OnePasswordSettings::resolve_program` against
+/// `search_path`, a `PATH` value the caller read — once, here, never per
+/// call. No `op` is [`SecretsError::CliNotInstalled`]. Spawns nothing, so
+/// `secrets.doctor` can call it (A9).
+/// Test: `onepassword_open_requires_machine_enablement`,
+/// `onepassword_path_search_skips_relative_empty_and_dot_entries`.
 pub fn open(
     machine_config: &Path,
     template_root: &Path,
     token: Option<SecretValue>,
+    search_path: Option<&OsStr>,
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     let id = BackendId::onepassword();
     let machine: Option<MachineSecretsConfig> = config::load_machine_at(machine_config)?;
@@ -332,6 +356,7 @@ pub fn open(
         machine_config,
         template_root.to_path_buf(),
         token,
-    )?;
+    )?
+    .resolve_program(search_path)?;
     Ok(Arc::new(OnePasswordBackend::new(settings)))
 }

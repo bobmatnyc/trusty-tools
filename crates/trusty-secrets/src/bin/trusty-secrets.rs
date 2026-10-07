@@ -13,7 +13,8 @@
 //! The git redirect variables are removed from its environment at start.
 //! #7519: on a `cli-backends` build, so is every `OP_*` variable but an
 //! `op signin` session; the service-account token is kept for the 1Password
-//! backend's overlay.
+//! backend's overlay. `PATH` is read once at start too, and the 1Password
+//! backend searches its absolute entries for `op` at each open.
 //! Test: `tests/on_demand_server.rs`.
 
 use std::process::ExitCode;
@@ -35,12 +36,14 @@ fn main() -> ExitCode {
         unsafe { std::env::remove_var(var) };
     }
     let onepassword_token = take_onepassword_env();
+    // #7519: handed to the factory, so `op` is found by absolute path only.
+    let search_path = std::env::var_os("PATH");
     match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(onepassword_token)),
+        Ok(runtime) => runtime.block_on(run(onepassword_token, search_path)),
         Err(e) => {
             eprintln!("trusty-secrets: cannot start the runtime: {e}");
             ExitCode::FAILURE
@@ -74,7 +77,10 @@ fn take_onepassword_env() -> Option<trusty_secrets::api::SecretValue> {
 
 /// Parse the command line and serve until idle or a signal.
 #[cfg(unix)]
-async fn run(onepassword_token: Option<trusty_secrets::api::SecretValue>) -> ExitCode {
+async fn run(
+    onepassword_token: Option<trusty_secrets::api::SecretValue>,
+    search_path: Option<std::ffi::OsString>,
+) -> ExitCode {
     use trusty_secrets::server::{ServerSettings, backends_for, serve};
 
     let settings = match ServerSettings::from_args(std::env::args_os().skip(1), |name| {
@@ -94,8 +100,8 @@ async fn run(onepassword_token: Option<trusty_secrets::api::SecretValue>) -> Exi
         idle.as_secs()
     );
     // #7519: CLI backends read the machine config and template directory
-    // these settings name, and take the token captured at start.
-    let backends = backends_for(&settings, onepassword_token);
+    // these settings name, and take the token and `PATH` captured at start.
+    let backends = backends_for(&settings, onepassword_token, search_path);
     match serve(settings, backends, trusty_common::shutdown_signal()).await {
         Ok(exit) => {
             eprintln!("trusty-secrets: {exit:?}; exiting");
