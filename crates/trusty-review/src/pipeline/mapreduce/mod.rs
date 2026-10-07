@@ -38,8 +38,8 @@ pub mod splitter;
 pub mod synthesis;
 pub mod unit;
 
-pub use map::{MapContext, run_map_stage};
 use map::run_map_stage_graded; // #9310 ruling 50
+pub use map::{MapContext, run_map_stage};
 pub use outcome::{MapOutcome, MapReduceStats, ReducedReview};
 pub use reduce::reduce;
 pub use splitter::split_into_units;
@@ -102,9 +102,9 @@ pub(crate) async fn run_map_reduce_with_wiped(
     );
     let graded = run_map_stage_graded(&units, llm, ctx, config.concurrency).await;
     // #9310 ruling 50: the strictest chunk floor, before hygiene relaxes a chunk.
-    let chunk_floor = graded
-        .iter()
-        .fold(Verdict::Approve, |worst, (_, f)| stricter_of(worst, f.clone()));
+    let chunk_floor = graded.iter().fold(Verdict::Approve, |worst, (_, f)| {
+        stricter_of(worst, f.clone())
+    });
     let mut outcomes: Vec<MapOutcome> = graded.into_iter().map(|(o, _)| o).collect();
 
     // Sanitize + verify citation integrity BEFORE reduce derives the aggregate

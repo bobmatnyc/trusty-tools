@@ -79,7 +79,12 @@ fn chunk_reply(n: usize, grade: &str, confidence: f32) -> String {
 async fn run(chunks: Vec<(usize, String)>, synthesis: &'static str) -> crate::models::ReviewResult {
     let (source, _tmp) = local_source(&chunked_diff());
     let llm: Arc<dyn LlmProvider> = Arc::new(ChunkScript { chunks, synthesis });
-    run_review(&ReviewConfig::load(None), input(source), confirmed_deps(llm)).await
+    run_review(
+        &ReviewConfig::load(None),
+        input(source),
+        confirmed_deps(llm),
+    )
+    .await
 }
 
 /// #9310 ruling 50, R8: a chunk APPROVE graded F with one confirmed Medium at

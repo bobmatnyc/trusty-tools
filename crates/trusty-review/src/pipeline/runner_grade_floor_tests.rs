@@ -237,8 +237,5 @@ async fn f_with_every_finding_withheld_stays_suppressed_reject() {
     assert!(result.findings.is_empty(), "{:?}", result.findings);
     assert!(!result.withheld_findings.is_empty());
     assert_eq!(result.verdict, Verdict::RequestChanges, "{result:?}");
-    assert_eq!(
-        result.verdict_status,
-        Some(VerdictStatus::SuppressedReject)
-    );
+    assert_eq!(result.verdict_status, Some(VerdictStatus::SuppressedReject));
 }

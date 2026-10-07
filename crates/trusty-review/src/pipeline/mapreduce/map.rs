@@ -25,14 +25,14 @@ use tracing::{debug, warn};
 
 use crate::{
     llm::{LlmProvider, LlmRequest},
+    models::Verdict,
     pipeline::{
+        letter_grade::grade_floor,  // #9310 ruling 50: a chunk's grade floor
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
         prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
         reply_shape::describe_reply,
-        letter_grade::grade_floor,  // #9310 ruling 50: a chunk's grade floor
         verdict_status::judged_verdict, // #9310: a chunk's grade floors its verdict
     },
-    models::Verdict,
     voice::VoiceConfig,
 };
 

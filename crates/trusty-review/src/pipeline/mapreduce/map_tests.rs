@@ -395,9 +395,8 @@ async fn run_map_stage_graded_reports_each_chunk_floor() {
         ("none", Verdict::Approve),
     ];
     for (grade, floor) in cases {
-        let json = format!(
-            r#"{{"verdict":"APPROVE","grade":"{grade}","summary":"s","findings":[]}}"#
-        );
+        let json =
+            format!(r#"{{"verdict":"APPROVE","grade":"{grade}","summary":"s","findings":[]}}"#);
         let llm: Arc<dyn LlmProvider> = Arc::new(RecordingLlm::with_response(&json));
         let pm = pr_meta();
         let context = ReviewContext::default();
