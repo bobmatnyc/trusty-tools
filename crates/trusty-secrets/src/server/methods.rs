@@ -26,7 +26,7 @@ use super::audit::AuditMethod;
 use super::errors::ErrorKind;
 use super::gate::{Recording, audited};
 use super::project::ProjectContext;
-use super::router::State;
+use super::router::{State, account_machine};
 use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
@@ -153,11 +153,10 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         project.require_in_scope(&request.vault)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
         // #7519: a backend switch or a copy leaves values in other backends.
-        let others = other_backends(
-            state,
-            &project.resolved_config().backend,
-            project.machine_config(),
-        )?;
+        // Ruling 74: the CLI backends swept are the ones the factory opens,
+        // so enablement comes from the account's file, not the spawner's.
+        let account = account_machine(state.file_consent_config.as_deref());
+        let others = other_backends(state, &project.resolved_config().backend, account.as_ref())?;
         gate.admit()?;
         let response = store.delete_across(&request.vault, &request.key, &others)?;
         to_json(&response)
@@ -168,7 +167,7 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
 ///
 /// Why: A5 — a delete must clear the backend a key was set under before a
 /// switch, not only the one configured now.
-/// What: [`swept_backends`] for the machine config — the local backends,
+/// What: [`swept_backends`] for the account's machine config — the local backends,
 /// plus each CLI backend it enables (#7519 P1 carry-over (a)) — minus
 /// `configured`, each opened through the factory. A factory that answers
 /// [`SecretsError::UnknownBackend`] has no such backend, so it holds

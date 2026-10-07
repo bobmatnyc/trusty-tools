@@ -301,7 +301,14 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
     let op_dir = fx.tmp.path().join("op-bin");
     install_op(&op_dir, "exit 1");
     let search = Some(op_dir.into_os_string());
-    let factory = backends_for(&fx.settings, Some(SecretValue::new(TOKEN)), search.clone());
+    // The fixture's machine config is also the account's own file here.
+    let account = Some(fx.settings.machine_config.clone());
+    let factory = router::backends_with(
+        account.clone(),
+        &fx.settings,
+        Some(SecretValue::new(TOKEN)),
+        search.clone(),
+    );
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
         matches!(err, SecretsError::BackendNotEnabled { .. }),
@@ -312,7 +319,7 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "secrets:\n  backend: onepassword\n").unwrap();
     let server = fx
-        .start_with(backends_for(&fx.settings, None, search))
+        .start_with(router::backends_with(account, &fx.settings, None, search))
         .await;
     let response = set(&fx, "A").await;
     assert_eq!(
@@ -329,6 +336,99 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
         Capabilities::READ | Capabilities::WRITE
     );
     assert!(!format!("{opened:?}").contains(TOKEN));
+}
+
+/// A spawner-chosen machine config that enables 1Password and pins `program`
+/// to a planted `op` that creates `marker` if it ever runs.
+fn spawner_enables_planted_op(fx: &Fixture, marker: &Path) {
+    let planted = plant_op(&fx.tmp.path().join("planted"), marker);
+    machine(
+        fx,
+        &format!(
+            "secrets:\n  default_backend: keychain\n  onepassword:\n    program: {}\n",
+            planted.display()
+        ),
+    );
+}
+
+/// A server whose `onepassword` opens through the production factory with
+/// `account` as the account's own machine config, and whose other backends
+/// are the fixture's in-memory doubles.
+async fn start_with_account(fx: &Fixture, account: Option<PathBuf>) -> Running {
+    let production = router::backends_with(account.clone(), &fx.settings, None, None);
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        BackendId::ONEPASSWORD => production(id),
+        _ => base(id),
+    });
+    let mut state = fx.state(factory);
+    state.file_consent_config = account;
+    fx.start_state(state).await
+}
+
+/// Why: #7519, ruling 74 — `--machine-config` and `$HOME` are the spawner's
+/// to choose, so a file there that enables 1Password and pins `program`
+/// neither opens the backend nor runs that program; only the account's own
+/// machine config may. Red before the factory and the delete sweep read
+/// enablement from the account's file.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_onepassword_enablement_ignores_a_spawner_chosen_machine_config() {
+    let fx = fixture();
+    let marker = fx.tmp.path().join("planted-ran");
+    spawner_enables_planted_op(&fx, &marker);
+    let account = fx.tmp.path().join("account").join("config.yaml");
+    std::fs::create_dir_all(account.parent().unwrap()).unwrap();
+    std::fs::write(&account, "secrets:\n  default_backend: keychain\n").unwrap();
+
+    let factory = router::backends_with(
+        Some(account.clone()),
+        &fx.settings,
+        Some(SecretValue::new(TOKEN)),
+        None,
+    );
+    let err = factory(&BackendId::onepassword()).unwrap_err();
+    assert!(
+        matches!(err, SecretsError::BackendNotEnabled { .. }),
+        "{err:?}"
+    );
+
+    let server = start_with_account(&fx, Some(account)).await;
+    ok(set(&fx, "A").await);
+    assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
+    server.stop().await;
+    assert!(!marker.exists(), "the spawner-pinned program ran");
+}
+
+/// Why: #7519, ruling 74 — an account machine config that cannot be read,
+/// or no account home at all, leaves 1Password off whatever the spawner's
+/// file says, and the server still serves the other backends.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
+    let fx = fixture();
+    let marker = fx.tmp.path().join("planted-ran");
+    spawner_enables_planted_op(&fx, &marker);
+    // A directory where the file belongs: present, but not readable as one.
+    let account = fx.tmp.path().join("account-dir");
+    std::fs::create_dir(&account).unwrap();
+    assert!(crate::store::config::load_machine_at(&account).is_err());
+
+    for config in [Some(account.clone()), None] {
+        let factory = router::backends_with(config.clone(), &fx.settings, None, None);
+        let err = factory(&BackendId::onepassword()).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::BackendNotEnabled { .. }),
+            "{config:?}: {err:?}"
+        );
+    }
+
+    let server = start_with_account(&fx, Some(account)).await;
+    ok(set(&fx, "A").await);
+    assert_eq!(listed(&fx).await[0]["name"], json!("A"));
+    assert_eq!(ok(delete(&fx, "A").await), json!({"removed": true}));
+    server.stop().await;
+    assert!(!marker.exists(), "the spawner-pinned program ran");
 }
 
 /// Why: #7519 owner ruling — a crash skips the template guard's drop and

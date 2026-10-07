@@ -31,9 +31,10 @@ use super::methods::{self, MethodFn};
 use super::settings::ServerSettings;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
-use crate::store::config::MACHINE_CONFIG_SUBPATH;
+use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, open_backend, open_backend_at, platform,
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at,
+    platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -51,31 +52,90 @@ pub fn default_backends() -> BackendFactory {
 
 /// The production factory for a server with `settings` (#7519).
 ///
-/// Why: a CLI backend must read the machine config the server was told to
-/// use, write its template files where the startup sweep looks, and get the
-/// service-account token the binary took out of its own environment.
-/// What: [`open_backend_at`] with [`ServerSettings::machine_config`],
-/// [`ServerSettings::template_root`], `onepassword_token`, and
-/// `search_path`, the `PATH` the binary read at start, which each open
-/// searches for `op`. The machine config is read on each open, so a change
-/// is seen on the next request.
-/// Test: `server_backends_for_opens_onepassword_only_when_enabled`.
+/// Why: a CLI backend must write its template files where the startup
+/// sweep looks and get the service-account token the binary took out of its
+/// own environment. Ruling 74: whether it opens at all, and which `op` runs,
+/// is the account's own machine config's to say, never a file the spawner
+/// chose through `--machine-config` or `$HOME`.
+/// What: `backends_with` on `account_machine_config`, the file #7524
+/// reads `file` consent from; with no account home, every CLI backend is
+/// off.
+/// Test: `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
 pub fn backends_for(
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
     search_path: Option<OsString>,
 ) -> BackendFactory {
-    let machine_config = settings.machine_config.clone();
+    backends_with(
+        account_machine_config(),
+        settings,
+        onepassword_token,
+        search_path,
+    )
+}
+
+/// [`backends_for`] with the account's machine config given.
+///
+/// What: a CLI backend opens through [`open_backend_at`] with
+/// `account_config`, [`ServerSettings::template_root`], `onepassword_token`
+/// and `search_path` (the `PATH` the binary read at start), only when
+/// [`account_machine`] enables it; else [`SecretsError::BackendNotEnabled`].
+/// The file is read on each open, so a change is seen on the next request.
+/// `keychain` and `file` open through [`open_backend`].
+/// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
+/// `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
+pub(crate) fn backends_with(
+    account_config: Option<PathBuf>,
+    settings: &ServerSettings,
+    onepassword_token: Option<SecretValue>,
+    search_path: Option<OsString>,
+) -> BackendFactory {
     let template_root = settings.template_root.clone();
     Arc::new(move |id: &BackendId| {
+        if !cli_backends().contains(id) {
+            return open_backend(id);
+        }
+        // #7519: ruling 74 — `settings.machine_config` is the spawner's to
+        // choose, so only the account's own file enables a CLI backend or
+        // pins its `program`; a missing or unreadable one leaves it off.
+        let config = account_config
+            .as_deref()
+            .filter(|path| account_machine(Some(path)).is_some_and(|machine| machine.enables(id)));
+        let Some(config) = config else {
+            return Err(SecretsError::BackendNotEnabled {
+                backend: id.to_string(),
+            });
+        };
         open_backend_at(
             id,
-            &machine_config,
+            config,
             &template_root,
             onepassword_token.clone(),
             search_path.as_deref(),
         )
     })
+}
+
+/// The account's own machine config: [`MACHINE_CONFIG_SUBPATH`] under
+/// `platform::account_home_dir`, or `None` when that home is unknown.
+///
+/// Why: #7524 H1 and ruling 74 — `--machine-config` and `$HOME` are the
+/// spawner's to set; this path is not.
+/// Test: `server_file_consent_defaults_to_the_account_home_config`.
+fn account_machine_config() -> Option<PathBuf> {
+    platform::account_home_dir()
+        .ok()
+        .map(|home| home.join(MACHINE_CONFIG_SUBPATH))
+}
+
+/// The account machine config at `path`, if it is given and loads.
+///
+/// What: a missing path, a missing or unreadable file, or a parse failure
+/// is `None`, so a caller that reads enablement from it fails closed.
+pub(crate) fn account_machine(path: Option<&Path>) -> Option<MachineSecretsConfig> {
+    path.and_then(|path| load_machine_at(path).ok().flatten())
 }
 
 /// What every handler shares.
@@ -101,7 +161,8 @@ pub struct State {
     // #7524: a field, not the constant, so tests can act as either build.
     pub(crate) keychain_compiled: bool,
     /// The machine config whose `default_backend: file` consents to value
-    /// writes into `file` on a Keychain build; `None` refuses them.
+    /// writes into `file` on a Keychain build; `None` refuses them. #7519:
+    /// also the one whose enabled CLI backends the delete sweep reaches.
     // #7524 H1: from the password database, never `--machine-config` or
     // `$HOME`; a crate-private field so only tests can aim it elsewhere.
     pub(crate) file_consent_config: Option<PathBuf>,
@@ -123,9 +184,7 @@ impl State {
             audit,
             keychain_compiled: KEYCHAIN_COMPILED,
             // #7524 H1: resolved once; a lookup failure refuses `file` writes.
-            file_consent_config: platform::account_home_dir()
-                .ok()
-                .map(|home| home.join(MACHINE_CONFIG_SUBPATH)),
+            file_consent_config: account_machine_config(),
         }
     }
 }

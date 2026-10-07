@@ -99,8 +99,9 @@ async fn run(
         socket.display(),
         idle.as_secs()
     );
-    // #7519: CLI backends read the machine config and template directory
-    // these settings name, and take the token and `PATH` captured at start.
+    // #7519: CLI backends read the account's own machine config (ruling
+    // 74) and the template directory these settings name, and take the
+    // token and `PATH` captured at start.
     let backends = backends_for(&settings, onepassword_token, search_path);
     match serve(settings, backends, trusty_common::shutdown_signal()).await {
         Ok(exit) => {

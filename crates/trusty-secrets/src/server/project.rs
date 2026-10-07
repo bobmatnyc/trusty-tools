@@ -163,8 +163,9 @@ impl ProjectContext {
 
     /// The machine config read by [`Self::resolve`], if the file exists.
     ///
-    /// What: the untracked file whose CLI sections enable a CLI backend,
-    /// and so the delete sweep's reach (#7519).
+    /// What: the untracked file `--machine-config` or `$HOME` names. #7519:
+    /// the server reads CLI-backend enablement from the account's own file
+    /// instead (`State::file_consent_config`).
     pub fn machine_config(&self) -> Option<&MachineSecretsConfig> {
         self.machine.as_ref()
     }
