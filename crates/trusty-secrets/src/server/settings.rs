@@ -15,17 +15,19 @@
 //! environment must not move the audit trail into a project tree (DOC-45
 //! C-7.12).
 //! #7524: for the same reason [`INDEX_DIR_ENV`] moves the index only for a
-//! server off the default socket. The first spawner's environment would
-//! otherwise move the names index for every client of the shared server; a
-//! test or sandbox on its own socket keeps the override, and `--index-dir`
-//! works on any socket.
+//! server whose socket is outside the default socket's directory. The first
+//! spawner's environment would otherwise move the names index for every
+//! client of the shared server; a test or sandbox in its own directory keeps
+//! the override, and `--index-dir` works on any socket.
 //! Test: `settings_flags_beat_env_beat_defaults`,
 //! `settings_audit_log_defaults_beside_the_index`,
 //! `settings_ignore_an_audit_log_environment_variable`,
 //! `settings_idle_env_falls_back_on_garbage_and_zero`,
 //! `settings_reject_unknown_and_incomplete_flags`,
 //! `settings_index_env_is_ignored_on_the_default_socket`,
-//! `settings_index_override_survives_off_the_default_socket`.
+//! `settings_index_override_survives_off_the_default_socket`,
+//! `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+//! `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -42,7 +44,7 @@ pub const SOCKET_SUBPATH: &str = ".trusty-tools/trusty-secrets/secrets.sock";
 pub const SOCKET_ENV: &str = "TRUSTY_SECRETS_SOCKET";
 
 /// Overrides the names-only index directory, but only for a server whose
-/// socket is not the default one (#7524).
+/// socket is outside the default socket's directory (#7524).
 pub const INDEX_DIR_ENV: &str = "TRUSTY_SECRETS_INDEX_DIR";
 
 /// The credential access audit log under `$HOME` (#4567, DOC-45 C-7.9).
@@ -160,9 +162,9 @@ impl ServerSettings {
     /// [`audit_log_beside`] an index named by the `--index-dir` flag, else
     /// [`AUDIT_LOG_SUBPATH`] under `$HOME` — also when the index comes from
     /// [`INDEX_DIR_ENV`]. No environment variable moves it. #7524:
-    /// [`INDEX_DIR_ENV`] is read only when the socket is not the default
-    /// socket (`is_default_socket`); on it, the index is the `--index-dir`
-    /// flag or the default.
+    /// [`INDEX_DIR_ENV`] is read only when the socket is outside the default
+    /// socket's directory (`is_default_socket`); inside it, the index is the
+    /// `--index-dir` flag or the default.
     ///
     /// # Errors
     ///
@@ -256,40 +258,74 @@ pub fn audit_log_beside(index_root: &Path) -> PathBuf {
 /// Whether `socket` is the shared default socket under `$HOME`.
 ///
 /// Why: #7524 M3 — [`INDEX_DIR_ENV`] must not reach the server every client
-/// shares, so another spelling of the default path counts as the default.
-/// What: `true` when `$HOME` is unknown (fail closed), when `socket` equals
-/// the default after lexical normalisation (`.`, `..`, repeated `/`), or
-/// when both share a file name and their parent directories canonicalise
-/// to one path (a symlinked directory). A lexical `..` match counts even if
-/// a symlink would resolve it elsewhere; that only ignores the variable.
+/// shares. A case-insensitive filesystem serves `SECRETS.SOCK` to a client
+/// dialling `secrets.sock`, so the decision rests on the directory alone.
+/// What: `true` when `$HOME` is unknown (fail closed), or when `socket` sits
+/// in the default socket's directory by [`same_socket`], whatever its file
+/// name.
 /// Test: `settings_index_env_is_ignored_on_the_default_socket`,
-/// `settings_socket_alias_through_a_symlinked_dir_is_the_same_socket`.
+/// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
 pub(crate) fn is_default_socket(socket: &Path) -> bool {
     dirs::home_dir().is_none_or(|home| same_socket(socket, &home.join(SOCKET_SUBPATH)))
 }
 
-/// Whether `a` and `b` name one socket; see [`is_default_socket`].
+/// Whether sockets `a` and `b` sit in one directory; file names are ignored.
+///
+/// What: compares the [`dir_identity`] of each parent. A parent that cannot
+/// be resolved counts as a match, failing closed like an unknown `$HOME`.
+/// Test: `settings_socket_alias_through_a_symlinked_dir_is_the_same_socket`,
+/// `settings_index_env_is_ignored_for_a_case_variant_default_socket`,
+/// `settings_index_env_is_ignored_for_a_bare_relative_default_socket`.
 pub(crate) fn same_socket(a: &Path, b: &Path) -> bool {
-    if lexical(a) == lexical(b) {
-        return true;
+    match (dir_identity(a), dir_identity(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
     }
-    let parent = |p: &Path| p.parent().and_then(|dir| dir.canonicalize().ok());
-    a.file_name() == b.file_name() && parent(a).is_some_and(|dir| parent(b) == Some(dir))
 }
 
-/// `path` with `.` dropped and each `..` removing the component before it.
-fn lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
+/// A directory as the device and inode of its deepest existing ancestor,
+/// plus the lowercased names below it that do not exist yet.
+type DirIdentity = ((u64, u64), Vec<String>);
+
+/// The [`DirIdentity`] of `socket`'s parent directory.
+///
+/// What: an empty parent (a bare relative name) is `.`. The kernel resolves
+/// the existing part, so case, `.`, `..`, `//` and symlinks reach one inode.
+/// Missing names are compared lowercased, because the server creates them
+/// and a case-insensitive filesystem would fold them; a `..` among them
+/// applies lexically, which is exact because none exists to be a symlink.
+/// `None` for no parent, or a `stat` that fails other than by absence.
+fn dir_identity(socket: &Path) -> Option<DirIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let parent = socket.parent()?;
+    let parts: Vec<Component<'_>> = parent.components().collect();
+    for exists in (usize::from(parent.has_root())..=parts.len()).rev() {
+        let mut prefix: PathBuf = parts[..exists].iter().collect();
+        if prefix.as_os_str().is_empty() {
+            prefix.push(".");
+        }
+        match std::fs::metadata(&prefix) {
+            Ok(meta) => {
+                let mut missing = Vec::new();
+                for part in &parts[exists..] {
+                    match part {
+                        Component::ParentDir => {
+                            missing.pop()?;
+                        }
+                        Component::Normal(name) => {
+                            missing.push(name.to_string_lossy().to_lowercase());
+                        }
+                        _ => {}
+                    }
+                }
+                return Some(((meta.dev(), meta.ino()), missing));
             }
-            other => out.push(other),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
         }
     }
-    out
+    None
 }
 
 /// A `--idle-timeout-secs` value: strict, because a flag is typed on purpose.
