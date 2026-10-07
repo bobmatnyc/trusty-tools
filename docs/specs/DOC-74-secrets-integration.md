@@ -472,18 +472,21 @@ surface T-3 already scrubs before it becomes visible anywhere).
 
 ```
 tm secrets configure                          # detect backends (§7), prompt for machine or project-level choice, write §6 config
-tm secrets import [--from .env.local] [--project|--machine]
-                                               # bulk-load KEY=VALUE pairs into the active vault; never deletes the source file (open question, §13)
+tm secrets import <path> [group]               # bulk-load a dotenv file's KEY=VALUE pairs into the project scope; never deletes the source file (§13 Q2)
+                                               # prints key names only, no value and no mask; skips and names each secret:// reference
+                                               # a syntax error names the line number, never its text, and stores nothing
+                                               # a key that fails is named and the rest continue; any failure exits non-zero
 tm secrets set KEY [group] [--value -]         # upsert one key; value from the clipboard by default, or stdin with `--value -`; never argv
                                                # an empty clipboard is an error: non-zero exit, nothing stored
                                                # confirms "(new)" or "(updated)", KEY, the first 8 characters and the length;
                                                # a value of 8 characters or fewer shows only its length (mask_secret, §15.6)
 tm secrets list                                # key NAMES, length and updated_at per scope — never values (mirrors KeyStore::list, mod.rs:171)
-tm secrets remove KEY
+tm secrets remove KEY [group]                  # delete one project-scope key; a key the scope does not hold is named and exits non-zero
 tm secrets copy --from <backend> --to <backend> [KEY...]
-                                               # moves the named keys (or the whole vault, if none named) from one backend to another
+                                               # copies the named keys (or the whole project scope, if none named) from one backend to another
                                                # for the ACTIVE project; reads each value in-process and writes it to the destination
                                                # backend without ever printing it — the owner's "copy vars between stores" requirement
+                                               # a key not copied (absent from the source, refused by the destination) is named; exits non-zero
 tm secrets doctor                              # runs detect_backends (§7), renders the table, flags a configured-but-unreachable backend
 tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
                                                # resolves each named KEY from the active vault and injects the VALUE into the child's
@@ -497,8 +500,11 @@ tm secrets exec --dotenv .env -- <command...>  # parses .env, resolves each secr
 owner ruled "let's just use 'set', remove 'add'" and "make --paste the
 default, throw an error if there is no value in the clipboard". `set` is the
 one write verb and upserts. The optional positional `group` label namespaces
-the key; the same key and group always resolve the same entry. Every CLI verb
-is a thin layer over the `trusty-secrets` crate (§15.2,
+the key: the entry key is `<group>.<KEY>`, and a group is 1–16 characters of
+`[A-Za-z0-9_-]`. A group holds no `.`, so the same KEY and group always
+resolve to the same entry. `set`, `remove`, `import` and `copy` write the
+project scope only; the owner scope is set from the console (§15.3). Every
+CLI verb is a thin layer over the `trusty-secrets` crate (§15.2,
 [#7521](https://github.com/bobmatnyc/trusty-tools/issues/7521)).
 
 **The `!tm secrets add` bang command is retired.** A value typed after `!`

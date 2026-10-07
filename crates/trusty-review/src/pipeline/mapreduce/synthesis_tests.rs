@@ -20,7 +20,9 @@ use crate::{
         mapreduce::{
             MapContext,
             outcome::{MapReduceStats, ReducedReview, TokenUsage},
-            synthesis::{apply_high_severity_floor_only, synthesize_review},
+            synthesis::{
+                apply_high_severity_floor_only, synthesize_review, synthesize_review_graded,
+            },
         },
         prompt::{ReviewContext, ReviewPrMeta},
     },
@@ -828,4 +830,47 @@ async fn synthesis_llm_error_preserves_map_tokens() {
         result.tokens, BASE_MAP_TOKENS,
         "synthesis fail-safe fall-back must preserve the map-stage token total"
     );
+}
+
+/// #9310 ruling 50: the synthesis floor reads the raw synthesis grade. A
+/// REQUEST_CHANGES graded B reads D+ in `ReducedReview::grade` (clamped to the
+/// verdict) yet floors at APPROVE, so the gates may still relax it; an APPROVE
+/// graded F floors at BLOCK; synthesis that is off or fails reports no floor,
+/// so the caller uses the chunk floor (Q2).
+#[tokio::test]
+async fn synthesize_review_graded_floors_on_the_raw_grade() {
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+    let answers = [
+        (
+            r#"{"verdict":"REQUEST_CHANGES","grade":"B","summary":"s"}"#,
+            "D+",
+            Verdict::Approve,
+        ),
+        (
+            r#"{"verdict":"APPROVE","grade":"F","summary":"s"}"#,
+            "F",
+            Verdict::Block,
+        ),
+        (
+            r#"{"verdict":"APPROVE","grade":"D","summary":"s"}"#,
+            "D",
+            Verdict::RequestChanges,
+        ),
+    ];
+    for (json, clamped, floor) in answers {
+        let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(json));
+        let reduced = reduced_with_findings(Verdict::Approve, Vec::new());
+        let (out, got) = synthesize_review_graded(reduced, &llm, &c, &cfg()).await;
+        assert_eq!(out.grade.as_deref(), Some(clamped), "{json}");
+        assert_eq!(got, Some(floor), "{json}");
+    }
+    let llm: Arc<dyn LlmProvider> = Arc::new(FailingLlm);
+    for config in [cfg(), cfg_synthesis_off()] {
+        let reduced = reduced_with_findings(Verdict::Approve, Vec::new());
+        let (_, got) = synthesize_review_graded(reduced, &llm, &c, &config).await;
+        assert_eq!(got, None);
+    }
 }

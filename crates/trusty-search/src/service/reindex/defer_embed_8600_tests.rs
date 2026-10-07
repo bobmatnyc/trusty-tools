@@ -232,6 +232,7 @@ async fn a_never_completing_embedder_aborts_the_pass_within_the_deadline() {
 /// first wave was dropped and `pending_embed_count` still read the full corpus.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_stalled_wave_commits_the_waves_before_it() {
     // #8863: the pending-marker read resolves `indexes.toml` from the
     // process-global `TRUSTY_DATA_DIR`, which sibling tests set in-process; a
@@ -310,6 +311,7 @@ async fn a_stalled_wave_commits_the_waves_before_it() {
 /// the full corpus.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn a_failed_wave_commits_the_waves_before_it() {
     // #8863: same process-global data-dir race as the stalled-wave test above.
     if !crate::service::test_isolation::isolate_in_child(
@@ -383,6 +385,7 @@ async fn a_failed_wave_commits_the_waves_before_it() {
 /// for the rest of the pass, and the 2 s `timeout` below failed.
 /// Test: this IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn status_answers_during_an_embed_pass_with_a_writer_queued() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let redb_path = tmp.path().join("index.redb");

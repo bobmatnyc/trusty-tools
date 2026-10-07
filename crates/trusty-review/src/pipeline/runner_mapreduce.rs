@@ -37,7 +37,7 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
-        verdict_status::judged_verdict, // #9310
+        verdict_status::{Judged, judged_verdict}, // #9310
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors,
@@ -120,7 +120,8 @@ pub(super) async fn run_mapreduce_branch(
         files = run.filtered.files.len(),
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
-    let (mut reduced, wiped_model_verdict): (ReducedReview, _) =
+    // #9310 ruling 50: `grade_floor` is the synthesis or worst-chunk floor (Q2).
+    let (mut reduced, wiped_model_verdict, grade_floor): (ReducedReview, _, _) =
         run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config).await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
@@ -160,11 +161,19 @@ pub(super) async fn run_mapreduce_branch(
     }
     let model_verdict = reviewer_verdict(&reduced.verdict, wiped_model_verdict.as_ref());
     // #9310: the synthesis grade floors the reviewers' verdict, as in `run_review`.
-    let model_verdict = judged_verdict(
-        model_verdict,
-        reduced.grade.as_deref(),
-        run.coverage_contrib.as_ref(),
-    );
+    // Ruling 50: so does a chunk floor, so the withheld mapping reads a chunk F
+    // as the rejection it is (Q1), not the relaxed aggregate.
+    let judged = Judged {
+        verdict: crate::pipeline::grade::stricter_of(
+            judged_verdict(
+                model_verdict,
+                reduced.grade.as_deref(),
+                run.coverage_contrib.as_ref(),
+            ),
+            grade_floor.clone(),
+        ),
+        grade_floor,
+    };
     let synthesis_active = reduced.grade.is_some();
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),
@@ -219,7 +228,7 @@ pub(super) async fn run_mapreduce_branch(
         ReduceFacts {
             synthesis_active,
             wiped_model_verdict,
-            model_verdict,
+            judged,
         },
     )
     .await;
@@ -343,8 +352,9 @@ struct ReduceFacts {
     synthesis_active: bool,
     /// From `run_map_reduce_with_wiped`, for `settle_no_survivors` (#9188).
     wiped_model_verdict: Option<crate::models::Verdict>,
-    /// #9310: the reviewers' verdict the withheld mapping reads.
-    model_verdict: crate::models::Verdict,
+    /// #9310: the reviewers' verdict the withheld mapping reads, and the
+    /// ruling-50 grade floor the gates end on.
+    judged: Judged,
 }
 
 /// The reviewers' own verdict on the map-reduce path (#9310).
@@ -468,7 +478,7 @@ async fn fold_reduced_into_result(
         refs: &refs,
         narrative: &parsed.summary, // #9188 C: the synthesis summary
         wiped_model_verdict: facts.wiped_model_verdict,
-        model_verdict: facts.model_verdict,
+        judged: facts.judged,
     };
     gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 

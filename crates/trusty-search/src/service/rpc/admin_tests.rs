@@ -582,6 +582,7 @@ use crate::service::test_isolation::isolate_in_child;
 /// console an unmounted volume's roster as deletion candidates.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn registry_orphans_over_the_socket_matches_the_http_body() {
     // #6369: a child process, not `IsolatedDataDir` — see `isolate_in_child`.
     if !isolate_in_child(
@@ -647,6 +648,7 @@ async fn registry_orphans_over_the_socket_matches_the_http_body() {
 /// registry, so it would prove nothing.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn an_unreadable_registry_is_refused_on_either_transport() {
     // #6369: a child process, not `IsolatedDataDir`. This test plants a
     // DIRECTORY at `indexes.toml`, so a sibling's registry write landing in the

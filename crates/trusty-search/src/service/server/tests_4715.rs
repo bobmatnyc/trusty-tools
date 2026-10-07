@@ -225,6 +225,7 @@ async fn restore_failed_index_grep_says_restart_not_retry() {
 /// Pre-fix all three return 503.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn deleted_cold_parked_index_is_404_not_a_permanent_503() {
     let state = state_with_cold_index("cold-deleted");
 

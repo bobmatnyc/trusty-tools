@@ -36,7 +36,10 @@ use crate::{
     config::mapreduce::MapReduceConfig,
     llm::{ChatMessage, LlmProvider, LlmRequest},
     models::{Finding, Verdict},
-    pipeline::{letter_grade::Grade, mapreduce::map::MapContext},
+    pipeline::{
+        letter_grade::{Grade, grade_floor},
+        mapreduce::map::MapContext,
+    },
 };
 
 use super::outcome::{ReducedReview, TokenUsage};
@@ -122,10 +125,29 @@ pub async fn synthesize_review(
     ctx: &MapContext<'_>,
     config: &MapReduceConfig,
 ) -> ReducedReview {
+    synthesize_review_graded(reduced, llm, ctx, config).await.0
+}
+
+/// [`synthesize_review`], also returning the synthesis grade floor when
+/// synthesis answered (#9310, owner ruling 50).
+///
+/// Why: `ReducedReview::grade` is the synthesis grade clamped to the floored
+/// verdict, so a REQUEST_CHANGES graded B reads D+ there; flooring on it would
+/// stop the gates relaxing an A-to-C review. The floor reads the raw grade.
+/// What: `Some(letter_grade::grade_floor(raw grade))` when the synthesis reply
+/// parsed; `None` when synthesis is off, failed or did not parse, so the
+/// caller falls back to the chunk floor (owner answer Q2).
+/// Test: `synthesize_review_graded_floors_on_the_raw_grade`.
+pub(crate) async fn synthesize_review_graded(
+    reduced: ReducedReview,
+    llm: &Arc<dyn LlmProvider>,
+    ctx: &MapContext<'_>,
+    config: &MapReduceConfig,
+) -> (ReducedReview, Option<Verdict>) {
     // Gate: synthesis disabled → return unchanged (legacy behaviour preserved).
     if !config.synthesis {
         debug!("synthesis disabled via config.synthesis=false — returning mechanical reduce");
-        return reduced;
+        return (reduced, None);
     }
 
     // Capture the mechanical verdict BEFORE any modification — needed by the
@@ -155,7 +177,7 @@ pub async fn synthesize_review(
                 error = %e,
                 "synthesis LLM call failed — falling back to mechanical reduce (fail-safe)"
             );
-            return reduced;
+            return (reduced, None);
         }
     };
 
@@ -178,13 +200,15 @@ pub async fn synthesize_review(
                 body_len = resp.text.len(),
                 "synthesis response could not be parsed — falling back to mechanical reduce"
             );
-            return reduced;
+            return (reduced, None);
         }
     };
 
     // Capture the raw (pre-floor) synthesized verdict so we can compute the
     // pre-floor grade independently from the post-floor grade (#1665 item 3).
     let raw_verdict = synthesis.synthesized_verdict.clone();
+    // #9310 ruling 50: the floor reads the raw grade, before either clamp below.
+    let floor = grade_floor(Some(synthesis.grade.as_str()));
 
     // Apply the two-tier synthesis floor (#1665 item 1):
     //   Tier 1: any unrefuted High finding → floor to BLOCK.
@@ -234,7 +258,7 @@ pub async fn synthesize_review(
     // Fold the synthesis call's usage into the map-stage total (#1885).
     let tokens = reduced.tokens.merged(synth_tokens);
 
-    ReducedReview {
+    let reviewed = ReducedReview {
         verdict: floored_verdict,
         findings: reduced.findings,
         stats: reduced.stats,
@@ -243,7 +267,8 @@ pub async fn synthesize_review(
         summary,
         tokens,
         withheld_findings: reduced.withheld_findings,
-    }
+    };
+    (reviewed, Some(floor))
 }
 
 // ─── Parsed synthesis output ──────────────────────────────────────────────────

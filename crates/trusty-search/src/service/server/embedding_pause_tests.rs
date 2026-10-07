@@ -175,6 +175,7 @@ async fn pausing_or_resuming_an_unknown_index_is_refused() {
 /// `stages.semantic.paused` flips and the other two stages never do.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_reports_the_semantic_stage_as_paused() {
     let (state, rpc) = state_with_index("pause-status").await;
 

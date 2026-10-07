@@ -271,7 +271,7 @@ pub async fn build_review_state() -> Result<AppState> {
     info!(
         reviewer_model = %config.role_models.reviewer.model,
         analyze_binary = %analyze.binary(),
-        search_url = %config.search_url,
+        search = %search.transport().describe(), // #9214: the leg, not a URL
         "trusty-review embedded AppState built"
     );
 

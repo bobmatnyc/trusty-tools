@@ -2815,6 +2815,10 @@ mod pr_body;
 #[path = "runner_verdict_status_tests.rs"]
 mod verdict_status;
 
+// #9310 ruling 50: a D or F grade is a hard verdict floor.
+#[path = "runner_grade_floor_tests.rs"]
+mod grade_floor;
+
 // #9348: a review that does not post leaves no in-progress dedup claim.
 #[path = "runner_dedup_claim_tests.rs"]
 mod dedup_claim;

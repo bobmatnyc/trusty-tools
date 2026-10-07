@@ -12,7 +12,11 @@ use super::{
     HttpSearchClient, ListIndexesResponse, SearchClient, SearchClientError, SearchRequest,
     SearchResponse, SearchResult,
 };
+use crate::config::ReviewConfig;
 use crate::integrations::search_client::IndexInfo;
+use crate::integrations::search_transport::fixture::{EnvGuard, FakeSearchSocket, healthy};
+use crate::integrations::search_transport::{TRUSTY_DATA_DIR_ENV, TRUSTY_SEARCH_URL_ENV};
+use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
 
 #[test]
 fn search_client_trait_object_compiles() {
@@ -34,12 +38,47 @@ fn http_search_client_strips_trailing_slash() {
     assert_eq!(client.base_url(), "http://127.0.0.1:7878");
 }
 
+/// Build the client `from_config` builds, with the transport env pinned.
+///
+/// #9214: `from_config` resolves the leg from `TRUSTY_SEARCH_SOCKET`,
+/// `TRUSTY_SEARCH_URL` and `TRUSTY_DATA_DIR`, so an exported or concurrently set
+/// value would decide what the assertion checks. Callers hold the serial lock.
+fn from_config_with_pinned_env(config: &ReviewConfig) -> HttpSearchClient {
+    let _env = [
+        EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
+        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
+    ];
+    HttpSearchClient::from_config(config).expect("TLS init should succeed")
+}
+
+/// A non-default `search_url` is the HTTP leg, on that URL.
+fn assert_from_config_targets_its_url() {
+    let mut config = ReviewConfig::load(None);
+    config.search_url = "http://localhost:9999".to_string();
+    let client = from_config_with_pinned_env(&config);
+    assert_eq!(client.base_url(), "http://localhost:9999");
+}
+
+#[serial_test::serial]
 #[test]
 fn http_search_client_from_config() {
-    let mut config = crate::config::ReviewConfig::load(None);
-    config.search_url = "http://localhost:9999".to_string();
-    let client = HttpSearchClient::from_config(&config).expect("TLS init should succeed");
-    assert_eq!(client.base_url(), "http://localhost:9999");
+    assert_from_config_targets_its_url();
+}
+
+/// #9214 critic: the `from_config` assertion holds while a live socket is
+/// exported, which is what an operator's shell or a concurrent serial test
+/// does. Unpinned, rule 1 picks that socket and `base_url` is empty.
+#[serial_test::serial]
+#[tokio::test]
+async fn from_config_assertion_ignores_an_exported_search_socket() {
+    let dir = tempfile::Builder::new()
+        .prefix("b5")
+        .tempdir_in("/tmp")
+        .expect("tempdir under /tmp");
+    let fake = FakeSearchSocket::serve(&dir.path().join("live.sock"), |_, _| Ok(healthy()));
+    let _exported = EnvGuard::set(TRUSTY_SEARCH_SOCKET_ENV, &fake.path.to_string_lossy());
+    assert_from_config_targets_its_url();
 }
 
 #[test]
