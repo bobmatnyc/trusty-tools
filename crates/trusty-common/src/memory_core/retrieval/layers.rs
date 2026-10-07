@@ -421,7 +421,7 @@ pub async fn retrieve_l2_scoped(
 /// room back, which is the invisible-failure class ADR-0027 D4.4 rejects.
 /// What: Embeds the query, searches with `top_k` (over-fetched to `top_k * 3`
 /// when a room filter is active, since filtered-out hits would otherwise eat
-/// the budget), joins each hit to its drawer via UUID-prefix match, drops
+/// the budget, or when the query names an id, #9279), joins each hit to its drawer via UUID-prefix match, drops
 /// drawers outside the requested room, scores each candidate with
 /// [`rank_score`], sorts by `rank_order`, and returns at most `top_k`
 /// `RecallResult`s.
@@ -473,7 +473,12 @@ pub async fn retrieve_l3_scoped(
     // transaction, and holding those locks across I/O would stall every writer
     // on this palace for its duration (same ordering rule as `retrieve_l2`).
     let allowed = scope.allowed_room_ids(&handle.kg);
-    let fetch = if allowed.is_some() {
+    let query_tokens: Vec<String> = extract_keywords(query);
+    // #9279: an id named in the query lifts the drawer that holds it.
+    let id_tokens = query_id_tokens(&query_tokens);
+    // #9279: the id boost can lift a hit from below the vector top_k, so an id
+    // query over-fetches like a scoped one; otherwise the hit is never scored.
+    let fetch = if allowed.is_some() || !id_tokens.is_empty() {
         top_k.saturating_mul(3).max(top_k)
     } else {
         top_k
@@ -482,9 +487,6 @@ pub async fn retrieve_l3_scoped(
 
     let drawers = handle.drawers.read();
     let closets = handle.closets.read();
-    let query_tokens: Vec<String> = extract_keywords(query);
-    // #9279: an id named in the query lifts the drawer that holds it.
-    let id_tokens = query_id_tokens(&query_tokens);
     let now = chrono::Utc::now();
     let mut results: Vec<RecallResult> = Vec::with_capacity(hits.len());
     for hit in hits {
