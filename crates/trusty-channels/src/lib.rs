@@ -8,9 +8,9 @@
 //! topology decision) keeps shared MCP framing, HTTP-client hardening, and
 //! credential wiring in one place instead of duplicating a crate per platform.
 //! See ADR-0014.
-//! What: One module per channel: [`slack`] and [`telegram`] (each with an MCP
-//! binary under `src/bin/`), and [`gchat`], whose Google Chat API layer has no
-//! binary yet (#9448).
+//! What: One module per channel, each with an MCP binary under `src/bin/`:
+//! [`slack`], [`telegram`], and [`gchat`] — the Google Chat API layer, its
+//! routes, egress gate, question ledger, and the `gchat-mcp` server (#9448).
 //! Test: `cargo test -p trusty-channels` covers each channel's client, MCP
 //! handshake, and tool registry.
 

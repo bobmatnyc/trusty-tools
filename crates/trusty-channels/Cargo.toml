@@ -16,6 +16,10 @@ path = "src/bin/slack-mcp.rs"
 name = "telegram-mcp"
 path = "src/bin/telegram-mcp.rs"
 
+[[bin]]
+name = "gchat-mcp"
+path = "src/bin/gchat-mcp.rs"
+
 [dependencies]
 trusty-common = { workspace = true, features = ["credentials"] }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
@@ -31,6 +35,11 @@ comrak = { workspace = true }
 # gchat: RS256 service-account assertions and Pub/Sub base64 payloads (#9448).
 jsonwebtoken = { workspace = true }
 base64 = { workspace = true }
+# gchat routes, ledger and audit (#9448 S2a): routes.toml parsing, review
+# notice URL check, RFC 3339 timestamps. All three are already in the graph.
+toml = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
@@ -40,3 +49,6 @@ tempfile = { workspace = true }
 # (#9448). Already in the graph via jsonwebtoken's `aws_lc_rs` backend, with
 # the same default features, so it adds no compile.
 aws-lc-rs = "1"
+# gchat-mcp poller test captures the tracing output it logs (#9448 S2b).
+# Already in the graph via trusty-common's tracing init.
+tracing-subscriber = { workspace = true }
