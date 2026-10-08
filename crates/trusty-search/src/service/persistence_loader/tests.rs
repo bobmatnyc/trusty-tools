@@ -1010,3 +1010,62 @@ async fn a_failed_retire_beside_a_populated_corpus_is_a_fault_and_changes_nothin
         "the fault must name the snapshot and the failed rename, got: {detail}"
     );
 }
+
+/// #9450: warm boot heals a pre-#9450 snapshot once, in the background. The
+/// sidecar of the snapshot it loaded is restamped with the heal marker.
+/// Test: this IS the test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn build_indexer_from_entry_heals_a_legacy_snapshot_in_the_background() {
+    use crate::core::store::UsearchStore;
+
+    let tmp = tempdir().unwrap();
+    let embedder = mock_embedder();
+    let dim = embedder.dimension();
+    let entry = PersistedIndex {
+        id: "test-idx-9450".to_string(),
+        root_path: tmp.path().to_path_buf(),
+        colocated: true,
+        ..Default::default()
+    };
+    let hnsw_path = persistence::hnsw_path_for_entry(&entry).unwrap();
+    let store = UsearchStore::new(dim).unwrap();
+    let items: Vec<(String, Vec<f32>)> = (0..50)
+        .map(|i| {
+            let mut v = vec![0.01; dim];
+            v[i % dim] = 1.0 + i as f32;
+            (format!("chunk-{i}"), v)
+        })
+        .collect();
+    store.upsert_batch(&items).await.unwrap();
+    store.save(&hnsw_path).await.unwrap();
+    drop(store);
+
+    // Strip the #9450 fields, as a pre-#9450 binary wrote the sidecar.
+    let sidecar = hnsw_path.with_extension("keys.json");
+    let mut map: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    let obj = map.as_object_mut().unwrap();
+    obj.remove("churn");
+    obj.remove("heal_epoch");
+    std::fs::write(&sidecar, serde_json::to_vec(&map).unwrap()).unwrap();
+
+    let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+    assert!(!indexer.hnsw_load_failed);
+    let mut healed = false;
+    for _ in 0..500 {
+        let map: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+        if map["heal_epoch"] == 1 {
+            healed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(healed, "#9450: warm boot must heal a legacy snapshot once");
+    assert_eq!(
+        indexer.vector_count().await,
+        Some(50),
+        "the heal keeps every vector"
+    );
+}

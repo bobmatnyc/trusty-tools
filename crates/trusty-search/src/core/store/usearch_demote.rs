@@ -276,6 +276,18 @@ impl UsearchStore {
         };
 
         let started = Instant::now();
+        // #9450: the idle persist is where churn past the threshold gets a
+        // rebuilt graph. A failed compaction must not block the save.
+        if let Err(e) = self
+            .compact_graph_now(super::types::CompactMode::IfDue)
+            .await
+        {
+            tracing::warn!(
+                "usearch: compaction before the write-cooldown persist of {} failed ({e:#}) — \
+                 saving the current graph (#9450)",
+                path.display()
+            );
+        }
         self.save(&path).await?;
         if !self.try_demote_to_view().await? {
             // A write landed during or after the save. The save itself is

@@ -17,8 +17,7 @@
 use std::collections::HashSet;
 
 // #9450: the generators are shared with the churn test in `src/core/store`.
-#[path = "../src/core/store/clustered_vectors.rs"]
-mod clustered_vectors;
+use crate::clustered_vectors;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

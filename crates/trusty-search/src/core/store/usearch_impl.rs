@@ -14,10 +14,10 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use super::super::store_config::VectorQuant;
-use super::types::RequantizeReport;
 use super::types::StagedSwapOutcome;
 use super::types::VectorHit;
 use super::types::VectorStore;
+use super::types::{CompactMode, CompactReport, ReindexProbe, RequantizeReport};
 use super::usearch_store::{
     dedupe_last_by_id, hnsw_max_elements, validate_embedding, UsearchStore,
 };
@@ -59,6 +59,8 @@ impl VectorStore for UsearchStore {
             index
                 .remove(key)
                 .map_err(|e| anyhow!("usearch remove (for upsert) failed: {e}"))?;
+            // #9450: a replacement unlinks the old node like a removal does.
+            self.compact.record(1);
         }
 
         UsearchStore::ensure_capacity(&index)?;
@@ -223,6 +225,8 @@ impl VectorStore for UsearchStore {
             // guard's refusal threshold in exactly the borderline cases it
             // exists to catch.
             self.removed_since_save.fetch_add(1, Ordering::Relaxed);
+            // #9450: counted toward the next graph compaction.
+            self.compact.record(1);
         }
         Ok(())
     }
@@ -349,6 +353,8 @@ impl VectorStore for UsearchStore {
                         anyhow!("usearch remove (displaced by rewrite) failed: {e}")
                     })?;
                     self.removed_since_save.fetch_add(1, Ordering::Relaxed);
+                    // #9450: counted toward the next graph compaction.
+                    self.compact.record(1);
                 }
             }
             self.mark_dirty();
@@ -488,6 +494,8 @@ impl VectorStore for UsearchStore {
             index
                 .remove(key)
                 .map_err(|e| anyhow!("usearch remove (for upsert) failed: {e}"))?;
+            // #9450: each replacement unlinks the old node.
+            self.compact.record(1);
         }
 
         // Per-item error isolation (issue #128). Each vector is screened and
@@ -623,6 +631,17 @@ impl VectorStore for UsearchStore {
     /// [`UsearchStore::live_quant`].
     async fn vector_quant_label(&self) -> Option<&'static str> {
         self.live_quant().await.map(|q| q.label())
+    }
+
+    /// #9450: see [`UsearchStore::spawn_heal_on_load`]. Fully qualified so
+    /// this never resolves back to itself.
+    fn spawn_heal_on_load(self: std::sync::Arc<Self>, index_id: String, reindexing: ReindexProbe) {
+        UsearchStore::spawn_heal_on_load(self, index_id, reindexing);
+    }
+
+    /// #9450: rebuild the graph. See [`UsearchStore::compact_graph_now`].
+    async fn compact_graph(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
+        self.compact_graph_now(mode).await
     }
 
     /// #6822: the operator-run scalar-precision backfill. See

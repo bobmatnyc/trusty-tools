@@ -54,6 +54,15 @@ pub(super) struct StoreKeyMap {
     pub(super) id_to_key: HashMap<String, u64>,
     pub(super) next_key: u64,
     pub(super) dim: usize,
+    /// #9450: removals plus replacements since the graph was last rebuilt.
+    /// Absent in a pre-#9450 sidecar, which reads as 0.
+    #[serde(default)]
+    pub(super) churn: u64,
+    /// #9450: the graph-heal generation this snapshot was rebuilt at. Absent
+    /// (0) means the snapshot predates the heal and gets one compaction at
+    /// load — see `usearch_compact::GRAPH_HEAL_EPOCH`.
+    #[serde(default)]
+    pub(super) heal_epoch: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +125,42 @@ pub struct RequantizeReport {
     pub applied: bool,
     /// `true` when this run was a report-only dry run.
     pub dry_run: bool,
+}
+
+/// Answers "is a staged reindex running for this index?" (issue #9450). The
+/// load heal consults it so it never writes the live snapshot mid-reindex.
+pub type ReindexProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// When a graph compaction runs (issue #9450).
+///
+/// Why: M005 compacts after dropping orphans whatever the churn count says;
+/// the periodic persist and the idle sweep compact only once churn crosses
+/// the threshold. One entry point serves both.
+/// What: `Always` rebuilds now; `IfDue` rebuilds only when the persisted churn
+/// counter has crossed `usearch_compact::compact_threshold`.
+/// Test: `store::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactMode {
+    Always,
+    IfDue,
+}
+
+/// What one graph compaction did (issue #9450).
+///
+/// Why: a compaction rebuilds the whole HNSW graph, so the caller logs what
+/// it touched and how long writers were held off.
+/// What: vector counts before and after, the churn the rebuild cleared, keys
+/// the key map named that the graph could not return (skipped, as in
+/// `requantize`), and the rebuild's wall time.
+/// Test: `store::tests_9450::compaction_keeps_every_key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CompactReport {
+    pub vectors_before: usize,
+    pub vectors_after: usize,
+    pub churn_cleared: u64,
+    pub missing: usize,
+    pub elapsed_ms: u64,
 }
 
 /// Abstract vector store interface. Concrete impls (in-process HNSW today,
@@ -325,6 +370,26 @@ pub trait VectorStore: Send + Sync {
         _cooldown: Duration,
     ) -> Result<Option<DemoteStats>> {
         Ok(None)
+    }
+
+    /// Rebuild the vector graph so heavy remove churn cannot strand survivors
+    /// (issue #9450). Writes nothing to disk; the caller's next save does.
+    /// What: default = no-op (`Ok(None)`) for stores with no graph.
+    /// `UsearchStore` overrides; see `UsearchStore::compact_graph_now`.
+    /// Test: `store::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`.
+    async fn compact_graph(&self, _mode: CompactMode) -> Result<Option<CompactReport>> {
+        Ok(None)
+    }
+
+    /// Start the one-time background heal of a freshly loaded snapshot
+    /// (issue #9450). Default no-op; `UsearchStore` overrides with
+    /// `UsearchStore::spawn_heal_on_load`.
+    /// Test: `service::persistence_loader::tests::build_indexer_from_entry_heals_a_legacy_snapshot_in_the_background`.
+    fn spawn_heal_on_load(
+        self: std::sync::Arc<Self>,
+        _index_id: String,
+        _reindexing: ReindexProbe,
+    ) {
     }
 
     /// Re-point a store that recorded `staged` as its snapshot source at

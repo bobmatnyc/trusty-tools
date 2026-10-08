@@ -4,9 +4,9 @@
 //! shape — Gaussian blobs whose members are close enough that a damaged graph
 //! loses them. One copy keeps the two tests measuring the same thing.
 //! What: test-only generators. The unit tests mount this file as a module;
-//! `tests/hnsw_recall_9414.rs` mounts it through `#[path]`, so it depends on
+//! `tests/integration.rs` mounts it through `#[path]`, so it depends on
 //! `rand` alone and on nothing else in this crate.
-//! Test: `tests_9450`, `tests/hnsw_recall_9414.rs`.
+//! Test: `tests_9450`, `tests/hnsw_recall_9414.rs`, `tests/hnsw_compact_9450.rs`.
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};

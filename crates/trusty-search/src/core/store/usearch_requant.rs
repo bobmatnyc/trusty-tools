@@ -32,14 +32,24 @@
 //! `backfill_dry_run_reports_without_writing`,
 //! `backfill_to_the_current_precision_is_a_no_op`.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, Result};
-use usearch::{Index, IndexOptions, MetricKind};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use super::super::store_config::VectorQuant;
 use super::types::RequantizeReport;
 use super::usearch_store::{hnsw_max_elements, UsearchStore};
+
+/// A hook `rebuild_at` calls with the count of vectors added so far, before
+/// each add; an `Err` aborts the rebuild (#9450 crash-safety tests).
+pub(super) type RebuildFault = std::sync::Arc<dyn Fn(usize) -> Result<()> + Send + Sync>;
+
+/// The production hook: never fails.
+pub(super) fn no_fault() -> RebuildFault {
+    std::sync::Arc::new(|_| Ok(()))
+}
 
 impl UsearchStore {
     /// The scalar precision the LIVE index actually holds, if this knob can
@@ -137,7 +147,9 @@ impl UsearchStore {
         // Build the replacement OUTSIDE the write lock's mutation window: the
         // extraction below only needs a read lock, so concurrent searches keep
         // running for the (potentially long) re-encode of a large arena.
-        let (rebuilt, missing) = self.rebuild_at(target).await?;
+        let (rebuilt, missing) = self
+            .rebuild_at(target.scalar_kind(), target.label(), no_fault())
+            .await?;
         report.missing = missing;
 
         {
@@ -179,67 +191,141 @@ impl UsearchStore {
     }
 
     /// Extract every mapped vector as `f32` and re-add it to a fresh index at
-    /// `target` precision.
+    /// `quantization` precision.
     ///
     /// Why split out: keeps [`Self::requantize`]'s control flow readable and
     /// confines the usearch handling to one place. Held separately so the
     /// expensive re-encode runs under a READ lock — the write lock is taken
-    /// only for the pointer swap.
+    /// only for the pointer swap. #9450's compaction reuses it at the
+    /// CURRENT precision: a fresh build re-links every surviving node.
     /// What: reserves for the full vector count, then for each `(id, key)` in
     /// `id_to_key` reads the stored vector through `Index::get::<f32>` (usearch
     /// casts from whatever the source precision is) and `add`s it under the
     /// SAME key, so the sidecar mapping stays valid verbatim. Returns the new
     /// index plus the count of keys the source index could not return.
-    /// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`.
-    async fn rebuild_at(&self, target: VectorQuant) -> Result<(Index, usize)> {
+    /// `fault` is called with the count of vectors added so far before each
+    /// add; an `Err` aborts the rebuild. Production passes [`no_fault`];
+    /// #9450's crash-safety tests inject a mid-rebuild failure through it.
+    /// The adds run on [`rebuild_threads`] threads (#9450).
+    /// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`,
+    /// `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+    pub(super) async fn rebuild_at(
+        &self,
+        quantization: ScalarKind,
+        label: &str,
+        fault: RebuildFault,
+    ) -> Result<(Index, usize)> {
         let keys: Vec<u64> = {
             let id_map = self.id_to_key.read().await;
             id_map.values().copied().collect()
         };
-        let source = self.index.read().await;
-        // Mirror `with_capacity_hint`'s graph tuning so a converted index keeps
-        // the recall characteristics it was built with.
-        // #9414: the same size-scaled table, so the two paths cannot drift.
-        let super::hnsw_tuning::HnswTuning {
-            connectivity,
-            expansion_add,
-            expansion_search,
-        } = super::hnsw_tuning::hnsw_tuning(keys.len());
-        let rebuilt = Index::new(&IndexOptions {
-            dimensions: self.dim,
-            metric: MetricKind::Cos,
-            quantization: target.scalar_kind(),
-            connectivity,
-            expansion_add,
-            expansion_search,
-            multi: false,
-        })
-        .map_err(|e| {
-            anyhow!(
-                "usearch Index::new for requantize to {} failed: {e}",
-                target.label()
-            )
-        })?;
-        rebuilt
-            .reserve(keys.len().max(1).min(hnsw_max_elements()))
-            .map_err(|e| anyhow!("usearch reserve for requantize failed: {e}"))?;
+        let source = self.index.clone().read_owned().await;
+        let dim = self.dim;
+        let label = label.to_string();
+        // #9450: the add loop is seconds of blocking FFI at 150K vectors; run
+        // it on the blocking pool so it never pins a runtime worker (#1746).
+        tokio::task::spawn_blocking(move || -> Result<(Index, usize)> {
+            // Mirror `with_capacity_hint`'s graph tuning so a converted index
+            // keeps the recall characteristics it was built with.
+            // #9414: the same size-scaled table, so the two paths cannot drift.
+            let super::hnsw_tuning::HnswTuning {
+                connectivity,
+                expansion_add,
+                expansion_search,
+            } = super::hnsw_tuning::hnsw_tuning(keys.len());
+            let rebuilt = Index::new(&IndexOptions {
+                dimensions: dim,
+                metric: MetricKind::Cos,
+                quantization,
+                connectivity,
+                expansion_add,
+                expansion_search,
+                multi: false,
+            })
+            .map_err(|e| anyhow!("usearch Index::new for rebuild at {label} failed: {e}"))?;
+            rebuilt
+                .reserve(keys.len().max(1).min(hnsw_max_elements()))
+                .map_err(|e| anyhow!("usearch reserve for rebuild at {label} failed: {e}"))?;
 
-        let mut buffer = vec![0f32; self.dim];
-        let mut missing = 0usize;
-        for key in keys {
-            match source.get(key, &mut buffer) {
-                Ok(n) if n > 0 => rebuilt.add(key, &buffer).map_err(|e| {
-                    anyhow!("usearch add during requantize (key {key}) failed: {e}")
-                })?,
-                // The key map named a vector the graph does not hold. Pre-existing
-                // drift, not something this conversion caused — count and skip.
-                Ok(_) => missing += 1,
-                Err(e) => {
-                    tracing::warn!("usearch: requantize could not read key {key}: {e} — skipping");
-                    missing += 1;
+            let missing = copy_vectors(&source, &rebuilt, &keys, dim, &label, &fault)?;
+            Ok((rebuilt, missing))
+        })
+        .await
+        .map_err(|e| anyhow!("usearch rebuild task panicked: {e}"))?
+    }
+}
+
+/// Threads for one rebuild's add loop (#9450): half the cores, at most 8, and
+/// one below 10K keys. A 150K x 384 f16 rebuild took 92 s on one thread and
+/// 11 s on eight (release, 16 cores), with every writer waiting on
+/// `save_lock` throughout; usearch's index takes concurrent `add`s, and half
+/// the cores leaves the rest for queries (`tests/hnsw_compact_9450.rs`).
+fn rebuild_threads(keys: usize) -> usize {
+    if keys < 10_000 {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (cores / 2).clamp(1, 8)
+}
+
+/// Copy every vector `keys` names from `source` into `rebuilt` under the same
+/// key, on [`rebuild_threads`] threads; returns the count `source` could not
+/// return. The first add or fault error stops every thread and is returned.
+/// Test: `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+fn copy_vectors(
+    source: &Index,
+    rebuilt: &Index,
+    keys: &[u64],
+    dim: usize,
+    label: &str,
+    fault: &RebuildFault,
+) -> Result<usize> {
+    let missing = AtomicUsize::new(0);
+    let abort = AtomicBool::new(false);
+    let first_error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    let per_thread = keys.len().div_ceil(rebuild_threads(keys.len())).max(1);
+    std::thread::scope(|scope| {
+        for chunk in keys.chunks(per_thread) {
+            let (missing, abort, first_error) = (&missing, &abort, &first_error);
+            scope.spawn(move || {
+                let mut buffer = vec![0f32; dim];
+                for &key in chunk {
+                    if abort.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let step =
+                        fault(rebuilt.size()).and_then(|()| match source.get(key, &mut buffer) {
+                            Ok(n) if n > 0 => rebuilt.add(key, &buffer).map_err(|e| {
+                                anyhow!(
+                                    "usearch add during rebuild at {label} (key {key}) failed: {e}"
+                                )
+                            }),
+                            // The key map named a vector the graph does not hold.
+                            // Pre-existing drift, not caused here — count and skip.
+                            Ok(_) => {
+                                missing.fetch_add(1, Ordering::AcqRel);
+                                Ok(())
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "usearch: rebuild could not read key {key}: {e} — skipping"
+                                );
+                                missing.fetch_add(1, Ordering::AcqRel);
+                                Ok(())
+                            }
+                        });
+                    if let Err(e) = step {
+                        abort.store(true, Ordering::Release);
+                        let mut slot = first_error.lock().unwrap_or_else(|p| p.into_inner());
+                        slot.get_or_insert(e);
+                        return;
+                    }
                 }
-            }
+            });
         }
-        Ok((rebuilt, missing))
+    });
+    match first_error.into_inner().unwrap_or_else(|p| p.into_inner()) {
+        Some(e) => Err(e),
+        None => Ok(missing.into_inner()),
     }
 }

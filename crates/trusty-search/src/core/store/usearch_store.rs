@@ -411,6 +411,9 @@ pub struct UsearchStore {
     /// Test: `tests::test_save_allows_legitimate_shrink_after_deletions`,
     /// `tests::test_save_refuses_unexplained_catastrophic_shrink`.
     pub(super) removed_since_save: Arc<AtomicU64>,
+    /// #9450: churn since the last graph rebuild, and the heal marker.
+    /// Persisted in the sidecar; see [`super::usearch_compact`].
+    pub(super) compact: super::usearch_compact::CompactState,
 }
 
 impl UsearchStore {
@@ -477,6 +480,7 @@ impl UsearchStore {
             closed: AtomicBool::new(false),
             save_lock: Arc::new(tokio::sync::Mutex::new(())),
             removed_since_save: Arc::new(AtomicU64::new(0)),
+            compact: super::usearch_compact::CompactState::fresh(),
         })
     }
 
@@ -587,6 +591,9 @@ impl UsearchStore {
                 id_to_key: id_to_key.clone(),
                 next_key: self.next_key.load(Ordering::Relaxed),
                 dim: self.dim,
+                // #9450: captured under the same gate as the graph.
+                churn: self.compact.churn(),
+                heal_epoch: self.compact.heal_epoch(),
             }
         };
 
@@ -984,6 +991,8 @@ impl UsearchStore {
         store
             .next_key
             .store(key_map.next_key.max(1), Ordering::Relaxed);
+        // #9450: a pre-#9450 sidecar reads churn 0 and heal epoch 0.
+        store.compact.restore(key_map.churn, key_map.heal_epoch);
         // QW#1 opt-out (#709): TRUSTY_HNSW_MMAP_SERVE=off promotes to heap now
         // (higher RSS, no cold-fault latency on EFS/NFS). Default = mmap, no-op.
         if MmapServeMode::from_env().promote_on_load() {
