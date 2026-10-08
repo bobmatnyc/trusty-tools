@@ -319,7 +319,7 @@ async fn a_new_input_turns_on_every_row_without_report_context() {
     assert_eq!(row(&ran.outcome, "pr_body").state, SourceState::Used);
 }
 
-/// #9194 AC2: with `report_context`, all eight rows in canonical order.
+/// #9194 AC2: with `report_context`, all nine rows in canonical order (#9195).
 #[tokio::test]
 async fn report_context_lists_every_source_in_canonical_order() {
     let ran = Run::new(report()).go().await;

@@ -18,7 +18,7 @@
 //!
 //! Test: `mapreduce/map_tests.rs`.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures_util::stream::{self, StreamExt};
 use tracing::{debug, warn};
@@ -92,7 +92,7 @@ pub async fn run_map_stage(
     ctx: &MapContext<'_>,
     concurrency: usize,
 ) -> Vec<MapOutcome> {
-    run_map_stage_graded(units, llm, ctx, concurrency, "")
+    run_map_stage_graded(units, llm, ctx, concurrency, &no_sections)
         .await
         .into_iter()
         .map(|(outcome, _)| outcome)
@@ -106,7 +106,9 @@ pub async fn run_map_stage(
 /// relaxes a chunk, and `MapOutcome` is public, so the floor travels beside it.
 /// What: `letter_grade::grade_floor` of each `Reviewed` chunk's raw grade;
 /// APPROVE (no floor) for a skipped or failed unit. #9197: every chunk prompt
-/// carries `extra_sections`, as the unified prompt does.
+/// carries the caller sections, as the unified prompt does. #9195: `sections`
+/// answers per chunk; `first` is true only for a file's first chunk that
+/// sends a prompt (ruling B), so a file's text rides one chunk.
 /// Test: `run_map_stage_graded_reports_each_chunk_floor`,
 /// `mapreduce_chunk_prompts_carry_the_issue_block`.
 pub(crate) async fn run_map_stage_graded(
@@ -114,7 +116,7 @@ pub(crate) async fn run_map_stage_graded(
     llm: &Arc<dyn LlmProvider>,
     ctx: &MapContext<'_>,
     concurrency: usize,
-    extra_sections: &str,
+    sections: ChunkSections<'_>,
 ) -> Vec<(MapOutcome, Verdict)> {
     let conc = concurrency.max(1);
     debug!(
@@ -129,9 +131,18 @@ pub(crate) async fn run_map_stage_graded(
     // lifetimes (it is `tokio::spawn`-ed by the webhook service), avoiding the
     // higher-ranked-lifetime Send failure that a borrowed `&MapContext` would
     // otherwise introduce.
+    // #9195 ruling B: only a unit that sends a prompt asks for sections.
+    let mut carried: HashSet<&str> = HashSet::new();
     let tasks: Vec<MapTask> = units
         .iter()
-        .map(|u| plan_unit(u, ctx, extra_sections))
+        .map(|u| {
+            let extra = if sends_prompt(u) {
+                sections(&u.file, carried.insert(u.file.as_str()))
+            } else {
+                String::new()
+            };
+            plan_unit(u, ctx, &extra)
+        })
         .collect();
 
     // Tasks that need no LLM call resolve immediately; only `Call` tasks fan out.
@@ -143,6 +154,23 @@ pub(crate) async fn run_map_stage_graded(
         .buffer_unordered(conc)
         .collect::<Vec<(MapOutcome, Verdict)>>()
         .await
+}
+
+/// What each chunk prompt carries beyond its diff, by `(file, first)` (#9197,
+/// #9195).
+pub(crate) type ChunkSections<'a> = &'a (dyn Fn(&str, bool) -> String + Sync);
+
+/// No extra section in any chunk prompt.
+pub(crate) fn no_sections(_file: &str, _first: bool) -> String {
+    String::new()
+}
+
+/// Whether `unit` sends a reviewer prompt (#9195 ruling B): a metadata-only
+/// unit and an oversized hunk resolve without one.
+///
+/// Test: `a_unit_without_a_prompt_gets_no_text_and_is_not_used`.
+pub(crate) fn sends_prompt(unit: &MapUnit) -> bool {
+    !unit.is_metadata_only() && !unit.hunk_oversized
 }
 
 /// An owned, borrow-free plan for processing one `MapUnit`.

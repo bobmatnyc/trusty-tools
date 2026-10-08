@@ -48,6 +48,7 @@ use crate::{
             ReviewOutcome,
             assemble::{PrBody, apply_caller_context, refs_for_review}, // #9188 D, #9192, #9197
             docs::{DocsCall, apply_docs},                              // #9193
+            files::{FilesCall, apply_files},                           // #9195
             ledger::ContextLedger,
             probes::ContextRows, // #9194
             seams::{PrHead, load_diff_via, pr_meta_via},
@@ -536,6 +537,10 @@ async fn run_pipeline(
     // #9193: ADR/spec/SLD docs and CLAUDE.md read at the head SHA, when asked for.
     let docs = DocsCall::new(config, &deps, options, &diff_source, &pr_meta, &filtered);
     apply_docs(&mut applied, docs.at(&head), ledger).await;
+    // #9195: the changed files, whole, at the head SHA, when asked for.
+    let paths = (review_path, &mr_config);
+    let files = FilesCall::new(options, &diff_source, &filtered, &raw_diff, paths);
+    apply_files(&mut applied, files.at(&head), ledger).await;
     // #9194: every row, once, before either review path (unified, map-reduce).
     let rows = ContextRows {
         search,

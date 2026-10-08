@@ -127,7 +127,7 @@ pub(super) async fn run_mapreduce_branch(
             &deps.llm,
             &ctx,
             mr_config,
-            &run.applied.prompt_sections(), // #9193: issues, then docs
+            &|file: &str, first: bool| run.applied.chunk_sections(file, first), // #9193, #9195
         )
         .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.

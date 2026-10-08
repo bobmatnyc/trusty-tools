@@ -185,7 +185,7 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
         .map(|r| r.source.as_str())
         .collect();
     assert_eq!(&names[1..3], ["caller_context", "issues"], "{names:?}");
-    assert_eq!(names.len(), 8, "{names:?}");
+    assert_eq!(names.len(), 9, "{names:?}"); // #9195: `changed_files` is the 9th
 }
 
 // #9194: `--report-context`, reusing this module's LLM capture and socket pin.

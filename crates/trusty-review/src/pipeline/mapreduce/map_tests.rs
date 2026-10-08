@@ -407,7 +407,7 @@ async fn run_map_stage_graded_reports_each_chunk_floor() {
             meta_unit("src/skipped.bin", "binary"),
             oversized_unit("src/huge.rs", "+fn h() {}"),
         ];
-        let graded = run_map_stage_graded(&units, &llm, &c, 4, "").await;
+        let graded = run_map_stage_graded(&units, &llm, &c, 4, &super::no_sections).await;
         assert_eq!(graded.len(), 3, "grade {grade}");
         for (outcome, chunk_floor) in &graded {
             let want = if outcome.file() == "src/reviewed.rs" {
@@ -419,4 +419,42 @@ async fn run_map_stage_graded_reports_each_chunk_floor() {
             assert_eq!(*chunk_floor, want, "grade {grade}, {}", outcome.file());
         }
     }
+}
+
+/// #9195 ruling B: only a unit that sends a prompt asks for its sections, and
+/// a multi-chunk file is `first` in its first prompting chunk only. A
+/// metadata-only unit and an oversized hunk ask for nothing.
+#[tokio::test]
+async fn sections_ride_the_first_prompting_chunk_only() {
+    let llm: Arc<dyn LlmProvider> = Arc::new(RecordingLlm::approving());
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+    let mut second = review_unit("src/a.rs", "+fn a2() {}");
+    second.chunk_index = 1;
+    second.chunk_total = 2;
+    let units = vec![
+        oversized_unit("src/a.rs", "+fn huge() {}"),
+        review_unit("src/a.rs", "+fn a1() {}"),
+        second,
+        meta_unit("src/gone.rs", "deleted file"),
+        oversized_unit("src/huge.rs", "+fn h() {}"),
+        review_unit("src/b.rs", "+fn b() {}"),
+    ];
+    let asked = std::sync::Mutex::new(Vec::new());
+    let sections = |file: &str, first: bool| {
+        asked.lock().expect("lock").push((file.to_string(), first));
+        String::new()
+    };
+    let graded = run_map_stage_graded(&units, &llm, &c, 4, &sections).await;
+    assert_eq!(graded.len(), 6);
+    assert_eq!(
+        asked.into_inner().expect("lock"),
+        [
+            ("src/a.rs".to_string(), true),
+            ("src/a.rs".to_string(), false),
+            ("src/b.rs".to_string(), true),
+        ]
+    );
 }

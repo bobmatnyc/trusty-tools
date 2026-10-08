@@ -224,6 +224,22 @@ pub struct RunArgs {
     /// context sources.
     #[arg(long)]
     pub claude_md: bool,
+
+    /// Show the PR's changed files whole, read at the PR head SHA, for the
+    /// reviewer only (#9195), within `--changed-files-budget` bytes. A file
+    /// is shown whole or named under "Not shown" with its reason; over
+    /// budget, tests drop first, then generated files, then the largest. Its
+    /// lines are context only: a finding still cites the diff. A local diff
+    /// has no head SHA; the source is reported unavailable and the review
+    /// runs. Reports context sources.
+    #[arg(long)]
+    pub changed_files: bool,
+
+    /// Byte budget for `--changed-files` (#9195): default 120,000, at most
+    /// 400,000 (a larger value is clamped and reported); 0 reviews the diff
+    /// only. Does nothing without `--changed-files`.
+    #[arg(long, value_name = "BYTES")]
+    pub changed_files_budget: Option<usize>,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────

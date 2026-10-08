@@ -190,6 +190,9 @@ pub fn tool_descriptors() -> Value {
                 }
                 // #9194: the context-source ledger, opt-in.
                 props[context_args::REPORT_CONTEXT] = context_args::report_context_schema();
+                for (name, schema) in context_args::changed_files_schemas() {
+                    props[name] = schema; // #9195
+                }
             }
         }
         arr.push(console_metrics::descriptor());
@@ -268,6 +271,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     // #9193: accepted, and reported `unavailable`: a raw diff has no head SHA.
     let request = context_args::with_doc_flags(request, args)?;
     let request = context_args::with_report_context_flag(request, args)?; // #9194
+    // #9195: accepted, and reported `unavailable`: a raw diff has no head SHA.
+    let request = context_args::with_changed_files(request, args)?;
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")

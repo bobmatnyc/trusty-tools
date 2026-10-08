@@ -11,12 +11,13 @@ use crate::models::SourceState;
 use crate::pipeline::optional_context::IssueDoc;
 
 /// The canonical row order when reporting is on.
-pub(crate) const CANONICAL: [&str; 8] = [
+pub(crate) const CANONICAL: [&str; 9] = [
     "pr_body",
     "caller_context",
     "issues",
     "spec_docs",
     "claude_md",
+    "changed_files", // #9195 ruling Q6
     "search",
     "analyze",
     "external_sources",
@@ -59,6 +60,7 @@ fn ledger_fills_not_requested_rows() {
         ("issues", "no issue_docs were sent"),
         ("spec_docs", "spec_docs is off"),
         ("claude_md", "claude_md is off"),
+        ("changed_files", "changed_files is off"), // #9195
     ] {
         let row = find(&records, source);
         assert_eq!(
@@ -76,11 +78,12 @@ fn ledger_fills_not_requested_rows() {
 fn a_requested_row_that_was_not_recorded_is_unavailable() {
     let request = OptionalContextRequest::default()
         .with_issue_docs(Vec::<IssueDoc>::new())
-        .with_spec_docs(true);
+        .with_spec_docs(true)
+        .with_changed_files(true); // #9195
     let mut ledger = ContextLedger::new(true);
     ledger.finish(&request, rows(), &GateFacts::default());
     let records = ledger.into_records();
-    for source in ["issues", "spec_docs", "caller_context"] {
+    for source in ["issues", "spec_docs", "caller_context", "changed_files"] {
         let row = find(&records, source);
         assert_eq!(
             (row.state, row.detail.as_deref()),

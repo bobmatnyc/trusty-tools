@@ -87,6 +87,29 @@ pub(crate) fn report_context_schema() -> Value {
     })
 }
 
+/// Show the PR's changed files whole, on both review tools (#9195).
+pub(crate) const CHANGED_FILES: &str = "changed_files";
+
+/// The byte budget for `changed_files`, on both review tools (#9195).
+pub(crate) const CHANGED_FILES_BUDGET: &str = "changed_files_budget";
+
+/// `request` with `changed_files` and `changed_files_budget` (#9195). STUB.
+///
+/// # Errors
+///
+/// [`ToolError::InvalidParams`] naming the parameter and the type it got.
+pub(crate) fn with_changed_files(
+    request: OptionalContextRequest,
+    _args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    Ok(request)
+}
+
+/// The `changed_files` JSON Schemas both review tools list (#9195). STUB.
+pub(crate) fn changed_files_schemas() -> Vec<(&'static str, Value)> {
+    Vec::new()
+}
+
 /// `review_pr`'s parsed optional context.
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPrContext {
@@ -147,6 +170,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
     parsed.request = with_issue_docs(parsed.request, args)?; // #9197
     parsed.request = with_doc_flags(parsed.request, args)?; // #9193
     parsed.request = with_report_context_flag(parsed.request, args)?; // #9194
+    parsed.request = with_changed_files(parsed.request, args)?; // #9195
     Ok(parsed)
 }
 

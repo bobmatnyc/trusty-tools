@@ -177,6 +177,25 @@ pub const MAX_CLAUDE_MD_FETCHES: usize = 4;
 pub const MAX_DOC_DISCOVERY_HITS: u32 = 8;
 /// Seconds one doc read or the discovery search may take (#9193).
 pub const DOC_READ_TIMEOUT_SECS: u64 = 10;
+
+// ─── Changed files at the PR head (#9195) ────────────────────────────────────
+// Each file is shown whole or named as left out; none is cut to fit. The
+// `Not shown:` list comes off the top of the budget (Architect ruling D).
+
+/// Default byte budget for full changed-file text (#9195, ruling Q5).
+///
+/// Why: about 30k tokens, under the 160,000-character diff cap.
+pub const DEFAULT_CHANGED_FILES_BUDGET: usize = 120_000;
+/// Largest byte budget a caller may ask for; a larger one is clamped and the
+/// clamp is named in the ledger (#9195, ruling Q5).
+pub const MAX_CHANGED_FILES_BUDGET: usize = 400_000;
+/// Most Contents API reads for `changed_files` in one review (#9195, ruling C).
+pub const MAX_CHANGED_FILE_FETCHES: usize = 60;
+/// Most changed-file reads in flight at once (#9195, amendment 7).
+pub const CHANGED_FILE_FETCH_CONCURRENCY: usize = 8;
+/// Longest path the `Not shown:` list and a ledger item id carry (#9195,
+/// amendment 4; precedent `MAX_ISSUE_DOC_LINE_CHARS`).
+pub const MAX_CHANGED_FILE_PATH_CHARS: usize = 512;
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
 
