@@ -161,3 +161,144 @@ async fn a_late_lookup_demotes_nothing() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].contains("budget"), "{lines:?}");
 }
+
+/// What a test palace's redb store holds before the handle opens it (#9462).
+#[derive(Default)]
+struct Seed {
+    /// `old superseded_by new` edges.
+    edges: Vec<(Uuid, Uuid)>,
+    /// Drawer rows written to redb only, absent from the in-memory table.
+    rows: Vec<Uuid>,
+    /// Drawer ids whose redb row holds undecodable bytes.
+    corrupt: Vec<Uuid>,
+    /// Drawers in the in-memory table only.
+    mirror: Vec<Uuid>,
+}
+
+/// A palace handle over an on-disk KG seeded with `seed`.
+///
+/// Why (#9462): whether an edge's replacement exists is a palace question —
+/// the in-memory table, then the durable redb row — so the tests seed both.
+fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
+    use trusty_common::memory_core::palace::PalaceId;
+    use trusty_common::memory_core::share::SUPERSEDED_BY;
+    use trusty_common::memory_core::store::kg::{KnowledgeGraph, Triple};
+    use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+    use trusty_common::memory_core::store::kg_store::DRAWERS;
+    use trusty_common::memory_core::store::vector::UsearchStore;
+
+    let kg_path = dir.join("kg.db");
+    {
+        let store = KgStoreRedb::open(&kg_path).expect("open kg store to seed");
+        for (old, new) in &seed.edges {
+            let triple = Triple {
+                subject: format!("drawer:{old}"),
+                predicate: SUPERSEDED_BY.to_string(),
+                object: format!("drawer:{new}"),
+                valid_from: Utc::now(),
+                valid_to: None,
+                confidence: 1.0,
+                provenance: Some("test:9462".to_string()),
+            };
+            store.assert(&triple).expect("seed edge");
+        }
+        for id in seed.rows.iter().chain(&seed.corrupt) {
+            store
+                .upsert_drawer(&Drawer::new(*id, "replacement"))
+                .expect("seed drawer row");
+        }
+    }
+    if !seed.corrupt.is_empty() {
+        let db = redb::Database::create(&kg_path).expect("reopen kg.db exclusively");
+        let wtx = db.begin_write().expect("begin write");
+        {
+            let mut table = wtx.open_table(DRAWERS).expect("open drawers table");
+            for id in &seed.corrupt {
+                table
+                    .insert(id.into_bytes().as_slice(), [0xFFu8; 4].as_slice())
+                    .expect("overwrite the row with undecodable bytes");
+            }
+        }
+        wtx.commit().expect("commit the row edit");
+    }
+    let vs = UsearchStore::new(dir.join("idx.usearch"), 384).expect("vector store");
+    let kg = KnowledgeGraph::open(&kg_path).expect("open kg");
+    let handle = PalaceHandle::new(PalaceId::new("p-9462"), String::new(), vs, kg);
+    handle
+        .drawers
+        .write()
+        .extend(seed.mirror.iter().map(|id| Drawer::new(*id, "replacement")));
+    handle
+}
+
+fn hit_for(drawer: Uuid) -> RecallResult {
+    RecallResult {
+        drawer: Drawer::new(drawer, "d"),
+        score: 0.8,
+        layer: 2,
+    }
+}
+
+/// Why (#9462, ADR-0028 C9): an edge is honoured only when it resolves to a
+/// real drawer. An edge whose replacement is in no table of the palace must
+/// not halve the only surviving copy.
+#[tokio::test]
+async fn an_edge_to_a_missing_drawer_demotes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (old, ghost) = (Uuid::new_v4(), Uuid::new_v4());
+    let seed = Seed {
+        edges: vec![(old, ghost)],
+        ..Seed::default()
+    };
+    let handle = handle_with(dir.path(), &seed);
+    let found = supersessions_for(&handle, &[hit_for(old)]).await;
+    assert!(found.is_empty(), "dangling edge honoured: {found:?}");
+
+    let mut results = vec![hit_for(old)];
+    demote_superseded(&mut results, &found);
+    assert!((results[0].score - 0.8).abs() < 1e-6, "{results:#?}");
+}
+
+/// Why (#9462 keeps #9421): a replacement found in the in-memory table, or
+/// only in the durable redb row, still demotes the drawer it replaced.
+#[tokio::test]
+async fn an_edge_to_an_existing_drawer_is_still_honoured() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let [old_a, in_mirror, old_b, on_disk] = std::array::from_fn(|_| Uuid::new_v4());
+    let seed = Seed {
+        edges: vec![(old_a, in_mirror), (old_b, on_disk)],
+        rows: vec![on_disk],
+        mirror: vec![in_mirror],
+        ..Seed::default()
+    };
+    let handle = handle_with(dir.path(), &seed);
+    let found = supersessions_for(&handle, &[hit_for(old_a), hit_for(old_b)]).await;
+    assert_eq!(
+        found,
+        Supersessions::from([(old_a, in_mirror), (old_b, on_disk)])
+    );
+}
+
+/// Why (#9462 fail-open, as #9421 and #1713): when the existence check itself
+/// fails, the edge cannot be shown to resolve, so it is not honoured; the
+/// recall still answers and the WARN names the palace and the drawer.
+#[tokio::test]
+async fn an_unverifiable_replacement_demotes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let [old, unreadable, old_ok, ok] = std::array::from_fn(|_| Uuid::new_v4());
+    let seed = Seed {
+        edges: vec![(old, unreadable), (old_ok, ok)],
+        corrupt: vec![unreadable],
+        mirror: vec![ok],
+        ..Seed::default()
+    };
+    let handle = handle_with(dir.path(), &seed);
+
+    let (log, _guard) = LogCapture::install();
+    let found = supersessions_for(&handle, &[hit_for(old), hit_for(old_ok)]).await;
+    assert_eq!(found, Supersessions::from([(old_ok, ok)]), "{found:?}");
+    let lines = log.lines_naming("#9462");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("WARN") && lines[0].contains("p-9462"), "{lines:?}");
+    assert!(lines[0].contains(&unreadable.to_string()), "{lines:?}");
+}
