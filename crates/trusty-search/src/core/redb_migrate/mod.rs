@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::core::corpus_recovery::{
-    backup_incompatible_corpus, is_incompatible_corpus_format, INCOMPATIBLE_CORPUS_SUFFIX,
+    backup_incompatible_corpus, is_genuine_corpus_corruption, is_incompatible_corpus_format,
+    INCOMPATIBLE_CORPUS_SUFFIX,
 };
 
 mod copy;
@@ -56,15 +57,15 @@ mod tests;
 /// probe and the replacement; `SiblingUnreadable` — a `*.v2-incompatible`
 /// candidate could not be probed.
 /// Test: `tests::unreadable_dest_refuses_and_keeps_live_corpus`,
-/// `tests::unclean_v4_dest_refuses_and_keeps_live_corpus`,
+/// `tests::corrupt_dest_refuses_and_is_not_replaced`,
 /// `tests::preserve_source_refuses_a_dest_holding_data`.
 #[derive(Debug, thiserror::Error)]
 pub enum RedbMigrateError {
     /// `dest` exists but its redb format or table contents could not be read.
     #[error(
         "cannot read the redb corpus at {path} ({source}); refusing to migrate so it is never \
-         replaced. Stop any trusty-search daemon that holds the file and re-run; a 4.x corpus \
-         left unclean by a crash must first be opened once by the daemon, which repairs it"
+         replaced. Stop any trusty-search daemon that holds the file and re-run; a corrupt \
+         corpus is never migrated"
     )]
     DestUnreadable {
         /// The destination corpus path.
@@ -146,7 +147,9 @@ pub enum MigrationOutcome {
 /// `tests::idempotent_on_v4`, `tests::second_run_after_in_place_migration_keeps_live_v4`,
 /// `tests::second_run_after_auto_recovery_reindex_keeps_live_v4`,
 /// `tests::unreadable_dest_refuses_and_keeps_live_corpus`,
-/// `tests::unclean_v4_dest_refuses_and_keeps_live_corpus`.
+/// `tests::unclean_v4_dest_with_data_is_already_v4_and_keeps_data`,
+/// `tests::unclean_empty_v4_dest_is_restored_from_v2_sibling`,
+/// `tests::corrupt_dest_refuses_and_is_not_replaced`.
 pub fn migrate_redb_corpus(dest: &Path) -> Result<MigrationOutcome> {
     // #9453: classify `dest` before looking at any sibling. The old resolver
     // skipped a 4.x `dest` and picked the stale 2.x sibling, then deleted the
@@ -262,17 +265,21 @@ enum CorpusState {
 /// 4.x file opens, and a 2.x file fails with `UpgradeRequired` (or a related
 /// incompatible-format error), which means redb2 can read it.
 /// What: opens `path` with [`redb::ReadOnlyDatabase`] — an `O_RDONLY` file
-/// under a shared lock, so the probe writes nothing and a writer holding the
-/// file (a running daemon) makes it fail (#9453). Returns `Missing` when the
-/// path does not exist; `V2` for an [`is_incompatible_corpus_format`] open
-/// error; `V4` with [`count_data_rows`] for a clean open. `RepairAborted` (a
-/// 4.x file left unclean, which a read-only open cannot repair) and every
-/// other stat, open or read error is returned, never read as "not 2.x".
+/// under a shared lock, so the probe of a clean file writes nothing and a
+/// writer holding the file (a running daemon) makes it fail (#9453). Returns
+/// `Missing` when the path does not exist; `V2` only for an old-format error
+/// ([`is_incompatible_corpus_format`] and not [`is_genuine_corpus_corruption`]);
+/// `V4` with [`count_data_rows`] for a clean open. With `repair_unclean`, a
+/// `RepairAborted` file is reopened with [`redb::Database::open`], which takes
+/// the exclusive lock and repairs it in place as the daemon's own open does;
+/// redb reports `RepairAborted` only after the header passed the 4.x version
+/// check. Every other stat, open or read error is returned.
 /// Test: `tests::unreadable_dest_refuses_and_keeps_live_corpus` (open error),
-/// `tests::unclean_v4_dest_refuses_and_keeps_live_corpus` (`RepairAborted`),
+/// `tests::unclean_v4_dest_with_data_is_already_v4_and_keeps_data` (repair),
+/// `tests::corrupt_dest_refuses_and_is_not_replaced` (corruption),
 /// `tests::idempotent_on_v4` (a 4.x file is not 2.x and does not panic), the
-/// #9453 second-run tests (the probe leaves `dest` byte-identical).
-fn probe_corpus(path: &Path) -> Result<CorpusState, redb::Error> {
+/// #9453 second-run tests (the probe leaves a clean `dest` byte-identical).
+fn probe_corpus(path: &Path, repair_unclean: bool) -> Result<CorpusState, redb::Error> {
     if !path.try_exists()? {
         return Ok(CorpusState::Missing);
     }
@@ -280,9 +287,19 @@ fn probe_corpus(path: &Path) -> Result<CorpusState, redb::Error> {
         Ok(db) => Ok(CorpusState::V4 {
             data_rows: count_data_rows(&db)?,
         }),
-        // #9453: an unclean 4.x file, not an old format — redb2 must never read it.
-        Err(e @ redb::DatabaseError::RepairAborted) => Err(e.into()),
-        Err(e) if is_incompatible_corpus_format(&e) => Ok(CorpusState::V2),
+        // #9453: a daemon exits via `process::exit` without dropping its
+        // `Database`, so a normal stop leaves no allocator state and a
+        // read-only open aborts. A writable open repairs it.
+        Err(redb::DatabaseError::RepairAborted) if repair_unclean => {
+            let db = redb::Database::open(path)?;
+            Ok(CorpusState::V4 {
+                data_rows: count_data_rows(&db)?,
+            })
+        }
+        // #9453: only an old format goes to redb2; corruption refuses (#4227).
+        Err(e) if is_incompatible_corpus_format(&e) && !is_genuine_corpus_corruption(&e) => {
+            Ok(CorpusState::V2)
+        }
         Err(e) => Err(e.into()),
     }
 }
@@ -296,8 +313,8 @@ fn probe_corpus(path: &Path) -> Result<CorpusState, redb::Error> {
 /// What: sums `len()` over every normal and multimap table except `_meta`,
 /// propagating every redb error.
 /// Test: `tests::second_run_after_auto_recovery_reindex_keeps_live_v4`.
-fn count_data_rows(db: &redb::ReadOnlyDatabase) -> Result<u64, redb::Error> {
-    use redb::{ReadableDatabase as _, ReadableTableMetadata as _, TableHandle as _};
+fn count_data_rows(db: &impl redb::ReadableDatabase) -> Result<u64, redb::Error> {
+    use redb::{ReadableTableMetadata as _, TableHandle as _};
     let meta = crate::core::migration::META_TABLE.name();
     let txn = db.begin_read()?;
     let mut rows = 0u64;
@@ -317,11 +334,11 @@ fn count_data_rows(db: &redb::ReadOnlyDatabase) -> Result<u64, redb::Error> {
 ///
 /// Why: a `dest` whose format cannot be read (held by a running daemon, a
 /// permission error) must stop the run, never be treated as replaceable.
-/// What: [`probe_corpus`] with any error wrapped as
-/// [`RedbMigrateError::DestUnreadable`].
+/// What: [`probe_corpus`] with unclean-file repair on, and any error wrapped
+/// as [`RedbMigrateError::DestUnreadable`].
 /// Test: `tests::unreadable_dest_refuses_and_keeps_live_corpus`.
 fn classify_dest(dest: &Path) -> Result<CorpusState, RedbMigrateError> {
-    probe_corpus(dest).map_err(|source| RedbMigrateError::DestUnreadable {
+    probe_corpus(dest, true).map_err(|source| RedbMigrateError::DestUnreadable {
         path: dest.to_path_buf(),
         source,
     })
@@ -338,7 +355,7 @@ fn classify_dest(dest: &Path) -> Result<CorpusState, RedbMigrateError> {
 /// Test: `tests::round_trip_from_incompatible_sibling`.
 fn find_v2_sibling(dest: &Path) -> Result<Option<PathBuf>, RedbMigrateError> {
     for sibling in incompatible_siblings(dest) {
-        match probe_corpus(&sibling) {
+        match probe_corpus(&sibling, false) {
             Ok(CorpusState::V2) => return Ok(Some(sibling)),
             Ok(_) => {}
             Err(source) => {
