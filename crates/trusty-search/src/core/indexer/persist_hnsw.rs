@@ -320,12 +320,21 @@ impl CodeIndexer {
     /// reindex orchestrator has resolved (committed or rolled back) the
     /// staged snapshot, so subsequent commits (outside this reindex) resume
     /// checkpointing straight to the live path as before.
-    /// What: clears the flag with `Release` ordering.
-    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`.
+    /// What: clears the flag with `Release` ordering, then starts the store's
+    /// quiet compaction (#9478), which exits at once when nothing is due.
+    /// Test: `tests::persistence_and_search::test_incremental_persist_redirects_to_staging_while_reindexing`,
+    /// `tests::persist_compact_9450::a_reindex_with_no_checkpoint_compacts_once_writes_stop`.
     pub fn end_reindex_staging(&self) {
         self.persist_state
             .reindexing
             .store(false, Ordering::Release);
+        // #9478: every persist during the reindex skipped compaction, and the
+        // final staging save is not a persist; with the idle persist off,
+        // nothing else compacts churn the reindex left due.
+        if let (Some(store), Ok(_)) = (&self.store, tokio::runtime::Handle::try_current()) {
+            Arc::clone(store)
+                .spawn_compact_once_quiet(self.index_id.clone(), self.reindex_staging_probe());
+        }
     }
 
     /// `true` while this indexer is in staged-reindex mode (issue #3970). See
@@ -583,7 +592,7 @@ impl CodeIndexer {
                 if let Some(store) = &store {
                     // #9450: rebuild a churned graph before it is saved. Not
                     // during a reindex, which replaces most vectors anyway —
-                    // the idle persist after it compacts once.
+                    // `end_reindex_staging` starts a quiet compaction (#9478).
                     if !reindexing {
                         let compacted = match store
                             .compact_graph(crate::core::store::CompactMode::IfDue)
