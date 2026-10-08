@@ -187,7 +187,8 @@ fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
     use trusty_common::memory_core::store::kg_store::DRAWERS;
     use trusty_common::memory_core::store::vector::UsearchStore;
 
-    let kg_path = dir.join("kg.db");
+    // `KnowledgeGraph::open` takes the legacy `kg.db` name and opens `kg.redb`.
+    let kg_path = dir.join("kg.redb");
     {
         let store = KgStoreRedb::open(&kg_path).expect("open kg store to seed");
         for (old, new) in &seed.edges {
@@ -204,7 +205,7 @@ fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
         }
         for id in seed.rows.iter().chain(&seed.corrupt) {
             store
-                .upsert_drawer(&Drawer::new(*id, "replacement"))
+                .upsert_drawer(&drawer(*id))
                 .expect("seed drawer row");
         }
     }
@@ -222,18 +223,25 @@ fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
         wtx.commit().expect("commit the row edit");
     }
     let vs = UsearchStore::new(dir.join("idx.usearch"), 384).expect("vector store");
-    let kg = KnowledgeGraph::open(&kg_path).expect("open kg");
+    let kg = KnowledgeGraph::open(&dir.join("kg.db")).expect("open kg");
     let handle = PalaceHandle::new(PalaceId::new("p-9462"), String::new(), vs, kg);
     handle
         .drawers
         .write()
-        .extend(seed.mirror.iter().map(|id| Drawer::new(*id, "replacement")));
+        .extend(seed.mirror.iter().map(|id| drawer(*id)));
     handle
 }
 
-fn hit_for(drawer: Uuid) -> RecallResult {
+/// A drawer with id `id` (`Drawer::new` takes a room id).
+fn drawer(id: Uuid) -> Drawer {
+    let mut d = Drawer::new(Uuid::new_v4(), "replacement");
+    d.id = id;
+    d
+}
+
+fn hit_for(id: Uuid) -> RecallResult {
     RecallResult {
-        drawer: Drawer::new(drawer, "d"),
+        drawer: drawer(id),
         score: 0.8,
         layer: 2,
     }
