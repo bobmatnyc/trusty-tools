@@ -129,6 +129,11 @@ fn build_router_inner(
             "/api/console/machine-status/stream",
             get(crate::routes::machine_history::stream_handler),
         )
+        // #9474: the Architect dashboard URL, or null when none is live here.
+        .route(
+            "/api/console/architect-dashboard",
+            get(crate::routes::architect::dashboard_link_handler),
+        )
         // ── trusty-mpm session-manager surface (#1222: P2 tab + P3 front door) ──
         // The console is the SINGLE HTTP front door for the session REST API;
         // every handler calls a trusty-mpm MCP tool via the stdio bridge — never
