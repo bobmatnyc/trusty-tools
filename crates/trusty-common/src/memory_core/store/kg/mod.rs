@@ -24,8 +24,9 @@ mod graph;
 mod ops;
 mod types;
 
+// #9433: `pub(crate)` so `retrieval::tier_c_tests` can reuse `poison_adjacency`.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 // #9421: the batch `superseded_by` lookup recall demotion reads, and its
 // opt-in latency profile.
