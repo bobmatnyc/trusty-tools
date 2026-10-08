@@ -585,7 +585,7 @@ impl UsearchStore {
         // below because usearch's save is `&self` but mutates internal
         // serializer buffers; treating it as a write-side operation matches the
         // rest of this store.
-        let key_map = {
+        let mut key_map = {
             let id_to_key = self.id_to_key.read().await;
             StoreKeyMap {
                 id_to_key: id_to_key.clone(),
@@ -594,6 +594,7 @@ impl UsearchStore {
                 // #9450: captured under the same gate as the graph.
                 churn: self.compact.churn(),
                 heal_epoch: self.compact.heal_epoch(),
+                graph: None,
             }
         };
 
@@ -754,6 +755,8 @@ impl UsearchStore {
                 }
             }
         }
+        // #9450: the sidecar names the binary it is published with.
+        key_map.graph = super::usearch_compact::graph_stamp(&tmp_hnsw);
         publish(hnsw_path, &key_map)?;
         // Only a published pair establishes a new baseline for shrink credit.
         self.removed_since_save.store(0, Ordering::Release);
@@ -992,7 +995,9 @@ impl UsearchStore {
             .next_key
             .store(key_map.next_key.max(1), Ordering::Relaxed);
         // #9450: a pre-#9450 sidecar reads churn 0 and heal epoch 0.
-        store.compact.restore(key_map.churn, key_map.heal_epoch);
+        // A marker whose graph stamp does not match `hnsw_path` reads as 0.
+        let heal_epoch = super::usearch_compact::verified_heal_epoch(hnsw_path, &key_map);
+        store.compact.restore(key_map.churn, heal_epoch);
         // QW#1 opt-out (#709): TRUSTY_HNSW_MMAP_SERVE=off promotes to heap now
         // (higher RSS, no cold-fault latency on EFS/NFS). Default = mmap, no-op.
         if MmapServeMode::from_env().promote_on_load() {

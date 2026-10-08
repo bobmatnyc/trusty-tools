@@ -124,6 +124,7 @@ async fn binary_publication_failure_restores_removed_and_rewritten_keys() {
             dim: 4,
             churn: 0,
             heal_epoch: 0,
+            graph: None,
         };
         // The missing staged binary makes the SECOND rename fail, after the
         // new sidecar was actually published. The old live binary still exists.
@@ -150,6 +151,7 @@ async fn binary_publication_failure_restores_absent_sidecar() {
         dim: 4,
         churn: 0,
         heal_epoch: 0,
+        graph: None,
     };
     assert!(super::snapshot_publish::publish_snapshot(&path, &map).is_err());
     assert!(!path.with_extension("keys.json").exists());

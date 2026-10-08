@@ -614,6 +614,16 @@ impl VectorStore for UsearchStore {
         self.try_demote_after_write_cooldown(cooldown).await
     }
 
+    /// #9450: see [`UsearchStore::try_demote_after_write_cooldown_with_compaction`].
+    async fn persist_and_demote_after_write_cooldown_with_compaction(
+        &self,
+        cooldown: std::time::Duration,
+        compact: bool,
+    ) -> Result<Option<super::types::DemoteStats>> {
+        self.try_demote_after_write_cooldown_with_compaction(cooldown, compact)
+            .await
+    }
+
     /// Issue #6299: keep `hnsw_path` / `is_view` truthful across a reindex's
     /// staged→live HNSW swap. See
     /// [`UsearchStore::resolve_staged_snapshot_inner`] for the mechanics.

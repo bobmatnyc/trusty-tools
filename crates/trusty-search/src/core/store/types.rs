@@ -63,6 +63,19 @@ pub(super) struct StoreKeyMap {
     /// load — see `usearch_compact::GRAPH_HEAL_EPOCH`.
     #[serde(default)]
     pub(super) heal_epoch: u32,
+    /// #9450: the graph file `heal_epoch` describes. A mismatch on load means
+    /// the binary was not published with this sidecar, so the marker is void
+    /// — see `usearch_compact::verified_heal_epoch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) graph: Option<GraphStamp>,
+}
+
+/// Identity of a published graph file: byte length and inode (#9450).
+/// Test: `store::tests_9450::a_crash_between_the_renames_heals_again`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct GraphStamp {
+    pub(super) len: u64,
+    pub(super) ino: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +383,18 @@ pub trait VectorStore: Send + Sync {
         _cooldown: Duration,
     ) -> Result<Option<DemoteStats>> {
         Ok(None)
+    }
+
+    /// [`Self::persist_and_demote_after_write_cooldown`] that skips the
+    /// #9450 graph compaction before the save when `compact` is false.
+    /// What: default delegates to the method above, ignoring `compact`.
+    /// Test: `core::indexer::tests::persist_compact_9450::the_idle_persist_never_compacts_during_a_reindex`.
+    async fn persist_and_demote_after_write_cooldown_with_compaction(
+        &self,
+        cooldown: Duration,
+        _compact: bool,
+    ) -> Result<Option<DemoteStats>> {
+        self.persist_and_demote_after_write_cooldown(cooldown).await
     }
 
     /// Rebuild the vector graph so heavy remove churn cannot strand survivors

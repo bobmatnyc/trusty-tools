@@ -196,8 +196,8 @@ impl UsearchStore {
     /// Why split out: keeps [`Self::requantize`]'s control flow readable and
     /// confines the usearch handling to one place. Held separately so the
     /// expensive re-encode runs under a READ lock — the write lock is taken
-    /// only for the pointer swap. #9450's compaction reuses it at the
-    /// CURRENT precision: a fresh build re-links every surviving node.
+    /// only for the pointer swap. #9450's compaction shares its index setup
+    /// and add loop, but builds from a copy so it holds no lock meanwhile.
     /// What: reserves for the full vector count, then for each `(id, key)` in
     /// `id_to_key` reads the stored vector through `Index::get::<f32>` (usearch
     /// casts from whatever the source precision is) and `add`s it under the
@@ -205,10 +205,8 @@ impl UsearchStore {
     /// index plus the count of keys the source index could not return.
     /// `fault` is called with the count of vectors added so far before each
     /// add; an `Err` aborts the rebuild. Production passes [`no_fault`];
-    /// #9450's crash-safety tests inject a mid-rebuild failure through it.
     /// The adds run on [`rebuild_threads`] threads (#9450).
-    /// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`,
-    /// `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+    /// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`.
     pub(super) async fn rebuild_at(
         &self,
         quantization: ScalarKind,
@@ -225,28 +223,7 @@ impl UsearchStore {
         // #9450: the add loop is seconds of blocking FFI at 150K vectors; run
         // it on the blocking pool so it never pins a runtime worker (#1746).
         tokio::task::spawn_blocking(move || -> Result<(Index, usize)> {
-            // Mirror `with_capacity_hint`'s graph tuning so a converted index
-            // keeps the recall characteristics it was built with.
-            // #9414: the same size-scaled table, so the two paths cannot drift.
-            let super::hnsw_tuning::HnswTuning {
-                connectivity,
-                expansion_add,
-                expansion_search,
-            } = super::hnsw_tuning::hnsw_tuning(keys.len());
-            let rebuilt = Index::new(&IndexOptions {
-                dimensions: dim,
-                metric: MetricKind::Cos,
-                quantization,
-                connectivity,
-                expansion_add,
-                expansion_search,
-                multi: false,
-            })
-            .map_err(|e| anyhow!("usearch Index::new for rebuild at {label} failed: {e}"))?;
-            rebuilt
-                .reserve(keys.len().max(1).min(hnsw_max_elements()))
-                .map_err(|e| anyhow!("usearch reserve for rebuild at {label} failed: {e}"))?;
-
+            let rebuilt = new_rebuild_index(dim, quantization, keys.len(), &label)?;
             let missing = copy_vectors(&source, &rebuilt, &keys, dim, &label, &fault)?;
             Ok((rebuilt, missing))
         })
@@ -257,10 +234,10 @@ impl UsearchStore {
 
 /// Threads for one rebuild's add loop (#9450): half the cores, at most 8, and
 /// one below 10K keys. A 150K x 384 f16 rebuild took 92 s on one thread and
-/// 11 s on eight (release, 16 cores), with every writer waiting on
-/// `save_lock` throughout; usearch's index takes concurrent `add`s, and half
-/// the cores leaves the rest for queries (`tests/hnsw_compact_9450.rs`).
-fn rebuild_threads(keys: usize) -> usize {
+/// 11 s on eight (release, 16 cores); usearch's index takes concurrent
+/// `add`s, and half the cores leaves the rest for queries
+/// (`tests/hnsw_compact_9450.rs`).
+pub(super) fn rebuild_threads(keys: usize) -> usize {
     if keys < 10_000 {
         return 1;
     }
@@ -268,10 +245,39 @@ fn rebuild_threads(keys: usize) -> usize {
     (cores / 2).clamp(1, 8)
 }
 
+/// An empty index sized for `n` vectors at `quantization`, tuned like
+/// `with_capacity_hint` so a rebuilt index keeps its recall characteristics.
+/// #9414: the same size-scaled table, so the two paths cannot drift.
+pub(super) fn new_rebuild_index(
+    dim: usize,
+    quantization: ScalarKind,
+    n: usize,
+    label: &str,
+) -> Result<Index> {
+    let super::hnsw_tuning::HnswTuning {
+        connectivity,
+        expansion_add,
+        expansion_search,
+    } = super::hnsw_tuning::hnsw_tuning(n);
+    let rebuilt = Index::new(&IndexOptions {
+        dimensions: dim,
+        metric: MetricKind::Cos,
+        quantization,
+        connectivity,
+        expansion_add,
+        expansion_search,
+        multi: false,
+    })
+    .map_err(|e| anyhow!("usearch Index::new for rebuild at {label} failed: {e}"))?;
+    rebuilt
+        .reserve(n.max(1).min(hnsw_max_elements()))
+        .map_err(|e| anyhow!("usearch reserve for rebuild at {label} failed: {e}"))?;
+    Ok(rebuilt)
+}
+
 /// Copy every vector `keys` names from `source` into `rebuilt` under the same
-/// key, on [`rebuild_threads`] threads; returns the count `source` could not
-/// return. The first add or fault error stops every thread and is returned.
-/// Test: `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+/// key; returns the count `source` could not return.
+/// Test: `tests/vector_quant_default_6822.rs::backfill_converts_an_f32_index_to_f16_and_keeps_recall`.
 fn copy_vectors(
     source: &Index,
     rebuilt: &Index,
@@ -280,40 +286,60 @@ fn copy_vectors(
     label: &str,
     fault: &RebuildFault,
 ) -> Result<usize> {
+    add_parallel(rebuilt, keys.len(), dim, label, fault, &|i, buffer| {
+        let key = keys[i];
+        match source.get(key, buffer) {
+            Ok(n) if n > 0 => Ok(Some(key)),
+            // The key map named a vector the graph does not hold.
+            // Pre-existing drift, not caused here — count and skip.
+            Ok(_) => Ok(None),
+            Err(e) => {
+                tracing::warn!("usearch: rebuild could not read key {key}: {e} — skipping");
+                Ok(None)
+            }
+        }
+    })
+}
+
+/// Reads item `i` of a rebuild source into the buffer and returns its key,
+/// or `None` when the source has no vector for it.
+pub(super) type ReadItem<'a> = dyn Fn(usize, &mut [f32]) -> Result<Option<u64>> + Sync + 'a;
+
+/// Add items `0..n` of `read` to `rebuilt` on [`rebuild_threads`] threads;
+/// returns the count `read` had no vector for. `fault` runs before each add.
+/// The first read, add or fault error stops every thread and is returned.
+/// Test: `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+pub(super) fn add_parallel(
+    rebuilt: &Index,
+    n: usize,
+    dim: usize,
+    label: &str,
+    fault: &RebuildFault,
+    read: &ReadItem<'_>,
+) -> Result<usize> {
     let missing = AtomicUsize::new(0);
     let abort = AtomicBool::new(false);
     let first_error: Mutex<Option<anyhow::Error>> = Mutex::new(None);
-    let per_thread = keys.len().div_ceil(rebuild_threads(keys.len())).max(1);
+    let per_thread = n.div_ceil(rebuild_threads(n)).max(1);
     std::thread::scope(|scope| {
-        for chunk in keys.chunks(per_thread) {
+        for start in (0..n).step_by(per_thread) {
+            let end = start.saturating_add(per_thread).min(n);
             let (missing, abort, first_error) = (&missing, &abort, &first_error);
             scope.spawn(move || {
                 let mut buffer = vec![0f32; dim];
-                for &key in chunk {
+                for i in start..end {
                     if abort.load(Ordering::Acquire) {
                         return;
                     }
-                    let step =
-                        fault(rebuilt.size()).and_then(|()| match source.get(key, &mut buffer) {
-                            Ok(n) if n > 0 => rebuilt.add(key, &buffer).map_err(|e| {
-                                anyhow!(
-                                    "usearch add during rebuild at {label} (key {key}) failed: {e}"
-                                )
-                            }),
-                            // The key map named a vector the graph does not hold.
-                            // Pre-existing drift, not caused here — count and skip.
-                            Ok(_) => {
-                                missing.fetch_add(1, Ordering::AcqRel);
-                                Ok(())
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "usearch: rebuild could not read key {key}: {e} — skipping"
-                                );
-                                missing.fetch_add(1, Ordering::AcqRel);
-                                Ok(())
-                            }
-                        });
+                    let step = fault(rebuilt.size()).and_then(|()| match read(i, &mut buffer)? {
+                        Some(key) => rebuilt.add(key, &buffer).map_err(|e| {
+                            anyhow!("usearch add during rebuild at {label} (key {key}) failed: {e}")
+                        }),
+                        None => {
+                            missing.fetch_add(1, Ordering::AcqRel);
+                            Ok(())
+                        }
+                    });
                     if let Err(e) = step {
                         abort.store(true, Ordering::Release);
                         let mut slot = first_error.lock().unwrap_or_else(|p| p.into_inner());

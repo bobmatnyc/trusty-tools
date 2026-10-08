@@ -13,17 +13,20 @@
 //! store mutation path and carries the graph-heal generation; both persist in
 //! the key sidecar, so the count survives a restart where
 //! `removed_since_save` does not. [`UsearchStore::compact_graph_now`]
-//! rebuilds at the CURRENT precision through `rebuild_at` (the #6822
-//! requantize machinery) and swaps under the HNSW write lock (#6826). It
+//! rebuilds at the CURRENT precision from a copy of the vectors (see
+//! `usearch_compact_snapshot`), so writers wait only for the copy and the
+//! swap, never for the build; a write during the build abandons the swap. It
 //! writes nothing to disk; the caller's next save publishes the rebuilt graph
-//! through the shrink-guarded `save`. Callers:
-//! - the idle write-cooldown persist and the incremental persister, once
-//!   churn crosses [`compact_threshold`];
+//! through the shrink-guarded `save`, and the sidecar records which graph
+//! file its heal marker describes ([`verified_heal_epoch`]). Callers:
+//! - the idle write-cooldown persist (not during a staged reindex) and the
+//!   incremental persister, once churn crosses [`compact_threshold`];
 //! - M005, unconditionally, after it drops orphaned vectors;
 //! - [`UsearchStore::heal_on_load`], once per pre-#9450 snapshot.
 //!
 //! Test: `super::tests_9450`.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,7 +35,8 @@ use anyhow::{anyhow, Result};
 use tokio::sync::Semaphore;
 
 use super::super::store_config::{MmapServeMode, VectorQuant};
-use super::types::{CompactMode, CompactReport, ReindexProbe};
+use super::types::{CompactMode, CompactReport, GraphStamp, ReindexProbe, StoreKeyMap};
+use super::usearch_compact_snapshot::build_from_snapshot;
 use super::usearch_requant::{no_fault, RebuildFault};
 use super::usearch_store::UsearchStore;
 
@@ -74,9 +78,9 @@ pub(super) fn compact_threshold(live: usize) -> u64 {
 
 /// Churn counter and graph-heal generation for one store (#9450).
 ///
-/// Invariant: `churn` and `heal_epoch` change only under the store's
-/// `save_lock`, so `save` captures them at the same mutation boundary as the
-/// graph and the key map.
+/// Invariant: `churn`, `heal_epoch` and `replaced` change only under the
+/// store's `save_lock`, so `save` captures them at the same mutation boundary
+/// as the graph and the key map.
 #[derive(Debug)]
 pub(crate) struct CompactState {
     churn: AtomicU64,
@@ -84,6 +88,9 @@ pub(crate) struct CompactState {
     /// After a failed `IfDue` compaction, the churn count at which to try
     /// again; 0 = no back-off. In memory only.
     retry_at_churn: AtomicU64,
+    /// Whole-graph replacements by an adopted snapshot ([`Self::restore`]),
+    /// which bypass `mark_dirty`; part of `UsearchStore::graph_epoch`.
+    replaced: AtomicU64,
 }
 
 impl CompactState {
@@ -94,14 +101,22 @@ impl CompactState {
             churn: AtomicU64::new(0),
             heal_epoch: AtomicU32::new(GRAPH_HEAL_EPOCH),
             retry_at_churn: AtomicU64::new(0),
+            replaced: AtomicU64::new(0),
         }
     }
 
-    /// Take the values a sidecar (or an adopted snapshot) recorded.
+    /// Take the values a sidecar (or an adopted snapshot) recorded. The graph
+    /// was just replaced, so an in-flight compaction must not swap (#9450).
     pub(super) fn restore(&self, churn: u64, heal_epoch: u32) {
         self.churn.store(churn, Ordering::Release);
         self.heal_epoch.store(heal_epoch, Ordering::Release);
         self.retry_at_churn.store(0, Ordering::Release);
+        self.replaced.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Count of whole-graph replacements; see `UsearchStore::graph_epoch`.
+    pub(super) fn replacements(&self) -> u64 {
+        self.replaced.load(Ordering::Acquire)
     }
 
     /// Count `n` removals or replacements.
@@ -142,13 +157,15 @@ impl UsearchStore {
     /// Rebuild the graph now (`Always`) or only when churn is due (`IfDue`).
     ///
     /// Why: see the module docs.
-    /// What: `IfDue` returns `Ok(None)` below the threshold. Otherwise waits
-    /// for the daemon-wide heal gate, then [`Self::compact_with_fault`]. A
-    /// failed `IfDue` attempt backs off until churn grows by another
-    /// threshold, so a rebuild that cannot succeed is not retried on every
-    /// persist. Writes nothing to disk.
+    /// What: `IfDue` returns `Ok(None)` below the threshold, checked again
+    /// once the daemon-wide heal gate is held, so a caller that queued behind
+    /// a compaction does not rebuild a second time. Then
+    /// [`Self::compact_with_fault`]. A failed or abandoned `IfDue` attempt
+    /// backs off until churn grows by another threshold, so a rebuild that
+    /// cannot succeed is not retried on every persist. Writes nothing to disk.
     /// Test: `super::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`,
-    /// `super::tests_9450::a_failed_compaction_keeps_the_churn_count_and_marker`.
+    /// `super::tests_9450::a_failed_compaction_keeps_the_churn_count_and_marker`,
+    /// `super::tests_9450::two_queued_compactions_rebuild_once`.
     pub async fn compact_graph_now(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
         if mode == CompactMode::IfDue && !self.compaction_due().await {
             return Ok(None);
@@ -157,6 +174,10 @@ impl UsearchStore {
             .acquire()
             .await
             .map_err(|e| anyhow!("compaction gate closed: {e}"))?;
+        // #9450: another caller may have compacted while this one waited.
+        if mode == CompactMode::IfDue && !self.compaction_due().await {
+            return Ok(None);
+        }
         match self.compact_with_fault(no_fault()).await {
             Ok(report) => Ok(Some(report)),
             Err(e) => {
@@ -172,65 +193,86 @@ impl UsearchStore {
 
     /// The compaction itself, with a fault hook for crash-safety tests.
     ///
-    /// What: under `save_lock` (writers wait; searches keep their read lock),
-    /// rebuilds every mapped vector at the live precision. Before the swap it
-    /// checks that the new graph holds every key the old one returned; any
-    /// rebuild error or a failed check returns `Err` with the old graph, the
-    /// churn count and the heal marker untouched. After the swap: the store
-    /// is mutable and dirty, churn is zero, and the heal marker is current.
+    /// Why (#9450): a build held under `save_lock` stalled every index
+    /// writer for the whole rebuild (~9 s at 124K vectors), and searches
+    /// queued behind those writers. The gate is now held twice, briefly.
+    /// What: (1) under `save_lock`, copy every mapped vector out with the
+    /// graph epoch and churn count (`snapshot_vectors`); (2) with no lock,
+    /// build the new graph from the copy at the live precision and check it
+    /// holds every key the copy held; (3) under `save_lock` again, swap only
+    /// if neither the graph epoch nor the churn count moved. A write in
+    /// between, a rebuild error or a failed check returns `Err` with the live
+    /// graph, the churn count and the heal marker untouched. After a swap:
+    /// the store is mutable and dirty, churn is zero, the marker is current.
     /// Test: `super::tests_9450::compaction_keeps_every_key`,
-    /// `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`.
+    /// `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`,
+    /// `super::tests_9450::a_write_during_a_compaction_waits_only_for_the_copy`.
     pub(super) async fn compact_with_fault(&self, fault: RebuildFault) -> Result<CompactReport> {
-        let _mutation_guard = self.save_lock.lock().await;
-        self.refuse_if_closed("compact")?;
         let started = Instant::now();
-        let (kind, vectors_before) = {
-            let index = self.index.read().await;
-            (index.scalar_kind(), index.size())
+        let snapshot = {
+            let _copy_gate = self.save_lock.lock().await;
+            self.refuse_if_closed("compact")?;
+            self.snapshot_vectors().await?
         };
-        let mapped = self.id_to_key.read().await.len();
-        let churn = self.compact.churn();
-        let label = VectorQuant::from_scalar_kind(kind).map_or("the live precision", |q| q.label());
+        let (base_epoch, base_churn) = (snapshot.epoch, snapshot.churn);
+        let (mapped, vectors_before) = (snapshot.mapped(), snapshot.vectors_before);
+        let label = VectorQuant::from_scalar_kind(snapshot.kind)
+            .map_or("the live precision", |q| q.label())
+            .to_string();
 
-        let (rebuilt, missing) = self.rebuild_at(kind, label, fault).await?;
+        let (rebuilt, missing) = build_from_snapshot(snapshot, label, fault).await?;
         let vectors_after = rebuilt.size();
         // #9450 postcondition: every mapped key the old graph returned is in
-        // the new one. `rebuild_at` aborts on a failed add, so a mismatch
-        // means a key was silently lost — refuse the swap.
+        // the new one. A failed add aborts the build, so a mismatch means a
+        // key was silently lost — refuse the swap.
         if vectors_after + missing != mapped {
             return Err(anyhow!(
                 "compaction rebuilt {vectors_after} vectors for {mapped} mapped keys \
                  ({missing} unreadable) — refusing to swap (#9450)"
             ));
         }
-        {
+        let swap_gate = self.save_lock.lock().await;
+        self.refuse_if_closed("compact")?;
+        // #9450: a write since the copy is not in `rebuilt`; swapping would
+        // lose it. Abandon; the next due persist retries.
+        if self.graph_epoch() != base_epoch || self.compact.churn() != base_churn {
+            return Err(anyhow!(
+                "compaction abandoned: the graph was written during the rebuild — the live \
+                 graph keeps serving and a later persist retries (#9450)"
+            ));
+        }
+        let replaced = {
             let mut index = self.index.write().await;
-            *index = rebuilt;
+            let old = std::mem::replace(&mut *index, rebuilt);
             // #6826: the flags that describe the swap move under the same lock.
             self.is_view.store(false, Ordering::Release);
             self.mark_dirty();
-        }
+            old
+        };
         // Graph entries no chunk id maps to are unreachable and are not
         // rebuilt; credit them so `save`'s #1717 shrink guard reads the drop
         // as explained.
         let unmapped = vectors_before.saturating_sub(vectors_after) as u64;
         self.removed_since_save
             .fetch_add(unmapped, Ordering::AcqRel);
-        self.compact.churn.fetch_sub(churn, Ordering::AcqRel);
+        self.compact.churn.fetch_sub(base_churn, Ordering::AcqRel);
         self.compact
             .heal_epoch
             .store(GRAPH_HEAL_EPOCH, Ordering::Release);
         self.compact.retry_at_churn.store(0, Ordering::Release);
+        drop(swap_gate);
+        // Free the old graph off the runtime and outside every store lock.
+        let _ = tokio::task::spawn_blocking(move || drop(replaced)).await;
 
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             "usearch: compacted HNSW graph ({vectors_before} → {vectors_after} vectors, \
-             {churn} churn cleared, {missing} unreadable, {elapsed_ms} ms) (#9450)"
+             {base_churn} churn cleared, {missing} unreadable, {elapsed_ms} ms) (#9450)"
         );
         Ok(CompactReport {
             vectors_before,
             vectors_after,
-            churn_cleared: churn,
+            churn_cleared: base_churn,
             missing,
             elapsed_ms,
         })
@@ -301,4 +343,42 @@ impl UsearchStore {
             }
         });
     }
+}
+
+/// Length and inode of the graph file at `path`, or `None` when it cannot be
+/// read (#9450). A rename keeps both; a different file almost never matches.
+pub(super) fn graph_stamp(path: &Path) -> Option<GraphStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(GraphStamp {
+        len: meta.len(),
+        ino,
+    })
+}
+
+/// The heal marker `key_map` records, if it describes the graph at `path`.
+///
+/// Why (#9450): `save` publishes the sidecar before the binary, so a crash
+/// between the two renames leaves a sidecar saying "healed" beside the old,
+/// unhealed graph, and the heal would never run again.
+/// What: the recorded marker when the sidecar's [`GraphStamp`] matches the
+/// file now at `path`; 0 (heal again) when it does not or none was recorded.
+/// A copied index (new inode) heals once more, which is the safe direction.
+/// Test: `super::tests_9450::a_crash_between_the_renames_heals_again`.
+pub(super) fn verified_heal_epoch(path: &Path, key_map: &StoreKeyMap) -> u32 {
+    if key_map.heal_epoch == 0 {
+        return 0;
+    }
+    if key_map.graph.is_some() && key_map.graph == graph_stamp(path) {
+        return key_map.heal_epoch;
+    }
+    tracing::info!(
+        "usearch: the heal marker in the sidecar of {} does not describe that graph file — \
+         it will be compacted again (#9450)",
+        path.display()
+    );
+    0
 }

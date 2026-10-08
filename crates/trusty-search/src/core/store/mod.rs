@@ -38,6 +38,9 @@ mod types;
 mod usearch_close;
 // #9450: graph compaction after remove churn, and the one-time load heal.
 mod usearch_compact;
+// #9450: the vector copy a compaction builds from, so writers never wait
+// for the build.
+mod usearch_compact_snapshot;
 // #6826: the whole view↔heap demotion state machine (the #2164 clean-store
 // demote and the write-cooldown demote), in its own file so
 // `usearch_store.rs` stays under the 500-SLOC production cap.

@@ -1009,42 +1009,34 @@ impl CodeIndexer {
         &self,
         cooldown: Duration,
     ) -> bool {
+        match self.write_cooldown_persist(cooldown) {
+            Some(job) => job.run().await,
+            None => false,
+        }
+    }
+
+    /// The write-cooldown persist as a job that owns what it needs, so the
+    /// idle ticker can drop its `indexer.read()` guard before the save, the
+    /// compaction and the demote run (#9450). `None` when the persist is off
+    /// (zero cooldown, `TRUSTY_HNSW_REVIEW_IDLE` off, or no vector store).
+    /// The job skips the compaction while a staged reindex runs.
+    /// Test: `tests::persist_compact_9450::the_idle_persist_never_compacts_during_a_reindex`.
+    pub fn write_cooldown_persist(&self, cooldown: Duration) -> Option<WriteCooldownPersist> {
         if cooldown.is_zero() {
-            return false;
+            return None;
         }
         // #6826: TRUSTY_HNSW_REVIEW_IDLE off disables demotion as a mechanism,
         // this path included — not only the #2164 trigger.
         if !crate::core::store_config::hnsw_review_idle_enabled() {
-            return false;
+            return None;
         }
-        let Some(store) = &self.store else {
-            return false;
-        };
-        match store
-            .persist_and_demote_after_write_cooldown(cooldown)
-            .await
-        {
-            Ok(Some(stats)) => {
-                tracing::info!(
-                    "index '{}': persisted and demoted its written HNSW store to mmap-view \
-                     after {}s write-idle ({} vectors, ~{} bytes released, {} ms)",
-                    self.index_id,
-                    cooldown.as_secs(),
-                    stats.vectors,
-                    stats.snapshot_bytes,
-                    stats.elapsed_ms,
-                );
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(
-                    "index '{}': HNSW write-cooldown demote failed ({e}); leaving heap-resident",
-                    self.index_id
-                );
-                false
-            }
-        }
+        Some(WriteCooldownPersist {
+            index_id: self.index_id.clone(),
+            store: Arc::clone(self.store.as_ref()?),
+            cooldown,
+            // #9450: never compact during a staged reindex.
+            compact: !self.persist_state.reindexing.load(Ordering::Acquire),
+        })
     }
 
     /// Estimate this index's rehydrate cost in milliseconds (issue #3683
@@ -1103,5 +1095,47 @@ impl CodeIndexer {
     /// realistically large (hundreds-of-thousands-of-chunks) corpus fixture.
     pub(crate) fn set_rehydrate_cost_ms_for_test(&self, ms: u64) {
         self.last_rehydrate_cost_ms.store(ms, Ordering::Relaxed);
+    }
+}
+
+/// One index's write-cooldown persist-and-demote, detached from the indexer
+/// lock (#9450). Built by [`CodeIndexer::write_cooldown_persist`].
+pub struct WriteCooldownPersist {
+    index_id: String,
+    store: Arc<dyn crate::core::store::VectorStore>,
+    cooldown: Duration,
+    compact: bool,
+}
+
+impl WriteCooldownPersist {
+    /// Run it: `true` when the store was persisted and demoted. Logs an
+    /// `info` on a demotion and a `warn` on failure (never fatal).
+    pub async fn run(self) -> bool {
+        match self
+            .store
+            .persist_and_demote_after_write_cooldown_with_compaction(self.cooldown, self.compact)
+            .await
+        {
+            Ok(Some(stats)) => {
+                tracing::info!(
+                    "index '{}': persisted and demoted its written HNSW store to mmap-view \
+                     after {}s write-idle ({} vectors, ~{} bytes released, {} ms)",
+                    self.index_id,
+                    self.cooldown.as_secs(),
+                    stats.vectors,
+                    stats.snapshot_bytes,
+                    stats.elapsed_ms,
+                );
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "index '{}': HNSW write-cooldown demote failed ({e}); leaving heap-resident",
+                    self.index_id
+                );
+                false
+            }
+        }
     }
 }
