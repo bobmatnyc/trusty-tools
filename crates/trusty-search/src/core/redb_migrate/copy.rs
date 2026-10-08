@@ -138,7 +138,11 @@ pub(super) fn copy_all_tables(source: &Path, staging: &Path) -> Result<CopySumma
     verify_counts(staging, &per_table)
         .context("verify migrated staging corpus row counts match the source")?;
 
-    let schema_version = read_schema_version(staging).unwrap_or(0);
+    // #8254: a failed `_meta` read aborts before the original is touched; only
+    // an absent table or key reads as version 0.
+    let schema_version = read_schema_version(staging)
+        .context("read schema_version from the migrated staging corpus")?
+        .unwrap_or(0);
     Ok((per_table, total_rows, schema_version))
 }
 
@@ -316,22 +320,32 @@ fn verify_table_len(read: &redb::ReadTransaction, name: &str, expected: &u64) ->
 /// than treating the corpus as brand-new. We read it back here purely to log /
 /// return it for operator confidence.
 /// What: opens `_meta` in the 4.x corpus, reads `schema_version`, decodes the
-/// 4-byte little-endian `u32`. Returns `None` when the table or key is absent
-/// (a legacy pre-migration-framework corpus → treated as version 0 by the
-/// runner).
-/// Test: the round-trip test seeds a `_meta` `schema_version` and asserts it is
-/// preserved.
-fn read_schema_version(staging: &Path) -> Option<u32> {
-    let db = redb::Database::open(staging).ok()?;
-    let read = db.begin_read().ok()?;
-    let table = read
-        .open_table::<&str, &[u8]>(redb::TableDefinition::new("_meta"))
-        .ok()?;
-    let v = table.get("schema_version").ok()??;
+/// 4-byte little-endian `u32`. Returns `Ok(None)` when the table or key is
+/// absent (a legacy pre-migration-framework corpus → treated as version 0 by
+/// the runner) or the value is not 4 bytes. Any redb open, transaction, table
+/// or lookup error is an `Err` (#8254): it used to read as `None`, which
+/// reported version 0 for a corpus whose `_meta` could not be read.
+/// Test: `round_trip_v2_to_v4` (version preserved),
+/// `schema_version_read_error_propagates_instead_of_reading_as_zero`.
+pub(super) fn read_schema_version(staging: &Path) -> Result<Option<u32>> {
+    // #8254: every redb failure below propagates; none reads as "no version".
+    let db = redb::Database::open(staging)
+        .with_context(|| format!("open migrated corpus {}", staging.display()))?;
+    let read = db.begin_read().context("begin _meta read txn")?;
+    let table = match read.open_table::<&str, &[u8]>(redb::TableDefinition::new("_meta")) {
+        Ok(t) => t,
+        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+        Err(e) => return Err(anyhow::anyhow!("open _meta table: {e}")),
+    };
+    let Some(v) = table.get("schema_version").context("read schema_version")? else {
+        return Ok(None);
+    };
     let bytes = v.value();
     if bytes.len() == 4 {
-        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        Ok(Some(u32::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ])))
     } else {
-        None
+        Ok(None)
     }
 }

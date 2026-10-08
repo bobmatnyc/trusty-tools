@@ -524,6 +524,40 @@ fn preserve_source_refuses_a_dest_holding_data() {
     );
 }
 
+/// Why: #8254 — `read_schema_version` read every redb failure as `None`, so
+/// a migrated corpus whose `_meta` could not be read reported version 0 and
+/// the migration installed it anyway.
+/// What: a `_meta` declared `&str → u64` fails the `&str → &[u8]` open with a
+/// type mismatch; that must be an `Err`. A corpus with no `_meta` still reads
+/// `Ok(None)`.
+/// Test: this test.
+#[test]
+fn schema_version_read_error_propagates_instead_of_reading_as_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let absent = dir.path().join("absent.redb");
+    drop(redb::Database::create(&absent).expect("create corpus without _meta"));
+    assert_eq!(
+        copy::read_schema_version(&absent).expect("an absent _meta is not an error"),
+        None
+    );
+
+    let mismatched = dir.path().join("mismatched.redb");
+    {
+        let db = redb::Database::create(&mismatched).expect("create corpus");
+        let write = db.begin_write().expect("begin write");
+        {
+            let def: redb::TableDefinition<&str, u64> = redb::TableDefinition::new("_meta");
+            let mut table = write.open_table(def).expect("open _meta as &str -> u64");
+            table.insert("schema_version", 7u64).expect("insert");
+        }
+        write.commit().expect("commit");
+    }
+    let err = copy::read_schema_version(&mismatched)
+        .expect_err("an unreadable _meta must be an error, not version 0");
+    assert!(format!("{err:#}").contains("_meta"), "{err:#}");
+}
+
 /// Why: prove the migration against a REAL redb 2.x corpus produced by a
 /// shipped trusty-search build, not just a synthetic fixture — the strongest
 /// evidence the byte-level copy handles a production schema. Machine-specific
