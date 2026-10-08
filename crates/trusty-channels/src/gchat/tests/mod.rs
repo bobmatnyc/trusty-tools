@@ -19,6 +19,7 @@ mod inbound;
 mod ledger;
 mod routes_load;
 mod server;
+mod space_routes;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
