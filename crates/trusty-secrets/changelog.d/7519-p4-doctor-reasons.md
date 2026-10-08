@@ -1,3 +1,0 @@
-Added
-- `secrets.doctor` rows carry a typed `reason` (`not_compiled`, `not_enabled`, `cli_not_installed`, `config_invalid`, `tracked_setting_refused`) and a `detail` naming the fix when a backend is unavailable; the reply adds `account_config` and `headless.onepassword_token` (whether `OP_SERVICE_ACCOUNT_TOKEN` was present at server start, never the token). All fields are additive, so an older client decodes a newer reply ([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519))
-- `server::serve_with` and `server::StartEnv`, so the binary reports what it read from its environment at start ([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519))
