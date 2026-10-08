@@ -377,6 +377,9 @@ impl CodeIndexer {
     ) -> Result<IndexFileOutcome> {
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
+        // #9459: a corpus closed for shutdown would take this write in memory
+        // only, and the reconcile delta would then stamp HEAD as if it landed.
+        self.refuse_if_closed_for_shutdown()?;
         if self.refuse_incremental_write("index_file", file_path) {
             anyhow::bail!(
                 "index '{}' is write-quarantined: its durable corpus failed to open, so \

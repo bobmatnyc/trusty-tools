@@ -879,6 +879,16 @@ pub async fn run_daemon_with(state: SearchAppState, http: HttpListener) -> Resul
             .unwrap_or_else(std::time::Instant::now),
     );
     flush_all_indexes_on_shutdown(&flush_state, budget).await;
+    // #9459, #9477: the caller exits through `process::exit(0)`, which skips
+    // redb's `Drop`, and the corpus reopen sweep keeps a strong clone of the
+    // state, so close every corpus here or each one is left needing repair.
+    // The report holds the closed indexes' permits until this function returns,
+    // so no reindex starts on a corpus-less indexer before the exit.
+    let _closed = crate::service::shutdown_close::close_corpora_on_shutdown(
+        &flush_state,
+        crate::service::shutdown_close::SHUTDOWN_CORPUS_CLOSE_BUDGET,
+    )
+    .await;
 
     // Best-effort cleanup; ignore errors so the lockfile drop is what frees
     // the next daemon, not our cleanup.

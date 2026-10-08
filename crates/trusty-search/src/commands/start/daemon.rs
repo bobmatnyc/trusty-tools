@@ -618,6 +618,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     }
     // Issue #1746: by the time `run_daemon` returns `Ok`, the graceful drain,
     // best-effort per-index flush, and PID-lockfile release have all completed.
+    // #9459: so has the bounded corpus close, since `exit(0)` runs no redb `Drop`.
     // Exit the process immediately instead of returning up through `main` and
     // dropping the tokio runtime: a worker left stuck in a blocking HNSW
     // `Index::save` FFI call, or a CUDA/embedder teardown that deadlocks at

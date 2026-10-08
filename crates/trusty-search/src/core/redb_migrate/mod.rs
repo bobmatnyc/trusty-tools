@@ -287,9 +287,9 @@ fn probe_corpus(path: &Path, repair_unclean: bool) -> Result<CorpusState, redb::
         Ok(db) => Ok(CorpusState::V4 {
             data_rows: count_data_rows(&db)?,
         }),
-        // #9453: a daemon exits via `process::exit` without dropping its
-        // `Database`, so a normal stop leaves no allocator state and a
-        // read-only open aborts. A writable open repairs it.
+        // #9453: a crash, a SIGKILL or a shutdown corpus close that ran out
+        // of time (#9459) leaves no allocator state, and a read-only open
+        // aborts. A writable open repairs it.
         Err(redb::DatabaseError::RepairAborted) if repair_unclean => {
             let db = redb::Database::open(path)?;
             Ok(CorpusState::V4 {
