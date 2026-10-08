@@ -145,7 +145,7 @@ name = "trusty-common"
 # `content::dev` / `content::tests` edits diverge from; 0.53.3 is on main.
 # 0.54.2 (Refs #9222): patch — CredentialSandbox git-config fix; no public item removed or changed.
 # 0.54.4 (Refs #9299): patch — additive public `recall_across_palaces_reporting`; 0.54.3 is live on crates.io.
-version = "0.54.4"
+version = "0.54.5"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
