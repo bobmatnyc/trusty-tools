@@ -11,7 +11,11 @@
 //! mode check; [`TokenSource`] signs an assertion, exchanges it at the token
 //! endpoint and caches the result until [`TOKEN_REFRESH_MARGIN_SECS`] before
 //! expiry. Time comes from an injectable [`Clock`].
-//! Test: `tests/gchat_http.rs` — `key_file_mode_0644_is_refused_before_any_request`,
+//! Loading a key and minting a token are crate-private (#9448 review): only
+//! [`crate::gchat::api::client::GchatClient`] does either, so no public call
+//! hands out a `chat.bot` token that skips the route check.
+//! Test: `tests/gchat_http.rs` — `key_file_mode_0644_is_refused_before_any_request`;
+//! `src/gchat/tests/auth.rs` —
 //! `token_is_cached_within_expiry_and_refreshed_past_margin`,
 //! `jwt_assertion_verifies_with_the_public_key_and_carries_the_claims`,
 //! `debug_output_never_contains_key_material_or_token`.
@@ -92,7 +96,7 @@ impl ServiceAccountKey {
     /// checked there.
     /// Test: `key_file_mode_0644_is_refused_before_any_request`,
     /// `key_file_that_is_not_a_service_account_key_is_refused`.
-    pub fn from_file(path: &Path) -> Result<Self, GchatError> {
+    pub(crate) fn from_file(path: &Path) -> Result<Self, GchatError> {
         let read_err = |e: std::io::Error| GchatError::KeyFileRead {
             path: path.to_path_buf(),
             reason: e.kind().to_string(),
@@ -241,7 +245,7 @@ pub struct TokenSource {
 impl TokenSource {
     /// A source for `key` that exchanges assertions at `token_url`, using the
     /// system clock.
-    pub fn new(
+    pub(crate) fn new(
         key: ServiceAccountKey,
         http: reqwest::Client,
         token_url: impl Into<String>,

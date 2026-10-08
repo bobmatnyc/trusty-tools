@@ -9,11 +9,12 @@
 //! bearer token, and maps non-2xx responses to [`GchatError::Http`] with the
 //! token redacted. A 401 also drops the cached token. Hosts are overridable
 //! through [`Endpoints`] so tests run against wiremock.
-//! Test: `tests/gchat_http.rs` — `create_message_sends_bearer_path_and_thread_key`,
+//! Test: `src/gchat/tests/client_send.rs` —
+//! `create_message_sends_bearer_path_and_thread_key`,
 //! `create_message_non_2xx_is_typed_and_never_contains_the_token`,
+//! `unauthorized_chat_call_drops_the_cached_token`; `tests/gchat_http.rs` —
 //! `pull_decodes_events_and_isolates_malformed_messages`,
-//! `acknowledge_sends_exactly_the_given_ack_ids`,
-//! `unauthorized_chat_call_drops_the_cached_token`; here
+//! `acknowledge_sends_exactly_the_given_ack_ids`; here
 //! `resource_names_reject_path_injection`.
 
 use std::path::Path;
@@ -178,8 +179,22 @@ impl GchatClient {
         self
     }
 
-    /// The token source, for callers that need a raw access token.
-    pub fn token_source(&self) -> &TokenSource {
+    /// Prove the key can obtain an access token, returning only its expiry.
+    ///
+    /// Why: doctor's token-mint column (#9448 D6) needs the check without
+    /// any caller ever holding the bearer token.
+    /// What: takes a token from the cache or mints one; returns
+    /// `expires_at` (Unix seconds) and drops the token.
+    /// Test: `doctor_mints_a_token_online_and_reports_in_use_state`.
+    pub(crate) async fn check_token(&self) -> Result<u64, GchatError> {
+        Ok(self.tokens.access_token().await?.expires_at())
+    }
+
+    /// The token source (crate tests only).
+    // #9448 review: crate-private, so no public call hands out a `chat.bot`
+    // bearer token without the route check.
+    #[cfg(test)]
+    pub(crate) fn token_source(&self) -> &TokenSource {
         &self.tokens
     }
 
@@ -196,7 +211,12 @@ impl GchatClient {
     /// Test: `create_message_sends_bearer_path_and_thread_key`,
     /// `create_message_with_thread_key_defaults_to_fallback_reply`,
     /// `create_message_non_2xx_is_typed_and_never_contains_the_token`.
-    pub async fn create_message(&self, request: &CreateMessage) -> Result<ChatMessage, GchatError> {
+    // #9448 ruling 7: crate-private, so every send passes the route check in
+    // `GchatChannel::send_question` / `send_review_notice`.
+    pub(crate) async fn create_message(
+        &self,
+        request: &CreateMessage,
+    ) -> Result<ChatMessage, GchatError> {
         validate_space(&request.space)?;
         let url = format!(
             "{}/v1/{}/messages",
