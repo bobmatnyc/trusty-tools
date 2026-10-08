@@ -12,6 +12,8 @@
 //! wait. Run 2 compacts with the reader only and reports the rebuild time.
 //! Both report process RSS before, at peak during, and after. A measurement,
 //! not a gate: it asserts only the outcomes and that no vector was lost.
+//! A second test compacts the same index six times while it grows and asserts
+//! that RSS after each compaction stays flat (#9450 fix round 2).
 //! Run (release, the shipping profile):
 //! `cargo test -p trusty-search --release --test integration hnsw_compact_9450 -- --ignored --nocapture`.
 //! Test: this file.
@@ -34,6 +36,27 @@ const BLOBS: clustered_vectors::Blobs = clustered_vectors::Blobs {
     sigma: 0.6,
 };
 
+/// The two tests here measure process-wide RSS, so they never run at once.
+static HEAVY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A `VECTORS`-key store of clustered vectors at the default precision, keys
+/// `c0..`.
+async fn build_store() -> Arc<UsearchStore> {
+    let store = Arc::new(UsearchStore::new(DIM).expect("store init"));
+    assert_eq!(store.vector_quant_label().await, Some("f16"));
+    for b in 0..VECTORS / BATCH {
+        let items: Vec<(String, Vec<f32>)> =
+            clustered_vectors::clustered_points(BATCH, BLOBS, 9450 + b as u64)
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (format!("c{}", b * BATCH + i), v))
+                .collect();
+        store.upsert_batch(&items).await.expect("upsert batch");
+    }
+    assert_eq!(store.len().await.expect("len"), VECTORS);
+    store
+}
+
 /// Sample process RSS every 25 ms into `peak` until `stop` is set.
 fn spawn_rss_sampler(stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -51,19 +74,9 @@ fn spawn_rss_sampler(stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) -> std::thread
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "builds a 150K x 384 HNSW index and compacts it; run in release with --ignored"]
 async fn compaction_cost_at_150k_384d_f16() {
-    let store = Arc::new(UsearchStore::new(DIM).expect("store init"));
-    assert_eq!(store.vector_quant_label().await, Some("f16"));
+    let _heavy = HEAVY.lock().await;
     let build = Instant::now();
-    for b in 0..VECTORS / BATCH {
-        let items: Vec<(String, Vec<f32>)> =
-            clustered_vectors::clustered_points(BATCH, BLOBS, 9450 + b as u64)
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| (format!("c{}", b * BATCH + i), v))
-                .collect();
-        store.upsert_batch(&items).await.expect("upsert batch");
-    }
-    assert_eq!(store.len().await.expect("len"), VECTORS);
+    let store = build_store().await;
     let build_secs = build.elapsed().as_secs_f64();
     let writes = clustered_vectors::clustered_points(4_000, BLOBS, 1);
     let probes = clustered_vectors::clustered_points(500, BLOBS, 2);
@@ -123,6 +136,63 @@ async fn compaction_cost_at_150k_384d_f16() {
         store.len().await.expect("len"),
         VECTORS + waits.len(),
         "no vector lost"
+    );
+}
+
+/// Compactions run on the 150K store in one process.
+const RSS_ROUNDS: usize = 6;
+/// Keys added between two compactions, so every copy has a new size.
+const RSS_GROWTH: usize = 2_000;
+/// Allowed RSS growth after the first compaction, over all later rounds. The
+/// keys added in five rounds account for ~15 MB of it.
+const RSS_FLAT_MB: u64 = 50;
+
+/// #9450 fix round 2: RSS after a compaction stays flat when the same index
+/// is compacted again and again while it grows.
+/// Why: the vector copy was one `keys x dim` f32 allocation (~230 MB at 150K
+/// x 384). The macOS allocator kept each freed block resident when the next
+/// copy asked for a different size, so RSS climbed by about a copy per round.
+/// Red before the fix: RSS after each round rose by ~200 MB.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "builds a 150K x 384 HNSW index and compacts it six times; run in release with --ignored"]
+async fn compaction_rss_stays_flat_across_rounds() {
+    let _heavy = HEAVY.lock().await;
+    let store = build_store().await;
+    let mut after: Vec<u64> = Vec::with_capacity(RSS_ROUNDS);
+    for round in 0..RSS_ROUNDS {
+        if round > 0 {
+            let items: Vec<(String, Vec<f32>)> =
+                clustered_vectors::clustered_points(RSS_GROWTH, BLOBS, 94_500 + round as u64)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (format!("g{round}-{i}"), v))
+                    .collect();
+            store.upsert_batch(&items).await.expect("grow");
+        }
+        let keys = store.len().await.expect("len");
+        let before = current_rss_mb().unwrap_or(0);
+        let report = store
+            .compact_graph_now(CompactMode::Always)
+            .await
+            .expect("compaction")
+            .expect("report");
+        assert_eq!(report.vectors_after, keys, "no vector lost");
+        let rss = current_rss_mb().unwrap_or(0);
+        eprintln!(
+            "#9450 rss: round {round}: {keys} keys, compaction {} ms, RSS before {before} MB, \
+             after {rss} MB",
+            report.elapsed_ms
+        );
+        after.push(rss);
+    }
+    let first = after[0];
+    let last = after[RSS_ROUNDS - 1];
+    let highest = after.iter().copied().max().unwrap_or(first);
+    eprintln!("#9450 rss: after-RSS per round {after:?} MB");
+    assert!(
+        highest.saturating_sub(first) < RSS_FLAT_MB,
+        "#9450: RSS after a compaction grew from {first} MB to {highest} MB (last {last} MB) \
+         over {RSS_ROUNDS} rounds; allowed {RSS_FLAT_MB} MB"
     );
 }
 
