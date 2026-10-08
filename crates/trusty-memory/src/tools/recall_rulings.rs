@@ -475,6 +475,23 @@ async fn search_one_bounded(
     }
 }
 
+/// Time the edge read gets to finish before the leg's outer timeout fires.
+const EDGE_READ_MARGIN: Duration = Duration::from_millis(25);
+
+/// The budget for one rulings palace's `superseded_by` read.
+///
+/// Why (#9421): the leg's outer timeout and the edge read's own timeout round
+/// to the same timer tick, so a read allowed to run up to `deadline` can lose
+/// the race and drop the palace's rulings, not just the demotion.
+/// What: [`LOOKUP_BUDGET`] or the time from `now` to `deadline` less
+/// [`EDGE_READ_MARGIN`], whichever is shorter; zero once less than the margin
+/// is left, so the read times out and fails open.
+/// Test: `the_edge_read_budget_leaves_a_margin_before_the_leg_deadline`.
+fn edge_read_budget(deadline: Instant, now: Instant) -> Duration {
+    let remaining = deadline.saturating_duration_since(now);
+    LOOKUP_BUDGET.min(remaining.saturating_sub(EDGE_READ_MARGIN))
+}
+
 /// Open and search one rulings palace. Runs on the blocking pool.
 ///
 /// Score scale (#9143 review): the project hits carry the vector score plus an
@@ -483,8 +500,8 @@ async fn search_one_bounded(
 /// scale. With no BM25 lane for that palace a ruling lacks the bonus (at most
 /// `1/61`), which errs toward the project hit.
 /// What: the hits, plus the `superseded_by` edges among them read from this
-/// palace's KG (#9421) within [`LOOKUP_BUDGET`] or the time left before
-/// `deadline`, whichever is shorter; a failed or late edge read logs a warning
+/// palace's KG (#9421) within [`edge_read_budget`], which stops short of
+/// `deadline`; a failed or late edge read logs a warning
 /// and demotes nothing for this palace. Empty when the palace is an alias of
 /// the project palace. Each search failure is logged with its full error chain
 /// and returned as a bare code.
@@ -528,7 +545,7 @@ fn search_palace(
             fuse_bm25_into_recall(&mut hits, &bm25_hits, search.window);
         }
         // #9421: read while the handle is open; never past the leg's bound.
-        let budget = LOOKUP_BUDGET.min(deadline.saturating_duration_since(Instant::now()));
+        let budget = edge_read_budget(deadline, Instant::now());
         let superseded = supersessions_for_within(&handle, &hits, budget).await;
         Ok(RulingsHits { hits, superseded })
     })

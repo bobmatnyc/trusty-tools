@@ -293,3 +293,16 @@ async fn a_default_state_ignores_the_rulings_env_until_the_daemon_opts_in() {
         ["rulings-env-a", "rulings-env-b"]
     );
 }
+
+/// Why (#9421): the edge read must end a margin before the leg's deadline, so
+/// the outer timeout never fires first and drops the palace's rulings.
+#[test]
+fn the_edge_read_budget_leaves_a_margin_before_the_leg_deadline() {
+    let now = Instant::now();
+    let ms = Duration::from_millis;
+    assert_eq!(edge_read_budget(now + ms(10), now), Duration::ZERO);
+    assert_eq!(edge_read_budget(now, now + ms(5)), Duration::ZERO);
+    assert_eq!(edge_read_budget(now + ms(100), now), ms(75));
+    let long = LOOKUP_BUDGET + EDGE_READ_MARGIN + ms(1);
+    assert_eq!(edge_read_budget(now + long, now), LOOKUP_BUDGET);
+}
