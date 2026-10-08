@@ -122,6 +122,28 @@ impl RecallCoverage {
         self.not_resident + self.filter_failed + self.top_k_zero + self.open_failed.len()
     }
 
+    /// Count `cold_count` non-resident palaces from the empty check's result.
+    ///
+    /// Why (#9299, Fail-Open Check): when the blocking empty check fails, the
+    /// cold palaces can be neither skipped nor called `not_resident`, and
+    /// dropping them would break the D4 invariant and hide them.
+    /// What: `Ok(empty)` counts `empty` as skipped and the rest as
+    /// `not_resident`; `Err` logs and counts all of them as `filter_failed`.
+    /// Test: `a_failed_empty_check_counts_every_cold_palace_as_filter_failed`.
+    fn classify_cold(&mut self, cold_count: usize, empty: Result<usize, tokio::task::JoinError>) {
+        match empty {
+            Ok(empty) => {
+                self.palaces_skipped = empty;
+                self.not_resident = cold_count.saturating_sub(empty);
+            }
+            Err(e) => {
+                // #9299: an unclassified palace is reported, never dropped.
+                tracing::warn!("recall-all empty-palace filter failed: {e}");
+                self.filter_failed = cold_count;
+            }
+        }
+    }
+
     /// Add the ADR-0071 D4 fields and `scope` to a response object.
     ///
     /// What: `coverage` is `"complete"` only when nothing went unsearched.
@@ -263,19 +285,10 @@ where
         palaces_total,
         ..RecallCoverage::default()
     };
-    match tokio::task::spawn_blocking(move || cold.iter().filter(|p| is_empty_on_disk(p)).count())
-        .await
-    {
-        Ok(empty) => {
-            coverage.palaces_skipped = empty;
-            coverage.not_resident = cold_count - empty;
-        }
-        Err(e) => {
-            // #9299: an unclassified palace is reported, never silently dropped.
-            tracing::warn!("recall-all empty-palace filter failed: {e}");
-            coverage.filter_failed = cold_count;
-        }
-    }
+    let empty =
+        tokio::task::spawn_blocking(move || cold.iter().filter(|p| is_empty_on_disk(p)).count())
+            .await;
+    coverage.classify_cold(cold_count, empty);
     if window == 0 {
         coverage.top_k_zero = resident.len();
         return Ok(RecallAllOutcome {
@@ -577,6 +590,40 @@ mod coverage_tests {
         assert_eq!(out["coverage"], "complete");
         assert_eq!(out["scope"], "resident");
         assert_eq!(out["not_searched_by_reason"], json!({}));
+    }
+
+    /// Why (#9299, Fail-Open Check): the default scope's blocking empty check
+    /// can fail. Its cold palaces must then be reported as `filter_failed`,
+    /// never dropped from the count or guessed empty.
+    /// What: a real `JoinError` from a panicking blocking task, fed to
+    /// `classify_cold` for three cold palaces beside one searched palace.
+    /// Test: this test.
+    #[tokio::test]
+    async fn a_failed_empty_check_counts_every_cold_palace_as_filter_failed() {
+        let join_err = tokio::task::spawn_blocking(|| -> usize { panic!("empty check failed") })
+            .await
+            .expect_err("a panicking task yields a JoinError");
+        let mut cov = RecallCoverage {
+            palaces_total: 4,
+            palaces_searched: 1,
+            ..RecallCoverage::default()
+        };
+        cov.classify_cold(3, Err(join_err));
+        assert_eq!(
+            (cov.filter_failed, cov.palaces_skipped, cov.not_resident),
+            (3, 0, 0)
+        );
+        let mut out = Map::new();
+        cov.insert_into(RecallAllScope::Resident, &mut out);
+        assert_eq!(out["coverage"], "partial");
+        assert_eq!(out["not_searched_by_reason"], json!({ "filter_failed": 3 }));
+
+        let mut ok = RecallCoverage::default();
+        ok.classify_cold(3, Ok(1));
+        assert_eq!(
+            (ok.palaces_skipped, ok.not_resident, ok.filter_failed),
+            (1, 2, 0)
+        );
     }
 
     /// Why: absent and null mean the default; anything unknown is an error.
