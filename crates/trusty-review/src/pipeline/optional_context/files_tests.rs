@@ -765,8 +765,10 @@ async fn fetch_concurrency_is_at_most_eight() {
     let diff: String = (0..20)
         .map(|i| modified(&format!("src/f{i:02}.rs")))
         .collect();
-    let mut fetcher = Fake::default();
-    fetcher.delay = Some(Duration::from_millis(20));
+    let fetcher = Fake {
+        delay: Some(Duration::from_millis(20)),
+        ..Fake::default()
+    };
     let ran = run(&diff, on(), fetcher).await;
     let peak = ran.fetcher.peak.load(Ordering::SeqCst);
     assert_eq!(ran.fetcher.calls().len(), 20);

@@ -70,7 +70,8 @@ impl AppliedContext {
     /// changed-files section, with `file`'s own text only when `first` (its
     /// first chunk that sends a prompt, ruling B).
     ///
-    /// Test: `file_text_reaches_only_its_first_mapreduce_chunk`.
+    /// Test: `file_text_reaches_only_its_own_mapreduce_chunk`,
+    /// `a_chunk_carries_only_its_own_file`.
     pub(crate) fn chunk_sections(&self, file: &str, first: bool) -> String {
         join_sections(&[
             &self.sections,
