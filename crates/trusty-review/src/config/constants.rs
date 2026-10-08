@@ -125,9 +125,11 @@ pub const MAX_PR_BODY_CHARS: usize = 64_000;
 //
 // Drop order, shared by B2a (caller `issue_docs`) and B2b (fetched issues):
 // docs are kept in priority order — caller-supplied docs in the order given,
-// then fetched docs. A doc that would pass `MAX_ISSUE_DOCS` or
-// `MAX_ISSUE_SECTION_CHARS` is omitted whole, and so is every doc after it, so
-// the lowest-priority docs go first and no doc is ever cut to fit the section.
+// then fetched docs in PR-body order. A doc that would pass its origin's item
+// limit (`MAX_ISSUE_DOCS` supplied, `MAX_LINKED_ISSUE_FETCHES` fetched) or
+// `MAX_ISSUE_SECTION_CHARS` is omitted whole, and so is every later doc of
+// its origin, so the fetched tail goes first, a supplied doc is never dropped
+// for a fetched one, and no doc is ever cut to fit the section.
 // A doc whose id repeats an earlier one is omitted and takes no budget.
 
 /// Maximum characters of one issue doc's body the reviewer receives (#9197).
@@ -156,6 +158,19 @@ pub const MAX_ISSUE_DOC_LINE_CHARS: usize = 512;
 
 /// Largest `--issue-docs-file` `run` reads: 256 KiB (#9197).
 pub const MAX_ISSUE_DOCS_FILE_BYTES: u64 = 256 * 1024;
+
+/// Most issues `fetch_linked_issues` fetches for one review (#9197, B2b).
+///
+/// Why: each fetch is a GitHub API call; a hostile PR body may link
+/// thousands. Refs skipped as supplied, the PR itself, or another repository
+/// take none of the budget.
+pub const MAX_LINKED_ISSUE_FETCHES: usize = 5;
+
+/// Seconds one linked-issue fetch may take (#9197, B2b ruling Q7).
+///
+/// Why: the GitHub tickets backend's HTTP client has no timeout, so this
+/// bound is the only one; a fetch past it is recorded `unavailable`.
+pub const LINKED_ISSUE_TIMEOUT_SECS: u64 = 10;
 
 /// Maximum characters of one ADR/spec/SLD doc the reviewer sees (#9193).
 ///

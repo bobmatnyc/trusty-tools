@@ -6,9 +6,11 @@
 //! What: [`IssueDoc`] is one doc. [`IssueDoc::list_from_json`] is the one
 //! strict parser the MCP `issue_docs` parameter and `run --issue-docs-file`
 //! share. [`issue_section`] renders the kept docs, capped and fenced as data,
-//! and records the `issues` ledger row. Issue text reaches the reviewer prompt
-//! and the refs corpus only; it never reaches the verifier (Ruling A).
-//! Test: `issues_tests.rs`, `runner_issue_docs_tests.rs`.
+//! and records the `issues` ledger row. #9197 B2b: [`IssueRender`] renders
+//! supplied docs then fetched ones through the same rules, and
+//! [`issues_row`] reads the worst item state. Issue text reaches the reviewer
+//! prompt and the refs corpus only; it never reaches the verifier (Ruling A).
+//! Test: `issues_tests.rs`, `runner_issue_docs_tests.rs`, `linked_issues_tests.rs`.
 
 use std::collections::HashSet;
 
@@ -17,12 +19,12 @@ use serde_json::{Map, Value};
 use crate::{
     config::constants::{
         MAX_ISSUE_DOC_CHARS, MAX_ISSUE_DOC_LINE_CHARS, MAX_ISSUE_DOCS, MAX_ISSUE_DOCS_LISTED,
-        MAX_ISSUE_SECTION_CHARS,
+        MAX_ISSUE_SECTION_CHARS, MAX_LINKED_ISSUE_FETCHES,
     },
     models::{ContextItemRecord, ContextSourceRecord, SourceState},
 };
 
-use super::{assemble::fence_text, ledger::ContextLedger};
+use super::{assemble::fence_text, docs_render::rank, ledger::ContextLedger};
 
 /// The heading the issue section opens with.
 pub(crate) const ISSUE_SECTION_HEADING: &str = "## Linked issues";
@@ -230,68 +232,173 @@ pub(crate) fn issue_section(docs: Option<&[IssueDoc]>, ledger: &mut ContextLedge
     let Some(docs) = docs else {
         return String::new();
     };
-    let mut blocks: Vec<String> = Vec::new();
-    let mut items: Vec<ContextItemRecord> = Vec::new();
-    let mut seen: HashSet<&str> = HashSet::new(); // #9197: O(1) per doc
-    let mut total = 0_usize;
-    let mut closed: Option<String> = None;
-    // #9197: a long input reports its dropped tail as one item.
-    let collapse = docs.len() > MAX_ISSUE_DOCS_LISTED;
-    let (mut tail_docs, mut tail_chars) = (0_usize, 0_usize);
-    for (index, doc) in docs.iter().enumerate() {
+    let mut render = IssueRender::new();
+    render.supplied(docs);
+    let (section, items) = render.finish();
+    ledger.push(issues_row(items));
+    section
+}
+
+/// One origin's share of the section: its item limit and why it closed.
+#[derive(Debug, Default)]
+struct Group {
+    limit: usize,
+    limit_reason: String,
+    placed: usize,
+    closed: Option<String>,
+}
+
+impl Group {
+    fn new(limit: usize, limit_reason: String) -> Self {
+        Self {
+            limit,
+            limit_reason,
+            placed: 0,
+            closed: None,
+        }
+    }
+}
+
+/// The `## Linked issues` section as it is built, supplied docs then
+/// fetched ones (#9197, B2a and B2b).
+///
+/// Why: one renderer for both origins, so the caps, the fence and the drop
+/// order cannot drift; B2b amendment 5 keeps [`issue_section`] unchanged.
+/// What: [`IssueRender::supplied`] places the caller's docs by the B2a rule;
+/// [`IssueRender::fetched`] places one fetched doc under the 5-issue limit
+/// with the characters the supplied docs left. Each origin closes on its
+/// own: the first doc past its item limit or the shared
+/// `MAX_ISSUE_SECTION_CHARS` cap is omitted whole with every later doc of
+/// that origin. Ids are shared, so a repeated id is omitted wherever it is.
+/// Test: `a_fetched_doc_that_does_not_fit_is_dropped_whole_with_every_later_one`,
+/// `supplied_docs_over_the_cap_still_drop_by_the_existing_rule`,
+/// `per_origin_limits_keep_eight_supplied_and_five_fetched`.
+#[derive(Debug)]
+pub(crate) struct IssueRender {
+    blocks: Vec<String>,
+    items: Vec<ContextItemRecord>,
+    seen: HashSet<String>,
+    total: usize,
+    fetched: Group,
+}
+
+impl IssueRender {
+    /// An empty section.
+    pub(crate) fn new() -> Self {
+        let reason = format!("over the {MAX_LINKED_ISSUE_FETCHES}-issue fetch limit");
+        Self {
+            blocks: Vec::new(),
+            items: Vec::new(),
+            seen: HashSet::new(),
+            total: 0,
+            fetched: Group::new(MAX_LINKED_ISSUE_FETCHES, reason),
+        }
+    }
+
+    /// Body characters still free under `MAX_ISSUE_SECTION_CHARS`.
+    pub(crate) fn remaining(&self) -> usize {
+        MAX_ISSUE_SECTION_CHARS.saturating_sub(self.total)
+    }
+
+    /// Add a ledger item that renders no block.
+    pub(crate) fn push_item(&mut self, item: ContextItemRecord) {
+        self.items.push(item);
+    }
+
+    /// Place the caller's docs by the B2a rule (see [`issue_section`]).
+    pub(crate) fn supplied(&mut self, docs: &[IssueDoc]) {
+        let mut group = Group::new(
+            MAX_ISSUE_DOCS,
+            format!("over the {MAX_ISSUE_DOCS}-doc limit"),
+        );
+        // #9197: a long input reports its dropped tail as one item.
+        let collapse = docs.len() > MAX_ISSUE_DOCS_LISTED;
+        let (mut tail_docs, mut tail_chars) = (0_usize, 0_usize);
+        for (index, doc) in docs.iter().enumerate() {
+            let chars = doc.body.chars().count();
+            if collapse && (group.closed.is_some() || index >= MAX_ISSUE_DOCS_LISTED) {
+                (tail_docs, tail_chars) = (tail_docs + 1, tail_chars + chars);
+                continue;
+            }
+            if let Err(reason) = self.place(doc, &mut group) {
+                if collapse {
+                    (tail_docs, tail_chars) = (tail_docs + 1, tail_chars + chars);
+                } else {
+                    self.items.push(omitted(&doc.id, chars, reason));
+                }
+            }
+        }
+        if tail_docs > 0 {
+            let reason = group
+                .closed
+                .unwrap_or_else(|| format!("over the {MAX_ISSUE_DOCS_LISTED}-doc input limit"));
+            let detail = format!("{tail_docs} more docs omitted: {reason}");
+            self.items.push(omitted("(rest)", tail_chars, detail));
+        }
+    }
+
+    /// Place one fetched doc after every supplied one (#9197, B2b).
+    pub(crate) fn fetched(&mut self, doc: &IssueDoc) {
+        let mut group = std::mem::take(&mut self.fetched);
+        if let Err(reason) = self.place(doc, &mut group) {
+            self.items
+                .push(omitted(&doc.id, doc.body.chars().count(), reason));
+        }
+        self.fetched = group;
+    }
+
+    /// Render `doc` into `group`, or `Err` with why the group is closed.
+    fn place(&mut self, doc: &IssueDoc, group: &mut Group) -> Result<(), String> {
         let chars = doc.body.chars().count();
         let kept = chars.min(MAX_ISSUE_DOC_CHARS);
-        if collapse && (closed.is_some() || index >= MAX_ISSUE_DOCS_LISTED) {
-            (tail_docs, tail_chars) = (tail_docs + 1, tail_chars + chars);
-            continue;
-        }
-        if !seen.insert(doc.id.as_str()) {
-            items.push(omitted(&doc.id, chars, "duplicate id".to_string()));
-            continue;
+        if !self.seen.insert(doc.id.clone()) {
+            self.items
+                .push(omitted(&doc.id, chars, "duplicate id".to_string()));
+            return Ok(());
         }
         if doc.body.trim().is_empty() {
-            items.push(ContextItemRecord::new(&doc.id, SourceState::Absent, 0, 0));
-            continue;
+            self.items
+                .push(ContextItemRecord::new(&doc.id, SourceState::Absent, 0, 0));
+            return Ok(());
         }
-        if closed.is_none() && blocks.len() == MAX_ISSUE_DOCS {
-            closed = Some(format!("over the {MAX_ISSUE_DOCS}-doc limit"));
+        if group.closed.is_none() && group.placed == group.limit {
+            group.closed = Some(group.limit_reason.clone());
         }
-        if closed.is_none() && total + kept > MAX_ISSUE_SECTION_CHARS {
-            closed = Some(format!(
-                "over the {MAX_ISSUE_SECTION_CHARS}-character issue section cap"
-            ));
+        if group.closed.is_none() && self.total + kept > MAX_ISSUE_SECTION_CHARS {
+            group.closed = Some(section_cap_reason());
         }
-        if let Some(reason) = &closed {
-            if collapse {
-                (tail_docs, tail_chars) = (tail_docs + 1, tail_chars + chars);
-            } else {
-                items.push(omitted(&doc.id, chars, reason.clone()));
-            }
-            continue;
+        if let Some(reason) = &group.closed {
+            return Err(reason.clone());
         }
-        total += kept;
-        blocks.push(render_doc(doc, kept, chars - kept));
+        self.total += kept;
+        group.placed += 1;
+        self.blocks.push(render_doc(doc, kept, chars - kept));
         let state = if chars > kept {
             SourceState::Truncated
         } else {
             SourceState::Used
         };
-        items.push(ContextItemRecord::new(&doc.id, state, kept, chars - kept));
+        self.items
+            .push(ContextItemRecord::new(&doc.id, state, kept, chars - kept));
+        Ok(())
     }
-    if tail_docs > 0 {
-        let reason =
-            closed.unwrap_or_else(|| format!("over the {MAX_ISSUE_DOCS_LISTED}-doc input limit"));
-        let detail = format!("{tail_docs} more docs omitted: {reason}");
-        items.push(omitted("(rest)", tail_chars, detail));
+
+    /// The section text (empty when no block was kept) and the items.
+    pub(crate) fn finish(self) -> (String, Vec<ContextItemRecord>) {
+        if self.blocks.is_empty() {
+            return (String::new(), self.items);
+        }
+        let section = format!(
+            "{ISSUE_SECTION_HEADING}\n\n{ISSUE_SECTION_NOTE}\n\n{}",
+            self.blocks.join("\n\n")
+        );
+        (section, self.items)
     }
-    ledger.push(issues_row(items));
-    if blocks.is_empty() {
-        return String::new();
-    }
-    format!(
-        "{ISSUE_SECTION_HEADING}\n\n{ISSUE_SECTION_NOTE}\n\n{}",
-        blocks.join("\n\n")
-    )
+}
+
+/// Why a doc past the shared character cap is omitted.
+pub(crate) fn section_cap_reason() -> String {
+    format!("over the {MAX_ISSUE_SECTION_CHARS}-character issue section cap")
 }
 
 /// One doc's block: heading and `URL:` line outside the fence, the capped
@@ -316,27 +423,35 @@ fn render_doc(doc: &IssueDoc, kept: usize, cut: usize) -> String {
     out
 }
 
-fn omitted(id: &str, chars: usize, reason: String) -> ContextItemRecord {
+/// An `omitted` item for `id` with `reason`.
+pub(crate) fn omitted(id: &str, chars: usize, reason: String) -> ContextItemRecord {
     let mut item = ContextItemRecord::new(id, SourceState::Omitted, 0, chars);
     item.detail = Some(reason);
     item
 }
 
-/// The `issues` row: `absent` when no doc reached the reviewer, `truncated`
-/// when any doc was cut or left out, `used` otherwise.
-fn issues_row(items: Vec<ContextItemRecord>) -> ContextSourceRecord {
-    let reached =
-        |i: &ContextItemRecord| matches!(i.state, SourceState::Used | SourceState::Truncated);
-    let lost =
-        |i: &ContextItemRecord| matches!(i.state, SourceState::Truncated | SourceState::Omitted);
-    let state = if !items.iter().any(reached) {
-        SourceState::Absent
-    } else if items.iter().any(lost) {
-        SourceState::Truncated
-    } else {
-        SourceState::Used
+/// The `issues` row: the worst item state, `omitted` read as `truncated`
+/// (#9197 B2b amendment 10, the B3 `worst` order: `unavailable` above
+/// `truncated`/`omitted` above `used` above `absent`); `absent` with no item.
+/// `detail` names every `unavailable` item.
+///
+/// Test: `issues_row_state_is_worst_of_items`.
+pub(crate) fn issues_row(items: Vec<ContextItemRecord>) -> ContextSourceRecord {
+    let worst = items.iter().map(|i| i.state).max_by_key(|s| rank(*s));
+    let state = match worst {
+        Some(SourceState::Omitted) => SourceState::Truncated,
+        Some(s) if rank(s) > 0 => s,
+        _ => SourceState::Absent,
     };
     let mut row = ContextSourceRecord::new("issues", state);
+    let failed: Vec<&str> = items
+        .iter()
+        .filter(|i| i.state == SourceState::Unavailable)
+        .map(|i| i.id.as_str())
+        .collect();
+    if !failed.is_empty() {
+        row.detail = Some(format!("unavailable: {}", failed.join(", ")));
+    }
     row.chars = items.iter().map(|i| i.chars).sum();
     row.chars_omitted = items.iter().map(|i| i.chars_omitted).sum();
     row.items = items;

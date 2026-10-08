@@ -133,7 +133,9 @@ pub fn tool_descriptors() -> Value {
                                        the reviewer (capped at 64,000 characters)."
                     },
                     // #9197: caller issue docs, off by default.
-                    "issue_docs": context_args::issue_docs_schema()
+                    "issue_docs": context_args::issue_docs_schema(),
+                    // #9197 B2b: review_pr only; review_diff has no PR body.
+                    "fetch_linked_issues": context_args::fetch_linked_issues_schema()
                 }
             }
         },

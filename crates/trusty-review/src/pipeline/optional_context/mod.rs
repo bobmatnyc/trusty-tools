@@ -11,6 +11,8 @@
 
 use std::sync::Arc;
 
+use trusty_common::intent_source::TicketFetcher;
+
 use crate::integrations::context::{ContextSource, contents_at_ref::DocFetcher};
 use crate::models::{ContextSourceRecord, ReviewResult};
 
@@ -24,6 +26,7 @@ pub(crate) mod files_render; // #9195
 pub(crate) mod files_select; // #9195
 pub(crate) mod issues;
 pub(crate) mod ledger;
+pub(crate) mod linked_issues; // #9197 B2b
 pub(crate) mod probes; // #9194
 pub(crate) mod seams;
 pub(crate) mod symbols; // #9196
@@ -50,10 +53,13 @@ pub(crate) use seams::PrSource;
 /// head SHA, for the reviewer only, within `changed_files_budget` bytes.
 /// `symbol_context` (#9196) shows each changed symbol's callers, callees
 /// and tests from the trusty-search call graph, for the reviewer only.
+/// `fetch_linked_issues` (#9197, B2b) fetches up to 5 issues the raw PR body
+/// links, for the reviewer only, after any `issue_docs`.
 /// `report_context` asks for the source ledger with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
 /// `requested_new_is_off_by_default_and_on_with_pr_body`,
-/// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`.
+/// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`,
+/// `fetch_linked_issues_turns_the_ledger_on`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OptionalContextRequest {
@@ -77,6 +83,8 @@ pub struct OptionalContextRequest {
     /// Show each changed symbol's callers, callees and tests from the
     /// trusty-search call graph (#9196).
     pub symbol_context: bool,
+    /// Fetch the issues the raw PR body links, from GitHub (#9197, B2b).
+    pub fetch_linked_issues: bool,
 }
 
 impl OptionalContextRequest {
@@ -157,6 +165,15 @@ impl OptionalContextRequest {
         self
     }
 
+    /// This request with `fetch_linked_issues` set to `on` (#9197, B2b).
+    ///
+    /// Test: `fetch_linked_issues_turns_the_ledger_on`.
+    #[must_use]
+    pub fn with_fetch_linked_issues(mut self, on: bool) -> Self {
+        self.fetch_linked_issues = on;
+        self
+    }
+
     /// Whether any new input is on.
     ///
     /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
@@ -165,7 +182,8 @@ impl OptionalContextRequest {
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
     /// `stdin_context_and_pr_description_never_report`,
     /// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`,
-    /// `changed_files_flag_turns_the_ledger_on`, `symbol_context_flag_turns_the_ledger_on`.
+    /// `changed_files_flag_turns_the_ledger_on`, `symbol_context_flag_turns_the_ledger_on`,
+    /// `fetch_linked_issues_turns_the_ledger_on`.
     pub fn requested_new(&self) -> bool {
         // #9197: sending `issue_docs` is a new input; #9193: so is either doc flag.
         // #9195: `changed_files` counts; its budget alone does not (amendment 10).
@@ -176,6 +194,7 @@ impl OptionalContextRequest {
             || self.claude_md
             || self.changed_files
             || self.symbol_context // #9196
+            || self.fetch_linked_issues // #9197 B2b
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request
@@ -191,8 +210,9 @@ impl OptionalContextRequest {
 ///
 /// Why: a default value runs the review exactly as `run_review` does, so a
 /// caller opts in to each new input and nothing else changes.
-/// What: the caller's [`OptionalContextRequest`], plus the PR and doc-read
-/// seams tests inject; production leaves both `None`.
+/// What: the caller's [`OptionalContextRequest`], plus the PR, doc-read,
+/// external-source and (#9197) ticket-fetch seams tests inject; production
+/// leaves each `None`.
 /// Test: `off_is_byte_identical_unified`,
 /// `include_pr_body_reaches_reviewer_and_verifier_prompts`.
 #[derive(Clone, Default)]
@@ -206,6 +226,8 @@ pub struct ReviewOptions {
     pub(crate) doc_fetcher: Option<Arc<dyn DocFetcher>>,
     /// Test seam for the external context sources (#9194).
     pub(crate) external_sources: Option<ExternalSources>,
+    /// Test seam for the linked-issue fetches (#9197, B2b).
+    pub(crate) ticket_fetcher: Option<Arc<dyn TicketFetcher>>,
 }
 
 /// Builds the external context sources a review gathers from (#9194 seam).
@@ -219,6 +241,7 @@ impl ReviewOptions {
             pr_source: None,
             doc_fetcher: None,
             external_sources: None,
+            ticket_fetcher: None,
         }
     }
 }

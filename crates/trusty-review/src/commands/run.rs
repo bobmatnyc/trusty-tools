@@ -251,6 +251,17 @@ pub struct RunArgs {
     /// runs. Reports context sources.
     #[arg(long)]
     pub symbol_context: bool,
+
+    /// Fetch the issues the PR body links with a keyword (`Fixes #12`,
+    /// `Refs owner/repo#12`) from this repository's GitHub issues, with the
+    /// token that read the diff, for the reviewer only (#9197): at most 5,
+    /// after any `--issue-docs-file` docs, which win on the same number.
+    /// Same caps as `--issue-docs-file`; a fetched issue is left out before a
+    /// supplied one. A failed fetch is reported unavailable and the review
+    /// runs. A local diff has no PR; the source is reported unavailable.
+    /// Reports context sources.
+    #[arg(long)]
+    pub fetch_linked_issues: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -426,10 +437,11 @@ pub async fn cmd_run(
 /// 2026-10-06 03:42Z).
 /// What: the request with `include_pr_body`, `report_context`, (#9193)
 /// `spec_docs` and `claude_md`, (#9195) `changed_files` and its budget, and
-/// (#9196) `symbol_context` from the flags.
+/// (#9196) `symbol_context` and (#9197 B2b) `fetch_linked_issues` from the flags.
 /// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`,
 /// `run_flags_set_the_request`, `run_changed_files_flags_set_the_request`,
-/// `changed_files_budget_without_flag_is_inert`, `run_symbol_context_flag_sets_the_request`.
+/// `changed_files_budget_without_flag_is_inert`, `run_symbol_context_flag_sets_the_request`,
+/// `run_fetch_linked_issues_flag_sets_the_request`.
 pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
     let request = OptionalContextRequest::default()
         .with_pr_body(args.include_pr_body)
@@ -437,7 +449,8 @@ pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
         .with_spec_docs(args.spec_docs)
         .with_claude_md(args.claude_md)
         .with_changed_files(args.changed_files) // #9195
-        .with_symbol_context(args.symbol_context); // #9196
+        .with_symbol_context(args.symbol_context) // #9196
+        .with_fetch_linked_issues(args.fetch_linked_issues); // #9197 B2b
     match args.changed_files_budget {
         Some(bytes) => request.with_changed_files_budget(bytes), // inert without the flag
         None => request,

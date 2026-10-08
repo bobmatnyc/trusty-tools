@@ -2850,3 +2850,11 @@ mod changed_files;
 // #9196: each changed symbol's callers, callees and tests.
 #[path = "runner_symbol_context_tests.rs"]
 mod symbol_context;
+
+// #9197 B2b: `fetch_linked_issues` through the pipeline.
+#[path = "runner_linked_issues_tests.rs"]
+mod linked_issues;
+
+// #9197 B2b: its failure branches, asserted on the finished ledger.
+#[path = "runner_linked_issues_failure_tests.rs"]
+mod linked_issues_failure;

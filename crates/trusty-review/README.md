@@ -302,9 +302,40 @@ empty result.
     and only its own file's symbols, in that file's first chunk.
   - A degraded run still consumes the head's dedup claim, as the other
     optional sources do.
+- `--fetch-linked-issues` (#9197) fetches the issues the raw PR body links
+  with a keyword (`Fixes #12`, `Closes #12`, `Refs #12`, `See #12`, `Part of
+  #12`, and the `owner/repo#12` form) from this repository's GitHub issues,
+  with the token that read the diff, and shows them under `## Linked issues`
+  after any `--issue-docs-file` docs, with the same caps, fence and `[gh:]`
+  rule. The verifier never sees them.
+  - Only the PR body the GitHub API returned is read: never
+    `--pr-description`, `--pr-discussion`, the referenced code or the title.
+    A bare `#N` with no keyword, a URL, a ref in a code block and a JIRA id
+    are not links.
+  - At most 5 issues are fetched, in body order, 10 seconds each. The PR's
+    own number is skipped silently. A number a supplied doc already carries
+    is not fetched, whatever that doc's body (recorded `omitted`,
+    "supplied"). Refs to another repository are never fetched and are one
+    `(other repositories)` item; refs past the 5 are one `(over the 5-issue
+    fetch limit)` item. Neither takes a fetch.
+  - Supplied docs are placed first and are never dropped for a fetched one.
+    A fetched doc that does not fit the 48,000-character section is left out
+    whole, with every fetched doc after it. When the supplied docs already
+    fill the section, nothing is fetched and each linked issue is `omitted`.
+  - A 404, a 403 or 429 rate limit, a server error and a timeout all read
+    `unavailable` with the error text in `detail`, so a typo'd issue number
+    reads `unavailable`, not `absent`; the review runs. An issue with an
+    empty body is `absent`.
+  - GitHub answers `/issues/N` for a pull request and for a transferred
+    issue too; either is shown as `### Issue #N`, with no open, closed or
+    pull-request marker.
+  - A local diff has no PR, and a failed PR metadata read has no body: the
+    `issues` row is `unavailable` with the reason, nothing is fetched, and
+    supplied docs still render.
 
 With `--include-pr-body`, `--issue-docs-file`, `--spec-docs`, `--claude-md`,
-`--changed-files`, `--symbol-context` or `--report-context`, `--json` prints
+`--changed-files`, `--symbol-context`, `--fetch-linked-issues` or
+`--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
 one line per source that was `absent`, `unavailable` or `truncated`. Without
 any of them, `--json` prints the review object alone, exactly as before. The
@@ -406,6 +437,7 @@ Optional PR context (#9192), all off by default:
 | `changed_files` | boolean | Show the PR's changed files whole, read at the PR head SHA (#9195); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same rules as `run --changed-files`. A non-boolean is an invalid-params error. |
 | `changed_files_budget` | integer | Byte budget for `changed_files`: default 120,000, at most 400,000 (a larger value is clamped); 0 reviews the diff only. Does nothing without `changed_files`. A negative, fractional or non-number value is an invalid-params error. |
 | `symbol_context` | boolean | Show each changed symbol's callers, callees and tests from the trusty-search call graph (#9196); also on `review_diff`, which reads the configured index. Same rules as `run --symbol-context`. A non-boolean is an invalid-params error. |
+| `fetch_linked_issues` | boolean | Fetch up to 5 issues the PR body links with a keyword, from this repository (#9197). `review_pr` only: `review_diff` has no PR body and ignores the name. Same rules as `run --fetch-linked-issues`. A non-boolean is an invalid-params error. |
 
 A mistyped text param is ignored with a warning. When any of these is sent
 (`changed_files_budget` alone does not count), the response envelope carries
