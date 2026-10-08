@@ -6,10 +6,12 @@
 //! two silently.
 //! What: calls `apply_archive_downrank` directly with mode `Code`, the only
 //! mode in which the soft downrank applies (search upgrades a balanced intent
-//! out of `Code` before it gets here).
+//! out of `Code` before it gets here), and checks `hard_file_filter`, which
+//! decides whether materialisation drops the doc instead (#9404).
 //! Test: this module.
 
 use super::drops::SearchDrops;
+use super::hard_file_filter;
 use crate::core::chunker::ChunkType;
 use crate::core::classifier::QueryIntent;
 use crate::core::indexer::{CodeChunk, CodeIndexer, SearchMode};
@@ -44,8 +46,12 @@ fn kept(intent: QueryIntent) -> Vec<(String, f32)> {
         chunk("doc", "/tmp/kw-9027/docs/pooling.md"),
         chunk("src", "/tmp/kw-9027/src/pool.rs"),
     ];
-    let mut dropped = SearchDrops::default();
-    idx.apply_archive_downrank(&mut results, &intent, SearchMode::Code, false, &mut dropped);
+    idx.apply_archive_downrank(
+        &mut results,
+        &intent,
+        SearchMode::Code,
+        &SearchDrops::default(),
+    );
     results.into_iter().map(|c| (c.id, c.score)).collect()
 }
 
@@ -60,8 +66,17 @@ fn keyword_downranks_docs_in_code_mode_like_unknown() {
         .find(|(id, _)| id == "doc")
         .expect("doc kept");
     assert!(doc.1 < 1.0, "the doc hit is down-ranked: {keyword:?}");
-    assert!(
-        kept(QueryIntent::BugDebt).iter().all(|(id, _)| id != "doc"),
+    assert_eq!(
+        hard_file_filter(&QueryIntent::Keyword, SearchMode::Code),
+        None
+    );
+    assert_eq!(
+        hard_file_filter(&QueryIntent::Unknown, SearchMode::Code),
+        None
+    );
+    assert_eq!(
+        hard_file_filter(&QueryIntent::BugDebt, SearchMode::Code),
+        Some(SearchMode::Code),
         "a non-balanced intent still hard-filters docs"
     );
 }
