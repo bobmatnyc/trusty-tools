@@ -45,6 +45,13 @@ const RECALL_LOG_FILENAME: &str = "recall.db";
 /// Test: `registry_tests::open_does_not_reset_idle_clock`.
 const NEVER_ACCESSED: u64 = 0;
 
+tokio::task_local! {
+    /// Set while a cross-palace fan-out runs; [`PalaceHandle::touch`] is then a
+    /// no-op (#9299, ADR-0071 D2). Read by `touch`, set by
+    /// [`PalaceHandle::without_idle_touch`].
+    static IDLE_TOUCH_SUPPRESSED: ();
+}
+
 /// Current unix time in whole seconds, saturating to 0 before the epoch.
 ///
 /// Why: `last_accessed` idle tracking (issue: idle-to-disk eviction) needs a
@@ -326,14 +333,35 @@ impl PalaceHandle {
     /// suppresses maintenance-driven touches without threading a flag through
     /// every pass.
     /// What: stores `now` into `last_accessed` unless a dream cycle is in
-    /// flight (`is_compacting`), in which case it is a no-op.
-    /// Test: `registry_tests::touch_suppressed_during_compaction`.
+    /// flight (`is_compacting`) or the caller runs inside
+    /// [`Self::without_idle_touch`], in which case it is a no-op.
+    /// Test: `registry_tests::touch_suppressed_during_compaction`,
+    /// `registry_tests::touch_suppressed_inside_without_idle_touch`.
     pub fn touch(&self) {
-        if self.is_compacting.load(Ordering::Relaxed) {
+        // #9299: a recall_all fan-out is not a user access (ADR-0071 D2).
+        if self.is_compacting.load(Ordering::Relaxed)
+            || IDLE_TOUCH_SUPPRESSED.try_with(|_| ()).is_ok()
+        {
             return;
         }
         self.last_accessed
             .store(now_epoch_secs(), Ordering::Relaxed);
+    }
+
+    /// Run `fut` with every [`Self::touch`] inside it suppressed.
+    ///
+    /// Why (#9299, ADR-0071 D2): `memory_recall_all` searches every resident
+    /// palace through the same `recall` path a targeted call uses, and that
+    /// path calls `touch`. A recall_all every few minutes would then keep the
+    /// whole resident set alive forever, so residency would follow the
+    /// fan-out instead of the operator's targeted use.
+    /// What: runs `fut` inside a task-local scope that `touch` checks. The
+    /// scope covers `fut` and everything it awaits on the same task, including
+    /// `join_all` fan-outs; work moved to another task via `tokio::spawn` is
+    /// outside it.
+    /// Test: `registry_tests::touch_suppressed_inside_without_idle_touch`.
+    pub async fn without_idle_touch<F: std::future::Future>(fut: F) -> F::Output {
+        IDLE_TOUCH_SUPPRESSED.scope((), fut).await
     }
 
     /// Seconds since the last genuine user access.

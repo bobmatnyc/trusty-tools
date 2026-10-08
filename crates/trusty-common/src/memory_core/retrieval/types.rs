@@ -251,6 +251,21 @@ pub struct CrossPalaceResult {
     pub result: RecallResult,
 }
 
+/// A cross-palace recall's merged hits plus the palaces whose recall failed.
+///
+/// Why (#9299): `recall_across_palaces` logs and skips a palace whose recall
+/// errors, so a caller that reports coverage cannot tell it was not searched.
+/// What: `results` is what `recall_across_palaces` returns; `failed` holds
+/// the ids of the palaces whose recall returned an error, in handle order.
+/// Test: `recall_across_palaces_reporting_names_a_failed_palace`.
+#[derive(Debug, Clone, Default)]
+pub struct CrossPalaceRecall {
+    /// Merged, deduplicated, sorted, truncated hits.
+    pub results: Vec<CrossPalaceResult>,
+    /// Ids of palaces whose recall errored; their hits are absent.
+    pub failed: Vec<String>,
+}
+
 // -- Legacy stubs (kept for backwards compatibility with existing callers) --
 
 pub struct RetrievalLayers;

@@ -13,6 +13,7 @@ use trusty_common::memory_core::{Drawer, PalaceRegistry};
 use uuid::Uuid;
 
 use super::core::MemoryService;
+use super::recall_stream::RecallAllScope;
 use crate::AppState;
 
 /// Create `full` (one stored drawer) and `empty` palaces under `root`.
@@ -51,7 +52,8 @@ fn create_on_disk(root: &Path, full: &PalaceId, empty: &PalaceId) {
 /// Why (#9141): a recall-all cold-opened every palace on disk, most of them
 /// empty. `skip_empty_palaces` skips a provably empty palace unopened, and
 /// `MemoryService::recall_all` must call it.
-/// What: one full and one empty palace, neither resident. `peek` is None
+/// What: one full and one empty palace, neither resident, searched with
+/// `scope: "all"` (#9299: the default opens nothing, so it proves nothing). `peek` is None
 /// after the call either way, because `recall_streamed` releases what it
 /// opened, so a sentinel `unopenable` record carries the proof: a successful
 /// open clears it (`PalaceRegistry::register_arc`).
@@ -68,10 +70,10 @@ async fn recall_all_never_opens_an_empty_palace() {
         .record_unopenable(empty.clone(), sentinel.to_string());
 
     let out = MemoryService::new(state.clone())
-        .recall_all("stored fact", 5, false)
+        .recall_all_scoped("stored fact", 5, false, RecallAllScope::All)
         .await;
 
-    assert!(out.is_array(), "{out}");
+    assert!(out["results"].is_array(), "{out}");
     assert!(state.registry.peek(&empty).is_none());
     assert_eq!(
         state.registry.unopenable_reason(&empty).as_deref(),

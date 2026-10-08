@@ -869,6 +869,28 @@ fn touch_suppressed_during_compaction() {
     );
 }
 
+/// Why (#9299, ADR-0071 D2): a recall_all fan-out must not reset the idle
+/// clock of the palaces it searches, including those reached through a
+/// `join_all` on the same task, which is how `recall_across_palaces` runs.
+/// What: inside `without_idle_touch`, a direct `touch` and one from a joined
+/// future both leave the clock at 0; outside the scope, `touch` advances it.
+/// Test: this test.
+#[tokio::test]
+async fn touch_suppressed_inside_without_idle_touch() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let dir = tempdir().unwrap();
+    let h = make_handle("fanout", dir.path());
+    h.last_accessed.store(0, Relaxed);
+    PalaceHandle::without_idle_touch(async {
+        h.touch();
+        futures::future::join_all([async { h.touch() }]).await;
+    })
+    .await;
+    assert_eq!(h.last_accessed.load(Relaxed), 0, "suppressed scope touched");
+    h.touch();
+    assert!(h.last_accessed.load(Relaxed) > 0, "touch outside the scope");
+}
+
 /// Idle-to-disk rehydrate correctness (Part 2): after an idle-evict drops a
 /// palace, the next access transparently re-opens it from redb and recall
 /// returns the same drawer content — no data loss.

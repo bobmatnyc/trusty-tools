@@ -237,10 +237,10 @@ pub(crate) const RECALL_OPEN_CONCURRENCY: usize = 4;
 
 /// Open a handle for every palace in `palaces`, off the async executor.
 ///
-/// Why (issue #4637): the cross-palace recall fan-out genuinely needs every
-/// palace open — answering a recall from cache-resident palaces only would
-/// silently drop ~98.9% of the corpus, which is a correctness regression, not
-/// an optimisation. So `peek()` is the wrong tool here. What *was* wrong is
+/// Why (issue #4637): the `scope: "all"` recall fan-out needs every palace
+/// open, so `peek()` is the wrong tool here. #9299 (ADR-0071 ruling 1): the
+/// default scope now answers from resident palaces and reports what it did
+/// not search, so this path no longer runs on every recall_all. What *was* wrong is
 /// that the open loop ran inline on a tokio worker thread, parking it for the
 /// full duration. This helper keeps the semantics (every palace is opened)
 /// and moves the blocking work to the blocking pool where it belongs. Three
@@ -249,15 +249,16 @@ pub(crate) const RECALL_OPEN_CONCURRENCY: usize = 4;
 /// What: opens each palace on the blocking pool, up to
 /// [`RECALL_OPEN_CONCURRENCY`] at a time (#9141; its callers bound how many
 /// palaces they pass, see `recall_stream`), returns the handles in input
-/// order, and skips failures with a `tracing::warn!` so one bad palace cannot
-/// fail the whole fan-out. `label` names the caller in that warning.
+/// order, and returns the id of every palace that failed to open, so one bad
+/// palace cannot fail the whole fan-out and is still reported (#9299).
+/// `label` names the caller in the `warn!` each failure also logs.
 /// Test: `open_palaces_blocking_opens_every_palace` pins that the fan-out
 /// still sees palaces that were never cached.
 pub(crate) async fn open_palaces_blocking(
     state: &AppState,
     palaces: &[Palace],
     label: &'static str,
-) -> Vec<Arc<PalaceHandle>> {
+) -> OpenOutcome<Arc<PalaceHandle>> {
     let registry = Arc::clone(&state.registry);
     let root = state.data_root.clone();
     let ids: Vec<PalaceId> = palaces.iter().map(|p| p.id.clone()).collect();
@@ -269,47 +270,73 @@ pub(crate) async fn open_palaces_blocking(
     .await
 }
 
+/// What [`open_bounded`] opened, and which ids it could not open.
+///
+/// Why (#9299, ADR-0071 D4): a palace that failed to open was dropped with
+/// only a log line, so a recall_all answered from fewer palaces than it
+/// reported. The failed ids are now part of the result.
+#[derive(Debug)]
+pub(crate) struct OpenOutcome<T> {
+    /// Successful opens, in input order.
+    pub(crate) opened: Vec<T>,
+    /// Ids whose open returned `Err` or whose blocking task failed, in input
+    /// order.
+    pub(crate) failed: Vec<PalaceId>,
+}
+
 /// Run `open` for every id on the blocking pool, at most `bound` at a time.
 ///
 /// Why (#9141): the bounded-concurrency core of [`open_palaces_blocking`],
 /// generic over the opener so a test can observe the overlap.
 /// What: one `spawn_blocking` per id, at most `bound` (minimum 1) in flight,
 /// results kept in input order. An `Err` or a join failure is logged at `warn`
-/// under `label` and dropped.
+/// under `label` and its id is returned in [`OpenOutcome::failed`] (#9299).
 /// Test: `open_bounded_overlaps_opens_up_to_its_bound`.
 pub(crate) async fn open_bounded<T, F>(
     ids: Vec<PalaceId>,
     bound: usize,
     label: &'static str,
     open: F,
-) -> Vec<T>
+) -> OpenOutcome<T>
 where
     T: Send + 'static,
     F: Fn(&PalaceId) -> Result<T> + Send + Sync + 'static,
 {
     use futures::StreamExt;
     let open = Arc::new(open);
-    futures::stream::iter(ids)
+    let results: Vec<(PalaceId, Option<T>)> = futures::stream::iter(ids)
         .map(|id| {
             let open = Arc::clone(&open);
             async move {
-                match tokio::task::spawn_blocking(move || (open(&id), id)).await {
-                    Ok((Ok(handle), _)) => Some(handle),
-                    Ok((Err(e), id)) => {
+                let task_id = id.clone();
+                match tokio::task::spawn_blocking(move || open(&task_id)).await {
+                    Ok(Ok(handle)) => (id, Some(handle)),
+                    Ok(Err(e)) => {
                         tracing::warn!(palace = %id, "{label}: open failed: {e:#}");
-                        None
+                        (id, None)
                     }
                     Err(e) => {
-                        tracing::warn!("{label}: join open_palaces failed: {e}");
-                        None
+                        // #9299: the id is kept so the failure is reported.
+                        tracing::warn!(palace = %id, "{label}: join open_palaces failed: {e}");
+                        (id, None)
                     }
                 }
             }
         })
         .buffered(bound.max(1))
-        .filter_map(std::future::ready)
         .collect()
-        .await
+        .await;
+    let mut outcome = OpenOutcome {
+        opened: Vec::with_capacity(results.len()),
+        failed: Vec::new(),
+    };
+    for (id, handle) in results {
+        match handle {
+            Some(h) => outcome.opened.push(h),
+            None => outcome.failed.push(id),
+        }
+    }
+    outcome
 }
 
 /// Build a `PalaceInfo` from a `Palace` row plus an optional opened handle.
@@ -979,7 +1006,9 @@ mod tests {
         let palaces = list_palaces_blocking(&state).await.expect("list palaces");
         assert_eq!(palaces.len(), 3);
 
-        let handles = open_palaces_blocking(&state, &palaces, "test").await;
+        let outcome = open_palaces_blocking(&state, &palaces, "test").await;
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let handles = outcome.opened;
 
         assert_eq!(
             handles.len(),
@@ -997,7 +1026,8 @@ mod tests {
     /// bound, and the handles must come back in input order without a failure.
     /// What: six ids, bound 3. Each open records how many are in flight and
     /// waits up to 2 s for a second one to start, so a serial runner reports a
-    /// peak of 1. The fourth id fails and must be dropped.
+    /// peak of 1. The fourth id fails: it is left out of `opened` and named in
+    /// `failed` (#9299).
     /// Test: this test.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn open_bounded_overlaps_opens_up_to_its_bound() {
@@ -1024,10 +1054,11 @@ mod tests {
         .await;
 
         assert_eq!(
-            opened,
+            opened.opened,
             ["p0", "p1", "p2", "p4", "p5"],
             "order or failure handling"
         );
+        assert_eq!(opened.failed, [PalaceId::new("p3")], "failure not reported");
         let peak = peak.load(Ordering::SeqCst);
         assert!(peak >= 2, "opens never overlapped (peak {peak})");
         assert!(peak <= 3, "opens exceeded the bound of 3 (peak {peak})");

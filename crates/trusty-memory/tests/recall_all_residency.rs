@@ -10,7 +10,8 @@
 //!
 //! What: seeds an estate wider than one `RECALL_PALACE_BATCH`, records the
 //! registry's open-handle baseline, runs the real `memory_recall_all` MCP
-//! dispatch, and asserts the count came back to that baseline. The second test
+//! dispatch with `scope: "all"` (the only scope that opens palaces since
+//! ADR-0071, #9299), and asserts the count came back to that baseline. The second test
 //! adds a palace the operator already had open and asserts the fan-out left it
 //! alone. Both run with a provably cold embedder, so the degraded (BM25 + L0/L1)
 //! lane serves the query and no ONNX model is needed — residency is the subject
@@ -84,7 +85,8 @@ async fn recall_all_returns_open_palaces_to_baseline() {
     let result = dispatch_tool(
         &state,
         "memory_recall_all",
-        json!({"q": "anything at all", "top_k": 5}),
+        // #9299: the streamed walk is `scope: "all"`; the default opens nothing.
+        json!({"q": "anything at all", "top_k": 5, "scope": "all"}),
     )
     .await
     .expect("memory_recall_all must succeed across the estate");
@@ -137,7 +139,8 @@ async fn recall_all_keeps_palaces_that_were_already_open() {
     dispatch_tool(
         &state,
         "memory_recall_all",
-        json!({"q": "anything at all", "top_k": 5}),
+        // #9299: the streamed walk is `scope: "all"`; the default opens nothing.
+        json!({"q": "anything at all", "top_k": 5, "scope": "all"}),
     )
     .await
     .expect("memory_recall_all must succeed across the estate");

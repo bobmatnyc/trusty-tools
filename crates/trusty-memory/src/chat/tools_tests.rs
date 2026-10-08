@@ -262,6 +262,8 @@ async fn chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot() {
     let rows = super::tools::execute_tool("recall_memories", &args, &state).await;
     let args = json!({ "q": query }).to_string();
     let all = super::tools::execute_tool("memory_recall_all", &args, &state).await;
+    // #9299: the chat recall_all answers an object; its hits sit in `results`.
+    let all = all["results"].clone();
     for (surface, rows) in [("recall_memories", &rows), ("memory_recall_all", &all)] {
         let (r, s) = (rank(rows, &ruling), rank(rows, &snapshot));
         assert!(r.is_some(), "{surface}: ruling recalled: {rows}");

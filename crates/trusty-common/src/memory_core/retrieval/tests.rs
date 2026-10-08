@@ -1099,6 +1099,82 @@ async fn recall_across_palaces_merges_results() {
     }
 }
 
+/// Embedder whose first call returns a wrong-dimension vector (#9299).
+///
+/// Why: a wrong-dimension query makes the palace's own vector search error,
+/// which is a real per-palace recall failure after a successful open.
+struct FailFirstEmbedder {
+    calls: std::sync::atomic::AtomicUsize,
+    inner: crate::embedder::MockEmbedder,
+}
+
+#[async_trait::async_trait]
+impl crate::memory_core::embed::Embedder for FailFirstEmbedder {
+    async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(texts.iter().map(|_| vec![1.0; 8]).collect());
+        }
+        self.inner.embed_batch(texts).await
+    }
+
+    fn dimension(&self) -> usize {
+        384
+    }
+}
+
+/// Why (#9299): `recall_across_palaces` drops a palace whose recall errors.
+/// The reporting variant must name it.
+/// What: two open palaces, an embedder that breaks the first palace's vector
+/// search; asserts one failed id, no hit from it, and hits from the other.
+/// Test: this test.
+#[tokio::test]
+async fn recall_across_palaces_reporting_names_a_failed_palace() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let mut handles = Vec::new();
+    for name in ["gamma", "delta"] {
+        let palace = Palace {
+            id: PalaceId::new(name),
+            name: name.into(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: dir.path().join(name),
+        };
+        std::fs::create_dir_all(&palace.data_dir).unwrap();
+        let handle = PalaceHandle::open(&palace).unwrap();
+        handle
+            .remember(
+                format!("the {name} palace stores a rust build fact"),
+                RoomType::Research,
+                vec![],
+                0.6,
+            )
+            .await
+            .unwrap();
+        handles.push(handle);
+    }
+    let embedder: Arc<dyn crate::memory_core::embed::Embedder + Send + Sync> =
+        Arc::new(FailFirstEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            inner: crate::embedder::MockEmbedder::new(384),
+        });
+
+    let recall = recall_across_palaces_reporting(&handles, &embedder, "rust build", 10, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        recall.failed.len(),
+        1,
+        "one palace failed: {:?}",
+        recall.failed
+    );
+    let failed = recall.failed[0].clone();
+    assert!(["gamma", "delta"].contains(&failed.as_str()));
+    assert!(recall.results.iter().all(|r| r.palace_id != failed));
+    assert!(!recall.results.is_empty(), "the other palace still answers");
+}
+
 /// Issue #61: short content must be rejected with an actionable error.
 #[tokio::test]
 async fn remember_rejects_short_content() {

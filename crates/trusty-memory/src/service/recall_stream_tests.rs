@@ -17,6 +17,7 @@ use chrono::Utc;
 use std::cell::RefCell;
 use std::path::Path;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
+use trusty_common::memory_core::retrieval::CrossPalaceRecall;
 use trusty_common::memory_core::PalaceRegistry;
 
 /// Create `n` palaces on disk and close every handle again.
@@ -75,7 +76,7 @@ async fn recall_all_releases_every_batch_when_the_search_fails() {
             if fail {
                 Err(anyhow!("search exploded"))
             } else {
-                Ok(Vec::new())
+                Ok(CrossPalaceRecall::default())
             }
         }
     })
@@ -114,7 +115,7 @@ async fn recall_streamed_visits_every_palace_in_bounded_batches() {
         widths.borrow_mut().push(handles.len());
         seen.borrow_mut()
             .extend(handles.iter().map(|h| h.id.as_str().to_string()));
-        async move { Ok(Vec::new()) }
+        async move { Ok(CrossPalaceRecall::default()) }
     })
     .await;
 
@@ -140,8 +141,9 @@ async fn recall_streamed_visits_every_palace_in_bounded_batches() {
 /// palace that holds drawers, nor one the registry already holds.
 /// What: seeds four palaces, puts a drawer in two, keeps one empty palace
 /// resident, then asserts the filter keeps three, skips one, opens nothing
-/// (the registry count stays at 1), and that `memory_recall_all` reports
-/// `palaces_searched: 3` and `palaces_skipped: 1`.
+/// (the registry count stays at 1), and that `memory_recall_all` with
+/// `scope: "all"` (#9299: the scope that opens) reports `palaces_searched: 3`
+/// and `palaces_skipped: 1`.
 /// Test: this test.
 #[tokio::test]
 async fn recall_all_skips_empty_palaces_without_opening_them() {
@@ -200,7 +202,7 @@ async fn recall_all_skips_empty_palaces_without_opening_them() {
     let out = crate::tools::dispatch_tool(
         &state,
         "memory_recall_all",
-        serde_json::json!({"q": "stored fact", "top_k": 5}),
+        serde_json::json!({"q": "stored fact", "top_k": 5, "scope": "all"}),
     )
     .await
     .expect("memory_recall_all");
