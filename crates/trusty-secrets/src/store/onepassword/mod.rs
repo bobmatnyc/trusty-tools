@@ -10,9 +10,10 @@
 //! 1Password vault's name; `<id>` is an id a listing returned):
 //! - every operation first runs `op item list --vault <v> --format json`,
 //!   which returns titles and ids, and keeps the rows titled with the key.
-//!   A vault this account lacks is a miss. A row of another category than
+//!   `op` says "isn't a vault" both for a vault the account lacks and for
+//!   one this identity cannot see. A row of another category than
 //!   `PASSWORD` is refused, so no other item is read, edited or deleted.
-//! - `get`: no row is `Ok(None)`. One row is
+//! - `get`: no vault or no row is `Ok(None)`. One row is
 //!   `op read --no-newline op://<vault id>/<id>/password`, the value on
 //!   stdout. Two rows are an error.
 //! - `set`: no row is `op item create --vault <v> -`, the JSON item template
@@ -20,14 +21,19 @@
 //!   --template <file>`, the template in a 0600 file in a 0700 directory
 //!   that is removed on drop (owner ruling 2026-10-07). Never
 //!   delete-then-create or create-then-archive. Two rows are an error.
-//! - `delete`: `op item delete <id> --vault <v>` for each row; none is
-//!   `Ok(false)`.
+//! - `delete`: `op item delete <id> --vault <v>` for each row; no row is
+//!   `Ok(false)`. No vault is [`SecretsError::VaultNotVisible`], never a
+//!   miss (#7524 P2-M3): the item may sit in a vault this identity cannot
+//!   see, so the delete sweep must keep the index row. The index records no
+//!   holding backend, so this also refuses a key that was never in
+//!   1Password; the error names the escapes (DOC-74 §8.2).
 //! - `list_names` is not implemented: listing goes through the names-only
 //!   index, so the capabilities are `READ | WRITE` only (A6).
 //!
 //! `op` runs by absolute path only: a machine `program` pin as given, or
-//! the first `op` in an absolute `PATH` entry, found once at open (`program.rs`).
-//! Nothing is spawned by bare name.
+//! the first `op` in a fixed list of system directories, found once at open
+//! (`program.rs`, #7524 P2-M2). No `PATH` is read, and nothing is spawned
+//! by bare name.
 //!
 //! The key never reaches argv: it is the item's title, compared with listed
 //! rows and written inside the template. Only the validated vault name,
@@ -60,8 +66,7 @@ mod onepassword_tests;
 #[cfg(test)]
 mod path_tests;
 
-use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::cli::{CliCommand, CliRun, CliSpec, TemplateFile, Verdict};
@@ -77,9 +82,8 @@ pub use settings::{
 /// The runner's facts about `op`: id, program, hints and markers.
 const SPEC: CliSpec = CliSpec::new(BackendId::ONEPASSWORD, "op", DEFAULT_TIMEOUT)
     .with_hints(
-        "install the 1Password CLI (https://developer.1password.com/docs/cli/get-started/) \
-         in an absolute PATH directory, set `secrets.onepassword.program` in the machine \
-         config to its absolute path, or select another secrets backend",
+        // #7524 P2-M2: names the system directories searched and the pin.
+        program::INSTALL_HINT,
         "unlock the 1Password app with its CLI integration on, run `op signin`, or set \
          OP_SERVICE_ACCOUNT_TOKEN for a headless run",
     )
@@ -104,7 +108,8 @@ pub struct OnePasswordBackend {
 
 /// What `op item list` said about a key.
 enum Lookup {
-    /// The account has no vault with this name.
+    /// `op` shows no vault with this name: it is missing, or this identity
+    /// cannot see it.
     NoVault,
     /// The `PASSWORD` rows titled with the key.
     Rows(Vec<Listed>),
@@ -120,7 +125,7 @@ impl OnePasswordBackend {
     ///
     /// What: a `program` that is not absolute is
     /// [`SecretsError::CliNotInstalled`], and nothing is spawned.
-    /// Test: `onepassword_path_without_an_absolute_op_is_cli_not_installed`.
+    /// Test: `onepassword_without_op_in_the_system_dirs_names_the_program_pin`.
     fn command(&self, vault: &VaultName, key: &SecretKey) -> Result<CliCommand, SecretsError> {
         let s = &self.settings;
         // #7519: a bare or relative name would resolve at spawn, through
@@ -301,7 +306,17 @@ impl SecretBackend for OnePasswordBackend {
 
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
         let rows = match self.lookup(vault, key)? {
-            Lookup::NoVault => return Ok(false),
+            // #7524 P2-M3: "isn't a vault" is also what `op` says for a vault
+            // this identity cannot see; a miss here let the sweep drop the row.
+            // Fix round: the error names both escapes (create the vault, or
+            // stop enabling 1Password); the index records no holding backend.
+            Lookup::NoVault => {
+                return Err(SecretsError::VaultNotVisible {
+                    backend: BackendId::ONEPASSWORD.to_string(),
+                    vault: vault.to_string(),
+                    key: key.to_string(),
+                });
+            }
             Lookup::Rows(rows) => rows,
         };
         let mut removed = false;
@@ -332,17 +347,36 @@ impl SecretBackend for OnePasswordBackend {
 /// What: reads `machine_config`; unless [`MachineSecretsConfig::enables`]
 /// the backend, [`SecretsError::BackendNotEnabled`]. Then
 /// [`OnePasswordSettings::from_machine`] with `template_root` and `token`,
-/// and #7519: `OnePasswordSettings::resolve_program` against
-/// `search_path`, a `PATH` value the caller read — once, here, never per
-/// call. No `op` is [`SecretsError::CliNotInstalled`]. Spawns nothing, so
-/// `secrets.doctor` can call it (A9).
+/// then `op` from the machine `program` pin or the first system directory
+/// in `crate::store::program::ONEPASSWORD_DIRS` that holds one — once,
+/// here, never per call. No `PATH` is read (#7524 P2-M2). No `op` is
+/// [`SecretsError::CliNotInstalled`]. Spawns nothing, so `secrets.doctor`
+/// can call it (A9).
 /// Test: `onepassword_open_requires_machine_enablement`,
-/// `onepassword_path_search_skips_relative_empty_and_dot_entries`.
+/// `onepassword_op_on_the_spawner_path_is_never_chosen`.
 pub fn open(
     machine_config: &Path,
     template_root: &Path,
     token: Option<SecretValue>,
-    search_path: Option<&OsStr>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    open_in(
+        machine_config,
+        template_root,
+        token,
+        &crate::store::program::onepassword_dirs(),
+    )
+}
+
+/// [`open`], searching `dirs` for `op` instead of the production list.
+///
+/// Why: a test cannot rely on the host having, or lacking, a real `op` in a
+/// system directory, and must never run one.
+/// Test: `onepassword_resolves_op_from_the_system_dirs_in_order`.
+pub(crate) fn open_in(
+    machine_config: &Path,
+    template_root: &Path,
+    token: Option<SecretValue>,
+    dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     let id = BackendId::onepassword();
     let machine: Option<MachineSecretsConfig> = config::load_machine_at(machine_config)?;
@@ -357,6 +391,6 @@ pub fn open(
         template_root.to_path_buf(),
         token,
     )?
-    .resolve_program(search_path)?;
+    .resolve_program(dirs)?;
     Ok(Arc::new(OnePasswordBackend::new(settings)))
 }

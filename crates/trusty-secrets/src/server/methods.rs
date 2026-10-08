@@ -252,8 +252,10 @@ impl CopySelection {
 /// A key the source lacks, or any other per-key failure, lands in `failed`
 /// and the copy continues. An entry that compensation could not delete
 /// aborts the copy with [`ErrorKind::OrphanedBackendEntry`] and no copied
-/// list; keys copied before it stay visible through `secrets.list`. Values
-/// are never returned. #4567: a refusal before the loop is one deny record;
+/// list; keys copied before it stay visible through `secrets.list`. #7524
+/// P2-M1: a key not started before the request's deadline is not read or
+/// written and lands in `failed` with [`ErrorKind::DeadlineExceeded`], so
+/// the reply names every key that was copied. Values are never returned. #4567: a refusal before the loop is one deny record;
 /// then the audit log is opened before the first key, and each key leaves
 /// one record — allow when copied, deny with its kind when it lands in
 /// `failed` or orphans. A record that cannot be written stops the copy
@@ -263,6 +265,7 @@ impl CopySelection {
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
 /// `audit_copy_writes_one_record_per_key`,
+/// `server_copy_past_its_deadline_starts_no_further_key`,
 /// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
 /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
@@ -304,13 +307,19 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         gate.admit()?;
         for key in keys {
             gate.ready()?;
-            let outcome = match source.get(&vault, &key) {
-                Ok(Some(value)) => store
-                    .set(&vault, &key, &value)
-                    .map(drop)
-                    .map_err(ErrorKind::from),
-                Ok(None) => Err(ErrorKind::NotFound),
-                Err(e) => Err(ErrorKind::from(e)),
+            // #7524 P2-M1: no key starts after the deadline, so the reply
+            // reaches the client and names everything that was copied.
+            let outcome = if crate::store::deadline::passed() {
+                Err(ErrorKind::DeadlineExceeded)
+            } else {
+                match source.get(&vault, &key) {
+                    Ok(Some(value)) => store
+                        .set(&vault, &key, &value)
+                        .map(drop)
+                        .map_err(ErrorKind::from),
+                    Ok(None) => Err(ErrorKind::NotFound),
+                    Err(e) => Err(ErrorKind::from(e)),
+                }
             };
             gate.record_key(&key, outcome)?;
             match outcome {

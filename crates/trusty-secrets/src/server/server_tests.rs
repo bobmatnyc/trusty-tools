@@ -211,7 +211,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 31] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 33] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -1159,7 +1159,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 31;
+    const ARMS: usize = 33;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1196,6 +1196,10 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::Internal => 29,
             // #7519: after `Internal`, so no existing discriminant moves.
             ErrorKind::BackendNotEnabled => 30,
+            // #7524 P2-M1: after `BackendNotEnabled`.
+            ErrorKind::DeadlineExceeded => 31,
+            // #7524 P2-M3 fix round: after `DeadlineExceeded`.
+            ErrorKind::VaultNotVisible => 32,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1209,12 +1213,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 31 variants, and the
+/// What: `kind as i32` equals its pinned value for all 33 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 31] = [
+    const PINNED: [(ErrorKind, i32); 33] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1246,6 +1250,8 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::FileBackendNotSelected, 28),
         (ErrorKind::Internal, 29),
         (ErrorKind::BackendNotEnabled, 30),
+        (ErrorKind::DeadlineExceeded, 31),
+        (ErrorKind::VaultNotVisible, 32),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
@@ -1723,6 +1729,28 @@ fn settings_reject_unknown_and_incomplete_flags() {
             Err(SettingsError::InvalidIdleTimeout)
         ));
     }
+}
+
+/// Why: #7524 P2-M1 — the client gave up at 30 s while the server went on
+/// and committed the write. For every method the server's deadline must be
+/// shorter than the client's wait, and a write's deadline must hold a
+/// 1Password set's two CLI calls at their full 60 s timeout.
+/// Test: itself.
+#[test]
+fn client_wait_exceeds_the_server_deadline_for_every_method() {
+    use super::deadline::{client_wait, request_deadline};
+    for (name, _) in router::METHODS {
+        assert!(client_wait(name) > request_deadline(name), "{name}");
+    }
+    for name in [method::SET, method::DELETE, method::COPY] {
+        assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
+        assert!(client_wait(name) > Duration::from_secs(120), "{name}");
+    }
+    assert_eq!(
+        ErrorKind::DeadlineExceeded.code(),
+        -32079,
+        "the next unused code"
+    );
 }
 
 // #4567: the audit-trail tests share this module's fixture.

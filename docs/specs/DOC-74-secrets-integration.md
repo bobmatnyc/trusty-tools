@@ -245,7 +245,8 @@ able to steer the server to a CLI backend, and enablement makes the delete
 sweep complete, because the sweep visits every enabled backend. The `program`,
 `account` and `config_path` settings are machine-config only; a tracked file
 that sets one is refused. `program` must be an absolute path; otherwise `op` is
-resolved from absolute `PATH` entries only.
+looked up in a fixed list of system directories (§6.2), never on a `PATH`
+(#7524 P2-M2).
 
 This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
@@ -284,6 +285,23 @@ secrets:
     program: /usr/local/bin/keeper           # required; absolute path to Keeper Commander
     config_path: /Users/me/.keeper/config.json   # required; Commander's config file, absolute, mode 0600
 ```
+
+**Where `op` comes from (#7524 P2-M2, Architect Decision A).** The machine
+config's `secrets.onepassword.program`, when set, is the program and
+overrides everything else. Without it, the backend takes the first executable
+`op` in this fixed list, in order:
+
+| OS | Directories searched |
+|---|---|
+| macOS | `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
+| Linux and other Unix | `/usr/local/bin`, `/usr/bin` |
+
+The `PATH` of whichever process spawned the server is never consulted: any
+directory on it is the spawner's choice, and a planted `op` there would
+receive item templates, values inside. With no pin and no `op` in the list,
+the backend fails with `cli_not_installed`, and the message names the
+`secrets.onepassword.program` setting. Keeper has no list: its `program` pin
+is required.
 
 These sections belong to the untracked machine config only (§6.1,
 [#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)). Neither
@@ -455,6 +473,33 @@ rather than composing it into the argv this document's own `ExternalCliCommand`
 would otherwise render into a log line (see `GhCommand::argv_display`,
 `gh.rs:289`, which exists precisely so a command can be logged — the new
 commands must never call the equivalent for a value-carrying argument).
+
+**1Password (#7519 P2; #7524 part 2).**
+
+- *Program.* `op` runs by absolute path: the machine `program` pin, or the
+  first `op` in the system directories of §6.2. No `PATH` is read.
+- *Lookup.* Every operation first runs `op item list --vault <vault>`. `op`
+  answers "isn't a vault" both for a vault the account lacks and for one the
+  current identity cannot see, so that answer never proves a key absent.
+- *Missing vault.* For `get` it is a miss (`Ok(None)`); for `set` it is an
+  error naming the vault. For `delete` it is `vault_not_visible` (-32080),
+  never a miss, so the delete sweep keeps the key's index row (#7524 P2-M3,
+  Architect Decision B). A missing item in a listed vault stays a miss for
+  every operation.
+- *Stuck delete (#7524 P2-M3, Architect ruling 2026-10-07 23:54Z).* The
+  names-only index does not record which backend holds a key, so a delete
+  sweeps 1Password whenever the machine config enables it. A project that
+  keeps its keys in the Keychain or `file` usually has no 1Password vault of
+  its name, so every delete of its keys clears the local backend, keeps the
+  index row and fails with `vault_not_visible`. Its text names the two ways
+  out: create the vault in 1Password, or stop enabling 1Password by removing
+  the `secrets.onepassword` section (and any `secrets.default_backend:
+  onepassword`) from the machine config
+  `~/.trusty-tools/trusty-common/config.yaml`. A later delete then succeeds.
+- *Copy past the deadline.* A `copy` into 1Password lists in `failed` both
+  the keys it did not start and a key whose `op` write the request deadline
+  cut short (§15.2). That write may have landed, so check the vault before
+  retrying a failed key.
 
 **Keeper (#7519 P3, Architect rulings 2026-10-07 17:11Z) — shims only, and
 provisional.** No test has run against a real Keeper account; every ruling
@@ -910,6 +955,21 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.copy` | Copies keys between backends inside one project (§13 Q6) | Names copied, names failed |
 | `secrets.doctor` | Runs `detect_backends` (§7) | The detection table |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
+
+**Request deadline and client wait (#7524 P2-M1).** The server gives each
+request one whole-operation deadline, counted from its arrival: 120 s for
+`secrets.set`, `secrets.delete` and `secrets.copy`, which reach vendor CLIs,
+and 15 s for every other method. Every CLI call the request makes is bounded
+by the time left; none starts after the deadline, and one still running then
+is killed with its process group. A request that runs out answers
+`deadline_exceeded` (-32079), whose text says a backend write already under
+way may have landed; a `copy` instead lists in `failed` each key it did not
+start and each key whose write the deadline cut short (§8.2). The client
+waits the method's deadline plus 15 s. For CLI-backed calls (1Password,
+Keeper) that means the server's reply always arrives, and a client timeout
+is never followed by a silent commit. A Keychain or file backend call is not
+bounded by the deadline: one that blocks, for example on a Keychain unlock
+prompt, can still outlast the client's wait and commit after it.
 
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves

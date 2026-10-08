@@ -53,7 +53,7 @@ pub struct DetectedTool {
 /// Every unsupported tool, installed or not, in a fixed order.
 ///
 /// What: a `None` or empty `search_path` finds nothing; relative and empty
-/// entries are skipped, as for `op`.
+/// entries are skipped.
 pub(crate) fn detect(search_path: Option<&OsStr>) -> Vec<DetectedTool> {
     UNSUPPORTED
         .iter()

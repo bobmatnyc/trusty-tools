@@ -10,6 +10,9 @@
 //! Test: the `*_tests.rs` files beside this module.
 
 mod backend;
+// #7524 P2-M1: the per-request deadline the server sets and the runner reads.
+#[cfg(any(feature = "server", feature = "cli-backends"))]
+pub(crate) mod deadline;
 // #7519: the runner the CLI-backed backends share; Unix only, because it
 // kills the child's process group.
 #[cfg(all(unix, feature = "cli-backends"))]
@@ -43,6 +46,9 @@ mod secret_store;
 // #7524: only the server's `State` reads it; unused without `server`.
 #[cfg(feature = "server")]
 pub(crate) use backend::KEYCHAIN_COMPILED;
+// #7524 P2-M2: the server's factory names the 1Password directories itself.
+#[cfg(feature = "server")]
+pub(crate) use backend::open_backend_at_in;
 pub use backend::{
     Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
     open_backend_at, swept_backends,

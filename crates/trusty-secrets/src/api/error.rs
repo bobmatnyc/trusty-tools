@@ -282,10 +282,11 @@ pub enum SecretsError {
         key: &'static str,
     },
 
-    /// A CLI-backed backend's program is not installed or not on `PATH`.
+    /// A CLI-backed backend's program was not found where the backend looks.
     /// Fails closed: no fallback to another backend.
-    // #7519: A4 — the error names the CLI and the fix.
-    #[error("`{program}` is not installed or not on PATH; {hint}")]
+    // #7519: A4 — the error names the CLI and the fix. #7524 P2-M2: no
+    // backend searches `PATH`, so the text no longer names it.
+    #[error("`{program}` was not found; {hint}")]
     CliNotInstalled {
         /// The program as configured, e.g. `op`.
         program: String,
@@ -321,5 +322,44 @@ pub enum SecretsError {
     BackendNotEnabled {
         /// Backend id, e.g. `onepassword`.
         backend: String,
+    },
+
+    /// A CLI-backed backend call was refused, or stopped, because the
+    /// server request it served ran past its deadline.
+    // #7524 P2-M1: after `BackendNotEnabled`, so no discriminant moves. The
+    // text says a write may have landed: a CLI killed mid-write cannot say.
+    #[error(
+        "the {backend} backend did not finish before the request deadline for {key} in {vault}; \
+         its CLI was stopped, and a write it had started may have landed"
+    )]
+    DeadlineExceeded {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the call served, or `(none)`.
+        vault: String,
+        /// The key the call served, or `(none)`.
+        key: String,
+    },
+
+    /// A delete found no vault of this name in a CLI backend that cannot
+    /// tell a missing vault from one this identity cannot see, so the key
+    /// may still be held there and its index row was kept.
+    // #7524 P2-M3 fix round: after `DeadlineExceeded`, so no discriminant
+    // moves. The index records no holding backend, so a key that was never
+    // in 1Password is refused too until one of the two escapes is taken.
+    #[error(
+        "the {backend} backend shows no vault {vault} to this identity, so {key} may still \
+         be held there and its index row was kept; create the vault {vault} in 1Password, \
+         or stop enabling 1Password by removing the `secrets.onepassword` section (and any \
+         `secrets.default_backend: onepassword`) from the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml"
+    )]
+    VaultNotVisible {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the delete named.
+        vault: String,
+        /// The key the delete named.
+        key: String,
     },
 }
