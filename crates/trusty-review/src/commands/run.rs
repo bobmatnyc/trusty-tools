@@ -190,8 +190,8 @@ pub struct RunArgs {
     pub include_pr_body: bool,
 
     /// Report every context source the review had (#9192, #9194): pr_body,
-    /// caller_context, issues, spec_docs, claude_md, search, analyze and
-    /// external_sources, each used, truncated, absent (asked for, nothing
+    /// caller_context, issues, spec_docs, claude_md, changed_files, search,
+    /// analyze and external_sources, each used, truncated, absent (asked for, nothing
     /// there), unavailable (could not be read) or not_requested. With
     /// `--json` the output becomes `{"result": <review>, "context_sources":
     /// [...]}`; otherwise one line is printed per source that was absent,
@@ -413,16 +413,23 @@ pub async fn cmd_run(
 /// for the ledger alone; the PR-context text flags are
 /// legacy and turn the ledger on only beside one of those two (ruling
 /// 2026-10-06 03:42Z).
-/// What: the request with `include_pr_body`, `report_context` and (#9193)
-/// `spec_docs` and `claude_md` from the flags.
+/// What: the request with `include_pr_body`, `report_context`, (#9193)
+/// `spec_docs` and `claude_md`, and (#9195) `changed_files` and its budget
+/// from the flags.
 /// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`,
-/// `run_flags_set_the_request`.
+/// `run_flags_set_the_request`, `run_changed_files_flags_set_the_request`,
+/// `changed_files_budget_without_flag_is_inert`.
 pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
-    OptionalContextRequest::default()
+    let request = OptionalContextRequest::default()
         .with_pr_body(args.include_pr_body)
         .with_report_context(args.report_context)
         .with_spec_docs(args.spec_docs)
         .with_claude_md(args.claude_md)
+        .with_changed_files(args.changed_files); // #9195
+    match args.changed_files_budget {
+        Some(bytes) => request.with_changed_files_budget(bytes), // inert without the flag
+        None => request,
+    }
 }
 
 /// [`run_request`] plus the docs `--issue-docs-file` names (#9197).

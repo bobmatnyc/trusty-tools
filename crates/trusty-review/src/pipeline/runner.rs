@@ -585,7 +585,7 @@ async fn run_pipeline(
         &input.reviewer_model,
         &voice_config,
         config.coverage.enabled,
-        &applied.prompt_sections(), // #9193: issues, then docs
+        &applied.prompt_sections(), // #9193, #9195: issues, docs, then changed files
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 

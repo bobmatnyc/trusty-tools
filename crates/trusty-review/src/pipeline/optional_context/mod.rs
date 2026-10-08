@@ -42,6 +42,8 @@ pub(crate) use seams::PrSource;
 /// for the reviewer only, `Some` whenever the caller sent the parameter, even
 /// an empty list. `spec_docs` and `claude_md` (#9193) read ADR/spec/SLD docs
 /// and CLAUDE.md files at the PR head SHA, for the reviewer only.
+/// `changed_files` (#9195) shows the PR's changed files whole, read at the
+/// head SHA, for the reviewer only, within `changed_files_budget` bytes.
 /// `report_context` asks for the source ledger with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
 /// `requested_new_is_off_by_default_and_on_with_pr_body`,
@@ -154,6 +156,7 @@ impl OptionalContextRequest {
             || self.issue_docs.is_some()
             || self.spec_docs
             || self.claude_md
+            || self.changed_files
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request

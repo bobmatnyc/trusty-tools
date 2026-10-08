@@ -334,6 +334,7 @@ async fn report_context_lists_every_source_in_canonical_order() {
             SourceState::NotRequested,
             SourceState::NotRequested,
             SourceState::NotRequested,
+            SourceState::NotRequested, // #9195: `changed_files`
             SourceState::Used,
             SourceState::Absent,
             SourceState::NotRequested,
