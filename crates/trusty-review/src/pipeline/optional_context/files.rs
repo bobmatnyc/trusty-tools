@@ -132,15 +132,7 @@ fn candidates(
             (normalize_path(&path), (status == "removed", lines))
         })
         .collect();
-    // #9195 ruling B: on the map-reduce path a file is carried only by a unit
-    // that sends a prompt.
-    let carried: Option<HashSet<String>> = (review_path == ReviewPath::MapReduce).then(|| {
-        split_into_units(filtered, mr)
-            .iter()
-            .filter(|u| sends_prompt(u))
-            .map(|u| normalize_path(&u.file))
-            .collect()
-    });
+    let carried = carried_paths(filtered, (review_path, mr));
     let kept = filtered.files.iter().map(|f| {
         let generated = f.disposition == FileDisposition::SummaryOnly;
         (
@@ -167,6 +159,25 @@ fn candidates(
             }
         })
         .collect()
+}
+
+/// The files a prompt carries: `None` on the unified path (every file), and
+/// on the map-reduce path the files of the units that send a prompt (#9195
+/// ruling B; #9196 reuses it so a symbol no prompt carries is never read).
+///
+/// Test: `a_unit_without_a_prompt_gets_no_text_and_is_not_used`,
+/// `a_unit_without_a_prompt_gets_no_symbols_and_is_not_used`.
+pub(super) fn carried_paths(
+    filtered: &FilteredDiff,
+    (review_path, mr): (ReviewPath, &MapReduceConfig),
+) -> Option<HashSet<String>> {
+    (review_path == ReviewPath::MapReduce).then(|| {
+        split_into_units(filtered, mr)
+            .iter()
+            .filter(|u| sends_prompt(u))
+            .map(|u| normalize_path(&u.file))
+            .collect()
+    })
 }
 
 /// Read the changed files at the head and leave them in `applied` (#9195).

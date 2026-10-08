@@ -38,6 +38,12 @@ pub(crate) struct FileSections {
 }
 
 impl FileSections {
+    /// Sections from their parts; #9196 renders the symbol section with it,
+    /// so both sections split for map-reduce one way.
+    pub(crate) fn from_parts(head: String, list: String, blocks: Vec<(String, String)>) -> Self {
+        Self { head, list, blocks }
+    }
+
     /// The section the unified prompt carries: the note, the `Not shown:`
     /// list, then every shown file; empty when there is nothing.
     ///

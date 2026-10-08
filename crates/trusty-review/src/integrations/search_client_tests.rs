@@ -275,6 +275,17 @@ async fn default_list_index_identities_fails_closed() {
     assert!(err.to_string().contains("not supported"), "{err}");
 }
 
+/// #9196 (ruling Q6): a client that cannot read the call graph answers
+/// `Unavailable`, never an empty report that would read as "no edges".
+#[tokio::test]
+async fn default_call_chain_is_unavailable() {
+    let err = NoIdentityClient
+        .call_chain("widget", "src/a.rs::f", "both", 1, false)
+        .await
+        .expect_err("the default body must not answer");
+    assert!(matches!(err, SearchClientError::Unavailable(_)), "{err:?}");
+}
+
 #[test]
 fn search_error_display() {
     let err = SearchClientError::Transport("connection refused".to_string());

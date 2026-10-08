@@ -31,9 +31,9 @@ const OUTSIDE_DIFF: &str = "let rate = unchecked_rate_9195(input);";
 
 /// One grounded finding on `src/billing.rs` quoting `quote` at `line`, or
 /// APPROVE when `quote` is empty or the prompt is not the billing chunk.
-struct QuotingReviewer {
-    quote: &'static str,
-    line: u32,
+pub(super) struct QuotingReviewer {
+    pub(super) quote: &'static str,
+    pub(super) line: u32,
 }
 
 #[async_trait]

@@ -219,6 +219,7 @@ fn blank() -> AppliedContext {
         doc_sections: String::new(),
         docs: DocCorpus::default(),
         files: FileSections::default(),
+        symbols: FileSections::default(),
     }
 }
 

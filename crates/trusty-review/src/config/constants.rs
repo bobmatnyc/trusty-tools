@@ -196,6 +196,34 @@ pub const CHANGED_FILE_FETCH_CONCURRENCY: usize = 8;
 /// Longest path the `Not shown:` list and a ledger item id carry (#9195,
 /// amendment 4; precedent `MAX_ISSUE_DOC_LINE_CHARS`).
 pub const MAX_CHANGED_FILE_PATH_CHARS: usize = 512;
+
+// ─── Changed-symbol call graph (#9196) ───────────────────────────────────────
+// Architect ruling Q5: constants, no budget parameter. AC2: capped per symbol
+// and in total, each cut marked.
+
+/// Most changed symbols one review asks the call graph about (#9196).
+pub const MAX_SYMBOL_CONTEXT_SYMBOLS: usize = 12;
+/// Most callers, callees or test lines one symbol's block lists, each (#9196).
+pub const MAX_SYMBOL_EDGES: usize = 6;
+/// Most characters of one symbol's block; a longer one is cut and marked.
+pub const MAX_SYMBOL_BLOCK_CHARS: usize = 2_500;
+/// Most characters of the whole symbol section; a symbol past it is left out
+/// whole and named (#9196).
+pub const MAX_SYMBOL_SECTION_CHARS: usize = 24_000;
+/// Seconds one call-chain read may take (#9196).
+pub const SYMBOL_CALL_TIMEOUT_SECS: u64 = 10;
+/// Seconds the whole call-chain phase may take; a symbol not started by then
+/// is left out (#9196).
+pub const SYMBOL_PHASE_DEADLINE_SECS: u64 = 30;
+/// Most call-chain reads in flight at once (#9196).
+pub const SYMBOL_CALL_CONCURRENCY: usize = 4;
+/// Most bytes of one call-chain report the parser reads (#9196).
+pub const MAX_SYMBOL_REPORT_BYTES: usize = 262_144;
+/// Most symbols the `Not shown:` list and the ledger name one by one; the
+/// rest fold into one line and one item (#9196, precedent
+/// `MAX_ISSUE_DOCS_LISTED`).
+pub const MAX_SYMBOLS_LISTED: usize = 64;
+
 /// Maximum number of context files retrieved from trusty-search per review.
 pub const MAX_CONTEXT_FILES: usize = 20;
 

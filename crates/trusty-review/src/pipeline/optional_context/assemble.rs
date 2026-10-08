@@ -39,6 +39,7 @@ use super::{
 /// `doc_sections` holds the docs and CLAUDE.md sections, for the prompt only
 /// (never the flat refs corpus); `docs` is their citable text. #9195:
 /// `files` holds the changed-files section, prompt only and never citable.
+/// #9196: `symbols` holds the changed-symbol section, the same way.
 /// Test: `off_is_byte_identical_unified`, `supplied_issue_doc_reaches_the_reviewer_prompt`,
 /// `doc_text_is_not_in_the_flat_refs_corpus`.
 #[derive(Debug, Clone)]
@@ -53,30 +54,40 @@ pub(crate) struct AppliedContext {
     pub(crate) docs: DocCorpus,
     /// The changed files read whole at the head (#9195); prompt only.
     pub(crate) files: FileSections,
+    /// The changed symbols' call graph (#9196); prompt only.
+    pub(crate) symbols: FileSections,
 }
 
 impl AppliedContext {
     /// Every extra section the unified reviewer prompt carries: issues, docs,
-    /// then changed files.
+    /// changed files, then (#9196) changed symbols.
     ///
     /// Test: `spec_docs_on_with_zero_docs_leaves_prompt_byte_identical`,
-    /// `file_text_reaches_the_unified_prompt_and_the_ledger_as_used`.
+    /// `file_text_reaches_the_unified_prompt_and_the_ledger_as_used`,
+    /// `symbol_section_reaches_the_unified_prompt_and_the_ledger_as_used`.
     pub(crate) fn prompt_sections(&self) -> String {
-        join_sections(&[&self.sections, &self.doc_sections, &self.files.unified()])
+        join_sections(&[
+            &self.sections,
+            &self.doc_sections,
+            &self.files.unified(),
+            &self.symbols.unified(),
+        ])
     }
 
     /// The extra sections one map-reduce chunk prompt for `file` carries
     /// (#9195, ruling Q4): issues and docs as every chunk has them, then the
     /// changed-files section, with `file`'s own text only when `first` (its
-    /// first chunk that sends a prompt, ruling B).
+    /// first chunk that sends a prompt, ruling B). #9196: then `file`'s own
+    /// changed symbols, the same way.
     ///
     /// Test: `file_text_reaches_only_its_own_mapreduce_chunk`,
-    /// `a_chunk_carries_only_its_own_file`.
+    /// `a_chunk_carries_only_its_own_file`, `symbol_blocks_ride_only_their_own_chunk`.
     pub(crate) fn chunk_sections(&self, file: &str, first: bool) -> String {
         join_sections(&[
             &self.sections,
             &self.doc_sections,
             &self.files.for_unit(file, first),
+            &self.symbols.for_unit(file, first),
         ])
     }
 }
@@ -152,6 +163,7 @@ pub(crate) fn apply_caller_context(
         doc_sections: String::new(), // #9193: filled by `docs::apply_docs`
         docs: DocCorpus::default(),
         files: FileSections::default(), // #9195: filled by `files::apply_files`
+        symbols: FileSections::default(), // #9196: filled by `symbols_apply::apply_symbols`
     }
 }
 

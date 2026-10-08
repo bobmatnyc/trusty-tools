@@ -307,8 +307,8 @@ async fn report_context_alone_turns_the_ledger_on() {
     assert_eq!(row(&seen, "pr_body").state, SourceState::NotRequested);
     assert_eq!(
         seen.outcome.context_sources.len(),
-        9,
-        "every row (#9194, #9195)"
+        10,
+        "every row (#9194, #9195, #9196)"
     );
 }
 
