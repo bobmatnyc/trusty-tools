@@ -611,8 +611,10 @@ pub(super) async fn reserve_inproject_worktree(
         .await
         .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
 
-    let worktree = super::inproject::create_session_worktree(base, &reserved_name, session_id)
-        .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
+    // #8994: recorded in the worktree ledger; a ledger it cannot write refuses.
+    let worktree =
+        super::inproject::create_daemon_session_worktree(base, &reserved_name, session_id)
+            .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
 
     // #2196: best-effort sync of the operator's allowlisted untracked/secret
     // files (default `.env*`) from the live checkout into the fresh

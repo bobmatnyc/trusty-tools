@@ -712,6 +712,15 @@ pub(crate) enum Command {
     /// with its status; exits 75 naming the holders when no slot frees.
     /// Test: `tests/tm_build_lease.rs`.
     BuildLease(crate::commands::build_lease::BuildLeaseArgs),
+    /// List the worktrees the machine-wide ledger records (#8994).
+    ///
+    /// Why: no machine-wide record of worktrees existed, so none could be
+    /// counted or reclaimed on evidence.
+    /// What: backfills `~/.trusty-mpm/worktrees.jsonl` from each registered
+    /// project's `git worktree list`, measures every live tree (unless
+    /// `--no-size`) and prints the count and GiB per project. Daemon-less.
+    /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`.
+    Worktrees(crate::commands::worktrees::WorktreesArgs),
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.

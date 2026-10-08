@@ -71,15 +71,19 @@ pub(crate) async fn run_fallback(
     }
 }
 
-/// [`run_fallback`] with `fallback_protected`'s own defaults: the real disk
-/// gate and the process home.
+/// [`run_fallback`] with `fallback_protected`'s own disk gate and a scratch home.
+///
+/// #8994: the home is a scratch directory, not the process home — a fallback
+/// that reaches worktree creation opens the worktree ledger under it, and a
+/// test must never write the operator's `~/.trusty-mpm/worktrees.jsonl`.
 pub(crate) async fn run_fallback_default(
     client: &reqwest::Client,
     url: &str,
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
     let gate = trusty_mpm::core::disk_usage_guard::DiskGate::MeasureTarget;
-    run_fallback(client, url, cwd, &gate, dirs::home_dir().as_deref())
+    let home = crate::test_support::hermetic_temp_dir();
+    run_fallback(client, url, cwd, &gate, Some(home.path()))
         .await
         .result
 }

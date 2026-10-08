@@ -52,6 +52,7 @@ pub(crate) async fn launch_protected_workspace(
         git_root,
         &session_id,
         gate,
+        home,
     )
     .await?;
 

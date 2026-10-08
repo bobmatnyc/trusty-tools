@@ -420,6 +420,62 @@ pub fn create_session_worktree_gated(
     )
 }
 
+/// [`create_session_worktree_gated`], recorded in the worktree ledger (#8994).
+///
+/// Why: every tm provisioning route must enter the tree it creates into
+/// `~/.trusty-mpm/worktrees.jsonl`, and a ledger it cannot write must refuse
+/// the creation instead of producing an unrecorded tree. One helper serves the
+/// daemon and the CLI so the two routes record identically.
+/// What: [`crate::core::worktree_ledger::record::create_recorded`] around
+/// [`create_session_worktree_gated`], with the session branch and `origin`.
+/// Test: `reserve_inproject_worktree_refuses_when_the_ledger_cannot_record`,
+/// `reserve_inproject_worktree_records_the_created_tree`,
+/// `a_launch_worktree_is_refused_when_the_ledger_cannot_record`.
+pub fn create_session_worktree_recorded(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+    gate: &crate::core::disk_usage_guard::DiskGate,
+    ledger: &crate::core::worktree_ledger::WorktreeLedger,
+    origin: crate::core::worktree_ledger::Origin,
+) -> Result<PathBuf, String> {
+    use crate::core::worktree_ledger::record::{CreationIntent, create_recorded};
+    let intent = CreationIntent {
+        repo: base_path,
+        branch: Some(worktree_branch_for(worktree_name)),
+        origin,
+        session: Some(owner_session_id.to_string()),
+    };
+    create_recorded(ledger, intent, || {
+        create_session_worktree_gated(base_path, worktree_name, owner_session_id, gate)
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// The daemon's [`create_session_worktree`], recorded in the operator's ledger
+/// (#8994).
+///
+/// What: [`create_session_worktree_recorded`] with the real disk measurement,
+/// the `$HOME` ledger and [`crate::core::worktree_ledger::Origin::TmDaemon`];
+/// no resolvable home is a refusal.
+/// Test: `reserve_inproject_worktree_refuses_when_the_ledger_cannot_record`.
+pub fn create_daemon_session_worktree(
+    base_path: &Path,
+    worktree_name: &str,
+    owner_session_id: &crate::session_manager::ManagedSessionId,
+) -> Result<PathBuf, String> {
+    use crate::core::worktree_ledger::{Origin, WorktreeLedger};
+    let ledger = WorktreeLedger::host().map_err(|e| e.to_string())?;
+    create_session_worktree_recorded(
+        base_path,
+        worktree_name,
+        owner_session_id,
+        &crate::core::disk_usage_guard::DiskGate::MeasureTarget,
+        &ledger,
+        Origin::TmDaemon,
+    )
+}
+
 /// [`create_session_worktree`] against an ALREADY-TAKEN measurement.
 ///
 /// Why: the seam the end-to-end tests pin a synthetic percentage through, so

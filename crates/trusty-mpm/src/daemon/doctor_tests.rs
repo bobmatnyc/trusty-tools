@@ -425,7 +425,7 @@ fn an_absent_path_still_matches_the_recorded_spelling_of_itself() {
 }
 
 #[tokio::test]
-async fn run_doctor_produces_sixty_seven_checks() {
+async fn run_doctor_produces_sixty_eight_checks() {
     // Issue #2158 added the `deployment` probe (nine → ten); issue #2246
     // adds `oauth_token` (ten → eleven); issue #2876 adds `skill_staleness`
     // and `legacy_sources` (eleven → thirteen); DOC-42 / issue #2889 adds
@@ -473,6 +473,7 @@ async fn run_doctor_produces_sixty_seven_checks() {
     // #9018 adds pm_guard (sixty-four → sixty-five).
     // #8378 adds content (sixty-five → sixty-six).
     // #9091 adds org_accounts (sixty-six → sixty-seven).
+    // #8994 adds worktree_registry (sixty-seven → sixty-eight).
     //
     // The test NAME had drifted four additions behind the tally above by the
     // time #6586 landed — it still read `thirty_two`. Renaming it is part of
@@ -530,6 +531,8 @@ async fn run_doctor_produces_sixty_seven_checks() {
         // `disk.max_usage_pct` — the number that decides whether the next
         // worktree is created at all.
         "disk_usage",
+        // #8994: count and GiB per project from the worktree ledger alone.
+        "worktree_registry",
         // See #6868: this machine's Rust build settings — the shared cargo
         // target directory, the job count, and the sccache posture — plus the
         // prefix line a PM pastes into an engineer brief.

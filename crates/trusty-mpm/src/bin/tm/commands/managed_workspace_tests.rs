@@ -271,6 +271,7 @@ async fn provision_for_launch_ignores_a_registered_worktree_true_project() {
         false,
         LaunchDir::OperatorCwd,
         &session_id,
+        None, // #8994: no worktree is requested, so no ledger is touched
     )
     .await
     .unwrap();
@@ -336,6 +337,7 @@ async fn provision_for_launch_without_a_request_uses_the_main_checkout() {
         false,
         LaunchDir::OperatorCwd,
         &session_id,
+        None, // #8994: no worktree is requested, so no ledger is touched
     )
     .await
     .expect(
@@ -388,6 +390,7 @@ async fn provision_for_launch_redirects_an_unmanaged_launch_to_the_managed_check
         false,
         LaunchDir::OperatorCwd,
         &session_id,
+        None, // #8994: no worktree is requested, so no ledger is touched
     )
     .await
     .expect("the managed checkout already exists, so the redirect reuses it");
@@ -441,6 +444,7 @@ async fn provision_for_launch_explicit_request_creates_worktree() {
         LaunchDir::OperatorCwd,
         &session_id,
         &empty_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .unwrap();
@@ -501,6 +505,7 @@ async fn provision_for_launch_from_subdirectory_targets_repo_root() {
         false,
         LaunchDir::OperatorCwd,
         &session_id,
+        None, // #8994: no worktree is requested, so no ledger is touched
     )
     .await
     .expect("no worktree request must not attempt a clone at all");
@@ -565,6 +570,7 @@ async fn provision_for_launch_keeps_a_caller_resolved_placement() {
         false,
         LaunchDir::CallerResolved,
         &session_id,
+        None, // #8994: no worktree is requested, so no ledger is touched
     )
     .await
     .expect("a caller-resolved placement must not attempt a clone at all");
@@ -613,6 +619,7 @@ async fn provision_for_fallback_opted_out_creates_no_clone_and_no_worktree() {
         git_root.path(),
         &session_id,
         &empty_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .expect(
@@ -672,6 +679,7 @@ async fn provision_for_fallback_unset_creates_worktree_not_live_checkout() {
         git_root.path(),
         &session_id,
         &empty_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .unwrap();
@@ -728,6 +736,7 @@ async fn provision_for_fallback_other_projects_optout_does_not_leak() {
         git_root.path(),
         &session_id,
         &empty_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .unwrap();
@@ -784,6 +793,7 @@ async fn a_pinned_over_threshold_gate_refuses_a_launch_worktree() {
         LaunchDir::OperatorCwd,
         &session_id,
         &full_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .expect_err("a pinned 100% mount is at or above every accepted threshold");
@@ -799,6 +809,91 @@ async fn a_pinned_over_threshold_gate_refuses_a_launch_worktree() {
     assert!(
         !expected_worktree(&base, &session_id).exists(),
         "#7497: a refused gate must create nothing"
+    );
+}
+
+/// #8994 criterion 1 on the CLI route: a ledger `tm launch --worktree` cannot
+/// append to refuses the launch, and no worktree is created.
+///
+/// What: the ledger path under the scratch home is a directory, so the append
+/// open fails for any user. Asserts `Err`, a message naming the ledger, no
+/// worktree directory, and nothing recorded.
+/// Test: this is the test. RED if the append error were logged and swallowed.
+#[tokio::test]
+async fn a_launch_worktree_is_refused_when_the_ledger_cannot_record() {
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+    let home = tempfile::tempdir().unwrap();
+    let ledger = trusty_mpm::core::worktree_ledger::WorktreeLedger::under_home(home.path());
+    std::fs::create_dir_all(ledger.path()).unwrap();
+
+    let err = provision_for_launch_gated(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+        &empty_disk(),
+        Some(home.path()),
+    )
+    .await
+    .expect_err("an unwritable ledger must refuse the launch worktree");
+
+    assert!(err.to_string().contains("worktree ledger"), "{err}");
+    assert!(
+        !expected_worktree(&base, &session_id).exists(),
+        "#8994: nothing may be created when the ledger cannot record it"
+    );
+}
+
+/// #8994: `tm launch --worktree` records the tree it creates.
+/// Test: this is the test.
+#[tokio::test]
+async fn a_launch_worktree_is_recorded_in_the_ledger() {
+    use trusty_mpm::core::worktree_ledger::{Origin, WorktreeLedger, fold::fold, ledger_key};
+    let origin = "https://github.invalid/fixture-owner/isolated-repo";
+    let repos_root = tempfile::tempdir().unwrap();
+    let base = repos_root
+        .path()
+        .join("fixture-owner")
+        .join("isolated-repo");
+    init_git_repo(&base);
+    let live = tempfile::tempdir().unwrap();
+    let session_id = ManagedSessionId::new();
+    let home = tempfile::tempdir().unwrap();
+
+    provision_for_launch_gated(
+        origin,
+        &base,
+        live.path(),
+        true,
+        LaunchDir::OperatorCwd,
+        &session_id,
+        &empty_disk(),
+        Some(home.path()),
+    )
+    .await
+    .expect("provision");
+
+    let state = fold(
+        &WorktreeLedger::under_home(home.path())
+            .read()
+            .unwrap()
+            .events,
+    );
+    let entry = &state.live[&ledger_key(&expected_worktree(&base, &session_id))];
+    assert_eq!(entry.origin, Origin::TmCli);
+    assert_eq!(
+        entry.session.as_deref(),
+        Some(session_id.to_string().as_str())
     );
 }
 
@@ -833,6 +928,7 @@ async fn a_pinned_over_threshold_gate_refuses_a_fallback_worktree() {
         git_root.path(),
         &session_id,
         &full_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .expect_err("a pinned 100% mount must refuse on the fallback path too");
@@ -886,6 +982,7 @@ async fn a_pinned_gate_keeps_a_launch_worktree_off_the_hosts_disk() {
         LaunchDir::OperatorCwd,
         &session_id,
         &empty_disk(),
+        Some(tempfile::tempdir().unwrap().path()), // #8994: scratch ledger home
     )
     .await
     .expect(

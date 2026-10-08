@@ -15,6 +15,19 @@
 
 use trusty_mpm::core::oauth_token::{self, TokenStatus};
 
+/// `tm auth <action>` dispatch.
+///
+/// Why: #8994 moved this match out of `main.rs`, which sits at the 500-SLOC cap.
+/// What: one handler per [`crate::cli::AuthAction`] variant.
+pub(crate) fn dispatch(action: crate::cli::AuthAction) -> anyhow::Result<()> {
+    use crate::cli::AuthAction;
+    match action {
+        AuthAction::SetToken { token, stdin } => set_token(token, stdin),
+        AuthAction::ClearToken => clear_token(),
+        AuthAction::Status => status(),
+    }
+}
+
 /// Read a token from stdin, trimmed; errors on a blank read.
 ///
 /// Why: the default (no `--token`) path for `tm auth set-token` — keeps the

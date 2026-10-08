@@ -163,6 +163,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
          when the mount could not be measured (issue #7497).",
     ),
     (
+        "worktree_registry",
+        "Count and GiB per project from the append-only worktree ledger `~/.trusty-mpm/worktrees.jsonl` alone — never git, never a filesystem walk; sizes are the last `measured` events `tm worktrees` recorded. Ok with no ledger yet (`tm worktrees` backfills it), Warn on malformed ledger lines, Unknown when the ledger cannot be read (issue #8994).",
+    ),
+    (
         "rust_build_env",
         "This machine's Rust build settings, for a project whose detected stack includes Rust — \
          a non-Rust project (or none supplied) reports the row as not applicable, never as a \
