@@ -40,15 +40,31 @@ pub fn read_project_pin(root: &Path) -> Result<Option<ProjectPin>> {
 /// Why: the lazy-write path in [`project_slug_at`] and the explicit
 /// `trusty-memory link` backfill command both need to emit the same YAML
 /// schema. A single writer keeps the format consistent.
-/// What: creates `.trusty-tools/` if missing, serialises `pin`, and writes it
-/// atomically (write to `<file>.tmp`, then rename). Returns the path written.
-/// Test: `write_and_read_pin_round_trips`, `write_pin_omits_null_note`.
+/// What: re-reads the pin already at `root` first (#9274, ADR-0067 D2). It
+/// refuses to write when that pin is newer than [`PIN_SCHEMA_VERSION`] or
+/// cannot be read or parsed, and otherwise keeps the on-disk pin's unknown
+/// fields. Then creates `.trusty-tools/` if missing, serialises the pin, and
+/// writes it atomically (write to `<file>.tmp`, then rename). Returns the path
+/// written.
+/// Test: `write_and_read_pin_round_trips`, `write_pin_omits_null_note`,
+/// `write_refuses_to_overwrite_a_newer_pin`,
+/// `rewrite_keeps_the_unknown_fields_of_the_pin_on_disk`,
+/// `write_refuses_when_the_pin_on_disk_cannot_be_read`.
 pub fn write_project_pin(root: &Path, pin: &ProjectPin) -> Result<PathBuf> {
+    // #9274: the file on disk decides whether this write may happen at all.
+    // Any read error refuses: an unread pin may be a newer one.
+    let pin = match trusty_common::palace_resolve::read_project_pin(root) {
+        Ok(None) => pin.clone(),
+        Ok(Some(on_disk)) => pin.clone().preserving_unknown_fields_of(&on_disk),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context("refusing to overwrite the palace pin"));
+        }
+    };
     let dir = root.join(TRUSTY_TOOLS_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| anyhow::anyhow!("create {}: {e}", dir.display()))?;
     let pin_path = root.join(PIN_FILE_REL);
     let tmp_path = pin_path.with_extension("yaml.tmp");
-    let yaml = serde_yaml::to_string(pin).map_err(|e| anyhow::anyhow!("serialise pin: {e}"))?;
+    let yaml = serde_yaml::to_string(&pin).map_err(|e| anyhow::anyhow!("serialise pin: {e}"))?;
     let header = "# .trusty-tools/trusty-memory.yaml\n\
                   # This file pins the trusty-memory palace slug for this project.\n\
                   # Commit it so the linkage survives directory renames and drive reorgs.\n\
@@ -227,3 +243,7 @@ pub fn project_slug() -> Result<Option<String>> {
     let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("read cwd: {e}"))?;
     Ok(project_slug_at(&cwd))
 }
+
+#[cfg(test)]
+#[path = "pin_file_tests.rs"]
+mod tests;
