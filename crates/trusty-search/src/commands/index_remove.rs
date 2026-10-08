@@ -7,9 +7,10 @@
 //!      file. The `index remove` subcommand collapses both steps into one.
 //! What: resolves PATH and `-i`/`--index`/`TRUSTY_INDEX` together via
 //!       [`classify_remove_target`], finds the matching daemon-side index id
-//!       via `GET /indexes/:id/status` (and/or `GET /indexes`), calls
-//!       `DELETE /indexes/:id?delete_data=<bool>`, then drops the matching
-//!       entry from `~/.config/trusty-search/config.yaml`.
+//!       via `search.index.status` (and/or `search.indexes.list`), calls
+//!       `search.index.delete {index_id, delete_data}` over the daemon socket
+//!       (#9214), then drops the matching entry from
+//!       `~/.config/trusty-search/config.yaml`.
 //!
 //! Issue #1087: when `-i`/`--index` is given it MUST override CWD auto-detection
 //! and never fall back to CWD detection.
@@ -35,8 +36,8 @@
 //!
 //! Test: `index_remove_resolves_path_*` unit tests cover the path resolution;
 //!       `classify_remove_target_*` cover the #8175 precedence/refusal
-//!       decision; `delete_index_url_*`, `confirmation_*` and `delete_body_*`
-//!       cover the #6422 default and its failure paths; the HTTP round-trip,
+//!       decision; `delete_params_*`, `confirmation_*` and `delete_body_*`
+//!       cover the #6422 default and its failure paths; the socket round-trip,
 //!       including the #8175 "touches neither index" proof, is exercised by
 //!       `tests/index_remove_env_conflict_8175.rs`.
 
@@ -54,6 +55,7 @@ use colored::Colorize;
 use serde_json::Value;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use trusty_search::service::rpc::writes::METHOD_INDEX_DELETE;
 
 /// Classify how `index remove` resolves its target, with no daemon call yet
 /// (issue #8175): the shared [`classify_explicit_target`] rule, verb `remove`.
@@ -67,7 +69,7 @@ pub(crate) fn classify_remove_target(
 
 /// Entry point for `trusty-search index remove [PATH]`.
 ///
-/// Why: keep the CLI handler thin — all reusable resolution / HTTP logic lives
+/// Why: keep the CLI handler thin — all reusable resolution / daemon logic lives
 ///      in helpers so the same flow can be invoked from a future MCP tool.
 ///
 /// Issue #1087: `explicit_index_id` is the value of the PARENT command's
@@ -86,8 +88,8 @@ pub(crate) fn classify_remove_target(
 ///
 /// What: see module docs.
 /// Test: `index_remove_resolves_path_*` below; `classify_remove_target_*` for
-///       the #8175 precedence/refusal rule; `delete_index_url_*` /
-///       `confirmation_*` / `delete_body_*` for #6422; the full HTTP path,
+///       the #8175 precedence/refusal rule; `delete_params_*` /
+///       `confirmation_*` / `delete_body_*` for #6422; the full socket path,
 ///       including the #8175 "touches neither index" proof, is covered by
 ///       `tests/index_remove_env_conflict_8175.rs`.
 pub async fn handle_index_remove(
@@ -105,9 +107,8 @@ pub async fn handle_index_remove(
     if let RemoveTarget::Refuse(reason) = &target {
         bail!("{reason}");
     }
-    // #9214: start the daemon over its socket, then resolve its HTTP base.
-    let base = super::daemon_http::ensure_daemon_http_base().await?;
-    let client = trusty_common::server::daemon_http_client()?;
+    // #9214: the socket only; nothing answering is an error naming it.
+    let client = super::daemon_rpc::connect().await?;
 
     // #8175: resolve each shape against the daemon; PATH plus an id must agree
     // (see `resolve_explicit_target`), and `TRUSTY_INDEX` alone refuses.
@@ -119,12 +120,12 @@ pub async fn handle_index_remove(
                 RemoveTarget::Path(p) => (p, "the PATH argument"),
                 _ => (resolve_target_path(None)?, "the current working directory"),
             };
-            let Some((id, root)) = registered_or_cleared(&client, &base, &path).await? else {
+            let Some((id, root)) = registered_or_cleared(&client, &path).await? else {
                 return Ok(());
             };
             (id, root, via)
         }
-        other => resolve_explicit_target("remove", &client, &base, other, ParkedTargets::Resolve)
+        other => resolve_explicit_target("remove", &client, other, ParkedTargets::Resolve)
             .await?
             .context("remove target resolution returned no index")?,
     };
@@ -155,26 +156,17 @@ pub async fn handle_index_remove(
         }
     }
 
-    let delete_url = delete_index_url(&base, &index_id, delete_data);
-    let body = match client.delete(&delete_url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let parsed: Value = resp.json().await.unwrap_or(Value::Null);
-            if !status.is_success() {
-                let reported = parsed.get("error").and_then(Value::as_str).unwrap_or("");
-                bail!(
-                    "daemon returned {status} for DELETE {delete_url}{}",
-                    if reported.is_empty() {
-                        String::new()
-                    } else {
-                        format!(": {reported}")
-                    }
-                );
-            }
-            parsed
-        }
-        Err(e) => bail!("could not reach daemon at {}: {e}", base),
-    };
+    // #9214: a refused or broken delete returns here, before any local row
+    // is touched; the daemon's own refusal text carries the reason. The root
+    // the operator confirmed pins the delete (#6380): an id relocated while
+    // the prompt waited is refused, not deleted under another root.
+    let body = super::daemon_rpc::call(
+        &client,
+        METHOD_INDEX_DELETE,
+        delete_params(&index_id, &registered_path, delete_data),
+    )
+    .await
+    .with_context(|| format!("could not delete index \"{index_id}\""))?;
 
     // #6422: a `200` is not proof — the daemon answers one for a delete that
     // removed no registration. The local cleanup below runs only when the
@@ -241,17 +233,26 @@ pub async fn handle_index_remove(
     Ok(())
 }
 
-/// The DELETE URL for one index, carrying the data choice explicitly.
+/// The `search.index.delete` params for one index, carrying the data choice
+/// explicitly.
 ///
 /// Why (#6422): the CLI purges on-disk data by default while the daemon's own
-/// default is still the opposite (`?delete_data` absent ⇒ preserve, #4123).
+/// default is still the opposite (`delete_data` absent ⇒ preserve, #4123).
 /// Sending the flag on every call means this command's default does not depend
 /// on which daemon version answers it.
-/// What: `<base>/indexes/<id>?delete_data=<true|false>`.
-/// Test: `delete_index_url_purges_by_default`,
-/// `delete_index_url_honours_keep_data`.
-pub(crate) fn delete_index_url(base: &str, id: &str, delete_data: bool) -> String {
-    format!("{base}/indexes/{id}?delete_data={delete_data}")
+/// What: `{"index_id": <id>, "delete_data": <bool>, "expected_root_path":
+/// <root>}` (#9214: the socket form). `root` is the registered root the
+/// operator was shown; the daemon refuses the delete when the id no longer
+/// points there (#6380).
+/// Test: `delete_params_purge_by_default`, `delete_params_honour_keep_data`,
+/// `a_delete_whose_root_moved_after_resolution_is_refused_and_keeps_local_rows`.
+pub(crate) fn delete_params(id: &str, root: &std::path::Path, delete_data: bool) -> Value {
+    // #9214: `display()` is the form the daemon's root comparison renders.
+    serde_json::json!({
+        "index_id": id,
+        "delete_data": delete_data,
+        "expected_root_path": root.display().to_string(),
+    })
 }
 
 /// Whether the operator must confirm before this delete runs.
@@ -474,11 +475,15 @@ mod tests {
     /// assertion fails there, on the substring and on the whole URL alike.
     /// Test: this is the test.
     #[test]
-    fn delete_index_url_purges_by_default() {
-        let url = super::delete_index_url("http://127.0.0.1:7878", "rustbot", true);
+    fn delete_params_purge_by_default() {
         assert_eq!(
-            url, "http://127.0.0.1:7878/indexes/rustbot?delete_data=true",
-            "the default delete must ask the daemon for the data too"
+            super::delete_params("rustbot", std::path::Path::new("/srv/rustbot"), true),
+            serde_json::json!({
+                "index_id": "rustbot",
+                "delete_data": true,
+                "expected_root_path": "/srv/rustbot",
+            }),
+            "the default delete must ask the daemon for the data too, pinned to the root"
         );
     }
 
@@ -488,11 +493,14 @@ mod tests {
     /// destroying the corpus it promised to keep.
     /// Test: this is the test.
     #[test]
-    fn delete_index_url_honours_keep_data() {
-        let url = super::delete_index_url("http://127.0.0.1:7878", "rustbot", false);
+    fn delete_params_honour_keep_data() {
         assert_eq!(
-            url,
-            "http://127.0.0.1:7878/indexes/rustbot?delete_data=false"
+            super::delete_params("rustbot", std::path::Path::new("/srv/rustbot"), false),
+            serde_json::json!({
+                "index_id": "rustbot",
+                "delete_data": false,
+                "expected_root_path": "/srv/rustbot",
+            })
         );
     }
 

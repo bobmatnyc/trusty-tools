@@ -42,6 +42,11 @@ const HTTP_MARKERS: &[&str] = &[
 ///
 /// #9214 B2(b1) moved `cleanup`, `config`, `convert` and `migrate` off it;
 /// [`the_b2b1_cli_paths_dial_no_http`] keeps them off.
+///
+/// #9214 B2(b2) moved `explicit_target`, `index`, `index_cwd_resolve`,
+/// `index_relocate`, `index_remove(_stale)`, `index_status`, `reindex` and
+/// `reindex_engine/*` off it; [`the_b2b2_cli_paths_dial_no_http`] keeps them
+/// off.
 const NOT_YET_MOVED: &[&str] = &[
     "src/commands/daemon_http.rs",
     "src/commands/discover/http.rs",
@@ -49,20 +54,7 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/doctor.rs",
     "src/commands/doctor_checks/mod.rs",
     "src/commands/doctor_pipeline.rs",
-    "src/commands/explicit_target.rs",
-    "src/commands/index.rs",
-    "src/commands/index_cwd_resolve.rs",
-    "src/commands/index_relocate.rs",
-    "src/commands/index_remove.rs",
-    "src/commands/index_remove_stale.rs",
-    "src/commands/index_status.rs",
     "src/commands/query.rs",
-    "src/commands/reindex.rs",
-    "src/commands/reindex_engine/driver.rs",
-    "src/commands/reindex_engine/file_ops.rs",
-    "src/commands/reindex_engine/registration.rs",
-    "src/commands/reindex_engine/tests.rs",
-    "src/commands/reindex_engine/verify.rs",
     "src/commands/start/tests.rs",
 ];
 
@@ -167,6 +159,27 @@ fn the_b2b1_cli_paths_dial_no_http() {
         "convert.rs",
         "daemon_rpc.rs",
         "migrate.rs",
+    ]);
+}
+
+/// #9214 B2(b2): the index, reindex, remove, relocate and status paths stay on
+/// the socket, under the same rule as [`the_b2a_cli_paths_dial_no_http`].
+/// Test: this test.
+#[test]
+fn the_b2b2_cli_paths_dial_no_http() {
+    assert_moved_off_http(&[
+        "explicit_target.rs",
+        "index.rs",
+        "index_cwd_resolve.rs",
+        "index_relocate.rs",
+        "index_remove.rs",
+        "index_remove_stale.rs",
+        "index_status.rs",
+        "reindex.rs",
+        "reindex_engine/driver.rs",
+        "reindex_engine/file_ops.rs",
+        "reindex_engine/registration.rs",
+        "reindex_engine/verify.rs",
     ]);
 }
 

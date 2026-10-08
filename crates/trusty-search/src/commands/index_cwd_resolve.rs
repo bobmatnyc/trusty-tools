@@ -6,15 +6,22 @@
 //! matching logic so the `index_status` handler stays focused on rendering.
 //!
 //! What: fetches the index list from the daemon, queries each index's
-//! `root_path` via `GET /indexes/:id/status`, and returns all indexes whose
+//! `root_path` via `search.index.status` over the socket (#9214), and returns
+//! all indexes whose
 //! `root_path` is an ANCESTOR OF or EQUAL TO the cwd.  Results are returned
 //! sorted by `root_path` (shortest match first = most-root ancestor first).
 //!
-//! Test: `cwd_resolve_matches_*` unit tests below cover exact, ancestor,
-//! multi-match, and no-match cases without hitting a live daemon.
+//! Test: `cwd_under_helper_*` unit tests below cover the matching predicate;
+//! `index_cwd_resolve_tests.rs` drives the resolver against a mock socket.
 
+use super::daemon_rpc::{registrations, resident_statuses};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+use trusty_search::service::daemon_client::DaemonClient;
+
+#[cfg(test)]
+#[path = "index_cwd_resolve_tests.rs"]
+mod socket_tests;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -23,14 +30,14 @@ use std::path::{Path, PathBuf};
 /// Why: bundles the id and the root_path so callers don't need to re-fetch.
 /// What: returned by `resolve_cwd_indexes`; sorted by `root_path` length
 /// ascending (broadest ancestor first).
-/// Test: produced by `cwd_resolve_matches_ancestor` in this module's tests.
+/// Test: produced by `a_readable_registry_matches_the_covering_roots`.
 #[derive(Debug, Clone)]
 pub struct CwdMatch {
-    /// Daemon-side index identifier (as returned by `GET /indexes`).
+    /// Daemon-side index identifier (as `search.indexes.list` reports it).
     pub id: String,
     /// Registered `root_path` for the index.
     pub root_path: PathBuf,
-    /// Full status JSON body (`GET /indexes/:id/status`).
+    /// Full status JSON body (`search.index.status`).
     pub status_body: serde_json::Value,
 }
 
@@ -42,17 +49,17 @@ pub struct CwdMatch {
 /// expects to see the status of whichever index(es) own the project they are
 /// working in — mirroring the convention used by `trusty-search index .`.
 ///
-/// What: lists all indexes via `GET /indexes`, queries each one's `root_path`
-/// via `GET /indexes/:id/status`, and collects every index whose `root_path`
+/// What: lists all indexes via `search.indexes.list`, queries each one's
+/// `root_path` via `search.index.status`, and collects every index whose `root_path`
 /// is an ancestor of (or equal to) `cwd`.  Results are sorted by `root_path`
 /// ascending so that a broad repo root appears before a narrow sub-index.
 ///
-/// Test: `cwd_resolve_matches_exact`, `cwd_resolve_matches_ancestor`,
-/// `cwd_resolve_multiple_matches`, `cwd_resolve_no_match` in this module.
-pub async fn resolve_cwd_indexes(client: &reqwest::Client, base: &str) -> Result<Vec<CwdMatch>> {
+/// Test: `a_readable_registry_matches_the_covering_roots`,
+/// `an_unreadable_status_refuses_instead_of_matching_nothing`.
+pub async fn resolve_cwd_indexes(client: &DaemonClient) -> Result<Vec<CwdMatch>> {
     let cwd = std::env::current_dir().context("could not determine current directory")?;
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
-    resolve_indexes_for_cwd(client, base, &cwd).await
+    resolve_indexes_for_cwd(client, &cwd).await
 }
 
 /// Core resolver that takes an explicit `cwd` rather than reading
@@ -62,60 +69,29 @@ pub async fn resolve_cwd_indexes(client: &reqwest::Client, base: &str) -> Result
 /// Why: separating the env-read from the matching logic lets unit tests
 /// pass synthetic index lists and synthetic cwd paths without side effects.
 /// What: identical logic to `resolve_cwd_indexes` but receives `cwd` as a
-/// parameter.
-/// Test: all `cwd_resolve_*` tests in this module call this function directly.
-pub async fn resolve_indexes_for_cwd(
-    client: &reqwest::Client,
-    base: &str,
-    cwd: &Path,
-) -> Result<Vec<CwdMatch>> {
-    // Fetch the list of all registered index ids.
-    let list_url = format!("{base}/indexes");
-    let list_body: serde_json::Value = client
-        .get(&list_url)
-        .send()
+/// parameter. #9214: a status that cannot be read refuses the whole lookup
+/// rather than being skipped — the skipped index could own `cwd`, and the
+/// caller would then report "no index registered" or show a narrower one.
+/// Test: `an_unreadable_status_refuses_instead_of_matching_nothing`,
+/// `a_readable_registry_matches_the_covering_roots`.
+pub async fn resolve_indexes_for_cwd(client: &DaemonClient, cwd: &Path) -> Result<Vec<CwdMatch>> {
+    let ids = registrations(client).await?.resident;
+    // #9214: H1 — a failed lookup refuses; it used to `continue`.
+    let read = resident_statuses(client, ids)
         .await
-        .with_context(|| format!("could not reach daemon at {base}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon returned an error for {list_url}"))?
-        .json()
-        .await
-        .context("could not parse /indexes response")?;
-
-    let empty: Vec<serde_json::Value> = Vec::new();
-    let ids: Vec<String> = list_body
-        .get("indexes")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
+        .require_all("refusing to guess which index covers the current directory")?;
 
     let mut matches: Vec<CwdMatch> = Vec::new();
-
-    for id in ids {
-        let url = format!("{base}/indexes/{id}/status");
-        let resp = match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
-        let body: serde_json::Value = match resp.json().await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let root_str = match body.get("root_path").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => continue,
-        };
-        let root = PathBuf::from(root_str);
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    for status in read {
+        let canonical_root =
+            std::fs::canonicalize(&status.root).unwrap_or_else(|_| status.root.clone());
 
         // Include this index if cwd is equal to root or is nested under it.
         if cwd_is_under(cwd, &canonical_root) {
             matches.push(CwdMatch {
-                id,
-                root_path: root,
-                status_body: body,
+                id: status.id,
+                root_path: status.root,
+                status_body: status.body,
             });
         }
     }
@@ -196,8 +172,8 @@ mod tests {
     }
 
     // ── resolve_indexes_for_cwd logic ────────────────────────────────────────
-    // The resolve_indexes_for_cwd function itself requires a live daemon, so
-    // we validate the matching predicate and sort order through synthetic helpers.
+    // The resolver itself is driven against a mock socket in
+    // `index_cwd_resolve_tests.rs`; these pin the predicate and sort order.
 
     /// Build a synthetic CwdMatch list and assert sort order.
     ///

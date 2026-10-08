@@ -106,18 +106,9 @@ pub async fn ensure_daemon_http_base() -> Result<String> {
     ensure_with_device(None).await
 }
 
-/// [`ensure_daemon_http_base`] for the indexing flow, which starts the daemon
-/// on the indexing device (issue #24).
-///
-/// # Errors
-///
-/// The same set as [`ensure_daemon_http_base`].
-pub async fn ensure_daemon_http_base_for_indexing() -> Result<String> {
-    let device = super::daemon_guard::indexing_device();
-    ensure_with_device(device.as_deref()).await
-}
-
-/// The shared body of the two guards above.
+/// The body of [`ensure_daemon_http_base`]. #9214 B2(b2): the indexing flow
+/// moved to the socket (`daemon_rpc::connect_for_indexing`), so no caller
+/// passes a device any more.
 async fn ensure_with_device(device: Option<&str>) -> Result<String> {
     if let Ok(base) = daemon_base_url() {
         if probe_once(&format!("{base}/health")).await {
