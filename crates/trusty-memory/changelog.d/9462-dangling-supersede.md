@@ -1,2 +1,0 @@
-Fixed
-- Recall no longer halves a drawer whose `superseded_by` edge names a drawer that does not exist in the palace. An edge counts only when its replacement is in the in-memory drawer table or has a redb drawer row (ADR-0028 C9). When that existence read fails, the edge is not honoured and a WARN names the palace and both drawers; recall still answers. Existing dangling edges are left in place (#9462).
