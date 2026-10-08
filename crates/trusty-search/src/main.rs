@@ -654,7 +654,11 @@ enum Commands {
     /// (chunks, entities, KG, file hashes, schema version) so an upgrade keeps
     /// the index WITHOUT re-embedding. Backs up the original first; re-running
     /// against an already-4.x corpus is a no-op. PATH may be the live
-    /// `index.redb` or its `*.v2-incompatible` recovery backup.
+    /// `index.redb` or its `*.v2-incompatible` recovery backup. A 4.x corpus that
+    /// holds data is never replaced, even with a `*.v2-incompatible` backup
+    /// beside it; only the empty corpus auto-recovery creates is filled from the
+    /// backup. Stop the daemon first: a corpus it holds open is refused.
+    // #9453: the help states the second-run and held-file behaviour.
     #[command(display_order = 28, name = "migrate-redb")]
     MigrateRedb {
         /// Path to the index.redb (or its .v2-incompatible backup) to migrate

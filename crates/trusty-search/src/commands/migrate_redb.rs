@@ -52,8 +52,9 @@ pub fn handle_migrate_redb(path: PathBuf) -> Result<()> {
 
     match outcome {
         MigrationOutcome::AlreadyV4 => {
+            // #9453: AlreadyV4 now also covers a 4.x corpus beside a 2.x backup.
             println!(
-                "{} {} already opens with redb 4.x — nothing to migrate.",
+                "{} {} already holds a redb 4.x corpus — nothing to migrate; it was left untouched.",
                 "·".dimmed(),
                 path.display()
             );
