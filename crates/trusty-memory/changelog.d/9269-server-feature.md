@@ -1,0 +1,2 @@
+Breaking
+- The daemon, the CLI and every server module now sit behind a default `server` feature; `daemon` stays as its alias for all of 1.x. A `default-features = false` build no longer compiles `MemoryMcpService`, `AppState`, the tool handlers or any `commands::*` item, and its dependency tree carries no trusty-mcp, clap or rusqlite. Both binaries, `trusty-memory-mcp-bridge` included, now have `required-features = ["server"]`. A slim consumer that needs the MCP schema enables `mcp-schema` (#9269).
