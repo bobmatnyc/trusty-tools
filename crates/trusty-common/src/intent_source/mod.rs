@@ -23,6 +23,7 @@
 //! Submodules (one concept each, to stay under the 500-SLOC cap):
 //! - [`types`]    — the data contract (`IntentQuery`, `ResolvedIntent`, …).
 //! - [`linkage`]  — PR → ticket extraction (tga regexes lifted, spec §6.3).
+//! - [`issue_refs`] — every issue ref a text links, in order (#9197).
 //! - [`spec_resolve`] — SLD docstring-ref → spec section (spec §6.4; C4 hardens).
 //! - [`extract`]  — method extraction (the OQ-1 seam; heuristic default).
 //! - [`resolve`]  — the `resolve` entry point + precedence + auth seams.
@@ -38,6 +39,7 @@
 //! [`IsrError`]: crate::intent_source::IsrError
 //! [`types`]: crate::intent_source::types
 //! [`linkage`]: crate::intent_source::linkage
+//! [`issue_refs`]: crate::intent_source::issue_refs
 //! [`spec_resolve`]: crate::intent_source::spec_resolve
 //! [`extract`]: crate::intent_source::extract
 //! [`resolve`]: crate::catchup::resolve
@@ -45,17 +47,21 @@
 
 pub mod backend_fetcher;
 pub mod extract;
+pub mod issue_refs;
 pub mod linkage;
 pub mod resolve;
 pub mod spec_resolve;
 pub mod types;
 
 #[cfg(test)]
+mod issue_refs_tests;
+#[cfg(test)]
 mod tests;
 
 // ── Public facade re-exports (callers import from `intent_source::*`) ─────────
 
 pub use extract::{HeuristicMethodExtractor, MethodExtractor, heuristic_method};
+pub use issue_refs::{IssueRef, extract_issue_refs};
 pub use linkage::{extract_pr_ticket, extract_ticket_id, is_ticketed};
 pub use resolve::{
     EnvTokenResolver, IntentTokenResolver, SpecLookup, TicketData, TicketFetcher, apply_precedence,
