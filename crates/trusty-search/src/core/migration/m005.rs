@@ -99,7 +99,27 @@ impl Migration for M005ChunkIdEndLine {
         "M005: clear + re-chunk so named chunk ids carry the end line (issue #6581)"
     }
 
-    /// Apply M005 to `index`.
+    /// Apply M005 to `index` through [`M005ChunkIdEndLine::run`].
+    async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
+        self.run(index).await.map(|_| ())
+    }
+}
+
+/// What a finished M005 pass reports (#9447).
+///
+/// Why: `unembedded` is the number of migrated chunks left with no vector. It
+/// was only ever logged, and it read 0 while 38,394 chunks had none.
+/// What: `committed` chunks landed in the corpus; `unembedded` of them hold no
+/// vector in the store. Both are 0 when the pass had nothing to do.
+/// Test: `m005_reports_the_real_vector_gap`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct M005Report {
+    pub committed: usize,
+    pub unembedded: usize,
+}
+
+impl M005ChunkIdEndLine {
+    /// Run M005 on `index` and report what it did.
     ///
     /// Why: see module-level doc.
     /// What: the seven steps below. Idempotent AND crash-recoverable: step 2
@@ -113,15 +133,16 @@ impl Migration for M005ChunkIdEndLine {
     /// `m005_never_advances_the_schema_over_missing_chunks`,
     /// `m005_rechunks_office_documents_through_the_extractor`,
     /// `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
-    /// `m005_drops_the_vectors_of_a_file_deleted_from_disk`.
-    async fn apply(&self, index: &IndexHandle) -> Result<(), anyhow::Error> {
+    /// `m005_drops_the_vectors_of_a_file_deleted_from_disk`,
+    /// `m005_keeps_a_vector_for_every_duplicate_text_chunk`.
+    pub(super) async fn run(&self, index: &IndexHandle) -> Result<M005Report> {
         let (corpus, root_path) = {
             let indexer = index.indexer.read().await;
             (indexer.corpus_store(), index.root_path.clone())
         };
         let Some(corpus) = corpus else {
             tracing::debug!(index_id = %index.id, "M005: no durable corpus, skipping");
-            return Ok(());
+            return Ok(M005Report::default());
         };
 
         // ── Step 1: read the corpus as it stands ──────────────────────────
@@ -169,33 +190,33 @@ impl Migration for M005ChunkIdEndLine {
                         chunks = old_chunks.len(),
                         "M005: no pre-#6581 named chunk ids present, nothing to re-chunk"
                     );
-                    return Ok(());
+                    return Ok(M005Report::default());
                 }
-                // `text hash → the id that text is stored under today`. First
-                // wins: two chunks with identical text can share one vector, and
-                // which of them keeps it is arbitrary because the vector is
-                // identical either way.
-                let mut vector_by_text: HashMap<[u8; 32], String> = HashMap::new();
-                let mut files: BTreeSet<String> = BTreeSet::new();
-                for chunk in &old_chunks {
-                    files.insert(chunk.file.clone());
-                    vector_by_text
-                        .entry(text_hash(&chunk.content))
-                        .or_insert_with(|| chunk.id.clone());
-                }
-                let plan = plan::M005Plan {
-                    files,
-                    vector_by_text: vector_by_text.into_iter().collect(),
-                    old_ids: old_chunks.iter().map(|c| c.id.clone()).collect(),
-                    old_count: old_chunks.len(),
-                };
+                // #9447: every old id is recorded under its text hash, not just
+                // the first — each duplicate-text chunk owns a vector to hand on.
+                let plan = plan::M005Plan::from_chunks(&old_chunks);
                 drop(old_chunks);
                 plan.store(&corpus).await?;
                 plan
             }
         };
 
-        let vector_by_text = plan.vector_by_text_map();
+        let mut vector_by_text = plan.vector_by_text_map();
+        // #9447: only an old id the store holds a vector for can hand one on.
+        // A vectorless claim would leave its chunk empty while a duplicate's
+        // vector went to the orphan sweep.
+        {
+            let ids: Vec<String> = vector_by_text.values().flatten().cloned().collect();
+            let present = index.indexer.read().await.vectors_present(&ids).await;
+            let held: std::collections::HashSet<&String> = ids
+                .iter()
+                .zip(&present)
+                .filter_map(|(id, &has)| has.then_some(id))
+                .collect();
+            for pool in vector_by_text.values_mut() {
+                pool.retain(|id| held.contains(id));
+            }
+        }
         let old_count = plan.old_count;
 
         tracing::info!(
@@ -247,7 +268,7 @@ impl Migration for M005ChunkIdEndLine {
             unreadable,
             committed,
             dropped_by_cap,
-            unembedded,
+            new_ids,
         } = outcome?;
 
         // ── Step 4: hand every reused vector to the id that now holds its text
@@ -289,6 +310,13 @@ impl Migration for M005ChunkIdEndLine {
                 .await
                 .context("M005: could not flush the HNSW sidecar after dropping orphans")?;
         }
+        // #9447: the gap is read from the store, so it is exact — it used to be
+        // claim bookkeeping that read 0 while 38,394 chunks had no vector.
+        let unembedded = {
+            let indexer = indexer_arc.read().await;
+            let present = indexer.vectors_present(&new_ids).await;
+            present.iter().filter(|has| !**has).count()
+        };
 
         // ── Step 6: rebuild the graph the clear emptied ───────────────────
         {
@@ -324,7 +352,10 @@ impl Migration for M005ChunkIdEndLine {
             unembedded,
             "M005: re-chunk complete (#6581) — no text was re-embedded"
         );
-        Ok(())
+        Ok(M005Report {
+            committed,
+            unembedded,
+        })
     }
 }
 
@@ -378,7 +409,8 @@ fn cancel_stop(index: &IndexHandle, committed: usize) -> anyhow::Error {
 /// rather than four out-parameters.
 /// What: `remap` is `old id → new id` for every chunk whose text is unchanged;
 /// `unreadable` is the root-relative path of every file that is still on disk
-/// but yielded no chunks (#6910); the counts are for the operator log.
+/// but yielded no chunks (#6910); `new_ids` is every chunk the corpus now holds
+/// (#9447); the counts are for the operator log.
 /// Test: covered through `apply` by `m005_rechunks_the_whole_corpus`,
 /// `m005_keeps_the_vectors_of_a_file_it_cannot_extract` and
 /// `m005_keeps_the_vectors_of_a_file_that_extracts_to_nothing`.
@@ -388,7 +420,7 @@ struct Rechunked {
     unreadable: BTreeSet<String>,
     committed: usize,
     dropped_by_cap: usize,
-    unembedded: usize,
+    new_ids: Vec<String>,
 }
 
 /// Clear the corpus and re-chunk `files` from disk, committing in batches.
@@ -426,7 +458,7 @@ async fn rechunk_all(
     indexer_arc: &std::sync::Arc<tokio::sync::RwLock<crate::core::indexer::CodeIndexer>>,
     root_path: &std::path::Path,
     files: &BTreeSet<String>,
-    vector_by_text: &HashMap<[u8; 32], String>,
+    vector_by_text: &HashMap<[u8; 32], Vec<String>>,
     old_count: usize,
 ) -> Result<Rechunked> {
     // #6581: fetched once, and AFTER `run_migrations_exclusive` took the index
@@ -443,11 +475,11 @@ async fn rechunk_all(
     }
 
     let ordered: Vec<&String> = files.iter().collect();
-    let mut remap: HashMap<String, String> = HashMap::new();
+    // `(new id, text hash)` for every chunk the pass committed.
+    let mut new_chunks: Vec<(String, [u8; 32])> = Vec::new();
     let mut unreadable: BTreeSet<String> = BTreeSet::new();
     let mut committed = 0usize;
     let mut dropped_by_cap = 0usize;
-    let mut unembedded = 0usize;
 
     for batch in ordered.chunks(BATCH_SIZE) {
         // #6581: the same checkpoint `reindex::runner`'s consumer loop takes.
@@ -521,17 +553,9 @@ async fn rechunk_all(
             indexer.commit_entities(entities_by_file).await;
             continue;
         }
-        for chunk in &chunks {
-            match vector_by_text.get(&text_hash(&chunk.content)) {
-                Some(old_id) => {
-                    remap.insert(old_id.clone(), chunk.id.clone());
-                }
-                // Text this corpus has never held — the recovered chunks #6571
-                // dropped. Nothing to reuse, and the ruling's budget forbids
-                // embedding it here; the ordinary catch-up pass covers it.
-                None => unembedded += 1,
-            }
-        }
+        // #9447: claimed after the loop, once every new id is known, so an
+        // unchanged id keeps its own vector and no old id is claimed twice.
+        new_chunks.extend(chunks.iter().map(|c| (c.id.clone(), text_hash(&c.content))));
         let embeddings = vec![None; chunks.len()];
         let parsed = ParsedBatch {
             chunks,
@@ -550,13 +574,80 @@ async fn rechunk_all(
         dropped_by_cap += timings.chunks_dropped_by_cap;
     }
 
+    if dropped_by_cap > 0 {
+        // #9447: a chunk the cap dropped has no corpus row; a vector handed to
+        // it would be an orphan, and counting it would overstate the gap.
+        let corpus = indexer_arc.read().await.corpus_store();
+        if let Some(corpus) = corpus {
+            let landed = tokio::task::spawn_blocking(move || corpus.list_chunk_ids())
+                .await
+                .context("M005: corpus id listing task panicked")?
+                .context("M005: could not list the re-chunked corpus ids")?;
+            new_chunks.retain(|(id, _)| landed.contains(id));
+        }
+    }
+    let remap = claim_vectors(&new_chunks, vector_by_text);
+
     Ok(Rechunked {
         remap,
         unreadable,
         committed,
         dropped_by_cap,
-        unembedded,
+        new_ids: new_chunks.into_iter().map(|(id, _)| id).collect(),
     })
+}
+
+/// Hand each re-chunked chunk at most one old vector holding its text.
+///
+/// Why (#9447): the pass used to insert `remap[old] = new` per chunk, so a
+/// second chunk with the same text overwrote the first one's claim. The first
+/// chunk was left with no vector yet never counted, and when ids were
+/// unchanged the re-pointed vector was then swept as an orphan too — 38,394
+/// chunks of a 158k index lost their vectors while the log said
+/// `unembedded=0`.
+/// What: `vector_by_text` holds every old id per text hash. Pass 1 lets a chunk
+/// whose id is itself an old id with the same text keep that vector; pass 2
+/// gives each remaining chunk the next unclaimed old id for its text; a chunk
+/// left with none gets no vector, and `apply` counts it from the store. Returns
+/// `old id → new id`, identities included so a kept vector is not an orphan.
+/// The map is injective: no old id is claimed twice and no new id receives two
+/// vectors.
+/// Test: `claim_vectors_gives_each_duplicate_its_own_vector`,
+/// `m005_keeps_a_vector_for_every_duplicate_text_chunk`.
+fn claim_vectors(
+    new_chunks: &[(String, [u8; 32])],
+    vector_by_text: &HashMap<[u8; 32], Vec<String>>,
+) -> HashMap<String, String> {
+    let old_hash: HashMap<&str, &[u8; 32]> = vector_by_text
+        .iter()
+        .flat_map(|(hash, ids)| ids.iter().map(move |id| (id.as_str(), hash)))
+        .collect();
+    let mut remap: HashMap<String, String> = HashMap::new();
+    let mut pending: Vec<&(String, [u8; 32])> = Vec::new();
+    for chunk in new_chunks {
+        let (id, hash) = chunk;
+        if old_hash.get(id.as_str()) == Some(&hash) && !remap.contains_key(id) {
+            remap.insert(id.clone(), id.clone());
+        } else {
+            pending.push(chunk);
+        }
+    }
+    let mut next: HashMap<&[u8; 32], usize> = HashMap::new();
+    for (id, hash) in pending {
+        let pool = vector_by_text.get(hash).map(Vec::as_slice).unwrap_or(&[]);
+        let cursor = next.entry(hash).or_insert(0);
+        while pool.get(*cursor).is_some_and(|old| remap.contains_key(old)) {
+            *cursor += 1;
+        }
+        // `None`: text this corpus never held (the chunks #6571 dropped), or
+        // more copies than it held vectors for. The ruling's budget forbids
+        // embedding here; the #8726 backfill covers it.
+        if let Some(old) = pool.get(*cursor) {
+            remap.insert(old.clone(), id.clone());
+            *cursor += 1;
+        }
+    }
+    remap
 }
 
 /// `true` only when `abs` is affirmatively absent from disk.
@@ -584,17 +675,25 @@ async fn file_is_gone(abs: &std::path::Path) -> bool {
 /// What: an id is retained when [`chunk_id::parse`] resolves its file to one of
 /// `unreadable`. An id that will not parse is treated as claimable — the sweep's
 /// pre-#6910 behaviour, and no `unreadable` file can own it.
+///
+/// An unclaimed old id that is also a remap TARGET is skipped too (#9447):
+/// Step 4 already re-pointed another vector onto that id and dropped the one
+/// it held, so removing it by id would delete the vector just handed on.
 /// Test: `m005_keeps_the_vectors_of_a_file_it_cannot_extract`,
-/// `orphan_partition_retains_only_unreadable_files`.
+/// `orphan_partition_retains_only_unreadable_files`,
+/// `claim_vectors_gives_each_duplicate_its_own_vector`.
 fn partition_orphans(
     old_ids: &[String],
     remap: &HashMap<String, String>,
     unreadable: &BTreeSet<String>,
 ) -> (Vec<String>, usize) {
+    let targets: std::collections::HashSet<&String> = remap.values().collect();
     let mut orphans = Vec::new();
     let mut retained = 0usize;
     for id in old_ids {
-        if remap.contains_key(id) {
+        // #9447: a target's own vector was displaced by the remap; its id now
+        // names the vector just re-pointed to it.
+        if remap.contains_key(id) || targets.contains(id) {
             continue;
         }
         let held = !unreadable.is_empty()

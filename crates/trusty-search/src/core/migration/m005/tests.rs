@@ -479,6 +479,18 @@ async fn m005_honours_the_chunk_cap() {
         after <= 2,
         "the cap must bound the migrated corpus, got {after}"
     );
+
+    // #9447: no vector may be handed to a chunk the cap dropped.
+    let corpus_ids: std::collections::HashSet<String> =
+        corpus_chunks(&f).await.into_iter().map(|c| c.id).collect();
+    let probe = seed_vector(LIB_RS.split("\n\n").next().unwrap());
+    for hit in f.store.search(&probe, 64).await.unwrap() {
+        assert!(
+            corpus_ids.contains(&hit.chunk_id),
+            "a vector was re-pointed to a chunk the cap dropped: {}",
+            hit.chunk_id
+        );
+    }
 }
 
 /// The ruling's item 3, per index: an index below the M005 marker matches both
@@ -582,20 +594,7 @@ async fn simulate_crash_after_clear(fx: &Fixture) -> plan::M005Plan {
         indexer.corpus_store().expect("fixture wires a corpus")
     };
     let old_chunks = corpus.load_all_chunks().expect("load");
-    let mut vector_by_text: HashMap<[u8; 32], String> = HashMap::new();
-    let mut files: BTreeSet<String> = BTreeSet::new();
-    for chunk in &old_chunks {
-        files.insert(chunk.file.clone());
-        vector_by_text
-            .entry(text_hash(&chunk.content))
-            .or_insert_with(|| chunk.id.clone());
-    }
-    let plan = plan::M005Plan {
-        files,
-        vector_by_text: vector_by_text.into_iter().collect(),
-        old_ids: old_chunks.iter().map(|c| c.id.clone()).collect(),
-        old_count: old_chunks.len(),
-    };
+    let plan = plan::M005Plan::from_chunks(&old_chunks);
     // Order matters: the real pass persists the plan BEFORE it clears, which is
     // what makes every crashable state carry the marker.
     plan.store(&corpus).await.expect("store plan");
@@ -1274,3 +1273,7 @@ fn orphan_partition_retains_only_unreadable_files() {
 // over chunks that have no vector.
 #[path = "vector_gap_8726_tests.rs"]
 mod vector_gap_8726_tests;
+
+// #9447: duplicate-text chunks each keep a vector, and the gap is logged exactly.
+#[path = "dup_text_9447_tests.rs"]
+mod dup_text_9447_tests;

@@ -29,6 +29,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::core::chunker::RawChunk;
 use crate::core::corpus::CorpusStore;
 
 /// Everything M005 needs to finish a pass, captured before the clear destroys
@@ -47,7 +48,8 @@ use crate::core::corpus::CorpusStore;
 pub(super) struct M005Plan {
     /// Root-relative paths to re-chunk from source.
     pub files: BTreeSet<String>,
-    /// `sha256(chunk text) → the id that text was stored under before the pass`.
+    /// `(sha256(chunk text), the id that text was stored under before the
+    /// pass)`, one pair per old chunk — a hash repeats when chunks share text.
     pub vector_by_text: Vec<([u8; 32], String)>,
     /// Every chunk id the corpus held before the pass.
     pub old_ids: Vec<String>,
@@ -56,9 +58,34 @@ pub(super) struct M005Plan {
 }
 
 impl M005Plan {
-    /// The `text hash → old id` lookup, rebuilt from the serialized pairs.
-    pub(super) fn vector_by_text_map(&self) -> HashMap<[u8; 32], String> {
-        self.vector_by_text.iter().cloned().collect()
+    /// Build the plan from the corpus as it stands before the clear.
+    ///
+    /// Why (#9447): the plan used to keep only the FIRST id per text hash, so
+    /// of two chunks with identical text only one vector could be handed on;
+    /// the other was swept as an orphan and its chunk left with no vector.
+    /// What: records every old chunk's `(text hash, id)` pair in corpus order.
+    /// Test: `m005_keeps_a_vector_for_every_duplicate_text_chunk`.
+    pub(super) fn from_chunks(old_chunks: &[RawChunk]) -> Self {
+        Self {
+            files: old_chunks.iter().map(|c| c.file.clone()).collect(),
+            vector_by_text: old_chunks
+                .iter()
+                .map(|c| (super::text_hash(&c.content), c.id.clone()))
+                .collect(),
+            old_ids: old_chunks.iter().map(|c| c.id.clone()).collect(),
+            old_count: old_chunks.len(),
+        }
+    }
+
+    /// The `text hash → old ids holding that text` lookup, rebuilt from the
+    /// serialized pairs in their stored order. A plan written before #9447
+    /// holds one id per hash and still loads.
+    pub(super) fn vector_by_text_map(&self) -> HashMap<[u8; 32], Vec<String>> {
+        let mut map: HashMap<[u8; 32], Vec<String>> = HashMap::new();
+        for (hash, id) in &self.vector_by_text {
+            map.entry(*hash).or_default().push(id.clone());
+        }
+        map
     }
 
     /// Read the plan a previous, unfinished pass left behind.

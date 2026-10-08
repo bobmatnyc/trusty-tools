@@ -68,6 +68,19 @@ impl CodeIndexer {
         }
     }
 
+    /// Which of `ids` the wired vector store holds a vector for (#9447).
+    ///
+    /// Why: M005 may only hand on a vector that exists, and reports its gap
+    /// from the store rather than from its own bookkeeping.
+    /// What: one bulk `contains_many`; all `false` when no store is wired.
+    /// Test: `m005_keeps_a_vector_for_every_duplicate_text_chunk`.
+    pub(crate) async fn vectors_present(&self, ids: &[String]) -> Vec<bool> {
+        match &self.store {
+            Some(store) => store.contains_many(ids).await,
+            None => vec![false; ids.len()],
+        }
+    }
+
     /// Tell the wired vector store how a reindex's staged→live HNSW swap
     /// resolved, so it can repair a snapshot path the swap moved or deleted
     /// (issue #6299).
