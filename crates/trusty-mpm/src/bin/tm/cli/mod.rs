@@ -717,9 +717,11 @@ pub(crate) enum Command {
     /// Why: no machine-wide record of worktrees existed, so none could be
     /// counted or reclaimed on evidence.
     /// What: backfills `~/.trusty-mpm/worktrees.jsonl` from each registered
-    /// project's `git worktree list`, measures every live tree (unless
-    /// `--no-size`) and prints the count and GiB per project. Daemon-less.
-    /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`.
+    /// project's `git worktree list`, records `removed` for a tree gone from
+    /// disk and from git, measures every live tree (unless `--no-size`) and
+    /// prints the count and GiB per project. Daemon-less; deletes nothing.
+    /// Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
+    /// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`.
     Worktrees(crate::commands::worktrees::WorktreesArgs),
     /// Run the trusty-mpm daemon.
     Daemon {

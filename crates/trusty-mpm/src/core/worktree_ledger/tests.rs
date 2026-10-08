@@ -2,12 +2,14 @@
 //! backfill (#8994).
 
 use std::cell::Cell;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
 
 use super::backfill::backfill_checkouts;
 use super::fold::{GIB, fold};
+use super::reconcile::{ReconcileReport, reconcile_removed};
 use super::record::{CreationIntent, RecordedCreateError, create_recorded, measure_live};
 use super::{EventKind, LedgerEvent, Origin, WorktreeLedger, ledger_key};
 use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
@@ -101,6 +103,65 @@ fn read_counts_a_torn_line_without_losing_the_rest() {
     let read = ledger.read().expect("read");
     assert_eq!(read.malformed, 1);
     assert_eq!(read.events.len(), 2);
+}
+
+/// Append `bytes` to the ledger file raw, with no trailing newline — the
+/// state a short write (ENOSPC) leaves behind.
+fn write_torn_fragment(ledger: &WorktreeLedger, bytes: &[u8]) {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(ledger.path())
+        .expect("open ledger");
+    file.write_all(bytes).expect("write fragment");
+}
+
+#[test]
+fn an_append_after_a_torn_line_with_no_newline_keeps_the_new_event() {
+    let (_dir, ledger) = scratch_ledger();
+    ledger
+        .append(&ev(0, "/w/a", created("/r")))
+        .expect("append");
+    write_torn_fragment(&ledger, br#"{"ts":"2027-01-15T08:00:00Z","pa"#);
+    ledger
+        .append(&ev(1, "/w/b", created("/r")))
+        .expect("append");
+    let read = ledger.read().expect("read");
+    assert_eq!(read.malformed, 1, "the fragment is counted: {read:?}");
+    assert_eq!(
+        read.events.len(),
+        2,
+        "the append after the fragment survives: {read:?}"
+    );
+    assert!(fold(&read.events).live.contains_key(Path::new("/w/b")));
+}
+
+#[test]
+fn a_torn_line_cut_inside_a_multibyte_path_leaves_the_ledger_readable() {
+    let (_dir, ledger) = scratch_ledger();
+    ledger
+        .append(&ev(0, "/w/a", created("/r")))
+        .expect("append");
+    let whole = serde_json::to_vec(&ev(1, "/w/日本/é", created("/r"))).unwrap();
+    let start = whole
+        .windows(3)
+        .position(|w| w == "日".as_bytes())
+        .expect("path bytes");
+    // Cut one byte into the three-byte "日", so the file is no longer UTF-8.
+    write_torn_fragment(&ledger, &whole[..start + 1]);
+    assert!(
+        std::str::from_utf8(&std::fs::read(ledger.path()).unwrap()).is_err(),
+        "the fixture must leave invalid UTF-8 on disk"
+    );
+    ledger
+        .append(&ev(2, "/w/c", created("/r")))
+        .expect("append");
+    let read = ledger
+        .read()
+        .expect("a torn multibyte line must not fail the read");
+    assert_eq!(read.malformed, 1, "{read:?}");
+    let paths: Vec<_> = read.events.iter().map(|e| e.path.clone()).collect();
+    assert_eq!(paths, vec![PathBuf::from("/w/a"), PathBuf::from("/w/c")]);
+    assert!(fold(&read.events).live.contains_key(Path::new("/w/c")));
 }
 
 // ── criterion 2: the fold ────────────────────────────────────────────────
@@ -325,4 +386,89 @@ fn backfill_reports_a_checkout_git_cannot_list() {
         !ledger.read().unwrap().present,
         "nothing to append, so no file"
     );
+}
+
+// ── #8994 finding 1: the reconcile never writes `removed` on doubt ───────
+
+/// Record `tree` as created for `repo`, keyed as provisioning keys it.
+fn record_tree(ledger: &WorktreeLedger, tree: &Path, repo: &Path) {
+    ledger
+        .append(&LedgerEvent::now(
+            ledger_key(tree),
+            EventKind::Created {
+                repo: ledger_key(repo),
+                branch: None,
+                origin: Origin::TmDaemon,
+                session: None,
+            },
+        ))
+        .unwrap();
+}
+
+fn removed_events(ledger: &WorktreeLedger) -> usize {
+    ledger
+        .read()
+        .unwrap()
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Removed)
+        .count()
+}
+
+#[test]
+fn reconcile_writes_nothing_for_a_gone_tree_git_still_lists() {
+    let fixture = GitWorktreeFixture::new();
+    let tree = fixture.add_worktree("deleted-not-pruned");
+    let (_dir, ledger) = scratch_ledger();
+    record_tree(&ledger, &tree, &fixture.repo);
+    // Deleted from disk, never `git worktree remove`d: git lists it prunable.
+    std::fs::remove_dir_all(&tree).unwrap();
+    let report = reconcile_removed(&ledger, &fold(&ledger.read().unwrap().events)).unwrap();
+    assert_eq!((report.removed, report.still_listed), (0, 1), "{report:?}");
+    assert_eq!(removed_events(&ledger), 0);
+    assert_eq!(fold(&ledger.read().unwrap().events).live.len(), 1);
+}
+
+#[test]
+fn reconcile_writes_nothing_when_the_repo_cannot_be_listed() {
+    let fixture = GitWorktreeFixture::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let not_a_repo = scratch.path().join("plain");
+    std::fs::create_dir_all(&not_a_repo).unwrap();
+    // A plain directory inside an unrelated repository: git walks up and
+    // answers for the enclosing repository, which must not count.
+    let nested = fixture.repo.join("nested-plain");
+    std::fs::create_dir_all(&nested).unwrap();
+    let cases = [
+        (
+            "repository directory gone",
+            scratch.path().join("gone-repo"),
+        ),
+        ("not a git repository", not_a_repo),
+        ("inside an unrelated repository", nested),
+    ];
+    for (label, repo) in cases {
+        let (_dir, ledger) = scratch_ledger();
+        record_tree(&ledger, &scratch.path().join("gone-tree"), &repo);
+        let report = reconcile_removed(&ledger, &fold(&ledger.read().unwrap().events)).unwrap();
+        assert_eq!(
+            (report.removed, report.unknown, report.unlistable.len()),
+            (0, 1, 1),
+            "{label}: {report:?}"
+        );
+        assert_eq!(removed_events(&ledger), 0, "{label}");
+    }
+}
+
+#[test]
+fn reconcile_writes_nothing_while_the_directory_exists() {
+    let fixture = GitWorktreeFixture::new();
+    // A directory git does not list at all: only its presence keeps it live.
+    let tree = fixture.repo.join("not-a-worktree");
+    std::fs::create_dir_all(&tree).unwrap();
+    let (_dir, ledger) = scratch_ledger();
+    record_tree(&ledger, &tree, &fixture.repo);
+    let report = reconcile_removed(&ledger, &fold(&ledger.read().unwrap().events)).unwrap();
+    assert_eq!(report, ReconcileReport::default());
+    assert_eq!(removed_events(&ledger), 0);
 }

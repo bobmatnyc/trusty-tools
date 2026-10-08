@@ -7,7 +7,7 @@
 //! one parser, `list_registered_worktrees`) for each checkout and appends one
 //! event per tree the ledger does not already hold live — `created` for a tree
 //! tm manages, `observed` for a Claude Code agent-isolation tree. It never
-//! appends `removed`: reconciling a vanished tree is slice 2.
+//! appends `removed`: a vanished tree is [`super::reconcile`]'s.
 //! [`registered_checkouts`] supplies the checkouts from the project registry.
 //! Test: `backfill_twice_appends_no_duplicate_events`,
 //! `backfill_observes_agent_isolation_trees`.

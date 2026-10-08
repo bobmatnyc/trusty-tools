@@ -13,26 +13,30 @@
 //! trees that predate the ledger). An append error is RETURNED, never logged
 //! and swallowed: a provisioning route that cannot record refuses instead.
 //!
-//! Scope (slice 1): agent-isolation trees are OBSERVED only, never reconciled
-//! against `git worktree list`; nothing here removes a worktree. The ledger
-//! feeds `merged_pr_reclaim` and `agent_worktree_reap` in a later slice and
-//! replaces neither.
+//! Scope (slice 1): nothing here removes a worktree. [`reconcile`] appends a
+//! `removed` event for a tree already gone from disk and from
+//! `git worktree list` — it observes, it never deletes. The ledger feeds
+//! `merged_pr_reclaim` and `agent_worktree_reap` in a later slice and replaces
+//! neither.
 //!
 //! Concurrency: the daemon and any `tm` process append. Each event is one
 //! `write` of one complete line to a file opened `O_APPEND`, so concurrent
-//! appenders interleave whole lines. A torn trailing line (a crash mid-write)
-//! is counted in [`LedgerRead::malformed`], never silently dropped.
+//! appenders interleave whole lines. A torn trailing line (a crash or a short
+//! write) is counted in [`LedgerRead::malformed`], never silently dropped: the
+//! next appender starts its first line with `\n` so nothing is concatenated
+//! onto the fragment, and the read parses each line's bytes on its own.
 //! Test: `worktree_ledger::tests`.
 
 pub mod backfill;
 pub mod fold;
+pub mod reconcile;
 pub mod record;
 
 #[cfg(test)]
 mod tests;
 
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -87,7 +91,8 @@ pub enum EventKind {
         /// Bytes allocated on disk, as `du` counts them.
         bytes: u64,
     },
-    /// The tree is gone. No slice-1 route writes this; the fold honours it.
+    /// The tree is gone from disk and from `git worktree list`
+    /// ([`reconcile`] writes it).
     Removed,
 }
 
@@ -199,20 +204,28 @@ impl WorktreeLedger {
     ///
     /// Why: the provisioning hook opens BEFORE it creates a tree, so a ledger
     /// that cannot be written refuses the creation with nothing on disk.
-    /// What: `create_dir_all` on the parent, then an `O_APPEND` open.
-    /// Test: `create_recorded_refuses_before_creating_when_the_ledger_is_unwritable`.
+    /// What: `create_dir_all` on the parent, then an `O_APPEND` open. When the
+    /// file is non-empty and its last byte is not `\n` (a torn line from a
+    /// short write), the appender's first write starts with `\n`.
+    /// Test: `create_recorded_refuses_before_creating_when_the_ledger_is_unwritable`,
+    /// `an_append_after_a_torn_line_with_no_newline_keeps_the_new_event`.
     pub fn open_appender(&self) -> Result<LedgerAppender, LedgerError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| self.io(e))?;
         }
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)
             .map_err(|e| self.io(e))?;
+        // #8994: without this guard the next line is concatenated onto a torn
+        // fragment and the new event is lost from the fold.
+        let needs_newline = ends_without_newline(&mut file).map_err(|e| self.io(e))?;
         Ok(LedgerAppender {
             ledger: self.clone(),
             file,
+            needs_newline,
         })
     }
 
@@ -225,12 +238,17 @@ impl WorktreeLedger {
     ///
     /// Why: the fold, `tm worktrees` and the doctor row all start here.
     /// What: an absent file reads as `present: false` with no events; any other
-    /// I/O failure is an error. Unparseable lines are counted, not fatal.
+    /// I/O failure is an error. The file is read as bytes and each line parsed
+    /// on its own, so an unparseable or non-UTF-8 line is counted in
+    /// [`LedgerRead::malformed`] and never fails the whole read.
     /// Test: `read_counts_a_torn_line_without_losing_the_rest`,
+    /// `a_torn_line_cut_inside_a_multibyte_path_leaves_the_ledger_readable`,
     /// `read_of_an_absent_ledger_is_empty_not_an_error`.
     pub fn read(&self) -> Result<LedgerRead, LedgerError> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
+        // #8994: bytes, not `read_to_string` — one torn multibyte path must not
+        // make the whole ledger unreadable.
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(LedgerRead::default());
             }
@@ -240,8 +258,11 @@ impl WorktreeLedger {
             present: true,
             ..LedgerRead::default()
         };
-        for line in text.lines().filter(|l| !l.trim().is_empty()) {
-            match serde_json::from_str::<LedgerEvent>(line) {
+        for line in bytes
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.trim_ascii().is_empty())
+        {
+            match serde_json::from_slice::<LedgerEvent>(line) {
                 Ok(event) => read.events.push(event),
                 Err(_) => read.malformed += 1,
             }
@@ -250,22 +271,44 @@ impl WorktreeLedger {
     }
 }
 
+/// `true` when `file` is non-empty and its last byte is not `\n`.
+fn ends_without_newline(file: &mut File) -> std::io::Result<bool> {
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    let mut last = [0u8; 1];
+    file.seek(SeekFrom::End(-1))?;
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
+}
+
 /// An open handle on the ledger, for one or more appends.
 #[derive(Debug)]
 pub struct LedgerAppender {
     ledger: WorktreeLedger,
     file: File,
+    /// The file ends in a torn line, so the next write must start with `\n`.
+    needs_newline: bool,
 }
 
 impl LedgerAppender {
     /// Append one event as one complete line in a single write.
+    ///
+    /// What: when the file ends in a torn line (found on open, or left by a
+    /// failed write on this handle) the line is prefixed with `\n`, so it
+    /// starts a line of its own.
+    /// Test: `an_append_after_a_torn_line_with_no_newline_keeps_the_new_event`.
     pub fn append(&mut self, event: &LedgerEvent) -> Result<(), LedgerError> {
-        let mut line = serde_json::to_vec(event)?;
+        let mut line = Vec::new();
+        if self.needs_newline {
+            line.push(b'\n');
+        }
+        line.extend(serde_json::to_vec(event)?);
         line.push(b'\n');
-        self.file
-            .write_all(&line)
-            .and_then(|()| self.file.flush())
-            .map_err(|e| self.ledger.io(e))
+        let written = self.file.write_all(&line).and_then(|()| self.file.flush());
+        // #8994: a failed write may itself leave a torn line behind.
+        self.needs_newline = written.is_err();
+        written.map_err(|e| self.ledger.io(e))
     }
 }
 

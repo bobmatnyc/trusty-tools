@@ -5,10 +5,12 @@
 //! route that FEEDS the ledger the facts the row cannot take itself — the
 //! backfill of pre-existing trees and the size measurement.
 //! What: [`collect`] backfills from every registered project's
-//! `git worktree list`, measures each live tree unless `--no-size`, folds the
-//! ledger and returns a [`WorktreesReport`]; [`run`] prints it as text or JSON.
-//! Daemon-less: it touches only `~/.trusty-mpm/` and git.
-//! Test: `tm_worktrees_json_reports_count_and_gib_per_project`
+//! `git worktree list`, records `removed` for a live tree gone from disk and
+//! from git, measures each live tree unless `--no-size`, folds the ledger and
+//! returns a [`WorktreesReport`]; [`run`] prints it as text or JSON.
+//! Daemon-less: it touches only `~/.trusty-mpm/` and git, and deletes nothing.
+//! Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
+//! `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`
 //! (`tests/tm_worktrees_cli.rs`).
 
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use trusty_mpm::core::worktree_ledger::backfill::{
     BackfillReport, backfill_checkouts, registered_checkouts,
 };
 use trusty_mpm::core::worktree_ledger::fold::{ProjectSummary, fold, gib};
+use trusty_mpm::core::worktree_ledger::reconcile::{ReconcileReport, reconcile_removed};
 use trusty_mpm::core::worktree_ledger::record::measure_live;
 
 /// Flags for `tm worktrees`.
@@ -72,20 +75,26 @@ pub(crate) struct WorktreesReport {
     pub backfill: BackfillSummary,
     /// Trees measured this run; `None` under `--no-size`.
     pub measured: Option<usize>,
-    /// Live trees whose directory is gone (reconciled in slice 2).
+    /// What the reconcile pass recorded `removed`, and what it left unknown.
+    pub reconcile: ReconcileReport,
+    /// Live trees whose directory is gone but which the reconcile left live:
+    /// git still lists them, or their repository could not be listed.
     pub missing: usize,
     /// Ledger lines that did not parse.
     pub malformed: usize,
 }
 
-/// Backfill, optionally measure, then fold the ledger under `home`.
+/// Backfill, reconcile, optionally measure, then fold the ledger under `home`.
 ///
 /// Why: `home` is an argument so the integration test drives a scratch home
 /// through the real binary and nothing here reads the process environment.
-/// What: registry → [`backfill_checkouts`] → [`measure_live`] (when `measure`)
-/// → fold. A ledger error propagates; an unreadable registry is reported in
+/// What: registry → [`backfill_checkouts`] → [`reconcile_removed`] →
+/// [`measure_live`] (when `measure`) → fold. The reconcile runs under
+/// `--no-size` too: it lists git, it never measures. A ledger error
+/// propagates; an unreadable registry is reported in
 /// [`BackfillSummary::registry_error`] and the rest still runs.
-/// Test: `tm_worktrees_json_reports_count_and_gib_per_project`.
+/// Test: `tm_worktrees_json_reports_count_and_gib_per_project`,
+/// `tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git`.
 pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<WorktreesReport> {
     let ledger = WorktreeLedger::under_home(home);
     let registry_dir = trusty_mpm::project::worktree_policy::registry_data_dir_under(
@@ -95,12 +104,12 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
         Ok(checkouts) => (backfill_checkouts(&ledger, &checkouts)?, None),
         Err(e) => (BackfillReport::default(), Some(e.to_string())),
     };
+    // #8994: without this pass a reaped or removed tree stays live forever.
+    let reconcile = reconcile_removed(&ledger, &fold(&ledger.read()?.events))?;
     let mut measured = None;
-    let mut missing = 0;
     if measure {
         let outcome = measure_live(&ledger, &fold(&ledger.read()?.events))?;
         measured = Some(outcome.measured);
-        missing = outcome.missing;
     }
     let read = ledger.read()?;
     let projects = fold(&read.events).by_project();
@@ -121,7 +130,8 @@ pub(crate) async fn collect(home: &Path, measure: bool) -> anyhow::Result<Worktr
             registry_error,
         },
         measured,
-        missing,
+        missing: reconcile.missing(),
+        reconcile,
         malformed: read.malformed,
     })
 }
@@ -173,9 +183,23 @@ fn print_text(report: &WorktreesReport) {
     if let Some(e) = &b.registry_error {
         eprintln!("tm worktrees: project registry unreadable, no backfill ran: {e}");
     }
+    if report.reconcile.removed > 0 {
+        println!(
+            "reconcile: {} tree(s) gone from disk and git recorded as removed",
+            report.reconcile.removed
+        );
+    }
+    for u in &report.reconcile.unlistable {
+        eprintln!(
+            "tm worktrees: cannot list {} ({}); its missing trees stay recorded",
+            u.repo.display(),
+            u.reason
+        );
+    }
     if report.missing > 0 {
         eprintln!(
-            "tm worktrees: {} recorded tree(s) no longer on disk (not removed from the ledger)",
+            "tm worktrees: {} recorded tree(s) no longer on disk but still listed by git \
+             or unlistable (not removed from the ledger)",
             report.missing
         );
     }

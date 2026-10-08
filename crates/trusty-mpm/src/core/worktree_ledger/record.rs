@@ -76,7 +76,7 @@ pub fn create_recorded(
 pub struct MeasureReport {
     /// Trees measured and recorded.
     pub measured: usize,
-    /// Live trees whose directory is gone; left for slice 2's reconciliation.
+    /// Live trees whose directory is gone; the reconcile pass decides on them.
     pub missing: usize,
 }
 
@@ -86,7 +86,7 @@ pub struct MeasureReport {
 /// `measured` event; `tm worktrees` is the route that takes the measurement.
 /// What: for each live path that is a directory, appends one `measured` event
 /// with its allocated bytes (`du` semantics). A missing directory is counted,
-/// not removed — slice 1 adds no remove route.
+/// not removed — `removed` is [`super::reconcile`]'s to write.
 /// Test: `measure_live_records_the_size_of_each_present_tree`.
 pub fn measure_live(
     ledger: &WorktreeLedger,

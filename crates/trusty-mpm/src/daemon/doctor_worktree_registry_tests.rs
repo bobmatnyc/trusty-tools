@@ -4,8 +4,10 @@ use std::path::PathBuf;
 
 use super::{CHECK_NAME, check_worktree_registry};
 use crate::core::doctor::CheckStatus;
-use crate::core::worktree_ledger::fold::GIB;
-use crate::core::worktree_ledger::{EventKind, LedgerEvent, Origin, WorktreeLedger};
+use crate::core::worktree_ledger::fold::{GIB, fold};
+use crate::core::worktree_ledger::reconcile::reconcile_removed;
+use crate::core::worktree_ledger::{EventKind, LedgerEvent, Origin, WorktreeLedger, ledger_key};
+use crate::session_manager::worktree_git_fixture::GitWorktreeFixture;
 
 fn created(path: &str, repo: &str) -> LedgerEvent {
     LedgerEvent::now(
@@ -101,4 +103,72 @@ fn worktree_registry_row_warns_on_malformed_lines() {
     let row = check_worktree_registry(home.path());
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     assert!(row.message.contains("1 malformed"), "{}", row.message);
+}
+
+/// #8994 finding 1: a tree removed from disk and from git leaves the row's
+/// count AND its GiB once the reconcile `tm worktrees` runs has recorded it.
+#[test]
+fn worktree_registry_row_drops_a_tree_reconciled_as_removed() {
+    let fixture = GitWorktreeFixture::new();
+    let a = ledger_key(&fixture.add_worktree("a"));
+    let b = ledger_key(&fixture.add_worktree("b"));
+    let repo = ledger_key(&fixture.repo);
+    let home = tempfile::tempdir().unwrap();
+    let ledger = WorktreeLedger::under_home(home.path());
+    let gib = GIB as u64;
+    for (tree, bytes) in [(&a, gib), (&b, gib / 2)] {
+        for kind in [
+            EventKind::Created {
+                repo: repo.clone(),
+                branch: None,
+                origin: Origin::TmDaemon,
+                session: None,
+            },
+            EventKind::Measured { bytes },
+        ] {
+            ledger
+                .append(&LedgerEvent::now(tree.clone(), kind))
+                .unwrap();
+        }
+    }
+    let before = check_worktree_registry(home.path());
+    assert!(
+        before
+            .message
+            .starts_with("2 worktree(s) across 1 project(s), 1.50 GiB measured"),
+        "{}",
+        before.message
+    );
+
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fixture.repo)
+        .args(["worktree", "remove", "--force"])
+        .arg(&a)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = reconcile_removed(&ledger, &fold(&ledger.read().unwrap().events)).unwrap();
+    assert_eq!(report.removed, 1, "{report:?}");
+
+    let after = check_worktree_registry(home.path());
+    assert_eq!(after.status, CheckStatus::Ok, "{}", after.message);
+    assert!(
+        after
+            .message
+            .starts_with("1 worktree(s) across 1 project(s), 0.50 GiB measured"),
+        "{}",
+        after.message
+    );
+    assert!(
+        after
+            .message
+            .contains(&format!("{} 1 (0.50 GiB)", repo.display())),
+        "{}",
+        after.message
+    );
 }

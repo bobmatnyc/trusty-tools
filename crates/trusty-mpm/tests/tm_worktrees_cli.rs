@@ -103,3 +103,116 @@ fn tm_worktrees_measures_a_live_tree_unless_no_size() {
         "{measured:#}"
     );
 }
+
+/// Run `git -C <dir> <args>`, panicking with git's stderr on failure.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("`git {}` could not run: {e}", args.join(" ")));
+    assert!(
+        out.status.success(),
+        "`git {}` failed in {}: {}",
+        args.join(" "),
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A one-commit repository at `<root>/repo` with worktrees `a` and `b`,
+/// returned canonicalized as the ledger keys them.
+fn repo_with_two_worktrees(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "--initial-branch=main"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.email=ci@test.invalid",
+            "-c",
+            "user.name=CI",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+    );
+    for name in ["a", "b"] {
+        let wt = repo.join(".worktrees").join(name);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &format!("wt/{name}"),
+                wt.to_str().unwrap(),
+            ],
+        );
+    }
+    let canon = |p: PathBuf| std::fs::canonicalize(p).unwrap();
+    (
+        canon(repo.clone()),
+        canon(repo.join(".worktrees").join("a")),
+        canon(repo.join(".worktrees").join("b")),
+    )
+}
+
+/// #8994 finding 1: a tree removed from disk AND from git leaves both the
+/// count and the GiB, because `tm worktrees` records it `removed`.
+#[test]
+fn tm_worktrees_records_removed_for_a_tree_gone_from_disk_and_git() {
+    let home = tempfile::tempdir().unwrap();
+    let (repo, a, b) = repo_with_two_worktrees(home.path());
+    let ledger = WorktreeLedger::under_home(home.path());
+    let gib = GIB as u64;
+    let repo_s = repo.to_str().unwrap();
+    for e in [
+        created(&a, repo_s),
+        created(&b, repo_s),
+        LedgerEvent::now(a.clone(), EventKind::Measured { bytes: 2 * gib }),
+        LedgerEvent::now(b.clone(), EventKind::Measured { bytes: gib / 4 }),
+    ] {
+        ledger.append(&e).unwrap();
+    }
+    let before = worktrees_json(home.path(), &["--no-size"]);
+    assert_eq!(before["total"]["count"], 2, "{before:#}");
+    assert_eq!(before["total"]["gib"], 2.25, "{before:#}");
+
+    git(
+        &repo,
+        &["worktree", "remove", "--force", a.to_str().unwrap()],
+    );
+    assert!(!a.exists(), "git removed the directory");
+
+    let after = worktrees_json(home.path(), &["--no-size"]);
+    assert_eq!(after["total"]["count"], 1, "{after:#}");
+    assert_eq!(after["total"]["gib"], 0.25, "{after:#}");
+    assert_eq!(after["projects"][0]["count"], 1, "{after:#}");
+    assert_eq!(after["projects"][0]["gib"], 0.25, "{after:#}");
+    let removed: Vec<PathBuf> = ledger
+        .read()
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == EventKind::Removed)
+        .map(|e| e.path)
+        .collect();
+    assert_eq!(removed, vec![a], "exactly one removed event, for `a`");
+
+    let again = worktrees_json(home.path(), &["--no-size"]);
+    assert_eq!(again["total"]["count"], 1, "{again:#}");
+    let removed_again = ledger
+        .read()
+        .unwrap()
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Removed)
+        .count();
+    assert_eq!(removed_again, 1, "a second run appends no second removed");
+}

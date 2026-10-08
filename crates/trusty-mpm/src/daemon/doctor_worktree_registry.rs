@@ -9,7 +9,8 @@
 //! never walks a worktree: the sizes are the last `measured` events.
 //! Test: `worktree_registry_row_reports_count_and_gib_from_the_ledger_alone`,
 //! `worktree_registry_row_with_no_ledger_is_ok_and_names_the_backfill`,
-//! `worktree_registry_row_warns_on_malformed_lines`.
+//! `worktree_registry_row_warns_on_malformed_lines`,
+//! `worktree_registry_row_drops_a_tree_reconciled_as_removed`.
 
 use std::path::Path;
 
