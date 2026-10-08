@@ -54,6 +54,8 @@ pub mod roots_registry;
 pub(crate) mod serve_only;
 pub mod server;
 pub mod shutdown_budget;
+// #9459: close every redb corpus before `process::exit(0)` skips its `Drop`.
+pub mod shutdown_close;
 pub mod shutdown_flush;
 // #6285 (ADR-0032): the hardened UDS listener the daemon serves alongside its
 // HTTP listener while the route families migrate.

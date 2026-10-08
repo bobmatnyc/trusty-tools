@@ -88,6 +88,9 @@ impl CodeIndexer {
         index_id: &IndexId,
         rel: &str,
     ) -> Result<(usize, bool)> {
+        // #9459: a delete against a corpus closed for shutdown leaves its rows
+        // in redb; refuse it so the reconcile delta does not stamp HEAD.
+        self.refuse_if_closed_for_shutdown()?;
         let removed = self
             .purge_file_with(index_id, rel, RedbChunkDelete::FailClosed)
             .await?;

@@ -903,3 +903,97 @@ async fn a_socket_only_stop_returns_ok_when_the_serve_loop_also_ended() {
         );
     }
 }
+
+/// #9459, #9477: a normal stop leaves every corpus closed cleanly.
+///
+/// Why: the daemon leaves through `process::exit(0)` once `run_daemon_with`
+/// returns, so a corpus still open at that point never runs redb's `Drop` and
+/// is left needing repair. A read-only open then fails, and
+/// `project.resolve` loses the `reindexed_unix` stamp (#9477).
+/// What: registers one index with a stamped corpus, starts the corpus reopen
+/// sweep exactly as `handle_start` does (it holds a strong clone of the state
+/// for the life of the process), runs a real socket-only daemon and stops it
+/// through the admin-stop channel. Once `run_daemon_with` has returned, the
+/// corpus must open read-only and the resolver's stamp read must return the
+/// stamp. Before #9459 the sweep's clone kept the corpus open, so the
+/// read-only open failed.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
+    use crate::core::corpus::CorpusStore;
+    use crate::core::indexer::CodeIndexer;
+    use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
+    use crate::service::project_resolve::{Candidate, Disk, LiveDisk, RootKind};
+    use crate::service::socket;
+    use crate::service::storage_layout::{StorageLayout, REDB_FILE};
+    use std::sync::Arc;
+    const STAMP: u64 = 1_700_009_459;
+    const ID: &str = "shutdown-9459";
+
+    with_isolated_daemon_paths(|_data_dir| async move {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("lib.rs"), "fn alpha() {}\n").unwrap();
+        let corpus_path = StorageLayout::DataDir
+            .file(ID, root.path(), REDB_FILE)
+            .expect("resolve the corpus path");
+        let corpus = CorpusStore::open(&corpus_path).expect("open the corpus");
+        corpus.write_reindexed_unix_sync(STAMP).expect("stamp it");
+        let mut indexer = CodeIndexer::new(ID, root.path());
+        indexer.set_corpus_store(Arc::new(corpus));
+        let registry = IndexRegistry::new();
+        registry.register(IndexHandle::bare(
+            IndexId::new(ID),
+            Arc::new(tokio::sync::RwLock::new(indexer)),
+            root.path().to_path_buf(),
+        ));
+        let state = SearchAppState::new(registry);
+        crate::service::corpus_reopen::spawn_corpus_reopen_sweep(state.clone());
+
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let shutdown_tx = state.shutdown_tx.clone();
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        assert!(wait_for_socket(&socket_path).await, "the socket must serve");
+        let _ = shutdown_tx.send(true);
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(20), handle).await;
+        assert!(
+            matches!(exit, Ok(Ok(Ok(())))),
+            "a graceful stop must return Ok: {exit:?}"
+        );
+
+        // What `process::exit(0)` leaves on disk from here on.
+        let read_only = redb::ReadOnlyDatabase::open(&corpus_path);
+        assert!(
+            read_only.is_ok(),
+            "#9459: after a normal stop the corpus must open read-only: {:?}",
+            read_only.err()
+        );
+        drop(read_only);
+
+        let candidate = Candidate {
+            index_id: ID.to_string(),
+            root_path: root.path().to_path_buf(),
+            repo_identity: None,
+            kind: RootKind::Indeterminate,
+            resident: false,
+            reindexed_unix: None,
+            corpus_modified_unix: None,
+            colocated: false,
+            additional_roots: Vec::new(),
+        };
+        let disk = LiveDisk {
+            names: trusty_common::workspace_layout::WorktreeDirNames::default(),
+            resident: std::collections::HashMap::new(),
+            runtime: Some(tokio::runtime::Handle::current()),
+        };
+        let stamp = tokio::task::spawn_blocking(move || disk.reindexed_unix(&candidate))
+            .await
+            .expect("the stamp read must not panic");
+        assert_eq!(
+            stamp,
+            Some(STAMP),
+            "#9477: project.resolve must read reindexed_unix after a normal stop"
+        );
+    })
+    .await;
+}
