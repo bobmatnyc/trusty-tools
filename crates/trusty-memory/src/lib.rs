@@ -37,7 +37,6 @@
 use {
     crate::session_store_cache::SessionStoreCache,
     anyhow::Result,
-    serde_json::{json, Value},
     std::net::SocketAddr,
     std::path::PathBuf,
     std::sync::atomic::{AtomicU8, AtomicUsize, Ordering},
@@ -46,7 +45,6 @@ use {
     trusty_common::memory_core::embed::Embedder,
     trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry},
     trusty_common::ChatProvider,
-    trusty_mcp::initialize_response,
 };
 
 /// Two-phase daemon readiness state (issues #910/#911, revised by #1970).
@@ -126,6 +124,12 @@ pub mod worker_liveness;
 // #4001: stall detection for handle locks whose holders never register.
 #[cfg(feature = "server")]
 pub mod lock_stall;
+// #9269: `handle_message` moved out of this file to keep it under the
+// 500-SLOC cap once the feature gates landed; re-exported below.
+#[cfg(feature = "server")]
+mod mcp_message;
+#[cfg(feature = "server")]
+pub use mcp_message::handle_message;
 // Why (issue #226): `chat` drives an LLM provider and a tool loop that only
 //      the daemon serves. Gating it behind `server` (#9269) is what lets a library
 //      consumer linking only `MemoryMcpService` — trusty-agents — keep it out
@@ -1515,106 +1519,6 @@ impl std::fmt::Debug for AppState {
             .field("data_root", &self.data_root)
             .field("registry_len", &self.registry.len())
             .finish()
-    }
-}
-
-/// Handle a single MCP JSON-RPC message and produce its response.
-///
-/// Why: Pulled out of the stdio loop so unit tests can drive every method
-/// without touching real stdin/stdout.
-/// What: Routes `initialize`, `tools/list`, `tools/call`, `ping`, and the
-/// `notifications/initialized` notification (which returns `Value::Null`).
-/// Test: See unit tests below — initialize/list/call all return expected
-/// JSON-RPC envelopes; notifications return `Null` (no response written).
-#[cfg(feature = "server")]
-pub async fn handle_message(state: &AppState, msg: Value) -> Value {
-    let id = msg.get("id").cloned().unwrap_or(Value::Null);
-    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-
-    match method {
-        "initialize" => {
-            let extra = state
-                .default_palace
-                .as_ref()
-                .map(|dp| json!({ "default_palace": dp }));
-            let result = initialize_response("trusty-memory", &state.version, extra);
-            // Why (issue #42): prompt-facts now flow through the
-            // per-message `get_prompt_context` tool rather than MCP
-            // prompts, so we no longer advertise the `prompts` capability.
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result,
-            })
-        }
-        // Notifications must NOT receive a response.
-        "notifications/initialized" | "notifications/cancelled" => Value::Null,
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": tools::tool_definitions_with(state.default_palace.is_some())
-        }),
-        // OpenRPC 1.3.2 discovery — see `openrpc.rs`. Returns the full
-        // service description so orchestrators (trusty-agents, etc.) can
-        // introspect every tool and its required `memory.read`/`memory.write`
-        // scope without bespoke per-server adapters.
-        "rpc.discover" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": openrpc::build_discover_response(
-                &state.version,
-                state.default_palace.is_some(),
-            ),
-        }),
-        "tools/call" => {
-            let params = msg.get("params").cloned().unwrap_or_default();
-            let tool_name = params
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let args = params.get("arguments").cloned().unwrap_or_default();
-            match tools::dispatch_tool(state, &tool_name, args).await {
-                Ok(content) => {
-                    // Why: tools that return a bare JSON string (e.g.
-                    // `get_prompt_context` returning the formatted
-                    // Markdown block) should surface as plain text in the
-                    // MCP `content[0].text` field — wrapping in
-                    // `Value::to_string()` would re-quote the payload and
-                    // force every caller to strip outer quotes.
-                    let text = match &content {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [{"type": "text", "text": text}]
-                        }
-                    })
-                }
-                Err(e) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    // Why: anyhow's `{:#}` alternate format walks the full
-                    // `Caused by:` chain so MCP clients see actionable
-                    // detail (e.g. "PalaceHandle::remember_with_options:
-                    // filter rejected: too short") instead of just the
-                    // outermost context label.
-                    "error": {"code": -32603, "message": format!("{e:#}")}
-                }),
-            }
-        }
-        "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": format!("Method not found: {method}")
-            }
-        }),
     }
 }
 
