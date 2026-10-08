@@ -4,8 +4,10 @@
 //! palaces through the same tools; one copy of the helpers keeps them in step.
 //! What: an `AppState` on a `TempDir` with the mock embedder seeded and an
 //! explicit (possibly empty) rulings list, so the process environment never
-//! leaks in; plus write, backdate and recall helpers over `dispatch_tool`.
-//! Test: used by `recall_temporal_rank.rs` and `recall_rulings_leg.rs`.
+//! leaks in; plus write, backdate and recall helpers over `dispatch_tool`,
+//! the per-surface recall driver, and (#9421) the `superseded_by` writer.
+//! Test: used by `recall_temporal_rank.rs`, `recall_rulings_leg.rs`,
+//! `recall_supersession.rs` and `recall_eval.rs`.
 #![allow(dead_code)] // each binary uses a different subset
 
 use chrono::{Duration, Utc};
@@ -13,6 +15,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::retrieval::seed_shared_embedder_with_mock;
+use trusty_memory::service::MemoryService;
 use trusty_memory::tools::dispatch_tool;
 use trusty_memory::AppState;
 use uuid::Uuid;
@@ -114,4 +117,76 @@ pub fn rank_of(results: &[Value], id: Uuid) -> Option<usize> {
     results.iter().position(|r| {
         r["drawer_id"].as_str() == Some(id.as_str()) || r["id"].as_str() == Some(id.as_str())
     })
+}
+
+/// Record `old superseded_by new` through the production writer (#9421).
+pub async fn supersede(state: &AppState, palace: &str, old: Uuid, new: Uuid) {
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new(palace))
+        .expect("open palace");
+    trusty_common::memory_core::share::assert_superseded_by(&handle.kg, old, new, "test:9421")
+        .await
+        .expect("superseded_by edge");
+}
+
+/// One recall surface, as the parametrised test drives it.
+#[derive(Debug, Clone, Copy)]
+pub enum Surface {
+    McpRecall,
+    McpRecallDeep,
+    McpRecallAll,
+    ServiceRecall,
+    ServiceRecallAll,
+}
+
+/// The ranked hits `surface` returns for `query` in `palace`.
+pub async fn recall_on(
+    state: &trusty_memory::AppState,
+    surface: Surface,
+    palace: &str,
+    query: &str,
+) -> Vec<Value> {
+    let top_k = 5;
+    let out = match surface {
+        Surface::McpRecall => {
+            dispatch_tool(
+                state,
+                "memory_recall",
+                json!({ "palace": palace, "query": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::McpRecallDeep => {
+            dispatch_tool(
+                state,
+                "memory_recall_deep",
+                json!({ "palace": palace, "query": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::McpRecallAll => {
+            dispatch_tool(
+                state,
+                "memory_recall_all",
+                json!({ "q": query, "top_k": top_k }),
+            )
+            .await
+        }
+        Surface::ServiceRecall => Ok(MemoryService::new(state.clone())
+            .recall(palace, query, top_k, false)
+            .await
+            .expect("service recall")),
+        Surface::ServiceRecallAll => Ok(MemoryService::new(state.clone())
+            .recall_all(query, top_k, false)
+            .await),
+    }
+    .unwrap_or_else(|e| panic!("{surface:?}: {e:#}"));
+    match out.get("results") {
+        Some(r) => r.as_array().expect("results").clone(),
+        None => out
+            .as_array()
+            .unwrap_or_else(|| panic!("{surface:?}: {out}"))
+            .clone(),
+    }
 }

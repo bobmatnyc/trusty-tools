@@ -4,7 +4,7 @@
 //! status snapshot outranked the ruling that replaced it, and no gate noticed.
 //! A fixed corpus with known answers, scored by the real model, turns "recall
 //! got worse" into a red pre-publish job.
-//! What: loads `testdata/recall_eval/corpus.json` (30 queries, 10 groups that
+//! What: loads `testdata/recall_eval/corpus.json` (32 queries, 12 groups that
 //! each pair a CURRENT drawer with a SUPERSEDED one) into a temp palace, recalls
 //! every query, and logs each expected drawer's rank. The gate fails when hit@1
 //! drops below `baseline.json`, when any superseded drawer ranks above its
@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use chrono::Duration;
-use recall_support::{backdate, create_palaces, fact_key, rank_of, recall, remember};
+use recall_support::{backdate, create_palaces, fact_key, rank_of, recall, remember, supersede};
 use serde::Deserialize;
 use tempfile::TempDir;
 use trusty_common::memory_core::embed::Embedder;
@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 /// Smallest corpus the gate accepts (#9281 acceptance criterion 1).
 const MIN_QUERIES: usize = 26;
-/// Supersession groups the corpus must carry (#9281).
-const GROUPS: usize = 10;
+/// Supersession groups the corpus must carry (#9281; #9421 added two).
+const GROUPS: usize = 12;
 /// Superseded-above-current ceiling. Pinned in code, not in the baseline file.
 const SUPERSEDED_PIN: usize = 0;
 /// Hits each query recalls.
@@ -57,6 +57,9 @@ enum Mechanism {
     Demotion,
     /// A Tier C slot the current drawer retires on write (ADR-0028 D6).
     FactKey,
+    /// #9421: an untagged, unkeyed drawer linked to its replacement by a
+    /// `superseded_by` KG edge.
+    SupersededBy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -123,7 +126,9 @@ impl Corpus {
     /// Why: a corpus whose groups cannot engage a mechanism measures nothing.
     /// What: size floors, unique ids, resolvable references, and per-group
     /// shape: a `fact_key` group shares one slot, written superseded first; a
-    /// `demotion` group's superseded drawer is an aged, unkeyed snapshot.
+    /// `demotion` group's superseded drawer is an aged, unkeyed snapshot; a
+    /// `superseded_by` group is unkeyed, carries no snapshot tag, and is
+    /// written superseded first.
     /// Test: `the_shipped_files_validate`, `a_short_corpus_fails_validation`.
     fn validate(&self) -> Result<()> {
         ensure!(
@@ -178,9 +183,27 @@ impl Corpus {
                         g.id
                     );
                 }
+                Mechanism::SupersededBy => {
+                    // #9421: only the edge may demote it — no tag, no slot.
+                    ensure!(
+                        sup.fact_key.is_none() && cur.fact_key.is_none(),
+                        "{}: a superseded_by group is unkeyed",
+                        g.id
+                    );
+                    ensure!(
+                        !sup.tags.iter().any(|t| SNAPSHOT_TAGS.contains(&t.as_str())),
+                        "{}: a superseded_by drawer carries no snapshot tag",
+                        g.id
+                    );
+                    ensure!(si < ci, "{}: superseded must be written first", g.id);
+                }
             }
         }
-        for m in [Mechanism::Demotion, Mechanism::FactKey] {
+        for m in [
+            Mechanism::Demotion,
+            Mechanism::FactKey,
+            Mechanism::SupersededBy,
+        ] {
             ensure!(
                 self.groups.iter().any(|g| g.mechanism == m),
                 "corpus has no {m:?} group"
@@ -327,24 +350,28 @@ async fn require_pinned_model(embedder: Result<SharedEmbedder>, fp: &Fingerprint
 
 /// Which staleness mechanisms the corpus load leaves engaged.
 ///
-/// Why (#9281 criterion 5): the gate must go red when either mechanism is
-/// reverted. Production has no switch for either, so the load neutralises each
-/// one's input: demotion's is a drawer's age, retirement's is a shared slot.
+/// Why (#9281 criterion 5): the gate must go red when any mechanism is
+/// reverted. Production has no switch for any, so the load neutralises each
+/// one's input: demotion's is a drawer's age, retirement's is a shared slot,
+/// supersession's (#9421) is the `superseded_by` edge.
 /// What: `demotion: false` skips backdating, so every snapshot is age zero and
 /// `temporal_weight` is 1.0. `retirement: false` moves each superseded drawer
 /// to its own slot (`<key>-prior`), so the current write retires nothing and
 /// the old drawer stays a live Tier C fact, exempt from demotion.
+/// `supersession: false` writes no edge.
 /// Test: `recall_eval_goes_red_with_demotion_or_retirement_off`.
 #[derive(Debug, Clone, Copy)]
 struct Mechanisms {
     demotion: bool,
     retirement: bool,
+    supersession: bool,
 }
 
 impl Mechanisms {
     const ON: Self = Self {
         demotion: true,
         retirement: true,
+        supersession: true,
     };
 }
 
@@ -519,6 +546,15 @@ async fn load_corpus(
             backdate(state, palace, ids[&d.id], Duration::days(d.age_days));
         }
     }
+    if mech.supersession {
+        for g in corpus
+            .groups
+            .iter()
+            .filter(|g| g.mechanism == Mechanism::SupersededBy)
+        {
+            supersede(state, palace, ids[&g.superseded], ids[&g.current]).await;
+        }
+    }
     // The seam must do what it claims, or the run measures nothing.
     for g in corpus
         .groups
@@ -625,7 +661,7 @@ async fn recall_eval_holds_the_recorded_baseline() {
     verdict(&report, &baseline, &fp.model).unwrap_or_else(|e| panic!("{e:#}"));
 }
 
-/// Why (#9281 criterion 5): the 0/10 pin is only worth something if it can go
+/// Why (#9281 criterion 5): the 0/12 pin is only worth something if it can go
 /// red. What: the same corpus with each mechanism neutralised in turn (see
 /// [`Mechanisms`]); each run must flip a group of the mechanism it disabled,
 /// and the verdict must fail on supersession alone (hit@1 floor 0).
@@ -638,17 +674,26 @@ async fn recall_eval_goes_red_with_demotion_or_retirement_off() {
             "demotion off",
             Mechanisms {
                 demotion: false,
-                retirement: true,
+                ..Mechanisms::ON
             },
             &[Mechanism::Demotion, Mechanism::FactKey][..],
         ),
         (
             "retirement off",
             Mechanisms {
-                demotion: true,
                 retirement: false,
+                ..Mechanisms::ON
             },
             &[Mechanism::FactKey][..],
+        ),
+        (
+            // #9421: no edge, so the untagged groups lose their only signal.
+            "supersession off",
+            Mechanisms {
+                supersession: false,
+                ..Mechanisms::ON
+            },
+            &[Mechanism::SupersededBy][..],
         ),
     ];
     for (label, mech, must_flip) in arms {
