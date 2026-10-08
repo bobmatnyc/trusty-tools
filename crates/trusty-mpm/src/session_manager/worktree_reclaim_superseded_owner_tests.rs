@@ -211,6 +211,7 @@ async fn worktree_7771_a_superseded_sessions_open_delegation_tree_is_reclaimed()
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &agent_live,
             in_use_now: &|| Some(c.clone()),

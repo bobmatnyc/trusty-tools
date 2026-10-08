@@ -317,6 +317,7 @@ fn worktree_7652_an_unanswerable_claim_probe_reclaims_nothing() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &no_agents,
             in_use_now: &|| None,
@@ -353,6 +354,7 @@ async fn worktree_7652_the_recheck_refuses_an_owner_that_came_back() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &no_agents,
             // First read feeds the survey; every later one is the re-check's.
@@ -402,6 +404,7 @@ async fn worktree_7652_an_owner_back_after_the_dirt_check_is_refused() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &no_agents,
             // Reads 1 and 2 are the survey's and the re-check's.

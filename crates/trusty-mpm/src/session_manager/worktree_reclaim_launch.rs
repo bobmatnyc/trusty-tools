@@ -16,7 +16,8 @@
 //! candidate and the directories processes were launched from.
 //! [`process_launch_dirs`] is the production collector — the current working
 //! directory and the running executable, both read with no subprocess and no
-//! process-table walk, so the gate costs nothing per candidate.
+//! process-table walk, so the gate costs nothing per candidate. Every OTHER
+//! process is the process-table probe's job (#7540: `FreshProbes::cwd_holder`).
 //!
 //! # Direction of the containment test
 //!

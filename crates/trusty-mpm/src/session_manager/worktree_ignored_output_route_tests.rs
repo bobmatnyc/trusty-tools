@@ -175,6 +175,7 @@ fn reclaim(fx: &GitWorktreeFixture, name: &str, s: Seed) -> (PathBuf, ReclaimOut
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &no_agents,
             // #7652: the fixture sentinel's owner has ended.
