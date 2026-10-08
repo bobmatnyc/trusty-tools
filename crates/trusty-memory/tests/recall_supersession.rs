@@ -180,6 +180,64 @@ async fn recall_order_is_unchanged_for_drawers_with_no_edge() {
     assert_eq!(others(&after), others(&before));
 }
 
+/// The score of drawer `id` in `results`.
+fn score_of(results: &[Value], id: Uuid) -> Option<f64> {
+    rank_of(results, id).and_then(|i| results[i]["score"].as_f64())
+}
+
+/// Why (#9462, ADR-0028 C9): live drawers carry `superseded_by` edges to
+/// drawers that were never written. Such an edge resolves to nothing, so the
+/// drawer is the only surviving copy and must keep its full score.
+/// What: recalls on every surface before and after an edge from the drawer to
+/// a random id with no drawer; the drawer's score is unchanged.
+#[tokio::test]
+async fn a_drawer_superseded_by_a_missing_drawer_keeps_its_score() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a"], &[]).await;
+    let query = "gateway certificate renewal schedule";
+    let only_copy = remember(
+        &state,
+        "project-a",
+        "gateway certificate renewal schedule: cert-manager renews every sixty days",
+        &[],
+        None,
+    )
+    .await;
+    remember(
+        &state,
+        "project-a",
+        "billing pool size is twelve",
+        &[],
+        None,
+    )
+    .await;
+    let surfaces = [
+        Surface::McpRecall,
+        Surface::McpRecallDeep,
+        Surface::McpRecallAll,
+        Surface::ServiceRecall,
+        Surface::ServiceRecallAll,
+    ];
+    let mut before = Vec::new();
+    for surface in surfaces {
+        let results = recall_on(&state, surface, "project-a", query).await;
+        let score = score_of(&results, only_copy);
+        assert!(score.is_some(), "{surface:?}: recalled: {results:#?}");
+        before.push(score);
+    }
+
+    supersede(&state, "project-a", only_copy, Uuid::new_v4()).await;
+
+    for (surface, before) in surfaces.into_iter().zip(before) {
+        let results = recall_on(&state, surface, "project-a", query).await;
+        assert_eq!(
+            score_of(&results, only_copy),
+            before,
+            "{surface:?}: a dangling edge must not demote: {results:#?}"
+        );
+    }
+}
+
 /// Opt-in switch for [`recall_supersession_latency_profile`].
 const PROFILE_ENV: &str = "TRUSTY_RECALL_SUPERSESSION_PROFILE";
 /// Drawers in the profiled project palace (#9421 AC5 states 20k rows).

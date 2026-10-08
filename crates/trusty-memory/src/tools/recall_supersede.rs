@@ -12,14 +12,16 @@
 //! [`LOOKUP_BUDGET`]. The rulings leg reads each rulings palace's own edges
 //! through [`supersessions_for_within`], inside the leg's time bound. A failed
 //! or late read logs a warning naming the palace and demotes nothing for that
-//! palace, so recall still answers ([`fail_open`]). [`demote_superseded`] halves a
+//! palace, so recall still answers ([`fail_open`]). An edge counts only when
+//! its replacement is a drawer of the palace (#9462, [`resolved_edges`]).
+//! [`demote_superseded`] halves a
 //! superseded drawer's score and, when its replacement is in the same list,
 //! keeps it strictly below the replacement. Nothing is deleted (D6).
 //! Test: `tools::recall_supersede_tests`; end to end in
 //! `tests/recall_supersession.rs` (rulings palaces included) and the
 //! `superseded_by` groups of `tests/recall_eval.rs`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -124,12 +126,7 @@ pub(crate) async fn supersessions_for_within(
         return Supersessions::new();
     }
     let ids = results.iter().map(|r| r.drawer.id).collect();
-    fail_open(
-        handle.id.as_str(),
-        handle.kg.superseded_by_many(ids),
-        budget,
-    )
-    .await
+    fail_open(handle.id.as_str(), resolved_edges(handle, ids), budget).await
 }
 
 /// The supersessions among a cross-palace batch's drawers.
@@ -154,10 +151,106 @@ pub(crate) async fn supersessions_across(
         if ids.is_empty() {
             continue;
         }
-        let lookup = handle.kg.superseded_by_many(ids);
+        let lookup = resolved_edges(handle, ids);
         found.extend(fail_open(handle.id.as_str(), lookup, LOOKUP_BUDGET).await);
     }
     found
+}
+
+/// The `superseded_by` edges of `ids` whose replacement is a drawer of the
+/// palace.
+///
+/// Why (#9462, ADR-0028 D5/C9): an edge is honoured only when it resolves to a
+/// real drawer. Live palaces carry edges to drawers that were never written;
+/// honouring one halves the only surviving copy with nothing to replace it.
+/// What: the KG read, then [`keep_resolved`]. A replacement in the in-memory
+/// drawer table resolves without I/O; any other is point-read from the redb
+/// drawer row on the blocking pool, since the table can miss a row redb holds.
+/// Runs inside [`fail_open`], so a KG read error or a late answer still
+/// demotes nothing for the palace.
+/// Test: `an_edge_to_a_missing_drawer_demotes_nothing`,
+/// `an_edge_to_an_existing_drawer_is_still_honoured`,
+/// `an_unverifiable_replacement_demotes_nothing`.
+async fn resolved_edges(handle: &PalaceHandle, ids: Vec<Uuid>) -> anyhow::Result<Supersessions> {
+    let edges = handle.kg.superseded_by_many(ids).await?;
+    if edges.is_empty() {
+        return Ok(edges);
+    }
+    let in_table: HashSet<Uuid> = {
+        let targets: HashSet<Uuid> = edges.values().copied().collect();
+        let drawers = handle.drawers.read();
+        drawers
+            .iter()
+            .filter(|d| targets.contains(&d.id))
+            .map(|d| d.id)
+            .collect()
+    };
+    let on_disk: Vec<Uuid> = edges
+        .values()
+        .filter(|r| !in_table.contains(r))
+        .copied()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let mut found: HashMap<Uuid, anyhow::Result<bool>> =
+        in_table.into_iter().map(|id| (id, Ok(true))).collect();
+    if !on_disk.is_empty() {
+        let kg = Arc::clone(&handle.kg);
+        let read = tokio::task::spawn_blocking(move || {
+            on_disk
+                .into_iter()
+                .map(|id| (id, kg.load_drawer(id).map(|row| row.is_some())))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("drawer existence read join error: {e}"))?;
+        found.extend(read);
+    }
+    Ok(keep_resolved(handle.id.as_str(), edges, |id| {
+        match found.get(&id) {
+            Some(Ok(exists)) => Ok(*exists),
+            Some(Err(e)) => Err(anyhow::anyhow!("{e:#}")),
+            None => Ok(false),
+        }
+    }))
+}
+
+/// Keep the edges whose replacement `exists` confirms.
+///
+/// Why (#9462): an edge to no drawer, or to a drawer whose existence cannot be
+/// read, does not resolve to a real drawer, so it is not honoured — the same
+/// fail-open answer as #9421 and #1713: the recall answers, undemoted.
+/// What: `Ok(true)` keeps the edge; `Ok(false)` drops it at DEBUG (the dangling
+/// edges are expected in live data); `Err` drops it with a WARN naming the
+/// palace and both drawers.
+/// Test: `an_edge_to_a_missing_drawer_demotes_nothing`,
+/// `an_unverifiable_replacement_demotes_nothing`.
+fn keep_resolved<F>(palace: &str, edges: Supersessions, exists: F) -> Supersessions
+where
+    F: Fn(Uuid) -> anyhow::Result<bool>,
+{
+    edges
+        .into_iter()
+        .filter(|(old, new)| match exists(*new) {
+            Ok(true) => true,
+            Ok(false) => {
+                // #9462: a dangling edge is not a supersession.
+                tracing::debug!(palace, %old, %new, "#9462: superseded_by names no drawer; ignored");
+                false
+            }
+            Err(e) => {
+                // #9462: unverifiable, so fail open — no demotion.
+                tracing::warn!(
+                    palace,
+                    %old,
+                    %new,
+                    "#9462: cannot read whether replacement {new} exists ({e:#}); \
+                     {old} is not demoted"
+                );
+                false
+            }
+        })
+        .collect()
 }
 
 /// A ranked hit whose inner [`RecallResult`] demotion rewrites.
