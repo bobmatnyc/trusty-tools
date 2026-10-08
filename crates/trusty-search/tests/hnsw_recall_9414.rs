@@ -16,6 +16,10 @@
 
 use std::collections::HashSet;
 
+// #9450: the generators are shared with the churn test in `src/core/store`.
+#[path = "../src/core/store/clustered_vectors.rs"]
+mod clustered_vectors;
+
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use trusty_search::core::chunk_id::ChunkIdShapes;
@@ -35,44 +39,14 @@ const CLUSTERS: usize = 30;
 const SIGMA: f32 = 0.6;
 const MIN_RECALL: f64 = 0.99;
 
-/// One standard-normal sample (Box-Muller).
-fn gaussian(rng: &mut StdRng) -> f32 {
-    let u1: f32 = rng.gen_range(f32::EPSILON..1.0);
-    let u2: f32 = rng.gen_range(0.0..1.0);
-    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
-}
-
-/// Normalise to unit length, then round every component to a multiple of
-/// 2^-10. Such values are exact in f16 (the default store precision), so the
-/// stored vector, the query cast and the f32 brute force all see one vector.
-fn quantize_unit(mut v: Vec<f32>) -> Vec<f32> {
-    let norm = v
-        .iter()
-        .map(|x| x * x)
-        .sum::<f32>()
-        .sqrt()
-        .max(f32::EPSILON);
-    for x in &mut v {
-        *x = ((*x / norm) * 1024.0).round() / 1024.0;
-    }
-    if v.iter().all(|x| *x == 0.0) {
-        v[0] = 1.0;
-    }
-    v
-}
-
 /// `n` points drawn from `CLUSTERS` Gaussian blobs of per-axis spread `SIGMA`.
 fn clustered_points(n: usize, seed: u64) -> Vec<Vec<f32>> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let centers: Vec<Vec<f32>> = (0..CLUSTERS)
-        .map(|_| (0..DIM).map(|_| gaussian(&mut rng)).collect())
-        .collect();
-    (0..n)
-        .map(|_| {
-            let c = &centers[rng.gen_range(0..CLUSTERS)];
-            quantize_unit(c.iter().map(|x| x + SIGMA * gaussian(&mut rng)).collect())
-        })
-        .collect()
+    let blobs = clustered_vectors::Blobs {
+        dim: DIM,
+        clusters: CLUSTERS,
+        sigma: SIGMA,
+    };
+    clustered_vectors::clustered_points(n, blobs, seed)
 }
 
 /// Cosine distance, the store's metric.

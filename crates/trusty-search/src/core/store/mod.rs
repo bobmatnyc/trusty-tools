@@ -23,6 +23,11 @@ mod snapshot_tests;
 mod tests_2936;
 #[cfg(test)]
 mod tests_9414;
+// #9450: survivors of heavy remove churn stay reachable.
+#[cfg(test)]
+mod clustered_vectors;
+#[cfg(test)]
+mod tests_9450;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.
