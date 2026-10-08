@@ -1290,3 +1290,114 @@ async fn machine_history_stream_route_is_an_event_stream() {
         "the stream opens with the current window, got {text:?}"
     );
 }
+
+// ── #9474: the Architect dashboard link ─────────────────────────────────────
+
+/// What the dashboard-link route answers when the Architect data dir holds
+/// `addr` (or no `http_addr` file at all, for `None`).
+///
+/// Why a sync test driving its own runtime: the route reads the discovery file
+/// through `TRUSTY_DATA_DIR_OVERRIDE`, a process-global variable every
+/// env-mutating test serialises on `crate::detect::ENV_LOCK`. Holding that std
+/// mutex across an `.await` is the `await_holding_lock` hazard, so the lock is
+/// taken outside the runtime and the request runs inside it.
+/// What: points the override at a fresh tempdir, writes
+/// `<tmp>/trusty-architect/http_addr` when `addr` is `Some`, issues
+/// `GET /api/console/architect-dashboard`, asserts a 200, and returns the
+/// body's `url` field.
+fn architect_link_for(addr: Option<&str>) -> serde_json::Value {
+    let _guard = crate::detect::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let data = tempfile::TempDir::new().expect("data tempdir");
+    if let Some(addr) = addr {
+        let dir = data.path().join("trusty-architect");
+        std::fs::create_dir_all(&dir).expect("architect data dir");
+        std::fs::write(dir.join("http_addr"), addr).expect("write http_addr");
+    }
+    // SAFETY: serialised on the crate's one TRUSTY_DATA_DIR_OVERRIDE lock.
+    unsafe {
+        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, data.path());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let result = runtime.block_on(async {
+        let router = build_router(make_test_state());
+        let req = Request::builder()
+            .uri("/api/console/architect-dashboard")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        let status = resp.status();
+        let bytes = get_bytes(resp).await;
+        (status, bytes)
+    });
+    // SAFETY: still under the same lock.
+    unsafe {
+        std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+    }
+    let (status, bytes) = result;
+    assert_eq!(status, StatusCode::OK, "the link route always answers 200");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+    body.get("url").cloned().expect("body carries a url field")
+}
+
+/// #9474: a dashboard that recorded its address and is listening gets a link.
+///
+/// What: binds a loopback listener (the stand-in dashboard), records its
+/// address, and expects the route to hand back the normalised URL.
+/// Test: this test itself.
+#[test]
+fn architect_link_present_when_dashboard_discovered_and_live() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let url = architect_link_for(Some(&addr.to_string()));
+    assert_eq!(url, serde_json::json!(format!("http://{addr}/")));
+    drop(listener);
+}
+
+/// #9474: a host with no Architect has no discovery file, so no link.
+/// Test: this test itself.
+#[test]
+fn architect_link_absent_without_discovery_file() {
+    assert_eq!(architect_link_for(None), serde_json::Value::Null);
+}
+
+/// #9474: a stale discovery file whose dashboard has stopped gives no link.
+///
+/// What: binds then drops a listener so the recorded port is closed.
+/// Test: this test itself.
+#[test]
+fn architect_link_absent_when_dashboard_not_live() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    drop(listener);
+    assert_eq!(
+        architect_link_for(Some(&addr.to_string())),
+        serde_json::Value::Null
+    );
+}
+
+/// #9474: a recorded URL naming any host other than loopback is refused.
+///
+/// What: each address names a non-loopback host; the route must answer `null`
+/// for every one. RFC 5737 TEST-NET and `.invalid` keep a broken allowlist from
+/// reaching a real machine.
+/// Test: this test itself.
+#[test]
+fn architect_link_refuses_non_localhost_url() {
+    for addr in [
+        "http://dashboard.invalid:7890/",
+        "192.0.2.1:7890",
+        "0.0.0.0:7890",
+        "http://127.0.0.1@dashboard.invalid:7890/",
+    ] {
+        assert_eq!(
+            architect_link_for(Some(addr)),
+            serde_json::Value::Null,
+            "{addr} must not produce a link"
+        );
+    }
+}

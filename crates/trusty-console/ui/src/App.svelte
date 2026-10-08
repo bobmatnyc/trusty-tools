@@ -34,6 +34,8 @@
   import { viewLabel } from './consoleNav.js';
   // #6908: the console's version and uptime, read from the one `/health` probe.
   import { fetchConsoleHealth } from './consoleVersion.js';
+  // #9474: the Architect dashboard link, shown only while one is live here.
+  import { fetchArchitectDashboard } from './architectLink.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -58,6 +60,12 @@
   let consoleUptimeSecs = $state(null);
   const HEALTH_POLL_MS = 10_000;
   let healthTimer;
+  // #9474: the dashboard's URL while it is live on this host, else null. Re-read
+  // on a timer so the link appears and disappears as the dashboard starts and
+  // stops without a reload.
+  let architectHref = $state(null);
+  const ARCHITECT_POLL_MS = 30_000;
+  let architectTimer;
 
   // Single source of truth: maps service.id → console tab key. A service absent
   // from this map has no dashboard, so `ServicesList` renders its row inert —
@@ -85,6 +93,9 @@
     armIdleWatch();
     stream = createMachineStream({ onState: (next) => (history = next) });
     stream.start();
+    // #9474: not awaited — the link is optional and must never hold up the page.
+    loadArchitect();
+    architectTimer = setInterval(loadArchitect, ARCHITECT_POLL_MS);
     await loadHealth();
     healthTimer = setInterval(loadHealth, HEALTH_POLL_MS);
     const roster = await fetchServices();
@@ -98,6 +109,11 @@
     const health = await fetchConsoleHealth();
     if (health.version !== null) consoleVersion = health.version;
     if (health.uptimeSecs !== null) consoleUptimeSecs = health.uptimeSecs;
+  }
+
+  /** Re-read the Architect dashboard link; a failed read hides it. */
+  async function loadArchitect() {
+    architectHref = await fetchArchitectDashboard();
   }
 
   // ── idle entry to the screensaver (#6519) ────────────────────────────────
@@ -135,6 +151,7 @@
     stream?.stop();
     clearInterval(idleTimer);
     clearInterval(healthTimer);
+    clearInterval(architectTimer);
     for (const event of IDLE_EVENTS) {
       window.removeEventListener(event, noteInput);
     }
@@ -174,6 +191,18 @@
       {/if}
     </div>
     <div class="header-right">
+      <!-- #9474: an outbound link, not a view — it opens the Architect
+           dashboard in a new tab, and exists only while one is live here. -->
+      {#if architectHref}
+        <a
+          class="header-action"
+          href={architectHref}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Architect ↗
+        </a>
+      {/if}
       <!-- #6909: Config is the one former tab with no Services row, so it keeps
            a single header action rather than a re-created tab strip. -->
       <!-- #6929: the Disk view has no Services row either, so it takes the
@@ -359,6 +388,11 @@
     line-height: 1.4;
     padding: 0.25rem 0.6rem;
     transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  /* #9474: the Architect link shares the action style; drop the anchor's
+     underline so it reads as one of the row. */
+  a.header-action {
+    text-decoration: none;
   }
   .header-action:hover {
     color: var(--trusty-text-primary);

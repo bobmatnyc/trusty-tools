@@ -17,6 +17,8 @@
 //! Test: each submodule carries its own `#[cfg(test)]` tests; the route wiring
 //! is exercised by `server.rs`'s integration tests.
 
+// #9474: the header's Architect dashboard link — discovered and probed live.
+pub mod architect;
 pub mod cleanup;
 pub mod config;
 pub mod deletes;
