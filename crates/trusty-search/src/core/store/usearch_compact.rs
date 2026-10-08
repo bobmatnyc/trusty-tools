@@ -167,6 +167,16 @@ impl UsearchStore {
     /// `super::tests_9450::a_failed_compaction_keeps_the_churn_count_and_marker`,
     /// `super::compact_9450_tests::two_queued_compactions_rebuild_once`.
     pub async fn compact_graph_now(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
+        self.compact_graph_with_fault(mode, no_fault()).await
+    }
+
+    /// [`Self::compact_graph_now`] with the build's fault hook, so a test can
+    /// race a write against the real abandon arm (#9450).
+    pub(super) async fn compact_graph_with_fault(
+        &self,
+        mode: CompactMode,
+        fault: RebuildFault,
+    ) -> Result<Option<CompactReport>> {
         if mode == CompactMode::IfDue && !self.compaction_due().await {
             return Ok(None);
         }
@@ -178,7 +188,7 @@ impl UsearchStore {
         if mode == CompactMode::IfDue && !self.compaction_due().await {
             return Ok(None);
         }
-        match self.compact_with_fault(no_fault()).await {
+        match self.compact_with_fault(fault).await {
             Ok(report) => Ok(Some(report)),
             Err(e) => {
                 if mode == CompactMode::IfDue {
@@ -299,6 +309,15 @@ impl UsearchStore {
         &self,
         reindexing: &(dyn Fn() -> bool + Sync),
     ) -> Result<Option<CompactReport>> {
+        self.heal_on_load_with_fault(reindexing, no_fault()).await
+    }
+
+    /// [`Self::heal_on_load`] with the build's fault hook (#9450 tests).
+    pub(super) async fn heal_on_load_with_fault(
+        &self,
+        reindexing: &(dyn Fn() -> bool + Sync),
+        fault: RebuildFault,
+    ) -> Result<Option<CompactReport>> {
         let needs_heal = |store: &Self| store.compact.heal_epoch() < GRAPH_HEAL_EPOCH;
         if !needs_heal(self) && !self.compaction_due().await {
             return Ok(None);
@@ -314,7 +333,7 @@ impl UsearchStore {
         let Some(path) = self.hnsw_path.read().await.clone() else {
             return Ok(None);
         };
-        let report = self.compact_with_fault(no_fault()).await?;
+        let report = self.compact_with_fault(fault).await?;
         if reindexing() {
             return Ok(Some(report));
         }
