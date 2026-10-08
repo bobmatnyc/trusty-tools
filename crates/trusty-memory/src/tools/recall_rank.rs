@@ -26,6 +26,8 @@ use trusty_common::memory_core::palace::{Drawer, DrawerType};
 use trusty_common::memory_core::retrieval::{CrossPalaceResult, RecallResult};
 
 use super::recall_projection::{candidate_window, MAX_CANDIDATE_WINDOW};
+// #9421: superseded drawers rank below their replacements.
+use super::recall_supersede::{demote_superseded, Supersessions};
 
 /// Tags that mark a drawer as an owner ruling or decision.
 ///
@@ -164,16 +166,24 @@ pub(crate) fn ranking_window(top_k: usize, min_score: Option<f32>) -> usize {
 ///
 /// Why: the handlers sort by score once the lanes are fused; a weight applied
 /// after that sort must re-sort or it changes numbers without changing order.
-/// What: multiplies every result's score by [`temporal_weight`], then
+/// What: multiplies every result's score by [`temporal_weight`], then demotes
+/// each drawer `sup` names as superseded (#9421, [`demote_superseded`]), then
 /// sorts by [`by_score_desc`], so equal scores rank by layer, then id. The list
 /// length is unchanged; the caller's floor and `top_k` cut run after this.
 /// Demotion can only lift what the lane fetched: callers fetch a
 /// [`ranking_window`] (about `2 * top_k`) so a hit just past `top_k` can rise.
-/// Test: `demotion_reorders_a_stale_snapshot_below_a_ruling`.
-pub(crate) fn demote_stale_snapshots(results: &mut [RecallResult], now: DateTime<Utc>) {
+/// Test: `demotion_reorders_a_stale_snapshot_below_a_ruling`,
+/// `a_superseded_snapshot_stays_below_its_replacement_after_both_weights`.
+pub(crate) fn demote_stale_snapshots(
+    results: &mut [RecallResult],
+    now: DateTime<Utc>,
+    sup: &Supersessions,
+) {
     for r in results.iter_mut() {
         r.score *= temporal_weight(&r.drawer, now);
     }
+    // #9421: after the snapshot weight, so no later multiplier undoes it.
+    demote_superseded(results, sup);
     results.sort_by(by_score_desc);
 }
 
@@ -181,12 +191,19 @@ pub(crate) fn demote_stale_snapshots(results: &mut [RecallResult], now: DateTime
 ///
 /// Why: the review saw three outdated "Builder band as of" snapshots at ranks
 /// 3-5 of `memory_recall_all`; the merged list needs the same weight.
-/// What: identical rule over each hit's inner [`RecallResult`].
+/// What: identical rule over each hit's inner [`RecallResult`], supersession
+/// included (#9421).
 /// Test: `cross_palace_demotion_reorders_the_merged_list`.
-pub(crate) fn demote_stale_snapshots_across(results: &mut [CrossPalaceResult], now: DateTime<Utc>) {
+pub(crate) fn demote_stale_snapshots_across(
+    results: &mut [CrossPalaceResult],
+    now: DateTime<Utc>,
+    sup: &Supersessions,
+) {
     for r in results.iter_mut() {
         r.result.score *= temporal_weight(&r.result.drawer, now);
     }
+    // #9421: same order of weights as the single-palace pass.
+    demote_superseded(results, sup);
     results.sort_by(|a, b| by_score_desc(&a.result, &b.result));
 }
 

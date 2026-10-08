@@ -529,12 +529,13 @@ async fn delete_drawer_404s_for_an_unknown_drawer_id() {
 }
 
 /// Collects formatted log output so a test can assert on what reached the log.
+/// #9421: shared with `tools::recall_supersede_tests`.
 #[derive(Clone, Default)]
-struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+pub(crate) struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl LogCapture {
     /// Capture `info` and above on this thread until the guard drops.
-    fn install() -> (Self, tracing::subscriber::DefaultGuard) {
+    pub(crate) fn install() -> (Self, tracing::subscriber::DefaultGuard) {
         let cap = Self::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(cap.clone())
@@ -545,7 +546,7 @@ impl LogCapture {
     }
 
     /// The log lines that name `needle`.
-    fn lines_naming(&self, needle: &str) -> Vec<String> {
+    pub(crate) fn lines_naming(&self, needle: &str) -> Vec<String> {
         let bytes = self.0.lock().map(|b| b.clone()).unwrap_or_default();
         String::from_utf8_lossy(&bytes)
             .lines()

@@ -27,6 +27,11 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+// #9421: the batch `superseded_by` lookup recall demotion reads, and its
+// opt-in latency profile.
+#[cfg(test)]
+mod supersession_tests;
+
 pub use explore::{ExpandDirection, SeedNode};
 pub use graph::KnowledgeGraph;
 pub use types::{AdjacencyDesync, KgEdge, Triple};

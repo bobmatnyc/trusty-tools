@@ -13,10 +13,9 @@
 mod recall_support;
 
 use chrono::Duration;
-use recall_support::{backdate, fact_key, rank_of, recall, remember, state_with};
-use serde_json::{json, Value};
-use trusty_memory::service::MemoryService;
-use trusty_memory::tools::dispatch_tool;
+use recall_support::{
+    backdate, fact_key, rank_of, recall, recall_on, remember, state_with, Surface,
+};
 
 /// Why (#9142, #8246): the review's Q02/Q11 shape — an old status snapshot
 /// that matches the query better than the current ruling outranked it.
@@ -126,67 +125,6 @@ async fn a_second_write_to_a_fact_key_demotes_the_first_and_another_key_demotes_
         rb < ra && rc < ra,
         "the retired slot ranks below both live slots: {results:#?}"
     );
-}
-
-/// One recall surface, as the parametrised test drives it.
-#[derive(Debug, Clone, Copy)]
-enum Surface {
-    McpRecall,
-    McpRecallDeep,
-    McpRecallAll,
-    ServiceRecall,
-    ServiceRecallAll,
-}
-
-/// The ranked hits `surface` returns for `query` in `palace`.
-async fn recall_on(
-    state: &trusty_memory::AppState,
-    surface: Surface,
-    palace: &str,
-    query: &str,
-) -> Vec<Value> {
-    let top_k = 5;
-    let out = match surface {
-        Surface::McpRecall => {
-            dispatch_tool(
-                state,
-                "memory_recall",
-                json!({ "palace": palace, "query": query, "top_k": top_k }),
-            )
-            .await
-        }
-        Surface::McpRecallDeep => {
-            dispatch_tool(
-                state,
-                "memory_recall_deep",
-                json!({ "palace": palace, "query": query, "top_k": top_k }),
-            )
-            .await
-        }
-        Surface::McpRecallAll => {
-            dispatch_tool(
-                state,
-                "memory_recall_all",
-                json!({ "q": query, "top_k": top_k }),
-            )
-            .await
-        }
-        Surface::ServiceRecall => Ok(MemoryService::new(state.clone())
-            .recall(palace, query, top_k, false)
-            .await
-            .expect("service recall")),
-        Surface::ServiceRecallAll => Ok(MemoryService::new(state.clone())
-            .recall_all(query, top_k, false)
-            .await),
-    }
-    .unwrap_or_else(|e| panic!("{surface:?}: {e:#}"));
-    match out.get("results") {
-        Some(r) => r.as_array().expect("results").clone(),
-        None => out
-            .as_array()
-            .unwrap_or_else(|| panic!("{surface:?}: {out}"))
-            .clone(),
-    }
 }
 
 /// Why (#8246 review): every recall surface demotes, not only `memory_recall`.

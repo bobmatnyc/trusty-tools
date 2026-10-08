@@ -36,7 +36,7 @@ mod core_kg_tests;
 mod core_recall_tests;
 #[cfg(test)]
 #[path = "core_tests.rs"]
-mod core_tests;
+pub(crate) mod core_tests;
 #[cfg(test)]
 #[path = "helpers_tests.rs"]
 mod helpers_tests;

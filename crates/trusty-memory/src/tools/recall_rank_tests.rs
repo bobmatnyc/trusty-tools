@@ -88,7 +88,7 @@ fn demotion_reorders_a_stale_snapshot_below_a_ruling() {
     );
     let other = hit(drawer("other", &["kg"], Duration::days(1), now), 0.55);
     let mut results = vec![snapshot, ruling, other];
-    demote_stale_snapshots(&mut results, now);
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
     let order: Vec<&str> = results.iter().map(|r| r.drawer.content()).collect();
     assert_eq!(order, ["rule", "other", "snap"]);
     assert_eq!(results.len(), 3, "demotion never drops a hit");
@@ -117,7 +117,7 @@ fn cross_palace_demotion_reorders_the_merged_list() {
             ),
         ),
     ];
-    demote_stale_snapshots_across(&mut results, now);
+    demote_stale_snapshots_across(&mut results, now, &Supersessions::new());
     assert_eq!(results[0].palace_id, "b");
 }
 
@@ -150,7 +150,7 @@ fn a_future_created_at_is_age_zero_not_a_boost() {
         hit(future, 0.5),
         hit(drawer("p", &["kg"], Duration::days(1), now), 0.6),
     ];
-    demote_stale_snapshots(&mut results, now);
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
     assert_eq!(results[0].drawer.content(), "p", "skew must not lift it");
     assert!((results[1].score - 0.5).abs() < 1e-6);
 }
@@ -164,7 +164,7 @@ fn a_nan_score_never_unorders_the_finite_scores() {
         .into_iter()
         .map(|s| hit(drawer("x", &["kg"], Duration::zero(), now), s))
         .collect();
-    demote_stale_snapshots(&mut results, now);
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
     let finite: Vec<f32> = results
         .iter()
         .map(|r| r.score)
@@ -206,7 +206,7 @@ fn ids_ascending(hits: &[RecallResult]) -> bool {
 fn tied_scores_rank_by_drawer_id_whatever_the_input_order() {
     let now = Utc::now();
     let mut results = tied_hits_in_reverse_id_order(now);
-    demote_stale_snapshots(&mut results, now);
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
     assert!(
         ids_ascending(&results),
         "ties must rank by drawer id: {results:#?}"
@@ -216,7 +216,7 @@ fn tied_scores_rank_by_drawer_id_whatever_the_input_order() {
     pinned.layer = 1;
     pinned.drawer.id = Uuid::max();
     results.push(pinned);
-    demote_stale_snapshots(&mut results, now);
+    demote_stale_snapshots(&mut results, now, &Supersessions::new());
     assert_eq!(
         results[0].layer, 1,
         "a lower layer wins a tie before the id"
