@@ -1,3 +1,0 @@
-Changed
-- `trusty-search status`, `health`, `list`, `remove`, `watch`, and the daemon auto-start guard now reach the daemon over its Unix socket instead of HTTP (#9214). Output and exit codes are unchanged; `status` prints the daemon's HTTP URL when it binds one, else its socket path.
-- The CLI no longer falls back to `http://127.0.0.1:7878` when the daemon published no address. Subcommands still on HTTP start the daemon over its socket, then fail with an error naming the missing `http_addr` and `daemon.port` files, for example against a `--no-http` daemon (#9214). A `daemon.port` file left by a daemon that crashed or was killed, naming a port nothing answers on, gets the same error instead of a dead URL.

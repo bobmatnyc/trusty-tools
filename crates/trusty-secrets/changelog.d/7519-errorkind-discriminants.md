@@ -1,2 +1,0 @@
-Changed
-- `server::ErrorKind` variants now carry explicit discriminants, pinned by a test: the 0.1.2 values `InvalidParams = 0` through `Internal = 29` stay as published, and `BackendNotEnabled` is `30`, after `Internal` ([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519), [#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)). `SecretsError::BackendNotEnabled` follows `HomeUnavailable`, so no published `SecretsError` position moves either.

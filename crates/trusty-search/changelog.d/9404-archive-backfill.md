@@ -1,2 +1,0 @@
-Fixed
-- A search with `exclude_archived` no longer returns a short or empty page when archived, deprecated or legacy chunks rank inside its `top_k`. The archive filter now runs while the page is filled, so matching non-archived chunks deeper in the candidate set take the freed slots; `meta.dropped.archived` counts the rows skipped while a slot was open. When only archived chunks match, the page stays empty and `archived` counts every row withheld. Kept chunks still carry the archive down-rank and `archive_reason` (#9404).

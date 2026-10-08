@@ -1,3 +1,0 @@
-Changed
-- `trusty-search port` asks the daemon over its socket which HTTP address it bound, instead of reading `http_addr` or `daemon.port`. Against a socket-only (`--no-http`) daemon it exits 1 with `no HTTP listener (socket-only daemon at <socket>)`; it reports "no daemon running" only when nothing answers on the socket, so a stale port file is never printed as the port. It never starts a daemon (#9214).
-- `trusty-search dashboard` and `monitor web` open the address the daemon reports. Against a socket-only daemon they exit non-zero naming the socket and asking for a restart without `--no-http`, and open no browser; they never fall back to a discovery file or port 7878 (#9214).

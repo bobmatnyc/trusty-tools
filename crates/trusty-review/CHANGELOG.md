@@ -6,6 +6,482 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.38.0] — 2026-10-07
+
+### Breaking
+
+- Behaviour: when no verification round runs — verification disabled in
+  config, or no verifier provider could be built — no finding is posted. Every
+  finding is withheld in `withheld_findings` with the reason `no verifier`, the
+  body leads with "N findings withheld: no verifier (…)", and the review is
+  UNKNOWN with no grade and that note as its error. A review with no findings
+  keeps its verdict. Before, these findings were posted behind a
+  "N findings not verified" note with the verdict unchanged. This supersedes
+  the 2026-09-29 #8904 rule (owner ruling, 2026-09-30; #4044).
+- Each drop function now takes a `&mut Vec<WithheldFinding>` sink as its last
+  argument and records every finding it drops there:
+  `finding_hygiene::sanitize_findings`,
+  `finding_hygiene::drop_self_negated_or_leaked_findings`,
+  `citation_check::enforce_citation_integrity` and
+  `absence_claim::drop_refuted_absence_claims`. Pass `&mut Vec::new()` to keep
+  the old behaviour (#4044).
+- New public fields on structs that are not `#[non_exhaustive]`, so a struct
+  literal outside this crate stops compiling:
+  `mapreduce::ReducedReview::withheld_findings`, and
+  `verify_posted::VerifyReport::unverifiable`, `unconfirmed` and
+  `withheld_findings` (#4044).
+- `VerifyReport` no longer derives `PartialEq` or `Eq`: its new
+  `withheld_findings` holds `Finding`, which implements neither (#4044).
+- New public fields on structs that are not `#[non_exhaustive]`, so a struct
+  literal outside this crate stops compiling: `Finding::citation_partial`,
+  `ReviewResult::withheld_findings`, `GateReport::partial` and
+  `GateReport::withheld_findings` (#8949).
+- `GateReport` no longer derives `PartialEq` or `Eq`: its new
+  `withheld_findings` holds `Finding`, which implements neither (#8949).
+- New public fields on structs that are not `#[non_exhaustive]`, so a struct
+  literal outside this crate stops compiling: `ReviewResult::withheld_count`,
+  `ReviewResult::withheld_by_reason` and `ReviewResult::verdict_status`, the
+  additive fields of owner ruling 7t (#9188).
+- `review_body` no longer carries the reviewer's summary prose or its fenced
+  review JSON on any path, map-reduce included. A caller that re-parsed the
+  body for an embedded `grade` or `verdict` reads the top-level `grade` and
+  `verdict` instead. An aborted review's body was empty, or the truncated
+  reply; it is now the summary sentence for `no_reviewer_output` (#9310).
+- New public field `Finding::severity: Option<Severity>` and new public enum
+  `models::Severity` (`low`, `medium`, `high`, `critical`). `Finding` is
+  `#[non_exhaustive]`, so no struct literal breaks, but a finished review's
+  serialized findings and withheld findings gain a `severity` key. A record
+  without the key still deserializes, with `severity` as `None` (#9310).
+- `ReviewResult` and `Finding` are `#[non_exhaustive]`; build them with
+  `ReviewResult::new` and `Finding::new`, since a struct literal outside the
+  crate no longer compiles (#9310).
+- `ReviewResult::verdict_status` is now `Option<VerdictStatus>`, a closed set
+  serialized as a string: `parsed`, `parse_failed`, `no_reviewer_output`,
+  `all_withheld`, `suppressed_reject`. Every finalized result carries one, so
+  `run --json`, the MCP `review_pr` / `review_diff` envelope, and a stored
+  review record always hold the key; a clean review reads `parsed` (#9310).
+- The `no_verified_findings` status is removed, with
+  `withheld_contract::verdict_status` and
+  `withheld_contract::VERDICT_STATUS_NO_VERIFIED_FINDINGS`. An approving
+  review whose findings were all withheld reads `all_withheld`; a stored
+  record that holds `no_verified_findings` still deserializes, as
+  `all_withheld` (#9310).
+- `run --json` now exits 0 for two reviews that exited non-zero as UNKNOWN
+  before: a review whose findings were all withheld and whose reviewer asked
+  for changes (REQUEST_CHANGES / `suppressed_reject`), and an approving review
+  whose withheld findings had raised its verdict (APPROVE / `all_withheld`).
+  Two all-withheld cases, a rejection whose findings were all advisory and a
+  map-reduce synthesis APPROVE graded D or F, exited 0 as APPROVE before and
+  still exit 0, now as REQUEST_CHANGES. Gate on `verdict` / `verdict_status`, not the exit code
+  alone (#9310).
+
+### Added
+
+- Every Bedrock Converse request now carries `requestMetadata`
+  `caller=trusty-review` and `crate_version=<version>`, so Bedrock model
+  invocation logs attribute trusty-review's spend. Requests whose response
+  schema identifies the call also carry `role` (`reviewer`, `verifier`,
+  `synthesis` or `investigate`). OpenRouter and Fireworks requests are
+  unchanged.
+- Public modules `trusty_review::pipeline::pr_index` (`PrIndex`, `IndexPin`,
+  `resolve_pr_index`) and `trusty_review::config::repo_index`
+  (`RepoIndexError`, `PinOrigin`), and `trusty_review::pipeline::caller_preamble`,
+  which splits a `# Context:` preamble off a diff and caps caller-context
+  fields (`cap_caller_context`).
+- `trusty-review run` takes `--pr-description`, `--pr-discussion` and
+  `--referenced-code` as literal text; a leading `@` is plain text. Each has a
+  `-file` twin (`--pr-description-file`, `--pr-discussion-file`,
+  `--referenced-code-file`) that reads a regular file of at most 256 KiB and
+  conflicts with its text flag. A file that cannot be read, is not a regular
+  file, or exceeds the cap fails the run before any network call.
+- `finding_hygiene::relax_wiped_verdict` and the crate-internal
+  `mapreduce::run_map_reduce_with_wiped` report the verdict the pre-grade
+  hygiene pass relaxed; `relax_verdict_if_evidence_wiped` and
+  `run_map_reduce` keep their signatures (#9188).
+- MCP `review_pr` accepts optional `pr_description`, `pr_discussion` and `referenced_code` (strings) and `include_pr_body` (boolean), all off by default. A call without them reviews exactly as before. A mistyped text param is ignored with a warning; a mistyped `include_pr_body` is an invalid-params error (#9192).
+- `include_pr_body` (MCP) and `run --include-pr-body` merge the fetched PR body, capped at 64,000 characters with its own visible marker, into the reviewer's PR description, ahead of any caller text, which keeps its own cap. The body sits in a code fence longer than any backtick run it holds, under a note marking it as data from the PR author, so it cannot pose as a prompt section. The verifier's author rationale and the citation corpus use the same capped text; a citation of the cut-off tail is withheld. On a local diff the body is recorded unavailable and the review runs (#9192).
+- A source ledger records each optional source (`pr_body`, `caller_context`) as `used`, `truncated`, `absent` or `unavailable`, with character counts and per-field items. It is on when `review_pr` receives any of the four new params, or when `run` gets `--include-pr-body` or the new `--report-context`; the `run` text flags and a `# Context:` preamble never turn it on alone. MCP reports it as `context_sources` on the envelope. `run --json` then prints `{"result": <review>, "context_sources": [...]}`, and human output prints one line per unavailable or truncated source. Without those flags `run --json` is unchanged, and `ReviewResult` is unchanged (#9192).
+- Library: `run_review_with(config, input, deps, ReviewOptions)` returns a `ReviewOutcome` (the `ReviewResult` plus `context_sources`); `run_review` is unchanged and equals `run_review_with` with `ReviewOptions::default()`. New public items: `OptionalContextRequest`, `ReviewOptions`, `ReviewOutcome`, `models::{ContextSourceRecord, ContextItemRecord, SourceState}`, `config::constants::MAX_PR_BODY_CHARS` (#9192).
+- A review that fails to parse now records its reply shape (stop reason, output
+  tokens, text length, and a short masked head and tail) in the warning log and
+  in the `review not parsed` error. The Bedrock provider logs the content-block
+  kinds of a structured reply that carried no tool call (#9310).
+- When a reply's ```` ```json ```` or ```` ```jsonc ```` fence holds no valid
+  review object, the fail-safe reason now says so. The review stays fail-safe
+  UNKNOWN, and no other object in the reply is trusted (#9310).
+- Opt-in raw capture of Bedrock reviewer replies: with
+  `TRUSTY_REVIEW_CAPTURE_DIR=<dir>` set, every reviewer call (unified and
+  map-reduce chunks, parsed or not) writes one JSON file (mode 0600, in a dir
+  created 0700) holding the raw reply, the tool-use input, model, stop reason,
+  token counts and a timestamp. Off by default. A failed write is logged and
+  never changes the review. The model-eval report names each row's capture
+  files (#9310).
+- Every finding in a finished review, and every withheld finding, carries a
+  `severity` of `low`, `medium`, `high` or `critical` in `run --json`, the
+  MCP `review_pr` / `review_diff` envelope and the stored review record. A
+  severity the reviewer gave is kept, so `critical` stays `critical`, but it
+  never exceeds what the finding's final effort allows: a `critical` finding
+  a gate demoted to Medium effort reads `medium`, and a High finding with no
+  citation and no `code_provable` flag reads at most `medium`. With no usable
+  reviewer severity it is derived from effort and is never `critical`.
+  Severity changes no verdict and no grade (#9310).
+- MCP `review_pr` and `review_diff` accept optional `spec_docs` and `claude_md` booleans, and `run` takes `--spec-docs` and `--claude-md`. `spec_docs` reads the ADR, spec and SLD docs the PR body names (`docs/adr`, `docs/specs`, `docs/design`, `docs/prd`, `docs/architecture`, `docs/reference`, `crates/*/docs`; an SLD `#anchor` reads the whole file), plus doc paths trusty-search finds; `claude_md` reads the root `CLAUDE.md` and up to 3 nested ones. Every read uses the GitHub Contents API at the PR head SHA, never the default branch. Off by default; a review without them is unchanged (#9193).
+- Docs render as `## Referenced docs` and `## Repository conventions (CLAUDE.md)` for the reviewer only, each block headed `path@sha` and fenced as data; a doc the PR itself changes is marked "this PR modifies this doc". Caps: 16,000 characters per doc with a visible marker, at most 6 docs and 48,000 characters, and 16,000 characters for the CLAUDE.md section; a doc past a limit is left out whole and recorded (#9193).
+- A new `[doc: path@sha — "excerpt"]` citation, taught only in the docs section note. It resolves only when the path was read, the SHA is a 7+ character prefix of the head, and every excerpt is in that doc's text as the reviewer saw it; otherwise the finding is withheld, like an unresolved `[code:]` citation (#9193).
+- The source ledger gains `spec_docs` and `claude_md` rows. A missing path is `absent`; an API error, a directory, an undecodable file, a fork head the base repository cannot resolve, a failed trusty-search discovery, or a malformed head SHA is `unavailable`; none stops the review. `review_diff` and `run` on a local diff report both sources `unavailable` (#9193).
+- `report_context` on the `review_pr` and `review_diff` MCP tools asks for the context-source ledger alone; a non-boolean is an invalid-params error, and the envelope then carries `context_sources` even when the list is empty (#9194).
+- The ledger lists every source when reporting is on, in a fixed order: `pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`, `search`, `analyze` and `external_sources`. A failed search query, analyze call or external source is `unavailable` with its reason; zero hits, no hotspots or smells in the changed files, or a source with no results is `absent`; a dependency the context gate degraded is `unavailable` with the gate's reason (#9194).
+- Every ledger detail, on a row or an item, is one line of at most 200 characters with credentials redacted, including a PR-metadata fetch error and a docs source that could not run; an `Authorization:Bearer` token with no space after the colon, an `X-Api-Key:` value spaced or glued to its colon (`Token:` and `Password:` alike), a JSON-quoted `"Authorization":"Bearer` token, an `authorization=bearer` token and a URL userinfo password are hidden too (#9194).
+- `SourceState::NotRequested` (`not_requested`) marks an input the request did not ask for (#9194).
+- `run --report-context` prints a line for each `absent` source as well as each `unavailable` or `truncated` one (#9194).
+- `AnalyzeClient::analysis_status`, a provided method, returns why analysis is unavailable; `run_output::ledger_value` builds the `context_sources` value, an `{"error": ...}` object if it cannot be serialised (#9194).
+- MCP `review_pr` and `review_diff` accept an optional `issue_docs` array, and `run` takes `--issue-docs-file <PATH>` (a JSON file of at most 256 KiB), to give the reviewer the issues a change addresses: `[{id, title?, body, url?}]`, GitHub issue numbers only; a `url` must be an `http://` or `https://` link with no whitespace. Both use one strict parser; a malformed value is an invalid-params error on MCP and fails `run` before any network call. Off by default; a review without them is unchanged (#9197).
+- Issue docs render as `## Linked issues` after the caller's sections, under one note marking every title, link and body as data; each link renders as `URL: <url>` and each body sits in a fence it cannot close. Each body is capped at 16,000 characters with a visible marker; at most 8 docs and 48,000 body characters are shown, and a doc past either limit, or with a repeated id, is left out whole. Past 64 docs the rest are not read and the dropped tail is one ledger item. The refs corpus holds the same capped text, so a `[gh: #N — "excerpt"]` citation resolves only against what the reviewer saw. The verifier never sees issue text. Works on a local diff (#9197).
+- The source ledger gains an `issues` row with one item per doc, the item state `omitted`, and an item `detail` naming why a doc was left out. `review_diff` now runs through `run_review_with` and reports `context_sources` only when `issue_docs` is sent (#9197).
+- Library: `OptionalContextRequest::with_issue_docs`, `IssueDoc`, `IssueDocsError`, `SourceState::Omitted`, `ContextItemRecord::detail`, and the `MAX_ISSUE_*` constants in `config::constants`. No existing public type gains a required field (#9197).
+
+### Fixed
+
+- Bedrock cost estimates use the AWS Price List rates (effective 2026-09-01)
+  and price a `global.` inference profile at the global rate and a geographic
+  profile (`us.`, `eu.`, `ap.`, `jp.`) at the regional rate, 10% higher.
+  Sonnet 5.5 and Opus 5.5 are now priced instead of reporting $0. Corrected
+  `us.` rates in $/MTok input/output: Haiku 4.5 1.10/5.50 (was 0.80/4.00),
+  Sonnet 4.6 and Sonnet 4.5 3.30/16.50 (was 3.00/15.00), Opus 4.8 5.50/27.50
+  (was 15.00/75.00).
+- Only findings the verifier confirms are posted. A finding the verifier judges
+  unverifiable, or that a hygiene pass marked unverifiable before the round, is
+  now withheld instead of posted as an advisory. It is recorded with the reason
+  `unverifiable` and counted in `withheld_unverified_count`. An APPROVE or
+  APPROVE* review that loses only such advisory findings keeps its verdict
+  (owner ruling on #8905, 2026-09-30; #4044).
+- `withheld_findings` now records every finding any gate withholds, each with a
+  reason that names the gate: `#4044 self-negated (marker "…")`,
+  `#4042 citation: …`, `#1873 refuted absence claim: …`, the map-reduce dedup
+  and `max_findings` cap, the #8905 citation gate, and the verifier
+  (`refuted by the verifier`, `the verifier could not judge it`,
+  `past the verifier-call cap`, `unverifiable`, `no verifier`). Before, it recorded #8905
+  drops only, and the other paths left only a log line. This holds on both the
+  single-pass and the map-reduce path (#4044).
+- The self-negation filter now also drops findings that say "this is fine",
+  "no issue here" or "non-finding", matched case-insensitively. One such
+  finding passed the filter on the 0.37.0 re-measure (#4044).
+- The webhook drain, the service `review` operation and `trusty-review run` on
+  a GitHub PR now review against the PR repo's own trusty-search index, as
+  `review_pr` has since #8649. Before, they used the index resolved once at
+  startup, or `"main"`. A repo with no index is an error that names the repo
+  and the index id. An unreadable index registry is an error on these
+  surfaces unless search is opted out (`TRUSTY_REVIEW_REQUIRE_SEARCH=false`),
+  which runs a degraded diff-only review. A drain delivery whose index cannot
+  be resolved is kept and retried. The unattended surfaces treat a configured
+  `TRUSTY_SEARCH_INDEX` as a hint only, so they never review against another
+  repo's index.
+- PR context now reaches the reviewer from `trusty-review run` and the MCP
+  `review_diff` tool. `review_diff` passes its `context` argument as the PR
+  description instead of writing it onto the diff, where the parser dropped it
+  as unattributable content.
+- A diff whose first line starts with `# Context:` no longer loses that block.
+  The lines before the first file header are read as the PR description and
+  removed from the diff. Other unattributable preambles still log the
+  "could not be attributed" warning.
+- Each caller-context field (PR description, PR discussion, referenced code) is
+  capped at 64,000 characters before the reviewer and verifier see it, on
+  every surface. A cut field ends with a `[... truncated: N more characters
+  omitted ...]` marker.
+- `trusty-review run --config <file>` now applies the whole file:
+  `[verification]`, `[models.verifier]`, `[models.reviewer]`, `[review]`,
+  `[voice]`, `[coverage]` and `[context]`. `run` rebuilt its config with the
+  model overrides from no file at all, so only the environment overrides took
+  effect. `calibrate` had the same defect and is fixed the same way.
+- The citation-integrity check reads a ranged or anchored `[code: …]` locator
+  (`a.rs:10-20`, `a.rs:L10`, `a.rs:L10-L20`, `a.rs#L10-L20`, `a.rs:10:5`) as
+  its path and start line, so a range starting past the file's last diffed
+  line is withheld. A true finding that quotes a `:` range form (`:N-M`,
+  `:LN`, `:LN-LM`) is no longer withheld as "not part of the diff" (#9188).
+- A review whose every finding was withheld posts none of them, and its
+  verdict follows the model's (#9188 A; AQ-7t, Bob 2026-10-05). A blocking
+  review (REQUEST_CHANGES or BLOCK) is UNKNOWN with no grade and an error, so
+  `run --json` exits non-zero. That includes a blocking review whose findings
+  were all dropped before grading because their quote or path is not in the
+  diff, on the single-pass and map-reduce paths: the #4042 relaxation to
+  APPROVE no longer decides its final verdict. An APPROVE or APPROVE* review keeps its
+  verdict and exits 0, whichever gate withheld its findings (citation gate,
+  verifier refutation or UNVERIFIABLE, head re-check, or no verifier round
+  because verification is disabled or no verifier could be built); it is
+  graded from the posted findings alone, so with none it is `A+` for APPROVE
+  and `C+` for APPROVE*, and it carries `withheld_count`, `withheld_by_reason`
+  and `verdict_status: "no_verified_findings"`. Before, a review whose
+  findings no verifier round checked was always UNKNOWN (#4044).
+- A finding with any quoted snippet missing from the cited file is withheld;
+  it is no longer kept as `citation_partial` (#9188 B).
+- The reviewer's prose and the map-reduce synthesis summary are kept only
+  when nothing was withheld and every `path:line` or `path:start-end` they
+  cite in a file of the diff overlaps a posted finding's line or `[code: …]`
+  span; otherwise the body carries a summary rebuilt from the posted findings
+  (#9188 C). Strings such as `127.0.0.1:8080`, `example.com:443` and paths
+  outside the diff are not citations, so they no longer replace the prose.
+- `[jira:]`, `[gh:]` and `[confluence:]` citations must resolve in the
+  context the reviewer was shown (PR title and body, discussion, fetched
+  sections), or the finding is withheld (#9188 D). The reference must occur
+  as a whole token (`#918` does not match `#9188`), every quoted excerpt must
+  occur, and an excerpt shorter than 12 characters verifies nothing.
+- A finding must quote the code it describes; neither identifiers in
+  unquoted prose nor a bare backtick identifier such as `step_4` or `run()`
+  anchors a citation (#9188 E).
+- A quote found only on removed lines anchors only a finding about a removal,
+  and such a finding, cited at its deletion's position, is posted unchanged;
+  it no longer carries a `citation_correction` to the line it already cited
+  (#9188 F).
+- A cited path with directories resolves only to that path or a file it ends
+  at a `/` boundary, never to another file sharing its basename (#9188 H).
+- A citation holds only when the quoted code falls on the cited lines; a
+  weaker anchor on the line no longer holds it, and a range must contain the
+  whole quote (#9188 I).
+- On a review that is not UNKNOWN, a withheld finding no longer shapes the
+  grade: it is recomputed from the posted findings alone (#9188 J).
+- `ReviewResult`, and so `run --json`, gains `withheld_count`,
+  `withheld_by_reason` and, when no finding survived, `verdict_status:
+  "no_verified_findings"`, whatever the verdict. The MCP envelope gains
+  `withheld` (`count`, `by_reason`) and the same `verdict_status`. All are
+  absent when nothing was withheld, and `isError` is unchanged (#9188 K).
+- Every posted finding is re-checked at the head after the verifier; a
+  CONFIRMED finding whose citation does not resolve is withheld (#9188 L).
+- `calibrate` reports `unresolvable_survivor_count` and `withheld_by_reason`
+  (#9188).
+- A reviewer, verifier or MCP `reviewer_model` set to a Bedrock model ARN
+  (`application-inference-profile`, `inference-profile` or `foundation-model`)
+  now runs on Bedrock Converse. Before, the Bedrock provider rejected every ARN
+  for lacking a `us.`-style prefix, so the review failed to start (#9200).
+- An ARN call goes to the region inside the ARN, ahead of `TRUSTY_AWS_REGION`
+  and `AWS_REGION`, because Bedrock resolves an ARN only in its own region. The
+  new `BedrockProvider::new_in_region` takes an explicit region, which wins
+  over the ARN's (#9200).
+- Cost for an `inference-profile` or `foundation-model` ARN is priced as the
+  model id the ARN names. An `application-inference-profile` ARN does not name
+  its model, so a warning log line reports it as unpriced and the review footer
+  shows `est. unpriced` in place of a dollar estimate (#9200).
+- An ARN's 12-digit account id is masked as `****` in three places. First,
+  the posted PR comment: both its footer and its verdict JSON block. Second,
+  the MCP review JSON, the CLI output and the logs of every review that
+  completes normally. Third, Bedrock error, validation and warning messages,
+  including ARNs that AWS quotes back. The ARN sent to AWS is not masked. The
+  validation error now says a Bedrock model ARN is accepted (#9200).
+- Structured Bedrock calls to Claude Sonnet 5.5 and Opus 5.5, including the
+  default reviewer, no longer fail with `ValidationException: tool_choice:
+  type "tool" and "any" are not supported for this model`. For these models
+  the request sets `toolChoice` to `auto`, keeps the output tool, and adds one
+  system-prompt line asking the model to answer through that tool. This holds
+  behind any inference-profile region prefix, including `apac.` and `au.`
+  inference-profile ARNs. An application-inference-profile ARN, which does not
+  name its model, gets the same `auto` request. Every other model sends the
+  same forced request as before. A prose reply is parsed as JSON text or fails
+  closed, as before.
+- The verifier's free-text keyword fallback no longer reads a verdict word
+  preceded by a negation as that verdict. "not REFUTED", "cannot be refuted",
+  "isn't refuted", "unrefuted" and "not UNVERIFIABLE" now judge nothing, so
+  the finding is withheld as unjudged and the verdict keeps its floor; before,
+  a negated REFUTED dropped the finding as refuted. Only a negation earlier in
+  the verdict word's own clause counts: "Not a real bug. REFUTED." and
+  "REFUTED is not accurate" are still refutations. A quoted verdict word
+  ('REFUTED') still matches (#9292).
+- The Bedrock provider no longer sends `temperature` to Claude Opus 5.5 or
+  Claude Sonnet 5.5, which reject it with `ValidationException`, so reviews on
+  either model no longer fail on every call. Every id shape is covered: bare,
+  any region prefix, and inference-profile or foundation-model ARNs. Every
+  other model, and an application-inference-profile ARN, still sends the
+  configured temperature ([#9304](https://github.com/bobmatnyc/trusty-tools/issues/9304)).
+- A reviewer finding with no `title`, or a blank one, no longer turns the
+  whole review into UNKNOWN. Its title is the first sentence of its `body`,
+  capped at 120 characters, or "Untitled finding" when the body is blank too.
+  `body` and `verdict` stay required, and the count of derived titles is
+  logged once per parsed reply.
+- When the review object fails to deserialize, the fail-safe reason now names
+  the serde cause and its line and column, for example ``missing field
+  `verdict` at line 1 column 52``. It never quotes the reply.
+- On the map-reduce path the reviewer's grade now counts toward the verdict.
+  A synthesis APPROVE graded D reads REQUEST_CHANGES and one graded F reads
+  BLOCK, unless a confirmed low-confidence finding relaxes it; a follow-up
+  #9310 PR makes a D or F grade a hard floor that no override relaxes. The
+  grade is kept; before, it read APPROVE and its grade was raised into the
+  APPROVE band. The grade only tightens the verdict: an APPROVE graded B+
+  beside Medium findings stays APPROVE (#9310).
+- With synthesis off or not answering, a chunk reply of APPROVE graded D or F
+  is a rejection, so one such chunk makes the whole review REQUEST_CHANGES or
+  BLOCK. When every finding of that chunk is withheld, the review reads
+  REQUEST_CHANGES / `suppressed_reject`, not APPROVE / `all_withheld` (#9310).
+- With synthesis on, a chunk reply of APPROVE graded F makes the mechanical
+  verdict BLOCK, so the synthesis floor holds the review at REQUEST_CHANGES or
+  stricter even when synthesis answers APPROVE. When every finding of that
+  chunk is withheld, the review reads `suppressed_reject` (#9310).
+- A finding's `source_citation` qualifies a High finding for the BLOCK floor
+  only when the whole string is a citation, optionally ending in one `.`: an
+  optional `code:`, `jira:` or `gh:` prefix in any case, then a
+  `path:line[:col][-line]`, a ticket key or spec id (`SPEC-X-03~draft`),
+  `[owner/repo]#N` or a named spec section, or a `,`/`;` list of these. A
+  path may contain `+ @ [ ] ( ) ~` and may be backticked. An identifier
+  inside prose ("see #1 trust me"), `#0`, `path:0` and a bare `§1` no longer
+  qualify, so such a finding is held at the REQUEST_CHANGES tier instead of
+  BLOCK (#9310).
+- The `trusty-review run` exit code does not change: it reads only a skipped
+  run or a recorded error, never the verdict (#9310).
+- A reviewer finding with `"title": null` or `"severity": null` no longer
+  turns the whole review into UNKNOWN. A null title is derived from the body,
+  as a missing one is, and a null severity is derived from effort (#9310).
+- When a double-encoded `findings` string does not decode, the fail-safe
+  reason names the line and column of that string in the reply. Before, it
+  named a position counted inside the decoded string (#9310).
+- A reviewer severity padded with whitespace now counts at its level: `" high "`
+  is high, not low, so its finding carries High effort and can raise the
+  verdict as any High finding can (#9310).
+- UNKNOWN now means only that the reviewer gave no usable answer: its reply
+  did not parse (`parse_failed`, with the cause in `error`), or there was no
+  reply (`no_reviewer_output`: a call error, an empty or truncated reply, or a
+  review stopped before the call). A blocking review whose supporting findings
+  were all withheld is REQUEST_CHANGES with `suppressed_reject`, never APPROVE;
+  an approving one is APPROVE with `all_withheld`. The reviewer's grade
+  counts toward its verdict: an APPROVE graded D or F is a rejection, so with
+  every finding withheld it reads REQUEST_CHANGES / `suppressed_reject`, on
+  the map-reduce synthesis path too. A rejection whose findings were all
+  withheld reads the same even when the gates had approved it, for example
+  because every finding was advisory. The PR comment heading
+  names any status other than `parsed` beside the verdict (#9310).
+- The "N findings withheld" headline counts every withheld finding, read from
+  `withheld_findings`, with one line per reason class below it. Each gate used
+  to prepend its own count, so the headline could read 6 while the array held
+  10 (#9310).
+- A Bedrock reply that ended in a tool call is parsed from the tool input
+  alone. A ```` ```json ```` fence or a verdict keyword in that text is never
+  read, and a tool input that does not deserialize is `parse_failed`, naming
+  the serde cause. Text replies keep every parse strategy (#9310).
+- A dry run no longer blocks a live review of the same head for up to 2h.
+  `run` without `--live` no longer opens the dedup store, and a review that
+  cannot post never claims its head, so a later live `run` or
+  `webhook-listen` review of that head no longer fails with "another review
+  holds the in-progress dedup claim" (#9348).
+- A live post whose request never reached GitHub now releases its dedup
+  claim, so a retry can run at once. That covers a token that could not be
+  resolved and a connection that failed — DNS failure, connection refused,
+  connect timeout, as on an offline or off-VPN machine. A post GitHub
+  rejected with a 4xx releases the claim too, so each bounded
+  `webhook-listen` drain retry of such a delivery runs the reviewer again. A
+  post that may have created the comment keeps the claim until the 7200s
+  stale window ends, so the retry cannot post a second comment (#9348).
+- A dry run of a head that a live review already completed now runs the
+  review instead of reporting "skipped: duplicate of a completed review".
+  That includes `run` without `--live` and a dry `webhook-listen` delivery: a
+  requested reviewer other than the bot or a `live_review_requesters` login,
+  or no reviewer login with `PR_INTELLIGENCE_DRY_RUN=true`. It
+  still posts nothing, and a live re-run of that head is still skipped
+  (#9348).
+- The `github_issues` context source no longer queries the GitHub Search API for a local diff, which has no repository; the query answered 422 and contributed nothing (#9194).
+
+### Changed
+
+- The default reviewer model on Bedrock is now Claude Sonnet 5.5
+  (`us.anthropic.claude-sonnet-5-5`), replacing Sonnet 4.6. The verifier and
+  summarizer defaults stay Haiku 4.5. `--reviewer-model`,
+  `TRUSTY_REVIEW_REVIEWER_MODEL` and the config file still override it.
+- The default `compare` model set is now Haiku 4.5, Sonnet 4.6, Sonnet 5.5 and
+  Opus 5.5, all on Bedrock `us.` profiles. Sonnet 4.5 is no longer in it.
+- `trusty-review run` on a GitHub PR checks a pinned index against the PR's
+  repository instead of using it unchecked. A `TRUSTY_SEARCH_INDEX` recorded
+  for the PR's repo is used; one recorded for another repo, not registered, or
+  with no recorded identity (unless its id is the repo name) fails the run with
+  an error naming both repos and how to clear the pin. The index
+  `--source-root` maps to fails the run when it is recorded for another repo;
+  a legacy index with no recorded identity is used with a warning. Local
+  `--local-diff`/`--base` runs are unchanged.
+- `trusty-review run` and `compare` now let an explicit `--source-root` win
+  over `TRUSTY_SEARCH_INDEX`, which can be inherited from a parent process's
+  environment. On a GitHub-PR `run`, the index `--source-root` maps to is still
+  checked against the PR's repository. With no `--source-root`, a
+  `TRUSTY_SEARCH_INDEX` pin is checked as before.
+- The citation gate keeps a finding when one quoted snippet places its
+  citation and another is not in the diff. The finding is marked
+  `citation_partial`, demoted to advisory so it cannot drive the verdict,
+  noted as "citation partly unverified", and posted in the review body, never
+  inline. A finding none of whose quoted snippets is in the file still drops.
+- A double-quoted phrase in a finding's prose no longer has to appear in the
+  cited file. It anchors the citation when present and is ignored otherwise.
+  Quote pairing skips backtick spans, so a string literal in quoted code no
+  longer opens a prose quote.
+- Every finding the gate drops is kept in the review record as
+  `withheld_findings`, with its reason and the quoted fragment that failed to
+  match. The drop log line names that fragment.
+- An APPROVE or APPROVE* review keeps its verdict when the gate drops only
+  advisory findings, instead of becoming UNKNOWN. A dropped finding that could
+  escalate the review on its own still makes it UNKNOWN.
+- New public type `models::WithheldFinding`.
+- `citation_gate::GateReport::partial` is deprecated: #9188 B withholds a
+  partly quoted finding instead of keeping it, so read `dropped` and
+  `withheld_findings` (`missing_fragment`). It still counts the kept findings
+  marked `citation_partial` (#9188).
+- trusty-review reaches trusty-search over its Unix socket when one is
+  present, and over HTTP otherwise. `TRUSTY_SEARCH_SOCKET` wins; an explicit
+  `TRUSTY_SEARCH_URL` (or a non-default `search_url`) keeps HTTP; with neither
+  set, the default socket is used when its file exists. The default socket
+  follows the daemon's own rule: `<TRUSTY_DATA_DIR>/trusty-search.sock` when
+  `TRUSTY_DATA_DIR` is set, so an isolated instance never reads the shared
+  daemon. A socket file with no
+  daemon behind it is reported as unreachable and never falls back to HTTP.
+  Socket errors read as the HTTP ones did: an unknown index is a 404 and an
+  unavailable one is a 503 carrying the daemon's body (#9214).
+- The search, report-trace, index-registry and subprocess-analyze clients all
+  follow that rule, and the spawned `trusty-analyze review` child is given the
+  resolved transport as `TRUSTY_SEARCH_SOCKET` or `TRUSTY_SEARCH_URL`. Context
+  gate messages name the transport used (`socket <path>` or the URL) (#9214).
+- New, additive: `SearchTransport`, `HttpSearchClient::with_transport` and
+  `transport`, `SubprocessAnalyzeClient::with_transport`,
+  `HttpTraceSource::with_transport` and
+  `index_registry::fetch_registered_indexes_via`. Existing constructors keep
+  their signatures (#9214).
+- A D or F grade is now a hard floor on the verdict, the follow-up the
+  map-reduce grade-floor entry promised: a review graded D+, D or D- reads at
+  least REQUEST_CHANGES and one graded F reads BLOCK, whatever relaxes it. A
+  confirmed low-confidence finding, an advisory-only finding set, the
+  verifier's re-check, a self-reported BLOCK held back on one uncited High
+  finding, and findings dropped before grading no longer lower it. The floor
+  reads the reviewer's own grade, before any pass regrades it; grades A to C
+  behave as before. With synthesis off or not answering, the strictest chunk
+  grade floors a map-reduce review; when synthesis answers, only its grade
+  does. Two cases stay REQUEST_CHANGES: a review whose every finding was
+  withheld (`suppressed_reject`), and an F whose every blocker the verifier
+  refuted, since the F is withdrawn with them. A review the floor raises reads
+  `verdict_status` `parsed`: an F review whose blocker a citation gate
+  withheld, and which still posts a finding, reads BLOCK / `parsed`, not
+  REQUEST_CHANGES / `suppressed_reject` (#9310).
+- What changes is the `verdict` and `verdict_status` fields of the JSON and
+  MCP result and the verdict in the PR comment heading. The `trusty-review run` exit code does
+  not change: it reads only a skipped run or a recorded error, never the
+  verdict (#9310).
+- The summary in `review_body` is built from the verified result and never
+  from the reviewer's prose: one sentence, then one line per surviving finding
+  with its severity, `file:line` and title, highest severity first. A withheld
+  or refuted finding is never named in it, and the withheld count stays in the
+  "N findings withheld" headline above it. With no surviving finding the
+  sentence names why: the reply did not parse, there was no reply, every
+  finding was withheld from an approving or a rejecting review, or the
+  reviewer raised none. The synthesis call still runs on the map-reduce path
+  and still sets the verdict and grade (#9310).
+- The citation checks read `[doc: …]` as a bracket citation, not as free-text quotes: its excerpt is no longer matched against the diff, and a `[doc:]` citation that does not resolve in the docs read at the PR head withholds its finding (#9193).
+
+### Security
+
+- `trusty-review` no longer prints AWS credential material on stderr. The AWS
+  credential provider logs the access key ID at INFO, and the SigV4 signer
+  logs the key ID and the session token at TRACE; a `RUST_LOG=info` or
+  `RUST_LOG=trace` meant for trusty-review's own events (agent sessions export
+  `RUST_LOG=info`) let them through. The stderr filter now holds every `aws*`
+  target at `warn` unless `RUST_LOG` has a directive for exactly `aws`. A
+  directive for one AWS crate or module, such as `aws_config::imds=debug`,
+  opens only that target. An unparsable `RUST_LOG` falls back to `warn` with
+  the guard.
+- A trusty-search URL with credentials no longer reaches `result.error`, `review_body` (what `review_pr` posts) or stderr when search is unreachable: its userinfo password, a username-only userinfo (sent as Basic auth) and credential query values (for example `access_token`) print as `[redacted]`, on the CLI and over MCP. The host, path and error stay. (#9431)
+
+### Documentation
+
+- The `contains_name` doc example no longer names the retired `trusty-mpm-gui` crate (Refs [#7964](https://github.com/bobmatnyc/trusty-tools/issues/7964))
+
 ## [0.37.0] — 2026-09-30
 
 ### Fixed
