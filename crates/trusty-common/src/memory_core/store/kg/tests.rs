@@ -800,8 +800,9 @@ async fn expand_neighbors_unknown_entity_is_empty() {
 /// print into an otherwise-clean test run — the hook is global, so a concurrent
 /// test panicking in that window loses its message but still fails.
 /// Test: used by `retract_triple_after_poisoned_adjacency_is_distinguishable_from_never_retracted`
-/// and `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`.
-fn poison_adjacency(kg: &KnowledgeGraph) {
+/// and `cascade_delete_after_poisoned_adjacency_is_distinguishable_from_never_deleted`,
+/// and (#9433) `a_failed_edge_write_still_lands_the_remember_and_warns`.
+pub(crate) fn poison_adjacency(kg: &KnowledgeGraph) {
     let adj = kg.adj.clone();
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));

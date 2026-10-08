@@ -830,3 +830,250 @@ async fn an_undecodable_incumbent_row_fails_the_write_instead_of_admitting_a_sec
          row load_drawers skips"
     );
 }
+
+// ── The supersession edge retire-on-write leaves behind (#9433) ─────────────
+
+/// The active `superseded_by` objects of `drawer:<id>`, read from redb.
+async fn superseded_by_edges(kg: &KnowledgeGraph, id: Uuid) -> Vec<String> {
+    use crate::memory_core::share::SUPERSEDED_BY;
+    kg.query_active(&format!("drawer:{id}"))
+        .await
+        .expect("query_active")
+        .into_iter()
+        .filter(|t| t.predicate == SUPERSEDED_BY)
+        .map(|t| t.object)
+        .collect()
+}
+
+/// A Tier C newcomer for `SLOT` with the default TTL.
+fn slot_newcomer(room_id: Uuid, content: &str) -> Drawer {
+    let mut d = Drawer::new(room_id, content);
+    d.fact_key = Some(SLOT.to_string());
+    d.expires_at = Some(Utc::now() + Duration::hours(24));
+    d
+}
+
+/// Why (#9433): retiring a slot's incumbent wrote no KG triple, so recall,
+/// which demotes on `superseded_by`, ranked the stale fact on similarity alone.
+/// What: two writes into one slot; the incumbent carries exactly one active
+/// edge, naming the newcomer, and the batch read recall uses resolves it.
+/// Test: this test.
+#[tokio::test]
+async fn a_retired_slot_incumbent_is_linked_to_its_replacement() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let old = write(&handle, "PR #4818 is in flight", Some(SLOT), None)
+        .await
+        .unwrap();
+    let new = write(
+        &handle,
+        "PR #4818 merged as squash 4c412ae1",
+        Some(SLOT),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        superseded_by_edges(&handle.kg, old).await,
+        vec![format!("drawer:{new}")]
+    );
+    let map = handle.kg.superseded_by_many(vec![old, new]).await.unwrap();
+    assert_eq!(map.get(&old), Some(&new), "{map:?}");
+    assert!(
+        !map.contains_key(&new),
+        "the live claimant is not superseded"
+    );
+}
+
+/// Why (#9433 AC4): each retirement links one retiree to its own successor.
+/// What: A, B, C into one slot yields A→B and B→C, one active edge each, and
+/// none from the live claimant C.
+/// Test: this test.
+#[tokio::test]
+async fn a_chain_of_slot_writes_links_each_retiree_to_its_successor() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let a = write(&handle, "deploy window is Thursday", Some(SLOT), None)
+        .await
+        .unwrap();
+    let b = write(&handle, "deploy window is Monday", Some(SLOT), None)
+        .await
+        .unwrap();
+    let c = write(&handle, "deploy window is Wednesday", Some(SLOT), None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        superseded_by_edges(&handle.kg, a).await,
+        vec![format!("drawer:{b}")]
+    );
+    assert_eq!(
+        superseded_by_edges(&handle.kg, b).await,
+        vec![format!("drawer:{c}")]
+    );
+    assert!(superseded_by_edges(&handle.kg, c).await.is_empty());
+}
+
+/// Why (#9433 AC4): a retirement that runs twice for the same pair must not
+/// leave two active edges, or the amendment graph forks.
+/// What: after A→B, re-points the slot index at A (a durable row edit, as a
+/// replayed commit would see it) and commits B again through the real commit
+/// step, so the retirement and its edge write run a second time. A still has
+/// exactly one active `superseded_by` edge.
+/// Test: this test.
+#[tokio::test]
+async fn re_running_a_retirement_keeps_one_active_edge() {
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let a = write(&handle, "build cap is six", Some(SLOT), None)
+        .await
+        .unwrap();
+    let b = write(&handle, "build cap is four", Some(SLOT), None)
+        .await
+        .unwrap();
+
+    let mut reclaimed = stored(&handle, a);
+    reclaimed.fact_key = Some(SLOT.to_string());
+    handle.kg.upsert_drawer(&reclaimed).await.unwrap();
+    assert_eq!(handle.kg.drawer_id_for_fact_key(SLOT).unwrap(), Some(a));
+
+    let ctx = super::tier_c::CommitCtx {
+        palace: PalaceId::new("tier-c"),
+        kg: Arc::clone(&handle.kg),
+        drawers: Arc::new(parking_lot::RwLock::new(Vec::new())),
+        commit_delay: None,
+    };
+    let order = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
+    super::tier_c::commit_and_mirror(ctx, stored(&handle, b), order)
+        .await
+        .expect("the replayed retirement commits");
+
+    assert_eq!(handle.kg.drawer_id_for_fact_key(SLOT).unwrap(), Some(b));
+    assert_eq!(
+        superseded_by_edges(&handle.kg, a).await,
+        vec![format!("drawer:{b}")],
+        "a replayed retirement must not add a second active edge"
+    );
+}
+
+/// Why (#9433 AC3): an edge may only name drawers that were committed. If the
+/// atomic `[retired, newcomer]` commit fails, nothing was retired and the
+/// newcomer does not exist, so no edge may be written.
+/// What: seeds a slot incumbent, opens the KG as a read-only snapshot (the
+/// redb file's lock is held, #59) so the atomic commit is refused, and runs
+/// the commit step. It fails, the incumbent still holds the slot, and no
+/// `superseded_by` edge exists.
+/// Test: this test.
+#[tokio::test]
+async fn a_failed_retirement_commit_writes_no_edge() {
+    use crate::memory_core::store::kg_redb::KgStoreRedb;
+
+    let dir = tempdir().unwrap();
+    let kg_path = dir.path().join("kg.redb");
+    let incumbent = slot_newcomer(Uuid::new_v4(), "the incumbent");
+    {
+        let store = KgStoreRedb::open(&kg_path).expect("open kg store");
+        store.upsert_drawer(&incumbent).expect("seed the incumbent");
+    }
+    let _live = redb::Database::create(&kg_path).expect("hold the redb lock");
+    let kg = Arc::new(KnowledgeGraph::open(&kg_path).expect("snapshot open"));
+    assert!(kg.is_read_only(), "precondition: a read-only snapshot");
+    assert_eq!(kg.drawer_id_for_fact_key(SLOT).unwrap(), Some(incumbent.id));
+
+    let ctx = super::tier_c::CommitCtx {
+        palace: PalaceId::new("tier-c"),
+        kg: Arc::clone(&kg),
+        drawers: Arc::new(parking_lot::RwLock::new(vec![incumbent.clone()])),
+        commit_delay: None,
+    };
+    let newcomer = slot_newcomer(incumbent.room_id, "the newcomer");
+    let newcomer_id = newcomer.id;
+    let order = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
+    super::tier_c::commit_and_mirror(ctx, newcomer, order)
+        .await
+        .expect_err("a read-only KG must refuse the atomic commit");
+
+    assert_eq!(kg.drawer_id_for_fact_key(SLOT).unwrap(), Some(incumbent.id));
+    assert!(superseded_by_edges(&kg, incumbent.id).await.is_empty());
+    assert!(
+        kg.superseded_by_many(vec![incumbent.id, newcomer_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Why (#9433 AC5, #1713 fail-open): the drawers are the write; the edge is
+/// provenance on top of it. A failed edge write must not fail a remember whose
+/// drawers already committed, and must not vanish without a trace.
+/// What: writes the incumbent, then poisons the KG adjacency and records the
+/// desync with one refused assert, so every later triple write is refused
+/// while drawer commits (which bypass the adjacency) still land. The second
+/// remember succeeds, the slot moves, no edge exists, and a WARN names the
+/// palace and both drawers.
+/// Test: this test.
+#[tokio::test]
+async fn a_failed_edge_write_still_lands_the_remember_and_warns() {
+    use super::recall_log_tests::Capture;
+    use crate::memory_core::store::kg::{Triple, tests::poison_adjacency};
+
+    let cap = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(cap.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    init_embedder();
+    let dir = tempdir().unwrap();
+    let handle = make_handle(dir.path());
+
+    let old = write(&handle, "release freeze starts Friday", Some(SLOT), None)
+        .await
+        .unwrap();
+    poison_adjacency(&handle.kg);
+    let refused = handle
+        .kg
+        .assert(Triple {
+            subject: "probe".into(),
+            predicate: "marks".into(),
+            object: "desync".into(),
+            valid_from: Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: None,
+        })
+        .await;
+    assert!(refused.is_err() && handle.kg.adjacency_desynced());
+
+    let new = write(&handle, "release freeze moved to Monday", Some(SLOT), None)
+        .await
+        .expect("a failed edge write must not fail the remember");
+
+    assert_eq!(handle.kg.drawer_id_for_fact_key(SLOT).unwrap(), Some(new));
+    assert_eq!(
+        stored(&handle, old).fact_key,
+        None,
+        "the incumbent is retired"
+    );
+    assert!(superseded_by_edges(&handle.kg, old).await.is_empty());
+    let logged = cap.text();
+    let warned = logged.lines().any(|l| {
+        l.contains("WARN")
+            && l.contains("#9433")
+            && l.contains("tier-c")
+            && l.contains(&old.to_string())
+            && l.contains(&new.to_string())
+    });
+    assert!(
+        warned,
+        "a WARN must name the palace and both drawers: {logged}"
+    );
+}

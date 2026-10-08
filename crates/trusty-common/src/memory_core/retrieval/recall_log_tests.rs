@@ -20,10 +20,10 @@ use tracing_subscriber::fmt::MakeWriter;
 
 /// Collects formatted log output so a test can assert on what reached the log.
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(Arc<Mutex<Vec<u8>>>);
 
 impl Capture {
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let bytes = self.0.lock().unwrap_or_else(|p| p.into_inner());
         String::from_utf8_lossy(&bytes).into_owned()
     }

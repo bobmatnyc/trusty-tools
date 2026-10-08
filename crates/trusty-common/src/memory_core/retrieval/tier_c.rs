@@ -17,7 +17,9 @@
 //! current occupant through the `DRAWERS_BY_FACT_KEY` index (#4884) and commits
 //! the incumbent's retirement and the newcomer's arrival in ONE redb
 //! transaction, so no reader and no crash can observe a slot with two claimants
-//! or with an incumbent retired and no replacement landed.
+//! or with an incumbent retired and no replacement landed. Once that commit
+//! lands, [`link_retired`] records `drawer:<retired> superseded_by
+//! drawer:<newcomer>` so recall can demote the retired fact (#9433).
 //! Test: the inline `tests` module below covers admission; the retirement
 //! invariant and the concurrency guarantee live in `retrieval::tier_c_tests` —
 //! `tier_c_write_retires_the_prior_slot_occupant`,
@@ -32,6 +34,7 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use crate::memory_core::palace::{Drawer, PalaceId};
+use crate::memory_core::share::assert_superseded_by;
 use crate::memory_core::store::kg::KnowledgeGraph;
 
 /// Default Tier C lifetime when the writer names a slot but no `expires_at`
@@ -402,6 +405,37 @@ pub(super) async fn persist_with_retirement(
     Ok(Some(incumbent_id))
 }
 
+/// Provenance stamped on the edge a Tier C retirement writes (#9433).
+const RETIREMENT_PROVENANCE: &str = "tier_c:retire-on-write";
+
+/// Record that `retired` was superseded by `newcomer`, failing open (#9433).
+///
+/// Why: retire-on-write demotes the incumbent by clearing its slot, but recall
+/// demotes on the `superseded_by` edge (ADR-0028 D6, #9421), not on the slot.
+/// Without the edge the retired fact ranked on similarity alone and could sit
+/// above its replacement. The edge is provenance on top of a write that has
+/// already landed, so its failure must not fail the remember (#1713): the
+/// drawers stay committed and the slot stays moved either way.
+/// What: asserts the edge through the one supersession writer,
+/// [`assert_superseded_by`]. On failure, logs a WARN naming the palace and both
+/// drawers and returns; it never panics. A re-run for the same pair closes the
+/// prior active row, so it never leaves two active edges.
+/// Test: `a_retired_slot_incumbent_is_linked_to_its_replacement`,
+/// `re_running_a_retirement_keeps_one_active_edge`,
+/// `a_failed_edge_write_still_lands_the_remember_and_warns`.
+async fn link_retired(ctx: &CommitCtx, retired: Uuid, newcomer: Uuid) {
+    if let Err(e) = assert_superseded_by(&ctx.kg, retired, newcomer, RETIREMENT_PROVENANCE).await {
+        tracing::warn!(
+            palace = %ctx.palace,
+            retired = %retired,
+            newcomer = %newcomer,
+            "#9433: retired the fact_key incumbent but could not record its \
+             superseded_by edge; both drawers are committed, recall will not \
+             demote the retired one: {e:#}"
+        );
+    }
+}
+
 /// The owned slice of a palace the durable commit needs (#6366).
 ///
 /// Why: [`commit_and_mirror`] runs in a task the caller's write budget cannot
@@ -467,8 +501,15 @@ pub(super) struct CommitCtx {
 /// which is the order their callers reached the commit — not necessarily the
 /// order they took the write mutex. Either order leaves exactly one claimant,
 /// which is the invariant; which of the two wins the slot is not.
+///
+/// After the mirror, still under the guard, a retirement is recorded as a
+/// `superseded_by` edge through [`link_retired`] (#9433). It runs only when the
+/// atomic commit succeeded, so the edge never names an uncommitted drawer, and
+/// it fails open.
 /// Test: `an_abandoned_commit_still_leaves_one_claimant_for_the_slot`,
-/// `a_second_writer_waits_for_an_abandoned_commit_to_mirror`.
+/// `a_second_writer_waits_for_an_abandoned_commit_to_mirror`,
+/// `a_failed_retirement_commit_writes_no_edge`,
+/// `a_chain_of_slot_writes_links_each_retiree_to_its_successor`.
 pub(super) async fn commit_and_mirror(
     ctx: CommitCtx,
     drawer: Drawer,
@@ -477,6 +518,7 @@ pub(super) async fn commit_and_mirror(
     let retired = persist_with_retirement(&ctx, &drawer)
         .await
         .context("persist drawer metadata")?;
+    let newcomer = drawer.id;
 
     // #6366: the seam a test uses to widen the commit window to the shape the
     // issue is actually about. In production the trigger is a slow commit — a
@@ -497,6 +539,11 @@ pub(super) async fn commit_and_mirror(
         let mut drawers = ctx.drawers.write();
         retire_in_memory(&mut drawers, retired);
         drawers.push(drawer);
+    }
+    // #9433: link the retiree to its replacement only after both committed,
+    // and before the guard drops, so the next writer's retirement edge follows.
+    if let Some(retired) = retired {
+        link_retired(&ctx, retired, newcomer).await;
     }
     // #6366: explicit so the release is visibly ordered AFTER the mirror — the
     // next writer's incumbent read must not start before this point.

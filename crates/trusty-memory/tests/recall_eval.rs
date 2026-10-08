@@ -357,8 +357,10 @@ async fn require_pinned_model(embedder: Result<SharedEmbedder>, fp: &Fingerprint
 /// What: `demotion: false` skips backdating, so every snapshot is age zero and
 /// `temporal_weight` is 1.0. `retirement: false` moves each superseded drawer
 /// to its own slot (`<key>-prior`), so the current write retires nothing and
-/// the old drawer stays a live Tier C fact, exempt from demotion.
-/// `supersession: false` writes no edge.
+/// the old drawer stays a live Tier C fact, exempt from demotion. Since
+/// #9433 a retirement also writes the `superseded_by` edge, so a FactKey
+/// group needs neither age nor a hand-written edge to rank correctly.
+/// `supersession: false` writes no hand-written edge.
 /// Test: `recall_eval_goes_red_with_demotion_or_retirement_off`.
 #[derive(Debug, Clone, Copy)]
 struct Mechanisms {
@@ -676,7 +678,9 @@ async fn recall_eval_goes_red_with_demotion_or_retirement_off() {
                 demotion: false,
                 ..Mechanisms::ON
             },
-            &[Mechanism::Demotion, Mechanism::FactKey][..],
+            // #9433: a retired slot incumbent now carries a `superseded_by`
+            // edge, so age is no longer a FactKey group's only signal.
+            &[Mechanism::Demotion][..],
         ),
         (
             "retirement off",
