@@ -174,7 +174,11 @@ fn round_trip_from_incompatible_sibling() {
     {
         let _empty = CorpusStore::open(&dest).expect("empty recovery corpus");
     }
-    assert!(opens_with_v4(&dest), "precondition: dest is empty 4.x");
+    assert_eq!(
+        classify_dest(&dest).unwrap(),
+        CorpusState::V4 { data_rows: 0 },
+        "precondition: dest is empty 4.x"
+    );
 
     let outcome = migrate_redb_corpus(&dest).expect("migration from sibling must succeed");
     match outcome {
@@ -220,6 +224,223 @@ fn idempotent_on_v4() {
         "no backup should be created for a no-op"
     );
     assert!(!staging_path(&dest).exists(), "no staging file for a no-op");
+}
+
+// ── #9453: a second run must never replace a live 4.x corpus ───────────────
+
+/// Id of the sentinel chunk the #9453 tests write into the live 4.x corpus.
+const SENTINEL_ID: &str = "sentinel:9453:9453";
+
+/// Write one sentinel chunk into the 4.x corpus at `dest`, standing in for
+/// rows the daemon indexed after the first migration or the auto-recovery.
+fn write_sentinel(dest: &Path) {
+    use crate::core::chunker::{ChunkType, RawChunk};
+    let store = CorpusStore::open(dest).expect("open live 4.x corpus");
+    let chunk = RawChunk {
+        id: SENTINEL_ID.to_string(),
+        file: "src/sentinel.rs".to_string(),
+        start_line: 9453,
+        end_line: 9453,
+        content: "fn sentinel_9453() {}".to_string(),
+        function_name: Some("sentinel_9453".to_string()),
+        language: Some("rust".to_string()),
+        chunk_type: ChunkType::Code,
+        calls: Vec::new(),
+        inherits_from: Vec::new(),
+        chunk_depth: 0,
+        parent_chunk_id: None,
+        child_chunk_ids: Vec::new(),
+        nlp_keywords: Vec::new(),
+        nlp_code_refs: Vec::new(),
+        virtual_terms: Vec::new(),
+    };
+    store.upsert_chunks(&[chunk]).expect("write sentinel chunk");
+}
+
+/// Assert the live corpus at `dest` still holds the sentinel and that its
+/// bytes after the run (`after`) equal those before it (`before`), so it was
+/// neither replaced nor rewritten.
+fn assert_live_corpus_untouched(dest: &Path, before: &[u8], after: &[u8]) {
+    {
+        let store = CorpusStore::open(dest).expect("live corpus still opens with redb 4.x");
+        let got = store.get_chunks(&[SENTINEL_ID]).expect("read sentinel");
+        assert_eq!(
+            got.len(),
+            1,
+            "#9453: the sentinel row written into the live 4.x corpus is gone"
+        );
+    }
+    assert!(
+        after == before,
+        "#9453: the live 4.x corpus was replaced or rewritten ({} bytes before, {} after)",
+        before.len(),
+        after.len()
+    );
+}
+
+/// Why: #9453 — after an in-place migration the old 2.x bytes sit in
+/// `<dest>.v2-incompatible`. A second run picked that sibling as its source,
+/// deleted the live 4.x `dest` and installed the stale snapshot.
+/// What: migrates a 2.x fixture in place, writes a sentinel row into the live
+/// 4.x corpus, runs the migration again, and asserts `AlreadyV4`, a
+/// byte-identical `dest`, and a readable sentinel.
+/// Test: this test.
+#[test]
+fn second_run_after_in_place_migration_keeps_live_v4() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("index.redb");
+    seed_v2_fixture(&dest, 4);
+    let first = migrate_redb_corpus(&dest).expect("first run migrates");
+    assert!(matches!(first, MigrationOutcome::Migrated { .. }));
+    assert!(
+        dir.path().join("index.redb.v2-incompatible").exists(),
+        "precondition: the first run left the 2.x sibling"
+    );
+    write_sentinel(&dest);
+    let before = std::fs::read(&dest).unwrap();
+
+    let second = migrate_redb_corpus(&dest);
+    let after = std::fs::read(&dest).unwrap();
+
+    assert_live_corpus_untouched(&dest, &before, &after);
+    assert!(
+        matches!(second, Ok(MigrationOutcome::AlreadyV4)),
+        "#9453: a second run on a 4.x dest must report AlreadyV4, got {second:?}"
+    );
+}
+
+/// Why: #9453 — the auto-recovery moves a 2.x corpus to
+/// `<dest>.v2-incompatible` and creates an empty 4.x `dest`, which the daemon
+/// then reindexes into. A later `migrate-redb` must not swap the stale
+/// snapshot over that reindexed corpus.
+/// What: opens a 2.x fixture through `CorpusStore::open` (the real recovery
+/// path), writes a sentinel row as the reindex would, runs the migration, and
+/// asserts `AlreadyV4`, a byte-identical `dest`, and a readable sentinel.
+/// Test: this test.
+#[test]
+fn second_run_after_auto_recovery_reindex_keeps_live_v4() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("index.redb");
+    seed_v2_fixture(&dest, 4);
+    {
+        let _recovered = CorpusStore::open(&dest).expect("auto-recovery recreates dest");
+    }
+    assert!(
+        dir.path().join("index.redb.v2-incompatible").exists(),
+        "precondition: the auto-recovery moved the 2.x corpus aside"
+    );
+    write_sentinel(&dest);
+    let before = std::fs::read(&dest).unwrap();
+
+    let outcome = migrate_redb_corpus(&dest);
+    let after = std::fs::read(&dest).unwrap();
+
+    assert_live_corpus_untouched(&dest, &before, &after);
+    assert!(
+        matches!(outcome, Ok(MigrationOutcome::AlreadyV4)),
+        "#9453: a reindexed 4.x dest must report AlreadyV4, got {outcome:?}"
+    );
+}
+
+/// Assert `outcome` is the typed [`RedbMigrateError::DestUnreadable`] refusal.
+fn assert_dest_unreadable(outcome: Result<MigrationOutcome>) {
+    let err = outcome.expect_err("#9453: an unreadable dest must refuse, not migrate");
+    assert!(
+        matches!(
+            err.downcast_ref::<RedbMigrateError>(),
+            Some(RedbMigrateError::DestUnreadable { .. })
+        ),
+        "#9453: expected DestUnreadable, got {err:#}"
+    );
+}
+
+/// Why: #9453 fail-closed — when `dest`'s format cannot be read (here another
+/// handle holds it open, as a running daemon would), the migration must refuse
+/// rather than fall through to replacing `dest` with the 2.x sibling.
+/// What: holds `dest` open with redb, places a 2.x sibling beside it, runs the
+/// migration, and asserts a typed [`RedbMigrateError::DestUnreadable`] error
+/// and an untouched `dest`. Both byte snapshots are taken while the hold is
+/// live, because opening and closing a read-write handle rewrites redb's header.
+/// Test: this test.
+#[test]
+fn unreadable_dest_refuses_and_keeps_live_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("index.redb");
+    seed_v2_fixture(&dir.path().join("index.redb.v2-incompatible"), 4);
+    write_sentinel(&dest);
+
+    let (before, outcome, after) = {
+        let _held = redb::Database::open(&dest).expect("hold dest open");
+        let before = std::fs::read(&dest).unwrap();
+        let outcome = migrate_redb_corpus(&dest);
+        (before, outcome, std::fs::read(&dest).unwrap())
+    };
+
+    assert_live_corpus_untouched(&dest, &before, &after);
+    assert_dest_unreadable(outcome);
+}
+
+/// Why: #9453 fail-closed — the probe opens `dest` read-only, and a read-only
+/// open reports a 4.x file left unclean by a crash as `RepairAborted`, which
+/// the shared classifier counts as an old format. Reading it as 2.x would hand
+/// a 4.x file to redb2 (which panics on one) and then replace it.
+/// What: copies a 4.x corpus while a write handle holds it (an unclean
+/// snapshot), places a 2.x sibling beside it, runs the migration, and asserts
+/// `DestUnreadable` and a byte-identical `dest`.
+/// Test: this test.
+#[test]
+fn unclean_v4_dest_refuses_and_keeps_live_corpus() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("index.redb");
+    let live = dir.path().join("live.redb");
+    seed_v2_fixture(&dir.path().join("index.redb.v2-incompatible"), 4);
+    write_sentinel(&live);
+    {
+        let _held = CorpusStore::open(&live).expect("hold the live corpus open");
+        std::fs::copy(&live, &dest).expect("snapshot the open corpus");
+    }
+    let before = std::fs::read(&dest).unwrap();
+    assert!(
+        matches!(
+            redb::ReadOnlyDatabase::open(&dest),
+            Err(redb::DatabaseError::RepairAborted)
+        ),
+        "precondition: a read-only open reports the unclean snapshot as RepairAborted"
+    );
+
+    let outcome = migrate_redb_corpus(&dest);
+    let after = std::fs::read(&dest).unwrap();
+
+    assert_live_corpus_untouched(&dest, &before, &after);
+    assert_dest_unreadable(outcome);
+}
+
+/// Why: #9453 — `preserve_source` holds the only removal of `dest`, so it
+/// re-probes `dest` and must refuse one that gained data after the first probe.
+/// What: calls `preserve_source` with a 4.x `dest` holding a sentinel and a 2.x
+/// sibling as the source, and asserts `DestChanged` and an untouched `dest`.
+/// Test: this test.
+#[test]
+fn preserve_source_refuses_a_dest_holding_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("index.redb");
+    let sibling = dir.path().join("index.redb.v2-incompatible");
+    seed_v2_fixture(&sibling, 4);
+    write_sentinel(&dest);
+    let before = std::fs::read(&dest).unwrap();
+
+    let outcome = preserve_source(&dest, &sibling);
+    let after = std::fs::read(&dest).expect("#9453: preserve_source deleted the live corpus");
+
+    assert_live_corpus_untouched(&dest, &before, &after);
+    let err = outcome.expect_err("#9453: a dest holding data must not be removed");
+    assert!(
+        matches!(
+            err.downcast_ref::<RedbMigrateError>(),
+            Some(RedbMigrateError::DestChanged { .. })
+        ),
+        "#9453: expected DestChanged, got {err:#}"
+    );
 }
 
 /// Why: prove the migration against a REAL redb 2.x corpus produced by a

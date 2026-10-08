@@ -1,0 +1,3 @@
+Fixed
+- `trusty-search migrate-redb` no longer replaces a live redb 4.x corpus with the stale 2.x snapshot in `<path>.v2-incompatible`. A second run after an in-place migration, or a run after the auto-recovery once the daemon has reindexed into the new corpus, deleted the live `index.redb` with no backup and installed the old snapshot. A 4.x corpus that holds any data now reports "nothing to migrate" and is left byte-identical. Only the empty corpus the auto-recovery creates is still filled from the backup (#9453).
+- `migrate-redb` now refuses with an error when it cannot read the target's format, for example while a running daemon holds the file, or after a crash left a 4.x corpus unclean. Before, an unreadable target was treated as replaceable (#9453).
