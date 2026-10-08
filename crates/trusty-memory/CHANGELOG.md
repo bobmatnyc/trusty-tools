@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.29.6] — 2026-10-08
+
+### Changed
+
+- Requires trusty-common 0.54.5, so `memory_remember` writes a `superseded_by` edge when it retires a fact_key incumbent and recall ranks the replacement above the retired fact ([#9433](https://github.com/bobmatnyc/trusty-tools/issues/9433), [#9470](https://github.com/bobmatnyc/trusty-tools/pull/9470)).
+
 ## [0.29.5] — 2026-10-08
 
 ### Changed
