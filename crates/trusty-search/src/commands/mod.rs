@@ -20,6 +20,8 @@
 // Shared support modules
 // #9214: the fail-closed HTTP resolver for the subcommands still on HTTP.
 pub mod daemon_http;
+// #9214: shared socket-call error mapping for the subcommands moved off HTTP.
+pub(crate) mod daemon_rpc;
 pub mod daemon_utils;
 pub mod doctor_checks;
 pub(crate) mod doctor_pipeline;

@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use trusty_common::claude_config::{
     default_settings_max_depth, discover_claude_settings, mcp_server_entry, write_json_atomic,
 };
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// The MCP server keys (legacy spellings) we replace with `trusty-search`.
 const LEGACY_MCP_KEYS: &[&str] = &["mcp-vector-search", "mcp_vector_search"];
@@ -166,9 +167,10 @@ fn run_mcp_phase(dry_run: bool) -> Result<()> {
 /// Index-migration phase: reuse the `convert all` logic.
 ///
 /// Why: index migration is identical to `convert all`; rather than duplicate
-/// the discovery + HTTP dance, we call the shared `convert.rs` helpers.
+/// the discovery + register/reindex calls, we call the shared `convert.rs`
+/// helpers.
 /// What: scans `$HOME` for mcp-vector-search configs and (unless dry-run)
-/// registers + reindexes each via the daemon.
+/// registers + reindexes each via the daemon socket (#9214).
 /// Test: `migrate mcp-vector-search --indexes-only --dry-run` enumerates
 /// every detected project.
 async fn run_index_phase(dry_run: bool) -> Result<()> {
@@ -180,12 +182,14 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
     }
     println!("{} Found {} project(s).\n", "·".dimmed(), configs.len());
 
-    let base = if dry_run {
-        // Dry run never contacts the daemon, so an empty base is harmless.
-        String::new()
+    let client = if dry_run {
+        // A dry run never contacts the daemon, so it resolves no client.
+        None
     } else {
-        // #9214: start the daemon over its socket, then resolve its HTTP base.
-        super::daemon_http::ensure_daemon_http_base().await?
+        // #9214: start the daemon over its socket and stay on it.
+        let client = DaemonClient::resolve()?;
+        super::daemon_guard::ensure_daemon_up(&client).await?;
+        Some(client)
     };
 
     let total = configs.len();
@@ -196,7 +200,7 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
 
     for (i, config_path) in configs.into_iter().enumerate() {
         let result = match parse_mvs_config(&config_path) {
-            Ok((root, name)) => convert_one(root, name, &base, dry_run).await,
+            Ok((root, name)) => convert_one(root, name, client.as_ref()).await,
             Err(e) => {
                 println!(
                     "  {} {} {} {}",

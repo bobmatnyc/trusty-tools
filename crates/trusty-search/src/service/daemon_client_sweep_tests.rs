@@ -39,10 +39,10 @@ const HTTP_MARKERS: &[&str] = &[
 /// [`the_b2a_cli_paths_dial_no_http`] keeps them off. The HTTP resolver
 /// `daemon_utils` held moved, fail-closed, to `daemon_http.rs`: the one row
 /// this list gained, and the file the last B2 phase deletes.
+///
+/// #9214 B2(b1) moved `cleanup`, `config`, `convert` and `migrate` off it;
+/// [`the_b2b1_cli_paths_dial_no_http`] keeps them off.
 const NOT_YET_MOVED: &[&str] = &[
-    "src/commands/cleanup.rs",
-    "src/commands/config.rs",
-    "src/commands/convert.rs",
     "src/commands/daemon_http.rs",
     "src/commands/discover/http.rs",
     "src/commands/discover/mod.rs",
@@ -56,7 +56,6 @@ const NOT_YET_MOVED: &[&str] = &[
     "src/commands/index_remove.rs",
     "src/commands/index_remove_stale.rs",
     "src/commands/index_status.rs",
-    "src/commands/migrate.rs",
     "src/commands/query.rs",
     "src/commands/reindex.rs",
     "src/commands/reindex_engine/driver.rs",
@@ -145,10 +144,7 @@ fn the_quantize_command_dials_no_http() {
 /// Test: this test.
 #[test]
 fn the_b2a_cli_paths_dial_no_http() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let dialling = files_dialling_http(root);
-    let forbidden = [["daemon_base", "_url"].concat(), ["78", "78"].concat()];
-    for f in [
+    assert_moved_off_http(&[
         "add.rs",
         "daemon_guard.rs",
         "daemon_utils.rs",
@@ -156,10 +152,34 @@ fn the_b2a_cli_paths_dial_no_http() {
         "remove.rs",
         "status.rs",
         "watch.rs",
-    ] {
+    ]);
+}
+
+/// #9214 B2(b1): `cleanup`, `config`, `convert`, `migrate` and the shared
+/// `daemon_rpc` mapper stay on the socket, under the same rule as
+/// [`the_b2a_cli_paths_dial_no_http`].
+/// Test: this test.
+#[test]
+fn the_b2b1_cli_paths_dial_no_http() {
+    assert_moved_off_http(&[
+        "cleanup.rs",
+        "config.rs",
+        "convert.rs",
+        "daemon_rpc.rs",
+        "migrate.rs",
+    ]);
+}
+
+/// Each of `files` under `src/commands/` is free of [`HTTP_MARKERS`], and no
+/// non-comment line builds a `7878` address or a `daemon_base_url` call.
+fn assert_moved_off_http(files: &[&str]) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dialling = files_dialling_http(root);
+    let forbidden = [["daemon_base", "_url"].concat(), ["78", "78"].concat()];
+    for f in files {
         let rel = format!("src/commands/{f}");
         assert!(!dialling.contains(&rel), "{rel} dials HTTP");
-        let text = std::fs::read_to_string(root.join(&rel)).expect("read a B2(a) file");
+        let text = std::fs::read_to_string(root.join(&rel)).expect("read a moved file");
         for (n, line) in text.lines().enumerate() {
             if line.trim_start().starts_with("//") {
                 continue;
