@@ -3,8 +3,9 @@
 //! Why: the default scope must search resident palaces only, open none, leave
 //! idle clocks alone, and report what it did not search on every surface.
 //! `scope: "all"` must keep the old ranking. Each test here failed against
-//! `origin/main` bd0148dc70 except `scope_all_top5_matches_the_golden`, a
-//! preservation test that passed there and pins the old answer.
+//! `origin/main` cb47439155 except two preservation tests that passed there:
+//! `scope_all_top5_matches_the_golden` pins the old answer, and
+//! `both_scopes_demote_a_superseded_drawer` pins #9421's demotion.
 //! What: drives the MCP dispatch, the chat tool and `MemoryService` with the
 //! mock embedder seeded, so the vector lane runs. Palaces that must be cold are
 //! created on a throwaway runtime and registry, so no handle or redb lock
@@ -275,6 +276,11 @@ async fn open_failure_is_reported_on_every_surface() {
         assert_eq!(out["open_failed"], json!(["bad-b"]), "{surface}: {out}");
         assert_eq!(out["palaces_searched"], 1, "{surface}: {out}");
         assert_eq!(out["coverage"], "partial", "{surface}: {out}");
+        // #9299 Fail-Open Check: the failed arm advances no residency.
+        assert!(
+            state.registry.list().is_empty(),
+            "{surface}: a palace stayed resident"
+        );
     }
     let out = MemoryService::new(state.clone())
         .recall_all("rust build fact", 5, false)
@@ -434,4 +440,79 @@ async fn default_top5_is_the_resident_subset_of_scope_all() {
         .collect();
     let default5 = mcp(&state, json!({"q": GOLDEN_QUERY, "top_k": 5})).await;
     assert_eq!(contents(&default5), restricted, "default: {default5}");
+}
+
+/// Write one drawer through `memory_remember`; returns its id.
+async fn remember_id(state: &AppState, palace: &str, text: &str) -> Uuid {
+    let args = json!({ "palace": palace, "text": text, "force": true });
+    let out = dispatch_tool(state, "memory_remember", args)
+        .await
+        .expect("memory_remember");
+    out["drawer_id"]
+        .as_str()
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(|| panic!("drawer_id: {out}"))
+}
+
+/// Rank of drawer `id` in `out["results"]`, or `None`.
+fn rank_of(out: &Value, id: Uuid) -> Option<usize> {
+    let id = id.to_string();
+    out["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("results: {out}"))
+        .iter()
+        .position(|r| r["drawer_id"].as_str() == Some(id.as_str()))
+}
+
+/// #9299 x #9421: both recall_all scopes demote a drawer superseded through a
+/// `superseded_by` edge.
+///
+/// Why: the merge moved #9421's per-batch edge reads into the
+/// `recall_all_scoped` search closure. The resident default and the
+/// `scope: "all"` walk over a palace that is not resident must both read the
+/// edge and rank the old drawer below its replacement.
+/// What: the old drawer repeats the query's wording, so similarity alone puts
+/// it first. Recalled once while its palace is resident (default scope), then
+/// again after the palace leaves the registry (`scope: "all"`, which opens it).
+#[tokio::test]
+async fn both_scopes_demote_a_superseded_drawer() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = ready_state(tmp.path()).await;
+    resident_with(&state, "sup-a", &[]).await;
+    let query = "release train deploy window";
+    let old = remember_id(
+        &state,
+        "sup-a",
+        "the release train deploy window opens on Thursdays at noon",
+    )
+    .await;
+    let new = remember_id(
+        &state,
+        "sup-a",
+        "Deploys moved: changes now ship Monday mornings after the train",
+    )
+    .await;
+    let handle = state
+        .registry
+        .open_palace(&state.data_root, &PalaceId::new("sup-a"))
+        .expect("open sup-a");
+    trusty_common::memory_core::share::assert_superseded_by(&handle.kg, old, new, "test:9299")
+        .await
+        .expect("superseded_by edge");
+    drop(handle);
+
+    let resident = mcp(&state, json!({"q": query, "top_k": 5})).await;
+    state.registry.remove(&PalaceId::new("sup-a"));
+    let all = mcp(&state, json!({"q": query, "top_k": 5, "scope": "all"})).await;
+
+    for (scope, out) in [("resident", &resident), ("all", &all)] {
+        assert_eq!(out["scope"], scope, "{out}");
+        assert_eq!(out["palaces_searched"], 1, "{scope}: {out}");
+        let (o, n) = (rank_of(out, old), rank_of(out, new));
+        assert!(n.is_some(), "{scope}: replacement recalled: {out}");
+        assert!(
+            o.is_none() || n < o,
+            "{scope}: the superseded drawer must rank below its replacement: {out}"
+        );
+    }
 }
