@@ -11153,6 +11153,7 @@ dependencies = [
  "anyhow",
  "aws-lc-rs",
  "base64 0.22.1",
+ "chrono",
  "comrak",
  "jsonwebtoken",
  "reqwest 0.12.28",
@@ -11162,9 +11163,11 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "trusty-common",
  "trusty-mcp",
+ "url",
  "wiremock",
 ]
 

@@ -9,8 +9,8 @@
 //! credential wiring in one place instead of duplicating a crate per platform.
 //! See ADR-0014.
 //! What: One module per channel: [`slack`] and [`telegram`] (each with an MCP
-//! binary under `src/bin/`), and [`gchat`], whose Google Chat API layer has no
-//! binary yet (#9448).
+//! binary under `src/bin/`), and [`gchat`] — the Google Chat API layer, its
+//! routes, egress gate and question ledger, with no binary yet (#9448).
 //! Test: `cargo test -p trusty-channels` covers each channel's client, MCP
 //! handshake, and tool registry.
 
