@@ -46,8 +46,12 @@ fn kept(intent: QueryIntent) -> Vec<(String, f32)> {
         chunk("doc", "/tmp/kw-9027/docs/pooling.md"),
         chunk("src", "/tmp/kw-9027/src/pool.rs"),
     ];
-    let mut dropped = SearchDrops::default();
-    idx.apply_archive_downrank(&mut results, &intent, SearchMode::Code, false, &mut dropped);
+    idx.apply_archive_downrank(
+        &mut results,
+        &intent,
+        SearchMode::Code,
+        &SearchDrops::default(),
+    );
     results.into_iter().map(|c| (c.id, c.score)).collect()
 }
 

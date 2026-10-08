@@ -1,10 +1,10 @@
-//! `Code` mode's docstring and file-type filters must not empty a page they
-//! could have filled (#9404).
+//! `Code` mode's docstring and file-type filters, and the `exclude_archived`
+//! filter, must not empty a page they could have filled (#9404).
 //!
-//! Why: both filters ran after `materialize_search_results` cut the fused list
-//! to `top_k`, so a `BugDebt` query whose `top_k` best candidates were all
-//! docstrings, or all doc files, answered `results: []` while matching code
-//! sat deeper in the oversampled candidate set.
+//! Why: these filters ran after `materialize_search_results` cut the fused
+//! list to `top_k`, so a `BugDebt` query whose `top_k` best candidates were
+//! all docstrings, doc files, or archived chunks answered `results: []` while
+//! matching code sat deeper in the oversampled candidate set.
 //! What: drives `search_with_drops` end to end on a BM25-only indexer (no
 //! embedder, so MMR is the identity and the ranking is deterministic) with a
 //! pinned lexical stage.
@@ -218,5 +218,91 @@ async fn doc_file_only_matches_return_an_empty_page_with_every_row_counted() {
     assert_eq!(
         dropped.mode_filtered, 5,
         "every withheld doc file is counted: {dropped:?}"
+    );
+}
+
+/// A chunk under a `legacy/` path — a strong archive signal — that repeats
+/// every query term, so it outranks the code in the fused order.
+fn archived(i: usize) -> RawChunk {
+    raw(
+        &format!("src/legacy/send_{i}.rs"),
+        format!("fn send_room_list_{i}() {{ cors_error() }} // CORS error: send the room list"),
+        ChunkType::Code,
+    )
+}
+
+fn excluding_archived(top_k: usize) -> SearchQuery {
+    SearchQuery {
+        exclude_archived: true,
+        ..query(top_k, SearchMode::All)
+    }
+}
+
+/// #9404 follow-up: the `exclude_archived` retain also ran after the `top_k`
+/// cut. Five archived chunks outrank four code chunks, so with `top_k: 3`
+/// every kept slot held an archived chunk and the page came back empty. The
+/// code deeper in the candidate set must fill it, capped at `top_k`.
+#[tokio::test]
+async fn exclude_archived_backfills_code_past_archived_chunks_filling_top_k() {
+    let mut chunks: Vec<RawChunk> = (0..5).map(archived).collect();
+    chunks.extend((0..4).map(code));
+    let idx = indexer(chunks).await;
+
+    // Fixture shape: without the flag, the top 3 are all archived chunks.
+    let unfiltered = idx
+        .search(&query(3, SearchMode::All))
+        .await
+        .expect("search");
+    assert!(
+        unfiltered.iter().all(|c| c.id.starts_with("src/legacy/")),
+        "precondition: archived chunks fill the unfiltered top_k: {unfiltered:?}"
+    );
+
+    let (results, dropped) = idx
+        .search_with_drops(&excluding_archived(3))
+        .await
+        .expect("search");
+    let ids: Vec<&str> = results.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(results.len(), 3, "the page is filled to top_k: {ids:?}");
+    assert!(
+        results.iter().all(|c| c.id.starts_with("src/handler_")),
+        "no archived chunk is returned: {ids:?}"
+    );
+    assert!(
+        results.windows(2).all(|w| w[0].score >= w[1].score),
+        "the page is sorted by score: {results:?}"
+    );
+    assert_eq!(
+        dropped.archived, 5,
+        "every archived chunk ranked ahead of a returned row was withheld"
+    );
+}
+
+/// #9404 follow-up: when only archived chunks match, `exclude_archived`
+/// returns an empty page. The caller asked for no archived code, so none
+/// stands in; `archived` counts every chunk withheld, not only the `top_k`
+/// the cut used to keep.
+#[tokio::test]
+async fn archived_only_matches_return_an_empty_page_with_every_row_counted() {
+    let unrelated = raw(
+        "src/other.rs",
+        "fn unrelated() -> bool { true }".to_string(),
+        ChunkType::Code,
+    );
+    let mut chunks: Vec<RawChunk> = (0..5).map(archived).collect();
+    chunks.push(unrelated);
+    let idx = indexer(chunks).await;
+
+    let (results, dropped) = idx
+        .search_with_drops(&excluding_archived(3))
+        .await
+        .expect("search");
+    assert!(
+        results.is_empty(),
+        "no archived chunk stands in: {results:?}"
+    );
+    assert_eq!(
+        dropped.archived, 5,
+        "every withheld archived chunk is counted: {dropped:?}"
     );
 }

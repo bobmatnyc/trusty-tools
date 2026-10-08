@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use crate::core::chunker::ChunkType;
 use crate::core::git::normalize_path;
 
+use super::super::archive::{self, MarkerCache};
 use super::super::docs_penalty;
 use super::super::helpers::compute_match_reason;
 use super::super::{
@@ -30,6 +31,8 @@ pub(super) struct PageFilters {
     pub(super) file_mode: Option<SearchMode>,
     /// Withhold docstring rows, with the all-docstring fallback (`Code` mode).
     pub(super) drop_docstrings: bool,
+    /// Drop rows with a strong archive signal (`exclude_archived`).
+    pub(super) drop_archived: bool,
 }
 
 impl CodeIndexer {
@@ -43,13 +46,17 @@ impl CodeIndexer {
     /// mode's file-type filter and `Code` mode's docstring filter run here,
     /// while the page is filled, because filtering after the `top_k` cut
     /// emptied a page whose every slot held a filtered row while matching code
-    /// sat deeper in `all`.
+    /// sat deeper in `all`. The `exclude_archived` filter runs here for the
+    /// same reason.
     /// What: walks `all` in rank order, fetching rows one deficit-sized batch
     /// at a time, until `top_k` slots are used. An emitted chunk or an id with
     /// no row (counted in `unresolved_corpus`) uses a slot. A row whose
     /// resolved file `filters.file_mode` rejects is skipped, counted in
     /// `mode_filtered`, and frees its slot; it is never returned, because the
     /// mode names the file types the caller asked for. With
+    /// `filters.drop_archived`, a row `archive::classify` labels with a strong
+    /// signal (any reason but `stale:`) is skipped the same way, counted in
+    /// `archived`, and never returned. With
     /// `filters.drop_docstrings`, a docstring row is skipped the same way and
     /// counted in `docstring_filtered`. If that leaves the page empty, the
     /// skipped docstrings (up to `top_k`, in rank order) are returned instead
@@ -63,7 +70,9 @@ impl CodeIndexer {
     /// Test: `bugdebt_query_backfills_code_past_a_docstring_filled_top_k`,
     /// `docstring_only_matches_return_the_docstrings_not_an_empty_page`,
     /// `bugdebt_query_backfills_code_past_doc_files_filling_top_k`,
-    /// `doc_file_only_matches_return_an_empty_page_with_every_row_counted`;
+    /// `doc_file_only_matches_return_an_empty_page_with_every_row_counted`,
+    /// `exclude_archived_backfills_code_past_archived_chunks_filling_top_k`,
+    /// `archived_only_matches_return_an_empty_page_with_every_row_counted`;
     /// `search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matching_row`
     /// in `service::server::tests_search` pins the unresolved count.
     // #9404: the page filters are the eighth argument.
@@ -90,6 +99,7 @@ impl CodeIndexer {
         let mut remaining = all.into_iter();
         // #7434: one root table per query, not per hit.
         let roots = self.chunk_roots();
+        let mut markers = MarkerCache::new();
         while slots_used < query.top_k {
             let batch: Vec<(String, f32)> =
                 remaining.by_ref().take(query.top_k - slots_used).collect();
@@ -119,10 +129,23 @@ impl CodeIndexer {
                 // #9404: checked against the resolved path, as the retain it
                 // replaces was, and before the docstring check, so a rejected
                 // docstring never becomes a fallback row.
+                let file = roots.resolve_absolute(&raw.file);
+                let file = file.to_string_lossy();
                 if let Some(mode) = filters.file_mode {
-                    let file = roots.resolve_absolute(&raw.file);
-                    if !docs_penalty::is_allowed_for_mode(&file.to_string_lossy(), mode) {
+                    if !docs_penalty::is_allowed_for_mode(&file, mode) {
                         dropped.mode_filtered += 1;
+                        continue;
+                    }
+                }
+                // #9404: the same inputs `apply_archive_downrank` classifies
+                // (resolved path, chunk text). `stale:` is a soft signal and
+                // stays. Checked before the docstring filter, so an archived
+                // docstring never becomes a fallback row.
+                if filters.drop_archived {
+                    let (_, reason) =
+                        archive::classify(&self.root_path, &file, &raw.content, &mut markers);
+                    if reason.is_some_and(|r| !r.starts_with("stale:")) {
+                        dropped.archived += 1;
                         continue;
                     }
                 }
