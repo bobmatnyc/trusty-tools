@@ -7,7 +7,9 @@
 //! What: a colocated index whose store has churn above the threshold is
 //! persisted twice — once while staging a reindex (no compaction), once after
 //! (compaction, churn cleared, no vector lost).
-//! Test: `the_persister_compacts_a_churned_graph_outside_a_reindex`.
+//! The idle write-cooldown persist skips the compaction the same way.
+//! Test: `the_persister_compacts_a_churned_graph_outside_a_reindex`,
+//! `the_idle_persist_never_compacts_during_a_reindex`.
 
 use std::sync::Arc;
 
@@ -59,4 +61,52 @@ async fn the_persister_compacts_a_churned_graph_outside_a_reindex() {
         "#9450: the persister compacts a churned graph before saving"
     );
     assert_eq!(store.len().await.expect("len"), 140, "no vector lost");
+}
+
+/// #9450 fix round: the idle write-cooldown persist never compacts while a
+/// staged reindex runs, and does once it ends.
+/// Red before the fix: the idle path compacted whatever the reindex state.
+/// Test: this test.
+#[tokio::test]
+async fn the_idle_persist_never_compacts_during_a_reindex() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("hnsw.usearch");
+    let store = Arc::new(UsearchStore::new(4).expect("store"));
+    let items: Vec<(String, Vec<f32>)> = (0..200).map(|i| (format!("c{i}"), vec4(i))).collect();
+    store.upsert_batch(&items).await.expect("upsert");
+    store.save(&path).await.expect("save");
+    for i in 0..60 {
+        store.remove(&format!("c{i}")).await.expect("remove");
+    }
+    // 60 churn against a threshold of max(140 / 10, 32) = 32.
+    assert_eq!(store.churn_since_compact(), 60);
+
+    let mut indexer = CodeIndexer::new("ts-9450-idle", dir.path());
+    indexer.set_store(store.clone());
+    let cooldown = std::time::Duration::from_millis(1);
+
+    indexer.begin_reindex_staging();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        indexer
+            .persist_and_demote_vector_store_after_write_cooldown(cooldown)
+            .await,
+        "the persist itself still runs"
+    );
+    assert_eq!(
+        store.churn_since_compact(),
+        60,
+        "#9450: no compaction during a staged reindex"
+    );
+    indexer.end_reindex_staging();
+
+    store.remove("c60").await.expect("remove");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        indexer
+            .persist_and_demote_vector_store_after_write_cooldown(cooldown)
+            .await
+    );
+    assert_eq!(store.churn_since_compact(), 0, "compacts once it ends");
+    assert_eq!(store.len().await.expect("len"), 139, "no vector lost");
 }

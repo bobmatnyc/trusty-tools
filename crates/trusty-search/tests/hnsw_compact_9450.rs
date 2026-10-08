@@ -1,15 +1,17 @@
 //! Issue #9450 — what one graph compaction costs at production scale.
 //!
-//! Why: a compaction rebuilds the whole HNSW graph while writers wait on the
-//! store's `save_lock`, and it holds a second copy of the graph until the
-//! swap. The threshold and the load heal are only acceptable if both costs
-//! are known at the index size #9414 reported.
+//! Why: a compaction rebuilds the whole HNSW graph and holds a copy of the
+//! vectors plus a second graph until the swap. Writers wait on the store's
+//! `save_lock` only while the vectors are copied and while the graph is
+//! swapped. The threshold and the load heal are only acceptable if these
+//! costs are known at the index size #9414 reported.
 //! What: builds a 150K-vector, 384-dim store at the default precision (f16)
-//! and default tuning, then runs one `CompactMode::Always` compaction while a
-//! writer upserts every 10 ms and a reader searches every 10 ms. Prints the
-//! rebuild time, the longest and median write wait, the longest search, and
-//! process RSS before, at peak during, and after the compaction. A
-//! measurement, not a gate: it asserts only that no vector was lost.
+//! and default tuning. Run 1 compacts while a writer upserts every 10 ms and
+//! a reader searches every 10 ms; a write lands during the build, so the
+//! compaction is abandoned, and the run reports the longest and median write
+//! wait. Run 2 compacts with the reader only and reports the rebuild time.
+//! Both report process RSS before, at peak during, and after. A measurement,
+//! not a gate: it asserts only the outcomes and that no vector was lost.
 //! Run (release, the shipping profile):
 //! `cargo test -p trusty-search --release --test integration hnsw_compact_9450 -- --ignored --nocapture`.
 //! Test: this file.
@@ -21,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use trusty_search::core::memguard::current_rss_mb;
-use trusty_search::core::store::{CompactMode, UsearchStore, VectorStore};
+use trusty_search::core::store::{CompactMode, CompactReport, UsearchStore, VectorStore};
 
 const VECTORS: usize = 150_000;
 const DIM: usize = 384;
@@ -44,8 +46,8 @@ fn spawn_rss_sampler(stop: Arc<AtomicBool>, peak: Arc<AtomicU64>) -> std::thread
     })
 }
 
-/// #9450 measurement: rebuild time, write-block time, and peak RSS of one
-/// compaction of a 150K x 384 f16 index.
+/// #9450 measurement: write-block time, rebuild time, and peak RSS of
+/// compacting a 150K x 384 f16 index, with and without a racing writer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "builds a 150K x 384 HNSW index and compacts it; run in release with --ignored"]
 async fn compaction_cost_at_150k_384d_f16() {
@@ -66,11 +68,88 @@ async fn compaction_cost_at_150k_384d_f16() {
     let writes = clustered_vectors::clustered_points(4_000, BLOBS, 1);
     let probes = clustered_vectors::clustered_points(500, BLOBS, 2);
 
+    // Run 1: a writer races the compaction.
+    let contended = measure(&store, &probes, Some(&writes)).await;
+    let err = contended
+        .outcome
+        .as_ref()
+        .expect_err("a write during the build abandons the compaction");
+    assert!(err.to_string().contains("abandoned"), "{err}");
+    // Run 2: readers only, so the compaction swaps.
+    let quiet = measure(&store, &probes, None).await;
+    let report = *quiet
+        .outcome
+        .as_ref()
+        .expect("compaction")
+        .as_ref()
+        .expect("report");
+
+    let mut waits = contended.waits.clone();
+    waits.sort();
+    let longest_wait = waits.last().copied().unwrap_or_default();
+    let median_wait = waits.get(waits.len() / 2).copied().unwrap_or_default();
+    eprintln!(
+        "#9450 measure: {VECTORS} x {DIM} f16, built in {build_secs:.1} s\n\
+         #9450 measure: run 1 (writer every 10 ms): abandoned after {} ms; writes {}; \
+         longest wait {} ms; median wait {} ms; searches {}, longest {} ms; \
+         RSS before {} MB, peak {} MB (+{} MB), after {} MB\n\
+         #9450 measure: run 2 (readers only): compaction {} ms ({} -> {} vectors, {} \
+         unreadable); searches {}, longest {} ms; RSS before {} MB, peak {} MB (+{} MB), \
+         after {} MB",
+        contended.elapsed.as_millis(),
+        waits.len(),
+        longest_wait.as_millis(),
+        median_wait.as_millis(),
+        contended.searches,
+        contended.longest_search.as_millis(),
+        contended.rss_before,
+        contended.rss_peak,
+        contended.rss_peak.saturating_sub(contended.rss_before),
+        contended.rss_after,
+        report.elapsed_ms,
+        report.vectors_before,
+        report.vectors_after,
+        report.missing,
+        quiet.searches,
+        quiet.longest_search.as_millis(),
+        quiet.rss_before,
+        quiet.rss_peak,
+        quiet.rss_peak.saturating_sub(quiet.rss_before),
+        quiet.rss_after,
+    );
+    assert_eq!(report.missing, 0);
+    assert_eq!(report.vectors_after, report.vectors_before);
+    assert_eq!(
+        store.len().await.expect("len"),
+        VECTORS + waits.len(),
+        "no vector lost"
+    );
+}
+
+/// What one measured compaction run saw.
+struct Run {
+    outcome: anyhow::Result<Option<CompactReport>>,
+    elapsed: Duration,
+    waits: Vec<Duration>,
+    searches: usize,
+    longest_search: Duration,
+    rss_before: u64,
+    rss_peak: u64,
+    rss_after: u64,
+}
+
+/// One `CompactMode::Always` compaction with a reader searching every 10 ms
+/// and, when `writes` is given, a writer upserting every 10 ms.
+async fn measure(
+    store: &Arc<UsearchStore>,
+    probes: &[Vec<f32>],
+    writes: Option<&[Vec<f32>]>,
+) -> Run {
     let rss_before = current_rss_mb().unwrap_or(0);
     let stop = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(rss_before));
     let sampler = spawn_rss_sampler(stop.clone(), peak.clone());
-
+    let started = Instant::now();
     let compaction = tokio::spawn({
         let store = store.clone();
         async move { store.compact_graph_now(CompactMode::Always).await }
@@ -78,6 +157,7 @@ async fn compaction_cost_at_150k_384d_f16() {
     let reader = tokio::spawn({
         let store = store.clone();
         let stop = stop.clone();
+        let probes = probes.to_vec();
         async move {
             let mut longest = Duration::ZERO;
             let mut i = 0usize;
@@ -94,9 +174,12 @@ async fn compaction_cost_at_150k_384d_f16() {
             (i, longest)
         }
     });
-
     let mut waits: Vec<Duration> = Vec::new();
     while !compaction.is_finished() {
+        let Some(writes) = writes else {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        };
         let i = waits.len();
         let t = Instant::now();
         store
@@ -106,41 +189,19 @@ async fn compaction_cost_at_150k_384d_f16() {
         waits.push(t.elapsed());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let report = compaction
-        .await
-        .expect("compaction task")
-        .expect("compaction")
-        .expect("report");
+    let outcome = compaction.await.expect("compaction task");
+    let elapsed = started.elapsed();
     stop.store(true, Ordering::Release);
     sampler.join().expect("sampler");
     let (searches, longest_search) = reader.await.expect("reader");
-    let rss_after = current_rss_mb().unwrap_or(0);
-
-    waits.sort();
-    let longest_wait = waits.last().copied().unwrap_or_default();
-    let median_wait = waits.get(waits.len() / 2).copied().unwrap_or_default();
-    let peak = peak.load(Ordering::Acquire);
-    eprintln!(
-        "#9450 measure: {VECTORS} x {DIM} f16, built in {build_secs:.1} s\n\
-         #9450 measure: compaction {} ms ({} -> {} vectors, {} unreadable)\n\
-         #9450 measure: writes during compaction {}; longest wait {} ms; median wait {} ms\n\
-         #9450 measure: searches during compaction {searches}; longest {} ms\n\
-         #9450 measure: RSS before {rss_before} MB, peak {peak} MB (+{} MB), after {rss_after} MB",
-        report.elapsed_ms,
-        report.vectors_before,
-        report.vectors_after,
-        report.missing,
-        waits.len(),
-        longest_wait.as_millis(),
-        median_wait.as_millis(),
-        longest_search.as_millis(),
-        peak.saturating_sub(rss_before),
-    );
-    assert_eq!(report.missing, 0);
-    assert_eq!(report.vectors_after, report.vectors_before);
-    assert_eq!(
-        store.len().await.expect("len"),
-        VECTORS + waits.len(),
-        "no vector lost"
-    );
+    Run {
+        outcome,
+        elapsed,
+        waits,
+        searches,
+        longest_search,
+        rss_before,
+        rss_peak: peak.load(Ordering::Acquire),
+        rss_after: current_rss_mb().unwrap_or(0),
+    }
 }
