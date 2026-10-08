@@ -16,6 +16,7 @@ use colored::Colorize;
 
 use super::explicit_target::lookup_index_by_path;
 use crate::config::GlobalConfig;
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Resolve PATH to its registration, or — when the daemon no longer registers
 /// it — clear its stale allowlist and config rows and stop (#8687).
@@ -26,11 +27,12 @@ use crate::config::GlobalConfig;
 /// Test: `removing_an_already_deleted_index_clears_its_stale_allowlist_row`,
 /// `an_unreadable_status_refuses_instead_of_reporting_not_registered`.
 pub(crate) async fn registered_or_cleared(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     path: &Path,
 ) -> Result<Option<(String, PathBuf)>> {
-    if let Some(found) = lookup_index_by_path(client, base, path).await? {
+    // #9214: a lookup error (unreachable, unreadable list or status) returns
+    // here, before any local row is touched.
+    if let Some(found) = lookup_index_by_path(client, path).await? {
         return Ok(Some((found.id, found.root)));
     }
     if clear_stale_path_rows(path)? == 0 {

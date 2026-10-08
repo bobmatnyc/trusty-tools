@@ -2,40 +2,38 @@
 //!
 //! Why: `add_path` and the doctor auto-repair path need to push individual
 //! files to the daemon without driving a full reindex pipeline; co-locating
-//! the HTTP dance here keeps the reindex driver focused on the SSE loop.
-//! What: `index_single_file` POSTs one file; `add_path` fans a directory out
-//! into per-file `index_single_file` calls (or indexes a single file directly).
-//! Test: covered indirectly by the `add` command integration tests.
+//! the per-file call here keeps the reindex driver focused on the event loop.
+//! What: `index_single_file` sends one file as `search.index.file.put` over the
+//! daemon socket (#9214); `add_path` fans a directory out into per-file
+//! `index_single_file` calls (or indexes a single file directly).
+//! Test: `a_single_file_is_sent_as_file_put`.
 
-use crate::commands::daemon_http::daemon_base_url;
+use crate::commands::daemon_rpc::call;
 use anyhow::Result;
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::writes::METHOD_INDEX_FILE_PUT;
 
-/// Index a single file via the daemon's `/indexes/:id/index-file` endpoint.
+/// Index a single file via the daemon's `search.index.file.put` method.
 ///
 /// Why: factored out of `main.rs` so `add_path` and other callers can reuse
-/// the single-file indexing path without duplicating the HTTP dance.
-/// What: reads the file from disk, POSTs its content to the daemon, and
-/// returns an error when the daemon reports failure.
-/// Test: covered indirectly by `add_path` and the doctor auto-repair path.
+/// the single-file indexing path without duplicating the call.
+/// What: reads the file from disk, sends its content to the daemon, and
+/// returns an error when the daemon refuses or cannot be reached.
+/// Test: `a_single_file_is_sent_as_file_put`.
 pub async fn index_single_file(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     index_id: &str,
     file: &std::path::Path,
 ) -> Result<()> {
     let content = tokio::fs::read_to_string(file)
         .await
         .map_err(|e| anyhow::anyhow!("read {}: {e}", file.display()))?;
-    let url = format!("{}/indexes/{}/index-file", base, index_id);
-    let body = serde_json::json!({
-        "path": file.display().to_string(),
-        "content": content,
+    let params = serde_json::json!({
+        "index_id": index_id,
+        "body": { "path": file.display().to_string(), "content": content },
     });
-    let resp = client.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("daemon returned {} for {}", resp.status(), url);
-    }
+    call(client, METHOD_INDEX_FILE_PUT, params).await?;
     Ok(())
 }
 
@@ -46,11 +44,11 @@ pub async fn index_single_file(
 /// indexing without a full reindex. A directory path fans out into per-file
 /// `index_single_file` calls rather than a full reindex pipeline.
 /// What: calls `index_single_file` for a file path; walks + indexes every
-/// source file under a directory path.
+/// source file under a directory path. The caller has already started the
+/// daemon; this resolves its socket.
 /// Test: covered indirectly by the `add` command integration tests.
 pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
-    let base = daemon_base_url()?;
-    let client = trusty_common::server::daemon_http_client()?;
+    let client = DaemonClient::resolve()?;
 
     if path.is_dir() {
         let walk = crate::service::walker::walk_source_files(path);
@@ -64,7 +62,7 @@ pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
         let mut ok = 0usize;
         let mut err = 0usize;
         for f in &walk.files {
-            match index_single_file(&client, &base, index_id, f).await {
+            match index_single_file(&client, index_id, f).await {
                 Ok(()) => ok += 1,
                 Err(e) => {
                     eprintln!("  {} {}: {e}", "\u{26a0}".yellow(), f.display());
@@ -80,7 +78,7 @@ pub async fn add_path(index_id: &str, path: &std::path::Path) -> Result<()> {
         );
         Ok(())
     } else {
-        index_single_file(&client, &base, index_id, path).await?;
+        index_single_file(&client, index_id, path).await?;
         println!("{} [{}] {}", "\u{2192}".cyan(), index_id, path.display());
         Ok(())
     }

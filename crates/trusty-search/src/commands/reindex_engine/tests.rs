@@ -2,9 +2,10 @@
 //! progress-aware wait-strategy decision logic, stall detection, and the
 //! issue-#744/#823 progress-bar fixes.
 //!
-//! Why: the full SSE loop in `driver::run_reindex_with` needs a live daemon and
-//! cannot run as a unit test; these tests pin the pure decision logic and the
-//! `ReindexUi` bar transitions that surround it.
+//! Why: these tests pin the pure decision logic and the `ReindexUi` bar
+//! transitions around the event loop, and (#9214) registration and the
+//! per-file write against a mock daemon socket. The loop itself is driven
+//! against a mock socket in `driver_tests.rs`.
 //! What: asserts defaults, hard-deadline vs stall-window construction, stall
 //! detection, ETA strings, and Embed/Chunk bar priming/freezing behaviour.
 //! Test: this module.
@@ -67,9 +68,8 @@ fn bar_style_does_not_panic() {
 
 // ── Progress-aware wait logic ─────────────────────────────────────────────
 //
-// The full SSE loop in `run_reindex_with` requires a live daemon and cannot
-// be tested in a unit test.  The tests below instead verify the *decision
-// logic* that governs the wait strategy:
+// The full event loop in `run_reindex_with` is driven in `driver_tests.rs`.
+// The tests below verify the *decision logic* that governs the wait strategy:
 //
 //  1. Whether `ReindexOptions` correctly represents "explicit" vs "default"
 //     timeout intent.
@@ -454,80 +454,42 @@ fn embedder_ready_fires_for_in_process_embedder() {
     );
 }
 
-// ── register_index_reporting_collision, on the wire (#7758) ──────────────
+// ── register_on, over the daemon socket (#7758, #9214) ───────────────────
 
-/// Serve `POST /indexes` with one fixed status and body, and point
-/// `daemon_base_url()` at it.
-///
-/// Why: the #7758 decision reads a field that exists only in the daemon's 409
-/// BODY, and the pre-fix code discarded the body after reading the status. A
-/// test that stubs the outcome would not have caught that; this drives the real
-/// reqwest call against a real listener.
-/// What: binds an axum listener on an ephemeral port and seeds
-/// `$TRUSTY_DATA_DIR/http_addr` with its address, which is what
-/// `DaemonAddrLayout::TRUSTY_SEARCH` resolves first. The caller owns the
-/// `TempDir` and must clear `TRUSTY_DATA_DIR` afterwards.
-async fn seed_conflict_daemon(
-    data_dir: &std::path::Path,
-    status: axum::http::StatusCode,
-    body: serde_json::Value,
-) {
-    use axum::extract::State;
-    use axum::routing::post;
-    use axum::{Json, Router};
-    use std::sync::Arc;
+use super::registration::{legacy_pair, register_on};
+use crate::commands::mock_socket::mock_daemon;
+use serde_json::json;
+use trusty_common::uds::server::RpcError;
+use trusty_search::service::rpc::error::{CODE_CONFLICT, CODE_NOT_FOUND};
 
-    type Canned = Arc<(axum::http::StatusCode, serde_json::Value)>;
-
-    async fn create(State(s): State<Canned>) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-        (s.0, Json(s.1.clone()))
-    }
-
-    let app = Router::new()
-        .route("/indexes", post(create))
-        .with_state(Arc::new((status, body)) as Canned);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral port must be bindable");
-    let addr = listener
-        .local_addr()
-        .expect("a bound listener must have an address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    std::fs::write(data_dir.join("http_addr"), addr.to_string()).expect("seed http_addr");
+/// A conflict refusal carrying the daemon's 409 body as `data`.
+fn conflict(message: &str, data: serde_json::Value) -> RpcError {
+    RpcError::new(CODE_CONFLICT, message).with_data(data)
 }
 
-/// #7758 regression: a `409` naming the index that already owns this root must
-/// come back as [`RegisterOutcome::RootOwnedBy`] carrying that id, not as a
-/// bail. Before the fix this arm read only `resp.status()` and raised
-/// `daemon returned 409 Conflict for POST /indexes`, so `index --force` had
-/// nothing to act on and aborted — the whole bug.
+/// #7758 regression: a conflict naming the index that already owns this root
+/// must come back as [`RegisterOutcome::RootOwnedBy`] carrying that id, not as
+/// a bail — `index --force` reindexes that id.
 /// Test: this function IS the test.
 #[tokio::test]
-#[serial_test::serial]
 async fn a_root_owned_by_another_index_is_reported_not_bailed() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    // SAFETY: `#[serial]` keeps every other TRUSTY_DATA_DIR mutator out.
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::CONFLICT,
-        serde_json::json!({
-            "error": "root_path is already registered to index 'owner'",
-            "existing_id": "owner",
-        }),
-    )
+    let daemon = mock_daemon(|method, params| {
+        assert_eq!(method, "search.index.create");
+        assert_eq!(params["id"], "requested");
+        Err(conflict(
+            "root_path is already registered to index 'owner'",
+            json!({ "existing_id": "owner" }),
+        ))
+    })
     .await;
 
-    let got = register_index_reporting_collision(
+    let got = register_on(
+        &daemon.client,
         "requested",
         std::path::Path::new("/repos/requested"),
         &RegisterFilters::default(),
     )
     .await;
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
 
     match got.expect("a root collision must be reported, not bailed") {
         RegisterOutcome::RootOwnedBy {
@@ -536,179 +498,250 @@ async fn a_root_owned_by_another_index_is_reported_not_bailed() {
         } => {
             assert_eq!(existing_id, "owner", "the owning id must be carried out");
             assert!(
-                refusal.contains("409"),
-                "the historical refusal must be preserved for the no-force path: {refusal}"
+                refusal.contains("conflict") && refusal.contains("'owner'"),
+                "the refusal must keep the daemon's text: {refusal}"
             );
         }
         other => panic!("expected RootOwnedBy, got {other:?}"),
     }
 }
 
-/// The same-id-different-root refusal is also a `409`, but it carries no
-/// `existing_id` — there is no other index to reindex, so it must stay a bail
-/// rather than become a silently-adopted target.
-/// Test: this function IS the test.
+/// #9214: today's daemon sends a conflict's body only as its message, so the
+/// owner is found by a lookup of the root — the index registered there.
 #[tokio::test]
-#[serial_test::serial]
-async fn a_conflict_without_an_existing_id_still_bails() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::CONFLICT,
-        serde_json::json!({ "error": "index 'requested' is registered at /elsewhere" }),
-    )
+async fn a_conflict_without_data_finds_the_owner_by_root() {
+    let root = tempfile::tempdir().expect("root");
+    let root_str = root.path().to_string_lossy().into_owned();
+    let listed = root_str.clone();
+    let daemon = mock_daemon(move |method, params| match method {
+        "search.index.create" => Err(RpcError::new(CODE_CONFLICT, "already registered")),
+        "search.indexes.list" => Ok(json!({ "indexes": ["owner"] })),
+        "search.index.status" if params["index_id"] == "owner" => {
+            Ok(json!({ "root_path": listed }))
+        }
+        other => Err(RpcError::internal(format!("unexpected {other}"))),
+    })
     .await;
 
-    let got = register_index_reporting_collision(
+    let got = register_on(
+        &daemon.client,
+        "requested",
+        std::path::Path::new(&root_str),
+        &RegisterFilters::default(),
+    )
+    .await
+    .expect("the owner is found");
+    assert!(
+        matches!(&got, RegisterOutcome::RootOwnedBy { existing_id, .. } if existing_id == "owner"),
+        "{got:?}"
+    );
+}
+
+/// The same-id-different-root refusal is also a conflict, but nothing else
+/// owns this root — there is no other index to reindex, so it must stay a
+/// bail rather than become a silently-adopted target.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_conflict_without_an_existing_id_still_bails() {
+    let daemon = mock_daemon(|method, _| match method {
+        "search.index.create" => Err(RpcError::new(
+            CODE_CONFLICT,
+            "index 'requested' is registered at /elsewhere",
+        )),
+        "search.indexes.list" => Ok(json!({ "indexes": [] })),
+        other => Err(RpcError::internal(format!("unexpected {other}"))),
+    })
+    .await;
+
+    let err = register_on(
+        &daemon.client,
         "requested",
         std::path::Path::new("/repos/requested"),
         &RegisterFilters::default(),
     )
-    .await;
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-
-    let err = got.expect_err("a 409 with no existing_id must still fail");
-    assert_eq!(
-        err.to_string(),
-        "daemon returned 409 Conflict for POST /indexes",
-        "the historical refusal must be unchanged"
-    );
+    .await
+    .expect_err("a conflict with no owner must still fail")
+    .to_string();
+    assert!(err.contains("registered at /elsewhere"), "{err}");
 }
 
 /// `register_index_with_daemon_filtered` is the arm every caller that has no
-/// `--force` to honour still uses — `init`, `discover`, `convert`, `migrate`.
-/// A root collision must reach them exactly as it did before #7758.
+/// `--force` to honour still uses — `init`, `discover`. A root collision must
+/// reach them as the daemon's refusal.
 /// Test: this function IS the test.
 #[tokio::test]
-#[serial_test::serial]
 async fn the_legacy_register_wrapper_still_bails_on_a_root_collision() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::CONFLICT,
-        serde_json::json!({ "error": "collision", "existing_id": "owner" }),
-    )
-    .await;
+    let daemon =
+        mock_daemon(|_, _| Err(conflict("collision", json!({ "existing_id": "owner" })))).await;
 
-    let got = register_index_with_daemon_filtered(
+    let outcome = register_on(
+        &daemon.client,
         "requested",
         std::path::Path::new("/repos/requested"),
         &RegisterFilters::default(),
     )
-    .await;
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-
-    let err = got.expect_err("the legacy wrapper must keep bailing");
-    assert_eq!(
-        err.to_string(),
-        "daemon returned 409 Conflict for POST /indexes",
-        "the pre-#7758 refusal must be unchanged"
-    );
+    .await
+    .expect("a collision is an outcome");
+    let err = legacy_pair(outcome).expect_err("the legacy wrapper must keep bailing");
+    assert!(err.to_string().contains("collision"), "{err}");
 }
 
-/// #8727: an overlap `409` carries the blocking index only in its body, and
-/// the CLI printed the bare status line, so the operator could not see which
-/// registration was in the way. The refusal must now name its id and root.
+/// #8727: an overlap conflict names the blocking index and its root in its
+/// message; the CLI must print that text.
 #[tokio::test]
-#[serial_test::serial]
 async fn an_overlap_conflict_names_the_blocking_index_and_root() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::CONFLICT,
-        serde_json::json!({
-            "error": "\"/repo\" contains the root of index 'agent-x' (\"/repo/wt/agent-x\")",
-            "overlap": "encloses_existing_root",
-            "existing_index_id": "agent-x",
-            "existing_root_path": "/repo/wt/agent-x",
-        }),
-    )
+    let daemon = mock_daemon(|method, _| match method {
+        "search.index.create" => Err(RpcError::new(
+            CODE_CONFLICT,
+            "\"/repo\" contains the root of index 'agent-x' (\"/repo/wt/agent-x\")",
+        )),
+        "search.indexes.list" => Ok(json!({ "indexes": [] })),
+        other => Err(RpcError::internal(format!("unexpected {other}"))),
+    })
     .await;
 
-    let got = register_index_reporting_collision(
+    let err = register_on(
+        &daemon.client,
         "requested",
         std::path::Path::new("/repo"),
         &RegisterFilters::default(),
     )
-    .await;
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-
-    let err = got
-        .expect_err("an overlap refusal must still fail")
-        .to_string();
+    .await
+    .expect_err("an overlap refusal must still fail")
+    .to_string();
     assert!(
         err.contains("agent-x") && err.contains("/repo/wt/agent-x"),
         "the refusal must name the blocking id and root: {err}"
     );
 }
 
-/// #8922: `POST /indexes` refuses an unparseable exclude glob with a `400`
-/// whose body names the pattern. The CLI must print that text, not the bare
-/// status line.
+/// #8922: an unparseable exclude glob is refused as invalid params whose
+/// message names the pattern. The CLI must print that text.
 #[tokio::test]
-#[serial_test::serial]
 async fn an_invalid_exclude_glob_refusal_names_the_pattern() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::BAD_REQUEST,
-        serde_json::json!({
-            "error": "invalid_exclude_glob",
-            "message": "exclude glob \"secrets/[unclosed\" does not parse",
-        }),
-    )
+    let daemon = mock_daemon(|_, _| {
+        Err(RpcError::invalid_params(
+            "invalid_exclude_glob: exclude glob \"secrets/[unclosed\" does not parse",
+        ))
+    })
     .await;
 
-    let got = register_index_reporting_collision(
+    let err = register_on(
+        &daemon.client,
         "requested",
         std::path::Path::new("/repo"),
         &RegisterFilters::default(),
     )
+    .await
+    .expect_err("an invalid-params refusal must fail")
+    .to_string();
+    assert!(err.contains("secrets/[unclosed"), "{err}");
+}
+
+/// A plain success must still report whether the daemon created the index,
+/// and the params carry the filters that differ from the defaults.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn a_successful_registration_reports_created() {
+    let daemon = mock_daemon(|_, params| {
+        assert_eq!(params["skip_kg"], true, "{params}");
+        assert!(params.get("defer_embed").is_none(), "{params}");
+        Ok(json!({ "id": "requested", "created": true }))
+    })
     .await;
+    let filters = RegisterFilters {
+        skip_kg: true,
+        ..RegisterFilters::default()
+    };
 
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-
-    let err = got.expect_err("a 400 must fail").to_string();
-    assert!(
-        err.contains("secrets/[unclosed"),
-        "the refusal must name the pattern: {err}"
+    let got = register_on(
+        &daemon.client,
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &filters,
+    )
+    .await;
+    assert_eq!(
+        got.expect("success must not fail"),
+        RegisterOutcome::Registered { created: true },
+        "a successful registration must report `created`"
     );
 }
 
-/// A plain `200` must still report whether the daemon created the index —
-/// the collision arm must not have changed the ordinary path.
-/// Test: this function IS the test.
+/// #9214 H2: a socket that accepts the connection and then breaks the
+/// exchange is a fault to report, not "the daemon is not running" — every
+/// caller turns `Unreachable` into "start the daemon" or a soft skip.
 #[tokio::test]
-#[serial_test::serial]
-async fn a_successful_registration_reports_created() {
-    let tmp = tempfile::tempdir().expect("a tempdir must be creatable");
-    unsafe { std::env::set_var("TRUSTY_DATA_DIR", tmp.path()) };
-    seed_conflict_daemon(
-        tmp.path(),
-        axum::http::StatusCode::OK,
-        serde_json::json!({ "id": "requested", "created": true }),
-    )
-    .await;
+async fn a_broken_exchange_is_an_error_not_unreachable() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let socket = dir.path().join("ts.sock");
+    // A hardened bind: the client refuses a socket in a non-0700 directory
+    // before it dials, which would read as unreachable for the wrong reason.
+    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
+    tokio::spawn(async move {
+        // Accept every connection and close it without answering.
+        while let Ok((conn, _)) = listener.accept().await {
+            drop(conn);
+        }
+    });
 
-    let got = register_index_reporting_collision(
+    let got = register_on(
+        &trusty_search::service::daemon_client::DaemonClient::at(&socket),
         "requested",
         std::path::Path::new("/repos/requested"),
         &RegisterFilters::default(),
     )
     .await;
-
-    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
-
-    assert_eq!(
-        got.expect("a 200 must not fail"),
-        RegisterOutcome::Registered { created: true },
-        "a successful registration must report `created`"
+    let err = got.expect_err("a broken exchange must be an error, not Unreachable");
+    assert!(
+        err.to_string().contains(&socket.display().to_string()),
+        "{err}"
     );
+}
+
+/// #9214 H2: nothing serving the socket is still `Unreachable`, naming it.
+#[tokio::test]
+async fn an_absent_socket_is_unreachable_and_named() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let socket = dir.path().join("absent.sock");
+    let got = register_on(
+        &trusty_search::service::daemon_client::DaemonClient::at(&socket),
+        "requested",
+        std::path::Path::new("/repos/requested"),
+        &RegisterFilters::default(),
+    )
+    .await
+    .expect("unreachable is an outcome");
+    match got {
+        RegisterOutcome::Unreachable { reason } => {
+            assert!(reason.contains(&socket.display().to_string()), "{reason}");
+        }
+        other => panic!("expected Unreachable, got {other:?}"),
+    }
+}
+
+/// `add`'s per-file write is `search.index.file.put` with the file's path and
+/// content under `body`.
+#[tokio::test]
+async fn a_single_file_is_sent_as_file_put() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let file = dir.path().join("a.rs");
+    std::fs::write(&file, "fn a() {}").expect("write");
+    let daemon = mock_daemon(|method, params| {
+        assert_eq!(method, "search.index.file.put");
+        assert_eq!(params["index_id"], "idx");
+        assert_eq!(params["body"]["content"], "fn a() {}");
+        Ok(json!({ "indexed": true }))
+    })
+    .await;
+    index_single_file(&daemon.client, "idx", &file)
+        .await
+        .expect("sent");
+
+    let refusing = mock_daemon(|_, _| Err(RpcError::new(CODE_NOT_FOUND, "unknown index"))).await;
+    let err = index_single_file(&refusing.client, "idx", &file)
+        .await
+        .expect_err("refused")
+        .to_string();
+    assert!(err.contains("unknown index"), "{err}");
 }

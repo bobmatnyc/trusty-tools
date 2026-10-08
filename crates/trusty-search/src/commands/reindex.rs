@@ -1,6 +1,5 @@
 //! Handler for `trusty-search reindex` (bare reindex, no force/verify).
 
-use super::daemon_http::daemon_base_url;
 use super::explicit_target::{
     classify_explicit_target, resolve_explicit_target, with_source, ExplicitTarget, IndexIdSource,
     ParkedTargets,
@@ -17,7 +16,9 @@ use anyhow::{bail, Result};
 /// refuses before any network call; PATH and/or `-i` resolve through the
 /// daemon (PATH plus id must agree), and the index's REGISTERED root is sent.
 /// With neither, the CWD-detected id and root are used as before. Then drives
-/// `run_reindex_opts`, which renders the SSE progress bar.
+/// `run_reindex_opts`, which renders the progress stream. #9214: the daemon is
+/// reached over its socket only, started on the indexing device (issue #24)
+/// when nothing answers.
 /// Test: `tests/reindex_quantize_env_conflict_8737.rs`.
 ///
 /// `timeout` is the user-supplied `--timeout` value: `None` means
@@ -39,19 +40,17 @@ pub async fn handle_reindex(
     let (index_id, reindex_path) = if target == ExplicitTarget::CwdAutoDetect {
         let (index_id, warned) = resolve_index(&None)?;
         print_index_header(&index_id, warned);
-        ensure_daemon().await?;
+        super::daemon_rpc::connect_for_indexing().await?;
         // #6550: detection can refuse the resolved root.
         let cwd = std::env::current_dir().unwrap_or_default();
         (index_id, detect_project(&cwd)?.root_path)
     } else {
-        ensure_daemon().await?;
-        let base = daemon_base_url()?;
-        let client = trusty_common::server::daemon_http_client()?;
-        // #8737: any failure here (down, 404, 503, mismatch) refuses before
-        // the reindex POST is ever sent.
+        // #9214: the socket only; nothing answering is an error naming it.
+        let client = super::daemon_rpc::connect_for_indexing().await?;
+        // #8737: any failure here (down, not found, unavailable, mismatch)
+        // refuses before the reindex kickoff is ever sent.
         let Some((id, root, via)) =
-            resolve_explicit_target("reindex", &client, &base, target, ParkedTargets::Refuse)
-                .await?
+            resolve_explicit_target("reindex", &client, target, ParkedTargets::Refuse).await?
         else {
             bail!("reindex target resolution returned no index");
         };
@@ -66,13 +65,4 @@ pub async fn handle_reindex(
         None => (0, false),
     };
     run_reindex_opts(&index_id, &reindex_path, timeout_secs, timeout_explicit).await
-}
-
-/// Issue #24: prefer CPU EP for an auto-spawned daemon (CoreML init OOMs the
-/// indexing path on Apple Silicon). Already-running daemons are untouched.
-async fn ensure_daemon() -> Result<()> {
-    // #9214: start the daemon over its socket; its HTTP base is resolved later.
-    super::daemon_http::ensure_daemon_http_base_for_indexing()
-        .await
-        .map(|_| ())
 }
