@@ -271,10 +271,13 @@ empty result.
   - Symbols come from the diff alone: a changed line that declares a `fn`,
     `def`, `function` or `func` (Rust, Python, TS/JS, Go), else the name in
     the hunk's `@@` header, else the nearest declaration in the context above
-    the first change. A Rust method takes the `impl` type the hunk shows
-    (`Type::name`). A body edit whose declaration is outside the hunk, and a
-    method on a generic `impl` type, are missed; the ledger counts the hunks
-    that named no symbol. Test files, deleted files, generated files and
+    the first change. An indented Rust `fn` inside an `impl` the hunk shows
+    still open takes that impl's self type exactly as written, which is how
+    trusty-search keys it (`FilesCall<'a>::new`); a column-0 `fn`, or one
+    after the impl's closing `}`, is a free function. A self type such as
+    `dyn Shape` or `&'a mut T` is not used and the method is queried by
+    name alone. A body edit whose declaration is outside the hunk is missed;
+    the ledger counts the hunks that named no symbol. Test files, deleted files, generated files and
     sensitive paths get no query.
   - Each symbol is read as `path::name`, `direction=both`, depth 1, without
     function bodies. Callers in a test path or named `test_*` are listed as
@@ -290,10 +293,11 @@ empty result.
     reviewed` (map-reduce, no chunk prompt reviews the file) or `deadline`.
   - Reads run 4 at a time, 10 seconds each, within a 30-second phase. No
     index, a context gate that degraded trusty-search, a symbol graph that is
-    not ready, a daemon that is down or answers 503 (not ready, KG disabled,
-    migrating), and an unparseable report each leave the section out and
-    record the source `unavailable`; the review runs. A failure that says
-    the daemon cannot answer stops further reads.
+    not ready, and a daemon that is down or answers 503 (not ready, KG
+    disabled, migrating) each leave the section out and record the source
+    `unavailable`; the review runs. A failure that says the daemon cannot
+    answer stops further reads. An unparseable report, a timeout or another
+    error on one symbol marks only that symbol `read failed`.
   - On the map-reduce path each chunk prompt carries the `Not shown:` list
     and only its own file's symbols, in that file's first chunk.
   - A degraded run still consumes the head's dedup claim, as the other

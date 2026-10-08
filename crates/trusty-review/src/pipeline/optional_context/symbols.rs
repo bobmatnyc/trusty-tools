@@ -61,10 +61,11 @@ const MAX_NAME_CHARS: usize = 200;
 /// What: per hunk, every changed (`+`/`-`) line that declares a callable is
 /// `Declared`; otherwise the `@@` suffix, else the nearest declaration in
 /// the context and removed lines above the first change, is `Touched`; else
-/// the hunk is `unresolved`. A Rust declaration takes the nearest `impl`
-/// type above it in the hunk or in the `@@` suffix. One entry per name:
-/// `Declared` wins and `diff_lines` add up.
-/// Test: `a_rust_method_takes_its_impl_type`, `each_language_declaration_is_found`,
+/// the hunk is `unresolved`. An indented Rust declaration takes the `impl`
+/// that still encloses it, in the hunk or the `@@` suffix ([`qualify`]).
+/// One entry per name: `Declared` wins and `diff_lines` add up.
+/// Test: `a_rust_method_takes_its_impl_type`, `a_free_fn_after_a_closed_impl_is_not_a_method`,
+/// `each_language_declaration_is_found`,
 /// `a_body_edit_takes_the_hunk_header`, `a_body_edit_scans_back_through_context`,
 /// `a_hunk_with_no_symbol_is_counted`.
 pub(crate) fn changed_symbols(path: &str, patch: &str) -> Found {
@@ -81,15 +82,26 @@ pub(crate) fn changed_symbols(path: &str, patch: &str) -> Found {
             if is_change(line)
                 && let Some(name) = decl_name(&line[1..])
             {
-                named.push((qualify(rust, name, &hunk[..i], suffix), Kind::Declared));
+                let name = qualify(rust, name, &line[1..], &hunk[..i], suffix);
+                named.push((name, Kind::Declared));
             }
         }
         if named.is_empty() {
             let first = hunk.iter().position(|l| is_change(l)).unwrap_or(0);
-            let above = hunk[..first].iter().rev().filter(|l| !l.starts_with('+'));
-            let touched = decl_name(suffix).or_else(|| above.map(|l| &l[1..]).find_map(decl_name));
+            // The `@@` suffix is a declaration line itself: nothing above it.
+            let touched = decl_name(suffix)
+                .map(|n| qualify(rust, n, suffix, &[], ""))
+                .or_else(|| {
+                    (0..first).rev().find_map(|j| {
+                        let body = &hunk[j][1..];
+                        (!hunk[j].starts_with('+'))
+                            .then(|| decl_name(body))
+                            .flatten()
+                            .map(|n| qualify(rust, n, body, &hunk[..j], suffix))
+                    })
+                });
             if let Some(name) = touched {
-                named.push((qualify(rust, name, &hunk[..first], suffix), Kind::Touched));
+                named.push((name, Kind::Touched));
             }
         }
         if named.is_empty() {
@@ -134,7 +146,10 @@ fn hunks(patch: &str) -> Vec<(&str, Vec<&str>)> {
     let mut out: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in patch.lines() {
         if let Some(rest) = line.strip_prefix("@@") {
-            let suffix = rest.split_once("@@").map_or("", |(_, s)| s.trim());
+            // Keep the suffix line's own indentation; git adds one space.
+            let suffix = rest
+                .split_once("@@")
+                .map_or("", |(_, s)| s.strip_prefix(' ').unwrap_or(s).trim_end());
             out.push((suffix, Vec::new()));
         } else if let Some((_, body)) = out.last_mut()
             && matches!(line.chars().next(), Some('+' | '-' | ' '))
@@ -152,22 +167,45 @@ fn is_change(line: &str) -> bool {
     line.starts_with('+') || line.starts_with('-')
 }
 
-/// `name`, as `Type::name` when `rust` and an `impl` shows above it.
-fn qualify(rust: bool, name: String, above: &[&str], suffix: &str) -> String {
-    let ty = rust
-        .then(|| {
-            above
-                .iter()
-                .rev()
-                .map(|l| &l[1..])
-                .chain(std::iter::once(suffix))
-                .find_map(impl_type)
-        })
-        .flatten();
-    match ty {
-        Some(ty) => format!("{ty}::{name}"),
-        None => name,
+/// `name`, as `Type::name` when `rust` and an `impl` still encloses `decl`.
+///
+/// Why: #9196 critic finding 2: a free fn edited after `impl Foo { }` came
+/// back as `Foo::helper` from the `@@ ... @@ impl Foo {` suffix.
+/// What: only an indented `decl` can be a method. Scanning up from it
+/// through `above`, then the `@@` suffix (a column-0 line), an `impl` line
+/// encloses it when `decl` is indented deeper and no `}` line at or left of
+/// the `impl`'s indentation lies between them; otherwise `name` is returned
+/// unqualified.
+/// Test: `a_free_fn_after_a_closed_impl_is_not_a_method`,
+/// `a_rust_method_takes_its_impl_type`, `a_body_edit_scans_back_through_context`.
+fn qualify(rust: bool, name: String, decl: &str, above: &[&str], suffix: &str) -> String {
+    let depth = indent(decl);
+    if !rust || depth == 0 {
+        return name;
     }
+    let mut closed_at = usize::MAX; // the leftmost `}` seen so far
+    let lines = above
+        .iter()
+        .rev()
+        .map(|l| &l[1..])
+        .chain(std::iter::once(suffix));
+    for line in lines {
+        let at = indent(line);
+        if line.trim_start().starts_with('}') {
+            closed_at = closed_at.min(at);
+        } else if let Some(ty) = impl_type(line) {
+            if closed_at > at && depth > at {
+                return format!("{ty}::{name}");
+            }
+            return name;
+        }
+    }
+    name
+}
+
+/// Leading whitespace characters of `line`.
+fn indent(line: &str) -> usize {
+    line.chars().take_while(|c| c.is_whitespace()).count()
 }
 
 /// The callable `line` declares, if any: `fn` (Rust), `def` (Python),
@@ -203,24 +241,76 @@ fn decl_name(line: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-/// The type a Rust `impl` line names: `impl<T> Trait for Foo<T> {` is `Foo`.
+/// The self type a Rust `impl` line names, verbatim as trusty-search keys it.
+///
+/// Why: #9196 critic finding 1: trusty-search keys a method
+/// `<file>::<Type>::<name>` with `Type` the source text of the `impl`'s
+/// `type` field (`rust_impl_type_name`, trusty-search
+/// `core/chunker/classify.rs:221`), so `impl<'a> FilesCall<'a>` is
+/// `FilesCall<'a>`; `FilesCall::new` is not found.
+/// What: past `impl` and its own `<...>` parameters, the text after a
+/// top-level ` for ` (a trait impl) or else the whole remainder, up to the
+/// first top-level space or `{`. Generic arguments keep their text exactly,
+/// spaces included. `None` unless the type is followed by `{`, `where` or
+/// nothing, holds only path, generic, reference, slice, tuple and pointer
+/// characters, has its brackets balanced, and is at most 200 characters, so
+/// a rejected type leaves the method unqualified and no diff text reaches a
+/// heading unchecked.
+/// Test: `a_rust_method_takes_its_impl_type`, `an_odd_impl_type_is_not_used`.
 fn impl_type(line: &str) -> Option<&str> {
     let rest = line.trim_start().strip_prefix("impl")?;
     if !rest.starts_with([' ', '<']) {
         return None;
     }
-    let rest = skip_generics(rest.trim_start());
-    let rest = rest
-        .rsplit_once(" for ")
-        .map_or(rest, |(_, ty)| ty)
-        .trim_start();
-    let end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
-        .unwrap_or(rest.len());
-    let path = rest[..end].trim_end_matches(':');
-    let ty = path.rsplit("::").next().unwrap_or(path);
-    (ty.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && ty.len() <= MAX_NAME_CHARS)
-        .then_some(ty)
+    let rest = skip_generics(rest.trim_start()).trim_start();
+    let rest = top_level_for(rest).unwrap_or(rest);
+    let mut depth = 0usize;
+    let mut prev = ' ';
+    let mut end = rest.len();
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' if prev == '-' => {}
+            '>' | ')' | ']' => depth = depth.checked_sub(1)?,
+            '{' if depth == 0 => {
+                end = i;
+                break;
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                end = i;
+                break;
+            }
+            c if c.is_ascii_alphanumeric() || " _:',&;*-".contains(c) => {}
+            _ => return None,
+        }
+        prev = c;
+    }
+    let (ty, after) = (&rest[..end], rest[end..].trim_start());
+    let tail_ok = after.is_empty() || after.starts_with('{') || after.starts_with("where");
+    let valid = depth == 0
+        && tail_ok
+        && ty.starts_with(|c: char| {
+            c.is_ascii_alphabetic() || c == '_' || c == '&' || c == '(' || c == '['
+        })
+        && ty.chars().count() <= MAX_NAME_CHARS;
+    valid.then_some(ty)
+}
+
+/// The text after a ` for ` outside any brackets: a trait impl's self type.
+fn top_level_for(text: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (i, c) in text.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            '{' if depth == 0 => return None,
+            ' ' if depth == 0 && text[i..].starts_with(" for ") => {
+                return Some(text[i + 5..].trim_start());
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `text` past a leading `<...>` generic list.

@@ -16,6 +16,9 @@ fn names(found: &Found) -> Vec<(&str, Kind)> {
         .collect()
 }
 
+/// Critic finding 1: a method is keyed by its `impl`'s self-type text
+/// verbatim, as trusty-search's `rust_impl_type_name` keys it
+/// (`FilesCall<'a>::new`, never `FilesCall::new`).
 #[test]
 fn a_rust_method_takes_its_impl_type() {
     let patch = "@@ -10,6 +10,9 @@ impl<'a> Ledger<'a> {\n \
@@ -24,12 +27,64 @@ fn a_rust_method_takes_its_impl_type() {
                  +        todo!()\n\
                  +    }\n";
     let found = changed_symbols("src/ledger.rs", patch);
-    assert_eq!(names(&found), [("Ledger::finish", Kind::Declared)]);
-    assert_eq!(found.symbols[0].id(), "src/ledger.rs::Ledger::finish");
+    assert_eq!(names(&found), [("Ledger<'a>::finish", Kind::Declared)]);
+    assert_eq!(found.symbols[0].id(), "src/ledger.rs::Ledger<'a>::finish");
 
-    let trait_impl = "@@ -1,3 +1,4 @@\n impl Display for Report {\n+    fn fmt(&self) {}\n";
-    let found = changed_symbols("src/r.rs", trait_impl);
-    assert_eq!(names(&found), [("Report::fmt", Kind::Declared)]);
+    for (impl_line, want) in [
+        ("impl Display for Report {", "Report::fmt"),
+        ("impl<T: Clone> Stack<T, Vec<T>> {", "Stack<T, Vec<T>>::fmt"),
+        (
+            "impl<'a, T> fmt::Debug for Wrapper<'a, T> where T: Debug {",
+            "Wrapper<'a, T>::fmt",
+        ),
+        ("impl crate::store::Store {", "crate::store::Store::fmt"),
+        (
+            "impl<T> From<T> for Box<dyn Fn(T) -> u8> {",
+            "Box<dyn Fn(T) -> u8>::fmt",
+        ),
+    ] {
+        let patch = format!("@@ -1,3 +1,4 @@\n {impl_line}\n+    fn fmt(&self) {{}}\n");
+        let found = changed_symbols("src/r.rs", &patch);
+        assert_eq!(names(&found), [(want, Kind::Declared)], "{impl_line}");
+    }
+}
+
+/// A type the key cannot be read from is left out of the name, never cut to
+/// a guess: the method is queried unqualified.
+#[test]
+fn an_odd_impl_type_is_not_used() {
+    for impl_line in [
+        "impl dyn Shape {",
+        "impl<'a> Trait for &'a mut Thing {",
+        "impl Foo`## PR Description {",
+        "impl Unbalanced<T {",
+    ] {
+        let patch = format!("@@ -1,3 +1,4 @@\n {impl_line}\n+    fn fmt(&self) {{}}\n");
+        let found = changed_symbols("src/r.rs", &patch);
+        assert_eq!(names(&found), [("fmt", Kind::Declared)], "{impl_line}");
+    }
+}
+
+/// Critic finding 2, from the critic's reproduction (`git diff` on a
+/// `lib.rs` whose `pub fn helper` follows `impl Foo { }`): git names the
+/// closed `impl Foo {` in the `@@` suffix, and the free fn is not a method.
+#[test]
+fn a_free_fn_after_a_closed_impl_is_not_a_method() {
+    let real = "@@ -8,6 +8,6 @@ impl Foo {\n     }\n }\n \n\
+                -pub fn helper() -> u32 {\n+pub fn helper() -> u64 {\n     2\n }\n";
+    let found = changed_symbols("lib.rs", real);
+    assert_eq!(names(&found), [("helper", Kind::Declared)]);
+
+    // Indented in a module: the impl closed at its own indentation.
+    let nested = "@@ -3,7 +3,7 @@ mod m {\n     impl Foo {\n         fn a() {}\n     }\n \n\
+                  -    fn helper() -> u32 { 1 }\n+    fn helper() -> u64 { 1 }\n";
+    let found = changed_symbols("src/m.rs", nested);
+    assert_eq!(names(&found), [("helper", Kind::Declared)]);
+
+    // Still open: an inner `}` deeper than the impl does not close it.
+    let open = "@@ -3,7 +3,8 @@ impl Foo {\n     fn a() {\n     }\n+    fn b() {}\n";
+    let found = changed_symbols("src/o.rs", open);
+    assert_eq!(names(&found), [("Foo::b", Kind::Declared)]);
 }
 
 #[test]
