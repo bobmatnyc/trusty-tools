@@ -29,7 +29,9 @@
 // so a broken intra-doc link is baked into that version forever and only a new
 // release can correct it. Deny keeps this crate at zero rather than letting the
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
-#![deny(rustdoc::broken_intra_doc_links)]
+// #9269: denied on the `server` build, the one docs.rs and that script
+// document; the slim builds drop the server items the prose links to.
+#![cfg_attr(feature = "server", deny(rustdoc::broken_intra_doc_links))]
 
 // #9269: everything below except `transport::socket_path`, `tools` and
 // `mcp_service` is the serving surface, compiled only under `server`.
