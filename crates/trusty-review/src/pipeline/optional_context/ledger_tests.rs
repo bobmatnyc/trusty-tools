@@ -11,7 +11,7 @@ use crate::models::SourceState;
 use crate::pipeline::optional_context::IssueDoc;
 
 /// The canonical row order when reporting is on.
-pub(crate) const CANONICAL: [&str; 9] = [
+pub(crate) const CANONICAL: [&str; 10] = [
     "pr_body",
     "caller_context",
     "issues",
@@ -20,6 +20,7 @@ pub(crate) const CANONICAL: [&str; 9] = [
     "changed_files", // #9195 ruling Q6
     "search",
     "analyze",
+    "symbol_context", // #9196 ruling Q7
     "external_sources",
 ];
 

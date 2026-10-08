@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// The row order when reporting is on (#9194, plan §2.1).
-const CANONICAL: [&str; 9] = [
+const CANONICAL: [&str; 10] = [
     "pr_body",
     "caller_context",
     "issues",
@@ -26,6 +26,7 @@ const CANONICAL: [&str; 9] = [
     "changed_files", // #9195 ruling Q6
     "search",
     "analyze",
+    "symbol_context", // #9196 ruling Q7
     "external_sources",
 ];
 
@@ -101,6 +102,11 @@ impl ContextLedger {
                 request.changed_files,
                 "changed_files is off",
             ), // #9195
+            (
+                "symbol_context",
+                request.symbol_context,
+                "symbol_context is off",
+            ), // #9196
         ];
         for (source, asked, off) in inputs {
             if self.records.iter().any(|r| r.source == source) {

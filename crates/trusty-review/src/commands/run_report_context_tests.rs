@@ -67,7 +67,8 @@ async fn local_run(flags: &[&str]) -> (ReviewOutcome, bool) {
 }
 
 /// #9194 AC2: `--report-context --json` wraps the unchanged review beside
-/// all nine rows (#9195: `changed_files` after `claude_md`).
+/// all ten rows (#9195: `changed_files` after `claude_md`; #9196:
+/// `symbol_context` after `analyze`).
 #[serial_test::serial]
 #[tokio::test]
 async fn run_report_context_json_wraps_every_row() {
@@ -88,6 +89,7 @@ async fn run_report_context_json_wraps_every_row() {
             "changed_files",
             "search",
             "analyze",
+            "symbol_context",
             "external_sources"
         ]
     );
@@ -164,6 +166,7 @@ fn report_context_help_names_the_rows_and_states() {
         "changed_files", // #9195
         "search",
         "analyze",
+        "symbol_context", // #9196
         "external_sources",
         "absent",
         "not_requested",
@@ -215,4 +218,16 @@ async fn run_changed_files_on_a_local_diff_is_unavailable() {
             .unwrap_or("")
             .contains("no PR head SHA")
     );
+}
+
+/// #9196: `--symbol-context` sets the flag, a new input that turns the
+/// ledger on; off by default.
+#[test]
+fn run_symbol_context_flag_sets_the_request() {
+    let args = RunArgs::try_parse_from(["run", "--symbol-context"]).expect("parse");
+    let request = run_request(&args);
+    assert!(request.symbol_context && request.requested_new() && request.ledger_enabled());
+    let args = RunArgs::try_parse_from(["run"]).expect("parse");
+    assert!(!run_request(&args).symbol_context);
+    assert!(RunArgs::try_parse_from(["run", "--symbol-context=yes"]).is_err());
 }

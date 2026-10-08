@@ -2846,3 +2846,7 @@ mod credential_url;
 // #9195: the PR's changed files, whole, at the head SHA.
 #[path = "runner_changed_files_tests.rs"]
 mod changed_files;
+
+// #9196: each changed symbol's callers, callees and tests.
+#[path = "runner_symbol_context_tests.rs"]
+mod symbol_context;

@@ -29,7 +29,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use trusty_common::search_rpc::{METHOD_HEALTH, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST};
 
-use super::search_transport::{METHOD_QUERY, SearchTransport, call_socket, decode};
+use super::search_transport::{
+    METHOD_CALL_CHAIN, METHOD_QUERY, SearchTransport, call_socket, decode,
+};
 use crate::pipeline::optional_context::probes::redact_credentials; // #9431
 
 /// Whole-request bound for one call, on either leg.
@@ -297,6 +299,34 @@ pub trait SearchClient: Send + Sync {
         query: &str,
         top_k: Option<u32>,
     ) -> Result<Vec<SearchResult>, SearchClientError>;
+
+    /// Read the call-graph report for one entry point (#9196).
+    ///
+    /// Why: B5 shows each changed symbol's callers, callees and tests from the
+    /// trusty-search call graph. Architect ruling Q6: a default-bodied method,
+    /// so every existing implementor keeps compiling.
+    /// What: the daemon's plain-text report for `entry_point`, walked in
+    /// `direction` (`both`, `outgoing` or `callers`) to `max_depth`, with
+    /// function bodies only when `include_source`. The default body fails
+    /// with [`SearchClientError::Unavailable`]: a client that cannot read the
+    /// graph must not look like one whose symbols have no edges (precedent
+    /// `list_index_identities`, #8649). `HttpSearchClient` overrides it.
+    /// Test: `call_chain_goes_over_the_socket_with_its_params`,
+    /// `call_chain_over_http_returns_the_text_body`,
+    /// `default_call_chain_is_unavailable`.
+    async fn call_chain(
+        &self,
+        index_id: &str,
+        entry_point: &str,
+        direction: &str,
+        max_depth: u32,
+        include_source: bool,
+    ) -> Result<String, SearchClientError> {
+        let _ = (index_id, entry_point, direction, max_depth, include_source);
+        Err(SearchClientError::Unavailable(
+            "call chains not supported by this search client".to_string(),
+        ))
+    }
 }
 
 // ─── HTTP implementation ──────────────────────────────────────────────────────
@@ -572,6 +602,62 @@ impl SearchClient for HttpSearchClient {
             .map_err(|e| SearchClientError::Parse(format!("search response: {e}")))?;
 
         Ok(search_resp.results)
+    }
+
+    // #9196: the call-graph report, plain text on both legs.
+    async fn call_chain(
+        &self,
+        index_id: &str,
+        entry_point: &str,
+        direction: &str,
+        max_depth: u32,
+        include_source: bool,
+    ) -> Result<String, SearchClientError> {
+        // #9214: `search.call_chain` answers the report as a bare string.
+        if let Some(socket) = self.transport.socket_path() {
+            let params = serde_json::json!({
+                "index_id": index_id,
+                "entry_point": entry_point,
+                "direction": direction,
+                "max_depth": max_depth,
+                "include_source": include_source,
+            });
+            let value = call_socket(socket, METHOD_CALL_CHAIN, params, SEARCH_TIMEOUT).await?;
+            return match value {
+                serde_json::Value::String(text) => Ok(text),
+                _ => Err(SearchClientError::Parse(
+                    "non-string call_chain result".to_string(),
+                )),
+            };
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
+        let url = format!("{}/indexes/{index_id}/call_chain", self.base_url);
+        let depth = max_depth.to_string();
+        let source = include_source.to_string();
+        let resp = self
+            .http
+            .get(&url)
+            .query(&[
+                ("entry_point", entry_point),
+                ("direction", direction),
+                ("max_depth", depth.as_str()),
+                ("include_source", source.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("GET {url}: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| SearchClientError::Transport(format!("read body of {url}: {e}")))?;
+        if !status.is_success() {
+            return Err(SearchClientError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(body)
     }
 }
 

@@ -907,3 +907,7 @@ mod report_context;
 // #9195: `changed_files` and `changed_files_budget` on both review tools.
 #[path = "tools_changed_files_tests.rs"]
 mod changed_files;
+
+// #9196: `symbol_context` on both review tools.
+#[path = "tools_symbol_context_tests.rs"]
+mod symbol_context;

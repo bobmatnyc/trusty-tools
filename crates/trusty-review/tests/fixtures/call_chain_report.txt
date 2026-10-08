@@ -1,0 +1,34 @@
+# Call chain: crates/trusty-review/src/pipeline/optional_context/files.rs::apply_files
+# Index: trusty-tools-4e2cf878  Direction: both  Depth: 1
+
+═══════════════════════════════════════
+
+## `apply_files` [ENTRY]  crates/trusty-review/src/pipeline/optional_context/files.rs:203
+Signature: pub(crate) async fn apply_files(
+Why: AC1-AC4: changed files are read at the head SHA within the budget, drop in the AC2 order, are each named when left out, and no failure stops the review.
+What: with `changed_files` off, does nothing (no read, no row).
+
+Calls →
+  · empty_row  crates/trusty-review/src/pipeline/optional_context/files_render.rs:190
+  · fetcher_for  crates/trusty-review/src/pipeline/optional_context/docs.rs:120
+  · screen  crates/trusty-review/src/pipeline/optional_context/files.rs:262
+  · read_all  crates/trusty-review/src/pipeline/optional_context/files.rs:290
+Called by ←
+  · run_review_with  crates/trusty-review/src/pipeline/runner.rs:240
+  · run_with  crates/trusty-review/src/pipeline/optional_context/files_tests.rs:224
+
+───────────────────────────────────────
+
+## `empty_row` [depth=1]  crates/trusty-review/src/pipeline/optional_context/files_render.rs:190
+Signature: pub(crate) fn empty_row(state: SourceState, detail: &str) -> ContextSourceRecord {
+Why: (no doc)
+What: (no doc)
+
+───────────────────────────────────────
+
+## `run_review_with` [caller]  crates/trusty-review/src/pipeline/runner.rs:240
+pub async fn run_review_with(
+// Why: one entry point for every optional input.
+
+───────────────────────────────────────
+
