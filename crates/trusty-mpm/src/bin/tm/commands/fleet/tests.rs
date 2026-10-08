@@ -913,3 +913,102 @@ fn every_architect_skill_asset_is_seeded() {
         assert_eq!(asset, skill.contents, "{}", skill.dest);
     }
 }
+
+/// #8981: the Architect line selects its conversation and ends in a bare
+/// `--remote-control`, for a resume and for a fresh start alike.
+#[test]
+fn the_architect_line_resumes_and_enables_remote_control() {
+    use trusty_mpm::core::architect_conversation::ConversationStart;
+    let id = "3f2b8c1e-5d4a-4b6f-9e2d-1a7c0b9e8f61".to_owned();
+    assert_eq!(
+        launch::architect_args(&ConversationStart::Resume(id.clone())),
+        ["--resume", id.as_str(), "--remote-control"]
+    );
+    let fresh = ConversationStart::Fresh {
+        id: id.clone(),
+        reason: Some("corrupt".to_owned()),
+    };
+    assert_eq!(
+        launch::architect_args(&fresh),
+        ["--session-id", id.as_str(), "--remote-control"]
+    );
+}
+
+/// #8981 critic MEDIUM: only a proven `Absent` pane fails a resume; a pane
+/// that cannot be read twice is `Unknown`, and one bad read is asked again.
+#[test]
+fn a_resume_fails_only_on_a_proven_absent_claude() {
+    use launch::{RESUME_SETTLE, ResumeCheck, resume_check};
+    use trusty_mpm::core::process::PaneClaude::{Absent, Present, Unknown};
+    let bound = Ok(trusty_mpm::core::twin_identity::ArmingRecord {
+        pid: 1,
+        start_time: 0,
+        project_dir: PathBuf::from("/arch"),
+        armed_at: String::new(),
+    });
+    let unbound = Err("no `claude` process appeared".to_owned());
+    let exited = || {
+        let secs = RESUME_SETTLE.as_secs();
+        ResumeCheck::Failed(format!("`claude` exited within {secs} s of starting"))
+    };
+    let cases = [
+        (
+            "unbound, gone",
+            &unbound,
+            vec![Absent],
+            ResumeCheck::Failed("no `claude` process appeared".to_owned()),
+        ),
+        (
+            "unbound, unreadable twice",
+            &unbound,
+            vec![Unknown, Unknown],
+            ResumeCheck::Unknown,
+        ),
+        (
+            "unbound, then gone",
+            &unbound,
+            vec![Unknown, Absent],
+            ResumeCheck::Failed("no `claude` process appeared".to_owned()),
+        ),
+        (
+            "unbound, then up",
+            &unbound,
+            vec![Present, Present],
+            ResumeCheck::Running,
+        ),
+        ("bound, up", &bound, vec![Present], ResumeCheck::Running),
+        ("bound, exited", &bound, vec![Absent], exited()),
+        (
+            "bound, unreadable twice",
+            &bound,
+            vec![Unknown, Unknown],
+            ResumeCheck::Unknown,
+        ),
+        (
+            "bound, then up",
+            &bound,
+            vec![Unknown, Present],
+            ResumeCheck::Running,
+        ),
+    ];
+    for (name, binding, answers, want) in cases {
+        let mut answers = answers.into_iter();
+        let mut slept = Vec::new();
+        let got = resume_check(
+            binding,
+            || answers.next().expect("one probe too many"),
+            |d| slept.push(d),
+        );
+        assert_eq!(got, want, "{name}");
+        assert_eq!(
+            answers.next(),
+            None,
+            "{name}: a probe answer was left unread"
+        );
+        let settled = !matches!(
+            (binding, &got),
+            (Err(_), ResumeCheck::Failed(_) | ResumeCheck::Unknown)
+        );
+        assert_eq!(slept.contains(&RESUME_SETTLE), settled, "{name}: {slept:?}");
+    }
+}

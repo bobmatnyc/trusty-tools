@@ -456,3 +456,41 @@ async fn register_supervisor_refuses_a_relative_dir_or_a_bad_name() {
     assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
     assert!(mgr.list().await.is_empty());
 }
+
+/// #8981 / #8942 live FAIL: the registration a relaunch sends (the Architect,
+/// its poller and its collector, the same directory) leaves one live
+/// `supervisor` row and one live `supervisor_aux` row per helper — the rows
+/// `tm ls` tags `architect` and `architect-helper` — however often it runs.
+#[tokio::test]
+async fn a_relaunch_registers_the_architect_and_both_helpers() {
+    let (root, fake, mgr) = manager().await;
+    let mut reg = registration(&root, Some("tm-arch-poll"));
+    reg.collector_session = Some("tm-arch-collector".into());
+    *fake.pane_cwd_override.lock().unwrap() = Some(reg.dir.clone());
+    *fake.pane_claude_override.lock().unwrap() = Some(PaneClaude::Absent);
+
+    for launch in ["first launch", "relaunch"] {
+        let report = mgr
+            .register_supervisor(&reg, &Verifier::bound())
+            .await
+            .expect("the Architect registers");
+        assert_eq!(report.registered.len(), 3, "{launch}: {report:?}");
+        let mut live: Vec<(String, SessionKind)> = mgr
+            .list()
+            .await
+            .into_iter()
+            .filter(|r| !r.state.is_terminal())
+            .map(|r| (r.tmux_name, r.kind))
+            .collect();
+        live.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            live,
+            [
+                ("tm-arch".to_owned(), SessionKind::Supervisor),
+                ("tm-arch-collector".to_owned(), SessionKind::SupervisorAux),
+                ("tm-arch-poll".to_owned(), SessionKind::SupervisorAux),
+            ],
+            "{launch}"
+        );
+    }
+}

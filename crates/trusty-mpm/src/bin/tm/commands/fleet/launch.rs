@@ -11,14 +11,26 @@
 //! `claude` line on the `opus` alias. It records the launch stamp in the tmux
 //! session environment, where [`launch_stamp`] reads it, and records the
 //! `claude` it started, with the session name, as the Architect's process
-//! ([`record_process`], #8878 ruling A). No daemon registration: the session
-//! is not in `tm ls` until #8536.
-//! Test: `fleet_init_launches_the_architect_and_status_is_complete`.
+//! ([`record_process`], #8878 ruling A). #8981: the `claude` line resumes the
+//! Architect's recorded conversation when one checks out, and carries
+//! `--remote-control` ([`architect_args`]). A resumed `claude` proven gone
+//! within [`RESUME_SETTLE`] is a failed resume: the session is killed, the
+//! conversation record cleared, and the launch fails, so the next run starts
+//! fresh. A pane that cannot be read twice keeps both, with a warning
+//! ([`resume_check`]). Daemon registration is not here: `fleet::run`
+//! registers a bound Architect after the poller step (`register`, #8942).
+//! Test: `fleet_init_launches_the_architect_and_status_is_complete`,
+//! `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
+//! `fleet_init_clears_the_conversation_record_when_the_resume_fails`,
+//! `fleet_init_keeps_the_resumed_architect_when_its_pane_cannot_be_read`.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
+use trusty_mpm::core::architect_conversation::{self, ConversationStart};
 use trusty_mpm::core::architect_session;
+use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::session_profile::{self, SESSION_PROFILE_ENV};
 use trusty_mpm::core::tmux::{self, TmuxCommand};
 use trusty_mpm::core::twin_identity::ArmingRecord;
@@ -26,6 +38,15 @@ use trusty_mpm::core::twin_identity::ArmingRecord;
 /// The Architect's default tmux session; the P1 poller's `ARCHITECT_SESSION`
 /// default. `--session` overrides it (#8878 R1).
 pub(crate) const ARCHITECT_SESSION: &str = architect_session::DEFAULT_ARCHITECT_SESSION;
+
+/// How long a resumed `claude` must stay up before the resume counts (#8981).
+///
+/// A `claude --resume` that cannot load its conversation exits within a
+/// second or two; a resume that dies later is caught on the next run.
+pub(crate) const RESUME_SETTLE: Duration = Duration::from_secs(5);
+
+/// The pause before [`resume_check`] asks an unreadable pane once more.
+const REPROBE: Duration = Duration::from_millis(500);
 
 /// What tmux reports about one session and its first pane (#8436 P4 fix).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,14 +162,18 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// What: see the module doc. Fails before creating the session when the
 /// profile would resolve to PM; kills the session when the `claude` line
 /// cannot be sent. `home` is the user home every write goes under; `session`
-/// is the validated session name. Returns the [`record_process`] outcome.
+/// is the validated session name. Returns the [`record_process`] outcome and
+/// how the conversation started (#8981). A failed resume ([`resume_check`])
+/// kills the session, clears the conversation record and is `Err`.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
-/// `fleet_init_with_a_session_override_names_every_session`.
+/// `fleet_init_with_a_session_override_names_every_session`,
+/// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
+/// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.
 pub(crate) fn start(
     dir: &Path,
     home: &Path,
     session: &str,
-) -> anyhow::Result<Result<ArmingRecord, String>> {
+) -> anyhow::Result<(Result<ArmingRecord, String>, ConversationStart)> {
     require_supervisor(dir, session)?;
     match trusty_mpm::core::session_launch::prepare_isolated_session_under(dir, None, Some(home)) {
         Ok(report) => {
@@ -188,7 +213,7 @@ pub(crate) fn start(
         Some(home),
     )?;
     // #8308: the launch travels in a spec under `home`; the pane types a short line.
-    let claude_spec = crate::commands::launch::launch_claude_spec(
+    let mut claude_spec = crate::commands::launch::launch_claude_spec(
         dir,
         trusty_mpm::core::alt_screen::operator_config_root().as_deref(),
         &model,
@@ -197,6 +222,12 @@ pub(crate) fn start(
         &cli.env,
         scoped_mcp.as_deref(),
     );
+    // #8981: the conversation id comes from tm's own record, which outlives
+    // the daemon's session record.
+    let root = home.join(".trusty-mpm");
+    let conversation =
+        architect_conversation::resolve_conversation(&root, dir, config_dir.as_deref());
+    claude_spec.args.extend(architect_args(&conversation));
     let spec_dir = crate::commands::launch::launch_spec_dir(Some(home))?;
     let workdir = dir
         .to_str()
@@ -215,7 +246,154 @@ pub(crate) fn start(
         });
         return Err(err);
     }
-    Ok(record_process(dir, home, session))
+    // #8981: a fresh conversation's id is recorded only once `claude` was
+    // started under it; a failed write means the next launch starts fresh.
+    if let ConversationStart::Fresh { id, .. } = &conversation
+        && let Err(err) = architect_conversation::record_conversation(&root, dir, id)
+    {
+        eprintln!(
+            "warning: conversation {id} was NOT recorded, so the next `tm fleet init` \
+             starts fresh: {err}"
+        );
+    }
+    let binding = record_process(dir, home, session);
+    // #8981 critic HIGH: a dead resume must not be retried by every later run.
+    if let ConversationStart::Resume(id) = &conversation {
+        let check = resume_check(
+            &binding,
+            || trusty_mpm::core::process::pane_claude(session),
+            std::thread::sleep,
+        );
+        settle_resume(check, &root, id, session)?;
+    }
+    Ok((binding, conversation))
+}
+
+/// What [`resume_check`] found in the resumed Architect's pane (#8981).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResumeCheck {
+    /// A `claude` runs in the pane.
+    Running,
+    /// Proven: no `claude` runs in the pane, for the reason given.
+    Failed(String),
+    /// tmux or the process table could not be read, twice.
+    Unknown,
+}
+
+/// Whether the resumed `claude` in the session is running (#8981 critic MEDIUM).
+///
+/// Why: `find_claude_pid_in_tmux` answers `None` both for "no `claude`" and
+/// for "tmux or ps could not be read", and the old check killed a live
+/// Architect and dropped its record on the second.
+/// What: `probe` is a three-state [`PaneClaude`] read; an `Unknown` answer is
+/// asked once more after [`REPROBE`]. When [`record_process`] found no
+/// `claude` (`binding` is `Err`), an `Absent` pane fails with that reason.
+/// Otherwise the pane is read again after [`RESUME_SETTLE`]: `Absent` fails,
+/// `Present` runs. Only a proven `Absent` is [`ResumeCheck::Failed`]; two
+/// `Unknown` answers are [`ResumeCheck::Unknown`].
+/// Test: `a_resume_fails_only_on_a_proven_absent_claude`.
+pub(crate) fn resume_check(
+    binding: &Result<ArmingRecord, String>,
+    mut probe: impl FnMut() -> PaneClaude,
+    mut sleep: impl FnMut(Duration),
+) -> ResumeCheck {
+    let mut read = |sleep: &mut dyn FnMut(Duration)| match probe() {
+        PaneClaude::Unknown => {
+            sleep(REPROBE);
+            probe()
+        }
+        seen => seen,
+    };
+    if let Err(why) = binding {
+        match read(&mut sleep) {
+            PaneClaude::Absent => return ResumeCheck::Failed(why.clone()),
+            PaneClaude::Unknown => return ResumeCheck::Unknown,
+            PaneClaude::Present => {}
+        }
+    }
+    sleep(RESUME_SETTLE);
+    match read(&mut sleep) {
+        PaneClaude::Present => ResumeCheck::Running,
+        PaneClaude::Unknown => ResumeCheck::Unknown,
+        PaneClaude::Absent => ResumeCheck::Failed(format!(
+            "`claude` exited within {} s of starting",
+            RESUME_SETTLE.as_secs()
+        )),
+    }
+}
+
+/// Act on [`resume_check`]'s answer for conversation `id` in `session`.
+///
+/// What: `Running` is `Ok`. `Unknown` keeps the session and the record and
+/// warns on stderr, naming both. `Failed` kills the session, clears the
+/// record and is `Err`, saying whether each step worked.
+/// Test: `fleet_init_clears_the_conversation_record_when_the_resume_fails`,
+/// `fleet_init_keeps_the_resumed_architect_when_its_pane_cannot_be_read`,
+/// `fleet_init_says_so_when_the_failed_resume_session_cannot_be_killed`.
+fn settle_resume(check: ResumeCheck, root: &Path, id: &str, session: &str) -> anyhow::Result<()> {
+    let path = architect_conversation::conversation_path(root);
+    let why = match check {
+        ResumeCheck::Running => return Ok(()),
+        ResumeCheck::Unknown => {
+            eprintln!(
+                "warning: could not tell whether the resumed `claude` (conversation {id}) runs \
+                 in tmux session {session}: tmux or the process table could not be read; kept \
+                 the session and the conversation record {}",
+                path.display()
+            );
+            return Ok(());
+        }
+        ResumeCheck::Failed(why) => why,
+    };
+    // #8981 critic LOW: a kill that failed must not be reported as done.
+    let killed = match kill_session(session) {
+        Ok(()) => format!("killed tmux session {session}"),
+        Err(err) => format!(
+            "could NOT kill tmux session {session}; run `tmux kill-session -t ={session}` \
+             ({err})"
+        ),
+    };
+    let record = match architect_conversation::clear_conversation(root) {
+        Ok(()) => format!(
+            "cleared {}, so the next `tm fleet init` starts a new conversation",
+            path.display()
+        ),
+        Err(err) => format!(
+            "could NOT clear {} ({err}); remove it, or the next `tm fleet init` resumes {id} \
+             again",
+            path.display()
+        ),
+    };
+    bail!("resuming the Architect's conversation {id} failed ({why}); {killed}, and {record}")
+}
+
+/// Kill tmux session `session`; `Err` says why it may still run.
+fn kill_session(session: &str) -> Result<(), String> {
+    let out = tmux::run_tmux(&TmuxCommand::KillSession {
+        name: session.to_owned(),
+    })
+    .map_err(|e| format!("cannot run tmux: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "tmux kill-session failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
+}
+
+/// The arguments the Architect's `claude` line adds for #8981.
+///
+/// Why: the owner (2026-10-01): "We should not require a remote session" —
+/// no `tmux attach` and `/remote-control` after a relaunch.
+/// What: the conversation's `--resume <id>` or `--session-id <id>`, then a
+/// bare `--remote-control` last, so its optional name never takes a
+/// following argument.
+/// Test: `the_architect_line_resumes_and_enables_remote_control`.
+pub(crate) fn architect_args(conversation: &ConversationStart) -> Vec<String> {
+    let mut args = conversation.claude_args().to_vec();
+    args.push("--remote-control".to_owned());
+    args
 }
 
 /// Bind the Architect identity to the `claude` [`start`] just launched

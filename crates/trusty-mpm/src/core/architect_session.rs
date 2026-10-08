@@ -122,7 +122,8 @@ pub fn record_launch(
 }
 
 /// Write `body` to `path` atomically, mode 0600, as `RecordStore::write` does.
-fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {
+// #8981: shared with the conversation record.
+pub(crate) fn write_owner_only(path: &Path, body: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let dir = path
         .parent()
