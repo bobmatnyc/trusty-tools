@@ -260,25 +260,65 @@ empty result.
     for the whole PR.
   - A local diff has no head SHA, so the source is recorded `unavailable` and
     the review runs.
+- `--symbol-context` (#9196) shows, for each function or method the diff
+  declares or edits, its callers, callees and tests from the trusty-search
+  call graph, for the reviewer only, as
+  `## Changed symbols: callers, callees and tests`. Each symbol is a
+  `### path::name` block fenced as data, beneath a note that the graph is
+  the indexed checkout's and may not be at the PR head. The text is context
+  only: it is never citable and the verifier never sees it. It works on a
+  local diff, against the configured index.
+  - Symbols come from the diff alone: a changed line that declares a `fn`,
+    `def`, `function` or `func` (Rust, Python, TS/JS, Go), else the name in
+    the hunk's `@@` header, else the nearest declaration in the context above
+    the first change. A Rust method takes the `impl` type the hunk shows
+    (`Type::name`). A body edit whose declaration is outside the hunk, and a
+    method on a generic `impl` type, are missed; the ledger counts the hunks
+    that named no symbol. Test files, deleted files, generated files and
+    sensitive paths get no query.
+  - Each symbol is read as `path::name`, `direction=both`, depth 1, without
+    function bodies. Callers in a test path or named `test_*` are listed as
+    tests; an inline `#[cfg(test)]` module is not told apart. A symbol with
+    none says "none found in the call graph".
+  - Caps: at most 12 symbols (declared before edited, then most changed
+    lines), 6 lines per list with a `... N more` line, 2,500 characters per
+    symbol and 24,000 in total, each cut marked. Every symbol left out is
+    named under `Not shown:` with one fixed reason: `over symbol cap`,
+    `over section cap`, `ambiguous` (the name matches several definitions;
+    none is picked), `wrong file` (the graph anchored it elsewhere), `not in
+    the index` (typically a symbol the PR adds), `read failed`, `not
+    reviewed` (map-reduce, no chunk prompt reviews the file) or `deadline`.
+  - Reads run 4 at a time, 10 seconds each, within a 30-second phase. No
+    index, a context gate that degraded trusty-search, a symbol graph that is
+    not ready, a daemon that is down or answers 503 (not ready, KG disabled,
+    migrating), and an unparseable report each leave the section out and
+    record the source `unavailable`; the review runs. A failure that says
+    the daemon cannot answer stops further reads.
+  - On the map-reduce path each chunk prompt carries the `Not shown:` list
+    and only its own file's symbols, in that file's first chunk.
+  - A degraded run still consumes the head's dedup claim, as the other
+    optional sources do.
 
 With `--include-pr-body`, `--issue-docs-file`, `--spec-docs`, `--claude-md`,
-`--changed-files` or `--report-context`, `--json` prints
+`--changed-files`, `--symbol-context` or `--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
 one line per source that was `absent`, `unavailable` or `truncated`. Without
 any of them, `--json` prints the review object alone, exactly as before. The
 text flags and a `# Context:` stdin preamble never turn the ledger on by
 themselves.
 
-The ledger lists every source, in this order (#9194, #9195): `pr_body`,
-`caller_context`, `issues`, `spec_docs`, `claude_md`, `changed_files`,
-`search`, `analyze` and `external_sources`. Each row is `used`, `truncated`, `absent` (asked for, and
+The ledger lists every source, in this order (#9194, #9195, #9196):
+`pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`,
+`changed_files`, `search`, `analyze`, `symbol_context` and
+`external_sources`. Each row is `used`, `truncated`, `absent` (asked for, and
 there was nothing: no hits, no hotspots or smells in the changed files, a
 source with no results), `unavailable` (could not be read; `detail` says why,
 one line of at most 200 characters with credentials redacted) or
 `not_requested` (an input the request did not ask for, or no external source
 configured). `analyze` has `hotspots` and `smells` items,
-`external_sources` one item per enabled source, and `changed_files` one item
-per changed file; a row takes its worst item. A
+`external_sources` one item per enabled source, `changed_files` one item
+per changed file, and `symbol_context` one item per changed symbol (`path::name`,
+at most 64, the rest folded into one); a row takes its worst item. A
 dependency the context gate degraded reads `unavailable` with the gate's
 reason. A review skipped before its context was gathered lists no rows. The
 ledger never changes the review: verdict, grade, findings and prompts are the
@@ -361,14 +401,15 @@ Optional PR context (#9192), all off by default:
 | `report_context` | boolean | Report the context-source ledger with no other new input (#9194); also on `review_diff`. `null` and `false` are off. A non-boolean is an invalid-params error. |
 | `changed_files` | boolean | Show the PR's changed files whole, read at the PR head SHA (#9195); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same rules as `run --changed-files`. A non-boolean is an invalid-params error. |
 | `changed_files_budget` | integer | Byte budget for `changed_files`: default 120,000, at most 400,000 (a larger value is clamped); 0 reviews the diff only. Does nothing without `changed_files`. A negative, fractional or non-number value is an invalid-params error. |
+| `symbol_context` | boolean | Show each changed symbol's callers, callees and tests from the trusty-search call graph (#9196); also on `review_diff`, which reads the configured index. Same rules as `run --symbol-context`. A non-boolean is an invalid-params error. |
 
 A mistyped text param is ignored with a warning. When any of these is sent
 (`changed_files_budget` alone does not count), the response envelope carries
 `context_sources`: every source in the order `run --report-context` lists
 them (`pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`,
-`changed_files`, `search`, `analyze`, `external_sources`), each
+`changed_files`, `search`, `analyze`, `symbol_context`, `external_sources`), each
 `used`, `truncated`, `absent`, `unavailable` or `not_requested`, with
-per-item rows (`omitted` names a doc or a changed file left out whole). A review skipped before
+per-item rows (`omitted` names a doc, a changed file or a changed symbol left out whole). A review skipped before
 its context was gathered carries `"context_sources": []`. Without any of them
 there is no such key, and with the ledger off a failed source is only logged
 (see `run` above). The `ReviewResult` text inside the envelope, `isError`,

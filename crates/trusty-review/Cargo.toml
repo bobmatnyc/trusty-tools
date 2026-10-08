@@ -133,6 +133,10 @@ name        = "trusty-review"
 # The changes are additive: new `#[non_exhaustive]` request fields, builder
 # methods, a CLI flag and MCP arguments. The root `[workspace.dependencies]`
 # row stays `version = "0.38"`, which 0.38.1 satisfies.
+#
+# #9196 lands under the same unpublished 0.38.1: additive only (a
+# `#[non_exhaustive]` request field and builder, a default-bodied
+# `SearchClient::call_chain`, a CLI flag and an MCP argument).
 version     = "0.38.1"
 edition     = "2024"
 rust-version.workspace = true
