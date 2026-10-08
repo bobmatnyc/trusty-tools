@@ -76,7 +76,8 @@ pub struct RouteHealth {
     pub recipient: String,
     /// Allowed kinds, schema spelling.
     pub kinds: Vec<&'static str>,
-    /// The learned DM space, or `None` until the recipient messages the app.
+    /// The space sends go to: the route's configured space, else the
+    /// learned DM space, or `None` until the recipient messages the app.
     pub space: Option<String>,
     /// Questions sent on this route and not yet answered.
     pub open_questions: usize,
@@ -209,10 +210,13 @@ impl GchatChannel {
                     name: r.name.clone(),
                     recipient: r.recipient.clone(),
                     kinds: r.kinds.iter().map(|k| k.as_str()).collect(),
-                    space: inner
-                        .spaces
-                        .space_for(&r.name, &r.recipient)
-                        .map(str::to_string),
+                    // #9448: a configured space is never looked up.
+                    space: r.space.clone().or_else(|| {
+                        inner
+                            .spaces
+                            .space_for(&r.name, &r.recipient)
+                            .map(str::to_string)
+                    }),
                     open_questions: inner
                         .ledger
                         .questions()

@@ -347,14 +347,27 @@ fn is_segment(s: &str, extra: &[char]) -> bool {
         })
 }
 
+/// True when `name` is `spaces/{space}` with one safe id segment.
+///
+/// Why: the routes file's `space` field and every send target share one
+/// rule (#9448), so a route cannot name a space a send would refuse.
+/// What: the `spaces/` prefix, then [`is_segment`] with no extra characters.
+/// Test: `resource_names_reject_path_injection`,
+/// `space_field_loads_and_a_malformed_space_fails_the_load`.
+pub(crate) fn is_space_name(name: &str) -> bool {
+    name.strip_prefix("spaces/")
+        .is_some_and(|id| is_segment(id, &[]))
+}
+
 /// Accept `spaces/{space}` only.
 fn validate_space(name: &str) -> Result<(), GchatError> {
-    match name.strip_prefix("spaces/") {
-        Some(id) if is_segment(id, &[]) => Ok(()),
-        _ => Err(GchatError::InvalidName {
+    if is_space_name(name) {
+        Ok(())
+    } else {
+        Err(GchatError::InvalidName {
             name: name.to_string(),
             expected: "spaces/{space}",
-        }),
+        })
     }
 }
 

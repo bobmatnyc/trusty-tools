@@ -7,8 +7,8 @@
 //! derived from its id so a reply can bind back (D5).
 //! What: [`GchatChannel::check_egress`] is the pure route check.
 //! [`GchatChannel::send_question`] and [`GchatChannel::send_review_notice`]
-//! run it, then the DM-space lookup (no fallback space), then the text
-//! checks, and only then call the crate-private `create_message`. Every
+//! run it, then the space lookup — the route's configured space, else its
+//! learned DM space (no fallback space) — then the text checks, and only then call the crate-private `create_message`. Every
 //! refusal is written to `audit.jsonl` without the message text.
 //! Test: `src/gchat/tests/egress.rs`.
 
@@ -74,7 +74,7 @@ impl GchatChannel {
     /// Post a question to the route `to` names.
     ///
     /// Why: the outbound half of the question/answer loop.
-    /// What: route check, learned DM space, text check; then reserves the
+    /// What: route check, the route's space, text check; then reserves the
     /// next id on disk, posts `[Q-<id>] <text>` with thread key
     /// `trusty-q-<id>-<unix ms>`, and records the question open with the
     /// thread name Chat returned. A failed post leaves the id reserved and
@@ -137,7 +137,7 @@ impl GchatChannel {
     /// Post a notice that a ticket or task waits for review.
     ///
     /// Why: the second message kind; it expects no reply (E3).
-    /// What: route check, https URL check, learned DM space, text check;
+    /// What: route check, https URL check, the route's space, text check;
     /// then posts `<text>\n<url>` with no thread key. Opens no question.
     /// Test: `review_notice_without_https_url_is_refused`,
     /// `valid_review_notice_is_sent_and_opens_no_question`.
@@ -177,14 +177,19 @@ impl GchatChannel {
             if let Some(url) = url {
                 check_review_url(url)?;
             }
-            let space = self
-                .lock()
-                .spaces
-                .space_for(&route.name, &route.recipient)
-                .map(str::to_string)
-                .ok_or_else(|| SendError::SpaceNotLearned {
-                    route: route.name.clone(),
-                })?;
+            let space = match &route.space {
+                // #9448: a space route posts to its configured space and
+                // never consults the learned DM binding.
+                Some(space) => space.clone(),
+                None => self
+                    .lock()
+                    .spaces
+                    .space_for(&route.name, &route.recipient)
+                    .map(str::to_string)
+                    .ok_or_else(|| SendError::SpaceNotLearned {
+                        route: route.name.clone(),
+                    })?,
+            };
             check_text(text)?;
             Ok((route, space))
         });

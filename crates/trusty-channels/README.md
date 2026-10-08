@@ -136,6 +136,48 @@ standard **process env → `.env.local` → secure store** precedence. Construct
 succeeds without either token (so `tools/list` works); a missing token
 surfaces only when a tool makes a live call that requires it.
 
+## Google Chat routes (`gchat-mcp`)
+
+`gchat-mcp` sends only along routes listed in the project's committed
+`.trusty-channels/routes.toml` (an uncommitted edit refuses every send). Each
+`[[gchat.routes]]` entry has `name`, `recipient` (the person's Chat email),
+`kinds` (`question`, `review_notice`) and an optional `space`:
+
+```toml
+version = 1
+
+[gchat.connection]
+project_id = "my-project"
+subscription = "chat-in"
+key_file = "~/.config/trusty/chat-sa.json"
+
+# DM route: no `space`. The DM is learned when the recipient first messages
+# the app; replies are accepted only in that DM.
+[[gchat.routes]]
+name = "janet"
+recipient = "janet@example.com"
+kinds = ["question", "review_notice"]
+
+# Space routes: both post to one named Space. A reply binds only from the
+# route's recipient, in that Space (`SPACE` or `GROUP_CHAT`); a DM is dropped.
+[[gchat.routes]]
+name = "bob"
+recipient = "bob@example.com"
+kinds = ["question"]
+space = "spaces/AAAAexample"
+
+[[gchat.routes]]
+name = "janet-space"
+recipient = "janet.s@example.com"
+kinds = ["question"]
+space = "spaces/AAAAexample"
+```
+
+`space` must be `spaces/<id>`; a malformed value fails the load. A space route
+never reads or writes the learned `state/gchat-spaces.json`, and `gchat-mcp
+doctor` reports its space as `configured`. Recipients stay unique across
+routes, so one person cannot hold both a DM route and a space route.
+
 ## Architecture
 
 Each channel module has two layers, deliberately decoupled — mirroring
