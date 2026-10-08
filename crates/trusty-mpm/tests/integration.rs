@@ -89,5 +89,7 @@ mod tm_ls_state_colors;
 mod tm_session_disk_cli;
 mod tm_sessions_alias_notice;
 mod tm_sessions_instructions_diagnostics;
+// #8994: `tm worktrees --json` on a scratch HOME.
+mod tm_worktrees_cli;
 mod trusty_mpm_alias;
 mod workspace_serial_test_features;

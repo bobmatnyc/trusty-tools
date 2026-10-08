@@ -280,6 +280,8 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
         Some(Command::Content { action }) => return commands::content::run(action).await,
+        // #8994: `tm worktrees` reads and appends the worktree ledger only.
+        Some(Command::Worktrees(args)) => return commands::worktrees::run(args).await,
         _ => {}
     }
 
@@ -636,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Env { action }) => commands::env_file::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,
+        Some(Command::Worktrees(args)) => commands::worktrees::run(args).await, // #8994
         Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
             // over STDIO adapter; a plain `tm sm <message>` chats as before.
@@ -652,14 +655,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Services { action }) => services(action),
         Some(Command::Repair { action }) => commands::repair::dispatch(&client, &url, action).await,
-        Some(Command::Auth { action }) => {
-            use cli::AuthAction;
-            match action {
-                AuthAction::SetToken { token, stdin } => commands::auth::set_token(token, stdin),
-                AuthAction::ClearToken => commands::auth::clear_token(),
-                AuthAction::Status => commands::auth::status(),
-            }
-        }
+        Some(Command::Auth { action }) => commands::auth::dispatch(action),
         Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
         Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
         Some(Command::Watch { cmd }) => watch_dispatch::dispatch_watch(&client, &url, cmd).await,

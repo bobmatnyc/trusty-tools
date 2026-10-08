@@ -219,6 +219,10 @@ use doctor_maintenance_storm::{check_live_maintenance_processes, check_maintenan
 mod doctor_worktree_disk;
 use doctor_worktree_disk::check_worktree_disk;
 
+// #8994: count and GiB per project from the worktree ledger alone.
+#[path = "doctor_worktree_registry.rs"]
+pub(crate) mod doctor_worktree_registry;
+
 // #7497: the check above counts the BYTES tm's own worktrees hold; this one
 // reports the MOUNT's headroom against `disk.max_usage_pct`, which is what
 // decides whether the next worktree is created at all.
@@ -443,7 +447,7 @@ use doctor_sidecars::{check_memory, check_search};
 /// the one tm-managed `CLAUDE_CONFIG_DIR` tier and nowhere else, so
 /// `check_agents`/`check_agent_skills` probe `paths.agent_deploy_dir()`, which
 /// is the same directory whether or not a `project_dir` was supplied.
-/// Test: `run_doctor_produces_sixty_seven_checks`,
+/// Test: `run_doctor_produces_sixty_eight_checks`,
 /// `agents_check_probes_the_managed_config_tier_not_the_workspace`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -604,6 +608,8 @@ pub(crate) async fn run_doctor_with_claims(
     // #7497: and this is the mount the store sits ON — the number the
     // `disk.max_usage_pct` gate reads before creating the next worktree.
     checks.push(check_disk_usage(repos_root, &home));
+    // #8994: what the worktree ledger records — no git, no filesystem walk.
+    checks.push(doctor_worktree_registry::check_worktree_registry(&home));
     // See #6868: the rows above measure what disk has ALREADY gone; this one
     // reports the Rust build settings that decide the next cold build's cost,
     // and prints the `CARGO_TARGET_DIR=… CARGO_BUILD_JOBS=…` line a PM pastes
@@ -845,7 +851,7 @@ pub async fn run_doctor_for_manager(
 /// and resolves the managed Claude config dir, then calls
 /// [`doctor_auto_memory::check_auto_memory`].
 /// Test: the three verdicts are covered directly in `doctor_auto_memory_tests`;
-/// this wiring is covered by `run_doctor_produces_sixty_seven_checks`.
+/// this wiring is covered by `run_doctor_produces_sixty_eight_checks`.
 async fn auto_memory_row(
     project_dir: Option<&Path>,
     home: &Path,

@@ -499,6 +499,103 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
     );
 }
 
+/// A committed git repository, the base `reserve_inproject_worktree` branches from.
+fn committed_repo_8994() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tmp base dir");
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "fixture: git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "T"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    dir
+}
+
+/// Drive the daemon's provisioning call against `base` under the current `$HOME`.
+async fn reserve_8994(base: &std::path::Path) -> Result<(std::path::PathBuf, String), String> {
+    let data_root = tempfile::TempDir::new().expect("tmp data root");
+    let state = std::sync::Arc::new(
+        crate::daemon::state::DaemonState::with_root_isolated_managed(
+            data_root.path().to_path_buf(),
+        )
+        .await,
+    );
+    let params = SpawnParams {
+        repo_url: base.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        task: "task".into(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: false,
+        worktree: true,
+    };
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();
+    let id = ManagedSessionId::new();
+    reserve_inproject_worktree(&state, &id, &params, base, base, "trusty-tools", &config).await
+}
+
+/// #8994 criterion 1: a ledger the daemon cannot append to refuses the
+/// provisioning call, and no worktree is left on disk.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn reserve_inproject_worktree_refuses_when_the_ledger_cannot_record() {
+    let home = disk_threshold_home(100);
+    // The ledger path is a directory, so the append open fails for any user.
+    let ledger = crate::core::worktree_ledger::WorktreeLedger::under_home(home.path());
+    std::fs::create_dir_all(ledger.path()).expect("block the ledger path");
+    let _home = set_home(home.path());
+    let base = committed_repo_8994();
+
+    let err = reserve_8994(base.path())
+        .await
+        .expect_err("an unwritable ledger must refuse the provisioning call");
+
+    assert!(
+        err.contains("worktree ledger"),
+        "the error must name the ledger: {err}"
+    );
+    let worktrees = base.path().join(".worktrees");
+    let created: Vec<_> = std::fs::read_dir(&worktrees)
+        .map(|it| it.filter_map(Result::ok).map(|e| e.path()).collect())
+        .unwrap_or_default();
+    assert!(created.is_empty(), "no worktree may exist: {created:?}");
+}
+
+/// #8994: the daemon's provisioning call records one `created` event.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn reserve_inproject_worktree_records_the_created_tree() {
+    use crate::core::worktree_ledger::{Origin, WorktreeLedger, fold::fold, ledger_key};
+    let home = disk_threshold_home(100);
+    let _home = set_home(home.path());
+    let base = committed_repo_8994();
+
+    let (worktree, _) = reserve_8994(base.path()).await.expect("reserve");
+
+    let read = WorktreeLedger::under_home(home.path())
+        .read()
+        .expect("ledger");
+    let state = fold(&read.events);
+    assert_eq!(state.live.len(), 1, "{state:?}");
+    let entry = &state.live[&ledger_key(&worktree)];
+    assert_eq!(entry.origin, Origin::TmDaemon);
+    assert_eq!(entry.repo, ledger_key(base.path()));
+    assert_eq!(entry.branch.as_deref(), Some("session/tm-trusty-tools-01"));
+}
+
 /// Why (#2158): the adopted-session sentinel `/unknown` (and any
 /// non-existent workspace) must never be handed to `validate_and_repair`
 /// — there is nothing on disk to diff, and the repair pipeline would

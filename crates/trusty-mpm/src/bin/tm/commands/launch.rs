@@ -233,6 +233,7 @@ pub(crate) async fn launch(
         worktree,
         launch_dir,
         &session_uuid,
+        home, // #8994: the worktree ledger's home
     )
     .await?;
     let managed_path = workspace.path().to_path_buf();

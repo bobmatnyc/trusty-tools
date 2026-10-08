@@ -406,6 +406,8 @@ pub mod worktree_index;
 pub mod worktree_landed_content;
 // #8633: the merge-into-base question, including a base that moved on.
 pub mod worktree_landed_history;
+// #8994: the machine-wide append-only worktree ledger.
+pub mod worktree_ledger;
 pub mod worktree_naming;
 // See ADR-0057 — the facts the pm-guard's removal re-checks ask git and GitHub.
 pub mod worktree_removal_facts;
