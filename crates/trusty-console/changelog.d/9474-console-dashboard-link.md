@@ -1,2 +1,0 @@
-Added
-- The console header links to the local Architect dashboard, opening it in a new tab. The link appears only while the dashboard is live on this host: it records its address in the trusty `http_addr` discovery file (`<data dir>/trusty-architect/http_addr`), the address must be loopback, and it must accept a connection within 300 ms. `GET /api/console/architect-dashboard` reports the URL or `null` (#9474).
