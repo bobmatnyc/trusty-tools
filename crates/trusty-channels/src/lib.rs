@@ -8,9 +8,9 @@
 //! topology decision) keeps shared MCP framing, HTTP-client hardening, and
 //! credential wiring in one place instead of duplicating a crate per platform.
 //! See ADR-0014.
-//! What: One module per channel. Today only [`slack`] exists (its `slack-mcp`
-//! binary lives in `src/bin/slack-mcp.rs`); a future `telegram` module and
-//! `telegram-mcp` binary slot in alongside it without a new crate.
+//! What: One module per channel: [`slack`] and [`telegram`] (each with an MCP
+//! binary under `src/bin/`), and [`gchat`], whose Google Chat API layer has no
+//! binary yet (#9448).
 //! Test: `cargo test -p trusty-channels` covers each channel's client, MCP
 //! handshake, and tool registry.
 
@@ -20,5 +20,6 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
+pub mod gchat;
 pub mod slack;
 pub mod telegram;

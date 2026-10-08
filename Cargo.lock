@@ -11151,11 +11151,15 @@ name = "trusty-channels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
+ "base64 0.22.1",
  "comrak",
+ "jsonwebtoken",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serial_test",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
