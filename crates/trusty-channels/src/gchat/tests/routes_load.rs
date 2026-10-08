@@ -129,7 +129,8 @@ fn load_rules_refuse_each_invalid_file() {
             "unknown route key",
             format!(
                 "{CONN}{}",
-                janet.replace("kinds", "space = \"spaces/A\"\nkinds")
+                // #9448: `space` is a route key now; `room` is not.
+                janet.replace("kinds", "room = \"spaces/A\"\nkinds")
             ),
         ),
         (

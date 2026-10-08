@@ -1,16 +1,18 @@
 //! Inbound processing: bind a pulled Chat reply to exactly one open question,
-//! learn a route's DM space at bootstrap, and drop everything else with an
+//! learn a DM route's space at bootstrap, and drop everything else with an
 //! audit line.
 //!
 //! Why: a reply must resolve only the question it answers, only from the
-//! route's recipient, only in that recipient's DM (#9448 rulings 4 and 6).
+//! route's recipient, and only in the route's space (#9448 rulings 4 and 6):
+//! the recipient's DM for a DM route, or the route's configured named space
+//! (`SPACE` or `GROUP_CHAT`) for a space route, which never takes a DM.
 //! Google documents `messageReplyOption` as named-space only, so a DM reply
 //! may not thread; the visible `[Q-<n>]` token is the fallback binding.
 //! What: [`GchatChannel::process_batch`] handles each [`PulledMessage`] and
 //! returns the ack ids it may acknowledge: a message is acked only after its
 //! outcome (answer or audit line) is on disk. [`GchatChannel::poll_once`]
 //! pulls, processes and acknowledges one batch.
-//! Test: `src/gchat/tests/inbound.rs`.
+//! Test: `src/gchat/tests/inbound.rs`, `src/gchat/tests/space_routes.rs`.
 
 use crate::gchat::api::error::EventParseError;
 use crate::gchat::api::events::{ChatEvent, MessageEvent, PulledMessage};
@@ -165,7 +167,7 @@ impl GchatChannel {
         Ok(report)
     }
 
-    /// Bind one MESSAGE event, learning the route's space at bootstrap.
+    /// Bind one MESSAGE event, learning a DM route's space at bootstrap.
     fn handle_message(&self, inner: &mut Inner, m: &MessageEvent) -> Result<Handled, StateError> {
         // #9448 review: a bot never binds a route or answers a question.
         if m.sender
@@ -185,22 +187,30 @@ impl GchatChannel {
             return Ok(Handled::drop("sender_not_recipient", None));
         };
         let name = Some(route.name.clone());
-        if !is_direct_message(m) {
-            return Ok(Handled::drop("not_direct_message", name));
-        }
         let mut learned = false;
-        match inner.spaces.space_for(&route.name, &route.recipient) {
-            Some(space) if space != m.space.name => {
-                return Ok(Handled::drop("space_mismatch", name));
+        if let Some(configured) = route.space.as_deref() {
+            // #9448: a space route binds only in its configured space and
+            // never reads or writes a learned binding.
+            if let Some(reason) = space_route_refusal(table, configured, m) {
+                return Ok(Handled::drop(reason, name));
             }
-            Some(_) => {}
-            None => {
-                if space_bound_elsewhere(table, inner, &route.name, &m.space.name) {
-                    return Ok(Handled::drop("space_bound_to_other_route", name));
+        } else {
+            if !is_direct_message(m) {
+                return Ok(Handled::drop("not_direct_message", name));
+            }
+            match inner.spaces.space_for(&route.name, &route.recipient) {
+                Some(space) if space != m.space.name => {
+                    return Ok(Handled::drop("space_mismatch", name));
                 }
-                learned = inner
-                    .spaces
-                    .learn(&route.name, &route.recipient, &m.space.name)?;
+                Some(_) => {}
+                None => {
+                    if space_bound_elsewhere(table, inner, &route.name, &m.space.name) {
+                        return Ok(Handled::drop("space_bound_to_other_route", name));
+                    }
+                    learned = inner
+                        .spaces
+                        .learn(&route.name, &route.recipient, &m.space.name)?;
+                }
             }
         }
         let thread_match: Vec<u64> = m
@@ -269,6 +279,42 @@ impl Handled {
 fn is_direct_message(m: &MessageEvent) -> bool {
     m.space.space_type.as_deref() == Some("DIRECT_MESSAGE")
         || (m.space.space_type.is_none() && m.space.legacy_type.as_deref() == Some("DM"))
+}
+
+/// Why a message from a space route's recipient is refused, or `None`.
+///
+/// Why: a space route accepts a reply only in its configured named space
+/// (#9448 owner ruling: one shared Space, no per-person DMs).
+/// What: in order — a DM is `direct_message_on_space_route`; a `spaceType`
+/// other than `SPACE` or `GROUP_CHAT` (absent included) is
+/// `space_type_not_allowed`; a space another route configures is
+/// `configured_space_mismatch`; any other space is `space_not_configured`.
+/// Test: `dm_from_a_space_route_recipient_is_dropped_and_audited`,
+/// `recipient_in_another_routes_space_is_dropped_and_audited`,
+/// `message_from_an_unconfigured_space_is_dropped_and_audited`.
+fn space_route_refusal(
+    table: &RouteTable,
+    configured: &str,
+    m: &MessageEvent,
+) -> Option<&'static str> {
+    if is_direct_message(m) {
+        return Some("direct_message_on_space_route");
+    }
+    if !matches!(m.space.space_type.as_deref(), Some("SPACE" | "GROUP_CHAT")) {
+        return Some("space_type_not_allowed");
+    }
+    if m.space.name == configured {
+        return None;
+    }
+    let elsewhere = table
+        .routes
+        .iter()
+        .any(|r| r.space.as_deref() == Some(m.space.name.as_str()));
+    Some(if elsewhere {
+        "configured_space_mismatch"
+    } else {
+        "space_not_configured"
+    })
 }
 
 /// True when another route already holds `space`.

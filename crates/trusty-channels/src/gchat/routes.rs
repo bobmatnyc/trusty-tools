@@ -7,13 +7,38 @@
 //! What: [`load_routes`] reads `<project>/.trusty-channels/routes.toml`,
 //! applies the load gate ([`crate::gchat::load_gate`]) and the schema-1 load
 //! rules, and returns a [`RouteTable`]. A missing file is an empty table.
-//! Test: `src/gchat/tests/routes_load.rs`.
+//! A route without `space` is a DM route: its DM space is learned when the
+//! recipient first messages the app. A route with `space = "spaces/<id>"`
+//! posts to, and accepts replies only from, that named space; several
+//! routes may share one (#9448).
+//! Test: `src/gchat/tests/routes_load.rs`, `src/gchat/tests/space_routes.rs`.
+//!
+//! ```toml
+//! version = 1
+//!
+//! [gchat.connection]
+//! project_id = "my-project"
+//! subscription = "chat-in"
+//! key_file = "~/.config/trusty/chat-sa.json"
+//!
+//! [[gchat.routes]]          # DM route
+//! name = "janet"
+//! recipient = "janet@example.com"
+//! kinds = ["question", "review_notice"]
+//!
+//! [[gchat.routes]]          # space route (optional `space`)
+//! name = "bob"
+//! recipient = "bob@example.com"
+//! kinds = ["question"]
+//! space = "spaces/AAAAexample"
+//! ```
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::gchat::api::client::is_space_name;
 use crate::gchat::error::RouteError;
 use crate::gchat::load_gate;
 
@@ -81,6 +106,17 @@ pub struct Route {
     pub recipient: String,
     /// Allowed kinds; never empty.
     pub kinds: BTreeSet<MessageKind>,
+    /// The named Chat space this route posts to and accepts replies from,
+    /// `spaces/{space}`; `None` for a DM route.
+    ///
+    /// Why: the owner ruled one shared Space for several people (#9448), so
+    /// a route may name its space instead of learning a DM.
+    /// What: validated at load like every outbound space name; several
+    /// routes may share one. A route with a space never reads or writes the
+    /// learned `gchat-spaces.json` binding.
+    /// Test: `space_field_loads_and_a_malformed_space_fails_the_load`,
+    /// `space_route_sends_to_its_configured_space_without_a_learned_binding`.
+    pub space: Option<String>,
 }
 
 impl Route {
@@ -256,10 +292,20 @@ fn validate_route(entry: &str, raw: RawRoute) -> Result<Route, RouteError> {
         })?;
         kinds.insert(kind);
     }
+    // #9448: a configured space passes the same check as a send target.
+    if let Some(space) = &raw.space {
+        if !is_space_name(space) {
+            return Err(invalid(
+                entry,
+                format!("space {space:?} must be spaces/{{space}}"),
+            ));
+        }
+    }
     Ok(Route {
         name: raw.name,
         recipient: raw.recipient.to_ascii_lowercase(),
         kinds,
+        space: raw.space,
     })
 }
 
@@ -362,6 +408,8 @@ struct RawRoute {
     name: String,
     recipient: String,
     kinds: Vec<String>,
+    #[serde(default)]
+    space: Option<String>,
 }
 
 fn read_error(path: &Path, e: &std::io::Error) -> RouteError {

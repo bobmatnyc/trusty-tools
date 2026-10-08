@@ -2,7 +2,7 @@
 //! the operator must pass before a session can send.
 //!
 //! Why: a Chat route fails in several independent places — the routes file,
-//! its load gate, the key file, the token grant, the learned DM space — and
+//! its load gate, the key file, the token grant, the route's space — and
 //! the operator needs to see which one, per route, without reading logs.
 //! While a server holds the state lock, doctor must still report everything
 //! that needs no lock.
@@ -12,11 +12,14 @@
 //! read "in use by a running gchat-mcp", which is not a failure.
 //! [`report_for_channel`] builds the same report from a channel already
 //! open; the `gchat_doctor` tool uses it, and a poller error fails it.
+//! A space route's space column reads `configured` from the routes file, so
+//! it needs no state lock; a DM route's reads `bound` or `pending`.
 //! No check sends a message; the token mint is skipped with `offline`.
 //! Test: `doctor_prints_one_row_per_route_and_passes`,
 //! `doctor_fails_on_a_broken_key_mode`,
 //! `doctor_mints_a_token_online_and_reports_in_use_state`,
-//! `doctor_fails_without_a_routes_file`.
+//! `doctor_fails_without_a_routes_file`,
+//! `doctor_reports_a_space_route_as_configured`.
 
 use std::path::Path;
 
@@ -35,8 +38,8 @@ pub const IN_USE: &str = "in use by a running gchat-mcp";
 /// One check's outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Cell {
-    /// `ok`, `failed`, `skipped`, `pending` or `in_use`. Only `failed`
-    /// fails the report.
+    /// `ok`, `failed`, `skipped`, `pending`, `in_use` or `configured`.
+    /// Only `failed` fails the report.
     pub status: &'static str,
     /// A short reason. Never key material, a token or message text.
     pub detail: String,
@@ -86,7 +89,8 @@ pub struct DoctorRow {
     pub key_file: Cell,
     /// An access token was minted (skipped offline).
     pub token: Cell,
-    /// The route's DM space is learned.
+    /// The route's space: `configured` in the routes file, else the
+    /// learned DM space (`bound`) or `pending`.
     pub space: Cell,
     /// Open questions on this route.
     pub open_questions: Cell,
@@ -351,6 +355,11 @@ fn build(
         .iter()
         .map(|r| {
             let (space, open_questions) = state_cells(&state, &r.name);
+            // #9448: a configured space comes from the routes file, not state.
+            let space = match &r.space {
+                Some(configured) => Cell::new("configured", configured.clone()),
+                None => space,
+            };
             DoctorRow {
                 route: r.name.clone(),
                 recipient: r.recipient.clone(),
