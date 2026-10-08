@@ -273,7 +273,9 @@ pub(crate) async fn apply_symbols(
 /// status other than `ready` is `Err`. A daemon that reports no stage status
 /// passes; the entry-file check still guards it.
 /// Test: `a_graph_stage_not_ready_is_unavailable_and_makes_no_call`,
-/// `an_index_status_failure_is_unavailable_not_a_skip`.
+/// `an_index_status_failure_is_unavailable_not_a_skip`,
+/// `a_hung_readiness_probe_is_unavailable_and_makes_no_call`,
+/// `a_status_without_a_graph_stage_is_read`.
 async fn graph_ready(search: &dyn SearchClient, index: &str) -> Result<(), String> {
     let limit = Duration::from_secs(SYMBOL_CALL_TIMEOUT_SECS);
     match timeout(limit, search.index_status(index)).await {

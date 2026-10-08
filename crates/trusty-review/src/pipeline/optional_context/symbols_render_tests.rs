@@ -49,9 +49,7 @@ fn per_symbol_edge_cap_is_marked_and_the_item_is_truncated() {
     assert!(shown.block.contains("- c5  src/c5.rs:1"), "{}", shown.block);
     assert!(!shown.block.contains("- c6  "), "{}", shown.block);
     assert!(
-        shown
-            .block
-            .contains("... 3 more callers omitted (cap 6)"),
+        shown.block.contains("... 3 more callers omitted (cap 6)"),
         "{}",
         shown.block
     );
@@ -104,8 +102,16 @@ fn a_symbol_with_no_test_caller_says_none_found() {
         &symbol("src/a.rs", "total"),
         &edges(vec![edge("test_total", "tests/billing.rs:3")], vec![]),
     );
-    assert!(tested.block.contains("tests:\n- test_total  tests/billing.rs:3"));
-    assert!(tested.block.contains("callers: none found in the call graph"));
+    assert!(
+        tested
+            .block
+            .contains("tests:\n- test_total  tests/billing.rs:3")
+    );
+    assert!(
+        tested
+            .block
+            .contains("callers: none found in the call graph")
+    );
 }
 
 /// B4 ruling A: index text is masked for credential shapes.
@@ -127,7 +133,11 @@ fn a_hostile_report_stays_inside_its_fence() {
     let fence_open = shown.block.find("````text\n").expect("a 4-backtick fence");
     let inject = shown.block.find("## PR Description").expect("kept as data");
     let fence_close = shown.block.rfind("\n````").expect("closing fence");
-    assert!(fence_open < inject && inject < fence_close, "{}", shown.block);
+    assert!(
+        fence_open < inject && inject < fence_close,
+        "{}",
+        shown.block
+    );
 }
 
 fn shown_of(i: usize, filler: usize) -> Shown {
@@ -149,7 +159,10 @@ fn section_cap_omits_whole_symbols_and_names_them() {
     assert_eq!(kept.len() + left.len(), 12);
     assert_eq!(kept.last().map(|s| s.id.as_str()), Some("src/f8.rs::f"));
     assert!(left.iter().all(|l| l.reason == Reason::OverSectionCap));
-    assert!(unified.contains("- \"src/f11.rs::f\": over section cap"), "{unified}");
+    assert!(
+        unified.contains("- \"src/f11.rs::f\": over section cap"),
+        "{unified}"
+    );
 }
 
 /// AC2 boundary: a section exactly at the cap keeps every block; one
@@ -164,14 +177,18 @@ fn exact_boundary_keeps_all_and_one_char_over_drops_exactly_one() {
         let (sections, kept) = render("idx", shown, &mut left);
         (sections.unified().chars().count(), kept.len(), left.len())
     };
-    let (base, kept, _) = run(0);
+    // Filler 1, not 0: an empty signature drops the `signature:` line.
+    let (base, kept, _) = run(1);
     assert_eq!(kept, 11, "the probe fits");
     let room = MAX_SYMBOL_SECTION_CHARS - base;
-    assert!(room < MAX_SYMBOL_BLOCK_CHARS - 200, "room {room} fits one block");
-    let (at_cap, kept, dropped) = run(room);
+    assert!(
+        room < MAX_SYMBOL_BLOCK_CHARS - 200,
+        "room {room} fits one block"
+    );
+    let (at_cap, kept, dropped) = run(1 + room);
     assert_eq!(at_cap, MAX_SYMBOL_SECTION_CHARS);
     assert_eq!((kept, dropped), (11, 0));
-    let (_, kept, dropped) = run(room + 1);
+    let (_, kept, dropped) = run(2 + room);
     assert_eq!((kept, dropped), (10, 1));
 }
 
@@ -216,7 +233,10 @@ fn omitted_symbols_are_prompt_lines_and_ledger_items_set_equal() {
         .collect();
     assert_eq!(prompt, ledger);
     assert_eq!(row.state, SourceState::Unavailable, "worst item wins");
-    assert!(!unified.contains("404") && !unified.contains("500"), "{unified}");
+    assert!(
+        !unified.contains("404") && !unified.contains("500"),
+        "{unified}"
+    );
 }
 
 /// Past `MAX_SYMBOLS_LISTED` the rest fold into one line and one item.
@@ -233,7 +253,11 @@ fn a_long_left_out_list_folds_into_one_line_and_one_item() {
         })
         .collect();
     let (sections, kept) = render("idx", Vec::new(), &mut left);
-    assert!(sections.unified().contains("- ... and 5 more symbols not shown"));
+    assert!(
+        sections
+            .unified()
+            .contains("- ... and 5 more symbols not shown")
+    );
     let row = row("d", &kept, &left);
     assert_eq!(row.items.len(), MAX_SYMBOLS_LISTED + 1);
     assert_eq!(row.items[MAX_SYMBOLS_LISTED].id, "(5 more symbols)");

@@ -328,3 +328,7 @@ pub(crate) fn row(detail: &str, shown: &[Shown], left: &[Left]) -> ContextSource
 pub(crate) fn empty_row(state: SourceState, detail: &str) -> ContextSourceRecord {
     ContextSourceRecord::new(SYMBOL_CONTEXT, state).with_detail(detail)
 }
+
+#[cfg(test)]
+#[path = "symbols_render_tests.rs"]
+mod tests;

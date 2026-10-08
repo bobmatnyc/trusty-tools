@@ -50,6 +50,7 @@ struct Graph {
     answers: HashMap<String, Answer>,
     fallback: Answer,
     graph_stage: Result<String, u16>,
+    status_hangs: bool,
     calls: Mutex<Vec<String>>,
     in_flight: AtomicUsize,
     peak: AtomicUsize,
@@ -61,6 +62,7 @@ impl Graph {
             answers: HashMap::new(),
             fallback,
             graph_stage: Ok("ready".to_string()),
+            status_hangs: false,
             calls: Mutex::new(Vec::new()),
             in_flight: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -88,6 +90,9 @@ impl SearchClient for Graph {
     }
 
     async fn index_status(&self, id: &str) -> Result<IndexStatusResponse, SearchClientError> {
+        if self.status_hangs {
+            std::future::pending::<()>().await;
+        }
         match &self.graph_stage {
             Ok(stage) => {
                 let mut status = IndexStatusResponse::ready(id);
@@ -341,6 +346,30 @@ async fn an_index_status_failure_is_unavailable_not_a_skip() {
     let ran = run(&adds(A, &["total"]), graph).await;
     assert!(ran.graph.calls().is_empty());
     assert_eq!(ran.row().state, SourceState::Unavailable);
+}
+
+/// Architect risk 2: a readiness probe that hangs is `unavailable` after the
+/// call timeout, and no call is made.
+#[tokio::test(start_paused = true)]
+async fn a_hung_readiness_probe_is_unavailable_and_makes_no_call() {
+    let mut graph = Graph::new(Answer::Text(report(A, "total", &[])));
+    graph.status_hangs = true;
+    let ran = run(&adds(A, &["total"]), graph).await;
+    assert!(ran.graph.calls().is_empty());
+    assert_eq!(ran.row().state, SourceState::Unavailable);
+    let detail = ran.row().detail.clone().unwrap_or_default();
+    assert!(detail.contains("timed out after 10 s"), "{detail}");
+}
+
+/// A daemon whose status reports no graph stage is read; the entry-file
+/// check still guards its answer.
+#[tokio::test]
+async fn a_status_without_a_graph_stage_is_read() {
+    let mut graph = Graph::new(Answer::Text(report(A, "total", &[])));
+    graph.graph_stage = Ok(String::new());
+    let ran = run(&adds(A, &["total"]), graph).await;
+    assert_eq!(ran.graph.calls(), ["src/a.rs::total"]);
+    assert_eq!(ran.row().state, SourceState::Used);
 }
 
 /// Arm 4: a client with the trait's default `call_chain` is `unavailable`
