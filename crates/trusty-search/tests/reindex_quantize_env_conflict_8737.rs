@@ -395,3 +395,52 @@ async fn reindex_path_and_flag_when_daemon_is_down_refuses_with_no_requests() {
     );
     guard.assert_unchanged("reindex_path_and_flag_when_daemon_is_down_refuses_with_no_requests");
 }
+
+/// #9214 (#767 rollback): a relocate the daemon refuses withdraws the
+/// allowlist approval the CLI granted the new path just before the call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_relocate_withdraws_the_new_paths_approval() {
+    let s = Scratch::new();
+    let guard = RealAllowlistGuard::capture();
+    let daemon = spawn_daemon(s.root_a.path(), s.root_b.path(), None).await;
+    // A tempdir is on the hard denylist, which would refuse the approval
+    // before the relocate is ever sent; the test process's own HOME is not.
+    let parent = dirs::home_dir()
+        .expect("HOME")
+        .join(".trusty-search-allowlist-tests");
+    std::fs::create_dir_all(&parent).expect("approvable parent");
+    let dest = tempfile::tempdir_in(&parent).expect("relocate destination");
+    let dest_path = std::fs::canonicalize(dest.path()).expect("canonical destination");
+    let config = if cfg!(target_os = "macos") {
+        s.home.path().join("Library").join("Application Support")
+    } else {
+        s.home.path().to_path_buf()
+    };
+    let allowlist = config.join("trusty-search").join("allowlist.toml");
+
+    let mut cmd = s.command(
+        &daemon.socket,
+        &["index", "relocate", "--index", INDEX_A, "--to"],
+    );
+    cmd.arg(&dest_path);
+    let (code, output) = run(cmd);
+
+    assert_ne!(code, 0, "a refused relocate must fail:\n{output}");
+    let relocates: Vec<_> = daemon
+        .mutations()
+        .into_iter()
+        .filter(|(m, _)| m == "search.index.relocate")
+        .collect();
+    assert_eq!(relocates.len(), 1, "the relocate must be sent: {output}");
+    assert!(
+        allowlist.exists(),
+        "the approval must have been written before the relocate:\n{output}"
+    );
+    let cfg = trusty_search::allowlist::AllowlistConfig::load_from(&allowlist)
+        .expect("load the fake allowlist");
+    assert!(
+        !cfg.contains(&dest_path),
+        "the refused relocate's approval must be withdrawn: {cfg:?}\n{output}"
+    );
+    guard.assert_unchanged("a_refused_relocate_withdraws_the_new_paths_approval");
+}

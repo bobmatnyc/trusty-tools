@@ -12,7 +12,8 @@
 //! `indexes.toml` rewrite never reaches a real registry; the subprocess gets a
 //! fake `HOME`, and the operator's real allowlist is proven unchanged. The
 //! parked-aware lookups are the shared `commands::explicit_target` ones, so
-//! the PATH-plus-flag shape and `reindex` are driven here too.
+//! the PATH-plus-flag shape and `reindex` are driven here too. #9214: the
+//! delete's root guard reuses this harness, so its end-to-end case is here.
 //! Test: `cargo test -p trusty-search --test index_remove_residency_8687`
 
 #[path = "support/socket_daemon.rs"]
@@ -322,6 +323,79 @@ async fn an_unreadable_status_refuses_instead_of_reporting_not_registered() {
     assert!(
         allowlisted(&file, &root_x),
         "X's row must survive a refusal"
+    );
+    assert_eq!(
+        real,
+        real_allowlist_bytes(),
+        "the real allowlist is untouched"
+    );
+}
+
+/// #9214 (#6380 guard): X is relocated between resolution and the delete —
+/// the window the confirmation prompt holds open. The delete must carry the
+/// root the operator confirmed, the daemon must refuse it, and the CLI must
+/// exit non-zero with X's local rows untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_delete_whose_root_moved_after_resolution_is_refused_and_keeps_local_rows() {
+    const ID: &str = "idx-x6-9214";
+    let real = real_allowlist_bytes();
+    let ((_x, root_x), (_m, moved)) = (canonical_tempdir(), canonical_tempdir());
+    let fake_home = tempfile::tempdir().expect("fake HOME");
+    let file = fake_allowlist(fake_home.path());
+    seed_allowlist(&file, &[&root_x]);
+    isolate_router_data_dir();
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+    let register = |state: &SearchAppState, root: &Path| {
+        let indexer = CodeIndexer::new(ID, root.to_string_lossy().into_owned());
+        state.registry.register(IndexHandle::bare(
+            IndexId::new(ID),
+            Arc::new(RwLock::new(indexer)),
+            root.to_path_buf(),
+        ));
+    };
+    register(&state, &root_x);
+    // The relocate lands as the delete arrives; the delete then reaches the
+    // real router, whose root guard decides.
+    let relocating = Arc::clone(&state);
+    let daemon = serve_logged(Arc::clone(&state), move |method, _| {
+        if method == "search.index.delete" {
+            register(&relocating, &moved);
+        }
+        None
+    })
+    .await;
+    let root = root_x.to_str().expect("utf-8 root");
+
+    let (code, output) = cli(
+        &daemon,
+        &["index", "remove", root, "--yes"],
+        fake_home.path(),
+    );
+
+    assert_ne!(code, 0, "a delete under a moved root must fail:\n{output}");
+    let sent: Vec<_> = daemon
+        .mutations()
+        .into_iter()
+        .filter(|(m, _)| m == "search.index.delete")
+        .map(|(_, p)| p)
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}\n{output}");
+    assert_eq!(
+        sent[0]["expected_root_path"], root,
+        "the delete must carry the confirmed root: {}",
+        sent[0]
+    );
+    assert!(
+        output.contains("could not delete index") && output.contains("now points at"),
+        "the daemon's root refusal must surface:\n{output}"
+    );
+    assert!(
+        state.registry.get(&IndexId::new(ID)).is_some(),
+        "the moved registration must survive"
+    );
+    assert!(
+        allowlisted(&file, &root_x),
+        "X's allowlist row must survive the refusal"
     );
     assert_eq!(
         real,

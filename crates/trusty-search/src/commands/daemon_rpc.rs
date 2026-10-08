@@ -100,13 +100,17 @@ pub(crate) struct Registrations {
 /// Why (#9214): a list answer with no `indexes` array used to read as "nothing
 /// registered", and `index remove <PATH>` then cleared PATH's local rows as
 /// stale without the daemon ever confirming PATH was unregistered.
-/// What: `search.indexes.list`; `indexes` must be an array of ids, `parked`
-/// may be absent (the daemon omits it when nothing is parked).
-/// Test: `a_list_without_an_indexes_array_is_an_error`.
+/// What: `search.indexes.list`; `indexes` must be an array of string ids,
+/// `parked` may be absent (the daemon omits it when nothing is parked) but
+/// when present must be an array of rows each carrying string `id` and
+/// `root_path`. Any other shape is an error, never a dropped row.
+/// Test: `a_list_without_an_indexes_array_is_an_error`,
+/// `a_non_string_index_id_is_an_error`, `a_parked_member_that_is_not_an_array_is_an_error`,
+/// `a_parked_row_missing_id_or_root_is_an_error`.
 ///
 /// # Errors
 ///
-/// A failed call, or an answer whose `indexes` member is not an array.
+/// A failed call, or an answer in any shape other than the one above.
 pub(crate) async fn registrations(client: &DaemonClient) -> anyhow::Result<Registrations> {
     let body = call(client, METHOD_INDEXES_LIST, json!({})).await?;
     // #9214: no `indexes` array is a broken answer, never an empty registry.
@@ -115,18 +119,32 @@ pub(crate) async fn registrations(client: &DaemonClient) -> anyhow::Result<Regis
         .and_then(Value::as_array)
         .with_context(|| format!("daemon's index list carries no `indexes` array: {body}"))?
         .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    let parked = body
-        .get("parked")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            let id = row.get("id")?.as_str()?.to_string();
-            Some((id, PathBuf::from(row.get("root_path")?.as_str()?)))
+        // #9214: a dropped id could own the PATH a caller then clears as stale.
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .with_context(|| format!("daemon's index list carries a non-string id {v}: {body}"))
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
+    // #9214: a `parked` member in another shape is a broken answer, not "none parked".
+    let parked = match body.get("parked") {
+        None => Vec::new(),
+        Some(rows) => rows
+            .as_array()
+            .with_context(|| format!("daemon's index list `parked` is not an array: {body}"))?
+            .iter()
+            .map(|row| {
+                let field = |name: &str| {
+                    row.get(name).and_then(Value::as_str).with_context(|| {
+                        format!(
+                            "daemon's index list has a parked row without a string `{name}`: {row}"
+                        )
+                    })
+                };
+                Ok((field("id")?.to_string(), PathBuf::from(field("root_path")?)))
+            })
+            .collect::<anyhow::Result<_>>()?,
+    };
     Ok(Registrations { resident, parked })
 }
 

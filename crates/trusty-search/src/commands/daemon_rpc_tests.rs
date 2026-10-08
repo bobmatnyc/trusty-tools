@@ -84,3 +84,55 @@ async fn a_failed_status_is_unreadable_and_a_missing_one_is_skipped() {
     );
     assert!(err.ends_with("refusing to guess"), "{err}");
 }
+
+/// Assert `answer` makes `registrations` fail, and that the PATH lookup
+/// `index remove` runs before clearing stale rows propagates the failure.
+async fn assert_list_refused(answer: Value, needle: &str) {
+    let daemon = mock_daemon(move |method, _| match method {
+        "search.indexes.list" => Ok(answer.clone()),
+        _ => Ok(json!({ "root_path": "/elsewhere" })),
+    })
+    .await;
+    let err = registrations(&daemon.client)
+        .await
+        .expect_err("a malformed list must not drop rows")
+        .to_string();
+    assert!(err.contains(needle), "{err}");
+
+    let dir = tempfile::tempdir().expect("scratch root");
+    let lookup = lookup_index_by_path(&daemon.client, dir.path()).await;
+    assert!(
+        lookup.is_err(),
+        "a malformed list must not read as `not registered`: {lookup:?}"
+    );
+}
+
+/// #9214: a non-string element of `indexes` is an error, not a skipped id.
+#[tokio::test]
+async fn a_non_string_index_id_is_an_error() {
+    assert_list_refused(json!({ "indexes": ["a", 7] }), "non-string id 7").await;
+}
+
+/// #9214: a `parked` member present in another shape is an error, not "none
+/// parked" — a parked PATH would read as unregistered and lose its rows.
+#[tokio::test]
+async fn a_parked_member_that_is_not_an_array_is_an_error() {
+    assert_list_refused(
+        json!({ "indexes": [], "parked": { "p": "/p" } }),
+        "`parked` is not an array",
+    )
+    .await;
+}
+
+/// #9214: a parked row without a string `id` or `root_path` is an error, not
+/// a dropped row.
+#[tokio::test]
+async fn a_parked_row_missing_id_or_root_is_an_error() {
+    for (row, field) in [
+        (json!({ "root_path": "/p" }), "`id`"),
+        (json!({ "id": "p" }), "`root_path`"),
+        (json!({ "id": "p", "root_path": 3 }), "`root_path`"),
+    ] {
+        assert_list_refused(json!({ "indexes": [], "parked": [row] }), field).await;
+    }
+}

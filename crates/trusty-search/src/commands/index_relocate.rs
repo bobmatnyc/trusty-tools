@@ -154,8 +154,9 @@ fn approve_destination(
 /// to STDERR as well as logging: this command talks to the operator through
 /// `println!`/`bail!`, so a tracing-only line means they see the relocate fail
 /// and never learn a stale approval was left behind.
-/// Test: `approve_destination_adds_a_missing_entry` covers the grant side;
-/// the no-op arm is asserted by
+/// Test: `a_refused_relocate_withdraws_the_new_paths_approval` (#9214) drives
+/// the withdrawal end to end; `approve_destination_adds_a_missing_entry`
+/// covers the grant side; the no-op arm is asserted by
 /// `approve_destination_preserves_an_existing_entrys_settings`.
 fn withdraw_approval(newly_approved: bool, canonical_new: &std::path::Path) {
     if !newly_approved {

@@ -157,11 +157,13 @@ pub async fn handle_index_remove(
     }
 
     // #9214: a refused or broken delete returns here, before any local row
-    // is touched; the daemon's own refusal text carries the reason.
+    // is touched; the daemon's own refusal text carries the reason. The root
+    // the operator confirmed pins the delete (#6380): an id relocated while
+    // the prompt waited is refused, not deleted under another root.
     let body = super::daemon_rpc::call(
         &client,
         METHOD_INDEX_DELETE,
-        delete_params(&index_id, delete_data),
+        delete_params(&index_id, &registered_path, delete_data),
     )
     .await
     .with_context(|| format!("could not delete index \"{index_id}\""))?;
@@ -238,10 +240,19 @@ pub async fn handle_index_remove(
 /// default is still the opposite (`delete_data` absent ⇒ preserve, #4123).
 /// Sending the flag on every call means this command's default does not depend
 /// on which daemon version answers it.
-/// What: `{"index_id": <id>, "delete_data": <bool>}` (#9214: the socket form).
-/// Test: `delete_params_purge_by_default`, `delete_params_honour_keep_data`.
-pub(crate) fn delete_params(id: &str, delete_data: bool) -> Value {
-    serde_json::json!({ "index_id": id, "delete_data": delete_data })
+/// What: `{"index_id": <id>, "delete_data": <bool>, "expected_root_path":
+/// <root>}` (#9214: the socket form). `root` is the registered root the
+/// operator was shown; the daemon refuses the delete when the id no longer
+/// points there (#6380).
+/// Test: `delete_params_purge_by_default`, `delete_params_honour_keep_data`,
+/// `a_delete_whose_root_moved_after_resolution_is_refused_and_keeps_local_rows`.
+pub(crate) fn delete_params(id: &str, root: &std::path::Path, delete_data: bool) -> Value {
+    // #9214: `display()` is the form the daemon's root comparison renders.
+    serde_json::json!({
+        "index_id": id,
+        "delete_data": delete_data,
+        "expected_root_path": root.display().to_string(),
+    })
 }
 
 /// Whether the operator must confirm before this delete runs.
@@ -466,9 +477,13 @@ mod tests {
     #[test]
     fn delete_params_purge_by_default() {
         assert_eq!(
-            super::delete_params("rustbot", true),
-            serde_json::json!({ "index_id": "rustbot", "delete_data": true }),
-            "the default delete must ask the daemon for the data too"
+            super::delete_params("rustbot", std::path::Path::new("/srv/rustbot"), true),
+            serde_json::json!({
+                "index_id": "rustbot",
+                "delete_data": true,
+                "expected_root_path": "/srv/rustbot",
+            }),
+            "the default delete must ask the daemon for the data too, pinned to the root"
         );
     }
 
@@ -480,8 +495,12 @@ mod tests {
     #[test]
     fn delete_params_honour_keep_data() {
         assert_eq!(
-            super::delete_params("rustbot", false),
-            serde_json::json!({ "index_id": "rustbot", "delete_data": false })
+            super::delete_params("rustbot", std::path::Path::new("/srv/rustbot"), false),
+            serde_json::json!({
+                "index_id": "rustbot",
+                "delete_data": false,
+                "expected_root_path": "/srv/rustbot",
+            })
         );
     }
 
