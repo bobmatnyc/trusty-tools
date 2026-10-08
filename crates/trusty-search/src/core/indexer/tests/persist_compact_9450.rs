@@ -65,6 +65,76 @@ async fn the_persister_compacts_a_churned_graph_outside_a_reindex() {
     assert_eq!(store.len().await.expect("len"), 140, "no vector lost");
 }
 
+/// #9450 fix round 3: a persist spawned by a commit, while writes are not yet
+/// quiet, still gets the churned graph compacted once writes stop, with no
+/// idle persist and no later persist.
+/// Why: `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=off` or `TRUSTY_HNSW_REVIEW_IDLE=off`
+/// turns the idle write-cooldown persist off, which left the commit-spawned
+/// persist as the only in-process compaction, and it always met unquiet
+/// writes.
+/// What: churn past the threshold, then `HNSW_SNAPSHOT_BATCH_INTERVAL` real
+/// commits, the last of which spawns the persist. The test runs no idle
+/// persist (the state either switch produces; the env vars are not set here
+/// because this binary's other tests read them) and never sleeps the quiet
+/// window: it polls the churn count.
+/// Red before the fix: churn stays at 60.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off() {
+    let fx = Fixture::new(false);
+    let store = Arc::new(UsearchStore::new(4).expect("store"));
+    let items: Vec<(String, Vec<f32>)> = (0..200).map(|i| (format!("c{i}"), vec4(i))).collect();
+    store.upsert_batch(&items).await.expect("upsert");
+    for i in 0..60 {
+        store.remove(&format!("c{i}")).await.expect("remove");
+    }
+    let mut indexer = CodeIndexer::new("ts-9450-quiet", fx.root.path())
+        .with_storage_layout(StorageLayout::Colocated);
+    indexer.set_store(store.clone());
+    // What the idle ticker passes for `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=off`.
+    assert!(indexer
+        .write_cooldown_persist(std::time::Duration::ZERO)
+        .is_none());
+
+    let batches = crate::core::indexer::HNSW_SNAPSHOT_BATCH_INTERVAL as usize;
+    for b in 0..batches {
+        let parsed = crate::core::indexer::ParsedBatch {
+            chunks: vec![super::raw(&format!("n{b}"), "src/n.rs", "fn n() {}")],
+            embeddings: vec![Some(vec4(1000 + b))],
+            entities_by_file: vec![],
+            parse_ms: 0,
+            embed_ms: 0,
+            vector_count: 1,
+        };
+        indexer
+            .commit_parsed_batch(parsed, true)
+            .await
+            .expect("commit");
+    }
+    // 60 churn against a threshold of max(156 / 10, 32) = 32.
+    assert_eq!(store.churn_since_compact(), 60);
+    assert!(wait_persist_task_done(&indexer).await, "persist finishes");
+    assert_eq!(
+        store.churn_since_compact(),
+        60,
+        "precondition: the persist met unquiet writes and did not compact"
+    );
+
+    let deadline = tokio::time::Instant::now()
+        + store.compaction_quiet_window()
+        + std::time::Duration::from_secs(10);
+    while store.churn_since_compact() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        store.churn_since_compact(),
+        0,
+        "#9450: churn past the threshold is compacted once writes stop"
+    );
+    assert_eq!(store.len().await.expect("len"), 156, "no vector lost");
+}
+
 /// #9450 fix round: the idle write-cooldown persist never compacts while a
 /// staged reindex runs, and does once it ends.
 /// Red before the fix: the idle path compacted whatever the reindex state.
