@@ -162,8 +162,8 @@ async fn search_handler_meta_reports_rows_dropped_when_the_corpus_has_no_matchin
 /// The mode filter and the docstring filter both delete post-fusion rows, and
 /// the caller must be able to see how many and why.
 ///
-/// Why: `apply_archive_downrank`'s two `retain`s delete rows the lanes did
-/// retrieve. That is often the right call, but it was uncounted and absent from
+/// Why: the file-type and docstring filters (in `materialize_search_results`
+/// since #9404) delete rows the lanes did retrieve. That is often the right call, but it was uncounted and absent from
 /// `meta` — the mechanism users read as "search is broken" in #2203.
 /// What: indexes a source chunk, a `.md` chunk, and a docstring chunk, runs a
 /// `BugDebt`-intent query (the intent that keeps `Code` mode's hard filter,
