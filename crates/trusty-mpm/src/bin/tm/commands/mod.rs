@@ -260,4 +260,6 @@ pub(crate) mod ticket;
 pub(crate) mod tmux_attach;
 // #5843: the condition-poll wait primitive that replaces backgrounding.
 pub(crate) mod wait;
+// #8994: `tm worktrees` — the worktree ledger report.
 pub(crate) mod watch;
+pub(crate) mod worktrees;

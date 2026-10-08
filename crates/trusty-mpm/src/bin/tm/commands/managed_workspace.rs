@@ -43,6 +43,7 @@
 use std::path::{Path, PathBuf};
 
 use trusty_mpm::core::disk_usage_guard::DiskGate;
+use trusty_mpm::core::worktree_ledger::{LedgerError, Origin, WorktreeLedger};
 use trusty_mpm::daemon::managed_routes::inproject;
 use trusty_mpm::session_manager::ManagedSessionId;
 
@@ -139,6 +140,7 @@ async fn provision(
     main_checkout: &Path,
     session_id: &ManagedSessionId,
     gate: &DiskGate,
+    home: Option<&Path>, // #8994: the ledger lives under this home
 ) -> Result<ManagedWorkspace, String> {
     if !isolate {
         // `main_checkout` is already resolved — this function never re-resolves
@@ -164,11 +166,17 @@ async fn provision(
     // semantic-name layout.
     // #7603: the gate's measurement source is an argument, so an in-process test
     // of either entry point above pins it instead of reading the host's volume.
-    let worktree = inproject::create_session_worktree_gated(
+    // #8994: the tree enters `<home>/.trusty-mpm/worktrees.jsonl`, or is refused.
+    let ledger = home
+        .map(WorktreeLedger::under_home)
+        .ok_or_else(|| LedgerError::NoHome.to_string())?;
+    let worktree = inproject::create_session_worktree_recorded(
         base_path,
         &session_id.to_string(),
         session_id,
         gate,
+        &ledger,
+        Origin::TmCli,
     )?;
     Ok(ManagedWorkspace::Worktree(worktree))
 }
@@ -219,6 +227,7 @@ pub(crate) async fn provision_for_launch(
     worktree_requested: bool,
     launch_dir: LaunchDir,
     session_id: &ManagedSessionId,
+    home: Option<&Path>, // #8994: where the worktree ledger lives
 ) -> anyhow::Result<ManagedWorkspace> {
     provision_for_launch_gated(
         origin_url,
@@ -228,6 +237,7 @@ pub(crate) async fn provision_for_launch(
         launch_dir,
         session_id,
         &DiskGate::MeasureTarget,
+        home,
     )
     .await
 }
@@ -244,7 +254,9 @@ pub(crate) async fn provision_for_launch(
 /// the measurement comes from; the threshold and the decision are unchanged.
 /// Test: `provision_for_launch_explicit_request_creates_worktree`,
 /// `a_pinned_over_threshold_gate_refuses_a_launch_worktree`,
-/// `a_pinned_gate_keeps_a_launch_worktree_off_the_hosts_disk`.
+/// `a_pinned_gate_keeps_a_launch_worktree_off_the_hosts_disk`,
+/// `a_launch_worktree_is_refused_when_the_ledger_cannot_record`.
+#[allow(clippy::too_many_arguments)] // #8994: `home` (the ledger's) is the eighth.
 pub(crate) async fn provision_for_launch_gated(
     origin_url: &str,
     base_path: &Path,
@@ -253,6 +265,7 @@ pub(crate) async fn provision_for_launch_gated(
     launch_dir: LaunchDir,
     session_id: &ManagedSessionId,
     gate: &DiskGate,
+    home: Option<&Path>, // #8994: where the worktree ledger lives
 ) -> anyhow::Result<ManagedWorkspace> {
     let launch_root = super::guided::find_git_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
     // ADR-0037 (2026-08-17 clarification): "the project's main checkout" is the
@@ -307,6 +320,7 @@ pub(crate) async fn provision_for_launch_gated(
         &main_checkout,
         session_id,
         gate,
+        home,
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))
@@ -346,6 +360,7 @@ pub(crate) async fn provision_for_fallback(
     git_root: &Path,
     session_id: &ManagedSessionId,
     gate: &DiskGate,
+    home: Option<&Path>, // #8994: where the worktree ledger lives
 ) -> anyhow::Result<ManagedWorkspace> {
     let Some(gh) = trusty_common::github_path::parse_github_path(origin_url) else {
         eprintln!(
@@ -382,17 +397,18 @@ pub(crate) async fn provision_for_fallback(
         );
     }
 
-    let workspace = match provision(isolate, origin_url, &base, git_root, session_id, gate).await {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!(
-                "tm: could not set up managed workspace for {}/{}: {e}\n\
+    let workspace =
+        match provision(isolate, origin_url, &base, git_root, session_id, gate, home).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!(
+                    "tm: could not set up managed workspace for {}/{}: {e}\n\
                  Start the daemon first with `tm start`, then run `tm` again.",
-                gh.owner, gh.repo
-            );
-            anyhow::bail!("failed to set up managed workspace: {e}");
-        }
-    };
+                    gh.owner, gh.repo
+                );
+                anyhow::bail!("failed to set up managed workspace: {e}");
+            }
+        };
 
     if workspace.is_worktree() {
         eprintln!(

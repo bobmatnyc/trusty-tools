@@ -1374,6 +1374,8 @@ async fn doctor_endpoint_returns_report() {
         "worktree_disk",
         // #7497: the mount that store sits on, against `disk.max_usage_pct`.
         "disk_usage",
+        // #8994: the worktree ledger roll-up.
+        "worktree_registry",
         // See #6868: this machine's Rust build settings and the prefix line a
         // PM pastes into an engineer brief.
         "rust_build_env",
