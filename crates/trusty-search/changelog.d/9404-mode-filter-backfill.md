@@ -1,2 +1,0 @@
-Fixed
-- A search with a file-type filter (`Code`, `Text` or `Data` mode, other than a short natural-language query in `Code` mode) no longer returns a short or empty page when files outside the mode rank inside its `top_k`. The filter now runs while the page is filled, so matching files deeper in the candidate set take the freed slots; `meta.dropped.mode_filtered` counts the rows skipped while a slot was open. When only excluded files match, the page stays empty and `mode_filtered` counts every row withheld (#9404).

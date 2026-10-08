@@ -125,6 +125,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   citation and no `code_provable` flag reads at most `medium`. With no usable
   reviewer severity it is derived from effort and is never `critical`.
   Severity changes no verdict and no grade (#9310).
+- MCP `review_pr` and `review_diff` accept optional `spec_docs` and `claude_md` booleans, and `run` takes `--spec-docs` and `--claude-md`. `spec_docs` reads the ADR, spec and SLD docs the PR body names (`docs/adr`, `docs/specs`, `docs/design`, `docs/prd`, `docs/architecture`, `docs/reference`, `crates/*/docs`; an SLD `#anchor` reads the whole file), plus doc paths trusty-search finds; `claude_md` reads the root `CLAUDE.md` and up to 3 nested ones. Every read uses the GitHub Contents API at the PR head SHA, never the default branch. Off by default; a review without them is unchanged (#9193).
+- Docs render as `## Referenced docs` and `## Repository conventions (CLAUDE.md)` for the reviewer only, each block headed `path@sha` and fenced as data; a doc the PR itself changes is marked "this PR modifies this doc". Caps: 16,000 characters per doc with a visible marker, at most 6 docs and 48,000 characters, and 16,000 characters for the CLAUDE.md section; a doc past a limit is left out whole and recorded (#9193).
+- A new `[doc: path@sha — "excerpt"]` citation, taught only in the docs section note. It resolves only when the path was read, the SHA is a 7+ character prefix of the head, and every excerpt is in that doc's text as the reviewer saw it; otherwise the finding is withheld, like an unresolved `[code:]` citation (#9193).
+- The source ledger gains `spec_docs` and `claude_md` rows. A missing path is `absent`; an API error, a directory, an undecodable file, a fork head the base repository cannot resolve, a failed trusty-search discovery, or a malformed head SHA is `unavailable`; none stops the review. `review_diff` and `run` on a local diff report both sources `unavailable` (#9193).
+- `report_context` on the `review_pr` and `review_diff` MCP tools asks for the context-source ledger alone; a non-boolean is an invalid-params error, and the envelope then carries `context_sources` even when the list is empty (#9194).
+- The ledger lists every source when reporting is on, in a fixed order: `pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`, `search`, `analyze` and `external_sources`. A failed search query, analyze call or external source is `unavailable` with its reason; zero hits, no hotspots or smells in the changed files, or a source with no results is `absent`; a dependency the context gate degraded is `unavailable` with the gate's reason (#9194).
+- Every ledger detail, on a row or an item, is one line of at most 200 characters with credentials redacted, including a PR-metadata fetch error and a docs source that could not run; an `Authorization:Bearer` token with no space after the colon, an `X-Api-Key:` value spaced or glued to its colon (`Token:` and `Password:` alike), a JSON-quoted `"Authorization":"Bearer` token, an `authorization=bearer` token and a URL userinfo password are hidden too (#9194).
+- `SourceState::NotRequested` (`not_requested`) marks an input the request did not ask for (#9194).
+- `run --report-context` prints a line for each `absent` source as well as each `unavailable` or `truncated` one (#9194).
+- `AnalyzeClient::analysis_status`, a provided method, returns why analysis is unavailable; `run_output::ledger_value` builds the `context_sources` value, an `{"error": ...}` object if it cannot be serialised (#9194).
+- MCP `review_pr` and `review_diff` accept an optional `issue_docs` array, and `run` takes `--issue-docs-file <PATH>` (a JSON file of at most 256 KiB), to give the reviewer the issues a change addresses: `[{id, title?, body, url?}]`, GitHub issue numbers only; a `url` must be an `http://` or `https://` link with no whitespace. Both use one strict parser; a malformed value is an invalid-params error on MCP and fails `run` before any network call. Off by default; a review without them is unchanged (#9197).
+- Issue docs render as `## Linked issues` after the caller's sections, under one note marking every title, link and body as data; each link renders as `URL: <url>` and each body sits in a fence it cannot close. Each body is capped at 16,000 characters with a visible marker; at most 8 docs and 48,000 body characters are shown, and a doc past either limit, or with a repeated id, is left out whole. Past 64 docs the rest are not read and the dropped tail is one ledger item. The refs corpus holds the same capped text, so a `[gh: #N — "excerpt"]` citation resolves only against what the reviewer saw. The verifier never sees issue text. Works on a local diff (#9197).
+- The source ledger gains an `issues` row with one item per doc, the item state `omitted`, and an item `detail` naming why a doc was left out. `review_diff` now runs through `run_review_with` and reports `context_sources` only when `issue_docs` is sent (#9197).
+- Library: `OptionalContextRequest::with_issue_docs`, `IssueDoc`, `IssueDocsError`, `SourceState::Omitted`, `ContextItemRecord::detail`, and the `MAX_ISSUE_*` constants in `config::constants`. No existing public type gains a required field (#9197).
 
 ### Fixed
 
@@ -359,6 +373,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   or no reviewer login with `PR_INTELLIGENCE_DRY_RUN=true`. It
   still posts nothing, and a live re-run of that head is still skipped
   (#9348).
+- The `github_issues` context source no longer queries the GitHub Search API for a local diff, which has no repository; the query answered 422 and contributed nothing (#9194).
 
 ### Changed
 
@@ -448,6 +463,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   finding was withheld from an approving or a rejecting review, or the
   reviewer raised none. The synthesis call still runs on the map-reduce path
   and still sets the verdict and grade (#9310).
+- The citation checks read `[doc: …]` as a bracket citation, not as free-text quotes: its excerpt is no longer matched against the diff, and a `[doc:]` citation that does not resolve in the docs read at the PR head withholds its finding (#9193).
 
 ### Security
 
@@ -460,6 +476,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   directive for one AWS crate or module, such as `aws_config::imds=debug`,
   opens only that target. An unparsable `RUST_LOG` falls back to `warn` with
   the guard.
+- A trusty-search URL with credentials no longer reaches `result.error`, `review_body` (what `review_pr` posts) or stderr when search is unreachable: its userinfo password, a username-only userinfo (sent as Basic auth) and credential query values (for example `access_token`) print as `[redacted]`, on the CLI and over MCP. The host, path and error stay. (#9431)
 
 ### Documentation
 
