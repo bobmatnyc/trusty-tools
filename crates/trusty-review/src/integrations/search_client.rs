@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use trusty_common::search_rpc::{METHOD_HEALTH, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST};
 
 use super::search_transport::{METHOD_QUERY, SearchTransport, call_socket, decode};
+use crate::pipeline::optional_context::probes::redact_credentials; // #9431
 
 /// Whole-request bound for one call, on either leg.
 const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -45,11 +46,14 @@ const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// `Parse` indicates unexpected JSON; `Unavailable` is the soft degradation
 /// signal; `ClientInit` covers TLS-backend initialisation failures at
 /// construction time so callers receive an `Err` instead of a panic.
-/// Test: `search_error_display`.
+/// #9431: `Transport` and `Unavailable` name the request URL (and reqwest's
+/// error names it again), so their Display masks its credentials; every
+/// `to_string`, log line and review field built from them inherits that.
+/// Test: `search_error_display`, `credential_url_never_reaches_result_error`.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchClientError {
     /// HTTP transport failure (DNS, connect, TLS, timeout).
-    #[error("trusty-search transport error: {0}")]
+    #[error("trusty-search transport error: {}", redact_credentials(.0))]
     Transport(String),
 
     /// trusty-search returned a non-2xx status.
@@ -66,7 +70,7 @@ pub enum SearchClientError {
     Parse(String),
 
     /// trusty-search health check failed: service is unavailable.
-    #[error("trusty-search is unavailable: {0}")]
+    #[error("trusty-search is unavailable: {}", redact_credentials(.0))]
     Unavailable(String),
 
     /// reqwest client construction failed (TLS backend unavailable).

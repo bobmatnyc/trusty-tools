@@ -168,6 +168,9 @@ impl SubprocessAnalyzeClient {
                 known
             }
             Err(e) => {
+                // #9431: reqwest's Display names the URL, token value included.
+                let e =
+                    crate::pipeline::optional_context::probes::redact_credentials(&e.to_string());
                 tracing::debug!("index existence probe failed for `{index_id}` (optional): {e}");
                 true
             }

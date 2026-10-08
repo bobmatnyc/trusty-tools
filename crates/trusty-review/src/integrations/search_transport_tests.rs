@@ -441,3 +441,16 @@ async fn fetch_registered_indexes_over_the_socket_is_fail_open() {
         ("search.indexes.list".to_string(), json!({"details": true}))
     );
 }
+
+/// #9431: the HTTP leg's name, which every gate message and the transport
+/// log line print, hides the userinfo password and the token value.
+#[test]
+fn describe_masks_url_credentials() {
+    let url = "http://user:fake123fake@127.0.0.1:9/p?access_token=fake123fake";
+    let shown = SearchTransport::Http(url.to_string()).describe();
+    assert!(!shown.contains("fake123fake"), "secret survived: {shown}");
+    assert!(shown.contains("127.0.0.1:9/p"), "host lost: {shown}");
+    // A username-only userinfo is the credential itself.
+    let shown = SearchTransport::Http("http://tok123@127.0.0.1:9/p".to_string()).describe();
+    assert_eq!(shown, "http://[redacted]@127.0.0.1:9/p");
+}

@@ -31,6 +31,7 @@ use trusty_common::daemon_guard::DaemonAddrLayout;
 use trusty_common::search_rpc::{self, SearchRpcError, TRUSTY_SEARCH_SOCKET_ENV};
 
 use super::search_client::SearchClientError;
+use crate::pipeline::optional_context::probes::redact_credentials;
 
 /// The env var that pins an explicit HTTP URL.
 pub const TRUSTY_SEARCH_URL_ENV: &str = "TRUSTY_SEARCH_URL"; // #9214 phase C: delete
@@ -116,12 +117,15 @@ impl SearchTransport {
         chosen
     }
 
-    /// Name the leg for an error or log line: `socket <path>` or the URL.
+    /// Name the leg for an error or log line: `socket <path>` or the URL,
+    /// its credentials masked.
+    /// Test: `describe_masks_url_credentials`.
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
             Self::Socket(path) => format!("socket {}", path.display()),
-            Self::Http(url) => url.clone(), // #9214 phase C: delete
+            // #9431: every gate message and log line prints this; mask it here.
+            Self::Http(url) => redact_credentials(url), // #9214 phase C: delete
         }
     }
 

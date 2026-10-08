@@ -18,6 +18,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::optional_context::probes::redact_credentials; // #9431
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Errors produced by `AnalyzeClient` implementations.
@@ -29,11 +31,13 @@ use serde::{Deserialize, Serialize};
 /// degradation" by the pipeline — none should block a review.  `ClientInit`
 /// covers TLS-backend initialisation failures at construction time so callers
 /// receive an `Err` instead of a panic.
-/// Test: `analyze_error_display`.
+/// #9431: `Transport` and `Unavailable` carry the probed trusty-search URL
+/// or the child's stderr, so their Display masks credentials.
+/// Test: `analyze_error_display`, `subprocess_health_error_masks_search_url_credentials`.
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzeClientError {
     /// HTTP transport failure.
-    #[error("trusty-analyze transport error: {0}")]
+    #[error("trusty-analyze transport error: {}", redact_credentials(.0))]
     Transport(String),
 
     /// trusty-analyze returned a non-2xx status.
@@ -50,7 +54,7 @@ pub enum AnalyzeClientError {
     Parse(String),
 
     /// Daemon is unreachable or unhealthy.
-    #[error("trusty-analyze unavailable: {0}")]
+    #[error("trusty-analyze unavailable: {}", redact_credentials(.0))]
     Unavailable(String),
 
     /// reqwest client construction failed (TLS backend unavailable).
