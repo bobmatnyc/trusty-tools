@@ -303,23 +303,23 @@ mod tests {
     /// recoverable `GworkspaceOutcome::Err` — never panic.
     ///
     /// Why: CI and consumers without Google credentials must keep running.
-    /// What: Points the token-storage dir at an empty temp dir so no profile
-    /// resolves, calls `execute`, asserts the outcome is an error naming the
-    /// tool. Restores the env var afterwards.
+    /// What: Inside the credential sandbox (empty temp `$HOME`, no credential
+    /// env, no keychain), calls `execute`, asserts the outcome is an error
+    /// naming the tool. The sandbox restores the environment on drop.
     /// Test: `cargo test -p tc-services execute_errors_without_credentials`.
     #[tokio::test]
+    #[serial_test::serial]
     async fn execute_errors_without_credentials() {
-        // `trusty-gworkspace` resolves token storage relative to the home
-        // directory; pointing HOME at an empty temp dir guarantees no stored
-        // profile is found. SAFETY: env mutation in tests is serialised by
-        // the harness running this single test; we restore HOME afterwards.
-        let tmp = std::env::temp_dir().join("tc-services-gw-test-488");
-        let _ = std::fs::create_dir_all(&tmp);
-        let prev_home = std::env::var("HOME").ok();
-        // SAFETY: single-threaded test scope, env access is acceptable.
-        unsafe {
-            std::env::set_var("HOME", &tmp);
-        }
+        // #9438: a hand-set HOME raced the granola sandbox test and could
+        // resolve the real `~/.gworkspace-mcp/tokens.json`; the sandbox holds
+        // HOME for the whole body and restores it even when an assert fails.
+        let _sandbox = trusty_common::credentials::test_sandbox::CredentialSandbox::enter();
+        // `TokenStorage` also reads a cwd-relative project store; fail closed
+        // rather than read one.
+        assert!(
+            !std::path::Path::new(".gworkspace-mcp/tokens.json").exists(),
+            "a project-tier gworkspace token store exists in the test cwd"
+        );
 
         let service = GworkspaceService::new("list_tasks").expect("schema resolves");
         let outcome = service.execute(json!({})).await;
@@ -333,14 +333,5 @@ mod tests {
             "error message must name the tool: {}",
             outcome.message()
         );
-
-        // Restore.
-        // SAFETY: same single-threaded test scope.
-        unsafe {
-            match prev_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 }
