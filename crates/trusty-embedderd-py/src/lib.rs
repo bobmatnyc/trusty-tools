@@ -30,6 +30,8 @@
 pub mod bootstrap;
 pub mod launcher;
 mod spawn_retry;
+// #9468: locate `uv`, or fetch a pinned, SHA-256-verified release.
+mod uv_fetch;
 
 pub use bootstrap::{ensure_venv, ensure_venv_eager, resolve_layout, VenvLayout};
 pub use launcher::{exec_sidecar, locate_launcher_binary};

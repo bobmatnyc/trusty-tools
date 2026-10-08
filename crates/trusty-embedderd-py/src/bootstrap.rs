@@ -8,7 +8,8 @@
 //! ort path so search never hard-fails.
 //!
 //! What: [`ensure_venv`] / [`ensure_venv_eager`] materialize the embedded
-//! Python project, locate `uv`, install a pinned CPython, create a venv, and
+//! Python project, locate `uv` (or fetch a pinned, verified one — #9468, see
+//! `uv_fetch`), install a pinned CPython, create a venv, and
 //! `uv pip sync` a hashed requirements file exported from the committed
 //! `uv.lock`, then run an import+embed smoke test and write a `.ready`
 //! sentinel (recording the lockfile hash). Robustness: disk-space precheck,
@@ -517,7 +518,12 @@ fn recheck_with_one_retry(
 /// The full build (called under the flock, after the ready re-check failed).
 fn build_venv(layout: &VenvLayout) -> Result<()> {
     precheck_disk_space(&layout.base)?;
-    let uv = locate_uv()?;
+    // #9468: may download the pinned uv — only here, under the bootstrap flock.
+    let py_root = layout
+        .base
+        .parent()
+        .context("venv base dir has no parent")?;
+    let uv = crate::uv_fetch::locate_or_fetch_uv(py_root)?;
     materialize_project(&layout.project_dir)?;
 
     // Isolate uv's provisioned CPython + cache under the data dir so the venv
@@ -626,9 +632,9 @@ fn human_bytes(n: u64) -> String {
     format!("{:.1} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-/// Locate `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known daemon bin dirs.
-/// (Vendored/download-with-SHA256 is a slice-5/6 follow-up; until then a
-/// missing uv is an actionable bootstrap error that triggers the ort fallback.)
+/// Locate an installed `uv`: `TRUSTY_UV_BIN` → live `PATH` → the well-known
+/// daemon bin dirs. Never downloads; the venv build path additionally checks
+/// the cached and pinned-download uv via `uv_fetch::locate_or_fetch_uv` (#9468).
 ///
 /// Why (#4125): this used to be a bare `which::which("uv")`, i.e. live-`PATH`
 /// only. trusty-search's daemon runs under launchd, whose plist sets no `PATH`
@@ -647,12 +653,8 @@ fn human_bytes(n: u64) -> String {
 /// fallback this now depends on is covered by trusty-common's own
 /// resolve_binary_finds_a_binary_outside_the_process_path.
 pub fn locate_uv() -> Result<PathBuf> {
-    if let Ok(explicit) = std::env::var("TRUSTY_UV_BIN") {
-        let p = PathBuf::from(&explicit);
-        if p.is_file() {
-            return Ok(p);
-        }
-        bail!("TRUSTY_UV_BIN={explicit:?} does not point to an existing file");
+    if let Ok(explicit) = std::env::var(crate::uv_fetch::UV_BIN_ENV) {
+        return Ok(crate::uv_fetch::explicit_uv(&explicit)?);
     }
     // #4125: PATH-only lookup misses Homebrew under launchd's minimal PATH.
     trusty_common::bin_resolve::resolve_binary("uv").ok_or_else(|| {

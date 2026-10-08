@@ -25,7 +25,8 @@ path = "src/main.rs"
 [dependencies]
 # resolve_data_dir + TRUSTY_DATA_DIR_OVERRIDE honouring (venv placement). Only
 # the always-on core of trusty-common (no embedder/ORT/torch) is pulled in.
-trusty-common = { workspace = true }
+# `integrity`: the shared SHA-256 verify for the pinned uv download (#9468).
+trusty-common = { workspace = true, features = ["integrity"] }
 
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -45,6 +46,13 @@ fs4 = { version = "0.8", features = ["sync"] }
 
 # `uv` discovery on PATH.
 which = { workspace = true }
+
+# #9468: fetch a pinned uv release when none is installed — HTTPS download
+# (blocking, run on its own thread), gzip + tar extraction, typed errors.
+reqwest = { workspace = true, features = ["blocking"] }
+flate2 = { workspace = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
