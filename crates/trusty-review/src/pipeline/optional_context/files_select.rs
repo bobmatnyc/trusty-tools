@@ -24,7 +24,9 @@ pub(crate) enum Class {
     Source,
 }
 
-/// Why a changed file is not shown: the fixed prompt vocabulary (amendment 2).
+/// Why a changed file is not shown: the fixed prompt vocabulary of amendment
+/// 2, plus `not reviewed` for a file no map-reduce chunk prompt carries
+/// (ruling B), so AC3 can name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reason {
     /// The read did not decode to UTF-8.

@@ -230,7 +230,11 @@ pub(crate) async fn apply_files(
     }
     let kept = select(shown, &mut not_shown, budget);
     let sha7 = call.head.sha.get(..7).unwrap_or_default();
-    let mut detail = format!("read at {sha7}; budget {budget} bytes");
+    let mut detail = if kept.is_empty() && not_shown.is_empty() {
+        "the diff names no changed file".to_string()
+    } else {
+        format!("read at {sha7}; budget {budget} bytes")
+    };
     if asked > budget {
         detail.push_str(&format!(" ({asked} asked for, clamped to {budget})"));
     }
