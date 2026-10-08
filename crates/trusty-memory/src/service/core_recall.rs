@@ -6,22 +6,23 @@
 //! out of `core.rs`, which sat at the 500-SLOC cap.
 //! What: [`MemoryService::recall_ranked`] (vector + BM25 over a widened
 //! window, demoted, cut to `top_k`), [`MemoryService::recall`] (its JSON rows),
-//! and [`MemoryService::recall_all`] (the cross-palace fan-out, demoted). No
-//! user-scope rulings leg here: these surfaces return a bare JSON array, which
-//! has nowhere to report a failed rulings palace.
+//! and [`MemoryService::recall_all`] (the cross-palace fan-out, demoted, with
+//! the ADR-0071 coverage report). No user-scope rulings leg here: the
+//! per-palace surfaces return a bare JSON array, which has nowhere to report
+//! a failed rulings palace.
 //! Test: `demotion_applies_on_every_recall_surface`
 //! (`tests/recall_temporal_rank.rs`); `recall_entry_json_hoists_drawer_fields`;
 //! `recall_all_never_opens_an_empty_palace` (#9141).
 
 use serde_json::{json, Value};
 use trusty_common::memory_core::retrieval::{
-    recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
-    recall_with_default_embedder, RecallResult,
+    recall_across_palaces_reporting, recall_deep_with_default_embedder,
+    recall_with_default_embedder, shared_embedder, RecallResult,
 };
 
 use super::core::MemoryService;
-use super::helpers::{list_palaces_blocking, recall_entry_json};
-use super::recall_stream::recall_streamed;
+use super::helpers::recall_entry_json;
+use super::recall_stream::{recall_all_scoped, RecallAllScope};
 use super::types::{ServiceError, ServiceResult};
 use crate::tools::recall_rank::{
     demote_stale_snapshots, demote_stale_snapshots_across, ranking_window,
@@ -89,60 +90,82 @@ impl MemoryService {
         Ok(json!(payload))
     }
 
-    /// Cross-palace recall.
+    /// Cross-palace recall over the default (resident) scope.
+    ///
+    /// Why (#9299, ADR-0071 D1): the default no longer opens palaces; this
+    /// keeps the old signature for in-process callers.
+    /// What: [`Self::recall_all_scoped`] with [`RecallAllScope::Resident`].
+    /// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`.
+    pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
+        self.recall_all_scoped(query, top_k, deep, RecallAllScope::Resident)
+            .await
+    }
+
+    /// Cross-palace recall over `scope`, with the coverage report.
     ///
     /// Why: shared by the chat `memory_recall_all` tool and in-process callers;
-    /// one open-everything-fanout-merge path avoids drift.
-    /// Why (issue #4637): every palace is still opened and searched — a recall
-    /// answered from cache-resident palaces only would omit most of the corpus.
-    /// Why (issue #7125): `recall_streamed` walks the estate in bounded
-    /// batches, so peak residency does not scale with the palace count.
-    /// What: lists every palace, streams them through `recall_streamed` over a
-    /// [`ranking_window`] of candidates, demotes stale snapshots (#8246), cuts
-    /// to `top_k`, and returns a JSON array tagged with each hit's palace id.
+    /// one fan-out-merge path avoids drift. #9299 (ADR-0071 D4): the response
+    /// says how much of the estate it searched, so it moved from a bare array
+    /// to an object.
+    /// What: runs `recall_all_scoped` over a [`ranking_window`] of candidates,
+    /// demotes stale snapshots (#8246) and superseded drawers (#9421) in either
+    /// scope, cuts to `top_k`, and returns
+    /// `{"results": [...]}` plus the D4 coverage fields. Each hit carries its
+    /// palace id. A listing or search error returns `{"error": ...}`.
     /// Test: `demotion_applies_on_every_recall_surface`;
-    /// `open_palaces_blocking_opens_every_palace`;
-    /// `recall_all_returns_open_palaces_to_baseline`.
-    pub async fn recall_all(&self, query: &str, top_k: usize, deep: bool) -> Value {
-        let palaces = match list_palaces_blocking(&self.state).await {
-            Ok(v) => v,
-            Err(e) => return json!({ "error": format!("{e:#}") }),
-        };
-        // #9141: an empty palace is skipped without being opened.
-        let (palaces, _) = super::recall_stream::skip_empty_palaces(&self.state, palaces).await;
+    /// `open_failure_is_reported_on_every_surface`;
+    /// `recall_all_returns_open_palaces_to_baseline`;
+    /// `both_scopes_demote_a_superseded_drawer` (#9421 on both scopes).
+    pub async fn recall_all_scoped(
+        &self,
+        query: &str,
+        top_k: usize,
+        deep: bool,
+        scope: RecallAllScope,
+    ) -> Value {
         let window = ranking_window(top_k, None);
-        // #9421: per-batch edge reads, as in `memory_recall_all`.
+        // #9421: per-batch edge reads, as in `memory_recall_all`. #9299: the
+        // batches come from either scope; both demote the merged list below.
         let sup = std::sync::Arc::new(parking_lot::Mutex::new(Supersessions::new()));
-        let streamed = recall_streamed(&self.state, &palaces, "recall_all", window, |handles| {
+        let outcome = recall_all_scoped(&self.state, scope, "recall_all", window, |handles| {
             let sup = sup.clone();
             async move {
-                let hits =
-                    recall_across_palaces_with_default_embedder(&handles, query, window, deep)
+                // #9299: the reporting variant names palaces whose recall failed.
+                let embedder = shared_embedder().await?;
+                let recall =
+                    recall_across_palaces_reporting(&handles, &embedder, query, window, deep)
                         .await?;
-                let found = supersessions_across(&handles, &hits).await;
+                let found = supersessions_across(&handles, &recall.results).await;
                 sup.lock().extend(found);
-                Ok(hits)
+                Ok(recall)
             }
         })
         .await;
-        match streamed {
-            Ok(mut results) => {
+        match outcome {
+            Ok(outcome) => {
+                let mut results = outcome.results;
                 // #8246: same demotion as `memory_recall_all`, then the cut.
                 let sup = std::mem::take(&mut *sup.lock());
                 demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
                 results.truncate(top_k);
-                json!(results
+                let rows: Vec<Value> = results
                     .into_iter()
-                    .map(|r| json!({
-                        "palace_id": r.palace_id,
-                        "drawer_id": r.result.drawer.id.to_string(),
-                        "content": r.result.drawer.content(),
-                        "importance": r.result.drawer.importance,
-                        "tags": r.result.drawer.tags,
-                        "score": r.result.score,
-                        "layer": r.result.layer,
-                    }))
-                    .collect::<Vec<_>>())
+                    .map(|r| {
+                        json!({
+                            "palace_id": r.palace_id,
+                            "drawer_id": r.result.drawer.id.to_string(),
+                            "content": r.result.drawer.content(),
+                            "importance": r.result.drawer.importance,
+                            "tags": r.result.drawer.tags,
+                            "score": r.result.score,
+                            "layer": r.result.layer,
+                        })
+                    })
+                    .collect();
+                let mut out = serde_json::Map::new();
+                out.insert("results".into(), json!(rows));
+                outcome.coverage.insert_into(scope, &mut out);
+                Value::Object(out)
             }
             Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
         }

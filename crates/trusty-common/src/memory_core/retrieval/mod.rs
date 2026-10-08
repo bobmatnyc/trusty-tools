@@ -59,8 +59,8 @@ pub use embedder::{shared_embedder, shared_embedder_initialized};
 
 // Core types
 pub use types::{
-    CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult, RememberOptions,
-    RetrievalLayers,
+    CrossPalaceRecall, CrossPalaceResult, ForgetOutcome, L0Identity, L1Essential, RecallResult,
+    RememberOptions, RetrievalLayers,
 };
 
 // Palace handle
@@ -92,8 +92,9 @@ pub use tier_c::{
 
 // Layer functions
 pub use layers::{
-    expand_query, recall, recall_across_palaces, recall_across_palaces_with_default_embedder,
-    recall_deep, recall_deep_in_room, recall_deep_scoped, recall_deep_with_default_embedder,
-    recall_in_room, recall_scoped, recall_with_default_embedder, rescore_l1_by_similarity,
-    retrieve_l0_l1, retrieve_l2, retrieve_l2_scoped, retrieve_l3, retrieve_l3_scoped,
+    expand_query, recall, recall_across_palaces, recall_across_palaces_reporting,
+    recall_across_palaces_with_default_embedder, recall_deep, recall_deep_in_room,
+    recall_deep_scoped, recall_deep_with_default_embedder, recall_in_room, recall_scoped,
+    recall_with_default_embedder, rescore_l1_by_similarity, retrieve_l0_l1, retrieve_l2,
+    retrieve_l2_scoped, retrieve_l3, retrieve_l3_scoped,
 };

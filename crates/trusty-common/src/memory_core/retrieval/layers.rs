@@ -5,7 +5,8 @@
 //! What: `retrieve_l0_l1`, `rescore_l1_by_similarity`, `rank_score`,
 //! `retrieve_l2`, `retrieve_l3`, `expand_query`, `recall`, `recall_deep`,
 //! `recall_with_default_embedder`, `recall_deep_with_default_embedder`,
-//! `recall_across_palaces`, `recall_across_palaces_with_default_embedder`,
+//! `recall_across_palaces`, `recall_across_palaces_reporting`,
+//! `recall_across_palaces_with_default_embedder`,
 //! `uuid_prefix_eq`, `dedup_extend`.
 //! Test: `recall_ranks_by_similarity_over_importance`, `l0_l1_always_present`,
 //! `l2_returns_relevant_drawer`, `l2_room_filter_excludes_other_rooms`,
@@ -44,7 +45,7 @@ use super::embedder::shared_embedder;
 use super::handle::PalaceHandle;
 use super::id_tokens::query_id_tokens;
 use super::scope::RecallScope;
-use super::types::{CrossPalaceResult, RecallResult};
+use super::types::{CrossPalaceRecall, CrossPalaceResult, RecallResult};
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::embed::Embedder;
 use crate::memory_core::palace::{Drawer, DrawerType, RoomType};
@@ -737,8 +738,31 @@ pub async fn recall_across_palaces(
     top_k: usize,
     deep: bool,
 ) -> Result<Vec<CrossPalaceResult>> {
+    recall_across_palaces_reporting(handles, embedder, query, top_k, deep)
+        .await
+        .map(|recall| recall.results)
+}
+
+/// [`recall_across_palaces`], also naming the palaces whose recall failed.
+///
+/// Why (#9299): a caller that reports search coverage must not count a palace
+/// as searched when its recall errored after the palace opened. The plain
+/// variant logs and drops that error, so coverage read complete while the
+/// palace's hits were missing.
+/// What: the same concurrent fan-out, merge, dedup, sort and truncate as
+/// [`recall_across_palaces`]. A palace whose recall errors is still logged
+/// and skipped, and its id is pushed to [`CrossPalaceRecall::failed`] in
+/// handle order. An empty `handles` or `top_k == 0` returns an empty value.
+/// Test: `recall_across_palaces_reporting_names_a_failed_palace`.
+pub async fn recall_across_palaces_reporting(
+    handles: &[Arc<PalaceHandle>],
+    embedder: &Arc<dyn Embedder + Send + Sync>,
+    query: &str,
+    top_k: usize,
+    deep: bool,
+) -> Result<CrossPalaceRecall> {
     if handles.is_empty() || top_k == 0 {
-        return Ok(Vec::new());
+        return Ok(CrossPalaceRecall::default());
     }
 
     // Fan out concurrently. Each future returns (palace_id, Result<Vec<...>>);
@@ -767,6 +791,7 @@ pub async fn recall_across_palaces(
     // chosen entry in place when a higher-scoring duplicate arrives.
     let mut merged: Vec<CrossPalaceResult> = Vec::new();
     let mut by_drawer: HashMap<Uuid, usize> = HashMap::new();
+    let mut failed: Vec<String> = Vec::new();
 
     for (palace_id, outcome) in outcomes {
         match outcome {
@@ -793,6 +818,8 @@ pub async fn recall_across_palaces(
             }
             Err(e) => {
                 tracing::warn!(palace = %palace_id, "recall_across_palaces: skipping palace: {e:#}");
+                // #9299: name the palace so a coverage report can exclude it.
+                failed.push(palace_id);
             }
         }
     }
@@ -804,7 +831,10 @@ pub async fn recall_across_palaces(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     merged.truncate(top_k);
-    Ok(merged)
+    Ok(CrossPalaceRecall {
+        results: merged,
+        failed,
+    })
 }
 
 /// Convenience wrapper for `recall_across_palaces` using the process-wide
