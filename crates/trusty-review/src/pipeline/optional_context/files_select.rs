@@ -192,17 +192,23 @@ pub(crate) fn classify(path: &str, generated: bool) -> Class {
 ///
 /// Why: a changed `.env` or key file must never be read into a prompt, even
 /// masked.
-/// What: the file name, any case, starts with `.env` or `id_rsa`, ends with
-/// `.pem` or `.key`, or contains `credentials` or `secret`.
+/// What: the file name, any case, starts with `.env` or `id_rsa`, or ends
+/// with `.pem` or `.key`; or any `/`-separated segment, any case, contains
+/// `credentials` or `secret`.
 /// Test: `sensitive_paths_are_on_the_deny_list`, `a_sensitive_path_is_named_and_never_read`.
 pub(crate) fn is_sensitive(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    // #9195 ruling A: the `*credentials*` / `*secret*` globs have no slash,
+    // so they match a directory segment too, not only the file name.
+    let segment_hit = lower
+        .split('/')
+        .any(|s| s.contains("credentials") || s.contains("secret"));
     name.starts_with(".env")
         || name.starts_with("id_rsa")
         || name.ends_with(".pem")
         || name.ends_with(".key")
-        || name.contains("credentials")
-        || name.contains("secret")
+        || segment_hit
 }
 
 /// Split `candidates` into `(fetch, over_cap)` at `cap` reads (ruling C).

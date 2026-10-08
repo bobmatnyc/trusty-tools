@@ -321,6 +321,13 @@ fn sensitive_paths_are_on_the_deny_list() {
         "src/my_credentials.rs",
         "src/secret_store.rs",
         "docs/SECRETS.md",
+        // A directory segment matches too (ruling A globs have no slash).
+        "k8s/secrets/db.yaml",
+        "config/credentials/prod.yml",
+        "deploy/Prod-Secrets/eu/app/values.yaml",
+        // The substring rule already denies this unrelated name; recorded,
+        // not endorsed.
+        "src/secretary.rs",
     ] {
         assert!(is_sensitive(path), "{path} must be denied");
     }
