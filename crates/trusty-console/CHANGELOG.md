@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.2] — 2026-10-08
+
+### Added
+
+- The console header links to the local Architect dashboard, opening it in a new tab. The link appears only while the dashboard is live on this host: it records its address in the trusty `http_addr` discovery file (`<data dir>/trusty-architect/http_addr`), the address must be loopback, and it must accept a connection within 300 ms. `GET /api/console/architect-dashboard` reports the URL or `null` (#9474).
+
+### Fixed
+
+- Tests that read repository content outside this crate resolve the checkout at runtime through `trusty_common::test_harness::test_repo_root()`, so a test binary built in one worktree under a shared `CARGO_TARGET_DIR` no longer reads another worktree's files (#9298).
+
+### Security
+
+- The analyze, memory and search UIs test with vitest 4.1.11, which drops the vulnerable tinypool 1.x dev dependency; the embedded UI bundles are rebuilt (#8350).
+
 ## [0.12.1] — 2026-10-05
 
 ### Added
