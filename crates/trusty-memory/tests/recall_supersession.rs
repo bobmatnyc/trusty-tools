@@ -238,6 +238,80 @@ async fn a_drawer_superseded_by_a_missing_drawer_keeps_its_score() {
     }
 }
 
+/// The active `superseded_by` objects of `drawer:<id>`, read through `kg_query`.
+async fn superseded_by_via_kg_query(state: &trusty_memory::AppState, id: Uuid) -> Vec<String> {
+    let out = trusty_memory::tools::dispatch_tool(
+        state,
+        "kg_query",
+        serde_json::json!({ "palace": "project-a", "subject": format!("drawer:{id}") }),
+    )
+    .await
+    .expect("kg_query");
+    out["triples"]
+        .as_array()
+        .expect("triples")
+        .iter()
+        .filter(|t| t["predicate"] == "superseded_by")
+        .map(|t| t["object"].as_str().expect("object").to_string())
+        .collect()
+}
+
+/// Why (#9433): `memory_remember` retires a `fact_key` slot's incumbent, but
+/// wrote no `superseded_by` edge, so recall ranked the stale fact on
+/// similarity alone, above its replacement (live: OLD 0.9422 > NEW 0.9392).
+/// What: two `memory_remember` calls into one slot, with no hand-written
+/// edge; the old drawer repeats the query's wording. `kg_query` on the old
+/// drawer returns the edge, and on every recall surface the replacement is
+/// recalled and the old drawer ranks below it.
+#[tokio::test]
+async fn remembering_into_a_fact_key_slot_demotes_the_retired_incumbent() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_with(&tmp, &["project-a"], &[]).await;
+    let slot = Some("deploy:release-train/window");
+    let query = "release train deploy window";
+    let old = remember(
+        &state,
+        "project-a",
+        "the release train deploy window opens on Thursdays at noon",
+        &[],
+        slot,
+    )
+    .await;
+    let new = remember(
+        &state,
+        "project-a",
+        "Deploys moved: changes now ship Monday mornings after the train",
+        &[],
+        slot,
+    )
+    .await;
+
+    for surface in [
+        Surface::McpRecall,
+        Surface::McpRecallDeep,
+        Surface::McpRecallAll,
+        Surface::ServiceRecall,
+        Surface::ServiceRecallAll,
+    ] {
+        let results = recall_on(&state, surface, "project-a", query).await;
+        let (o, n) = (rank_of(&results, old), rank_of(&results, new));
+        assert!(
+            n.is_some(),
+            "{surface:?}: replacement recalled: {results:#?}"
+        );
+        assert!(
+            o.is_none() || n < o,
+            "{surface:?}: the retired incumbent must rank below its \
+             replacement: {results:#?}"
+        );
+    }
+    assert_eq!(
+        superseded_by_via_kg_query(&state, old).await,
+        vec![format!("drawer:{new}")],
+        "#9433: retiring the incumbent must write drawer:<old> superseded_by drawer:<new>"
+    );
+}
+
 /// Opt-in switch for [`recall_supersession_latency_profile`].
 const PROFILE_ENV: &str = "TRUSTY_RECALL_SUPERSESSION_PROFILE";
 /// Drawers in the profiled project palace (#9421 AC5 states 20k rows).
