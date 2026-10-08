@@ -12,17 +12,19 @@
 //! verified against [`PINNED_DIGESTS`] before the binary is extracted, then
 //! written to a temp file and renamed into place with mode 0755, under a
 //! `flock` of its own so concurrent bootstraps (even for different lock
-//! hashes) never corrupt the cache. `TRUSTY_UV_FETCH=0` disables the download.
+//! hashes) never corrupt the cache. The download has a total wall-clock budget
+//! (`http.rs`). `TRUSTY_UV_FETCH=0` disables the download.
 //! Test: `uv_fetch_tests.rs`.
+
+mod http;
 
 use std::fs;
 use std::io;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use fs4::FileExt;
+use http::http_fetch;
 use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
 /// The pinned uv release fetched when no `uv` is installed (#9468).
@@ -50,10 +52,8 @@ pub const UV_FETCH_ENV: &str = "TRUSTY_UV_FETCH";
 /// Env var naming an explicit `uv` binary; always wins over everything else.
 pub const UV_BIN_ENV: &str = "TRUSTY_UV_BIN";
 
-/// Upper bound on the downloaded tarball (the real ones are ~17-20 MB).
-const MAX_TARBALL_BYTES: u64 = 64 * 1024 * 1024;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// Name prefix of the temp file a fetch extracts into before the rename.
+const TEMP_PREFIX: &str = ".uv.tmp.";
 
 /// Why `uv` could not be located or fetched.
 ///
@@ -280,14 +280,15 @@ pub(crate) fn fetch_for_triple(
 /// executed by every later bootstrap, so the cache path must only ever hold a
 /// complete, verified file.
 /// What: takes `<cache dir>/.fetch.lock` (flock), returns a cache hit another
-/// process placed while this one waited, else fetches the asset, checks it
-/// against `expected` before reading the archive, streams the entry whose
-/// basename is `uv` into a temp file, sets mode 0755 and renames it into
-/// place. Every error path removes the temp file.
+/// process placed while this one waited, else sweeps stale temp files, fetches
+/// the asset, checks it against `expected` before reading the archive, streams
+/// the entry whose basename is `uv` into a temp file, sets mode 0755 and
+/// renames it into place. Every error path removes the temp file.
 /// Test: `a_digest_mismatch_places_nothing_and_names_the_checksum`,
 /// `extraction_finds_uv_by_basename_under_any_prefix`,
 /// `a_tarball_without_uv_places_nothing`, `a_network_error_places_nothing`,
-/// `concurrent_fetches_download_once_and_place_a_whole_file`.
+/// `concurrent_fetches_download_once_and_place_a_whole_file`,
+/// `stale_temp_files_are_swept_before_a_fetch`.
 pub(crate) fn fetch_verified(
     py_root: &Path,
     triple: &str,
@@ -322,6 +323,7 @@ fn fetch_locked(
     if let Some(cached) = cached_uv(py_root) {
         return Ok(cached);
     }
+    sweep_stale_temps(dir);
     let url = asset_url(triple);
     tracing::warn!("py-embedder: `uv` not found — fetching pinned uv {UV_VERSION} from {url}");
     let bytes = fetch(&url)?;
@@ -339,6 +341,32 @@ fn fetch_locked(
     tmp.disarm();
     tracing::info!(uv = %dest.display(), "py-embedder: placed verified uv {UV_VERSION}");
     Ok(dest.to_path_buf())
+}
+
+/// Remove every `.uv.tmp.*` entry in `dir` (#9468).
+///
+/// Why: a fetch killed mid-extract never runs the [`TempFile`] drop guard, so
+/// each crash would leave a ~40 MB file behind for good.
+/// What: runs under the fetch flock, so no live writer owns a match. A failed
+/// removal logs at warn and the fetch goes on; the cache never depends on it.
+/// Test: `stale_temp_files_are_swept_before_a_fetch`.
+fn sweep_stale_temps(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(dir = %dir.display(), "py-embedder: cannot list uv cache dir for stale temp files: {e}");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(e) = fs::remove_file(&path) {
+            tracing::warn!(path = %path.display(), "py-embedder: cannot remove stale uv temp file: {e}");
+        }
+    }
 }
 
 /// Stream the first regular-file entry whose basename is `uv` into `out`.
@@ -408,7 +436,7 @@ impl TempFile {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         Self {
-            path: dir.join(format!(".uv.tmp.{}.{n}", std::process::id())),
+            path: dir.join(format!("{TEMP_PREFIX}{}.{n}", std::process::id())),
             armed: true,
         }
     }
@@ -424,71 +452,6 @@ impl Drop for TempFile {
             let _ = fs::remove_file(&self.path);
         }
     }
-}
-
-/// Download `url` over HTTPS into memory, honouring the operator's proxy.
-///
-/// Why: `reqwest::blocking` refuses to run on a thread that is inside a tokio
-/// runtime, and `build_venv` is reached from `spawn_blocking` and
-/// `block_in_place`. A dedicated thread has no runtime context.
-/// What: GET with connect/request bounds, a success-status check, and a
-/// [`MAX_TARBALL_BYTES`] body bound. Every failure is [`UvError::Network`].
-/// Test: `real_pinned_asset_matches_the_embedded_digest` (`#[ignore]`, network).
-pub(crate) fn http_fetch(url: &str) -> Result<Vec<u8>, UvError> {
-    let owned = url.to_owned();
-    std::thread::Builder::new()
-        .name("uv-fetch".to_owned())
-        .spawn(move || http_fetch_on_this_thread(&owned))
-        .map_err(|e| network(url, format!("spawn download thread: {e}")))?
-        .join()
-        .map_err(|_| network(url, "download thread panicked".to_owned()))?
-}
-
-fn http_fetch_on_this_thread(url: &str) -> Result<Vec<u8>, UvError> {
-    let client = reqwest::blocking::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("trusty-embedderd-py/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| network(url, error_chain(&e)))?;
-    let resp = client
-        .get(url)
-        .send()
-        .map_err(|e| network(url, error_chain(&e)))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(network(url, format!("HTTP {status}")));
-    }
-    let mut body = Vec::new();
-    resp.take(MAX_TARBALL_BYTES + 1)
-        .read_to_end(&mut body)
-        .map_err(|e| network(url, format!("reading body: {e}")))?;
-    if body.len() as u64 > MAX_TARBALL_BYTES {
-        return Err(network(
-            url,
-            format!("body exceeds {MAX_TARBALL_BYTES} bytes"),
-        ));
-    }
-    Ok(body)
-}
-
-fn network(url: &str, reason: String) -> UvError {
-    UvError::Network {
-        url: url.to_owned(),
-        reason,
-    }
-}
-
-/// `e` and its source chain, joined by `: ` (reqwest's own Display is terse).
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut out = e.to_string();
-    let mut cur = e.source();
-    while let Some(src) = cur {
-        out.push_str(": ");
-        out.push_str(&src.to_string());
-        cur = src.source();
-    }
-    out
 }
 
 #[cfg(test)]

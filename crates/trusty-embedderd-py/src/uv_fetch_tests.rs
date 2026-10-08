@@ -3,9 +3,11 @@
 //! env-derived input is passed through `UvSources`, so nothing needs `#[serial]`
 //! or the child-process isolation `bootstrap_tests.rs` uses.
 
+use super::http::{http_fetch_within, network};
 use super::*;
-use std::io::Write as _;
+use std::io::{BufRead as _, Write as _};
 use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant};
 
 /// Build a `.tar.gz` in memory from `(path, contents)` regular-file entries.
 fn tarball(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -303,6 +305,82 @@ fn concurrent_fetches_download_once_and_place_a_whole_file() {
     );
     assert_eq!(fs::read(cache_path(tmp.path())).unwrap(), payload);
     assert_eq!(leftovers(tmp.path()), vec!["uv".to_owned()]);
+}
+
+#[test]
+fn stale_temp_files_are_swept_before_a_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = cache_path(tmp.path()).parent().unwrap().to_path_buf();
+    fs::create_dir_all(&dir).unwrap();
+    // What a SIGKILL during extract leaves behind: the drop guard never ran.
+    for stale in [".uv.tmp.99999.0", ".uv.tmp.12345.7"] {
+        fs::write(dir.join(stale), b"half-extracted uv").unwrap();
+    }
+    let bytes = tarball(&[("uv-x/uv", b"the uv binary")]);
+    let digest = Sha256Digest::of_bytes(&bytes);
+    let calls = AtomicUsize::new(0);
+    let fetch = serving(bytes, &calls);
+
+    let placed = fetch_verified(tmp.path(), "aarch64-apple-darwin", &digest, &fetch).unwrap();
+
+    assert_eq!(fs::read(&placed).unwrap(), b"the uv binary");
+    assert_eq!(leftovers(tmp.path()), vec!["uv".to_owned()]);
+}
+
+/// A one-shot HTTP/1.1 server on loopback that sends a `chunks` KiB body, one
+/// KiB every `gap`. Returns its URL.
+fn dripping_server(chunks: usize, gap: Duration) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut reader = io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) if line == "\r\n" => break,
+                Ok(_) => {}
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            chunks * 1024
+        );
+        if stream.write_all(head.as_bytes()).is_err() {
+            return;
+        }
+        for _ in 0..chunks {
+            std::thread::sleep(gap);
+            if stream.write_all(&[0u8; 1024]).is_err() || stream.flush().is_err() {
+                return;
+            }
+        }
+    });
+    format!("http://{addr}/uv.tar.gz")
+}
+
+#[test]
+fn a_download_dripping_past_the_total_budget_times_out_and_places_nothing() {
+    // Each KiB arrives 100 ms after the last, far inside any per-read timeout,
+    // but the whole body takes ~1.2 s against a 300 ms total budget.
+    let url = dripping_server(12, Duration::from_millis(100));
+    let tmp = tempfile::tempdir().unwrap();
+    let fetch = |_asset: &str| http_fetch_within(&url, Duration::from_millis(300));
+    let digest = Sha256Digest::of_bytes(b"never matches");
+    let started = Instant::now();
+
+    let err = fetch_verified(tmp.path(), "aarch64-apple-darwin", &digest, &fetch).unwrap_err();
+
+    let elapsed = started.elapsed();
+    assert!(matches!(err, UvError::Network { .. }), "got {err:?}");
+    assert!(err.to_string().contains("timed out"), "got: {err}");
+    assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+    assert!(!cache_path(tmp.path()).exists());
+    assert_eq!(leftovers(tmp.path()), Vec::<String>::new());
 }
 
 /// Downloads the real pinned asset for this host and checks the embedded
