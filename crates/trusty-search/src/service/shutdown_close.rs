@@ -10,13 +10,16 @@
 //! open — the one `project.resolve` uses for the `reindexed_unix` stamp —
 //! failed with `RepairAborted` (#9477).
 //! What: [`close_corpora_on_shutdown`] takes the corpus out of every
-//! registered indexer and drops the last `Arc` itself, inside a deadline.
+//! registered indexer no reindex holds and drops the last `Arc` itself, inside
+//! a deadline.
 //! Test: `a_normal_stop_leaves_every_corpus_openable_read_only` in
 //! `service::daemon_tests`; this module's own tests.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::core::corpus::CorpusStore;
 use crate::core::registry::IndexHandle;
@@ -50,6 +53,9 @@ pub struct CorpusCloseReport {
     /// One line per corpus left open or not confirmed clean, naming the index
     /// and why. Each one needs repair on the next open, as before #9459.
     pub unclean: Vec<String>,
+    /// The per-index permits the close took. Holding the report keeps every
+    /// reindex, relocate and embed pass off those indexes.
+    permits: Vec<OwnedSemaphorePermit>,
 }
 
 /// Close every registered index's redb corpus, bounded by `budget`.
@@ -61,12 +67,17 @@ pub struct CorpusCloseReport {
 /// held index cannot spend another's time, then logs the outcome: `info` when
 /// every corpus closed clean, `warn` naming each one that did not.
 ///
-/// The indexers are left without a corpus, so any later write is refused as
-/// for a detached corpus. Call it only when the process is about to exit.
+/// An index whose reindex, relocate or embed pass is running keeps its corpus
+/// and is reported unclean. Each indexer the close takes a corpus from is left
+/// without one, and a write that finds none persists nothing. The returned
+/// report holds the permits it took, so no reindex, relocate or embed pass
+/// starts on those indexes while the caller keeps it. Call it only when the process is about to exit, and
+/// hold the report until then.
 ///
 /// Test: `a_normal_stop_leaves_every_corpus_openable_read_only`,
 /// `a_held_corpus_or_lock_cannot_stall_the_close`,
-/// `a_clone_released_inside_the_budget_is_closed_cleanly`.
+/// `a_clone_released_inside_the_budget_is_closed_cleanly`,
+/// `a_corpus_whose_reindex_is_running_stays_attached`.
 pub async fn close_corpora_on_shutdown(
     state: &SearchAppState,
     budget: Duration,
@@ -78,7 +89,8 @@ pub async fn close_corpora_on_shutdown(
         .into_iter()
         .map(|handle| close_one(handle, deadline));
     let mut report = CorpusCloseReport::default();
-    for outcome in futures::future::join_all(closes).await {
+    for (outcome, permit) in futures::future::join_all(closes).await {
+        report.permits.extend(permit);
         match outcome {
             Ok(true) => report.closed += 1,
             Ok(false) => {}
@@ -102,7 +114,33 @@ pub async fn close_corpora_on_shutdown(
     report
 }
 
-/// Close one index's corpus by `deadline`.
+/// Close one index's corpus by `deadline`, unless a reindex holds the index.
+///
+/// Why: a reindex that loses its corpus fails open — its last batches and
+/// prunes are dropped, yet `finish_reindex` still writes the HEAD-SHA marker,
+/// so the next boot does no catch-up. The shutdown flush skips such an index
+/// too (#1717).
+/// What: takes the index permit with `try_acquire_owned`, as `corpus_reopen`
+/// does, and returns it so the caller holds it past the close; a held permit
+/// leaves the corpus attached and returns `Err`. Then [`close_attached`] runs.
+async fn close_one(
+    handle: Arc<IndexHandle>,
+    deadline: Instant,
+) -> (Result<bool, String>, Option<OwnedSemaphorePermit>) {
+    // #9459: never take the corpus from under a reindex, relocate or embed
+    // pass; its permit is the one `run_reindex` holds through the finish.
+    let Ok(permit) = crate::service::reindex::index_semaphore(&handle.id).try_acquire_owned()
+    else {
+        let id = &handle.id;
+        let line = format!(
+            "{id}: a reindex, relocate or embed pass holds the index; its corpus stays attached"
+        );
+        return (Err(line), None);
+    };
+    (close_attached(handle, deadline).await, Some(permit))
+}
+
+/// Close one index's corpus by `deadline`; the caller holds its permit.
 ///
 /// What:
 /// 1. Takes the indexer write lock and the corpus out with
@@ -113,7 +151,7 @@ pub async fn close_corpora_on_shutdown(
 ///
 /// `Ok(true)` closed clean, `Ok(false)` had no corpus, `Err` names the index
 /// and the step still pending at the deadline, or the probe's failure.
-async fn close_one(handle: Arc<IndexHandle>, deadline: Instant) -> Result<bool, String> {
+async fn close_attached(handle: Arc<IndexHandle>, deadline: Instant) -> Result<bool, String> {
     let id = &handle.id;
     let wait = deadline.saturating_duration_since(Instant::now());
     let Ok(mut indexer) = tokio::time::timeout(wait, handle.indexer.write()).await else {

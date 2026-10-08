@@ -102,6 +102,45 @@ async fn a_held_corpus_or_lock_cannot_stall_the_close() {
     drop(held_lock);
 }
 
+/// #9459: an index whose reindex permit is held keeps its corpus attached.
+///
+/// Why: a reindex that loses its corpus mid-run fails open — its last batches
+/// and prunes are dropped while `finish_reindex` still writes the HEAD-SHA
+/// marker, so the next boot does no catch-up. The close must leave such an
+/// index alone, as the shutdown flush does (#1717).
+/// What: holds the index's `index_semaphore` permit as a running reindex
+/// does, runs the close, and asserts the corpus is still attached and the
+/// index is reported unclean, naming the held permit.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corpus_whose_reindex_is_running_stays_attached() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let registry = IndexRegistry::new();
+    let id = "reindexing-9459";
+    let (_, corpus, indexer) = register(&registry, dir.path(), id);
+    drop(corpus);
+    let reindex_permit = crate::service::reindex::index_semaphore(&IndexId::new(id))
+        .try_acquire_owned()
+        .expect("no other task holds this test's permit");
+    let state = SearchAppState::new(registry);
+
+    let report = close_corpora_on_shutdown(&state, Duration::from_millis(200)).await;
+
+    assert!(
+        indexer.read().await.has_corpus_store(),
+        "the running reindex keeps its corpus: {report:?}"
+    );
+    assert_eq!(report.closed, 0, "{report:?}");
+    assert!(
+        report
+            .unclean
+            .iter()
+            .any(|l| l.starts_with("reindexing-9459:") && l.contains("reindex")),
+        "{report:?}"
+    );
+    drop(reindex_permit);
+}
+
 /// #9459: a clone released inside the budget is waited out and closed clean.
 ///
 /// Why: a background task can hold a corpus clone for a moment at shutdown;
