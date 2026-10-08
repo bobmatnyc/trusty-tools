@@ -163,22 +163,68 @@ fn a_bad_fetched_title_or_url_never_fails_the_doc() {
     assert_eq!((ok.title, ok.url.as_deref()), (None, Some("https://x/2")));
 }
 
-/// F18: `/issues/{n}` may answer for a PR or a moved issue; it renders under
-/// the number the body linked.
+/// F18 reversed (fix round HIGH): a transferred issue answers through a 301
+/// from another repository; it shows no block, title or url and is
+/// `omitted` "moved to another repository", not a failure.
 #[tokio::test]
-async fn a_moved_issue_renders_under_the_linked_number() {
-    let seen = fetch(
-        "Refs #1",
-        None,
-        FakeFetcher::default().answer(1, Answer::Moved("MOVED".into())),
-    )
-    .await;
+async fn a_moved_issue_is_omitted_not_rendered() {
+    let at = Answer::At(
+        "https://github.com/acme/private-vault/issues/77".into(),
+        77,
+        "PRIVATE_TEXT".into(),
+    );
+    let seen = fetch("Refs #1", None, FakeFetcher::default().answer(1, at)).await;
+    assert_moved(&seen, "PRIVATE_TEXT");
+}
+
+/// `#N`'s answer must name `#N` of the reviewed repository: the same number
+/// from another owner, or a repository whose name only starts with the
+/// reviewed one, is omitted.
+#[tokio::test]
+async fn a_same_number_answer_from_another_repo_is_omitted() {
+    for url in [
+        "https://github.com/evil/billing/issues/1",
+        "https://github.com/acme/billing-private/issues/1",
+        "https://github.example.com/acme/billing/issues/1",
+    ] {
+        let at = Answer::At(url.into(), 1, "OTHER_TEXT".into());
+        let seen = fetch("Refs #1", None, FakeFetcher::default().answer(1, at)).await;
+        assert_moved(&seen, "OTHER_TEXT");
+    }
+}
+
+/// A pull request of the reviewed repository (any case) still renders.
+#[tokio::test]
+async fn a_pull_request_in_the_reviewed_repo_still_renders() {
+    let at = Answer::At(
+        "https://github.com/ACME/Billing/pull/1".into(),
+        1,
+        "PR_TEXT".into(),
+    );
+    let seen = fetch("Refs #1", None, FakeFetcher::default().answer(1, at)).await;
     assert!(
-        seen.section.contains("### Issue #1 — Moved"),
+        seen.section.contains("### Issue #1 — Elsewhere"),
         "{}",
         seen.section
     );
-    assert!(!seen.section.contains("#4242"));
+    assert_eq!(item(&seen.row, "#1").state, SourceState::Used);
+}
+
+/// `#1` shows nothing of `text` and is `omitted` as moved.
+fn assert_moved(seen: &Run, text: &str) {
+    assert_eq!(seen.calls, ["1"]);
+    assert!(seen.section.is_empty(), "{}", seen.section);
+    let one = item(&seen.row, "#1");
+    assert_eq!(
+        (one.state, one.chars, one.chars_omitted),
+        (SourceState::Omitted, 0, 0)
+    );
+    assert_eq!(one.detail.as_deref(), Some(MOVED_DETAIL));
+    let json = serde_json::to_string(&seen.row).expect("serialize");
+    assert!(
+        !json.contains(text) && !json.contains("Elsewhere") && !json.contains("://"),
+        "{json}"
+    );
 }
 
 /// F13 (amendment 1): a blank token is `NoToken` from the resolver, so the

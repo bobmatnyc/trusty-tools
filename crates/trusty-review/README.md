@@ -314,8 +314,9 @@ empty result.
     are not links.
   - At most 5 issues are fetched, in body order, 10 seconds each. The PR's
     own number is skipped silently. A number a supplied doc already carries
-    is not fetched, whatever that doc's body (recorded `omitted`,
-    "supplied"). Refs to another repository are never fetched and are one
+    is not fetched, whatever that doc's body, and adds no ledger item: the
+    supplied doc's own item stands. Refs to another repository are never
+    fetched and are one
     `(other repositories)` item; refs past the 5 are one `(over the 5-issue
     fetch limit)` item. Neither takes a fetch.
   - Supplied docs are placed first and are never dropped for a fetched one.
@@ -326,9 +327,14 @@ empty result.
     `unavailable` with the error text in `detail`, so a typo'd issue number
     reads `unavailable`, not `absent`; the review runs. An issue with an
     empty body is `absent`.
-  - GitHub answers `/issues/N` for a pull request and for a transferred
-    issue too; either is shown as `### Issue #N`, with no open, closed or
-    pull-request marker.
+  - An answer is shown only when its `html_url` starts with
+    `https://github.com/<owner>/<repo>/` of the reviewed repository (any
+    case) and its number is the linked `N`. GitHub answers `/issues/N` for a
+    pull request too; one in the same repository is shown as
+    `### Issue #N`, with no open, closed or pull-request marker. A
+    transferred issue redirects to another repository, possibly a private
+    one: it is never shown (no block, title or URL) and is recorded
+    `omitted`, "moved to another repository".
   - A local diff has no PR, and a failed PR metadata read has no body: the
     `issues` row is `unavailable` with the reason, nothing is fetched, and
     supplied docs still render.

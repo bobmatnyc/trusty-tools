@@ -23,8 +23,7 @@ use trusty_common::intent_source::{
 
 use crate::{
     config::constants::{
-        LINKED_ISSUE_TIMEOUT_SECS, MAX_ISSUE_DOC_LINE_CHARS, MAX_ISSUE_DOCS_LISTED,
-        MAX_LINKED_ISSUE_FETCHES,
+        LINKED_ISSUE_TIMEOUT_SECS, MAX_ISSUE_DOC_LINE_CHARS, MAX_LINKED_ISSUE_FETCHES,
     },
     integrations::context::ticket_token::FixedTicketToken,
     models::{ContextItemRecord, SourceState},
@@ -79,8 +78,10 @@ impl<'a> LinkedIssuesCall<'a> {
 pub(crate) struct Selection {
     /// Issue numbers to fetch, in body order, at most 5.
     pub(crate) fetch: Vec<u64>,
-    /// Items for refs that are not fetched; ids are `#N` or a fixed label.
+    /// Items for refs that are not fetched; each id is a fixed label.
     pub(crate) items: Vec<ContextItemRecord>,
+    /// Refs to a supplied doc's number: not fetched, no item (ruling R3).
+    pub(crate) supplied_refs: usize,
 }
 
 /// Pick the issues to fetch from the raw PR `body` (#9197, B2b).
@@ -90,13 +91,14 @@ pub(crate) struct Selection {
 /// What: reads `extract_issue_refs(body)` in order. A ref is a candidate when
 /// it is bare `#N` or `owner/repo#N` naming `owner`/`repo` (ASCII
 /// case-insensitive, ruling Q5). The PR's own number and a repeated number
-/// are skipped silently. A number a supplied doc already carries is an
-/// `omitted` "supplied" item, whatever that doc's body (amendment 8). The
-/// first 5 other candidates are fetched. Other-repository refs fold into one
-/// `(other repositories)` item and refs past the limit into one
-/// `(over the 5-issue fetch limit)` item; neither takes fetch budget, and no
-/// untrusted `owner/repo` text reaches an item. "supplied" items past
-/// `MAX_ISSUE_DOCS_LISTED` fold into one `(rest)` item (amendment 4).
+/// are skipped silently. A number a supplied doc already carries is never
+/// fetched, whatever that doc's body (amendment 8), and adds no item: the
+/// supplied doc has its own (ruling R3), so it is only counted in
+/// `supplied_refs`. The first 5 other candidates are fetched.
+/// Other-repository refs fold into one `(other repositories)` item and refs
+/// past the limit into one `(over the 5-issue fetch limit)` item; neither
+/// takes fetch budget, and no untrusted `owner/repo` text reaches an item
+/// (amendment 4).
 /// Test: `select_refs_skips_supplied_self_and_other_repos_in_body_order`,
 /// `a_mixed_case_owner_repo_ref_is_fetched`, `ten_thousand_bare_refs_make_five_calls_and_a_bounded_row`,
 /// `a_thousand_long_other_repo_refs_fold_into_one_item`.
@@ -110,7 +112,7 @@ pub(crate) fn select_refs(
     let supplied: HashSet<&str> = supplied.iter().map(|d| d.id.as_str()).collect();
     let mut seen: HashSet<u64> = HashSet::new();
     let mut out = Selection::default();
-    let (mut other, mut over, mut rest) = (0_usize, 0_usize, 0_usize);
+    let (mut other, mut over) = (0_usize, 0_usize);
     for found in extract_issue_refs(body) {
         if let Some((o, r)) = &found.owner_repo
             && !(o.eq_ignore_ascii_case(owner) && r.eq_ignore_ascii_case(repo))
@@ -123,11 +125,7 @@ pub(crate) fn select_refs(
         }
         let id = format!("#{}", found.number);
         if supplied.contains(id.as_str()) {
-            if out.items.len() < MAX_ISSUE_DOCS_LISTED {
-                out.items.push(omitted(&id, 0, "supplied".to_string()));
-            } else {
-                rest += 1;
-            }
+            out.supplied_refs += 1; // #9197 ruling R3: informational, no item
         } else if out.fetch.len() < MAX_LINKED_ISSUE_FETCHES {
             out.fetch.push(found.number);
         } else {
@@ -145,7 +143,6 @@ pub(crate) fn select_refs(
             over,
             "more same-repository refs are not fetched",
         ),
-        ("(rest)".to_string(), rest, "more supplied refs omitted"),
     ];
     for (label, count, what) in folds {
         if count > 0 {
@@ -191,7 +188,9 @@ pub(crate) fn ticket_fetcher_for(
 /// candidate is `omitted` with the cap reason and nothing is fetched
 /// (amendment 7). Else up to 5 fetches run concurrently, each under
 /// `LINKED_ISSUE_TIMEOUT_SECS`; a failure or timeout is an `unavailable`
-/// item, a fetched issue is placed in body order. `applied.sections` gets
+/// item, an answer from another repository or number is an `omitted`
+/// [`MOVED_DETAIL`] item and shows nothing, and a fetched issue is placed in
+/// body order. `applied.sections` gets
 /// the new section and the `issues` row is replaced by name (amendment 6).
 /// Error text is kept only in item details, which `ContextLedger::finish`
 /// passes through `cap_detail`.
@@ -223,7 +222,9 @@ pub(crate) async fn apply_linked_issues(
     let row = match target {
         Ok((fetcher, body, owner, repo, pr)) => {
             let selection = select_refs(body, owner, repo, pr, supplied);
-            let no_refs = selection.fetch.is_empty() && selection.items.is_empty();
+            let no_refs = selection.fetch.is_empty()
+                && selection.items.is_empty()
+                && selection.supplied_refs == 0;
             place_fetched(&mut render, fetcher.as_ref(), owner, repo, selection).await;
             let (section, items) = render.finish();
             applied.sections = section;
@@ -263,8 +264,11 @@ async fn place_fetched(
         let results = fetch_all(fetcher, owner, repo, &selection.fetch).await;
         for (n, result) in selection.fetch.iter().zip(results) {
             match result {
-                Ok(doc) => render.fetched(&doc),
-                Err(detail) => {
+                Fetched::Doc(doc) => render.fetched(&doc),
+                Fetched::Moved => {
+                    render.push_item(omitted(&format!("#{n}"), 0, MOVED_DETAIL.to_string()));
+                }
+                Fetched::Failed(detail) => {
                     let item =
                         ContextItemRecord::new(&format!("#{n}"), SourceState::Unavailable, 0, 0);
                     // #9197: raw error text; `finish` caps and redacts it.
@@ -279,6 +283,19 @@ async fn place_fetched(
         .for_each(|i| render.push_item(i));
 }
 
+/// The detail of a fetched issue that answered from elsewhere (#9197).
+pub(crate) const MOVED_DETAIL: &str = "moved to another repository";
+
+/// What one linked-issue fetch yielded.
+enum Fetched {
+    /// The issue, from the reviewed repository, under the linked number.
+    Doc(IssueDoc),
+    /// An answer for another repository or number: never shown.
+    Moved,
+    /// The error text, or the timeout.
+    Failed(String),
+}
+
 /// Fetch every number concurrently, each under the timeout; results follow
 /// `numbers`' order whatever order the fetches finish in.
 async fn fetch_all(
@@ -286,16 +303,38 @@ async fn fetch_all(
     owner: &str,
     repo: &str,
     numbers: &[u64],
-) -> Vec<Result<IssueDoc, String>> {
+) -> Vec<Fetched> {
     let limit = Duration::from_secs(LINKED_ISSUE_TIMEOUT_SECS);
     let fetches = numbers.iter().map(|n| async move {
         match timeout(limit, fetcher.fetch(owner, repo, &n.to_string())).await {
-            Err(_) => Err(format!("timed out after {LINKED_ISSUE_TIMEOUT_SECS} s")),
-            Ok(Err(e)) => Err(e.to_string()),
-            Ok(Ok(data)) => Ok(doc_from_ticket(*n, data)),
+            Err(_) => Fetched::Failed(format!("timed out after {LINKED_ISSUE_TIMEOUT_SECS} s")),
+            Ok(Err(e)) => Fetched::Failed(e.to_string()),
+            Ok(Ok(data)) if !is_from(&data, owner, repo, *n) => Fetched::Moved,
+            Ok(Ok(data)) => Fetched::Doc(doc_from_ticket(*n, data)),
         }
     });
     join_all(fetches).await
+}
+
+/// Whether `data` is item `n` of `owner`/`repo` (#9197 fix round, HIGH).
+///
+/// Why: GitHub answers a transferred issue with a 301 that the tickets
+/// backend follows with the token, so a public PR's `Refs #N` could pull a
+/// private repository's issue into the prompt and the citation corpus.
+/// What: true only when the answer's number is `n` and its `html_url` starts
+/// with `https://github.com/{owner}/{repo}/` (ASCII case-insensitive, ruling
+/// Q5); a pull request of the same repository qualifies, a missing url does
+/// not.
+/// Test: `a_moved_issue_is_omitted_not_rendered`,
+/// `a_same_number_answer_from_another_repo_is_omitted`,
+/// `a_pull_request_in_the_reviewed_repo_still_renders`.
+fn is_from(data: &TicketData, owner: &str, repo: &str, n: u64) -> bool {
+    let prefix = format!("https://github.com/{owner}/{repo}/");
+    let url_ok = data.url.as_deref().is_some_and(|u| {
+        u.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(&prefix))
+    });
+    url_ok && data.id == format!("#{n}")
 }
 
 /// `data` as the doc for issue `n`; never fails (#9197 B2b amendment 9).

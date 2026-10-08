@@ -53,11 +53,10 @@ async fn supplied_blank_doc_suppresses_the_fetch_and_supplied_refs_take_no_budge
         )
         .await;
         assert_eq!(seen.calls, ["1", "3", "4", "5", "6"]);
+        // Ruling R3: the supplied doc's own item is the only `#2` item.
         let two: Vec<_> = seen.row.items.iter().filter(|i| i.id == "#2").collect();
-        assert_eq!(
-            two.last().map(|i| i.detail.as_deref()),
-            Some(Some("supplied"))
-        );
+        assert_eq!(two.len(), 1, "{two:?}");
+        assert_ne!(two[0].state, SourceState::Omitted);
         let over = item(&seen.row, "(over the 5-issue fetch limit)");
         assert_eq!(
             over.detail.as_deref(),
@@ -186,4 +185,17 @@ async fn a_duplicate_fetched_id_renders_once_and_supplied_wins() {
     let (section, items) = render.finish();
     assert!(section.contains("SUPPLIED_3") && !section.contains("FETCHED_3"));
     assert_eq!(items[1].detail.as_deref(), Some("duplicate id"));
+}
+
+/// Ruling R3: a body ref to a supplied doc is informational; with nothing
+/// lost the row reads `used`, with one item per supplied doc and no call.
+#[tokio::test]
+async fn a_ref_to_a_supplied_doc_leaves_the_row_used() {
+    let docs = vec![doc("#3", "SUPPLIED_3")];
+    let seen = fetch("Fixes #3", Some(docs), fetched(&[9; 3])).await;
+    assert!(seen.calls.is_empty());
+    assert!(seen.section.contains("SUPPLIED_3") && !seen.section.contains("F3 "));
+    let ids: Vec<&str> = seen.row.items.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, ["#3"]);
+    assert_eq!((seen.row.state, seen.row.detail), (SourceState::Used, None));
 }

@@ -36,8 +36,9 @@ pub(crate) enum Answer {
     Hang,
     /// The issue body, after this many seconds.
     Late(u64, String),
-    /// An answer for another number (a transferred issue or a PR).
-    Moved(String),
+    /// An answer from this `html_url` and number, with this body (a
+    /// transferred issue, a PR, or another repository's issue).
+    At(String, u64, String),
 }
 
 /// A [`TicketFetcher`] with fixed answers that records each call's id; a
@@ -96,9 +97,11 @@ impl TicketFetcher for FakeFetcher {
             Some(Answer::Hang) => std::future::pending().await,
             Some(Answer::Late(secs, body)) => {
                 tokio::time::sleep(Duration::from_secs(*secs)).await;
-                Ok(ticket(format!("#{n}"), "Late", body, None))
+                Ok(ticket(format!("#{n}"), "Late", body, Some(&url)))
             }
-            Some(Answer::Moved(body)) => Ok(ticket("#4242".to_string(), "Moved", body, None)),
+            Some(Answer::At(at, m, body)) => {
+                Ok(ticket(format!("#{m}"), "Elsewhere", body, Some(at)))
+            }
         }
     }
 }
@@ -230,10 +233,10 @@ fn select_refs_skips_supplied_self_and_other_repos_in_body_order() {
     let sel = select_refs(body, "acme", "billing", 7, &[doc("#3", "")]);
     assert_eq!(sel.fetch, [4, 2]);
     let ids: Vec<&str> = sel.items.iter().map(|i| i.id.as_str()).collect();
-    assert_eq!(ids, ["#3", "(other repositories)"]);
-    assert_eq!(sel.items[0].detail.as_deref(), Some("supplied"));
+    // Ruling R3: the supplied `#3` is counted, never an item.
+    assert_eq!((ids, sel.supplied_refs), (vec!["(other repositories)"], 1));
     assert_eq!(
-        sel.items[1].detail.as_deref(),
+        sel.items[0].detail.as_deref(),
         Some("1 refs to other repositories are not fetched")
     );
 }
