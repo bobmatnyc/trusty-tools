@@ -335,6 +335,56 @@ fn runner_timeout_kills_the_process_group() {
     assert!(gone, "grandchild {pid} outlived the timeout");
 }
 
+/// Why: #7524 P2-M1 — once a server request's deadline has passed, no CLI
+/// call starts, so nothing can land after the server has answered.
+/// Test: itself.
+#[test]
+fn runner_refuses_to_spawn_after_the_request_deadline() {
+    let shim = Shim::new(RECORDER);
+    let err = crate::store::deadline::within(Instant::now(), || {
+        shim.command().run_with_stdin(&SecretValue::new(CANARY))
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, SecretsError::DeadlineExceeded { backend, .. } if backend == "testcli"),
+        "{err:?}"
+    );
+    assert!(!format!("{err} {err:?}").contains(CANARY));
+    assert!(shim.logged_nothing(), "a CLI started after the deadline");
+}
+
+/// Why: #7524 P2-M1 — a call the request deadline cuts short is killed at
+/// that deadline, not at its own longer timeout, with its whole process
+/// group, and the error says so.
+/// Test: itself.
+#[test]
+fn runner_kills_the_cli_at_the_request_deadline() {
+    let shim = Shim::new("sleep 60 &\necho $! > '@LOG@/pid'\nwait\n");
+    let started = Instant::now();
+    let err = crate::store::deadline::within(started + Duration::from_millis(300), || {
+        shim.command().timeout(Duration::from_secs(30)).run()
+    })
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(
+        matches!(err, SecretsError::DeadlineExceeded { .. }),
+        "{err:?}"
+    );
+    assert!(
+        gone_soon(shim.logged_pid()),
+        "the grandchild outlived the deadline"
+    );
+
+    // Without a request deadline the run's own timeout still applies.
+    let err = shim
+        .command()
+        .timeout(Duration::from_millis(200))
+        .run()
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+}
+
 /// Why: #7519 A10 — `Debug` reaches logs; an overlay may carry a token.
 /// Test: itself.
 #[test]

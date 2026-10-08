@@ -13,10 +13,9 @@
 //! Test: `store_capabilities_gate_operations`, `store_open_backend_knows_keychain_and_file`,
 //! `store_keychain_failure_never_falls_through_to_file`.
 
-use std::ffi::OsStr;
 use std::fmt;
 use std::ops::BitOr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::KeychainBackend;
@@ -224,7 +223,8 @@ pub fn swept_backends(machine: Option<&MachineSecretsConfig>) -> Vec<BackendId> 
 /// `onepassword` → [`open_backend_at`] with the machine config and template
 /// directory under `$HOME`, which resolves `$HOME` for that id only, no
 /// token overlay — an in-process caller's `op` inherits its environment —
-/// and that caller's `PATH`, read at this open, to find `op`; `keeper` →
+/// and `op` from the machine pin or the fixed system directories (#7524
+/// P2-M2); `keeper` →
 /// [`open_backend_at`]'s Keeper arm with the machine config under `$HOME`;
 /// anything else → [`SecretsError::UnknownBackend`].
 /// Test: `store_open_backend_knows_keychain_and_file`.
@@ -239,7 +239,7 @@ pub fn open_backend(id: &BackendId) -> Result<Arc<dyn SecretBackend>, SecretsErr
 }
 
 /// [`open_backend`], with a CLI backend's machine config, template
-/// directory, service-account token and `PATH` value given (#7519).
+/// directory and service-account token given (#7519).
 ///
 /// Why: the server names its machine config by flag, keeps template files
 /// beside its index, and strips the token from its own environment at
@@ -247,8 +247,9 @@ pub fn open_backend(id: &BackendId) -> Result<Arc<dyn SecretBackend>, SecretsErr
 /// What: `keychain` and `file` as [`open_backend`]. `onepassword` reads
 /// `machine_config` and opens only when [`MachineSecretsConfig::enables`]
 /// says it is enabled, else [`SecretsError::BackendNotEnabled`]; it then
-/// finds `op` in the absolute entries of `search_path` unless the machine
-/// config pins `program`, else [`SecretsError::CliNotInstalled`]. `keeper`
+/// takes `op` from the machine config's `program` pin, or else from the
+/// first of a fixed list of system directories that holds one, never from
+/// a `PATH` (#7524 P2-M2), else [`SecretsError::CliNotInstalled`]. `keeper`
 /// reads the same `machine_config` the same way and takes its program and
 /// Commander config file from it (#7519 P3). A build without
 /// `cli-backends` answers [`SecretsError::UnknownBackend`] for both.
@@ -261,22 +262,48 @@ pub fn open_backend_at(
     machine_config: &Path,
     template_root: &Path,
     onepassword_token: Option<SecretValue>,
-    search_path: Option<&OsStr>,
+) -> Result<Arc<dyn SecretBackend>, SecretsError> {
+    open_backend_at_in(
+        id,
+        machine_config,
+        template_root,
+        onepassword_token,
+        &onepassword_dirs(),
+    )
+}
+
+/// [`open_backend_at`], searching `op_dirs` for `op` instead of the
+/// production system directories (#7524 P2-M2).
+///
+/// Why: the server's factory takes the list as a value, so a test can name
+/// its own directories and never depend on, or run, the host's `op`.
+/// Test: `server_backends_for_opens_onepassword_only_when_enabled`.
+pub(crate) fn open_backend_at_in(
+    id: &BackendId,
+    machine_config: &Path,
+    template_root: &Path,
+    onepassword_token: Option<SecretValue>,
+    op_dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     open_backend_from(
         id,
         open_keychain,
         open_file,
-        || {
-            open_onepassword(
-                machine_config,
-                template_root,
-                onepassword_token,
-                search_path,
-            )
-        },
+        || open_onepassword(machine_config, template_root, onepassword_token, op_dirs),
         || open_keeper(machine_config),
     )
+}
+
+/// The 1Password system directories this build searches for `op`.
+#[cfg(all(unix, feature = "cli-backends"))]
+fn onepassword_dirs() -> Vec<PathBuf> {
+    super::program::onepassword_dirs()
+}
+
+/// No 1Password backend, so no directory to search.
+#[cfg(not(all(unix, feature = "cli-backends")))]
+fn onepassword_dirs() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// [`open_backend`] with each opener injected.
@@ -322,9 +349,9 @@ fn open_onepassword(
     machine_config: &Path,
     template_root: &Path,
     token: Option<SecretValue>,
-    search_path: Option<&OsStr>,
+    op_dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
-    super::onepassword::open(machine_config, template_root, token, search_path)
+    super::onepassword::open_in(machine_config, template_root, token, op_dirs)
 }
 
 /// [`open_onepassword`] with the machine config and template directory
@@ -332,13 +359,12 @@ fn open_onepassword(
 #[cfg(all(unix, feature = "cli-backends"))]
 fn open_onepassword_at_home() -> Result<Arc<dyn SecretBackend>, SecretsError> {
     let home = super::platform::home_dir()?;
-    // #7519: the in-process caller's own `PATH`, read once, at this open.
-    let search_path = std::env::var_os("PATH");
+    // #7524 P2-M2: the fixed system directories, never the caller's `PATH`.
     open_onepassword(
         &home.join(super::config::MACHINE_CONFIG_SUBPATH),
         &home.join(super::cli::TMP_SUBDIR),
         None,
-        search_path.as_deref(),
+        &onepassword_dirs(),
     )
 }
 
@@ -348,7 +374,7 @@ fn open_onepassword(
     _machine_config: &Path,
     _template_root: &Path,
     _token: Option<SecretValue>,
-    _search_path: Option<&OsStr>,
+    _op_dirs: &[PathBuf],
 ) -> Result<Arc<dyn SecretBackend>, SecretsError> {
     open_onepassword_at_home()
 }

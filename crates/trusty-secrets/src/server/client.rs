@@ -26,6 +26,7 @@ use trusty_common::uds::{
     send_framed_request,
 };
 
+use super::deadline::client_wait;
 use super::errors::ErrorKind;
 use super::settings::{SERVE_SUBCOMMAND, SOCKET_SUBPATH};
 
@@ -42,9 +43,6 @@ const TIMEOUTS: ServiceTimeouts = ServiceTimeouts::new(
     Duration::from_secs(1),
     Duration::from_secs(3),
 );
-
-/// Budget for one request, connect included.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A client call that did not produce a result.
 ///
@@ -224,6 +222,10 @@ impl OnDemandSecrets {
 
     /// Call `method` with `params`, starting the server first if needed.
     ///
+    /// What: waits `deadline::client_wait(method)` for the reply, connect
+    /// included — longer than the server's deadline for that method, so a
+    /// reply the server sends is never dropped as a timeout (#7524 P2-M1).
+    ///
     /// # Errors
     ///
     /// [`ClientError`]; the server's own refusals are [`ClientError::Rpc`].
@@ -234,12 +236,14 @@ impl OnDemandSecrets {
             "method": method,
             "params": params,
         });
+        // #7524 P2-M1: the wait outlasts the server's deadline for `method`.
+        let wait = client_wait(method);
         let path = self.ensure_running().await?;
-        let response: RpcResponse = match send_framed_request(&path, &request, CALL_TIMEOUT).await {
+        let response: RpcResponse = match send_framed_request(&path, &request, wait).await {
             // Never connected, so never sent: safe to re-spawn and resend.
             Err(UdsRpcError::Dial { .. } | UdsRpcError::ConnectRetriesExhausted { .. }) => {
                 let path = self.ensure_running().await?;
-                send_framed_request(&path, &request, CALL_TIMEOUT)
+                send_framed_request(&path, &request, wait)
                     .await
                     .map_err(transport)?
             }

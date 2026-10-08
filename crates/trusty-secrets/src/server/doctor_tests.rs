@@ -44,7 +44,7 @@ fn account(fx: &Fixture, yaml: &str) -> PathBuf {
 /// with `account` as the account's own machine config; `keychain` stays the
 /// fixture's double.
 async fn start_with_account(fx: &Fixture, account: Option<PathBuf>) -> Running {
-    let production = router::backends_with(account.clone(), &fx.settings, None, None);
+    let production = router::backends_with(account.clone(), &fx.settings, None, Vec::new());
     let base = fx.backends();
     let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
         BackendId::ONEPASSWORD | BackendId::KEEPER => production(id),

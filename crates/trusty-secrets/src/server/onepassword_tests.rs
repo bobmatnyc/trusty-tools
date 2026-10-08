@@ -293,21 +293,21 @@ async fn server_tracked_onepassword_program_is_refused_before_any_spawn() {
 /// only when the machine config enables it, so a tracked `backend:
 /// onepassword` alone cannot aim the server at an account, and nothing is
 /// written where the delete sweep does not reach. Opening spawns nothing;
-/// #7519: it finds `op` in a `PATH` value handed in, never the process's own.
+/// #7524 P2-M2: it finds `op` in the directory list handed in, never a `PATH`.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn server_backends_for_opens_onepassword_only_when_enabled() {
     let fx = fixture();
     let op_dir = fx.tmp.path().join("op-bin");
     install_op(&op_dir, "exit 1");
-    let search = Some(op_dir.into_os_string());
+    let op_dirs = vec![op_dir];
     // The fixture's machine config is also the account's own file here.
     let account = Some(fx.settings.machine_config.clone());
     let factory = router::backends_with(
         account.clone(),
         &fx.settings,
         Some(SecretValue::new(TOKEN)),
-        search.clone(),
+        op_dirs.clone(),
     );
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
@@ -319,7 +319,7 @@ async fn server_backends_for_opens_onepassword_only_when_enabled() {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "secrets:\n  backend: onepassword\n").unwrap();
     let server = fx
-        .start_with(router::backends_with(account, &fx.settings, None, search))
+        .start_with(router::backends_with(account, &fx.settings, None, op_dirs))
         .await;
     let response = set(&fx, "A").await;
     assert_eq!(
@@ -355,7 +355,7 @@ fn spawner_enables_planted_op(fx: &Fixture, marker: &Path) {
 /// `account` as the account's own machine config, and whose other backends
 /// are the fixture's in-memory doubles.
 async fn start_with_account(fx: &Fixture, account: Option<PathBuf>) -> Running {
-    let production = router::backends_with(account.clone(), &fx.settings, None, None);
+    let production = router::backends_with(account.clone(), &fx.settings, None, Vec::new());
     let base = fx.backends();
     let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
         BackendId::ONEPASSWORD => production(id),
@@ -385,7 +385,7 @@ async fn server_onepassword_enablement_ignores_a_spawner_chosen_machine_config()
         Some(account.clone()),
         &fx.settings,
         Some(SecretValue::new(TOKEN)),
-        None,
+        Vec::new(),
     );
     let err = factory(&BackendId::onepassword()).unwrap_err();
     assert!(
@@ -418,7 +418,7 @@ async fn server_onepassword_is_off_when_the_account_config_is_unreadable() {
     assert!(crate::store::config::load_machine_at(&account).is_err());
 
     for config in [Some(account.clone()), None] {
-        let factory = router::backends_with(config.clone(), &fx.settings, None, None);
+        let factory = router::backends_with(config.clone(), &fx.settings, None, Vec::new());
         let err = factory(&BackendId::onepassword()).unwrap_err();
         assert!(
             matches!(err, SecretsError::BackendNotEnabled { .. }),
@@ -562,6 +562,164 @@ async fn server_template_sweep_failure_keeps_serving_and_refuses_the_edit() {
         made,
         vec![stale.clone()],
         "a template landed behind the link"
+    );
+    server.stop().await;
+}
+
+/// A factory for `fx` that maps `onepassword` to a backend over `shim`
+/// whose calls each get the production 60 s timeout.
+fn with_slow_onepassword(fx: &Fixture, shim: &OpShim) -> BackendFactory {
+    let mut settings = shim.settings(&fx.settings.template_root);
+    settings.timeout = crate::store::onepassword::DEFAULT_TIMEOUT;
+    let backend: Arc<dyn SecretBackend> = Arc::new(OnePasswordBackend::new(settings));
+    let base = fx.backends();
+    Arc::new(move |id: &BackendId| match id.as_str() {
+        BackendId::ONEPASSWORD => Ok(Arc::clone(&backend)),
+        _ => base(id),
+    })
+}
+
+/// Why: #7524 P2-M1 — the client waited 30 s while one `op` call may take
+/// 60 s, so a slow 1Password set was reported as a transport timeout and
+/// then committed. Through the real client, a set whose `op item create`
+/// takes 31 s now reports its real outcome, and the key is listed. Red
+/// while the client's wait was 30 s.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_onepassword_set_slower_than_the_old_client_wait_reports_its_outcome() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    shim.delay("create", 31);
+    let server = fx.start_with(with_slow_onepassword(&fx, &shim)).await;
+    let client = crate::server::OnDemandSecrets::at(&fx.settings.socket)
+        .with_program(fx.tmp.path().join("no-such-trusty-secrets"));
+    let mut params = target(&fx, "A");
+    params["value"] = json!(VALUE);
+
+    let started = std::time::Instant::now();
+    let answer = client.call(method::SET, params).await;
+    let result = answer.expect("the client gave up before the server answered");
+    assert!(started.elapsed() >= Duration::from_secs(31));
+    assert_eq!(result["outcome"], json!("new"), "{result}");
+    assert!(!result.to_string().contains(VALUE));
+    assert_eq!(shim.items().len(), 1);
+    assert_eq!(listed(&fx).await[0]["name"], json!("A"));
+    server.stop().await;
+}
+
+/// Why: #7524 P2-M1 — a request that runs past the server's deadline gets a
+/// definite `deadline_exceeded` answer while the client still waits, and
+/// nothing commits afterwards: the `op` it started is killed with its group,
+/// so no item appears later, and no index row is written.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_request_past_its_deadline_is_a_definite_error_and_commits_nothing() {
+    let fx = fixture();
+    machine(&fx, SELECTED);
+    let shim = OpShim::new();
+    shim.delay("create", 4);
+    let mut state = fx.state(with_slow_onepassword(&fx, &shim));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let server = fx.start_state(state).await;
+
+    let started = std::time::Instant::now();
+    let response = set(&fx, "A").await;
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        fixed_error(&response, method::SET),
+        ErrorKind::DeadlineExceeded
+    );
+    assert!(!wire(&response).contains(VALUE));
+    assert!(
+        wire(&response).contains("may have landed"),
+        "{}",
+        wire(&response)
+    );
+
+    // Past the shim's own sleep: the killed `op` never stored the item.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(shim.items().is_empty(), "the write landed after the reply");
+    assert_eq!(listed(&fx).await, json!([]));
+    server.stop().await;
+}
+
+/// Why: #7524 P2-M1 — a `copy` reaches a vendor CLI once per key, so it can
+/// outlast any fixed wait. Past the deadline it starts no further key, and
+/// the reply names every key that was not copied.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_copy_past_its_deadline_starts_no_further_key() {
+    let fx = fixture();
+    machine(&fx, ENABLED);
+    let shim = OpShim::new();
+    shim.delay("create", 3);
+    let mut state = fx.state(with_slow_onepassword(&fx, &shim));
+    state.deadline_override = Some(Duration::from_secs(1));
+    let server = fx.start_state(state).await;
+    ok(set(&fx, "A").await);
+    ok(set(&fx, "B").await);
+
+    let copied = ok(call(
+        &fx.settings.socket,
+        method::COPY,
+        json!({"project": fx.project(), "from_backend": "keychain",
+               "to_backend": "onepassword", "keys": ["A", "B"]}),
+    )
+    .await);
+    assert_eq!(copied, json!({"copied": [], "failed": ["A", "B"]}));
+    let calls = shim.calls();
+    assert_eq!(
+        calls.lines().count(),
+        2,
+        "B started after the deadline: {calls}"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(shim.items().is_empty(), "a copy landed after the reply");
+    server.stop().await;
+}
+
+/// Why: #7524 P2-M3 fix round, Architect ruling 23:54Z — with 1Password
+/// enabled but a project on the Keychain, the 1Password vault usually does
+/// not exist, `op` answers "isn't a vault", and ruling B refuses every
+/// delete. The index records no holding backend, so the refusal stands; its
+/// wire error must name both ways out: create the vault, or stop enabling
+/// 1Password in the machine config. The row stays. Red while the refusal
+/// was a bare `backend_failed`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_delete_refused_for_a_hidden_vault_names_both_escapes() {
+    let fx = fixture();
+    machine(&fx, ENABLED);
+    let shim = OpShim::new();
+    shim.fail(
+        "list",
+        "[ERROR] \"trusty/acme/web\" isn't a vault in this account.",
+    );
+    let server = fx.start_with(with_onepassword(&fx, &shim, None)).await;
+    ok(set(&fx, "A").await);
+
+    let response = delete(&fx, "A").await;
+    assert_eq!(
+        fixed_error(&response, method::DELETE),
+        ErrorKind::VaultNotVisible
+    );
+    let text = wire(&response);
+    assert!(text.contains("create the vault in 1Password"), "{text}");
+    assert!(text.contains("`secrets.onepassword` section"), "{text}");
+    assert!(
+        text.contains("~/.trusty-tools/trusty-common/config.yaml"),
+        "{text}"
+    );
+    assert!(!text.contains(VALUE));
+    assert_eq!(
+        listed(&fx).await[0]["name"],
+        json!("A"),
+        "the row was dropped"
     );
     server.stop().await;
 }

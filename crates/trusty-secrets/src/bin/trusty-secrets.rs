@@ -13,9 +13,10 @@
 //! The git redirect variables are removed from its environment at start.
 //! #7519: on a `cli-backends` build, so is every `OP_*` variable but an
 //! `op signin` session; the service-account token is kept for the 1Password
-//! backend's overlay. `PATH` is read once at start too, and the 1Password
-//! backend searches its absolute entries for `op` at each open. #7519 P4:
-//! `secrets.doctor` reports whether the token was present, never the token.
+//! backend's overlay. `PATH` is read once at start for doctor's tool
+//! detection only; the 1Password backend never searches it (#7524 P2-M2).
+//! #7519 P4: `secrets.doctor` reports whether the token was present, never
+//! the token.
 //! Test: `tests/on_demand_server.rs`.
 
 use std::process::ExitCode;
@@ -37,7 +38,7 @@ fn main() -> ExitCode {
         unsafe { std::env::remove_var(var) };
     }
     let onepassword_token = take_onepassword_env();
-    // #7519: handed to the factory, so `op` is found by absolute path only.
+    // #7524 P2-M2: doctor's tool detection only; never the 1Password `op`.
     let search_path = std::env::var_os("PATH");
     match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -103,11 +104,11 @@ async fn run(
     // #7519 P4: presence only; the token itself goes to the factory below.
     let start = StartEnv::default()
         .with_onepassword_token(onepassword_token.is_some())
-        .with_search_path(search_path.clone());
+        .with_search_path(search_path);
     // #7519: CLI backends read the account's own machine config (ruling
     // 74) and the template directory these settings name, and take the
-    // token and `PATH` captured at start.
-    let backends = backends_for(&settings, onepassword_token, search_path);
+    // token captured at start. #7524 P2-M2: no `PATH`.
+    let backends = backends_for(&settings, onepassword_token);
     match serve_with(settings, backends, start, trusty_common::shutdown_signal()).await {
         Ok(exit) => {
             eprintln!("trusty-secrets: {exit:?}; exiting");

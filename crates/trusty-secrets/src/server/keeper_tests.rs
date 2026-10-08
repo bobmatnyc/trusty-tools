@@ -222,7 +222,7 @@ async fn server_backends_for_opens_keeper_only_when_enabled() {
     let shim = KeeperShim::new();
     let provisioned = provision(&fx, &shim);
     let account = Some(fx.settings.machine_config.clone());
-    let factory = router::backends_with(account.clone(), &fx.settings, None, None);
+    let factory = router::backends_with(account.clone(), &fx.settings, None, Vec::new());
     let err = factory(&BackendId::keeper()).unwrap_err();
     assert!(
         matches!(err, SecretsError::BackendNotEnabled { .. }),
@@ -233,7 +233,12 @@ async fn server_backends_for_opens_keeper_only_when_enabled() {
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
     std::fs::write(&config, "secrets:\n  backend: keeper\n").unwrap();
     let server = fx
-        .start_with(router::backends_with(account, &fx.settings, None, None))
+        .start_with(router::backends_with(
+            account,
+            &fx.settings,
+            None,
+            Vec::new(),
+        ))
         .await;
     let response = set(&fx, "A").await;
     assert_eq!(
@@ -261,7 +266,7 @@ async fn server_backends_for_opens_keeper_only_when_enabled() {
 /// A server whose `keeper` opens through the production factory with
 /// `account` as the account's own machine config.
 async fn start_with_account(fx: &Fixture, account: Option<PathBuf>) -> Running {
-    let production = router::backends_with(account.clone(), &fx.settings, None, None);
+    let production = router::backends_with(account.clone(), &fx.settings, None, Vec::new());
     let base = fx.backends();
     let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
         BackendId::KEEPER => production(id),
@@ -286,7 +291,7 @@ async fn server_keeper_enablement_ignores_a_spawner_chosen_machine_config() {
     std::fs::create_dir_all(account.parent().unwrap()).unwrap();
     std::fs::write(&account, "secrets:\n  default_backend: keychain\n").unwrap();
 
-    let factory = router::backends_with(Some(account.clone()), &fx.settings, None, None);
+    let factory = router::backends_with(Some(account.clone()), &fx.settings, None, Vec::new());
     let err = factory(&BackendId::keeper()).unwrap_err();
     assert!(
         matches!(err, SecretsError::BackendNotEnabled { .. }),
@@ -315,7 +320,7 @@ async fn server_keeper_is_off_when_the_account_config_is_unreadable() {
     assert!(crate::store::config::load_machine_at(&account).is_err());
 
     for config in [Some(account.clone()), None] {
-        let factory = router::backends_with(config.clone(), &fx.settings, None, None);
+        let factory = router::backends_with(config.clone(), &fx.settings, None, Vec::new());
         let err = factory(&BackendId::keeper()).unwrap_err();
         assert!(
             matches!(err, SecretsError::BackendNotEnabled { .. }),

@@ -18,6 +18,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use trusty_common::uds::server::{
@@ -26,6 +27,7 @@ use trusty_common::uds::server::{
 use trusty_common::uds::{bind_singleton_hardened, prepare_socket_dir};
 
 use super::audit::AuditSink;
+use super::deadline::request_deadline;
 use super::doctor;
 use super::errors::ErrorKind;
 use super::methods::{self, MethodFn};
@@ -34,7 +36,7 @@ use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MACHINE_CONFIG_SUBPATH, MachineSecretsConfig, load_machine_at};
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at,
+    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, cli_backends, open_backend, open_backend_at_in,
     platform,
 };
 
@@ -57,31 +59,32 @@ pub fn default_backends() -> BackendFactory {
 /// sweep looks and get the service-account token the binary took out of its
 /// own environment. Ruling 74: whether it opens at all, and which `op` runs,
 /// is the account's own machine config's to say, never a file the spawner
-/// chose through `--machine-config` or `$HOME`.
+/// chose through `--machine-config` or `$HOME`. #7524 P2-M2: nor the
+/// spawner's `PATH`; `op` comes from the pin or the fixed system directories.
 /// What: `backends_with` on `account_machine_config`, the file #7524
-/// reads `file` consent from; with no account home, every CLI backend is
-/// off.
+/// reads `file` consent from, and the production 1Password directories; with
+/// no account home, every CLI backend is off.
 /// Test: `server_onepassword_enablement_ignores_a_spawner_chosen_machine_config`,
 /// `server_onepassword_is_off_when_the_account_config_is_unreadable`.
 pub fn backends_for(
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
-    search_path: Option<OsString>,
 ) -> BackendFactory {
     backends_with(
         account_machine_config(),
         settings,
         onepassword_token,
-        search_path,
+        crate::store::program::onepassword_dirs(),
     )
 }
 
 /// [`backends_for`] with the account's machine config given.
 ///
-/// What: a CLI backend opens through [`open_backend_at`] with
+/// What: a CLI backend opens through `open_backend_at_in` with
 /// `account_config`, [`ServerSettings::template_root`], `onepassword_token`
-/// and `search_path` (the `PATH` the binary read at start), only when
-/// [`account_machine`] enables it; else [`SecretsError::BackendNotEnabled`].
+/// and `op_dirs`, the directories searched for `op` when the account
+/// config pins no `program` (#7524 P2-M2), only when [`account_machine`]
+/// enables it; else [`SecretsError::BackendNotEnabled`].
 /// The file is read on each open, so a change is seen on the next request.
 /// `keychain` and `file` open through [`open_local`].
 /// Test: `server_backends_for_opens_onepassword_only_when_enabled`,
@@ -91,7 +94,7 @@ pub(crate) fn backends_with(
     account_config: Option<PathBuf>,
     settings: &ServerSettings,
     onepassword_token: Option<SecretValue>,
-    search_path: Option<OsString>,
+    op_dirs: Vec<PathBuf>,
 ) -> BackendFactory {
     let template_root = settings.template_root.clone();
     Arc::new(move |id: &BackendId| {
@@ -109,12 +112,12 @@ pub(crate) fn backends_with(
                 backend: id.to_string(),
             });
         };
-        open_backend_at(
+        open_backend_at_in(
             id,
             config,
             &template_root,
             onepassword_token.clone(),
-            search_path.as_deref(),
+            &op_dirs,
         )
     })
 }
@@ -223,6 +226,8 @@ pub struct State {
     pub(crate) file_consent_config: Option<PathBuf>,
     /// What the binary read from its environment at start (#7519 P4).
     pub(crate) start: StartEnv,
+    /// Replaces every method's deadline; tests only (#7524 P2-M1).
+    pub(crate) deadline_override: Option<Duration>,
 }
 
 impl State {
@@ -243,7 +248,14 @@ impl State {
             // #7524 H1: resolved once; a lookup failure refuses `file` writes.
             file_consent_config: account_machine_config(),
             start: StartEnv::default(),
+            deadline_override: None,
         }
+    }
+
+    /// The whole-operation deadline for one request of `name`.
+    fn deadline_for(&self, name: &str) -> Duration {
+        self.deadline_override
+            .unwrap_or_else(|| request_deadline(name))
     }
 }
 
@@ -273,8 +285,11 @@ pub(crate) const METHODS: [(&str, MethodFn); 6] = [
 /// happens in the method body, which drops the serde message.
 /// What: each call runs its body on tokio's blocking pool; an `Err` becomes
 /// [`ErrorKind::to_rpc`] for that method, and a body that panics becomes
-/// [`ErrorKind::Internal`].
-/// Test: `server_error_text_is_fixed_per_method_and_kind`.
+/// [`ErrorKind::Internal`]. #7524 P2-M1: the request's deadline starts when
+/// the call arrives and is set on the body's thread, so every CLI call the
+/// body makes is bounded by it (`store::deadline`).
+/// Test: `server_error_text_is_fixed_per_method_and_kind`,
+/// `server_request_past_its_deadline_is_a_definite_error_and_commits_nothing`.
 pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
     METHODS
         .into_iter()
@@ -283,10 +298,14 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
             router.typed::<Value, Value, _, _>(name, move |params| {
                 let state = Arc::clone(&state);
                 async move {
-                    tokio::task::spawn_blocking(move || body(&state, params))
-                        .await
-                        .unwrap_or(Err(ErrorKind::Internal))
-                        .map_err(|kind| kind.to_rpc(name))
+                    // #7524 P2-M1: one deadline for the whole request.
+                    let deadline = Instant::now() + state.deadline_for(name);
+                    tokio::task::spawn_blocking(move || {
+                        crate::store::deadline::within(deadline, || body(&state, params))
+                    })
+                    .await
+                    .unwrap_or(Err(ErrorKind::Internal))
+                    .map_err(|kind| kind.to_rpc(name))
                 }
             })
         })

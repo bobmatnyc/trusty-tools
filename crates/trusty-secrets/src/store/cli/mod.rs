@@ -28,8 +28,8 @@ mod template;
 pub(crate) mod test_shim;
 
 pub use classify::Verdict;
-// #7519 P4: the PATH search moved to `store::program`, which doctor uses on every build.
-pub(crate) use crate::store::program::{find_on_path, is_executable_file};
+// #7519 P4: the program checks moved to `store::program`, which doctor uses on every build.
+pub(crate) use crate::store::program::is_executable_file;
 pub use runner::{CliCommand, CliRun, OUTPUT_CAP};
 pub use spec::CliSpec;
 pub use template::{TMP_SUBDIR, TemplateFile, default_tmp_root, sweep_stale_templates};
