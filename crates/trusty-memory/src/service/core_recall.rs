@@ -27,6 +27,8 @@ use super::types::{ServiceError, ServiceResult};
 use crate::tools::recall_rank::{
     demote_stale_snapshots, demote_stale_snapshots_across, ranking_window,
 };
+// #9421: superseded drawers rank below their replacements here too.
+use crate::tools::recall_supersede::{supersessions_across, supersessions_for, Supersessions};
 
 impl MemoryService {
     /// Per-palace recall, ranked: the hits every non-MCP recall surface shows.
@@ -64,7 +66,8 @@ impl MemoryService {
             crate::tools::bm25::fuse_bm25_into_recall(&mut results, &hits, window);
         }
         // #8246: same stale-snapshot demotion as the MCP recall handlers.
-        demote_stale_snapshots(&mut results, chrono::Utc::now());
+        let sup = supersessions_for(&handle, &results).await;
+        demote_stale_snapshots(&mut results, chrono::Utc::now(), &sup);
         results.truncate(top_k);
         Ok(results)
     }
@@ -119,21 +122,27 @@ impl MemoryService {
         scope: RecallAllScope,
     ) -> Value {
         let window = ranking_window(top_k, None);
-        let outcome = recall_all_scoped(
-            &self.state,
-            scope,
-            "recall_all",
-            window,
-            |handles| async move {
-                recall_across_palaces_with_default_embedder(&handles, query, window, deep).await
-            },
-        )
+        // #9421: per-batch edge reads, as in `memory_recall_all`. #9299: the
+        // batches come from either scope; both demote the merged list below.
+        let sup = std::sync::Arc::new(parking_lot::Mutex::new(Supersessions::new()));
+        let outcome = recall_all_scoped(&self.state, scope, "recall_all", window, |handles| {
+            let sup = sup.clone();
+            async move {
+                let hits =
+                    recall_across_palaces_with_default_embedder(&handles, query, window, deep)
+                        .await?;
+                let found = supersessions_across(&handles, &hits).await;
+                sup.lock().extend(found);
+                Ok(hits)
+            }
+        })
         .await;
         match outcome {
             Ok(outcome) => {
                 let mut results = outcome.results;
                 // #8246: same demotion as `memory_recall_all`, then the cut.
-                demote_stale_snapshots_across(&mut results, chrono::Utc::now());
+                let sup = std::mem::take(&mut *sup.lock());
+                demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
                 results.truncate(top_k);
                 let rows: Vec<Value> = results
                     .into_iter()

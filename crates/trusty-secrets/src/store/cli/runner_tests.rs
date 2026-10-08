@@ -133,6 +133,34 @@ fn runner_refuses_the_value_in_argv_before_spawn() {
     assert!(shim.logged_nothing());
 }
 
+/// Why: #7519 P3 — Keeper's stdin carries the value base64-encoded, so the
+/// raw value is not a substring of stdin; a value `hide` names is still
+/// refused in argv and the overlay before the spawn. Red without the
+/// `hidden_leaks` check in `refuse_leaks`.
+/// Test: itself.
+#[test]
+fn runner_refuses_a_hidden_secret_in_argv_before_spawn() {
+    let shim = Shim::new(RECORDER);
+    let hidden = SecretValue::new(CANARY);
+    let encoded = SecretValue::new("record-update password=$BASE64:c2stY2FuYXJ5\n");
+    let in_argv = shim.command().hide(&hidden).arg(format!("--x={CANARY}"));
+    let in_env = shim.command().hide(&hidden).env("TESTCLI_EXTRA", CANARY);
+    for command in [in_argv, in_env] {
+        let err = command.run_with_stdin(&encoded).unwrap_err();
+        assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+        assert!(!format!("{err} {err:?}").contains(CANARY));
+    }
+    assert!(shim.logged_nothing());
+    // The same command without the secret in argv runs.
+    let run = shim
+        .command()
+        .hide(&hidden)
+        .arg("--x=y")
+        .run_with_stdin(&encoded)
+        .unwrap();
+    assert_eq!(run.verdict, Verdict::Ok);
+}
+
 /// Why: #7519 A10 — an overlay token in argv would be readable through
 /// `ps`; it is refused before the spawn on both runners.
 /// Test: itself.
@@ -305,6 +333,56 @@ fn runner_timeout_kills_the_process_group() {
         gone
     });
     assert!(gone, "grandchild {pid} outlived the timeout");
+}
+
+/// Why: #7524 P2-M1 — once a server request's deadline has passed, no CLI
+/// call starts, so nothing can land after the server has answered.
+/// Test: itself.
+#[test]
+fn runner_refuses_to_spawn_after_the_request_deadline() {
+    let shim = Shim::new(RECORDER);
+    let err = crate::store::deadline::within(Instant::now(), || {
+        shim.command().run_with_stdin(&SecretValue::new(CANARY))
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, SecretsError::DeadlineExceeded { backend, .. } if backend == "testcli"),
+        "{err:?}"
+    );
+    assert!(!format!("{err} {err:?}").contains(CANARY));
+    assert!(shim.logged_nothing(), "a CLI started after the deadline");
+}
+
+/// Why: #7524 P2-M1 — a call the request deadline cuts short is killed at
+/// that deadline, not at its own longer timeout, with its whole process
+/// group, and the error says so.
+/// Test: itself.
+#[test]
+fn runner_kills_the_cli_at_the_request_deadline() {
+    let shim = Shim::new("sleep 60 &\necho $! > '@LOG@/pid'\nwait\n");
+    let started = Instant::now();
+    let err = crate::store::deadline::within(started + Duration::from_millis(300), || {
+        shim.command().timeout(Duration::from_secs(30)).run()
+    })
+    .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+    assert!(
+        matches!(err, SecretsError::DeadlineExceeded { .. }),
+        "{err:?}"
+    );
+    assert!(
+        gone_soon(shim.logged_pid()),
+        "the grandchild outlived the deadline"
+    );
+
+    // Without a request deadline the run's own timeout still applies.
+    let err = shim
+        .command()
+        .timeout(Duration::from_millis(200))
+        .run()
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 }
 
 /// Why: #7519 A10 — `Debug` reaches logs; an overlay may carry a token.

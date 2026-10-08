@@ -133,6 +133,7 @@ async fn cold_parked_index_accepts_a_write_by_driving_the_load() {
 /// write test.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn cold_parked_index_accepts_a_delete_by_driving_the_load() {
     let state = mock_state().await;
     let (_dir, root) = super::test_support::allowlisted_index_root("ts-5349-delete-");

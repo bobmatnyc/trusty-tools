@@ -3,17 +3,20 @@
 //! Why: the convert flow has two distinct sub-cases (single project / all
 //! projects) plus dry-run handling and bounded-concurrency fan-out, plus the
 //! mcp-vector-search config discovery + parsing helpers. Keeping it all in one
-//! module co-locates the (de)serialization, the per-project HTTP dance, and
-//! the render layer.
-//! What: `handle_convert` is the entry point; everything else is private.
-//! Test: `cargo run -- convert project --dry-run` from inside an
-//! mcp-vector-search repo prints the would-convert line; `convert all
-//! --dry-run` enumerates every detected project.
+//! module co-locates the (de)serialization, the per-project register-and-
+//! reindex calls, and the render layer.
+//! What: `handle_convert` is the entry point; everything else is private. The
+//! daemon is reached over its socket only (#9214).
+//! Test: `convert_one_registers_then_reindexes_over_the_socket`,
+//! `convert_one_stops_at_a_refused_create`,
+//! `convert_one_contacts_nothing_on_a_dry_run`.
 
-use super::daemon_utils::daemon_base_url;
 use anyhow::Result;
 use clap::ValueEnum;
 use colored::Colorize;
+use serde_json::json;
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
+use trusty_search::service::rpc::writes::{METHOD_INDEX_CREATE, METHOD_INDEX_REINDEX};
 
 /// Why: `convert` accepts a discrete operating mode, so model it as an enum
 /// rather than a free-form string. Validated at parse time by clap.
@@ -160,102 +163,61 @@ pub(crate) struct ConvertResult {
 /// Convert one project: register it with the daemon (idempotent) and trigger
 /// a reindex.
 ///
-/// Why: the per-project HTTP dance (register → reindex) is reused verbatim by
+/// Why: the per-project register-then-reindex pair is reused verbatim by
 /// `migrate mcp-vector-search`, so it is exposed crate-wide.
-/// What: POSTs `/indexes` then `/indexes/:id/reindex`; returns a `ConvertResult`.
-/// Test: `convert project` against a running daemon yields a `Queued` status.
+/// What: `search.index.create` then `search.index.reindex` over the daemon
+/// socket (#9214) — the twins of `POST /indexes` and
+/// `POST /indexes/:id/reindex`, with the same bodies. `client: None` is a dry
+/// run: it contacts nothing and reports `DryRun`.
+/// Test: `convert_one_registers_then_reindexes_over_the_socket`,
+/// `convert_one_stops_at_a_refused_create`,
+/// `convert_one_contacts_nothing_on_a_dry_run`.
 pub(crate) async fn convert_one(
     project_root: std::path::PathBuf,
     index_name: String,
-    base_url: &str,
-    dry_run: bool,
+    client: Option<&DaemonClient>,
 ) -> ConvertResult {
-    if dry_run {
-        return ConvertResult {
-            name: index_name,
-            path: project_root,
-            status: ConvertStatus::DryRun,
-        };
+    let status = match client {
+        None => ConvertStatus::DryRun,
+        Some(client) => register_and_reindex(client, &project_root, &index_name).await,
+    };
+    ConvertResult {
+        name: index_name,
+        path: project_root,
+        status,
     }
+}
 
-    let client = match trusty_common::server::daemon_http_client() {
-        Ok(c) => c,
-        Err(e) => {
-            return ConvertResult {
-                name: index_name,
-                path: project_root,
-                status: ConvertStatus::Failed(format!("failed to build HTTP client: {e}")),
-            };
-        }
+/// Register `name` at `root` (idempotent), then queue its reindex.
+async fn register_and_reindex(
+    client: &DaemonClient,
+    root: &std::path::Path,
+    name: &str,
+) -> ConvertStatus {
+    // 1. Register the index. `created: false` means it already existed —
+    //    still proceed to reindex so the user gets a fresh build.
+    let create = json!({ "id": name, "root_path": root });
+    let already_existed = match client.call(METHOD_INDEX_CREATE, create).await {
+        Ok(body) => !body
+            .get("created")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        Err(e) => return step_failed("create", e),
     };
 
-    // 1. Register the index. 200 with body.created=false means it already
-    //    existed — still proceed to reindex so the user gets a fresh build.
-    let create_url = format!("{base_url}/indexes");
-    let create_resp = client
-        .post(&create_url)
-        .json(&serde_json::json!({
-            "id": index_name,
-            "root_path": project_root,
-        }))
-        .send()
-        .await;
-
-    let already_existed = match create_resp {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value =
-                resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-            !body
-                .get("created")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true)
-        }
-        Ok(resp) => {
-            return ConvertResult {
-                name: index_name,
-                path: project_root,
-                status: ConvertStatus::Failed(format!("create returned {}", resp.status())),
-            };
-        }
-        Err(e) => {
-            return ConvertResult {
-                name: index_name,
-                path: project_root,
-                status: ConvertStatus::Failed(format!("create error: {e}")),
-            };
-        }
-    };
-
-    // 2. Kick off reindex (fire-and-forget — we don't follow the SSE stream
-    //    here because `convert all` may have many parallel migrations).
-    let reindex_url = format!("{base_url}/indexes/{index_name}/reindex");
-    let reindex_resp = client
-        .post(&reindex_url)
-        .json(&serde_json::json!({ "root_path": project_root }))
-        .send()
-        .await;
-
-    match reindex_resp {
-        Ok(resp) if resp.status().is_success() => ConvertResult {
-            name: index_name,
-            path: project_root,
-            status: if already_existed {
-                ConvertStatus::AlreadyRegistered
-            } else {
-                ConvertStatus::Queued
-            },
-        },
-        Ok(resp) => ConvertResult {
-            name: index_name,
-            path: project_root,
-            status: ConvertStatus::Failed(format!("reindex returned {}", resp.status())),
-        },
-        Err(e) => ConvertResult {
-            name: index_name,
-            path: project_root,
-            status: ConvertStatus::Failed(format!("reindex error: {e}")),
-        },
+    // 2. Kick off reindex (fire-and-forget — we don't follow the progress
+    //    stream here because `convert all` may have many parallel migrations).
+    let reindex = json!({ "index_id": name, "body": { "root_path": root } });
+    match client.call(METHOD_INDEX_REINDEX, reindex).await {
+        Ok(_) if already_existed => ConvertStatus::AlreadyRegistered,
+        Ok(_) => ConvertStatus::Queued,
+        Err(e) => step_failed("reindex", e),
     }
+}
+
+/// A failed socket call as a `Failed` row, worded as `daemon_rpc` words it.
+fn step_failed(step: &str, e: DaemonCallError) -> ConvertStatus {
+    ConvertStatus::Failed(format!("{step}: {}", super::daemon_rpc::rpc_error(e)))
 }
 
 /// Render one ConvertResult line for the `convert all` table.
@@ -304,17 +266,18 @@ pub async fn handle_convert(
     dry_run: bool,
     concurrency: usize,
 ) -> Result<()> {
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket and stay on it.
+    let client = DaemonClient::resolve()?;
+    super::daemon_guard::ensure_daemon_up(&client).await?;
 
     match target {
-        ConvertTarget::Project => handle_convert_project(dry_run, &base).await,
-        ConvertTarget::All => handle_convert_all(dry_run, concurrency, base).await,
+        ConvertTarget::Project => handle_convert_project(dry_run, &client).await,
+        ConvertTarget::All => handle_convert_all(dry_run, concurrency, client).await,
     }
 }
 
 /// Convert the mcp-vector-search project rooted at (or above) the cwd.
-async fn handle_convert_project(dry_run: bool, base: &str) -> Result<()> {
+async fn handle_convert_project(dry_run: bool, client: &DaemonClient) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let config_path = find_mvs_config(&cwd).ok_or_else(|| {
         anyhow::anyhow!(
@@ -339,7 +302,7 @@ async fn handle_convert_project(dry_run: bool, base: &str) -> Result<()> {
         name.bold(),
         root.display()
     );
-    let result = convert_one(root, name, base, false).await;
+    let result = convert_one(root, name, Some(client)).await;
     match &result.status {
         ConvertStatus::Queued => {
             println!(
@@ -361,7 +324,7 @@ async fn handle_convert_project(dry_run: bool, base: &str) -> Result<()> {
 
 /// Convert every mcp-vector-search project found under `$HOME`, fanning out
 /// with `tokio::task::JoinSet` and bounding concurrency by `concurrency`.
-async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> Result<()> {
+async fn handle_convert_all(dry_run: bool, concurrency: usize, client: DaemonClient) -> Result<()> {
     let home_display = dirs::home_dir()
         .map(|h| h.display().to_string())
         .unwrap_or_else(|| "$HOME".to_string());
@@ -374,7 +337,21 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> 
         println!("{} No mcp-vector-search projects found.", "·".dimmed());
         return Ok(());
     }
+    convert_configs(configs, dry_run, concurrency, &client).await
+}
 
+/// Convert each mcp-vector-search config in `configs`, print the table and the
+/// summary.
+///
+/// What: bounded fan-out over [`convert_one`]; rows print in input order.
+/// Test: `convert_all_fails_when_a_conversion_failed`,
+/// `convert_all_succeeds_when_every_conversion_succeeded`.
+async fn convert_configs(
+    configs: Vec<std::path::PathBuf>,
+    dry_run: bool,
+    concurrency: usize,
+    client: &DaemonClient,
+) -> Result<()> {
     if dry_run {
         println!(
             "{} Dry run — would convert {} projects:\n",
@@ -392,12 +369,12 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> 
 
     let total = configs.len();
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency.max(1)));
-    let base = std::sync::Arc::new(base);
     let mut tasks = tokio::task::JoinSet::new();
 
     for (i, config_path) in configs.into_iter().enumerate() {
         let sem = sem.clone();
-        let base = base.clone();
+        // A dry run hands `convert_one` no client, so it contacts nothing.
+        let client = (!dry_run).then(|| client.clone());
         tasks.spawn(async move {
             // Acquire permit inside the task so JoinSet limits concurrency
             // cleanly without us pre-allocating futures that all immediately
@@ -405,7 +382,7 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> 
             let _permit = sem.acquire_owned().await.ok();
             let parsed = parse_mvs_config(&config_path);
             let result = match parsed {
-                Ok((root, name)) => convert_one(root, name, &base, dry_run).await,
+                Ok((root, name)) => convert_one(root, name, client.as_ref()).await,
                 Err(e) => ConvertResult {
                     name: config_path.display().to_string(),
                     path: config_path.clone(),
@@ -448,7 +425,7 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> 
     } else {
         println!(
             "{} Summary: {} queued, {} already registered (reindexing), {} failed",
-            "✓".green(),
+            summary_glyph(failed),
             queued,
             already,
             failed
@@ -458,5 +435,164 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, base: String) -> 
             "trusty-search list".cyan()
         );
     }
+    fail_on_failed_rows(failed, total)
+}
+
+/// The summary line's lead glyph: a success mark only when nothing failed.
+pub(crate) fn summary_glyph(failed: usize) -> colored::ColoredString {
+    if failed == 0 {
+        "✓".green()
+    } else {
+        "!".yellow()
+    }
+}
+
+/// `Err` when any of `total` rows failed, after the table has been printed.
+///
+/// # Errors
+///
+/// When `failed > 0`.
+pub(crate) fn fail_on_failed_rows(failed: usize, total: usize) -> Result<()> {
+    // #9214: a run whose rows failed used to exit 0 under a green summary.
+    if failed > 0 {
+        anyhow::bail!("{failed} of {total} conversions failed");
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::mock_socket::mock_daemon;
+    use serde_json::Value;
+    use std::sync::{Arc, Mutex};
+    use trusty_common::uds::server::RpcError;
+    use trusty_search::service::rpc::error::CODE_CONFLICT;
+
+    type CallLog = Arc<Mutex<Vec<(String, Value)>>>;
+
+    /// #9214: a convert registers with `search.index.create` and then queues
+    /// `search.index.reindex`, each carrying the HTTP body it replaced;
+    /// `created: false` reports the index as already registered.
+    #[tokio::test]
+    async fn convert_one_registers_then_reindexes_over_the_socket() {
+        for (created, want_existing) in [(true, false), (false, true)] {
+            let calls: CallLog = Arc::default();
+            let log = Arc::clone(&calls);
+            let daemon = mock_daemon(move |method, params| {
+                log.lock().expect("log").push((method.to_string(), params));
+                Ok(json!({ "id": "proj", "created": created, "queued": true }))
+            })
+            .await;
+
+            let result = convert_one("/tmp/proj".into(), "proj".into(), Some(&daemon.client)).await;
+
+            assert_eq!(
+                *calls.lock().expect("log"),
+                vec![
+                    (
+                        METHOD_INDEX_CREATE.to_string(),
+                        json!({ "id": "proj", "root_path": "/tmp/proj" })
+                    ),
+                    (
+                        METHOD_INDEX_REINDEX.to_string(),
+                        json!({ "index_id": "proj", "body": { "root_path": "/tmp/proj" } })
+                    ),
+                ]
+            );
+            let existing = matches!(result.status, ConvertStatus::AlreadyRegistered);
+            let queued = matches!(result.status, ConvertStatus::Queued);
+            assert_eq!(
+                (existing, queued),
+                (want_existing, !want_existing),
+                "{result:?}"
+            );
+        }
+    }
+
+    /// #9214: a refused create is a failed row carrying the daemon's reason,
+    /// and no reindex is queued behind it.
+    #[tokio::test]
+    async fn convert_one_stops_at_a_refused_create() {
+        let calls: CallLog = Arc::default();
+        let log = Arc::clone(&calls);
+        let daemon = mock_daemon(move |method, params| {
+            log.lock().expect("log").push((method.to_string(), params));
+            Err(RpcError::new(CODE_CONFLICT, "index_root_overlap"))
+        })
+        .await;
+
+        let result = convert_one("/tmp/proj".into(), "proj".into(), Some(&daemon.client)).await;
+
+        let ConvertStatus::Failed(why) = &result.status else {
+            panic!("a refused create must fail the row: {result:?}");
+        };
+        assert!(why.starts_with("create: daemon returned"), "{why}");
+        assert!(why.contains("index_root_overlap"), "{why}");
+        assert_eq!(
+            calls.lock().expect("log").len(),
+            1,
+            "no reindex after a refusal"
+        );
+    }
+
+    /// #9214: a dry run takes no client and reports what it would convert.
+    #[tokio::test]
+    async fn convert_one_contacts_nothing_on_a_dry_run() {
+        let result = convert_one("/tmp/proj".into(), "proj".into(), None).await;
+        assert!(matches!(result.status, ConvertStatus::DryRun), "{result:?}");
+    }
+
+    /// Write one mcp-vector-search config per name under `dir`.
+    fn mvs_configs(dir: &std::path::Path, names: &[&str]) -> Vec<std::path::PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let cfg = dir.join(name).join(".mcp-vector-search");
+                std::fs::create_dir_all(&cfg).expect("config dir");
+                let root = dir.join(name);
+                let path = cfg.join("config.json");
+                std::fs::write(&path, json!({ "project_root": root }).to_string())
+                    .expect("config file");
+                path
+            })
+            .collect()
+    }
+
+    /// #9214 (fix-bar): `convert all` whose conversions failed — here the
+    /// daemon refuses every create — is an error after the table and summary,
+    /// not an exit 0.
+    #[tokio::test]
+    async fn convert_all_fails_when_a_conversion_failed() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let daemon =
+            mock_daemon(|_, _| Err(RpcError::new(CODE_CONFLICT, "index_root_overlap"))).await;
+
+        let err = convert_configs(
+            mvs_configs(dir.path(), &["a", "b"]),
+            false,
+            2,
+            &daemon.client,
+        )
+        .await
+        .expect_err("failed conversions must fail the run");
+
+        assert!(err.to_string().contains("2 of 2"), "{err}");
+    }
+
+    /// #9214: a `convert all` whose every conversion queued still exits 0.
+    #[tokio::test]
+    async fn convert_all_succeeds_when_every_conversion_succeeded() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let daemon = mock_daemon(|_, _| Ok(json!({ "created": true, "queued": true }))).await;
+
+        convert_configs(
+            mvs_configs(dir.path(), &["a", "b"]),
+            false,
+            2,
+            &daemon.client,
+        )
+        .await
+        .expect("every conversion queued");
+    }
 }

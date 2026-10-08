@@ -52,6 +52,8 @@ pub mod recall_projection;
 // #8246 / #9143: stale-snapshot demotion and the user-scope rulings leg.
 pub(crate) mod recall_rank;
 pub mod recall_rulings;
+// #9421: `superseded_by` demotion, read from the palace KG.
+pub(crate) mod recall_supersede;
 // #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
 pub(crate) mod recall_rulings_floor;
 pub mod room_definitions;

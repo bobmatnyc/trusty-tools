@@ -23,7 +23,7 @@
 mod http;
 mod marker;
 
-use super::daemon_utils::daemon_base_url;
+use super::daemon_http::daemon_base_url;
 use super::reindex_engine::register_index_with_daemon;
 use crate::config::GlobalConfig;
 use http::{fetch_known_index_ids, wait_for_daemon_ready};
@@ -75,7 +75,12 @@ pub async fn auto_discover_and_index() {
         return;
     }
 
-    let base = daemon_base_url();
+    // #9214: this task races the daemon's own startup, so wait for it to
+    // publish its HTTP address rather than guessing the default port.
+    let Some(base) = wait_for_published_base(Duration::from_secs(15)).await else {
+        tracing::warn!("auto-discover: the daemon published no HTTP address within 15s — skipping");
+        return;
+    };
     let client = match trusty_common::server::daemon_http_client() {
         Ok(c) => c,
         Err(e) => {
@@ -238,10 +243,65 @@ pub async fn auto_discover_and_index() {
     }
 }
 
+/// Poll for the daemon's published HTTP base until `budget` elapses (#9214).
+///
+/// Why: `auto_discover_and_index` is spawned beside `run_daemon`, before the
+/// daemon writes `http_addr`. The resolver used to answer the default port
+/// then; it now errors, so the first read can come too early.
+/// What: [`daemon_base_url`] every 250 ms; `None` at the deadline.
+/// Test: `wait_for_published_base_gives_up_at_its_budget`.
+async fn wait_for_published_base(budget: Duration) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        if let Ok(base) = daemon_base_url() {
+            return Some(base);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use serial_test::serial;
+
+    use super::wait_for_published_base;
+    use crate::commands::daemon_http::tests::DataDir;
+
+    /// #9214: the published-address wait in `auto_discover_and_index` ends at
+    /// its budget with no address when the daemon published none.
+    ///
+    /// Why: the Fail-Open Check on the skip arm — the wait must neither hang
+    /// nor fall back to a guessed address such as `127.0.0.1:7878`.
+    /// What: an empty isolated data dir and a 300 ms budget; asserts `None`,
+    /// that the wait lasted the budget, and that it ended well under a second.
+    /// Test: this function.
+    #[tokio::test]
+    #[serial]
+    async fn wait_for_published_base_gives_up_at_its_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = DataDir::set(dir.path());
+        let budget = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(2), wait_for_published_base(budget))
+            .await
+            .expect("the wait ends at its budget instead of hanging");
+        let elapsed = started.elapsed();
+
+        assert_eq!(got, None, "no address was published, so none is returned");
+        assert!(elapsed >= budget, "the wait gave up early: {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "the wait overran: {elapsed:?}"
+        );
+    }
 
     fn tempdir_unique(label: &str) -> PathBuf {
         let pid = std::process::id();

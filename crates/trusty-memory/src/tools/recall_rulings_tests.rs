@@ -68,11 +68,12 @@ fn the_same_ruling_from_two_palaces_appears_once() {
     let already_in_project = "commits never land on local main";
     results.push(hit(already_in_project, &["standing-rule"], 0.7, 2));
     let outcomes = vec![
-        Ok(vec![hit(text, &["bob-ruling"], 0.6, 2)]),
+        Ok(vec![hit(text, &["bob-ruling"], 0.6, 2)].into()),
         Ok(vec![
             hit(text, &["bob-ruling"], 0.6, 2),
             hit(already_in_project, &["standing-rule"], 0.65, 2),
-        ]),
+        ]
+        .into()),
     ];
     let degraded = fold_rulings(&mut results, outcomes, "q", 9, None).degraded;
     assert!(degraded.is_empty());
@@ -94,7 +95,8 @@ fn rulings_contribute_at_most_a_third_of_top_k() {
         hit("r4", &["standing-rule"], 0.45, 2),
         hit("note", &["note"], 0.99, 2),
         hit("weak", &["ruling"], 0.10, 2),
-    ])];
+    ]
+    .into())];
     fold_rulings(&mut results, outcomes, "q", 6, Some(0.2));
     assert_eq!(contents(&results), ["project a", "project b", "r1", "r2"]);
     assert!(results[2..].iter().all(|r| r.layer == 1));
@@ -114,7 +116,7 @@ fn only_capped_rulings_that_answer_the_query_are_floored() {
     let off_topic = hit("commits never land on local main", &["ruling"], 0.60, 2);
     let past_cap = hit("issue titles name a symptom too", &["ruling"], 0.50, 2);
     let (on_id, past_id) = (on_topic.drawer.id, past_cap.drawer.id);
-    let outcomes = vec![Ok(vec![on_topic, off_topic, past_cap])];
+    let outcomes = vec![Ok(vec![on_topic, off_topic, past_cap].into())];
     let fold = fold_rulings(&mut results, outcomes, query, 6, None);
     assert_eq!(fold.floored, [on_id]);
     assert_eq!(results.len(), 4, "{:?}", contents(&results));
@@ -290,4 +292,17 @@ async fn a_default_state_ignores_the_rulings_env_until_the_daemon_opts_in() {
         opted_in.rulings.palaces(),
         ["rulings-env-a", "rulings-env-b"]
     );
+}
+
+/// Why (#9421): the edge read must end a margin before the leg's deadline, so
+/// the outer timeout never fires first and drops the palace's rulings.
+#[test]
+fn the_edge_read_budget_leaves_a_margin_before_the_leg_deadline() {
+    let now = Instant::now();
+    let ms = Duration::from_millis;
+    assert_eq!(edge_read_budget(now + ms(10), now), Duration::ZERO);
+    assert_eq!(edge_read_budget(now, now + ms(5)), Duration::ZERO);
+    assert_eq!(edge_read_budget(now + ms(100), now), ms(75));
+    let long = LOOKUP_BUDGET + EDGE_READ_MARGIN + ms(1);
+    assert_eq!(edge_read_budget(now + long, now), LOOKUP_BUDGET);
 }

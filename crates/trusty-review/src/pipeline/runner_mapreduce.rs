@@ -29,7 +29,7 @@ use crate::{
         diff_analyzer::models::FilteredDiff,
         letter_grade::{Grade, default_grade_for_verdict, reconcile_grade_with_verdict},
         mapreduce::{MapContext, ReducedReview, run_map_reduce_with_wiped},
-        optional_context::assemble::refs_for_gate,
+        optional_context::assemble::{AppliedContext, refs_for_review}, // #9192, #9197
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{CallerContext, ReviewDeps, ReviewInput},
@@ -37,7 +37,7 @@ use crate::{
             DedupClaim, abort_dry, apply_grade_and_floor, attach_inline_comments,
             build_author_rationale, finalize_run,
         },
-        verdict_status::judged_verdict, // #9310
+        verdict_status::{Judged, judged_verdict}, // #9310
         verify_posted::{GateInputs, gate_then_verify},
         voice_config::build_voice_config,
         withheld_contract::regrade_from_survivors,
@@ -67,8 +67,8 @@ pub(super) struct MapReduceRun {
     pub coverage_contrib: Option<CoverageVerdictContrib>,
     /// Degraded reason from the #590 context gate (None = authoritative).
     pub degraded_reason: Option<String>,
-    /// #9192: false when `include_pr_body` put the capped body in the context.
-    pub body_in_refs: bool,
+    /// #9192 corpus switch and #9197 issue section from `apply_caller_context`.
+    pub(crate) applied: AppliedContext,
 }
 
 /// Run the map-reduce review branch and return the finalized `ReviewResult`.
@@ -120,8 +120,16 @@ pub(super) async fn run_mapreduce_branch(
         files = run.filtered.files.len(),
         "map-reduce branch: reviewing over-cap diff per-file (no truncation)"
     );
-    let (mut reduced, wiped_model_verdict): (ReducedReview, _) =
-        run_map_reduce_with_wiped(&run.filtered, &deps.llm, &ctx, mr_config).await;
+    // #9310 ruling 50: `grade_floor` is the synthesis or worst-chunk floor (Q2).
+    let (mut reduced, wiped_model_verdict, grade_floor): (ReducedReview, _, _) =
+        run_map_reduce_with_wiped(
+            &run.filtered,
+            &deps.llm,
+            &ctx,
+            mr_config,
+            &|file: &str, first: bool| run.applied.chunk_sections(file, first), // #9193, #9195
+        )
+        .await;
     // #4044: per-chunk hygiene, dedup and cap withholds reach the review record.
     result
         .withheld_findings
@@ -160,11 +168,19 @@ pub(super) async fn run_mapreduce_branch(
     }
     let model_verdict = reviewer_verdict(&reduced.verdict, wiped_model_verdict.as_ref());
     // #9310: the synthesis grade floors the reviewers' verdict, as in `run_review`.
-    let model_verdict = judged_verdict(
-        model_verdict,
-        reduced.grade.as_deref(),
-        run.coverage_contrib.as_ref(),
-    );
+    // Ruling 50: so does a chunk floor, so the withheld mapping reads a chunk F
+    // as the rejection it is (Q1), not the relaxed aggregate.
+    let judged = Judged {
+        verdict: crate::pipeline::grade::stricter_of(
+            judged_verdict(
+                model_verdict,
+                reduced.grade.as_deref(),
+                run.coverage_contrib.as_ref(),
+            ),
+            grade_floor.clone(),
+        ),
+        grade_floor,
+    };
     let synthesis_active = reduced.grade.is_some();
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),
@@ -219,7 +235,7 @@ pub(super) async fn run_mapreduce_branch(
         ReduceFacts {
             synthesis_active,
             wiped_model_verdict,
-            model_verdict,
+            judged,
         },
     )
     .await;
@@ -343,8 +359,9 @@ struct ReduceFacts {
     synthesis_active: bool,
     /// From `run_map_reduce_with_wiped`, for `settle_no_survivors` (#9188).
     wiped_model_verdict: Option<crate::models::Verdict>,
-    /// #9310: the reviewers' verdict the withheld mapping reads.
-    model_verdict: crate::models::Verdict,
+    /// #9310: the reviewers' verdict the withheld mapping reads, and the
+    /// ruling-50 grade floor the gates end on.
+    judged: Judged,
 }
 
 /// The reviewers' own verdict on the map-reduce path (#9310).
@@ -450,15 +467,12 @@ async fn fold_reduced_into_result(
         input.caller_context.pr_discussion.as_deref(),
     );
     // #9188 D: context citations resolve in what the reviewer was shown.
-    let refs = refs_for_gate(
-        &run.pr_meta.title,
-        run.body_in_refs.then_some(run.pr_meta.body.as_str()), // #9192
+    // #9197: plus the issue section every chunk prompt carried.
+    let refs = refs_for_review(
+        &run.pr_meta,
         &run.external_context,
-        [
-            run.context.pr_description.as_deref(),
-            run.context.pr_discussion.as_deref(),
-            run.context.referenced_code.as_deref(),
-        ],
+        &run.context,
+        &run.applied,
     );
     let inputs = GateInputs {
         filtered: &run.filtered,
@@ -466,9 +480,10 @@ async fn fold_reduced_into_result(
         per_file: true,
         author_rationale: author_rationale.as_deref(),
         refs: &refs,
+        docs: &run.applied.docs,    // #9193
         narrative: &parsed.summary, // #9188 C: the synthesis summary
         wiped_model_verdict: facts.wiped_model_verdict,
-        model_verdict: facts.model_verdict,
+        judged: facts.judged,
     };
     gate_then_verify(config, deps.verifier.as_ref(), result, &inputs).await;
 

@@ -1471,9 +1471,19 @@ the daemon:
   projects over HTTP.
 
 The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
-`/upgrade`, `/metrics`, `/api/chat/providers`. The CLI subcommands
-still resolve the daemon over HTTP; against a `--no-http` daemon they fall back
-to `127.0.0.1:7878`, so use them only once they move to the socket.
+`/upgrade`, `/metrics`, `/api/chat/providers`. `status`, `list`, `add`'s
+guard, `remove` and `watch` use the socket (#9214 B2(a)), and so do
+`config get|set`, `cleanup`, `convert` and `migrate`'s index phase (#9214
+B2(b1)); `config` and `cleanup` never start the daemon. `port`,
+`dashboard` and `monitor web` ask the daemon over the socket which HTTP
+address it bound (#9214 B2(d1)). Against a `--no-http` daemon, `port` exits 1
+with `no HTTP listener (socket-only daemon at <socket>)`; `dashboard` and
+`monitor web` exit non-zero, name the socket, and open no browser, because the
+dashboard needs the HTTP listener until phase C. `port` reports "no daemon
+running" only when nothing answers on the socket, and never starts a daemon.
+The other CLI subcommands still send their requests over HTTP; against a
+`--no-http` daemon they now fail with an error naming the missing
+`http_addr`/`daemon.port` files, rather than falling back to `127.0.0.1:7878`.
 `--no-http` on `trusty-search serve` is a different, older flag and is still a
 no-op there.
 

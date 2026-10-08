@@ -16,6 +16,10 @@
 //! the timeout; on timeout, on a stdin write that did not finish, and on
 //! every early return the group gets `SIGKILL` and the child is reaped. stderr only feeds the `classify`
 //! verdict and is then dropped; no error carries child output.
+//! #7524 P2-M1: a run inside a server request is also bounded by that
+//! request's deadline (`store::deadline`): it is refused before spawning
+//! once the deadline has passed, and a run the deadline cuts short is
+//! [`SecretsError::DeadlineExceeded`].
 //! Test: `runner_tests.rs` beside this file.
 
 use std::ffi::{OsStr, OsString};
@@ -29,6 +33,7 @@ use std::time::{Duration, Instant};
 use super::classify::{Verdict, classify};
 use super::spec::CliSpec;
 use crate::api::{SecretKey, SecretValue, SecretsError, VaultName};
+use crate::store::deadline;
 
 /// The most bytes kept from each of stdout and stderr (1 MiB).
 pub const OUTPUT_CAP: usize = 1024 * 1024;
@@ -67,6 +72,8 @@ pub struct CliCommand {
     program: OsString,
     args: Vec<OsString>,
     envs: Vec<(OsString, OsString)>,
+    /// Secrets refused in argv and the overlay besides the stdin value.
+    hidden: Vec<SecretValue>,
     timeout: Duration,
     vault: String,
     key: String,
@@ -93,6 +100,7 @@ impl CliCommand {
             program: OsString::from(spec.program),
             args: Vec::new(),
             envs: Vec::new(),
+            hidden: Vec::new(),
             timeout: spec.timeout,
             vault: NO_TARGET.to_string(),
             key: NO_TARGET.to_string(),
@@ -130,6 +138,18 @@ impl CliCommand {
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.envs
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Refuse `secret` in argv and the overlay too, beside the stdin value.
+    ///
+    /// Why: #7519 P3 — Keeper's stdin is a batch command holding the value
+    /// encoded, so the value itself is not a substring of stdin and the
+    /// stdin check alone would not catch it in argv.
+    /// Test: `runner_refuses_a_hidden_secret_in_argv_before_spawn`.
+    #[must_use]
+    pub fn hide(mut self, secret: &SecretValue) -> Self {
+        self.hidden.push(secret.clone());
         self
     }
 
@@ -200,13 +220,52 @@ impl CliCommand {
             .collect();
         let value_leaks = stdin.is_some_and(|v| found_in(&argv, v) || found_in(&overlay, v));
         let token_leaks = overlay.iter().any(|token| found_in(&argv, token));
-        if value_leaks || token_leaks {
+        // #7519 P3: a value a backend encoded into stdin, checked raw.
+        let hidden_leaks = self.hidden.iter().any(|secret| {
+            let secret = secret.expose().as_bytes();
+            found_in(&argv, secret) || found_in(&overlay, secret)
+        });
+        if value_leaks || token_leaks || hidden_leaks {
             return Err(self.failure(REFUSED));
         }
         Ok(())
     }
 
+    /// This run's time budget, and whether the request deadline set it.
+    ///
+    /// What: the run's own timeout, capped at [`MAX_TIMEOUT`], or the time
+    /// left before the request deadline when that is shorter (#7524 P2-M1).
+    fn budget(&self) -> (Duration, bool) {
+        let own = self.timeout.min(MAX_TIMEOUT);
+        match deadline::remaining() {
+            Some(left) if left < own => (left, true),
+            _ => (own, false),
+        }
+    }
+
+    /// The error for a run the request deadline refused or cut short.
+    fn deadline_exceeded(&self) -> SecretsError {
+        SecretsError::DeadlineExceeded {
+            backend: self.spec.backend.to_string(),
+            vault: self.vault.clone(),
+            key: self.key.clone(),
+        }
+    }
+
     fn execute(&self, stdin: Option<&[u8]>) -> Result<CliRun, SecretsError> {
+        let (budget, by_request) = self.budget();
+        // #7524 P2-M1: nothing starts once the request's deadline has passed,
+        // so no write lands after the server has answered.
+        if by_request && budget.is_zero() {
+            return Err(self.deadline_exceeded());
+        }
+        let timed_out = || {
+            if by_request {
+                self.deadline_exceeded()
+            } else {
+                self.failure(TIMED_OUT)
+            }
+        };
         let mut command = std::process::Command::new(&self.program);
         command
             .args(&self.args)
@@ -228,7 +287,7 @@ impl CliCommand {
             child,
             reaped: false,
         };
-        let deadline = Instant::now() + self.timeout.min(MAX_TIMEOUT);
+        let deadline = Instant::now() + budget;
         let (tx, rx) = mpsc::channel();
         let (stdout, stderr) = (guard.child.stdout.take(), guard.child.stderr.take());
         let stdin_pipe = guard.child.stdin.take();
@@ -260,7 +319,7 @@ impl CliCommand {
             let now = Instant::now();
             if now >= deadline {
                 // The guard's drop kills the group and reaps the child.
-                return Err(self.failure(TIMED_OUT));
+                return Err(timed_out());
             }
             std::thread::sleep(POLL.min(deadline - now));
         };
@@ -273,7 +332,7 @@ impl CliCommand {
                     // A straggler still holds a pipe. The group id cannot be
                     // reused while the group has a member.
                     kill_group(guard.child.id());
-                    return Err(self.failure(TIMED_OUT));
+                    return Err(timed_out());
                 }
             }
         }

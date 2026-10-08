@@ -218,6 +218,7 @@ fn without_host_sampled(mut body: serde_json::Value, fields: &[&str]) -> serde_j
 /// asked for details.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn indexes_list_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 
@@ -250,6 +251,7 @@ async fn indexes_list_over_the_socket_matches_the_http_body() {
 /// than a cosmetic one.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
 async fn index_status_over_the_socket_matches_the_http_body() {
     let (_state, http, rpc) = fixture().await;
 

@@ -97,6 +97,7 @@ async fn semantic_stage_on_skip_vector_index_is_503_not_degraded_200() {
 /// degraded 200 pre-fix.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn semantic_stage_before_embed_completes_is_503_retryable() {
     let state = state_with_handle("vec-pending", |h| {
         h.skip_vector = false;
@@ -154,6 +155,7 @@ async fn semantic_stage_on_a_ready_vector_lane_is_not_refused() {
 /// commit.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn unpinned_search_reports_vector_unavailable_in_meta() {
     let state = state_with_handle("vec-meta", |h| {
         h.skip_vector = true;
@@ -412,6 +414,7 @@ async fn residency_miss_is_404_only_when_absent_everywhere() {
 /// same lie this issue is about.
 /// Test: this test.
 #[tokio::test]
+#[serial_test::parallel]
 async fn status_semantic_coverage_reports_live_vector_count() {
     let state = state_with_handle("coverage", |h| {
         h.skip_vector = false;

@@ -83,6 +83,7 @@ fn probe_query(text: &str) -> SearchQuery {
 ///
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_root_override_still_returns_search_results() {
     let (_dir, root_old) = super::test_support::allowlisted_index_root("ts-4951-");
     // The production shape: the new root is one level BELOW the registered one
@@ -207,6 +208,7 @@ async fn reindex_root_override_still_returns_search_results() {
 /// existence assertion is the point — a lexical check is what let this through.
 /// Test: this test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn reindex_root_override_is_refused_when_the_corpus_disagrees() {
     use crate::core::corpus::CorpusStore;
 

@@ -101,11 +101,8 @@ pub(super) fn check_skill_staleness(
     let submodule = (source != paths.skills).then_some(source);
     // #9012: the bundled skills are runtime content; none is an empty
     // reference, which `report` grades Unknown.
-    let content = match project_dir {
-        Some(dir) => crate::core::content_source::framework_content_for(dir),
-        None => crate::core::content_source::framework_content(),
-    }
-    .ok();
+    let content = // #9396: read-only; never fetches the content release.
+    crate::core::content_source::framework_content_local(project_dir).ok();
     let reference = skill_reference(submodule.as_deref(), content.as_ref());
     report(&reference, paths, project_dir)
 }

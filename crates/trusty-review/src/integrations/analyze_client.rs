@@ -18,6 +18,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::optional_context::probes::redact_credentials; // #9431
+
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Errors produced by `AnalyzeClient` implementations.
@@ -29,11 +31,13 @@ use serde::{Deserialize, Serialize};
 /// degradation" by the pipeline — none should block a review.  `ClientInit`
 /// covers TLS-backend initialisation failures at construction time so callers
 /// receive an `Err` instead of a panic.
-/// Test: `analyze_error_display`.
+/// #9431: `Transport` and `Unavailable` carry the probed trusty-search URL
+/// or the child's stderr, so their Display masks credentials.
+/// Test: `analyze_error_display`, `subprocess_health_error_masks_search_url_credentials`.
 #[derive(Debug, thiserror::Error)]
 pub enum AnalyzeClientError {
     /// HTTP transport failure.
-    #[error("trusty-analyze transport error: {0}")]
+    #[error("trusty-analyze transport error: {}", redact_credentials(.0))]
     Transport(String),
 
     /// trusty-analyze returned a non-2xx status.
@@ -50,7 +54,7 @@ pub enum AnalyzeClientError {
     Parse(String),
 
     /// Daemon is unreachable or unhealthy.
-    #[error("trusty-analyze unavailable: {0}")]
+    #[error("trusty-analyze unavailable: {}", redact_credentials(.0))]
     Unavailable(String),
 
     /// reqwest client construction failed (TLS backend unavailable).
@@ -171,6 +175,25 @@ pub trait AnalyzeClient: Send + Sync {
     /// (not an error) on any transport failure — analyze is optional.
     /// Test: `subprocess_client_has_analysis_returns_false_on_error`.
     async fn has_analysis(&self, index_id: &str) -> bool;
+
+    /// [`Self::has_analysis`] with the reason when the answer is no (#9194).
+    ///
+    /// Why: the context-source ledger reports why analysis was unavailable,
+    /// and a bare `bool` drops the transport error.
+    /// What: `Ok(())` when analysis is available; otherwise an error naming
+    /// why. The default asks `has_analysis` once, so a client that overrides
+    /// nothing makes the same calls as before.
+    /// Test: `analysis_status_default_names_the_index`,
+    /// `facts_name_analyze_when_it_is_down`.
+    async fn analysis_status(&self, index_id: &str) -> Result<(), AnalyzeClientError> {
+        if self.has_analysis(index_id).await {
+            Ok(())
+        } else {
+            Err(AnalyzeClientError::Unavailable(format!(
+                "no analysis for index `{index_id}`"
+            )))
+        }
+    }
 
     /// Fetch complexity hotspots for an index.
     ///

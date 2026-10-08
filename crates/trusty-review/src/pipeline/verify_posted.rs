@@ -28,9 +28,11 @@ use crate::{
     llm::LlmProvider,
     models::{Finding, ReviewResult, Verdict, VerifyOutcome, WithheldFinding},
     pipeline::{
-        citation_gate::{LineIndex, gate_posted_findings_with_index, verdict as withhold},
+        citation_gate::{
+            DocCorpus, LineIndex, gate_posted_findings_with_index, verdict as withhold,
+        },
         diff_analyzer::models::FilteredDiff,
-        verdict_status::apply_withheld_outcome,
+        verdict_status::{Judged, apply_grade_floor, apply_withheld_outcome},
         verify::{VerifierReach, apply_outcome, maybe_verify, rederive_verdict},
         withheld_contract as contract,
     },
@@ -250,6 +252,8 @@ pub(crate) struct GateInputs<'a> {
     /// #9188 D: the fetched context a `[jira:]`/`[gh:]`/`[confluence:]`
     /// citation must resolve in.
     pub(crate) refs: &'a str,
+    /// #9193: doc text read at the head that a `[doc:]` citation must quote.
+    pub(crate) docs: &'a DocCorpus,
     /// #9188 C: the model-written prose inside `review_body`; #9310: replaced
     /// by the verified summary, never posted.
     pub(crate) narrative: &'a str,
@@ -257,8 +261,8 @@ pub(crate) struct GateInputs<'a> {
     /// before grading; `settle_no_survivors` decides from it (#9188, option A).
     pub(crate) wiped_model_verdict: Option<Verdict>,
     /// #9310: the reviewer's own verdict (`verdict_status::judged_verdict`),
-    /// which the withheld mapping reads.
-    pub(crate) model_verdict: Verdict,
+    /// which the withheld mapping reads, and its grade floor (ruling 50).
+    pub(crate) judged: Judged,
 }
 
 /// Gate citations, then verify the survivors, on a graded review (#8904).
@@ -282,8 +286,10 @@ pub(crate) struct GateInputs<'a> {
 /// owner ruling D2, "Always template").
 /// #9310: then `verdict_status::apply_withheld_outcome` maps a withheld
 /// review from the reviewer's own verdict (`all_withheld` APPROVE,
-/// `suppressed_reject` REQUEST_CHANGES), and one headline counting
-/// `withheld_findings` leads the body (`prepend_withheld_headline`).
+/// `suppressed_reject` REQUEST_CHANGES), `verdict_status::apply_grade_floor`
+/// holds a D or F review at its grade floor (owner ruling 50), and one
+/// headline counting `withheld_findings` leads the body
+/// (`prepend_withheld_headline`).
 /// Test: `run_review_posts_no_refuted_advisory_finding`,
 /// `run_review_partial_verifier_outage_reports_the_withheld_count`,
 /// `run_review_enabled_without_a_verifier_withholds_every_finding`,
@@ -292,7 +298,8 @@ pub(crate) struct GateInputs<'a> {
 /// `run_review_posts_a_confirmed_removal_finding_at_its_deletion_line`,
 /// `run_review_writes_the_template_for_a_clean_review_byte_for_byte`,
 /// `run_review_all_withheld_request_changes_is_suppressed_reject`,
-/// `the_withheld_headline_counts_the_whole_array`.
+/// `the_withheld_headline_counts_the_whole_array`,
+/// `f_with_one_confirmed_low_confidence_finding_reads_block`.
 pub(crate) async fn gate_then_verify(
     config: &ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,
@@ -301,13 +308,16 @@ pub(crate) async fn gate_then_verify(
 ) {
     let error_before = result.error.clone(); // #9310: restored if the mapping replaces UNKNOWN
     let narrative = contract::take_narrative(result, inputs.narrative);
-    let index = LineIndex::from_filtered(inputs.filtered).with_refs(inputs.refs);
+    let index = LineIndex::from_filtered(inputs.filtered)
+        .with_refs(inputs.refs)
+        .with_docs(inputs.docs); // #9193: the gate and the re-check (L) both read it
     gate_posted_findings_with_index(result, &index); // #8905 runs first.
     verify_survivors(config, verifier, result, inputs).await;
     contract::withhold_unresolved(result, &index); // #9188 L
     contract::settle_no_survivors(result, inputs.wiped_model_verdict.as_ref()); // #9188 A, J
     // #9310: the withheld mapping, last, from the reviewer's own verdict.
-    apply_withheld_outcome(result, &inputs.model_verdict, error_before);
+    apply_withheld_outcome(result, &inputs.judged.verdict, error_before);
+    apply_grade_floor(result, &inputs.judged.grade_floor); // #9310 ruling 50: last, so nothing relaxes it
     contract::write_summary(result, narrative); // #9188 C; #9310 D2: always the template
     contract::prepend_withheld_headline(result); // #9310: one total, from the array
 }

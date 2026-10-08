@@ -127,7 +127,13 @@ name        = "trusty-review"
 # `cargo-semver-checks` flags three lints against 0.36.1. CHANGELOG.md [0.37.0]
 # lists every break and the caller's fix. The root
 # `[workspace.dependencies]` row is widened to `version = "0.37"`.
-version     = "0.38.0"
+#
+# 0.38.0 -> 0.38.1 (#9195): PATCH. 0.38.0 is already live and this PR edits
+# `src/**`, so the `PR version bump vs crates.io` gate (#4421) requires a bump.
+# The changes are additive: new `#[non_exhaustive]` request fields, builder
+# methods, a CLI flag and MCP arguments. The root `[workspace.dependencies]`
+# row stays `version = "0.38"`, which 0.38.1 satisfies.
+version     = "0.38.1"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true

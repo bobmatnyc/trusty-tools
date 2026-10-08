@@ -193,12 +193,101 @@ empty result.
   citation corpus see the same capped text. A local diff has no PR body; the
   review runs and the ledger records the body `unavailable`.
 - `--report-context` asks for the source ledger with no other new input.
+- `--issue-docs-file <PATH>` (#9197) gives the reviewer the issues the change
+  addresses: a JSON array of `{"id": "#42", "title": "…", "body": "…",
+  "url": "…"}` in a regular file of at most 256 KiB. Ids are GitHub issue
+  numbers only. Each body is capped at 16,000 characters with a visible
+  marker; at most 8 docs and 48,000 body characters are shown, and a doc past
+  either limit is left out whole and recorded `omitted`. The docs render as
+  `## Linked issues` under a note marking them as data; a `url` must be an
+  `http(s)://` link and renders as `URL: <url>`. A `[gh: #N — "excerpt"]`
+  citation resolves only against text the reviewer saw. The verifier never
+  sees issue text. Works on a local diff.
+- `--spec-docs` (#9193) reads the ADR, spec and SLD docs the PR body names
+  (`docs/adr`, `docs/specs`, `docs/design`, `docs/prd`, `docs/architecture`,
+  `docs/reference`, `crates/*/docs`; an SLD `#anchor` reads the whole file),
+  plus doc paths trusty-search finds. Each is read through the GitHub
+  Contents API at the PR head SHA, never the default branch, and renders as
+  `## Referenced docs`, fenced as data under a `path@sha` heading. Each doc is
+  capped at 16,000 characters with a visible marker; at most 6 docs and
+  48,000 characters are shown, and a doc past either limit is left out whole
+  and recorded `omitted`. A doc the PR itself changes is marked "this PR
+  modifies this doc". The verifier never sees doc text.
+- `--claude-md` (#9193) reads the root `CLAUDE.md` and up to 3 nested ones
+  found by trusty-search, at the PR head SHA, as `## Repository conventions
+  (CLAUDE.md)`, 16,000 characters in total.
+- With either doc flag, a finding may cite `[doc: path@sha — "excerpt"]`. It
+  resolves only when the path was read, the SHA is a 7+ character prefix of
+  the head, and every excerpt is in the text the reviewer saw; otherwise the
+  finding is withheld. A missing path is recorded `absent`; an API error, a
+  directory, a fork head the base repository cannot resolve, or a failed
+  search is `unavailable`; none stops the review. A local diff has no head
+  SHA, so both sources are recorded `unavailable` and the review runs.
+- `--changed-files` (#9195) shows the PR's changed files whole, read through
+  the GitHub Contents API at the PR head SHA, for the reviewer only, as
+  `## Changed files (full text at the PR head)`. Each file is fenced as data
+  under a `path@sha` heading, beneath a note that the whole section is
+  PR-author text. `--changed-files-budget <BYTES>` sets the byte budget:
+  default 120,000, at most 400,000 (a larger value is clamped and the clamp
+  is named in the ledger), and 0 reviews the diff only. A budget without
+  `--changed-files` does nothing. The file text is context only: citations,
+  the verifier and inline comments still use the diff, and a finding that
+  quotes a line outside the diff is withheld.
+  - A file is shown whole or not at all. Over budget, test files drop first,
+    then generated files (lock, snapshot, fixture, `dist/`, `generated/`),
+    then the largest, ties broken by path. "The file a finding cites" cannot
+    be known before the review runs, so the guarantee is this fixed order,
+    in which source files drop last.
+  - Every file left out is named under `Not shown:` in the prompt, with one
+    fixed reason: `not UTF-8`, `binary` (a NUL byte), `too large` (no inline
+    content, as for a file over 1 MB), `read failed` (a 404, a timeout, an API
+    error, or a path that is not plain `[A-Za-z0-9._/-]` of at most 200
+    characters), `over budget`, `over fetch cap`, `deleted`, `sensitive
+    path`, or `not reviewed` (on the map-reduce path, a file no chunk prompt
+    reviews, such as a rename with no hunk). The list is paid for out of the
+    budget first, and each path in it is cut to 512 characters. The ledger
+    item carries the error text; the prompt never does.
+  - `.env*`, `*.pem`, `*.key`, `id_rsa*`, `*credentials*` and `*secret*`
+    paths are never read, and credential-shaped text in a shown file is
+    masked before it reaches the prompt.
+  - At most 60 files are read, 8 at a time, each with a 10-second timeout.
+    Size is unknown before a read, so past 60 files the fetch cap drops
+    tests first, then generated files, then the files with the most diff
+    lines, and names each one `over fetch cap`. This ranking stands in for
+    the AC2 order until a file is read (Architect ruling C).
+  - On the map-reduce path each chunk prompt carries the `Not shown:` list
+    and only its own file's text, in that file's first chunk; the budget is
+    for the whole PR.
+  - A local diff has no head SHA, so the source is recorded `unavailable` and
+    the review runs.
 
-With `--include-pr-body` or `--report-context`, `--json` prints
+With `--include-pr-body`, `--issue-docs-file`, `--spec-docs`, `--claude-md`,
+`--changed-files` or `--report-context`, `--json` prints
 `{"result": <review>, "context_sources": [...]}`, and the human output prints
-one line per source that was `unavailable` or `truncated`. Without either flag,
-`--json` prints the review object alone, exactly as before. The text flags and
-a `# Context:` stdin preamble never turn the ledger on by themselves.
+one line per source that was `absent`, `unavailable` or `truncated`. Without
+any of them, `--json` prints the review object alone, exactly as before. The
+text flags and a `# Context:` stdin preamble never turn the ledger on by
+themselves.
+
+The ledger lists every source, in this order (#9194, #9195): `pr_body`,
+`caller_context`, `issues`, `spec_docs`, `claude_md`, `changed_files`,
+`search`, `analyze` and `external_sources`. Each row is `used`, `truncated`, `absent` (asked for, and
+there was nothing: no hits, no hotspots or smells in the changed files, a
+source with no results), `unavailable` (could not be read; `detail` says why,
+one line of at most 200 characters with credentials redacted) or
+`not_requested` (an input the request did not ask for, or no external source
+configured). `analyze` has `hotspots` and `smells` items,
+`external_sources` one item per enabled source, and `changed_files` one item
+per changed file; a row takes its worst item. A
+dependency the context gate degraded reads `unavailable` with the gate's
+reason. A review skipped before its context was gathered lists no rows. The
+ledger never changes the review: verdict, grade, findings and prompts are the
+same with it on or off.
+
+With the ledger off, a failed search query, analyze call or external source is
+logged as a warning and nothing else: the default output stays byte-identical,
+so the ledger is where such a failure shows. `github_issues` makes no GitHub
+call for a local diff, which has no repository.
 
 A repeat review of the same head with different context flags is skipped as a
 duplicate when a dedup store is wired. Push a new head, or clear the claim.
@@ -266,11 +355,24 @@ Optional PR context (#9192), all off by default:
 | `pr_description` | string | PR description for the reviewer and the verifier. |
 | `pr_discussion` | string | Review and issue comments for the reviewer and the verifier. |
 | `referenced_code` | string | Related code the diff depends on, for the reviewer. |
+| `issue_docs` | array | Issues the change addresses (#9197), `[{id, title?, body, url?}]`; also on `review_diff`. Same caps and rules as `run --issue-docs-file`. A malformed value is an invalid-params error. |
+| `spec_docs` | boolean | Read the ADR, spec and SLD docs the PR body names, plus trusty-search hits, at the PR head SHA (#9193); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same caps and `[doc:]` rules as `run --spec-docs`. A non-boolean is an invalid-params error. |
+| `claude_md` | boolean | Read the root `CLAUDE.md` and up to 3 nested ones at the PR head SHA (#9193); also on `review_diff`, as above. Same caps as `run --claude-md`. A non-boolean is an invalid-params error. |
+| `report_context` | boolean | Report the context-source ledger with no other new input (#9194); also on `review_diff`. `null` and `false` are off. A non-boolean is an invalid-params error. |
+| `changed_files` | boolean | Show the PR's changed files whole, read at the PR head SHA (#9195); also on `review_diff`, which has no head SHA and reports the source `unavailable`. Same rules as `run --changed-files`. A non-boolean is an invalid-params error. |
+| `changed_files_budget` | integer | Byte budget for `changed_files`: default 120,000, at most 400,000 (a larger value is clamped); 0 reviews the diff only. Does nothing without `changed_files`. A negative, fractional or non-number value is an invalid-params error. |
 
-A mistyped text param is ignored with a warning. When any of the four is
-sent, the response envelope carries `context_sources`: one record per source
-(`pr_body`, `caller_context`) with state `used`, `truncated`, `absent` or
-`unavailable`. The `ReviewResult` text inside the envelope is unchanged.
+A mistyped text param is ignored with a warning. When any of these is sent
+(`changed_files_budget` alone does not count), the response envelope carries
+`context_sources`: every source in the order `run --report-context` lists
+them (`pr_body`, `caller_context`, `issues`, `spec_docs`, `claude_md`,
+`changed_files`, `search`, `analyze`, `external_sources`), each
+`used`, `truncated`, `absent`, `unavailable` or `not_requested`, with
+per-item rows (`omitted` names a doc or a changed file left out whole). A review skipped before
+its context was gathered carries `"context_sources": []`. Without any of them
+there is no such key, and with the ledger off a failed source is only logged
+(see `run` above). The `ReviewResult` text inside the envelope, `isError`,
+`mcp_status` and the status values are unchanged.
 
 Returns a `ReviewResult` JSON object with:
 - `grade` (A+ | A | A- | B+ | B | B- | C+ | C | C- | D+ | D | D- | F) — letter grade

@@ -275,6 +275,7 @@ async fn assert_only_a_committed_delete_stamps(site: Site) {
 /// Boot reconcile's `apply_delta`. Fails against 8fe9e93737: no delete
 /// stamped; against cb543af1de: the refused delete dropped memory.
 #[tokio::test]
+#[serial_test::parallel]
 async fn reconcile_delete_stamps_only_when_committed() {
     assert_only_a_committed_delete_stamps(Site::Reconcile).await;
 }
@@ -338,6 +339,7 @@ async fn durable_rows(fx: &Fixture, rel: &str) -> Vec<(String, String)> {
 /// until a clean retry. Fails against d6529ca1f5: `apply_delta` answered
 /// `true` and stamped.
 #[tokio::test]
+#[serial_test::parallel]
 async fn a_partially_failed_reconcile_delta_does_not_stamp_the_sha() {
     let fx = Fixture::new(Site::ReconcilePartial).await;
     let handle = Arc::new(fx.handle());

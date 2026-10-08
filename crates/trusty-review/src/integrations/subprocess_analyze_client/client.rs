@@ -15,8 +15,23 @@ use crate::integrations::analyze_client::{
 // #4440: the single, shared interpretation of a trusty-search /health payload.
 // This module must CONSUME it rather than re-deriving its own — see `health`.
 use crate::integrations::health::{HealthResponse, ServingState};
+use crate::integrations::search_client::SearchClientError;
+use crate::integrations::search_transport::{SearchTransport, call_socket, decode};
+use trusty_common::search_rpc::{METHOD_HEALTH, METHOD_INDEX_STATUS};
 
 use super::{DEFAULT_ANALYZE_BIN, ENV_ANALYZE_BIN, SubprocessReviewReport, map_report};
+
+/// Bound for one trusty-search probe, on either leg.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The #6687 warning for an index trusty-search has never heard of.
+fn warn_unknown_index(index_id: &str) {
+    tracing::warn!(
+        index = %index_id,
+        "trusty-search has no index `{index_id}` — trusty-analyze has nothing to \
+         analyse for it (#6687)"
+    );
+}
 
 // ─── Client ───────────────────────────────────────────────────────────────────
 
@@ -31,10 +46,12 @@ use super::{DEFAULT_ANALYZE_BIN, ENV_ANALYZE_BIN, SubprocessReviewReport, map_re
 pub struct SubprocessAnalyzeClient {
     /// Path or name of the `trusty-analyze` binary.
     pub(super) binary: String,
-    /// Base URL of the trusty-search daemon, used for the health probe.
-    pub(super) search_url: String,
+    /// Base URL of the trusty-search daemon, used for the HTTP health probe.
+    pub(super) search_url: String, // #9214 phase C: delete
     /// reqwest client with a short timeout for health probes.
-    pub(super) probe_http: reqwest::Client,
+    pub(super) probe_http: reqwest::Client, // #9214 phase C: delete
+    /// #9214: the leg the probes take and the child is told to use.
+    pub(super) transport: SearchTransport,
 }
 
 impl SubprocessAnalyzeClient {
@@ -51,14 +68,34 @@ impl SubprocessAnalyzeClient {
         binary: impl Into<String>,
         search_url: impl Into<String>,
     ) -> Result<Self, AnalyzeClientError> {
-        let probe_http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+        // #9214: an explicit URL is the HTTP leg, exactly as before.
+        let url = search_url.into().trim_end_matches('/').to_string();
+        Self::with_transport(binary, SearchTransport::Http(url)) // #9214 phase C: delete
+    }
+
+    /// Construct over an already-resolved transport (#9214).
+    ///
+    /// Why: the additive, transport-aware twin of [`Self::new`].
+    /// What: stores `transport` for the probes and the child's env; builds the
+    /// HTTP probe client either way. `Err(ClientInit)` on a TLS failure.
+    /// Test: `subprocess_probe_status_over_socket_is_false_only_on_32004`.
+    pub fn with_transport(
+        binary: impl Into<String>,
+        transport: SearchTransport,
+    ) -> Result<Self, AnalyzeClientError> {
+        let probe_http = reqwest::Client::builder() // #9214 phase C: delete
+            .timeout(PROBE_TIMEOUT)
             .build()
             .map_err(|e| AnalyzeClientError::ClientInit(e.to_string()))?;
+        let search_url = match &transport {
+            SearchTransport::Http(url) => url.clone(), // #9214 phase C: delete
+            SearchTransport::Socket(_) => String::new(),
+        };
         Ok(Self {
             binary: binary.into(),
-            search_url: search_url.into(),
+            search_url,
             probe_http,
+            transport,
         })
     }
 
@@ -66,15 +103,15 @@ impl SubprocessAnalyzeClient {
     ///
     /// Why: the canonical factory used by both `run.rs` and `serve.rs`.
     /// What: reads `TRUSTY_ANALYZE_BIN` (falls back to `"trusty-analyze"`) for
-    /// the binary; takes `config.search_url` for the health probe.  Propagates
-    /// any TLS-backend init failure as `Err`.
+    /// the binary; #9214 — resolves the trusty-search transport from `config`
+    /// (socket first). Propagates any TLS-backend init failure as `Err`.
     /// Test: `subprocess_client_from_config`.
     pub fn from_config(config: &crate::config::ReviewConfig) -> Result<Self, AnalyzeClientError> {
         let binary = std::env::var(ENV_ANALYZE_BIN)
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| DEFAULT_ANALYZE_BIN.to_string());
-        Self::new(binary, config.search_url.clone())
+        Self::with_transport(binary, SearchTransport::resolve(config))
     }
 
     /// Return the binary path/name this client uses.
@@ -97,8 +134,27 @@ impl SubprocessAnalyzeClient {
     /// `200`, a `503` residency miss, or a probe that could not complete —
     /// answers `true`, because `health()` has already established the daemon is
     /// up and an indeterminate probe must not manufacture an analyze outage.
-    /// Test: `subprocess_client_has_no_analysis_for_an_unknown_index`.
+    /// #9214: over the socket, `false` ONLY on `-32004`.
+    /// Test: `subprocess_client_has_no_analysis_for_an_unknown_index`,
+    /// `subprocess_probe_status_over_socket_is_false_only_on_32004`.
     async fn search_index_exists(&self, index_id: &str) -> bool {
+        if let Some(socket) = self.transport.socket_path() {
+            let params = serde_json::json!({ "index_id": index_id });
+            return match call_socket(socket, METHOD_INDEX_STATUS, params, PROBE_TIMEOUT).await {
+                Err(e) if e.is_unknown_index() => {
+                    warn_unknown_index(index_id);
+                    false
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "index existence probe failed for `{index_id}` (optional): {e}"
+                    );
+                    true
+                }
+                Ok(_) => true,
+            };
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!(
             "{}/indexes/{index_id}/status",
             self.search_url.trim_end_matches('/')
@@ -107,19 +163,57 @@ impl SubprocessAnalyzeClient {
             Ok(resp) => {
                 let known = resp.status() != reqwest::StatusCode::NOT_FOUND;
                 if !known {
-                    tracing::warn!(
-                        index = %index_id,
-                        "trusty-search has no index `{index_id}` — trusty-analyze has nothing to \
-                         analyse for it (#6687)"
-                    );
+                    warn_unknown_index(index_id);
                 }
                 known
             }
             Err(e) => {
+                // #9431: reqwest's Display names the URL, token value included.
+                let e =
+                    crate::pipeline::optional_context::probes::redact_credentials(&e.to_string());
                 tracing::debug!("index existence probe failed for `{index_id}` (optional): {e}");
                 true
             }
         }
+    }
+
+    /// Probe trusty-search's health on the resolved leg.
+    ///
+    /// Why/What: any failure to get a payload is `Unavailable` on both legs, as
+    /// it was on HTTP; a payload that will not parse is `Parse`. #9214 added the
+    /// socket leg.
+    /// Test: `subprocess_client_health_check_fails_gracefully`,
+    /// `subprocess_probe_status_over_socket_is_false_only_on_32004`.
+    async fn search_health(&self) -> Result<HealthResponse, AnalyzeClientError> {
+        if let Some(socket) = self.transport.socket_path() {
+            let value = call_socket(socket, METHOD_HEALTH, serde_json::json!({}), PROBE_TIMEOUT)
+                .await
+                .map_err(|e| {
+                    AnalyzeClientError::Unavailable(format!("{}: {e}", self.transport.describe()))
+                })?;
+            return decode(value, "search health parse")
+                .map_err(|e: SearchClientError| AnalyzeClientError::Parse(e.to_string()));
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
+        let url = format!("{}/health", self.search_url.trim_end_matches('/'));
+        let resp = self
+            .probe_http
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AnalyzeClientError::Unavailable(format!("GET {url}: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| AnalyzeClientError::Transport(format!("read body of {url}: {e}")))?;
+        if !status.is_success() {
+            return Err(AnalyzeClientError::Unavailable(format!(
+                "GET {url} returned {status}: {body}"
+            )));
+        }
+        serde_json::from_str(&body)
+            .map_err(|e| AnalyzeClientError::Parse(format!("search health parse: {e}")))
     }
 
     /// Invoke `trusty-analyze review --index-id <id> -` with the given diff on stdin.
@@ -137,12 +231,15 @@ impl SubprocessAnalyzeClient {
     ) -> Result<(Vec<ComplexityHotspot>, Vec<Smell>), AnalyzeClientError> {
         // Spawn is blocking; run on a thread pool so we do not block the async runtime.
         let binary = self.binary.clone();
+        let transport = self.transport.clone();
         let index_id = index_id.to_string();
         let diff_owned = diff_text.to_string();
 
-        tokio::task::spawn_blocking(move || spawn_analyze_review(&binary, &index_id, &diff_owned))
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("spawn_blocking join error: {e}")))?
+        tokio::task::spawn_blocking(move || {
+            spawn_analyze_review(&binary, &transport, &index_id, &diff_owned)
+        })
+        .await
+        .map_err(|e| AnalyzeClientError::Transport(format!("spawn_blocking join error: {e}")))?
     }
 }
 
@@ -151,15 +248,21 @@ impl SubprocessAnalyzeClient {
 /// Why: isolated so it can be called from `spawn_blocking` without capturing
 /// async context.
 /// What: launches `trusty-analyze review --index-id <id> --format json -`,
-/// pipes `diff` to stdin, captures stdout, parses JSON.
-/// Test: called by `analyze_diff` tests via `spawn_blocking`.
+/// pipes `diff` to stdin, captures stdout, parses JSON. #9214: the child's env
+/// carries `transport` — `TRUSTY_SEARCH_SOCKET` or `TRUSTY_SEARCH_URL` — so it
+/// reaches the daemon this process resolved; no `--search-url` argv.
+/// Test: called by `analyze_diff` tests via `spawn_blocking`;
+/// `analyze_child_env_carries_the_resolved_transport`.
 pub(super) fn spawn_analyze_review(
     binary: &str,
+    transport: &SearchTransport,
     index_id: &str,
     diff: &str,
 ) -> Result<(Vec<ComplexityHotspot>, Vec<Smell>), AnalyzeClientError> {
+    let (search_env, search_target) = transport.child_env();
     let mut child = Command::new(binary)
         .args(["review", "--index-id", index_id, "--format", "json", "-"])
+        .env(search_env, search_target)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -238,7 +341,8 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// place — and only one — that decides what a trusty-search health payload
     /// means.
     ///
-    /// What: GETs `<search_url>/health`, deserialises the full
+    /// What: probes trusty-search's health on the resolved leg (#9214:
+    /// `search.health` over the socket, `GET /health` over HTTP), deserialises the full
     /// [`HealthResponse`], and refuses ONLY on [`ServingState::NotServing`]
     /// (embedder down, or a status that is neither `"ok"` nor `"degraded"`).
     /// A `Degraded` daemon is answering queries and so passes, carrying
@@ -251,34 +355,13 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// `subprocess_client_not_serving_search_has_no_analysis`,
     /// `subprocess_client_health_preserves_degraded_status_string`.
     async fn health(&self) -> Result<AnalyzeHealthResponse, AnalyzeClientError> {
-        // Probe trusty-search /health directly.
-        let url = format!("{}/health", self.search_url.trim_end_matches('/'));
-        let resp = self
-            .probe_http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| AnalyzeClientError::Unavailable(format!("GET {url}: {e}")))?;
-
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AnalyzeClientError::Transport(format!("read body of {url}: {e}")))?;
-
-        if !status.is_success() {
-            return Err(AnalyzeClientError::Unavailable(format!(
-                "GET {url} returned {status}: {body}"
-            )));
-        }
-
         // #4440: parse the FULL trusty-search health payload and delegate the
         // verdict to the shared `serving_state()`, instead of re-testing
         // `status == "ok"` on a locally-declared one-field struct. The old
         // private struct is gone deliberately: keeping it is what let this copy
         // drift out of sync with the #4086 fix in the first place.
-        let sh: HealthResponse = serde_json::from_str(&body)
-            .map_err(|e| AnalyzeClientError::Parse(format!("search health parse: {e}")))?;
+        let sh = self.search_health().await?;
+        let url = self.transport.describe(); // #9214: name the leg used
 
         // Refuse ONLY when trusty-search genuinely cannot answer queries.
         // `Degraded` means "serving, with a named capability gap" — a review can
@@ -357,13 +440,29 @@ impl AnalyzeClient for SubprocessAnalyzeClient {
     /// `subprocess_client_not_serving_search_has_no_analysis`,
     /// `subprocess_client_has_no_analysis_for_an_unknown_index`.
     async fn has_analysis(&self, index_id: &str) -> bool {
-        match self.health().await {
-            Ok(h) => h.search_reachable && self.search_index_exists(index_id).await,
-            Err(e) => {
-                tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
-                false
-            }
+        self.analysis_status(index_id).await.is_ok()
+    }
+
+    /// [`Self::has_analysis`] with its reason (#9194): the health error, a
+    /// search daemon that is not serving, or an index it does not know.
+    ///
+    /// Test: `subprocess_client_analysis_status_carries_the_health_error`,
+    /// `subprocess_client_analysis_status_names_an_unknown_index`.
+    async fn analysis_status(&self, index_id: &str) -> Result<(), AnalyzeClientError> {
+        let h = self.health().await.inspect_err(|e| {
+            tracing::debug!("trusty-analyze subprocess health check failed (optional): {e}");
+        })?;
+        if !h.search_reachable {
+            return Err(AnalyzeClientError::Unavailable(
+                "trusty-search is not serving".to_string(),
+            ));
         }
+        if !self.search_index_exists(index_id).await {
+            return Err(AnalyzeClientError::Unavailable(format!(
+                "no analysis for index `{index_id}`"
+            )));
+        }
+        Ok(())
     }
 
     /// Returns empty hotspots for the subprocess model.

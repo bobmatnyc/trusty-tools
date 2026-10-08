@@ -15,21 +15,26 @@
 //! owner; a wider override comes only from the untracked machine config.
 //! #9326: likewise, on a Keychain build the project file may not select the
 //! `file` backend; only the machine config may. #4567: nor may it turn the
-//! credential audit off ([`ErrorKind::TrackedAuditRefused`]).
+//! credential audit off ([`ErrorKind::TrackedAuditRefused`]). #7524 H1: on a
+//! Keychain build no request writes a value into `file` unless the account's
+//! own machine config selected it; `ProjectContext::open_for_write` is that
+//! one check.
 //! Test: `server_scopes_round_trip_over_a_real_socket`,
 //! `server_project_without_a_remote_is_a_fixed_error`,
 //! `server_project_config_overrides_the_project_vault`,
 //! `server_vault_outside_the_project_is_refused`,
 //! `server_tracked_vault_override_outside_the_owner_is_refused`,
 //! `server_non_github_remote_is_a_fixed_error`,
-//! `server_tracked_file_backend_is_refused_on_a_keychain_build`.
+//! `server_tracked_file_backend_is_refused_on_a_keychain_build`,
+//! `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+//! `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::errors::ErrorKind;
 use super::router::State;
-use crate::api::{SecretsError, VaultName};
+use crate::api::{BackendId, SecretsError, VaultName};
 use crate::store::config::{self, MachineSecretsConfig, ProjectSecretsConfig, ResolvedConfig};
 use crate::store::{ScopeSet, SecretBackend, platform};
 
@@ -48,6 +53,7 @@ pub struct ProjectContext {
     config: Option<ProjectSecretsConfig>,
     machine: Option<MachineSecretsConfig>,
     scopes: ScopeSet,
+    keychain_compiled: bool,
 }
 
 impl ProjectContext {
@@ -76,10 +82,11 @@ impl ProjectContext {
         let config_path = root.join(PROJECT_CONFIG_SUBPATH);
         let config = config::load_project_at(&config_path)?;
         // #9326: on a Keychain build only the machine config may pick `file`.
-        config::check_project_backend(config.as_ref(), &config_path)?;
+        // #7524: the build comes from `state`, as for `open_for_write`.
+        config::check_project_backend_for(config.as_ref(), &config_path, state.keychain_compiled)?;
         // #4567: likewise only the machine config may turn the audit off.
         super::gate::check_tracked_audit(config.as_ref())?;
-        let machine = config::load_machine_at(&state.settings.machine_config)?;
+        let machine = selecting_machine(state)?;
         // #9328: the tracked `vault` is checked against the remote's owner;
         // only the machine config may pick a vault outside it.
         let tracked = config.as_ref().and_then(|c| c.vault.clone());
@@ -89,6 +96,7 @@ impl ProjectContext {
             config,
             machine,
             scopes,
+            keychain_compiled: state.keychain_compiled,
         })
     }
 
@@ -125,9 +133,100 @@ impl ProjectContext {
         Ok((state.backends)(&self.resolved_config().backend)?)
     }
 
+    /// Open backend `id` to write values into, after the `file` posture check.
+    ///
+    /// Why: #7524 H1, owner ruling item 74 — the Keychain ACL is a boundary
+    /// against same-user callers, so a request may not move values into the
+    /// plaintext `file` backend on its own say. Every value write (`set`, and
+    /// `copy`'s destination) opens its backend here, so one check covers all.
+    /// What: [`config::check_value_write_for`] with the server's
+    /// `State::file_consent_config` — the account's own machine config, not
+    /// `--machine-config` or one under `$HOME` — and the server's build: on a
+    /// Keychain build, `file` is [`ErrorKind::FileBackendNotSelected`] unless
+    /// that file's `default_backend` is `file`, and nothing is opened. Then
+    /// the factory opens `id`.
+    /// Test: `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+    /// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+    /// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+    /// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
+    /// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
+    pub(crate) fn open_for_write(
+        &self,
+        state: &State,
+        id: &BackendId,
+    ) -> Result<Arc<dyn SecretBackend>, ErrorKind> {
+        // #7524 H1: consent is the account's file, never the request's machine config.
+        let consent = state.file_consent_config.as_deref();
+        config::check_value_write_for(id, consent, self.keychain_compiled)?;
+        Ok((state.backends)(id)?)
+    }
+
+    /// The machine config read by [`Self::resolve`], if the file exists.
+    ///
+    /// What: the untracked file `--machine-config` or `$HOME` names. #7519:
+    /// the server reads CLI-backend enablement from the account's own file
+    /// instead (`State::file_consent_config`).
+    pub fn machine_config(&self) -> Option<&MachineSecretsConfig> {
+        self.machine.as_ref()
+    }
+
     /// The §6.1 resolution for this project and the server's machine config.
     pub fn resolved_config(&self) -> ResolvedConfig {
         config::resolve(self.config.as_ref(), self.machine.as_ref())
+    }
+}
+
+/// The machine config a request selects its backend from (DOC-74 §6.1).
+///
+/// Why: #7519 P4 — doctor's `selected` and every request's backend must
+/// come from one source, so both read it here.
+/// What: [`ServerSettings::machine_config`](super::ServerSettings), the
+/// file `--machine-config` or `$HOME` names; a missing file is `None`, one
+/// that does not parse fails closed. CLI-backend enablement and `file`
+/// consent come from the account's own file instead (ruling 74, #7524 H1).
+/// Test: `doctor_selected_is_the_backend_a_write_uses_when_the_configs_differ`.
+pub(crate) fn selecting_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKind> {
+    Ok(config::load_machine_at(&state.settings.machine_config)?)
+}
+
+/// A project whose tracked config every request refuses (#7519 P4).
+///
+/// Why: doctor reports such a project instead of failing, so the operator
+/// sees which backend it selects and the refusal's fix.
+/// What: the checkout root, the backend the tracked config and the
+/// selecting machine config resolve to, and the refusal's text, which names
+/// the file and the key, never a value.
+/// Test: `doctor_reports_a_refused_tracked_setting_on_the_selected_row`.
+pub(crate) struct RefusedProject {
+    pub(crate) root: PathBuf,
+    pub(crate) backend: BackendId,
+    pub(crate) detail: String,
+}
+
+impl RefusedProject {
+    /// Re-read the project at `dir` that [`ProjectContext::resolve`] refused
+    /// with the tracked-config `kind`.
+    ///
+    /// What: the backend and vault refusals give their own error's text;
+    /// the audit refusal, which has none, gives `kind`'s fixed text.
+    pub(crate) fn resolve(state: &State, dir: &Path, kind: ErrorKind) -> Result<Self, ErrorKind> {
+        let root = checkout_root(dir).ok_or(ErrorKind::ProjectUnresolved)?;
+        let path = root.join(PROJECT_CONFIG_SUBPATH);
+        let project = config::load_project_at(&path)?;
+        let detail = match config::check_project_backend_for(
+            project.as_ref(),
+            &path,
+            state.keychain_compiled,
+        ) {
+            Err(e) => e.to_string(),
+            Ok(()) => kind.text().to_string(),
+        };
+        let machine = selecting_machine(state)?;
+        Ok(Self {
+            backend: config::resolve(project.as_ref(), machine.as_ref()).backend,
+            root,
+            detail,
+        })
     }
 }
 

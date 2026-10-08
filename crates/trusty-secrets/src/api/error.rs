@@ -253,14 +253,27 @@ pub enum SecretsError {
         path: PathBuf,
     },
 
-    /// A tracked project config set a vendor CLI's `account` or
-    /// `config_path`, which only the untracked machine config may. Raised
+    /// A value write into the `file` backend on a build with a Keychain,
+    /// where the untracked machine config does not select `file`. Raised
+    /// before the `file` backend is opened.
+    // #7524 H1: owner ruling item 74 — the Keychain ACL is a boundary against
+    // same-user callers, so moving a value to plaintext needs machine consent.
+    #[error(
+        "this build has a Keychain, so a value is written to the plaintext `file` \
+         backend only when the machine config selects it; set \
+         `secrets.default_backend: file` in the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml to allow it"
+    )]
+    FileBackendNotSelected,
+
+    /// A tracked project config set a vendor CLI's `account`, `config_path`
+    /// or `program`, which only the untracked machine config may. Raised
     /// before any backend is opened, on every build.
     // #7519: owner ruling 2026-10-07; names the key, never its value.
     #[error(
         "secrets config {path} is tracked and may not set `{key}`: a repository could \
-         point the CLI at an account or config directory of its choosing; remove it \
-         and set it in the machine config instead"
+         point the CLI at an account, config directory or program of its choosing; \
+         remove it and set it in the machine config instead"
     )]
     TrackedCliSettingRefused {
         /// The tracked project config file.
@@ -269,10 +282,11 @@ pub enum SecretsError {
         key: &'static str,
     },
 
-    /// A CLI-backed backend's program is not installed or not on `PATH`.
+    /// A CLI-backed backend's program was not found where the backend looks.
     /// Fails closed: no fallback to another backend.
-    // #7519: A4 — the error names the CLI and the fix.
-    #[error("`{program}` is not installed or not on PATH; {hint}")]
+    // #7519: A4 — the error names the CLI and the fix. #7524 P2-M2: no
+    // backend searches `PATH`, so the text no longer names it.
+    #[error("`{program}` was not found; {hint}")]
     CliNotInstalled {
         /// The program as configured, e.g. `op`.
         program: String,
@@ -293,4 +307,59 @@ pub enum SecretsError {
     /// `$HOME` is unknown, so a default location cannot be resolved.
     #[error("home directory is unavailable")]
     HomeUnavailable,
+
+    /// A CLI-backed backend the untracked machine config has not enabled.
+    /// Raised before any process is spawned.
+    // #7519: after `HomeUnavailable`, so no published discriminant moves
+    // (0.1.2 accepted-break declaration). P1 carry-over (a) — the delete
+    // sweep reaches every enabled CLI backend, so a backend opens only when
+    // enabled; no value lands outside the sweep.
+    #[error(
+        "the {backend} backend is not enabled on this machine; add a `secrets.{backend}:` \
+         section, or `secrets.default_backend: {backend}`, to the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml"
+    )]
+    BackendNotEnabled {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+    },
+
+    /// A CLI-backed backend call was refused, or stopped, because the
+    /// server request it served ran past its deadline.
+    // #7524 P2-M1: after `BackendNotEnabled`, so no discriminant moves. The
+    // text says a write may have landed: a CLI killed mid-write cannot say.
+    #[error(
+        "the {backend} backend did not finish before the request deadline for {key} in {vault}; \
+         its CLI was stopped, and a write it had started may have landed"
+    )]
+    DeadlineExceeded {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the call served, or `(none)`.
+        vault: String,
+        /// The key the call served, or `(none)`.
+        key: String,
+    },
+
+    /// A delete found no vault of this name in a CLI backend that cannot
+    /// tell a missing vault from one this identity cannot see, so the key
+    /// may still be held there and its index row was kept.
+    // #7524 P2-M3 fix round: after `DeadlineExceeded`, so no discriminant
+    // moves. The index records no holding backend, so a key that was never
+    // in 1Password is refused too until one of the two escapes is taken.
+    #[error(
+        "the {backend} backend shows no vault {vault} to this identity, so {key} may still \
+         be held there and its index row was kept; create the vault {vault} in 1Password, \
+         or stop enabling 1Password by removing the `secrets.onepassword` section (and any \
+         `secrets.default_backend: onepassword`) from the machine config \
+         ~/.trusty-tools/trusty-common/config.yaml"
+    )]
+    VaultNotVisible {
+        /// Backend id, e.g. `onepassword`.
+        backend: String,
+        /// The vault the delete named.
+        vault: String,
+        /// The key the delete named.
+        key: String,
+    },
 }

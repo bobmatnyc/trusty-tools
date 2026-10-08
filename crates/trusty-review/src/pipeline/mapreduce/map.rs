@@ -18,16 +18,18 @@
 //!
 //! Test: `mapreduce/map_tests.rs`.
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures_util::stream::{self, StreamExt};
 use tracing::{debug, warn};
 
 use crate::{
     llm::{LlmProvider, LlmRequest},
+    models::Verdict,
     pipeline::{
+        letter_grade::grade_floor,  // #9310 ruling 50: a chunk's grade floor
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
-        prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_coverage},
+        prompt::{ReviewContext, ReviewPrMeta, build_review_prompt_with_sections},
         reply_shape::describe_reply,
         verdict_status::judged_verdict, // #9310: a chunk's grade floors its verdict
     },
@@ -90,6 +92,32 @@ pub async fn run_map_stage(
     ctx: &MapContext<'_>,
     concurrency: usize,
 ) -> Vec<MapOutcome> {
+    run_map_stage_graded(units, llm, ctx, concurrency, &no_sections)
+        .await
+        .into_iter()
+        .map(|(outcome, _)| outcome)
+        .collect()
+}
+
+/// [`run_map_stage`], pairing each outcome with its chunk's grade floor
+/// (#9310, owner ruling 50).
+///
+/// Why: the floor must be read from the reviewer's own grade before hygiene
+/// relaxes a chunk, and `MapOutcome` is public, so the floor travels beside it.
+/// What: `letter_grade::grade_floor` of each `Reviewed` chunk's raw grade;
+/// APPROVE (no floor) for a skipped or failed unit. #9197: every chunk prompt
+/// carries the caller sections, as the unified prompt does. #9195: `sections`
+/// answers per chunk; `first` is true only for a file's first chunk that
+/// sends a prompt (ruling B), so a file's text rides one chunk.
+/// Test: `run_map_stage_graded_reports_each_chunk_floor`,
+/// `mapreduce_chunk_prompts_carry_the_issue_block`.
+pub(crate) async fn run_map_stage_graded(
+    units: &[MapUnit],
+    llm: &Arc<dyn LlmProvider>,
+    ctx: &MapContext<'_>,
+    concurrency: usize,
+    sections: ChunkSections<'_>,
+) -> Vec<(MapOutcome, Verdict)> {
     let conc = concurrency.max(1);
     debug!(
         units = units.len(),
@@ -103,7 +131,19 @@ pub async fn run_map_stage(
     // lifetimes (it is `tokio::spawn`-ed by the webhook service), avoiding the
     // higher-ranked-lifetime Send failure that a borrowed `&MapContext` would
     // otherwise introduce.
-    let tasks: Vec<MapTask> = units.iter().map(|u| plan_unit(u, ctx)).collect();
+    // #9195 ruling B: only a unit that sends a prompt asks for sections.
+    let mut carried: HashSet<&str> = HashSet::new();
+    let tasks: Vec<MapTask> = units
+        .iter()
+        .map(|u| {
+            let extra = if sends_prompt(u) {
+                sections(&u.file, carried.insert(u.file.as_str()))
+            } else {
+                String::new()
+            };
+            plan_unit(u, ctx, &extra)
+        })
+        .collect();
 
     // Tasks that need no LLM call resolve immediately; only `Call` tasks fan out.
     stream::iter(tasks)
@@ -112,8 +152,25 @@ pub async fn run_map_stage(
             async move { run_task(task, &llm).await }
         })
         .buffer_unordered(conc)
-        .collect::<Vec<MapOutcome>>()
+        .collect::<Vec<(MapOutcome, Verdict)>>()
         .await
+}
+
+/// What each chunk prompt carries beyond its diff, by `(file, first)` (#9197,
+/// #9195).
+pub(crate) type ChunkSections<'a> = &'a (dyn Fn(&str, bool) -> String + Sync);
+
+/// No extra section in any chunk prompt.
+pub(crate) fn no_sections(_file: &str, _first: bool) -> String {
+    String::new()
+}
+
+/// Whether `unit` sends a reviewer prompt (#9195 ruling B): a metadata-only
+/// unit and an oversized hunk resolve without one.
+///
+/// Test: `a_unit_without_a_prompt_gets_no_text_and_is_not_used`.
+pub(crate) fn sends_prompt(unit: &MapUnit) -> bool {
+    !unit.is_metadata_only() && !unit.hunk_oversized
 }
 
 /// An owned, borrow-free plan for processing one `MapUnit`.
@@ -144,7 +201,7 @@ enum MapTask {
 /// `Resolved(Failed{hunk_oversized:true})` (#1639 backstop); otherwise builds the
 /// reviewer prompt and returns `Call`.
 /// Test: covered by `map_*` tests.
-fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
+fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>, extra_sections: &str) -> MapTask {
     match &unit.kind {
         MapUnitKind::MetadataOnly { note } => MapTask::Resolved(MapOutcome::Skipped {
             file: unit.file.clone(),
@@ -167,7 +224,7 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
                     hunk_oversized: true,
                 });
             }
-            let req = build_review_prompt_with_coverage(
+            let req = build_review_prompt_with_sections(
                 ctx.owner,
                 ctx.repo,
                 ctx.pr_meta,
@@ -177,6 +234,7 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
                 ctx.reviewer_model,
                 ctx.voice_config,
                 ctx.coverage_enabled,
+                extra_sections, // #9197
             );
             MapTask::Call {
                 file: unit.file.clone(),
@@ -186,7 +244,8 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
     }
 }
 
-/// Execute one planned `MapTask`, producing its `MapOutcome`.
+/// Execute one planned `MapTask`, producing its `MapOutcome` and the chunk's
+/// grade floor (#9310 ruling 50; APPROVE when no reply graded it).
 ///
 /// Why: the async half of the split — it only owns the task and a cloned `Arc`,
 /// so it holds no borrows across the LLM await.
@@ -195,10 +254,11 @@ fn plan_unit(unit: &MapUnit, ctx: &MapContext<'_>) -> MapTask {
 /// inline anchoring is preserved, and folding the chunk's grade into its
 /// verdict), and fail-OPENs a transport error to `Failed`.
 /// Test: covered by all `map_*` tests; the grade fold by
-/// `map_chunk_approve_graded_f_reads_block`.
-async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
+/// `map_chunk_approve_graded_f_reads_block`; the floor by
+/// `run_map_stage_graded_reports_each_chunk_floor`.
+async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> (MapOutcome, Verdict) {
     let (file, req) = match task {
-        MapTask::Resolved(outcome) => return outcome,
+        MapTask::Resolved(outcome) => return (outcome, Verdict::Approve),
         MapTask::Call { file, req } => (file, *req),
     };
 
@@ -233,7 +293,8 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
             // #9310: fold the chunk grade into its verdict before hygiene runs,
             // so a wiped chunk carries the grade-floored verdict.
             let verdict = judged_verdict(parsed.verdict, parsed.grade.as_deref(), None);
-            MapOutcome::Reviewed {
+            let floor = grade_floor(parsed.grade.as_deref()); // #9310 ruling 50: the raw grade
+            let outcome = MapOutcome::Reviewed {
                 file,
                 verdict,
                 findings,
@@ -245,7 +306,8 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
                     output_tokens: resp.output_tokens,
                     cost_usd: resp.cost_usd,
                 },
-            }
+            };
+            (outcome, floor)
         }
         Err(e) => {
             // Fail-OPEN: one chunk's transport error drops that file's review and
@@ -256,11 +318,12 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
                 error = %e,
                 "map stage: chunk LLM call failed — dropping this file's review (fail-open)"
             );
-            MapOutcome::Failed {
+            let outcome = MapOutcome::Failed {
                 file,
                 error: format!("LLM error: {e}"),
                 hunk_oversized: false,
-            }
+            };
+            (outcome, Verdict::Approve)
         }
     }
 }

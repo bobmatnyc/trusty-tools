@@ -68,15 +68,21 @@ fn a_test_daemon_env_carries_no_secret_shaped_variable() {
         .map(|(name, _)| name.to_string_lossy().into_owned())
         .collect();
     configured.sort();
-    let mut allowed: Vec<String> = ["HOME", "TRUSTY_MPM_WORKSPACE_ROOT", "TRUSTY_MPM_ORPHAN_GC"]
-        .into_iter()
-        .chain(
-            ["PATH", "TMUX_TMPDIR"]
-                .into_iter()
-                .filter(|name| std::env::var_os(name).is_some()),
-        )
-        .map(String::from)
-        .collect();
+    // #9396: TRUSTY_CONTENT_OFFLINE keeps a test daemon off the network.
+    let mut allowed: Vec<String> = [
+        "HOME",
+        "TRUSTY_MPM_WORKSPACE_ROOT",
+        "TRUSTY_MPM_ORPHAN_GC",
+        trusty_mpm::content::first_use::OFFLINE_ENV,
+    ]
+    .into_iter()
+    .chain(
+        ["PATH", "TMUX_TMPDIR"]
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_some()),
+    )
+    .map(String::from)
+    .collect();
     allowed.sort();
     assert_eq!(
         configured, allowed,

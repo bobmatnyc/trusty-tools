@@ -1,6 +1,5 @@
 //! Handler for `trusty-search query`.
 
-use super::daemon_utils::daemon_base_url;
 use anyhow::{bail, Result};
 use colored::Colorize;
 
@@ -152,8 +151,8 @@ pub async fn handle_query(
     top_k: usize,
     full: bool,
 ) -> Result<()> {
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
     let client = trusty_common::server::daemon_http_client()?;
 
     match classify_target(explicit_index, &indexes) {

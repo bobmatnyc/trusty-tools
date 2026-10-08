@@ -14,6 +14,8 @@ use super::{
     SubprocessComplexity, SubprocessFileReview, SubprocessReviewReport, SubprocessSmellHit,
     map_report,
 };
+use crate::integrations::search_transport::SearchTransport;
+use crate::integrations::search_transport::fixture::{FakeSearchSocket, healthy};
 
 #[test]
 fn subprocess_client_binary_accessor() {
@@ -37,6 +39,33 @@ async fn subprocess_client_health_check_fails_gracefully() {
         matches!(result.unwrap_err(), AnalyzeClientError::Unavailable(_)),
         "expected Unavailable variant"
     );
+}
+
+/// #9194: `analysis_status` carries the health probe's own error, which
+/// `has_analysis` reduces to `false`.
+#[tokio::test]
+async fn subprocess_client_analysis_status_carries_the_health_error() {
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:1")
+        .expect("TLS init should succeed");
+    let health = client.health().await.expect_err("port 1 is refused");
+    let status = client
+        .analysis_status("main")
+        .await
+        .expect_err("no analysis when search is down");
+    assert_eq!(status.to_string(), health.to_string());
+}
+
+/// #9431: the analyze client's search-health error hides the credentials of
+/// the search URL it probed, and keeps the variant and the host.
+#[tokio::test]
+async fn subprocess_health_error_masks_search_url_credentials() {
+    let url = "http://user:fake123fake@127.0.0.1:1/p?access_token=fake123fake";
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", url).expect("TLS init");
+    let err = client.health().await.expect_err("port 1 is refused");
+    assert!(matches!(err, AnalyzeClientError::Unavailable(_)), "{err:?}");
+    let shown = err.to_string();
+    assert!(!shown.contains("fake123fake"), "secret survived: {shown}");
+    assert!(shown.contains("127.0.0.1:1"), "host lost: {shown}");
 }
 
 /// has_analysis must return false (not panic) on transport error.
@@ -259,6 +288,19 @@ async fn subprocess_client_has_no_analysis_for_an_unknown_index() {
     );
 }
 
+/// #9194: `analysis_status` names an index trusty-search does not know.
+#[tokio::test]
+async fn subprocess_client_analysis_status_names_an_unknown_index() {
+    let base_url = stub_search_server(LIVE_DEGRADED_HEALTH, "trusty-tools").await;
+    let client = SubprocessAnalyzeClient::new("echo", base_url).expect("TLS init should succeed");
+    assert!(client.analysis_status("trusty-tools").await.is_ok());
+    let err = client
+        .analysis_status("no-such-index")
+        .await
+        .expect_err("unknown index");
+    assert!(err.to_string().contains("`no-such-index`"), "{err}");
+}
+
 /// The degraded status string must survive the probe unaltered.
 ///
 /// Why: the fix must not "solve" the block by laundering `"degraded"` into
@@ -460,7 +502,9 @@ fn subprocess_review_report_deserialises_from_wire_json() {
 fn spawn_analyze_review_with_fake_binary_that_fails() {
     // Use `false` (always exits 1) or `sh -c "exit 1"` as a fake binary.
     // On all POSIX systems, `false` is a valid binary that exits 1.
-    let result = spawn_analyze_review("false", "main", "+++ b/x.rs\n");
+    // #9214: the transport only sets the child's env; `false` ignores it.
+    let transport = SearchTransport::Http("http://127.0.0.1:1".to_string());
+    let result = spawn_analyze_review("false", &transport, "main", "+++ b/x.rs\n");
     assert!(result.is_err(), "exit-1 binary must return Err");
     assert!(
         matches!(result.unwrap_err(), AnalyzeClientError::Unavailable(_)),
@@ -475,4 +519,100 @@ fn subprocess_client_trait_object_compiles() {
     let client = SubprocessAnalyzeClient::new("trusty-analyze", "http://127.0.0.1:7878")
         .expect("TLS init should succeed");
     _accepts_dyn(&client);
+}
+
+// ─── #9214: the socket leg ───────────────────────────────────────────────────
+
+/// #9214: over the socket the index probe is `false` ONLY on `-32004`.
+///
+/// Why: the HTTP probe answered `false` only on a 404; a 503 residency miss or
+/// a failed probe must not manufacture an analyze outage on the socket leg
+/// either.
+/// What: a fake socket answers `search.health` healthy and `search.index.status`
+/// with `-32004` for `ghost`, `-32002` for `cold`, and a status for `main`;
+/// `true` is the binary (it ignores `--version`).
+/// Test: this test.
+#[tokio::test]
+async fn subprocess_probe_status_over_socket_is_false_only_on_32004() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = FakeSearchSocket::serve(&dir.path().join("s.sock"), |method, params| {
+        match (method, params["index_id"].as_str()) {
+            ("search.health", _) => Ok(healthy()),
+            ("search.index.status", Some("ghost")) => {
+                Err((-32004, "unknown index: ghost".to_string(), None))
+            }
+            ("search.index.status", Some("cold")) => Err((
+                -32002,
+                "index_not_resident".to_string(),
+                Some(serde_json::json!({"error": "index_not_resident", "retryable": true})),
+            )),
+            ("search.index.status", _) => Ok(serde_json::json!({"index_id": "main"})),
+            _ => Err((-32601, "method not found".to_string(), None)),
+        }
+    });
+    let client =
+        SubprocessAnalyzeClient::with_transport("true", SearchTransport::Socket(fake.path.clone()))
+            .expect("client builds");
+
+    assert!(
+        !client.has_analysis("ghost").await,
+        "-32004 is the one `false`"
+    );
+    assert!(
+        client.has_analysis("cold").await,
+        "-32002 is not an absence"
+    );
+    assert!(
+        client.has_analysis("main").await,
+        "a known index is present"
+    );
+    assert!(
+        fake.methods().iter().any(|m| m == "search.index.status"),
+        "the probe must go over the socket: {:?}",
+        fake.methods()
+    );
+}
+
+/// #9214: the analyze child's env carries the transport this process resolved.
+///
+/// Why: `trusty-analyze review` reaches trusty-search on its own; until B4 it
+/// reads `TRUSTY_SEARCH_URL`, after B4 `TRUSTY_SEARCH_SOCKET`. Review passes no
+/// `--search-url` argv, so the env is the whole contract.
+/// What: a fake binary dumps its env to a file and exits 1; the socket leg must
+/// set `TRUSTY_SEARCH_SOCKET=<path>` and the HTTP leg `TRUSTY_SEARCH_URL=<url>`.
+/// Test: this test.
+#[test]
+fn analyze_child_env_carries_the_resolved_transport() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = dir.path().join("fake-analyze");
+    let dump = dir.path().join("env.txt");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nenv > '{}'\nexit 1\n", dump.display()),
+    )
+    .expect("write the fake binary");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let bin = script.to_string_lossy().to_string();
+
+    let socket = SearchTransport::Socket(dir.path().join("search.sock"));
+    let _ = spawn_analyze_review(&bin, &socket, "main", "+++ b/x.rs\n");
+    let env = std::fs::read_to_string(&dump).expect("the child ran");
+    let want = format!(
+        "TRUSTY_SEARCH_SOCKET={}",
+        dir.path().join("search.sock").display()
+    );
+    assert!(
+        env.lines().any(|l| l == want),
+        "socket leg: {want} not in child env"
+    );
+
+    let http = SearchTransport::Http("http://127.0.0.1:4242".to_string());
+    let _ = spawn_analyze_review(&bin, &http, "main", "+++ b/x.rs\n");
+    let env = std::fs::read_to_string(&dump).expect("the child ran");
+    assert!(
+        env.lines()
+            .any(|l| l == "TRUSTY_SEARCH_URL=http://127.0.0.1:4242"),
+        "http leg: TRUSTY_SEARCH_URL not in child env"
+    );
 }

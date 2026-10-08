@@ -84,6 +84,7 @@ fn handle(state: &SearchAppState, id: &str) -> Arc<IndexHandle> {
 /// released leaves the index quarantined with its transient kind, which is what
 /// `/health` and `GET /indexes/:id/status` report as degraded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_lock_that_never_releases_keeps_the_index_degraded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, _holder) = contended_index("held-8958", dir.path()).await;
@@ -111,6 +112,7 @@ async fn a_lock_that_never_releases_keeps_the_index_degraded() {
 /// the quarantine, reloads the chunks, and re-derives the stages, with no
 /// restart. On pre-fix code nothing re-attempts the open.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn the_sweep_lifts_a_contention_quarantine_once_the_lock_is_released() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, holder) = contended_index("sweep-8085", dir.path()).await;
@@ -142,6 +144,7 @@ async fn the_sweep_lifts_a_contention_quarantine_once_the_lock_is_released() {
 /// re-attaches the corpus, and the reindex writes content hashes into the redb.
 /// On pre-fix code the second request is refused too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_reindex_after_the_holder_releases_reattaches_the_corpus() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, holder) = contended_index("reindex-8958", dir.path()).await;
@@ -189,6 +192,7 @@ async fn a_reindex_after_the_holder_releases_reattaches_the_corpus() {
 /// #8085: a schema chain that failed at boot for lack of a corpus is re-run
 /// once the corpus re-opens, which clears its recorded fault.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_reopen_reruns_a_schema_chain_that_failed_for_lack_of_a_corpus() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, holder) = contended_index("chain-8085", dir.path()).await;
@@ -317,6 +321,7 @@ async fn a_keep_data_delete_during_a_reopen_closes_the_corpus() {
 /// HIGH-1: a handle that is no longer the registered one is not re-attached,
 /// and the corpus the attempt opened is closed again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_swapped_handle_is_not_reattached() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, redb, holder) = contended_index("swap-8085", dir.path()).await;
@@ -340,6 +345,7 @@ async fn a_swapped_handle_is_not_reattached() {
 /// HIGH-1: a re-open never creates a missing corpus. `CorpusStore::open` runs
 /// `create_dir_all` and creates the file, which resurrected a deleted store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_reopen_never_creates_a_missing_corpus() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, redb, holder) = contended_index("gone-8085", dir.path()).await;
@@ -364,6 +370,7 @@ async fn a_reopen_never_creates_a_missing_corpus() {
 /// HIGH-1: the sweep skips an index whose permit a reindex, relocate or
 /// catch-up holds, and re-opens it once the permit is free.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_reopen_skips_an_index_whose_permit_is_held() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, holder) = contended_index("busy-8085", dir.path()).await;
@@ -395,6 +402,7 @@ async fn a_reopen_skips_an_index_whose_permit_is_held() {
 /// The full delete gives that wait up after 1.5 s under `cfg(test)`, which
 /// would let a second read through and hide the stall.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_release_catch_up_returns_while_a_delete_is_queued() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, _redb, holder) = contended_index("release-8958", dir.path()).await;
@@ -490,6 +498,7 @@ fn plant_an_undecodable_row(redb: &Path, key: &str) {
 /// quarantined as `Unclassified`, with no corpus wired and the refused-write
 /// count it had before the attempt.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::parallel]
 async fn a_corpus_that_cannot_be_read_back_stays_quarantined() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (state, redb, holder) = contended_index("unread-8085", dir.path()).await;

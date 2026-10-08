@@ -226,6 +226,7 @@ mod tests {
     /// assert `warm_boot_degraded = true` and `indexes_skipped_timeout = 1`.
     /// Test: this test.
     #[test]
+    #[serial_test::parallel]
     fn warmboot_summary_timeout_sets_degraded_flag() {
         let state = make_state();
         // 5 loaded, 1 timed out, 0 TCC denials, prior count = 0 (first run).
@@ -248,6 +249,7 @@ mod tests {
     /// What: call with 1 TCC skip, 0 timeouts, prior = 0; assert degraded = true.
     /// Test: this test.
     #[test]
+    #[serial_test::parallel]
     fn warmboot_summary_tcc_skip_sets_degraded_flag() {
         let state = make_state();
         record_warm_boot_result(&state, 5, 1, 0, 0, 0);
@@ -289,6 +291,7 @@ mod tests {
     /// What: call with 5 loaded, 0 skipped, prior = 5; assert degraded = false.
     /// Test: this test.
     #[test]
+    #[serial_test::parallel]
     fn warmboot_summary_clean_boot_not_degraded() {
         let state = make_state();
         state
@@ -307,6 +310,7 @@ mod tests {
     /// What: set prior = 10, load only 7 (70%), call with 0 skips; assert degraded.
     /// Test: this test.
     #[test]
+    #[serial_test::parallel]
     fn warmboot_summary_count_drop_sets_degraded_flag() {
         let state = make_state();
         state

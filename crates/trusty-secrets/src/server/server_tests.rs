@@ -66,6 +66,8 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         // #4567: the audit log stays in the temp dir too.
         audit_log: tmp.path().join("audit").join("audit.jsonl"),
         audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
+        // #7519: template files and the startup sweep stay in the temp dir.
+        template_root: tmp.path().join("tmp"),
     };
     // #9326: the build default is `file` where no Keychain is compiled; pin
     // `keychain` (the in-memory double here) so every host runs one path.
@@ -121,8 +123,24 @@ impl Fixture {
     }
 
     async fn start_with(&self, backends: BackendFactory) -> Running {
+        self.start_state(self.state(backends)).await
+    }
+
+    /// The state [`Self::start_with`] serves.
+    ///
+    /// What: the fixture's machine config is also the account's own file
+    /// consent config, as in production when no flag or `$HOME` moves it.
+    // #7524 H1: never the real account home's config in a test.
+    fn state(&self, backends: BackendFactory) -> State {
+        let mut state = State::new(self.settings.clone(), backends);
+        state.file_consent_config = Some(self.settings.machine_config.clone());
+        state
+    }
+
+    /// Serve `state` on the fixture's socket.
+    async fn start_state(&self, state: State) -> Running {
         let (tx, rx) = oneshot::channel::<()>();
-        let task = tokio::spawn(serve(self.settings.clone(), backends, async move {
+        let task = tokio::spawn(router::serve_state(state, async move {
             let _ = rx.await;
         }));
         wait_serving(&self.settings.socket).await;
@@ -164,6 +182,17 @@ async fn call(socket: &Path, method: &str, params: Value) -> RpcResponse {
         .unwrap()
 }
 
+/// [`ServerSettings::from_args`] with a fixed account home that is never
+/// `$HOME` and holds no socket a test names.
+// #7524: no test reads the real password database; a host without a row for
+// the test uid would fail closed and read every socket as the default.
+fn parse_settings(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<ServerSettings, SettingsError> {
+    ServerSettings::from_args_with(args, env, || Some(PathBuf::from("/account-home-7524")))
+}
+
 fn ok(response: RpcResponse) -> Value {
     assert!(response.error.is_none(), "{:?}", response.error);
     response.result.unwrap()
@@ -182,7 +211,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 29] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 33] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -574,21 +603,39 @@ async fn server_doctor_reports_backends_and_paths_only() {
     assert_eq!(bare.index_root, fx.settings.index_root);
     assert_eq!(bare.project_config, None);
     assert_eq!(bare.selected_backend, BackendId::keychain());
+    // #7519 P4: every row names why it is unavailable; the CLI-backed rows
+    // are listed on every build.
+    let cli = if crate::store::cli_backends().is_empty() {
+        Unavailable::NotCompiled
+    } else {
+        Unavailable::NotEnabled
+    };
+    let rows: Vec<_> = bare
+        .backends
+        .iter()
+        .map(|b| {
+            (
+                b.id.as_str(),
+                b.available,
+                b.capabilities.join(","),
+                b.reason,
+            )
+        })
+        .collect();
     assert_eq!(
-        bare.backends,
+        rows,
         [
-            BackendStatus {
-                id: BackendId::keychain(),
-                available: true,
-                capabilities: vec!["READ".to_string(), "WRITE".to_string()],
-            },
+            ("keychain", true, "READ,WRITE".to_string(), None),
             // #9326: listed beside the Keychain; this fixture maps no `file`.
-            BackendStatus {
-                id: BackendId::file(),
-                available: false,
-                capabilities: Vec::new(),
-            },
+            ("file", false, String::new(), Some(Unavailable::NotCompiled)),
+            ("onepassword", false, String::new(), Some(cli)),
+            ("keeper", false, String::new(), Some(cli)),
         ]
+    );
+    assert!(
+        bare.backends
+            .iter()
+            .all(|b| b.available == b.detail.is_none())
     );
     assert_eq!(bare.posture, Some(StoragePosture::Keychain));
 
@@ -1112,7 +1159,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 29;
+    const ARMS: usize = 33;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1144,13 +1191,74 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::TrackedCliSettingRefused => 25,
             ErrorKind::CliNotInstalled => 26,
             ErrorKind::BackendLocked => 27,
-            ErrorKind::Internal => 28,
+            // #7524 H1: a write into `file` the machine config did not select.
+            ErrorKind::FileBackendNotSelected => 28,
+            ErrorKind::Internal => 29,
+            // #7519: after `Internal`, so no existing discriminant moves.
+            ErrorKind::BackendNotEnabled => 30,
+            // #7524 P2-M1: after `BackendNotEnabled`.
+            ErrorKind::DeadlineExceeded => 31,
+            // #7524 P2-M3 fix round: after `DeadlineExceeded`.
+            ErrorKind::VaultNotVisible => 32,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
     for (i, kind) in ErrorKind::ALL.into_iter().enumerate() {
         assert_eq!(index(kind), i, "{kind:?} is out of place in ErrorKind::ALL");
         assert_eq!(ErrorKind::from_wire(kind.as_str()), Some(kind));
+    }
+}
+
+/// Why: `ErrorKind`'s discriminants are a public contract (#7524). For this
+/// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
+/// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
+/// moves a published value.
+/// What: `kind as i32` equals its pinned value for all 33 variants, and the
+/// table names every kind in `ErrorKind::ALL` exactly once.
+/// Test: itself.
+#[test]
+fn error_kind_discriminants_are_pinned() {
+    const PINNED: [(ErrorKind, i32); 33] = [
+        (ErrorKind::InvalidParams, 0),
+        (ErrorKind::ProjectInvalid, 1),
+        (ErrorKind::ProjectUnresolved, 2),
+        (ErrorKind::VaultOutOfScope, 3),
+        (ErrorKind::InvalidValue, 4),
+        (ErrorKind::NotFound, 5),
+        (ErrorKind::Unsupported, 6),
+        (ErrorKind::UnknownBackend, 7),
+        (ErrorKind::BackendFailed, 8),
+        (ErrorKind::OrphanedBackendEntry, 9),
+        (ErrorKind::IndexCorrupt, 10),
+        (ErrorKind::IndexBusy, 11),
+        (ErrorKind::StorageUnavailable, 12),
+        (ErrorKind::ConfigInvalid, 13),
+        (ErrorKind::HomeUnavailable, 14),
+        (ErrorKind::SameBackend, 15),
+        (ErrorKind::AgentUseRefused, 16),
+        (ErrorKind::InvalidEnvEntry, 17),
+        (ErrorKind::EnvResolutionFailed, 18),
+        (ErrorKind::DotenvSyntax, 19),
+        (ErrorKind::RemoteHostUnsupported, 20),
+        (ErrorKind::StorageRefused, 21),
+        (ErrorKind::TrackedBackendRefused, 22),
+        (ErrorKind::AuditUnavailable, 23),
+        (ErrorKind::TrackedAuditRefused, 24),
+        (ErrorKind::TrackedCliSettingRefused, 25),
+        (ErrorKind::CliNotInstalled, 26),
+        (ErrorKind::BackendLocked, 27),
+        (ErrorKind::FileBackendNotSelected, 28),
+        (ErrorKind::Internal, 29),
+        (ErrorKind::BackendNotEnabled, 30),
+        (ErrorKind::DeadlineExceeded, 31),
+        (ErrorKind::VaultNotVisible, 32),
+    ];
+    for (kind, value) in PINNED {
+        assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
+    }
+    for kind in ErrorKind::ALL {
+        let rows = PINNED.iter().filter(|(k, _)| *k == kind).count();
+        assert_eq!(rows, 1, "{kind:?} must be pinned exactly once");
     }
 }
 
@@ -1208,6 +1316,26 @@ fn client_rpc_failure_reads_every_kind_from_the_wire() {
     );
     let transport = ClientError::Transport(Box::new(std::io::Error::other("io detail")));
     assert_eq!(transport.to_string(), "io detail");
+}
+
+/// Why: #7519 — a client branches on the wire code of a refused CLI
+/// backend, so `backend_not_enabled` keeps -32078 (-32077 is #7524's); the
+/// uniqueness check alone would let it move to any unused code.
+/// Test: itself.
+#[test]
+fn server_backend_not_enabled_is_wire_code_32078() {
+    let kind = ErrorKind::from(SecretsError::BackendNotEnabled {
+        backend: SENTINEL.into(),
+    });
+    assert_eq!(kind, ErrorKind::BackendNotEnabled);
+    assert_eq!(kind.code(), -32078);
+    assert_eq!(kind.as_str(), "backend_not_enabled");
+    let failure = RpcFailure::from_wire(kind.to_rpc(method::SET));
+    assert_eq!(
+        (failure.code, failure.kind),
+        (-32078, Some(ErrorKind::BackendNotEnabled))
+    );
+    assert!(!failure.message.contains(SENTINEL), "{}", failure.message);
 }
 
 /// Why: a key left in the backend with no index row needs reconciling, so it
@@ -1518,12 +1646,12 @@ fn settings_flags_beat_env_beat_defaults() {
         IDLE_TIMEOUT_ENV => Some("7".to_string()),
         _ => None,
     };
-    let from_env = ServerSettings::from_args(args(&["serve"]), env).unwrap();
+    let from_env = parse_settings(args(&["serve"]), env).unwrap();
     assert_eq!(from_env.socket, PathBuf::from("/env/s.sock"));
     assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
     assert_eq!(from_env.idle_timeout, Duration::from_secs(7));
 
-    let flags = ServerSettings::from_args(
+    let flags = parse_settings(
         args(&[
             "serve",
             "--socket",
@@ -1552,7 +1680,7 @@ fn settings_flags_beat_env_beat_defaults() {
     );
 
     if let Some(home) = dirs::home_dir() {
-        let defaults = ServerSettings::from_args(args(&["serve"]), |_| None).unwrap();
+        let defaults = parse_settings(args(&["serve"]), |_| None).unwrap();
         assert_eq!(defaults.socket, home.join(SOCKET_SUBPATH));
         assert_eq!(defaults.idle_timeout, DEFAULT_IDLE_TIMEOUT);
     }
@@ -1578,7 +1706,7 @@ fn settings_idle_env_falls_back_on_garbage_and_zero() {
 #[test]
 fn settings_reject_unknown_and_incomplete_flags() {
     let parse = |v: &[&str]| {
-        ServerSettings::from_args(
+        parse_settings(
             v.iter()
                 .map(Into::into)
                 .collect::<Vec<std::ffi::OsString>>(),
@@ -1603,6 +1731,28 @@ fn settings_reject_unknown_and_incomplete_flags() {
     }
 }
 
+/// Why: #7524 P2-M1 — the client gave up at 30 s while the server went on
+/// and committed the write. For every method the server's deadline must be
+/// shorter than the client's wait, and a write's deadline must hold a
+/// 1Password set's two CLI calls at their full 60 s timeout.
+/// Test: itself.
+#[test]
+fn client_wait_exceeds_the_server_deadline_for_every_method() {
+    use super::deadline::{client_wait, request_deadline};
+    for (name, _) in router::METHODS {
+        assert!(client_wait(name) > request_deadline(name), "{name}");
+    }
+    for name in [method::SET, method::DELETE, method::COPY] {
+        assert!(request_deadline(name) >= Duration::from_secs(120), "{name}");
+        assert!(client_wait(name) > Duration::from_secs(120), "{name}");
+    }
+    assert_eq!(
+        ErrorKind::DeadlineExceeded.code(),
+        -32079,
+        "the next unused code"
+    );
+}
+
 // #4567: the audit-trail tests share this module's fixture.
 #[path = "audit_tests.rs"]
 mod audit_tests;
@@ -1610,3 +1760,55 @@ mod audit_tests;
 // #7519: the delete-across-backends tests share this module's fixture.
 #[path = "delete_tests.rs"]
 mod delete_tests;
+
+// #7519 P4: the doctor reason, readiness and wire tests share this fixture.
+#[path = "doctor_tests.rs"]
+mod doctor_tests;
+
+// #7524: the Keychain-to-file write posture tests share this module's fixture.
+#[path = "posture_tests.rs"]
+mod posture_tests;
+
+// #7519: the 1Password server-path tests share this module's fixture.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[path = "onepassword_tests.rs"]
+mod onepassword_tests;
+
+// #7519 P3: the Keeper server-path tests share this module's fixture.
+#[cfg(all(unix, feature = "cli-backends"))]
+#[path = "keeper_tests.rs"]
+mod keeper_tests;
+
+/// Why: #7519 — the template directory holds values, so like the audit log
+/// it follows only the `--index-dir` flag, never an environment variable.
+/// Test: itself.
+#[test]
+fn settings_template_root_follows_the_index_flag_only() {
+    let args = |v: &[&str]| {
+        v.iter()
+            .map(Into::into)
+            .collect::<Vec<std::ffi::OsString>>()
+    };
+    let env = |name: &str| (name == INDEX_DIR_ENV).then(|| "/env/index".to_string());
+    if let Some(home) = dirs::home_dir() {
+        // #7519: through `parse_settings`, so a host with no password-database
+        // row for the test uid (a Linux container) does not fail closed here.
+        let flagged = parse_settings(args(&["serve", "--index-dir", "/f/index"]), env);
+        assert_eq!(flagged.unwrap().template_root, PathBuf::from("/f/tmp"));
+        // #7524: the environment moves the index only off the default socket.
+        let from_env =
+            parse_settings(args(&["serve", "--socket", "/s/secrets.sock"]), env).unwrap();
+        assert_eq!(from_env.index_root, PathBuf::from("/env/index"));
+        let default = settings::template_root_beside(&home.join(crate::store::INDEX_SUBDIR));
+        assert_eq!(from_env.template_root, default);
+        #[cfg(all(unix, feature = "cli-backends"))]
+        assert_eq!(default, home.join(crate::store::cli::TMP_SUBDIR));
+    }
+    let built = ServerSettings::new(
+        "/s".into(),
+        "/x/index".into(),
+        "/m".into(),
+        DEFAULT_IDLE_TIMEOUT,
+    );
+    assert_eq!(built.template_root, PathBuf::from("/x/tmp"));
+}

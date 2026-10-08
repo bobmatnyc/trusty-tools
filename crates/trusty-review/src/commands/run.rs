@@ -21,7 +21,8 @@ use tracing::warn;
 use trusty_review::{
     config::{
         InvocationSurface, ReviewConfig, RoleCliOverrides, SourceRootOutcome,
-        constants::MAX_CALLER_CONTEXT_CHARS, repo_index::PinOrigin,
+        constants::{MAX_CALLER_CONTEXT_CHARS, MAX_ISSUE_DOCS_FILE_BYTES},
+        repo_index::PinOrigin,
     },
     integrations::{
         NullAnalyzeClient, NullSearchClient,
@@ -32,13 +33,13 @@ use trusty_review::{
     llm::build_provider,
     models::{ContextSourceRecord, ReviewResult, SourceState},
     pipeline::{
-        CallerContext, DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
-        TriggerDecision, log_json_path,
+        CallerContext, DiffSource, IssueDoc, OptionalContextRequest, ReviewDeps, ReviewInput,
+        ReviewOptions, TriggerDecision, log_json_path,
         post::{FinalizeAction, decide_action},
         pr_index::{IndexPin, PrIndex, resolve_pr_index},
         run_review_with,
     },
-    run_output::{run_failure_reason, run_is_failure, run_json_payload},
+    run_output::{ledger_value, run_failure_reason, run_is_failure, run_json_payload},
     store::{DedupNeed, open_dedup_for},
 };
 
@@ -188,13 +189,57 @@ pub struct RunArgs {
     #[arg(long)]
     pub include_pr_body: bool,
 
-    /// Report which optional context sources the review used (#9192). With
+    /// Report every context source the review had (#9192, #9194): pr_body,
+    /// caller_context, issues, spec_docs, claude_md, changed_files, search,
+    /// analyze and external_sources, each used, truncated, absent (asked for, nothing
+    /// there), unavailable (could not be read) or not_requested. With
     /// `--json` the output becomes `{"result": <review>, "context_sources":
-    /// [...]}`; otherwise one line is printed per source that was unavailable
-    /// or truncated. `--include-pr-body` does the same. Without either flag
-    /// `--json` prints the review object alone, as before.
+    /// [...]}`; otherwise one line is printed per source that was absent,
+    /// unavailable or truncated. Any new input flag does the same. Without
+    /// one `--json` prints the review object alone, as before, and a failed
+    /// search or external source is only logged.
     #[arg(long)]
     pub report_context: bool,
+
+    /// Issue docs for the reviewer (#9197): a JSON array of
+    /// `{"id": "#42", "title": "...", "body": "...", "url": "..."}` in a
+    /// regular file of at most 256 KiB. GitHub issue numbers only; works on a
+    /// local diff. Each body is capped at 16,000 characters; at most 8 docs
+    /// and 48,000 characters are shown, and a doc past either limit is left
+    /// out whole. The verifier never sees them. Reports context sources, like
+    /// `--include-pr-body`.
+    #[arg(long, value_name = "PATH")]
+    pub issue_docs_file: Option<std::path::PathBuf>,
+
+    /// Read the ADR, spec and SLD docs the PR body names (plus trusty-search
+    /// hits) at the PR head SHA, for the reviewer only (#9193): at most 6
+    /// docs, 16,000 characters each and 48,000 in total, cut with a visible
+    /// marker. A local diff has no head SHA; the source is reported
+    /// unavailable and the review runs. Reports context sources.
+    #[arg(long)]
+    pub spec_docs: bool,
+
+    /// Read the root CLAUDE.md and up to 3 nested ones at the PR head SHA,
+    /// 16,000 characters in total, for the reviewer only (#9193). Reports
+    /// context sources.
+    #[arg(long)]
+    pub claude_md: bool,
+
+    /// Show the PR's changed files whole, read at the PR head SHA, for the
+    /// reviewer only (#9195), within `--changed-files-budget` bytes. A file
+    /// is shown whole or named under "Not shown" with its reason; over
+    /// budget, tests drop first, then generated files, then the largest. Its
+    /// lines are context only: a finding still cites the diff. A local diff
+    /// has no head SHA; the source is reported unavailable and the review
+    /// runs. Reports context sources.
+    #[arg(long)]
+    pub changed_files: bool,
+
+    /// Byte budget for `--changed-files` (#9195): default 120,000, at most
+    /// 400,000 (a larger value is clamped and reported); 0 reviews the diff
+    /// only. Does nothing without `--changed-files`.
+    #[arg(long, value_name = "BYTES")]
+    pub changed_files_budget: Option<usize>,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -252,6 +297,7 @@ pub async fn cmd_run(
     // #8654: read the PR-context flags before any network call, so an
     // unreadable or oversized `-file` fails the run instead of being dropped.
     let caller_context = caller_context_from_args(&args)?;
+    let request = run_request_with_issue_docs(&args)?; // #9197: same rule as the -file flags
     let diff_source = resolve_diff_source_run(&config, &args).await?;
 
     let mut config_with_overrides = run_config(config_path, &args);
@@ -319,7 +365,6 @@ pub async fn cmd_run(
     };
 
     let input = run_input(&args, diff_source, reviewer_model.clone(), caller_context);
-    let request = run_request(&args);
     let wants_ledger = request.ledger_enabled();
     let outcome = run_review_with(
         &config_with_overrides,
@@ -363,16 +408,55 @@ pub async fn cmd_run(
 
 /// The optional inputs `run`'s flags ask for (#9192).
 ///
-/// Why: `--include-pr-body` is the one new input `run` takes and
-/// `--report-context` asks for the ledger alone; the PR-context text flags are
+/// Why: `--include-pr-body` is a new input (with `--issue-docs-file`, read
+/// by [`run_request_with_issue_docs`], #9197) and `--report-context` asks
+/// for the ledger alone; the PR-context text flags are
 /// legacy and turn the ledger on only beside one of those two (ruling
 /// 2026-10-06 03:42Z).
-/// What: the request with `include_pr_body` and `report_context` from the flags.
-/// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`.
+/// What: the request with `include_pr_body`, `report_context`, (#9193)
+/// `spec_docs` and `claude_md`, and (#9195) `changed_files` and its budget
+/// from the flags.
+/// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`,
+/// `run_flags_set_the_request`, `run_changed_files_flags_set_the_request`,
+/// `changed_files_budget_without_flag_is_inert`.
 pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
-    OptionalContextRequest::default()
+    let request = OptionalContextRequest::default()
         .with_pr_body(args.include_pr_body)
         .with_report_context(args.report_context)
+        .with_spec_docs(args.spec_docs)
+        .with_claude_md(args.claude_md)
+        .with_changed_files(args.changed_files); // #9195
+    match args.changed_files_budget {
+        Some(bytes) => request.with_changed_files_budget(bytes), // inert without the flag
+        None => request,
+    }
+}
+
+/// [`run_request`] plus the docs `--issue-docs-file` names (#9197).
+///
+/// Why: a bad file must fail the run before any network call, as an
+/// unreadable `--pr-description-file` does (#8654).
+/// What: reads the file through [`read_pr_context_file`] (regular file, at
+/// most [`MAX_ISSUE_DOCS_FILE_BYTES`], UTF-8), parses it as JSON, and runs
+/// the same strict parser as the MCP `issue_docs` parameter.
+///
+/// # Errors
+///
+/// The file cannot be read, is over the cap, is not JSON, or is not a valid
+/// `issue_docs` array; the message names the flag and the path.
+///
+/// Test: `issue_docs_file_parses_and_reports_context`,
+/// `issue_docs_file_over_256_kib_is_refused`, `issue_docs_file_with_a_jira_id_is_refused`.
+pub(crate) fn run_request_with_issue_docs(args: &RunArgs) -> Result<OptionalContextRequest> {
+    let request = run_request(args);
+    let Some(path) = args.issue_docs_file.as_deref() else {
+        return Ok(request);
+    };
+    let flag = || format!("--issue-docs-file {}", path.display());
+    let text = read_pr_context_file(path).with_context(flag)?;
+    let value: serde_json::Value = serde_json::from_str(&text).with_context(flag)?;
+    let docs = IssueDoc::list_from_json(&value).with_context(flag)?;
+    Ok(request.with_issue_docs(docs))
 }
 
 /// `run --json`'s output value (#9192).
@@ -392,21 +476,24 @@ pub(crate) fn run_json_value(
     let Some(sources) = ledger else {
         return payload;
     };
-    let sources = serde_json::to_value(sources).unwrap_or_else(
-        |e| serde_json::json!({ "error": format!("failed to serialise context_sources: {e}") }),
-    );
+    let sources = ledger_value(sources); // #9194: the MCP envelope's form too
     let mut wrapped = serde_json::Map::new();
     wrapped.insert("result".to_string(), payload);
     wrapped.insert("context_sources".to_string(), sources);
     serde_json::Value::Object(wrapped)
 }
 
-/// One line per ledger row a reader must act on: `unavailable` or `truncated`.
+/// One line per ledger row a reader must act on: `unavailable`, `truncated`
+/// or (#9194) `absent`.
 ///
 /// Why: a human `run --include-pr-body` that could not read the body said
-/// nothing (critic MEDIUM, #9192).
-/// What: names the source and the reason, or the characters cut.
-/// Test: `ledger_notes_name_unavailable_and_truncated_rows`.
+/// nothing (critic MEDIUM, #9192); #9194 AC3: a source that returned nothing
+/// is what separates a context-starved APPROVE from a fully-informed one.
+/// What: names the source and the reason, or the characters cut. `used` and
+/// `not_requested` rows print nothing.
+/// Test: `ledger_notes_name_unavailable_and_truncated_rows`,
+/// `run_human_output_names_absent_unavailable_and_truncated_rows`,
+/// `ledger_notes_skip_used_and_not_requested_rows`.
 pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
     sources
         .iter()
@@ -415,6 +502,11 @@ pub(crate) fn ledger_notes(sources: &[ContextSourceRecord]) -> Vec<String> {
                 "context source {}: unavailable — {}",
                 row.source,
                 row.detail.as_deref().unwrap_or("no detail")
+            )),
+            SourceState::Absent => Some(format!(
+                "context source {}: absent — {}",
+                row.source,
+                row.detail.as_deref().unwrap_or("no text")
             )),
             SourceState::Truncated => Some(format!(
                 "context source {}: truncated — {} characters omitted",
@@ -533,6 +625,8 @@ pub(crate) fn caller_context_from_args(args: &RunArgs) -> Result<CallerContext> 
 /// text the pipeline's per-field cap would carry whole.
 pub(crate) const PR_CONTEXT_FILE_CAP: u64 = 256 * 1024;
 const _: () = assert!(PR_CONTEXT_FILE_CAP >= MAX_CALLER_CONTEXT_CHARS as u64 * 4);
+// #9197: `--issue-docs-file` reads through the same bounded reader.
+const _: () = assert!(PR_CONTEXT_FILE_CAP == MAX_ISSUE_DOCS_FILE_BYTES);
 
 /// Read one PR-context file, bounded by [`PR_CONTEXT_FILE_CAP`] (#8654).
 ///
@@ -948,6 +1042,20 @@ mod tests {
         assert!(!run_request(&args).ledger_enabled());
     }
 
+    /// #9193: `--spec-docs` and `--claude-md` default off and set their own
+    /// flag in the request, each a new input.
+    #[test]
+    fn run_flags_set_the_request() {
+        let none = run_request(&RunArgs::try_parse_from(["run"]).expect("parse"));
+        assert!(!none.spec_docs && !none.claude_md && !none.requested_new());
+        let args = RunArgs::try_parse_from(["run", "--spec-docs"]).expect("parse");
+        let request = run_request(&args);
+        assert!(request.spec_docs && !request.claude_md && request.requested_new());
+        let args = RunArgs::try_parse_from(["run", "--claude-md"]).expect("parse");
+        let request = run_request(&args);
+        assert!(request.claude_md && !request.spec_docs && request.requested_new());
+    }
+
     /// #9192: `--report-context` turns the ledger on with no other new input,
     /// and the text flags turn it on only beside it.
     #[test]
@@ -996,7 +1104,7 @@ mod tests {
     }
 
     /// #9192: the human output names an unavailable or truncated source, and
-    /// says nothing about a used or absent one.
+    /// says nothing about a used one (#9194: an absent one is named too).
     #[test]
     fn ledger_notes_name_unavailable_and_truncated_rows() {
         let mut down = ContextSourceRecord::new("pr_body", SourceState::Unavailable);
@@ -1495,3 +1603,8 @@ mod tests {
 #[cfg(test)]
 #[path = "run_pr_tests.rs"]
 mod pr_tests;
+
+// #9197: `--issue-docs-file`.
+#[cfg(test)]
+#[path = "run_issue_docs_tests.rs"]
+mod issue_docs_tests;

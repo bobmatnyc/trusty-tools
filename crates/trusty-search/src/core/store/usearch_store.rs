@@ -425,18 +425,20 @@ impl UsearchStore {
         Self::with_capacity_hint(dim, INITIAL_CAPACITY)
     }
 
-    /// Construct with an estimated final size. When `expected_chunks > 50_000`
-    /// we tune the HNSW graph for higher recall (higher `connectivity` /
-    /// `expansion_add`) at the cost of more memory and slower build —
-    /// worthwhile on large monorepos where the default `connectivity=16`
-    /// produces noisier neighbour lists. Smaller indexes keep usearch's
-    /// auto-defaults (0 = library-chosen).
+    /// Construct with an estimated final size. The HNSW options come from
+    /// [`super::hnsw_tuning::hnsw_tuning`]: above 50K keys a wider graph and a
+    /// search beam that grows with the key count; smaller indexes keep
+    /// usearch's auto-defaults (0 = library-chosen). `load_from` passes the
+    /// snapshot's key count here, which is how a reloaded index gets its beam.
+    /// Test: `super::tests_9414::load_from_applies_the_size_scaled_beam`.
     pub fn with_capacity_hint(dim: usize, expected_chunks: usize) -> Result<Self> {
-        let (connectivity, expansion_add, expansion_search) = if expected_chunks > 50_000 {
-            (32, 128, 64)
-        } else {
-            (0, 0, 0)
-        };
+        // #9414: one size-scaled table instead of a single 50K step that kept
+        // expansion_search at 64 for every index size.
+        let super::hnsw_tuning::HnswTuning {
+            connectivity,
+            expansion_add,
+            expansion_search,
+        } = super::hnsw_tuning::hnsw_tuning(expected_chunks);
         let options = IndexOptions {
             dimensions: dim,
             metric: MetricKind::Cos,

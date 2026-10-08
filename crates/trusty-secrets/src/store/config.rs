@@ -53,9 +53,37 @@ pub struct MachineSecretsConfig {
     // #4567: DOC-45 C-7.10 — only this untracked file may suppress the audit.
     #[serde(default)]
     pub audit: Option<bool>,
+    /// DOC-74 §6.2's 1Password section. Present, even as `{}`, it enables
+    /// the `onepassword` backend on this machine (#7519).
+    #[serde(default)]
+    pub onepassword: Option<CliSettings>,
+    /// DOC-74 §6.2's Keeper section. Present, even as `{}`, it enables the
+    /// `keeper` backend on this machine (#7519 P3); it opens only when the
+    /// section also pins `program` and `config_path`.
+    #[serde(default)]
+    pub keeper: Option<CliSettings>,
 }
 
 impl MachineSecretsConfig {
+    /// Whether this machine enables the CLI-backed backend `id`.
+    ///
+    /// Why: #7519 P1 carry-over (a) — a delete sweeps every enabled CLI
+    /// backend, and a CLI backend opens only when enabled, so no value is
+    /// ever written where the sweep cannot reach it. Only this untracked
+    /// file may enable one.
+    /// What: `default_backend` names `id`, or `id`'s own section is present.
+    /// A built-in backend (`keychain`, `file`) is never "enabled" here.
+    /// Test: `onepassword_open_requires_machine_enablement`,
+    /// `keeper_open_requires_machine_enablement`.
+    pub fn enables(&self, id: &BackendId) -> bool {
+        let section = match id.as_str() {
+            BackendId::ONEPASSWORD => self.onepassword.is_some(),
+            BackendId::KEEPER => self.keeper.is_some(),
+            _ => return false,
+        };
+        section || self.default_backend.as_ref() == Some(id)
+    }
+
     /// The `project_vaults` entry for `<owner>/<repo>`, if any.
     ///
     /// What: keys compare ASCII case-insensitively, as owner and repository
@@ -91,6 +119,9 @@ pub struct ProjectSecretsConfig {
     /// Read only so [`check_project_backend`] can refuse it here (#7519).
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// Read only so [`check_project_backend`] can refuse it here (#7519).
+    #[serde(default)]
+    pub program: Option<PathBuf>,
     /// DOC-74 §6.2's 1Password section; read only to refuse it (#7519).
     #[serde(default)]
     pub onepassword: Option<CliSettings>,
@@ -113,6 +144,10 @@ pub struct CliSettings {
     /// The vendor CLI's config file or directory.
     #[serde(default)]
     pub config_path: Option<PathBuf>,
+    /// The vendor CLI's executable, by absolute path (machine config only).
+    // #7519: a pin skips the `PATH` search; a repository must not choose it.
+    #[serde(default)]
+    pub program: Option<PathBuf>,
 }
 
 /// The resolved backend and project-vault override for one invocation.
@@ -156,20 +191,23 @@ pub fn resolve(
 }
 
 /// Refuse a tracked project config that selects `file` on a Keychain build,
-/// or that sets a vendor CLI's `account` or `config_path` on any build.
+/// or that sets a vendor CLI's `account`, `config_path` or `program` on any
+/// build.
 ///
 /// Why: #9326, Architect ruling (basis ruling 06 R2, the #9328 class) — the
 /// project file is tracked, so anyone who lands a change in the repository
 /// could move every value to plaintext files. Where a Keychain is compiled
 /// in, only the untracked machine config may select `file`. #7519, owner
 /// ruling 2026-10-07: for the same reason it may not aim a vendor CLI at an
-/// account or config directory of its choosing.
+/// account or config directory of its choosing, nor choose the program run
+/// as the CLI.
 /// What: on a Keychain build, project `secrets.backend: file` is
 /// [`SecretsError::TrackedBackendRefused`] naming `path` (the project file)
 /// and the machine key to set, never the file's content. Any other project
 /// backend, and every project backend on a build without a Keychain, passes.
-/// Then, on every build, an `account` or `config_path` at the top level or
-/// under `onepassword`/`keeper` is [`SecretsError::TrackedCliSettingRefused`]
+/// Then, on every build, an `account`, `config_path` or `program` at the top
+/// level or under `onepassword`/`keeper` is
+/// [`SecretsError::TrackedCliSettingRefused`]
 /// naming the key, never its value.
 /// Test: `config_tracked_file_backend_is_refused_on_a_keychain_build`,
 /// `server_tracked_file_backend_is_refused_on_a_keychain_build`,
@@ -207,25 +245,79 @@ pub(crate) fn check_project_backend_for(
     }
 }
 
+/// Refuse a value write into `file` on a Keychain build unless the account's
+/// own machine config selected `file`.
+///
+/// Why: #7524 H1, owner ruling item 74 — the Keychain ACL is a boundary
+/// against same-user callers. Without this, any same-uid process could ask
+/// the server to move Keychain values into 0600 plaintext files. Architect
+/// ruling: a config path the spawner chooses — `--machine-config`, or one
+/// under a redirected `$HOME` — is not that machine config.
+/// What: with `keychain_compiled`, a `target` of `file` passes only when
+/// `consent_config` is `Some` and loads (by [`load_machine_at`]) with
+/// `default_backend: file`. No path, a missing or unreadable file, a parse
+/// failure, no `secrets:` section, or another `default_backend` is
+/// [`SecretsError::FileBackendNotSelected`]. Every other target, and every
+/// target on a build without a Keychain, passes without reading the file.
+/// Reads and deletes never call this.
+/// Test: `config_value_write_into_file_needs_the_consent_config`,
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+/// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`,
+/// `server_copy_to_file_is_allowed_when_the_machine_config_selects_file`,
+/// `server_copy_to_file_is_allowed_on_a_build_without_a_keychain`.
+// #7524: only the server writes values on a caller's behalf.
+#[cfg(feature = "server")]
+pub(crate) fn check_value_write_for(
+    target: &BackendId,
+    consent_config: Option<&Path>,
+    keychain_compiled: bool,
+) -> Result<(), SecretsError> {
+    let is_file = |id: &BackendId| id.as_str() == BackendId::FILE;
+    if !keychain_compiled || !is_file(target) {
+        return Ok(());
+    }
+    // #7524 H1: fail closed — any failure to read a `file` selection refuses.
+    let consented = consent_config
+        .and_then(|path| load_machine_at(path).ok().flatten())
+        .and_then(|machine| machine.default_backend)
+        .is_some_and(|id| is_file(&id));
+    if consented {
+        Ok(())
+    } else {
+        Err(SecretsError::FileBackendNotSelected)
+    }
+}
+
 /// The first CLI setting `project` sets, as the key the refusal names.
 fn tracked_cli_setting(project: &ProjectSecretsConfig) -> Option<&'static str> {
+    // #7519: `program` too — a tracked pin would choose what runs as the CLI.
     let flags = |s: Option<&CliSettings>| {
-        s.map_or([false, false], |s| {
-            [s.account.is_some(), s.config_path.is_some()]
+        s.map_or([false; 3], |s| {
+            [
+                s.account.is_some(),
+                s.config_path.is_some(),
+                s.program.is_some(),
+            ]
         })
     };
+    let top = [
+        project.account.is_some(),
+        project.config_path.is_some(),
+        project.program.is_some(),
+    ];
     let sections = [
-        (
-            [project.account.is_some(), project.config_path.is_some()],
-            ["account", "config_path"],
-        ),
+        (top, ["account", "config_path", "program"]),
         (
             flags(project.onepassword.as_ref()),
-            ["onepassword.account", "onepassword.config_path"],
+            [
+                "onepassword.account",
+                "onepassword.config_path",
+                "onepassword.program",
+            ],
         ),
         (
             flags(project.keeper.as_ref()),
-            ["keeper.account", "keeper.config_path"],
+            ["keeper.account", "keeper.config_path", "keeper.program"],
         ),
     ];
     sections

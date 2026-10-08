@@ -1,4 +1,4 @@
-//! HTTP client over trusty-search (`:7878`).
+//! Client over trusty-search — its Unix socket or, until #9214 phase C, HTTP.
 //!
 //! Why: the review pipeline needs semantic / BM25 code search to retrieve
 //! relevant context before generating a review.  trusty-search is the
@@ -8,10 +8,10 @@
 //! (spec REV-430, doc 01 REV-009)
 //!
 //! What: defines `SearchClient` trait (health check, list indexes, search)
-//! and `HttpSearchClient`, an async HTTP implementation over
-//! `TRUSTY_SEARCH_URL` (default `http://127.0.0.1:7878`).  All methods
-//! return typed results; transport errors surface as `SearchClientError`
-//! variants.
+//! and `HttpSearchClient`, which reaches the daemon over the transport
+//! [`super::search_transport::SearchTransport`] resolves (#9214): the socket
+//! when one is present, HTTP otherwise.  All methods return typed results;
+//! transport errors surface as `SearchClientError` variants on either leg.
 //!
 //! `HealthResponse` and the tolerant `EmbedderState` deserialiser live in the
 //! `health` submodule (see `health.rs`).
@@ -27,6 +27,13 @@ pub use super::index_status::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use trusty_common::search_rpc::{METHOD_HEALTH, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST};
+
+use super::search_transport::{METHOD_QUERY, SearchTransport, call_socket, decode};
+use crate::pipeline::optional_context::probes::redact_credentials; // #9431
+
+/// Whole-request bound for one call, on either leg.
+const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 // ─── Error type ───────────────────────────────────────────────────────────────
 
@@ -39,11 +46,14 @@ use serde::{Deserialize, Serialize};
 /// `Parse` indicates unexpected JSON; `Unavailable` is the soft degradation
 /// signal; `ClientInit` covers TLS-backend initialisation failures at
 /// construction time so callers receive an `Err` instead of a panic.
-/// Test: `search_error_display`.
+/// #9431: `Transport` and `Unavailable` name the request URL (and reqwest's
+/// error names it again), so their Display masks its credentials; every
+/// `to_string`, log line and review field built from them inherits that.
+/// Test: `search_error_display`, `credential_url_never_reaches_result_error`.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchClientError {
     /// HTTP transport failure (DNS, connect, TLS, timeout).
-    #[error("trusty-search transport error: {0}")]
+    #[error("trusty-search transport error: {}", redact_credentials(.0))]
     Transport(String),
 
     /// trusty-search returned a non-2xx status.
@@ -60,7 +70,7 @@ pub enum SearchClientError {
     Parse(String),
 
     /// trusty-search health check failed: service is unavailable.
-    #[error("trusty-search is unavailable: {0}")]
+    #[error("trusty-search is unavailable: {}", redact_credentials(.0))]
     Unavailable(String),
 
     /// reqwest client construction failed (TLS backend unavailable).
@@ -291,18 +301,22 @@ pub trait SearchClient: Send + Sync {
 
 // ─── HTTP implementation ──────────────────────────────────────────────────────
 
-/// HTTP implementation of `SearchClient` over a running trusty-search daemon.
+/// `SearchClient` over a running trusty-search daemon.
 ///
-/// Why: the default transport for all production and staging deployments.
-/// What: targets `TRUSTY_SEARCH_URL` (default `http://127.0.0.1:7878`) and
-/// calls the live trusty-search REST API.  Transport errors are mapped to
-/// `SearchClientError` variants so the pipeline can degrade gracefully.
-/// Test: `http_search_client_url_is_configurable`.
+/// Why: the default client for all production and staging deployments. The
+/// name predates #9214; it now speaks the socket too, and keeps the name until
+/// phase C so no caller breaks.
+/// What: each method calls the socket method when `transport` is the socket
+/// leg and the REST route when it is HTTP. Both legs map failures onto the
+/// same `SearchClientError` values so the pipeline degrades identically.
+/// Test: `http_search_client_url_is_configurable`, `socket_is_used_when_present`.
 pub struct HttpSearchClient {
-    /// Base URL of the trusty-search daemon (no trailing slash).
-    base_url: String,
+    /// HTTP base URL (no trailing slash); empty on the socket leg.
+    base_url: String, // #9214 phase C: delete
     /// Underlying reqwest client.
-    http: reqwest::Client,
+    http: reqwest::Client, // #9214 phase C: delete
+    /// #9214: which leg every call takes.
+    transport: SearchTransport,
 }
 
 impl HttpSearchClient {
@@ -317,29 +331,54 @@ impl HttpSearchClient {
     /// Test: `http_search_client_url_is_configurable`.
     pub fn new(base_url: impl Into<String>) -> Result<Self, SearchClientError> {
         let raw = base_url.into();
-        let base_url = raw.trim_end_matches('/').to_string();
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+        // #9214: an explicit URL is the HTTP leg, exactly as before.
+        Self::with_transport(SearchTransport::Http(raw.trim_end_matches('/').to_string()))
+    }
+
+    /// Construct over an already-resolved transport (#9214).
+    ///
+    /// Why: the report pass and the tests pick the leg themselves; this is the
+    /// additive, transport-aware twin of [`Self::new`].
+    /// What: stores `transport`; the HTTP client is built either way so the
+    /// HTTP leg stays usable until phase C. `Err(ClientInit)` on a TLS failure.
+    /// Test: `rpc_32004_maps_to_the_http_404_error`.
+    pub fn with_transport(transport: SearchTransport) -> Result<Self, SearchClientError> {
+        let base_url = match &transport {
+            SearchTransport::Http(url) => url.clone(), // #9214 phase C: delete
+            SearchTransport::Socket(_) => String::new(),
+        };
+        let http = reqwest::Client::builder() // #9214 phase C: delete
+            .timeout(SEARCH_TIMEOUT)
             .build()
             .map_err(|e| SearchClientError::ClientInit(e.to_string()))?;
-        Ok(Self { base_url, http })
+        Ok(Self {
+            base_url,
+            http,
+            transport,
+        })
     }
 
     /// Construct from a `ReviewConfig`, reading `search_url`.
     ///
     /// Why: the pipeline constructs the client from its injected config rather
     /// than reading env vars.
-    /// What: calls `Self::new(config.search_url.clone())` and propagates any
-    /// TLS-backend init failure as `Err`.
-    /// Test: `http_search_client_from_config`.
+    /// What: #9214 — resolves the transport from `config` (socket first, see
+    /// [`SearchTransport::resolve`]) and propagates any TLS-backend init
+    /// failure as `Err`.
+    /// Test: `http_search_client_from_config`, `socket_is_used_when_present`.
     pub fn from_config(config: &crate::config::ReviewConfig) -> Result<Self, SearchClientError> {
-        Self::new(config.search_url.clone())
+        Self::with_transport(SearchTransport::resolve(config))
     }
 
-    /// Return the base URL this client targets.
+    /// The leg this client calls (#9214).
+    pub fn transport(&self) -> &SearchTransport {
+        &self.transport
+    }
+
+    /// Return the HTTP base URL this client targets.
     ///
     /// Why: tests need to assert the URL is constructed correctly.
-    /// What: returns a reference to the stored base URL string.
+    /// What: returns the stored base URL; empty on the socket leg (#9214).
     /// Test: `http_search_client_url_is_configurable`.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -357,6 +396,17 @@ impl HttpSearchClient {
         &self,
         repo_identity: Option<&str>,
     ) -> Result<Vec<T>, SearchClientError> {
+        // #9214: `search.indexes.list` takes the same fields as the query string.
+        if let Some(socket) = self.transport.socket_path() {
+            let mut params = serde_json::json!({ "details": true });
+            if let Some(identity) = repo_identity {
+                params["repo_identity"] = identity.into();
+            }
+            let value = call_socket(socket, METHOD_INDEXES_LIST, params, SEARCH_TIMEOUT).await?;
+            let envelope: ListIndexesResponse<T> = decode(value, "list indexes response")?;
+            return Ok(envelope.indexes);
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/indexes", self.base_url);
         let mut query = vec![("details", "true")];
         if let Some(identity) = repo_identity {
@@ -392,6 +442,16 @@ impl HttpSearchClient {
 #[async_trait]
 impl SearchClient for HttpSearchClient {
     async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        // #9214: any socket failure is "unavailable", as any HTTP failure is.
+        if let Some(socket) = self.transport.socket_path() {
+            let value = call_socket(socket, METHOD_HEALTH, serde_json::json!({}), SEARCH_TIMEOUT)
+                .await
+                .map_err(|e| {
+                    SearchClientError::Unavailable(format!("{}: {e}", self.transport.describe()))
+                })?;
+            return decode(value, "health response");
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/health", self.base_url);
         let resp = self
             .http
@@ -430,6 +490,14 @@ impl SearchClient for HttpSearchClient {
 
     // #6686: the per-index probe the required-context gate decides on.
     async fn index_status(&self, index_id: &str) -> Result<IndexStatusResponse, SearchClientError> {
+        // #9214: -32004 arrives as `Api{404}`, so `is_unknown_index` holds.
+        if let Some(socket) = self.transport.socket_path() {
+            let params = serde_json::json!({ "index_id": index_id });
+            let value = call_socket(socket, METHOD_INDEX_STATUS, params, SEARCH_TIMEOUT).await?;
+            let parsed: IndexStatusResponse = decode(value, "index status response")?;
+            return Ok(with_index_id(parsed, index_id));
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/indexes/{index_id}/status", self.base_url);
         let resp = self
             .http
@@ -454,14 +522,9 @@ impl SearchClient for HttpSearchClient {
             });
         }
 
-        let mut parsed: IndexStatusResponse = serde_json::from_str(&body)
+        let parsed: IndexStatusResponse = serde_json::from_str(&body)
             .map_err(|e| SearchClientError::Parse(format!("index status response: {e}")))?;
-        // Older daemons may omit `index_id`; the reason string must still name
-        // the index the review asked about.
-        if parsed.index_id.is_empty() {
-            parsed.index_id = index_id.to_string();
-        }
-        Ok(parsed)
+        Ok(with_index_id(parsed, index_id))
     }
 
     async fn search(
@@ -470,11 +533,19 @@ impl SearchClient for HttpSearchClient {
         query: &str,
         top_k: Option<u32>,
     ) -> Result<Vec<SearchResult>, SearchClientError> {
-        let url = format!("{}/indexes/{index_id}/search", self.base_url);
         let request_body = SearchRequest {
             text: query.to_string(),
             top_k,
         };
+        // #9214: `search.query` nests the HTTP body under `body`.
+        if let Some(socket) = self.transport.socket_path() {
+            let params = serde_json::json!({ "index_id": index_id, "body": request_body });
+            let value = call_socket(socket, METHOD_QUERY, params, SEARCH_TIMEOUT).await?;
+            let search_resp: SearchResponse = decode(value, "search response")?;
+            return Ok(search_resp.results);
+        }
+        // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
+        let url = format!("{}/indexes/{index_id}/search", self.base_url);
 
         let resp = self
             .http
@@ -502,6 +573,17 @@ impl SearchClient for HttpSearchClient {
 
         Ok(search_resp.results)
     }
+}
+
+/// Fill an index status's `index_id` when the daemon omitted it.
+///
+/// Older daemons may omit `index_id`; the reason string must still name the
+/// index the review asked about.
+fn with_index_id(mut parsed: IndexStatusResponse, index_id: &str) -> IndexStatusResponse {
+    if parsed.index_id.is_empty() {
+        parsed.index_id = index_id.to_string();
+    }
+    parsed
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

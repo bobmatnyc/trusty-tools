@@ -10,6 +10,9 @@
 //! Test: the `*_tests.rs` files beside this module.
 
 mod backend;
+// #7524 P2-M1: the per-request deadline the server sets and the runner reads.
+#[cfg(any(feature = "server", feature = "cli-backends"))]
+pub(crate) mod deadline;
 // #7519: the runner the CLI-backed backends share; Unix only, because it
 // kills the child's process group.
 #[cfg(all(unix, feature = "cli-backends"))]
@@ -21,16 +24,35 @@ mod dotenv;
 #[cfg(unix)]
 pub(crate) mod file;
 mod index;
+// #7519 P3: the Keeper Commander backend; spawns `keeper` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod keeper;
 mod keychain;
 mod mask;
 #[cfg(any(test, feature = "test-support"))]
 mod memory;
+// #7519: the 1Password backend; spawns `op` through `cli`.
+#[cfg(all(unix, feature = "cli-backends"))]
+pub mod onepassword;
 pub(crate) mod platform;
+// #7519 P4: the absolute-PATH program lookup; the CLI backends and doctor's
+// tool detection share it, so it is not behind `cli-backends` alone.
+#[cfg(all(unix, any(feature = "server", feature = "cli-backends")))]
+pub(crate) mod program;
 pub mod resolve;
 mod scope;
 mod secret_store;
 
-pub use backend::{Capabilities, SecretBackend, default_backend, local_backends, open_backend};
+// #7524: only the server's `State` reads it; unused without `server`.
+#[cfg(feature = "server")]
+pub(crate) use backend::KEYCHAIN_COMPILED;
+// #7524 P2-M2: the server's factory names the 1Password directories itself.
+#[cfg(feature = "server")]
+pub(crate) use backend::open_backend_at_in;
+pub use backend::{
+    Capabilities, SecretBackend, cli_backends, default_backend, local_backends, open_backend,
+    open_backend_at, swept_backends,
+};
 pub use dotenv::parse_dotenv;
 #[cfg(unix)]
 pub use file::{FileBackend, VALUES_SUBDIR};

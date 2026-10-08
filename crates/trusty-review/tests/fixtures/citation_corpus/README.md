@@ -14,6 +14,10 @@ Fields:
 - `diff` — the unified diff, one line per array entry; or `diff_file`, a
   `.diff` file in this directory (`billing.diff` is shared).
 - `pr_description` — optional caller context; context citations resolve in it.
+- `pr_body` and `docs` — optional (#9193). A case with `docs` runs as a GitHub
+  PR whose body is `pr_body`, with `spec_docs` on; `docs` maps each repository
+  path to its text at the head SHA `0123456789abcdef0123456789abcdef01234567`.
+  A `[doc: path@sha — "excerpt"]` citation resolves only in that text.
 - `reviewer` — `prose`, `verdict`, `grade` and `findings` (the reviewer JSON
   finding shape: `title`, `body`, `severity`, `confidence`, `file`, `line`).
 - `verifier` — `CONFIRMED`, `REFUTED` or `UNVERIFIABLE`.
@@ -24,7 +28,8 @@ Fields:
   prints it (`APPROVE`, `APPROVE*`, `REQUEST_CHANGES`, `BLOCK`, `UNKNOWN`).
 
 A case's hallucination count is: survivors that are labelled hallucinated or
-that the runner's own resolver cannot resolve at the head, plus each forbidden
+that the runner's own resolver cannot resolve at the head (code quotes, and
+every `[doc:]` citation against `docs`), plus each forbidden
 text found in the body, plus one when no finding survived but some were
 withheld and the review still blocks, or carries a grade other than the one an
 empty survivor set gives its verdict (`A+` for APPROVE, `C+` for APPROVE*, `D+`

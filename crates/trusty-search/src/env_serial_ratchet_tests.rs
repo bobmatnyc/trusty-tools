@@ -12,7 +12,10 @@
 //! offender fails, and so does a stale row.
 //!
 //! Limits: the unit is the FILE, as in trusty-common's ratchet. `tests/**`
-//! binaries are separate processes and outside this scan.
+//! binaries are separate processes and outside this scan. It checks writers
+//! only: a test that READS the data dir (`persistence::data_dir`, the daemon
+//! dir) without writing it takes `#[serial_test::parallel]`, which excludes
+//! the writers but not other readers (#9233).
 //! Test: this file IS the test module.
 
 use std::path::{Path, PathBuf};

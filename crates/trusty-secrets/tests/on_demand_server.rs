@@ -236,3 +236,65 @@ async fn inherited_git_redirect_env_never_reaches_the_servers_git_calls() {
         [json!("trusty/acme/alpha"), json!("trusty/acme/beta")]
     );
 }
+
+/// Why: #7519 P4 A10, owner ruling Q1 — the real binary takes
+/// `OP_SERVICE_ACCOUNT_TOKEN` out of its environment at start, and doctor
+/// reports only that it was present (on a `cli-backends` build, the one
+/// that reads it). The token reaches neither the reply nor the server's
+/// stderr.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_doctor_reports_token_presence_and_never_the_token() {
+    const TOKEN: &str = "ops_binary_canary_7519_p4_fedcba9876543210";
+    let p = paths();
+    let log = p.tmp.path().join("stderr.log");
+    let mut child = server_command(&p, 1)
+        .env("OP_SERVICE_ACCOUNT_TOKEN", TOKEN)
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    wait_serving(&p.socket).await;
+    let report = doctor(&p.socket).await;
+    assert_eq!(
+        report["headless"]["onepassword_token"],
+        json!(cfg!(feature = "cli-backends"))
+    );
+    assert!(!report.to_string().contains(TOKEN), "{report}");
+    let status = wait_exit(&mut child, Duration::from_secs(15));
+    assert!(status.success(), "{status:?}");
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(!stderr.is_empty(), "the server wrote no stderr at all");
+    assert!(!stderr.contains(TOKEN), "{stderr}");
+}
+
+/// Why: #7519 P4, DOC-74 §7 — the real binary detects an unsupported tool
+/// on the `PATH` it started with, and runs nothing it finds.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_doctor_detects_tools_on_its_start_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = paths();
+    let bin = p.tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let marker = p.tmp.path().join("doppler-ran");
+    let doppler = bin.join("doppler");
+    std::fs::write(&doppler, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&doppler, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = server_command(&p, 1)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .spawn()
+        .unwrap();
+    wait_serving(&p.socket).await;
+    let report = doctor(&p.socket).await;
+    let found = report["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "doppler")
+        .cloned()
+        .unwrap();
+    assert_eq!(found["installed"], json!(true));
+    assert_eq!(found["path"], json!(doppler.display().to_string()));
+    assert!(wait_exit(&mut child, Duration::from_secs(15)).success());
+    assert!(!marker.exists(), "the server ran doppler");
+}

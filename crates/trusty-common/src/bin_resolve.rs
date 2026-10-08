@@ -110,12 +110,14 @@ pub fn daemon_path_env() -> String {
 /// locations. Checking those locations after the `PATH` lookup makes spawning
 /// resilient to the inherited environment without trusting it.
 /// What: if `name` contains a path separator it is treated as a literal path
-/// and returned when it is an existing file. Otherwise each entry of the
-/// current process `PATH` is checked, then each [`daemon_path_dirs`] entry, for
-/// an existing `dir/name`; the first hit is returned. Returns `None` if nothing
-/// matches.
+/// and returned when it is an existing file. Otherwise each absolute entry of
+/// the current process `PATH` is checked, then each [`daemon_path_dirs`]
+/// entry, for an existing `dir/name`; the first hit is returned. An empty,
+/// `.` or other relative `PATH` entry names the caller's working directory,
+/// so it is skipped (#7524). Returns `None` if nothing matches.
 /// Test: `resolve_binary_finds_in_well_known_dir`,
 /// `resolve_binary_finds_a_binary_outside_the_process_path`,
+/// `resolve_binary_skips_relative_path_entries`,
 /// `resolve_binary_returns_none_for_missing`,
 /// `resolve_binary_accepts_absolute_path`.
 pub fn resolve_binary(name: &str) -> Option<PathBuf> {
@@ -139,6 +141,21 @@ pub fn resolve_binary(name: &str) -> Option<PathBuf> {
 /// [`daemon_path_dirs`] as step 2's search list.
 /// Test: `resolve_binary_finds_a_binary_outside_the_process_path`.
 fn resolve_binary_in(name: &str, fallback_dirs: &[PathBuf]) -> Option<PathBuf> {
+    resolve_binary_with(name, std::env::var_os("PATH").as_deref(), fallback_dirs)
+}
+
+/// [`resolve_binary_in`] with the `PATH` value supplied by the caller.
+///
+/// Why: #7524 part-1 L1 — a test of the `PATH` half must not change the
+/// process-global `PATH`, which races the parallel harness.
+/// What: `path_var` stands in for the live `PATH`; only its absolute entries
+/// are searched.
+/// Test: `resolve_binary_skips_relative_path_entries`.
+fn resolve_binary_with(
+    name: &str,
+    path_var: Option<&std::ffi::OsStr>,
+    fallback_dirs: &[PathBuf],
+) -> Option<PathBuf> {
     // An explicit path (absolute or relative with a separator) is used verbatim.
     if name.contains(std::path::MAIN_SEPARATOR) {
         let p = PathBuf::from(name);
@@ -146,8 +163,10 @@ fn resolve_binary_in(name: &str, fallback_dirs: &[PathBuf]) -> Option<PathBuf> {
     }
 
     // 1) Honour the live PATH (covers interactive/login invocations).
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
+    if let Some(path_var) = path_var {
+        // #7524: an empty, `.` or relative entry names the working directory,
+        // where a planted binary (e.g. `trusty-secrets`) would be run.
+        for dir in std::env::split_paths(path_var).filter(|dir| dir.is_absolute()) {
             if let Some(hit) = candidate(&dir, name) {
                 return Some(hit);
             }
@@ -929,6 +948,49 @@ mod tests {
             resolve_binary_in(name, std::slice::from_ref(&tmp)).as_deref(),
             Some(bin.as_path()),
             "a binary outside the process PATH must still resolve from the fallback dirs"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Why: #7524 part-1 L1 — a relative `PATH` entry resolves against the
+    /// caller's working directory, so a `trusty-secrets` planted in a
+    /// checkout would be spawned as the secrets server and receive every
+    /// `set`. Only absolute entries are searched.
+    /// What: plants an executable in a temp dir and reaches it through a
+    /// relative entry (and `./` before it), which must miss; the same dir as
+    /// an absolute entry must hit. No process-global `PATH` is changed.
+    /// Test: this test.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_skips_relative_path_entries() {
+        let tmp = make_temp_dir("relative_entry");
+        let name = "trusty-fake-secrets-7524";
+        let bin = tmp.join(name);
+        write_executable(&bin);
+        let cwd = std::env::current_dir()
+            .and_then(|d| d.canonicalize())
+            .expect("cwd");
+        let tmp = tmp.canonicalize().expect("canonical temp dir");
+        let mut relative = PathBuf::new();
+        for _ in cwd.components().skip(1) {
+            relative.push("..");
+        }
+        relative.push(tmp.strip_prefix("/").expect("absolute temp dir"));
+        assert!(relative.is_relative() && cwd.join(&relative).join(name).is_file());
+
+        let entries = [relative.clone(), Path::new(".").join(&relative)];
+        let path_var = std::env::join_paths(&entries).expect("join PATH");
+        assert_eq!(
+            resolve_binary_with(name, Some(&path_var), &[]),
+            None,
+            "a relative PATH entry must never resolve"
+        );
+        let path_var = std::env::join_paths([&tmp]).expect("join PATH");
+        assert_eq!(
+            resolve_binary_with(name, Some(&path_var), &[]),
+            Some(tmp.join(name)),
+            "the same directory as an absolute entry must resolve"
         );
 
         std::fs::remove_dir_all(&tmp).ok();

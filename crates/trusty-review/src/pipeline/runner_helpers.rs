@@ -18,7 +18,7 @@ use crate::integrations::github::{
     fetch_pr_metadata,
 };
 use crate::{
-    config::ReviewConfig,
+    config::{ReviewConfig, constants::LOCAL_OWNER},
     models::{InlineCommentOut, ReviewResult, Verdict},
     pipeline::{
         diff::DiffSource,
@@ -32,6 +32,35 @@ use crate::{
 };
 
 use super::runner::{ReviewDeps, ReviewInput};
+
+/// The review subject a diff source names: `(owner, repo, pr, is_local)`.
+///
+/// Why: moved from `run_pipeline` step 1 for `runner.rs` SLOC headroom (#9194).
+/// What: a GitHub source names its PR. `LocalFile`, `GitRange` and `Stdin`
+/// share the owner [`LOCAL_OWNER`], the sentinel `post::finalize_review`
+/// checks (`is_github = owner != "local"`) to force `FinalizeAction::LogOnly`,
+/// so every non-GitHub source inherits the never-post / #2993 dry-run
+/// guarantee without a separate posting check.
+/// Test: `run_review_local_diff_is_dry_run_and_not_posted`,
+/// `run_review_git_range_is_dry_run_and_not_posted`,
+/// `run_review_stdin_is_dry_run_and_not_posted`.
+pub(super) fn subject_of(source: &DiffSource) -> (String, String, u64, bool) {
+    match source {
+        DiffSource::Github {
+            owner, repo, pr, ..
+        } => (owner.clone(), repo.clone(), *pr, false),
+        DiffSource::LocalFile { path } => {
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("local");
+            (LOCAL_OWNER.to_string(), stem.to_string(), 0_u64, true)
+        }
+        DiffSource::GitRange { base, head, .. } => {
+            let head_label = head.as_deref().unwrap_or("HEAD");
+            let repo = format!("{base}...{head_label}");
+            (LOCAL_OWNER.to_string(), repo, 0_u64, true)
+        }
+        DiffSource::Stdin => (LOCAL_OWNER.to_string(), "stdin".to_string(), 0_u64, true),
+    }
+}
 
 /// Combine caller-supplied PR description + discussion into a single author-
 /// rationale block for the adversarial verifier (#1618).
@@ -127,6 +156,23 @@ pub(super) fn apply_grade_and_floor(
     (floor_verdict, floor_grade, original_llm_grade)
 }
 
+/// Whether a PR's head is in a different repository than its base (#9193).
+///
+/// Why: a fork head's commit may not be readable from the base repository, so
+/// a doc read that 404s there is `unavailable`, not `absent`.
+/// What: each label is `owner:branch`; the head is a fork unless both labels
+/// are present and name the same owner. GitHub logins are case-insensitive,
+/// so owners that differ only in case are the same owner. A missing or
+/// colon-free label cannot prove the same repository, so it counts as a fork.
+/// Test: `head_is_fork_compares_label_owners`.
+pub(crate) fn head_is_fork(head_label: Option<&str>, base_label: Option<&str>) -> bool {
+    let owner = |label: Option<&str>| label?.split_once(':').map(|(o, _)| o.to_lowercase());
+    match (owner(head_label), owner(base_label)) {
+        (Some(head), Some(base)) => head != base,
+        _ => true,
+    }
+}
+
 /// Fetch PR metadata and return `(ReviewPrMeta, head_sha)`.
 ///
 /// Why: centralises the GitHub API call and head-SHA surfacing so the runner
@@ -139,13 +185,22 @@ pub(super) async fn fetch_github_pr_meta(
     repo: &str,
     pr: u64,
     run_mode: RunMode,
-) -> Result<(ReviewPrMeta, String), GithubError> {
+) -> Result<
+    (
+        ReviewPrMeta,
+        crate::pipeline::optional_context::seams::PrHead,
+    ),
+    GithubError,
+> {
     let client = GithubClient::new()?;
     let token = AuthStrategy::select(run_mode, None)
         .resolve_token(&client, config, owner)
         .await?;
     let meta = fetch_pr_metadata(&client, owner, repo, pr, &token).await?;
-    let head_sha = meta.head.sha.clone();
+    let head = crate::pipeline::optional_context::seams::PrHead {
+        sha: meta.head.sha.clone(),
+        fork: head_is_fork(meta.head.label.as_deref(), meta.base.label.as_deref()), // #9193
+    };
     Ok((
         ReviewPrMeta {
             title: meta.title,
@@ -155,7 +210,7 @@ pub(super) async fn fetch_github_pr_meta(
             author: meta.user.login,
             url: meta.html_url,
         },
-        head_sha,
+        head,
     ))
 }
 
