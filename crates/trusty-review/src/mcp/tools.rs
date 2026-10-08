@@ -193,6 +193,7 @@ pub fn tool_descriptors() -> Value {
                 for (name, schema) in context_args::changed_files_schemas() {
                     props[name] = schema; // #9195
                 }
+                props[context_args::SYMBOL_CONTEXT] = context_args::symbol_context_schema(); // #9196
             }
         }
         arr.push(console_metrics::descriptor());
@@ -273,6 +274,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let request = context_args::with_report_context_flag(request, args)?; // #9194
     // #9195: accepted, and reported `unavailable`: a raw diff has no head SHA.
     let request = context_args::with_changed_files(request, args)?;
+    // #9196 ruling Q8: works without a head SHA, against the configured index.
+    let request = context_args::with_symbol_context_flag(request, args)?;
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")

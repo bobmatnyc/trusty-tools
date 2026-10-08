@@ -15,6 +15,7 @@ use crate::integrations::context::{ContextSource, contents_at_ref::DocFetcher};
 use crate::models::{ContextSourceRecord, ReviewResult};
 
 pub(crate) mod assemble;
+pub(crate) mod callgraph; // #9196
 pub(crate) mod doc_refs; // #9193
 pub(crate) mod docs; // #9193
 pub(crate) mod docs_render; // #9193
@@ -25,6 +26,9 @@ pub(crate) mod issues;
 pub(crate) mod ledger;
 pub(crate) mod probes; // #9194
 pub(crate) mod seams;
+pub(crate) mod symbols; // #9196
+pub(crate) mod symbols_apply; // #9196
+pub(crate) mod symbols_render; // #9196
 
 pub use issues::{IssueDoc, IssueDocsError}; // #9197
 pub(crate) use seams::PrSource;
@@ -44,6 +48,8 @@ pub(crate) use seams::PrSource;
 /// and CLAUDE.md files at the PR head SHA, for the reviewer only.
 /// `changed_files` (#9195) shows the PR's changed files whole, read at the
 /// head SHA, for the reviewer only, within `changed_files_budget` bytes.
+/// `symbol_context` (#9196) shows each changed symbol's callers, callees
+/// and tests from the trusty-search call graph, for the reviewer only.
 /// `report_context` asks for the source ledger with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
 /// `requested_new_is_off_by_default_and_on_with_pr_body`,
@@ -68,6 +74,9 @@ pub struct OptionalContextRequest {
     /// Byte budget for `changed_files`; `None` is the default budget. Inert
     /// without `changed_files` (#9195).
     pub changed_files_budget: Option<usize>,
+    /// Show each changed symbol's callers, callees and tests from the
+    /// trusty-search call graph (#9196).
+    pub symbol_context: bool,
 }
 
 impl OptionalContextRequest {
@@ -139,6 +148,15 @@ impl OptionalContextRequest {
         self
     }
 
+    /// This request with `symbol_context` set to `on` (#9196).
+    ///
+    /// Test: `symbol_context_flag_turns_the_ledger_on`.
+    #[must_use]
+    pub fn with_symbol_context(mut self, on: bool) -> Self {
+        self.symbol_context = on;
+        self
+    }
+
     /// Whether any new input is on.
     ///
     /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
@@ -147,7 +165,7 @@ impl OptionalContextRequest {
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
     /// `stdin_context_and_pr_description_never_report`,
     /// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`,
-    /// `changed_files_flag_turns_the_ledger_on`.
+    /// `changed_files_flag_turns_the_ledger_on`, `symbol_context_flag_turns_the_ledger_on`.
     pub fn requested_new(&self) -> bool {
         // #9197: sending `issue_docs` is a new input; #9193: so is either doc flag.
         // #9195: `changed_files` counts; its budget alone does not (amendment 10).
@@ -157,6 +175,7 @@ impl OptionalContextRequest {
             || self.spec_docs
             || self.claude_md
             || self.changed_files
+            || self.symbol_context // #9196
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request

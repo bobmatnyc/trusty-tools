@@ -454,3 +454,114 @@ fn describe_masks_url_credentials() {
     let shown = SearchTransport::Http("http://tok123@127.0.0.1:9/p".to_string()).describe();
     assert_eq!(shown, "http://[redacted]@127.0.0.1:9/p");
 }
+
+// ── The call-chain read (#9196) ──────────────────────────────────────────────
+
+/// #9196: `call_chain` takes the socket leg with the HTTP route's parameters,
+/// returns the bare-string report, maps a not-ready `-32002` onto the HTTP
+/// 503 and refuses a result that is not a string.
+#[tokio::test]
+async fn call_chain_goes_over_the_socket_with_its_params() {
+    let dir = short_tempdir();
+    let fake =
+        FakeSearchSocket::serve(
+            &dir.path().join("s.sock"),
+            |_, params| match params["entry_point"].as_str() {
+                Some("src/a.rs::cold") => Err((
+                    CODE_UNAVAILABLE,
+                    "index_not_resident".to_string(),
+                    Some(json!({"error": "index_not_resident", "retryable": true})),
+                )),
+                Some("src/a.rs::odd") => Ok(json!({"report": "x"})),
+                _ => Ok(Value::String("## `f` [ENTRY]  src/a.rs:3\n".to_string())),
+            },
+        );
+    let client = HttpSearchClient::with_transport(SearchTransport::Socket(fake.path.clone()))
+        .expect("client builds");
+
+    let text = client
+        .call_chain("idx", "src/a.rs::f", "both", 1, false)
+        .await
+        .expect("report");
+    assert_eq!(text, "## `f` [ENTRY]  src/a.rs:3\n");
+    assert_eq!(
+        fake.calls()[0],
+        (
+            "search.call_chain".to_string(),
+            json!({"index_id": "idx", "entry_point": "src/a.rs::f", "direction": "both",
+                   "max_depth": 1, "include_source": false})
+        )
+    );
+    let cold = client
+        .call_chain("idx", "src/a.rs::cold", "both", 1, false)
+        .await
+        .expect_err("not ready");
+    assert!(
+        matches!(cold, SearchClientError::Api { status: 503, .. }),
+        "{cold:?}"
+    );
+    let odd = client
+        .call_chain("idx", "src/a.rs::odd", "both", 1, false)
+        .await
+        .expect_err("non-string");
+    assert!(matches!(odd, SearchClientError::Parse(_)), "{odd:?}");
+}
+
+/// A one-request HTTP stub that answers `status` with a `text/plain` `body`
+/// and hands back the request it read.
+async fn text_stub(
+    status: &'static str,
+    body: &'static str,
+) -> (String, tokio::sync::oneshot::Receiver<String>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the HTTP stub");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = vec![0_u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        }
+    });
+    (url, rx)
+}
+
+/// #9196, #9214 phase B: the HTTP leg reads `GET /indexes/{id}/call_chain`
+/// with the same parameters and returns the `text/plain` body; a 404 keeps
+/// its body so "entry point not found" and "unknown index" stay apart.
+#[tokio::test]
+async fn call_chain_over_http_returns_the_text_body() {
+    let (url, request) = text_stub("200 OK", "## `f` [ENTRY]  src/a.rs:3\n").await;
+    let client = HttpSearchClient::new(url).expect("client builds");
+    let text = client
+        .call_chain("idx", "src/a.rs::f", "both", 1, false)
+        .await
+        .expect("report");
+    assert_eq!(text, "## `f` [ENTRY]  src/a.rs:3\n");
+    let line = request.await.expect("request seen");
+    assert!(
+        line.starts_with(
+            "GET /indexes/idx/call_chain?entry_point=src%2Fa.rs%3A%3Af&direction=both\
+             &max_depth=1&include_source=false "
+        ),
+        "{line}"
+    );
+
+    let (url, _request) =
+        text_stub("404 Not Found", r#"{"error":"entry point not found: g"}"#).await;
+    let client = HttpSearchClient::new(url).expect("client builds");
+    match client.call_chain("idx", "g", "both", 1, false).await {
+        Err(SearchClientError::Api { status: 404, body }) => {
+            assert!(body.contains("entry point not found"), "{body}");
+        }
+        other => panic!("expected Api 404, got {other:?}"),
+    }
+}

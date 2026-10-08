@@ -191,8 +191,9 @@ pub struct RunArgs {
 
     /// Report every context source the review had (#9192, #9194): pr_body,
     /// caller_context, issues, spec_docs, claude_md, changed_files, search,
-    /// analyze and external_sources, each used, truncated, absent (asked for, nothing
-    /// there), unavailable (could not be read) or not_requested. With
+    /// analyze, symbol_context and external_sources, each used, truncated,
+    /// absent (asked for, nothing there), unavailable (could not be read) or
+    /// not_requested. With
     /// `--json` the output becomes `{"result": <review>, "context_sources":
     /// [...]}`; otherwise one line is printed per source that was absent,
     /// unavailable or truncated. Any new input flag does the same. Without
@@ -240,6 +241,16 @@ pub struct RunArgs {
     /// only. Does nothing without `--changed-files`.
     #[arg(long, value_name = "BYTES")]
     pub changed_files_budget: Option<usize>,
+
+    /// For each function or method the diff declares or edits, show its
+    /// callers, callees and tests from the trusty-search call graph, for the
+    /// reviewer only (#9196): at most 12 symbols, 6 lines per list, 2,500
+    /// characters per symbol and 24,000 in total, each cut marked. The graph
+    /// is the indexed checkout's and may not be at the PR head. Works on a
+    /// local diff. A search outage leaves the section out and the review
+    /// runs. Reports context sources.
+    #[arg(long)]
+    pub symbol_context: bool,
 }
 
 // ─── handler ─────────────────────────────────────────────────────────────────
@@ -414,18 +425,19 @@ pub async fn cmd_run(
 /// legacy and turn the ledger on only beside one of those two (ruling
 /// 2026-10-06 03:42Z).
 /// What: the request with `include_pr_body`, `report_context`, (#9193)
-/// `spec_docs` and `claude_md`, and (#9195) `changed_files` and its budget
-/// from the flags.
+/// `spec_docs` and `claude_md`, (#9195) `changed_files` and its budget, and
+/// (#9196) `symbol_context` from the flags.
 /// Test: `run_include_pr_body_flag_parses`, `run_report_context_flag_turns_the_ledger_on`,
 /// `run_flags_set_the_request`, `run_changed_files_flags_set_the_request`,
-/// `changed_files_budget_without_flag_is_inert`.
+/// `changed_files_budget_without_flag_is_inert`, `run_symbol_context_flag_sets_the_request`.
 pub(crate) fn run_request(args: &RunArgs) -> OptionalContextRequest {
     let request = OptionalContextRequest::default()
         .with_pr_body(args.include_pr_body)
         .with_report_context(args.report_context)
         .with_spec_docs(args.spec_docs)
         .with_claude_md(args.claude_md)
-        .with_changed_files(args.changed_files); // #9195
+        .with_changed_files(args.changed_files) // #9195
+        .with_symbol_context(args.symbol_context); // #9196
     match args.changed_files_budget {
         Some(bytes) => request.with_changed_files_budget(bytes), // inert without the flag
         None => request,

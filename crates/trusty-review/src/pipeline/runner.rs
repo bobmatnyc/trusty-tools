@@ -52,6 +52,7 @@ use crate::{
             ledger::ContextLedger,
             probes::ContextRows, // #9194
             seams::{PrHead, load_diff_via, pr_meta_via},
+            symbols_apply::{SymbolsCall, apply_symbols}, // #9196
         },
         parser::parse_review_reply, // #9310: tool-call replies parse their input only
         post::{FinalizeAction, decide_action},
@@ -541,6 +542,9 @@ async fn run_pipeline(
     let paths = (review_path, &mr_config);
     let files = FilesCall::new(options, &diff_source, &filtered, &raw_diff, paths);
     apply_files(&mut applied, files.at(&head), ledger).await;
+    // #9196: each changed symbol's callers, callees and tests, when asked for.
+    let symbols = SymbolsCall::new(options, &deps, config, &facts, &filtered, &raw_diff, paths);
+    apply_symbols(&mut applied, symbols, ledger).await;
     // #9194: every row, once, before either review path (unified, map-reduce).
     let rows = ContextRows {
         search,
