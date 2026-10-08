@@ -44,7 +44,7 @@ async fn review_diff_report_context_turns_the_ledger_on() {
     let rows = envelope["context_sources"]
         .as_array()
         .unwrap_or_else(|| panic!("no context_sources: {envelope}"));
-    assert_eq!(rows.len(), 8, "{envelope}");
+    assert_eq!(rows.len(), 9, "{envelope}"); // #9195: `changed_files` is the 9th
     assert_eq!(rows[0]["source"], "pr_body", "{envelope}");
     assert_eq!(rows[0]["state"], "not_requested", "{envelope}");
 }
@@ -160,18 +160,25 @@ fn both_review_tools_list_report_context() {
 }
 
 /// #9194 byte identity: `tools/list` is the golden captured before B6 once
-/// the new optional `report_context` parameter is set aside.
-/// `UPDATE_GOLDEN=1` rewrites the golden.
+/// the new optional `report_context` parameter, and (#9195) the
+/// `changed_files` and `changed_files_budget` parameters, are set aside. Each
+/// set-aside name must be listed, so a stripped property is never one the
+/// golden did not expect. `UPDATE_GOLDEN=1` rewrites the golden.
 #[test]
-fn tools_list_is_unchanged_apart_from_report_context() {
+fn tools_list_is_unchanged_apart_from_ledger_parameters() {
+    const NEW: [&str; 3] = ["report_context", "changed_files", "changed_files_budget"];
     let mut tools = tool_descriptors();
     if let Some(list) = tools.as_array_mut() {
         for tool in list {
+            let review = tool["name"] == "review_pr" || tool["name"] == "review_diff";
             if let Some(props) = tool
                 .pointer_mut("/inputSchema/properties")
                 .and_then(Value::as_object_mut)
             {
-                props.remove("report_context");
+                for name in NEW {
+                    let removed = props.remove(name).is_some();
+                    assert_eq!(removed, review, "{name} listed on a review tool only");
+                }
             }
         }
     }

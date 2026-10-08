@@ -79,12 +79,95 @@ pub(crate) fn report_context_schema() -> Value {
     serde_json::json!({
         "type": "boolean",
         "description": "Report every context source in a context_sources ledger beside the \
-                        review: pr_body, caller_context, issues, spec_docs, claude_md, search, \
-                        analyze and external_sources, each used, truncated, absent (asked for, \
-                        nothing there), unavailable (could not be read, with the reason), or \
-                        not_requested. Default false; any other new input turns it on too. \
+                        review: pr_body, caller_context, issues, spec_docs, claude_md, \
+                        changed_files, search, analyze and external_sources, each used, \
+                        truncated, absent (asked for, nothing there), unavailable (could not \
+                        be read, with the reason), or not_requested. Default false; any other new input turns it on too. \
                         The review itself is unchanged."
     })
+}
+
+/// Show the PR's changed files whole, on both review tools (#9195).
+pub(crate) const CHANGED_FILES: &str = "changed_files";
+
+/// The byte budget for `changed_files`, on both review tools (#9195).
+pub(crate) const CHANGED_FILES_BUDGET: &str = "changed_files_budget";
+
+/// `request` with `changed_files` and `changed_files_budget` (#9195).
+///
+/// Why: both are new parameters with no legacy callers, so a wrong type is
+/// refused before any work, as `spec_docs` is (amendment 10).
+/// What: absent or `null` leaves each unset. `changed_files` takes a
+/// boolean; `changed_files_budget` a non-negative integer, kept as sent (one
+/// over the ceiling is clamped when the review runs) and inert without the
+/// flag.
+///
+/// # Errors
+///
+/// [`ToolError::InvalidParams`] naming the parameter and the type it got.
+///
+/// Test: `changed_files_mistyped_is_invalid_params`, `changed_files_params_set_the_request`.
+pub(crate) fn with_changed_files(
+    request: OptionalContextRequest,
+    args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    let request = match args.get(CHANGED_FILES) {
+        None | Some(Value::Null) => request,
+        Some(Value::Bool(on)) => request.with_changed_files(*on),
+        Some(other) => {
+            return Err(ToolError::InvalidParams(format!(
+                "'{CHANGED_FILES}' must be a boolean, got {}",
+                type_name(other)
+            )));
+        }
+    };
+    match args.get(CHANGED_FILES_BUDGET) {
+        None | Some(Value::Null) => Ok(request),
+        Some(value) => match value.as_u64() {
+            // A budget past `usize` is over the ceiling anyway; the run clamps it.
+            Some(bytes) => {
+                Ok(request.with_changed_files_budget(usize::try_from(bytes).unwrap_or(usize::MAX)))
+            }
+            None => Err(ToolError::InvalidParams(format!(
+                "'{CHANGED_FILES_BUDGET}' must be a non-negative integer, got {}",
+                type_name(value)
+            ))),
+        },
+    }
+}
+
+/// The `changed_files` JSON Schemas both review tools list (#9195).
+///
+/// Test: `both_review_tools_list_changed_files`.
+pub(crate) fn changed_files_schemas() -> [(&'static str, Value); 2] {
+    [
+        (
+            CHANGED_FILES,
+            serde_json::json!({
+                "type": "boolean",
+                "description": "Show the PR's changed files whole, read at the PR head SHA \
+                                through the GitHub Contents API, for the reviewer only (the \
+                                verifier never sees them), within changed_files_budget bytes. \
+                                Each file is shown whole or named under \"Not shown\" with its \
+                                reason; over budget, tests drop first, then generated files, \
+                                then the largest. The text is context: cite only lines in the \
+                                diff. Default false. review_diff has no head SHA, so it \
+                                reports the source unavailable. The response then carries a \
+                                context_sources ledger."
+            }),
+        ),
+        (
+            CHANGED_FILES_BUDGET,
+            serde_json::json!({
+                "type": "integer",
+                "minimum": 0,
+                "description": "Byte budget for changed_files: default 120,000, at most \
+                                400,000 (a larger value is clamped and reported). The list \
+                                of files not shown is paid for first. 0 reviews the diff \
+                                only. Does nothing without changed_files."
+            }),
+        ),
+    ]
 }
 
 /// `review_pr`'s parsed optional context.
@@ -147,6 +230,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
     parsed.request = with_issue_docs(parsed.request, args)?; // #9197
     parsed.request = with_doc_flags(parsed.request, args)?; // #9193
     parsed.request = with_report_context_flag(parsed.request, args)?; // #9194
+    parsed.request = with_changed_files(parsed.request, args)?; // #9195
     Ok(parsed)
 }
 

@@ -2842,3 +2842,7 @@ mod external_report;
 // #9431: a credentialed trusty-search URL never reaches review output.
 #[path = "runner_credential_url_tests.rs"]
 mod credential_url;
+
+// #9195: the PR's changed files, whole, at the head SHA.
+#[path = "runner_changed_files_tests.rs"]
+mod changed_files;
