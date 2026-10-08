@@ -68,6 +68,20 @@ impl CodeIndexer {
         }
     }
 
+    /// Rebuild the wired vector store's graph now (#9450). M005 calls this
+    /// after dropping orphans; the caller saves. `Ok(None)` without a store.
+    /// Test: `core::migration::m005::tests::m005_compacts_the_graph_after_dropping_orphans`.
+    pub(crate) async fn compact_vector_store(
+        &self,
+    ) -> Result<Option<crate::core::store::CompactReport>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        store
+            .compact_graph(crate::core::store::CompactMode::Always)
+            .await
+    }
+
     /// Which of `ids` the wired vector store holds a vector for (#9447).
     ///
     /// Why: M005 may only hand on a vector that exists, and reports its gap
@@ -291,6 +305,15 @@ impl CodeIndexer {
         self.persist_state.reindexing.store(true, Ordering::Release);
     }
 
+    /// A probe for "is a staged reindex running?" that outlives `&self`
+    /// (#9450): the background load heal must not write the live snapshot
+    /// while one is.
+    /// Test: `service::persistence_loader::tests::build_indexer_from_entry_heals_a_legacy_snapshot_in_the_background`.
+    pub fn reindex_staging_probe(&self) -> crate::core::store::ReindexProbe {
+        let state = Arc::clone(&self.persist_state);
+        Arc::new(move || state.reindexing.load(Ordering::Acquire))
+    }
+
     /// End staged HNSW persistence (issue #3970).
     ///
     /// Why: counterpart of [`Self::begin_reindex_staging`] — called once the
@@ -484,6 +507,7 @@ impl CodeIndexer {
         let chunks = self.chunks.clone();
         let entities = self.entities.clone();
         let persist_state = self.persist_state.clone();
+        let reindex_probe = self.reindex_staging_probe();
         // Issue #28: when a redb `CorpusStore` is wired, the chunk corpus is
         // already persisted transactionally per-batch by `commit_corpus_to_redb`.
         // Skipping the full-rewrite `chunks.json` snapshot here eliminates the
@@ -557,6 +581,30 @@ impl CodeIndexer {
 
                 // Save HNSW first (large, parallel-friendly).
                 if let Some(store) = &store {
+                    // #9450: rebuild a churned graph before it is saved. Not
+                    // during a reindex, which replaces most vectors anyway —
+                    // the idle persist after it compacts once.
+                    if !reindexing {
+                        let compacted = match store
+                            .compact_graph(crate::core::store::CompactMode::IfDue)
+                            .await
+                        {
+                            Ok(report) => report.is_some(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "incremental persist: compaction for '{index_id}' failed \
+                                     ({e:#}) — saving the current graph (#9450)"
+                                );
+                                false
+                            }
+                        };
+                        // #9450: writes are rarely quiet this soon after a
+                        // commit; compact once they are.
+                        if !compacted {
+                            Arc::clone(store)
+                                .spawn_compact_once_quiet(index_id.clone(), reindex_probe.clone());
+                        }
+                    }
                     if let Err(e) = store.save_to(&hnsw_target).await {
                         tracing::warn!(
                             "incremental persist: failed to save HNSW for '{index_id}' \

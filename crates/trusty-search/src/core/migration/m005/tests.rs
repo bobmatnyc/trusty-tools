@@ -417,6 +417,30 @@ async fn m005_reuses_the_existing_vectors() {
     }
 }
 
+/// #9450: M005 rebuilds the HNSW graph after dropping orphans, whatever the
+/// churn count. One removal leaves churn far below the threshold, so only the
+/// unconditional compaction clears it; the vector count must not change.
+#[tokio::test]
+async fn m005_compacts_the_graph_after_dropping_orphans() {
+    let f = fixture().await;
+    f.store
+        .upsert("probe-9450", seed_vector("probe"))
+        .await
+        .unwrap();
+    f.store.remove("probe-9450").await.unwrap();
+    assert_eq!(f.store.churn_since_compact(), 1);
+    let vectors_before = f.store.len().await.unwrap();
+
+    M005ChunkIdEndLine.apply(&f.handle).await.expect("apply");
+
+    assert_eq!(
+        f.store.churn_since_compact(),
+        0,
+        "M005 must compact the graph before its save (#9450)"
+    );
+    assert_eq!(f.store.len().await.unwrap(), vectors_before);
+}
+
 /// Running `apply` twice must leave the second run with nothing to do — the
 /// crash-retry contract every migration owes.
 #[tokio::test]

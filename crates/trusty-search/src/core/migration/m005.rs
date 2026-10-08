@@ -302,13 +302,21 @@ impl M005ChunkIdEndLine {
                 unreadable.len()
             );
         }
-        if !orphans.is_empty() {
+        {
             let indexer = indexer_arc.read().await;
-            indexer.remove_vectors(&orphans).await;
+            if !orphans.is_empty() {
+                indexer.remove_vectors(&orphans).await;
+            }
+            // #9450: rebuild the graph whatever the churn count, before the
+            // save. A failure leaves the old graph serving; the load heal and
+            // the churn threshold retry it.
+            if let Err(e) = indexer.compact_vector_store().await {
+                tracing::warn!(index_id = %index.id, "M005: graph compaction failed ({e:#})");
+            }
             indexer
                 .save_vector_store(&hnsw_path)
                 .await
-                .context("M005: could not flush the HNSW sidecar after dropping orphans")?;
+                .context("M005: could not flush the HNSW snapshot after compaction")?;
         }
         // #9447: the gap is read from the store, so it is exact — it used to be
         // claim bookkeeping that read 0 while 38,394 chunks had no vector.

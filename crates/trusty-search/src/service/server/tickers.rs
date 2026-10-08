@@ -301,9 +301,14 @@ async fn run_idle_eviction_tick(state: &Arc<SearchAppState>, base_secs: u64) -> 
         // demote paths.
         let write_cooldown =
             crate::core::store_config::hnsw_demote_cooldown().unwrap_or(Duration::ZERO);
-        indexer
-            .persist_and_demote_vector_store_after_write_cooldown(write_cooldown)
-            .await;
+        // #9450: the save, compaction and demote run without the indexer
+        // guard, so a reindex writer never waits on them with searches
+        // queued behind it.
+        let persist = indexer.write_cooldown_persist(write_cooldown);
+        drop(indexer);
+        if let Some(persist) = persist {
+            persist.run().await;
+        }
     }
     total_evicted
 }
