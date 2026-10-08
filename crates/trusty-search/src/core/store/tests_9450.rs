@@ -147,6 +147,8 @@ async fn churned_store(seed: u64) -> Churned {
             }
         }
         store.upsert_batch(&batch).await.expect("replace batch");
+        // #9450: an `IfDue` compaction starts only once writes are quiet.
+        tokio::time::sleep(store.compaction_quiet_window()).await;
         store
             .persist_and_demote_after_write_cooldown(Duration::from_nanos(1))
             .await
@@ -323,6 +325,8 @@ async fn churn_past_the_threshold_compacts_at_the_next_persist() {
     }
     assert_eq!(store.churn_since_compact(), 104);
     let live = store.len().await.expect("len");
+    // #9450: an `IfDue` compaction starts only once writes are quiet.
+    tokio::time::sleep(store.compaction_quiet_window()).await;
     let demoted = store
         .persist_and_demote_after_write_cooldown(Duration::from_nanos(1))
         .await

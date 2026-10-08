@@ -20,7 +20,8 @@
 //! through the shrink-guarded `save`, and the sidecar records which graph
 //! file its heal marker describes ([`verified_heal_epoch`]). Callers:
 //! - the idle write-cooldown persist (not during a staged reindex) and the
-//!   incremental persister, once churn crosses [`compact_threshold`];
+//!   incremental persister, once churn crosses [`compact_threshold`] or the
+//!   graph is unhealed, and writes have gone quiet;
 //! - M005, unconditionally, after it drops orphaned vectors;
 //! - [`UsearchStore::heal_on_load`], once per pre-#9450 snapshot.
 //!
@@ -29,7 +30,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::Semaphore;
@@ -63,6 +64,20 @@ const COMPACT_CHURN_DIVISOR: u64 = 10;
 /// Floor on the threshold so a tiny index does not rebuild on every persist.
 const MIN_COMPACT_CHURN: u64 = 32;
 
+/// Shortest write-quiet window before an `IfDue` compaction starts (#9450).
+/// The window is the last build's duration when that is longer.
+const COMPACT_QUIET_FLOOR: Duration = Duration::from_secs(1);
+
+/// A compaction lost the race with a write between the copy and the swap
+/// (#9450). Not a failure: the next quiet `IfDue` compaction retries it, so
+/// it arms no churn back-off.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "compaction abandoned: the graph was written during the rebuild — the live graph keeps \
+     serving and a later persist retries (#9450)"
+)]
+pub(super) struct CompactAbandoned;
+
 /// One compaction at a time across the daemon (#9450): each rebuild holds a
 /// second copy of its graph on the heap until the swap, so a warm boot
 /// healing every index at once would multiply the peak. The load heal keeps
@@ -85,9 +100,12 @@ pub(super) fn compact_threshold(live: usize) -> u64 {
 pub(crate) struct CompactState {
     churn: AtomicU64,
     heal_epoch: AtomicU32,
-    /// After a failed `IfDue` compaction, the churn count at which to try
-    /// again; 0 = no back-off. In memory only.
+    /// After a failed (not abandoned) compaction, the churn count at which
+    /// to try again; 0 = no back-off. In memory only.
     retry_at_churn: AtomicU64,
+    /// Wall time of the last build that ran to completion, in ms; sets the
+    /// `IfDue` write-quiet window. In memory only.
+    last_build_ms: AtomicU64,
     /// Whole-graph replacements by an adopted snapshot ([`Self::restore`]),
     /// which bypass `mark_dirty`; part of `UsearchStore::graph_epoch`.
     replaced: AtomicU64,
@@ -101,6 +119,7 @@ impl CompactState {
             churn: AtomicU64::new(0),
             heal_epoch: AtomicU32::new(GRAPH_HEAL_EPOCH),
             retry_at_churn: AtomicU64::new(0),
+            last_build_ms: AtomicU64::new(0),
             replaced: AtomicU64::new(0),
         }
     }
@@ -145,27 +164,67 @@ impl UsearchStore {
         self.compact.heal_epoch()
     }
 
-    /// `true` when churn has crossed [`compact_threshold`] and no back-off
-    /// from a failed attempt is pending.
+    /// `true` when the graph is unhealed or churn has crossed
+    /// [`compact_threshold`], and no back-off from a failed attempt is
+    /// pending.
+    /// Test: `super::compact_9450_tests::an_abandoned_load_heal_runs_once_writes_stop`.
     async fn compaction_due(&self) -> bool {
         let live = self.index.read().await.size();
         let churn = self.compact.churn();
-        churn >= compact_threshold(live)
+        // #9450: an unhealed graph stays due until a heal swaps.
+        let unhealed = self.compact.heal_epoch() < GRAPH_HEAL_EPOCH;
+        (unhealed || churn >= compact_threshold(live))
             && churn >= self.compact.retry_at_churn.load(Ordering::Acquire)
+    }
+
+    /// How long writes must have been quiet before an `IfDue` compaction
+    /// starts: the last completed build's duration, at least
+    /// [`COMPACT_QUIET_FLOOR`] (#9450).
+    pub(crate) fn compaction_quiet_window(&self) -> Duration {
+        Duration::from_millis(self.compact.last_build_ms.load(Ordering::Acquire))
+            .max(COMPACT_QUIET_FLOOR)
+    }
+
+    /// `true` when no write landed within [`Self::compaction_quiet_window`].
+    fn writes_quiet(&self) -> bool {
+        self.write_clock
+            .since_last_write()
+            .is_none_or(|since| since >= self.compaction_quiet_window())
+    }
+
+    /// An `IfDue` compaction should start: due, and writes are quiet.
+    async fn if_due_ready(&self) -> bool {
+        self.writes_quiet() && self.compaction_due().await
+    }
+
+    /// After a failed compaction, back off until churn grows by another
+    /// threshold. An abandon is not a failure and arms nothing (#9450).
+    async fn back_off_unless_abandoned(&self, e: &anyhow::Error) {
+        if e.is::<CompactAbandoned>() {
+            return;
+        }
+        let live = self.index.read().await.size();
+        let retry = self.compact.churn().saturating_add(compact_threshold(live));
+        self.compact.retry_at_churn.store(retry, Ordering::Release);
     }
 
     /// Rebuild the graph now (`Always`) or only when churn is due (`IfDue`).
     ///
     /// Why: see the module docs.
-    /// What: `IfDue` returns `Ok(None)` below the threshold, checked again
-    /// once the daemon-wide heal gate is held, so a caller that queued behind
-    /// a compaction does not rebuild a second time. Then
-    /// [`Self::compact_with_fault`]. A failed or abandoned `IfDue` attempt
-    /// backs off until churn grows by another threshold, so a rebuild that
-    /// cannot succeed is not retried on every persist. Writes nothing to disk.
+    /// What: `IfDue` returns `Ok(None)` unless the graph is due (unhealed, or
+    /// churn past the threshold) and writes have been quiet for
+    /// [`Self::compaction_quiet_window`], so a build does not start while
+    /// writes are arriving and lose the race. Checked again once the
+    /// daemon-wide heal gate is held, so a caller that queued behind a
+    /// compaction does not rebuild a second time. Then
+    /// [`Self::compact_with_fault`]. A failed `IfDue` attempt backs off until
+    /// churn grows by another threshold, so a rebuild that cannot succeed is
+    /// not retried on every persist; an abandoned one does not, so it runs
+    /// again once writes stop. Writes nothing to disk.
     /// Test: `super::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`,
     /// `super::tests_9450::a_failed_compaction_keeps_the_churn_count_and_marker`,
-    /// `super::compact_9450_tests::two_queued_compactions_rebuild_once`.
+    /// `super::compact_9450_tests::two_queued_compactions_rebuild_once`,
+    /// `super::compact_9450_tests::an_abandoned_if_due_compaction_runs_once_writes_stop`.
     pub async fn compact_graph_now(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
         self.compact_graph_with_fault(mode, no_fault()).await
     }
@@ -177,24 +236,23 @@ impl UsearchStore {
         mode: CompactMode,
         fault: RebuildFault,
     ) -> Result<Option<CompactReport>> {
-        if mode == CompactMode::IfDue && !self.compaction_due().await {
+        if mode == CompactMode::IfDue && !self.if_due_ready().await {
             return Ok(None);
         }
         let _permit = HEAL_GATE
             .acquire()
             .await
             .map_err(|e| anyhow!("compaction gate closed: {e}"))?;
-        // #9450: another caller may have compacted while this one waited.
-        if mode == CompactMode::IfDue && !self.compaction_due().await {
+        // #9450: another caller may have compacted, or writes may have
+        // arrived, while this one waited.
+        if mode == CompactMode::IfDue && !self.if_due_ready().await {
             return Ok(None);
         }
         match self.compact_with_fault(fault).await {
             Ok(report) => Ok(Some(report)),
             Err(e) => {
                 if mode == CompactMode::IfDue {
-                    let live = self.index.read().await.size();
-                    let retry = self.compact.churn().saturating_add(compact_threshold(live));
-                    self.compact.retry_at_churn.store(retry, Ordering::Release);
+                    self.back_off_unless_abandoned(&e).await;
                 }
                 Err(e)
             }
@@ -231,6 +289,11 @@ impl UsearchStore {
             .to_string();
 
         let (rebuilt, missing) = build_from_snapshot(snapshot, label, fault).await?;
+        // #9450: the next `IfDue` waits at least this long for quiet writes.
+        let built_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.compact
+            .last_build_ms
+            .store(built_ms, Ordering::Release);
         let vectors_after = rebuilt.size();
         // #9450 postcondition: every mapped key the old graph returned is in
         // the new one. A failed add aborts the build, so a mismatch means a
@@ -244,12 +307,9 @@ impl UsearchStore {
         let swap_gate = self.save_lock.lock().await;
         self.refuse_if_closed("compact")?;
         // #9450: a write since the copy is not in `rebuilt`; swapping would
-        // lose it. Abandon; the next due persist retries.
+        // lose it. Abandon; the next quiet `IfDue` compaction retries.
         if self.graph_epoch() != base_epoch || self.compact.churn() != base_churn {
-            return Err(anyhow!(
-                "compaction abandoned: the graph was written during the rebuild — the live \
-                 graph keeps serving and a later persist retries (#9450)"
-            ));
+            return Err(CompactAbandoned.into());
         }
         let replaced = {
             let mut index = self.index.write().await;
@@ -302,9 +362,12 @@ impl UsearchStore {
     /// during the compaction skips the save: its own staged checkpoints carry
     /// the rebuilt graph and marker, and the live snapshot stays the
     /// pre-reindex one an abort restores (#3975). A failed compaction or
-    /// save leaves the on-disk marker unset, so the next load heals again.
+    /// save leaves the marker unset, so the graph stays due: the next quiet
+    /// `IfDue` compaction heals it, or the next load. A failed (not
+    /// abandoned) compaction arms the churn back-off, as an `IfDue` one does.
     /// Test: `super::tests_9450::the_load_heal_runs_once`,
-    /// `super::tests_9450::the_load_heal_never_saves_during_a_reindex`.
+    /// `super::tests_9450::the_load_heal_never_saves_during_a_reindex`,
+    /// `super::compact_9450_tests::an_abandoned_load_heal_runs_once_writes_stop`.
     pub async fn heal_on_load(
         &self,
         reindexing: &(dyn Fn() -> bool + Sync),
@@ -318,8 +381,8 @@ impl UsearchStore {
         reindexing: &(dyn Fn() -> bool + Sync),
         fault: RebuildFault,
     ) -> Result<Option<CompactReport>> {
-        let needs_heal = |store: &Self| store.compact.heal_epoch() < GRAPH_HEAL_EPOCH;
-        if !needs_heal(self) && !self.compaction_due().await {
+        // #9450: `compaction_due` covers the unhealed graph too.
+        if !self.compaction_due().await {
             return Ok(None);
         }
         let _permit = HEAL_GATE
@@ -327,13 +390,19 @@ impl UsearchStore {
             .await
             .map_err(|e| anyhow!("compaction gate closed: {e}"))?;
         // Re-check: another trigger may have compacted while this one waited.
-        if (!needs_heal(self) && !self.compaction_due().await) || reindexing() {
+        if !self.compaction_due().await || reindexing() {
             return Ok(None);
         }
         let Some(path) = self.hnsw_path.read().await.clone() else {
             return Ok(None);
         };
-        let report = self.compact_with_fault(fault).await?;
+        let report = match self.compact_with_fault(fault).await {
+            Ok(report) => report,
+            Err(e) => {
+                self.back_off_unless_abandoned(&e).await;
+                return Err(e);
+            }
+        };
         if reindexing() {
             return Ok(Some(report));
         }

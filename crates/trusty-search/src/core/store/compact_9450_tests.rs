@@ -113,6 +113,8 @@ async fn two_queued_compactions_rebuild_once() {
         store.remove(&id).await.expect("remove");
     }
     // 100 churn against a threshold of max(900 / 10, 32) = 90.
+    // #9450: an `IfDue` compaction starts only once writes are quiet.
+    tokio::time::sleep(store.compaction_quiet_window()).await;
     let (first, second) = tokio::join!(
         store.compact_graph_now(CompactMode::IfDue),
         store.compact_graph_now(CompactMode::IfDue)

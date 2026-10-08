@@ -53,6 +53,8 @@ async fn the_persister_compacts_a_churned_graph_outside_a_reindex() {
     );
     indexer.end_reindex_staging();
 
+    // #9450: an `IfDue` compaction starts only once writes are quiet.
+    tokio::time::sleep(store.compaction_quiet_window()).await;
     indexer.force_incremental_persist();
     assert!(wait_persist_task_done(&indexer).await, "persist finishes");
     assert_eq!(
@@ -101,7 +103,8 @@ async fn the_idle_persist_never_compacts_during_a_reindex() {
     indexer.end_reindex_staging();
 
     store.remove("c60").await.expect("remove");
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    // #9450: an `IfDue` compaction starts only once writes are quiet.
+    tokio::time::sleep(store.compaction_quiet_window()).await;
     assert!(
         indexer
             .persist_and_demote_vector_store_after_write_cooldown(cooldown)
