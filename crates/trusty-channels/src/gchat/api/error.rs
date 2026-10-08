@@ -182,7 +182,7 @@ mod tests {
     fn error_message_redacts_before_truncating() {
         // The secret straddles the truncation point: truncating first would
         // keep a prefix of it that the replace could no longer match.
-        let secret = "ya29.secret-token-value";
+        let secret = "ya29.secret-token-value"; // pragma: allowlist secret
         let padding = "x".repeat(ERROR_MESSAGE_MAX_CHARS - 5);
         let body = format!("{{\"error\":{{\"message\":\"{padding}{secret}\"}}}}");
         let msg = error_message(&body, &[secret]);

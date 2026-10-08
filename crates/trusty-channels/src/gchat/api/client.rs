@@ -12,7 +12,8 @@
 //! Test: `tests/gchat_http.rs` — `create_message_sends_bearer_path_and_thread_key`,
 //! `create_message_non_2xx_is_typed_and_never_contains_the_token`,
 //! `pull_decodes_events_and_isolates_malformed_messages`,
-//! `acknowledge_sends_exactly_the_given_ack_ids`; here
+//! `acknowledge_sends_exactly_the_given_ack_ids`,
+//! `unauthorized_chat_call_drops_the_cached_token`; here
 //! `resource_names_reject_path_injection`.
 
 use std::path::Path;
@@ -88,7 +89,9 @@ pub struct CreateMessage {
     pub text: String,
     /// App-defined thread key; sent as the body's `thread.threadKey`.
     pub thread_key: Option<String>,
-    /// Whether the message replies in the keyed thread.
+    /// Whether the message replies in the keyed thread. `None` with a
+    /// `thread_key` set sends `ReplyFallbackToNewThread`: Chat's default
+    /// (`MESSAGE_REPLY_OPTION_UNSPECIFIED`) ignores the thread key.
     pub reply_option: Option<MessageReplyOption>,
     /// Idempotency key: a retry with the same id returns the first message.
     pub request_id: Option<String>,
@@ -187,8 +190,11 @@ impl GchatClient {
     /// What: `POST {chat}/v1/{space}/messages` with body
     /// `{"text", "thread": {"threadKey"}}` and query `messageReplyOption` /
     /// `requestId` when set. The deprecated `threadKey` query parameter is not
-    /// used; Chat's reference directs callers to `thread.threadKey`.
+    /// used; Chat's reference directs callers to `thread.threadKey`. A thread
+    /// key with no reply option defaults to `ReplyFallbackToNewThread`, since
+    /// Chat's own default ignores the key and would drop the binding.
     /// Test: `create_message_sends_bearer_path_and_thread_key`,
+    /// `create_message_with_thread_key_defaults_to_fallback_reply`,
     /// `create_message_non_2xx_is_typed_and_never_contains_the_token`.
     pub async fn create_message(&self, request: &CreateMessage) -> Result<ChatMessage, GchatError> {
         validate_space(&request.space)?;
@@ -198,7 +204,12 @@ impl GchatClient {
             request.space
         );
         let mut query: Vec<(&str, &str)> = Vec::new();
-        if let Some(option) = request.reply_option {
+        // #9448: Chat's unspecified option starts a new thread and ignores the key.
+        let reply_option = request.reply_option.or(request
+            .thread_key
+            .as_ref()
+            .map(|_| MessageReplyOption::ReplyFallbackToNewThread));
+        if let Some(option) = reply_option {
             query.push(("messageReplyOption", option.as_str()));
         }
         if let Some(id) = request.request_id.as_deref() {
@@ -305,9 +316,12 @@ impl GchatClient {
 }
 
 /// True when `s` is one non-empty resource-id segment: no `/`, `?`, `#`, `%`
-/// or whitespace that could reshape the request URL.
+/// or whitespace that could reshape the request URL, and not the dot segment
+/// `.` or `..`, which URL parsing would remove or resolve away.
 fn is_segment(s: &str, extra: &[char]) -> bool {
     !s.is_empty()
+        && s != "."
+        && s != ".."
         && s.chars().all(|c| {
             c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') || extra.contains(&c)
         })
@@ -354,6 +368,8 @@ mod tests {
             "spaces/A?x=1",
             "rooms/A",
             "spaces/a%2Fb",
+            "spaces/.",
+            "spaces/..",
         ] {
             assert!(validate_space(bad).is_err(), "{bad} accepted");
         }
@@ -364,6 +380,10 @@ mod tests {
             "projects/p/subscriptions/s/x",
             "projects/p/subscriptions/s:pull",
             "projects/p q/subscriptions/s",
+            "projects/./subscriptions/s",
+            "projects/../subscriptions/s",
+            "projects/p/subscriptions/.",
+            "projects/p/subscriptions/..",
         ] {
             assert!(validate_subscription(bad).is_err(), "{bad} accepted");
         }

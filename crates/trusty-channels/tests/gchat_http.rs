@@ -210,11 +210,24 @@ async fn jwt_assertion_verifies_with_the_public_key_and_carries_the_claims() {
 async fn token_endpoint_refusal_is_typed_and_redacted() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().expect("tempdir");
+    // A hostile endpoint that echoes the signed assertion back in its error.
+    let echoed = Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = Arc::clone(&echoed);
     Mock::given(method("POST"))
         .and(path("/token"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "error": "invalid_grant", "error_description": "Invalid JWT Signature."
-        })))
+        .respond_with(move |req: &wiremock::Request| {
+            let form = String::from_utf8_lossy(&req.body).into_owned();
+            let assertion = form
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("assertion="))
+                .unwrap_or_default()
+                .to_string();
+            *seen.lock().expect("lock") = assertion.clone();
+            ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": format!("Invalid JWT Signature: {assertion}")
+            }))
+        })
         .mount(&server)
         .await;
     let err = client(&server, dir.path())
@@ -226,6 +239,92 @@ async fn token_endpoint_refusal_is_typed_and_redacted() {
         matches!(&err, GchatError::TokenEndpoint { status: 400, message } if message.starts_with("invalid_grant")),
         "{err:?}"
     );
+    let assertion = echoed.lock().expect("lock").clone();
+    assert!(
+        assertion.len() > 100,
+        "mock saw no assertion: {assertion:?}"
+    );
+    // The message is truncated to 300 chars, which can cut the full assertion
+    // short, so check for its leading 60 chars.
+    let prefix = &assertion[..60];
+    for text in [err.to_string(), format!("{err:?}")] {
+        assert!(!text.contains(prefix), "assertion leaked: {text}");
+    }
+}
+
+#[tokio::test]
+async fn unauthorized_chat_call_drops_the_cached_token() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    mount_token(&server, 3600, 2).await;
+    // First Chat call: 401 (a revoked token). Later calls succeed.
+    Mock::given(method("POST"))
+        .and(path("/v1/spaces/AAAA/messages"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {"code": 401, "message": "Request had invalid authentication credentials."}
+        })))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/spaces/AAAA/messages"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/AAAA/messages/M3"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client(&server, dir.path());
+    let request = CreateMessage {
+        space: "spaces/AAAA".into(),
+        text: "hi".into(),
+        ..CreateMessage::default()
+    };
+    let err = client.create_message(&request).await.expect_err("401");
+    assert!(
+        matches!(err, GchatError::Http { status: 401, .. }),
+        "{err:?}"
+    );
+    client
+        .create_message(&request)
+        .await
+        .expect("retry succeeds");
+    assert_eq!(
+        token_requests(&server).await.len(),
+        2,
+        "the 401 did not drop the cached token"
+    );
+}
+
+#[tokio::test]
+async fn create_message_with_thread_key_defaults_to_fallback_reply() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    mount_token(&server, 3600, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/v1/spaces/AAAA/messages"))
+        .and(query_param(
+            "messageReplyOption",
+            "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+        ))
+        .and(body_partial_json(json!({"thread": {"threadKey": "q-9"}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"name": "spaces/AAAA/messages/M4"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let request = CreateMessage {
+        space: "spaces/AAAA".into(),
+        text: "Question?".into(),
+        thread_key: Some("q-9".into()),
+        ..CreateMessage::default()
+    };
+    client(&server, dir.path())
+        .create_message(&request)
+        .await
+        .expect("a keyed message without a reply option must default to fallback");
 }
 
 #[tokio::test]
