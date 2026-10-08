@@ -203,7 +203,14 @@ async fn a_drawer_superseded_by_a_missing_drawer_keeps_its_score() {
         None,
     )
     .await;
-    remember(&state, "project-a", "billing pool size is twelve", &[], None).await;
+    remember(
+        &state,
+        "project-a",
+        "billing pool size is twelve",
+        &[],
+        None,
+    )
+    .await;
     let surfaces = [
         Surface::McpRecall,
         Surface::McpRecallDeep,

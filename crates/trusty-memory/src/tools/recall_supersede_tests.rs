@@ -204,9 +204,7 @@ fn handle_with(dir: &std::path::Path, seed: &Seed) -> PalaceHandle {
             store.assert(&triple).expect("seed edge");
         }
         for id in seed.rows.iter().chain(&seed.corrupt) {
-            store
-                .upsert_drawer(&drawer(*id))
-                .expect("seed drawer row");
+            store.upsert_drawer(&drawer(*id)).expect("seed drawer row");
         }
     }
     if !seed.corrupt.is_empty() {
@@ -307,6 +305,9 @@ async fn an_unverifiable_replacement_demotes_nothing() {
     assert_eq!(found, Supersessions::from([(old_ok, ok)]), "{found:?}");
     let lines = log.lines_naming("#9462");
     assert_eq!(lines.len(), 1, "{lines:?}");
-    assert!(lines[0].contains("WARN") && lines[0].contains("p-9462"), "{lines:?}");
+    assert!(
+        lines[0].contains("WARN") && lines[0].contains("p-9462"),
+        "{lines:?}"
+    );
     assert!(lines[0].contains(&unreadable.to_string()), "{lines:?}");
 }
