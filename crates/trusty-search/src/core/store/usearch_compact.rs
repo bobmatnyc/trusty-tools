@@ -165,7 +165,7 @@ impl UsearchStore {
     /// cannot succeed is not retried on every persist. Writes nothing to disk.
     /// Test: `super::tests_9450::churn_past_the_threshold_compacts_at_the_next_persist`,
     /// `super::tests_9450::a_failed_compaction_keeps_the_churn_count_and_marker`,
-    /// `super::tests_9450::two_queued_compactions_rebuild_once`.
+    /// `super::compact_9450_tests::two_queued_compactions_rebuild_once`.
     pub async fn compact_graph_now(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
         if mode == CompactMode::IfDue && !self.compaction_due().await {
             return Ok(None);
@@ -206,7 +206,7 @@ impl UsearchStore {
     /// the store is mutable and dirty, churn is zero, the marker is current.
     /// Test: `super::tests_9450::compaction_keeps_every_key`,
     /// `super::tests_9450::a_failed_rebuild_leaves_the_old_index_serving`,
-    /// `super::tests_9450::a_write_during_a_compaction_waits_only_for_the_copy`.
+    /// `super::compact_9450_tests::a_write_during_a_compaction_waits_only_for_the_copy`.
     pub(super) async fn compact_with_fault(&self, fault: RebuildFault) -> Result<CompactReport> {
         let started = Instant::now();
         let snapshot = {
@@ -367,7 +367,7 @@ pub(super) fn graph_stamp(path: &Path) -> Option<GraphStamp> {
 /// What: the recorded marker when the sidecar's [`GraphStamp`] matches the
 /// file now at `path`; 0 (heal again) when it does not or none was recorded.
 /// A copied index (new inode) heals once more, which is the safe direction.
-/// Test: `super::tests_9450::a_crash_between_the_renames_heals_again`.
+/// Test: `super::compact_9450_tests::a_crash_between_the_renames_heals_again`.
 pub(super) fn verified_heal_epoch(path: &Path, key_map: &StoreKeyMap) -> u32 {
     if key_map.heal_epoch == 0 {
         return 0;

@@ -13,7 +13,7 @@
 //! [`build_from_snapshot`] builds the new graph from that copy with no store
 //! lock held. The caller swaps only if [`UsearchStore::graph_epoch`] and the
 //! churn count are unchanged, so a write during the build is never lost.
-//! Test: `super::tests_9450::a_write_during_a_compaction_waits_only_for_the_copy`.
+//! Test: `super::compact_9450_tests::a_write_during_a_compaction_waits_only_for_the_copy`.
 
 use anyhow::{anyhow, Result};
 use usearch::{Index, ScalarKind};

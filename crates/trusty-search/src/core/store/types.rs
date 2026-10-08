@@ -71,7 +71,7 @@ pub(super) struct StoreKeyMap {
 }
 
 /// Identity of a published graph file: byte length and inode (#9450).
-/// Test: `store::tests_9450::a_crash_between_the_renames_heals_again`.
+/// Test: `store::compact_9450_tests::a_crash_between_the_renames_heals_again`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct GraphStamp {
     pub(super) len: u64,

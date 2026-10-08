@@ -28,6 +28,9 @@ mod tests_9414;
 mod clustered_vectors;
 #[cfg(test)]
 mod tests_9450;
+// #9450 fix round: writes during a compaction, queued callers, crash safety.
+#[cfg(test)]
+mod compact_9450_tests;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.
