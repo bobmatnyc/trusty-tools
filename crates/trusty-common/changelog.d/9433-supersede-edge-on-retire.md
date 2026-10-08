@@ -1,2 +1,0 @@
-Fixed
-- A Tier C write that retires a `fact_key` slot's incumbent now records `drawer:<retired> superseded_by drawer:<newcomer>` after the atomic retire-and-replace commit, so recall ranks the retired fact below its replacement. A failed commit writes no edge. A failed edge write leaves the remember successful and logs a WARN naming the palace and both drawers. Existing palaces are not backfilled (#9433).
