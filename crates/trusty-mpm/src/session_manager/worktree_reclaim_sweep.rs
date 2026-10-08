@@ -544,7 +544,8 @@ pub(crate) struct FreshProbes<'a> {
     /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
     /// An empty slice is the pre-#7504 behaviour — a no-op gate.
     pub launched_from: &'a [PathBuf],
-    /// Name any live process whose cwd is inside a candidate (#7540).
+    /// Name any live process owned by the daemon's user whose cwd is inside a
+    /// candidate (#7540).
     ///
     /// Why: `launched_from` covers only the sweeping process, and the claim
     /// and agent gates cover only what trusty-mpm registered. An unmanaged
@@ -555,6 +556,9 @@ pub(crate) struct FreshProbes<'a> {
     /// because other processes' cwds DO change during a sweep. `Some(reason)`
     /// refuses, covering both "a process stands in it" and "could not look"
     /// (ADR-0045). Production passes [`process_holding`].
+    ///
+    /// Known limit: without root, `lsof` omits other users' processes and
+    /// still exits 0, so a process another user owns does not block.
     /// Test: `reclaim_remove_mode_spares_a_worktree_an_unregistered_process_stands_in`.
     pub cwd_holder: &'a dyn Fn(&Path) -> Option<String>,
     /// Take a candidate's landed proof before its deletion (#8109).

@@ -1709,9 +1709,17 @@ fn reclaim_remove_mode_spares_a_worktree_an_unregistered_process_stands_in() {
     );
     assert!(out.removed.is_empty(), "outcome: {out:?}");
     let refused = format!("{:?}", out.refused_at_recheck);
-    // A host with no `lsof` refuses every removal by design (ADR-0045); where
-    // the probe runs, the refusal must name the process it found.
-    let probe_unavailable = refused.contains("could not run") || refused.contains("exited");
+    // A host with no working `lsof` refuses every removal by design (ADR-0045);
+    // where the probe runs, the refusal must name the process it found. The
+    // unavailable arms are matched on `run_cwd_probe`'s exact refusal prefixes.
+    let probe_unavailable = [
+        "could not run `lsof` to check for live processes:",
+        "`lsof` timed out after ",
+    ]
+    .iter()
+    .any(|prefix| refused.contains(prefix))
+        || (refused.contains("`lsof` exited ")
+            && refused.contains(" while checking for live processes:"));
     assert!(
         probe_unavailable || refused.contains(&format!("pid {} ", child.0.id())),
         "the refusal must name the unregistered process: {refused}"
