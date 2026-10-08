@@ -177,6 +177,24 @@ async fn self_recall_misses(
     misses
 }
 
+/// Each item's ordered top-10 hits for its own vector, as chunk id and score
+/// bits, in `items` order.
+async fn self_search_hits(
+    store: &UsearchStore,
+    items: &[(String, Vec<f32>)],
+) -> Vec<Vec<(String, u32)>> {
+    let mut all = Vec::with_capacity(items.len());
+    for (_, v) in items {
+        let hits = store.search(v, 10).await.expect("search");
+        all.push(
+            hits.into_iter()
+                .map(|h| (h.chunk_id, h.score.to_bits()))
+                .collect(),
+        );
+    }
+    all
+}
+
 /// `size` plus `contains` for every key, the #9450 no-key-loss check.
 pub(super) async fn assert_every_key_present(
     store: &UsearchStore,
@@ -364,7 +382,8 @@ async fn compaction_keeps_every_key() {
 }
 
 /// #9450 crash safety: a rebuild that fails halfway leaves the old graph
-/// serving every key, and the snapshot on disk byte-for-byte intact. 12K
+/// serving every key with the same self-search hits as before, and the
+/// snapshot on disk byte-for-byte intact. 12K
 /// keys put the rebuild on several threads, so the abort crosses threads.
 #[tokio::test]
 async fn a_failed_rebuild_leaves_the_old_index_serving() {
@@ -375,6 +394,11 @@ async fn a_failed_rebuild_leaves_the_old_index_serving() {
     store.save(&path).await.expect("save");
     let snapshot = std::fs::read(&path).expect("read snapshot");
     let keys = std::fs::read(path.with_extension("keys.json")).expect("read sidecar");
+    // #9450: a fresh f16 graph's own self-recall is not perfect and varies
+    // with the SIMD kernel, so the failed rebuild is held to "changed
+    // nothing". A search on an unchanged graph is read-only and deterministic,
+    // tied scores included, so any difference is a side effect of the rebuild.
+    let before = self_search_hits(&store, &items).await;
 
     let half = items.len() / 2;
     let err = store
@@ -390,8 +414,20 @@ async fn a_failed_rebuild_leaves_the_old_index_serving() {
     assert!(err.to_string().contains("injected fault"), "{err}");
 
     assert_every_key_present(&store, &items, "after a failed rebuild").await;
-    let survivors: HashMap<String, Vec<f32>> = items.iter().cloned().collect();
-    assert!(self_recall_misses(&store, &survivors).await.is_empty());
+    let after = self_search_hits(&store, &items).await;
+    let changed: Vec<&String> = items
+        .iter()
+        .zip(before.iter().zip(&after))
+        .filter(|(_, (b, a))| b != a)
+        .map(|((id, _), _)| id)
+        .collect();
+    assert!(
+        changed.is_empty(),
+        "#9450: a failed rebuild changed the self-search hits of {} of {} keys: {:?}",
+        changed.len(),
+        items.len(),
+        &changed[..changed.len().min(20)]
+    );
     let snapshot_now = std::fs::read(&path).expect("snapshot");
     assert!(snapshot_now == snapshot, "snapshot bytes changed");
     let keys_now = std::fs::read(path.with_extension("keys.json")).expect("sidecar");
