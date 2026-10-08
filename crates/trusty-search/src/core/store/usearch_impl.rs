@@ -649,6 +649,16 @@ impl VectorStore for UsearchStore {
         UsearchStore::spawn_heal_on_load(self, index_id, reindexing);
     }
 
+    /// #9450: see [`UsearchStore::spawn_compact_once_quiet`]. Fully qualified
+    /// so this never resolves back to itself.
+    fn spawn_compact_once_quiet(
+        self: std::sync::Arc<Self>,
+        index_id: String,
+        reindexing: ReindexProbe,
+    ) {
+        UsearchStore::spawn_compact_once_quiet(self, index_id, reindexing);
+    }
+
     /// #9450: rebuild the graph. See [`UsearchStore::compact_graph_now`].
     async fn compact_graph(&self, mode: CompactMode) -> Result<Option<CompactReport>> {
         self.compact_graph_now(mode).await

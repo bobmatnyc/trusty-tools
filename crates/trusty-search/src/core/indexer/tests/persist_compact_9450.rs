@@ -7,9 +7,11 @@
 //! What: a colocated index whose store has churn above the threshold is
 //! persisted twice — once while staging a reindex (no compaction), once after
 //! (compaction, churn cleared, no vector lost).
-//! The idle write-cooldown persist skips the compaction the same way.
+//! The idle write-cooldown persist skips the compaction the same way. A
+//! commit-spawned persist that meets unquiet writes compacts once they stop.
 //! Test: `the_persister_compacts_a_churned_graph_outside_a_reindex`,
-//! `the_idle_persist_never_compacts_during_a_reindex`.
+//! `the_idle_persist_never_compacts_during_a_reindex`,
+//! `a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off`.
 
 use std::sync::Arc;
 

@@ -507,6 +507,7 @@ impl CodeIndexer {
         let chunks = self.chunks.clone();
         let entities = self.entities.clone();
         let persist_state = self.persist_state.clone();
+        let reindex_probe = self.reindex_staging_probe();
         // Issue #28: when a redb `CorpusStore` is wired, the chunk corpus is
         // already persisted transactionally per-batch by `commit_corpus_to_redb`.
         // Skipping the full-rewrite `chunks.json` snapshot here eliminates the
@@ -584,14 +585,24 @@ impl CodeIndexer {
                     // during a reindex, which replaces most vectors anyway —
                     // the idle persist after it compacts once.
                     if !reindexing {
-                        if let Err(e) = store
+                        let compacted = match store
                             .compact_graph(crate::core::store::CompactMode::IfDue)
                             .await
                         {
-                            tracing::warn!(
-                                "incremental persist: compaction for '{index_id}' failed \
-                                 ({e:#}) — saving the current graph (#9450)"
-                            );
+                            Ok(report) => report.is_some(),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "incremental persist: compaction for '{index_id}' failed \
+                                     ({e:#}) — saving the current graph (#9450)"
+                                );
+                                false
+                            }
+                        };
+                        // #9450: writes are rarely quiet this soon after a
+                        // commit; compact once they are.
+                        if !compacted {
+                            Arc::clone(store)
+                                .spawn_compact_once_quiet(index_id.clone(), reindex_probe.clone());
                         }
                     }
                     if let Err(e) = store.save_to(&hnsw_target).await {

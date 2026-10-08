@@ -406,6 +406,17 @@ pub trait VectorStore: Send + Sync {
         Ok(None)
     }
 
+    /// Compact in the background once writes go quiet (issue #9450).
+    /// Default no-op; `UsearchStore` overrides with
+    /// `UsearchStore::spawn_compact_once_quiet`.
+    /// Test: `core::indexer::tests::persist_compact_9450::a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off`.
+    fn spawn_compact_once_quiet(
+        self: std::sync::Arc<Self>,
+        _index_id: String,
+        _reindexing: ReindexProbe,
+    ) {
+    }
+
     /// Start the one-time background heal of a freshly loaded snapshot
     /// (issue #9450). Default no-op; `UsearchStore` overrides with
     /// `UsearchStore::spawn_heal_on_load`.

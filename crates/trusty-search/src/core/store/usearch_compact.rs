@@ -21,14 +21,17 @@
 //! file its heal marker describes ([`verified_heal_epoch`]). Callers:
 //! - the idle write-cooldown persist (not during a staged reindex) and the
 //!   incremental persister, once churn crosses [`compact_threshold`] or the
-//!   graph is unhealed, and writes have gone quiet;
+//!   graph is unhealed, and writes have gone quiet. The persister usually
+//!   runs while writes are still arriving, so it then starts
+//!   [`UsearchStore::spawn_compact_once_quiet`], which compacts in memory
+//!   once they stop; the next save publishes the result;
 //! - M005, unconditionally, after it drops orphaned vectors;
 //! - [`UsearchStore::heal_on_load`], once per pre-#9450 snapshot.
 //!
 //! Test: `super::tests_9450`.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,6 +112,9 @@ pub(crate) struct CompactState {
     /// Whole-graph replacements by an adopted snapshot ([`Self::restore`]),
     /// which bypass `mark_dirty`; part of `UsearchStore::graph_epoch`.
     replaced: AtomicU64,
+    /// A [`UsearchStore::spawn_compact_once_quiet`] task is live (#9450), so
+    /// a store has at most one. In memory only.
+    quiet_retry: AtomicBool,
 }
 
 impl CompactState {
@@ -121,6 +127,7 @@ impl CompactState {
             retry_at_churn: AtomicU64::new(0),
             last_build_ms: AtomicU64::new(0),
             replaced: AtomicU64::new(0),
+            quiet_retry: AtomicBool::new(false),
         }
     }
 
@@ -187,9 +194,16 @@ impl UsearchStore {
 
     /// `true` when no write landed within [`Self::compaction_quiet_window`].
     fn writes_quiet(&self) -> bool {
+        self.until_writes_quiet().is_zero()
+    }
+
+    /// Time left until writes count as quiet; zero once they do.
+    fn until_writes_quiet(&self) -> Duration {
         self.write_clock
             .since_last_write()
-            .is_none_or(|since| since >= self.compaction_quiet_window())
+            .map_or(Duration::ZERO, |since| {
+                self.compaction_quiet_window().saturating_sub(since)
+            })
     }
 
     /// An `IfDue` compaction should start: due, and writes are quiet.
@@ -411,6 +425,64 @@ impl UsearchStore {
             self.try_demote_to_view().await?;
         }
         Ok(Some(report))
+    }
+
+    /// Compact once writes go quiet (#9450).
+    ///
+    /// Why: the incremental persister runs milliseconds after a commit, so
+    /// its `IfDue` compaction always finds writes unquiet. With the idle
+    /// write-cooldown persist switched off, nothing else compacted until a
+    /// restart.
+    /// What: while the store is open and the graph is due, sleeps until
+    /// writes have been quiet for [`Self::compaction_quiet_window`] and no
+    /// staged reindex runs, then runs an `IfDue` compaction. A write that
+    /// lands first, or abandons the build, starts the wait again. Returns
+    /// the compaction's result, or `Ok(None)` once nothing is due. Writes
+    /// nothing to disk.
+    /// Test: `crate::core::indexer::tests::persist_compact_9450::a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off`.
+    async fn compact_once_quiet(
+        &self,
+        reindexing: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<CompactReport>> {
+        while !self.closed.load(Ordering::Acquire) && self.compaction_due().await {
+            let wait = self.until_writes_quiet();
+            if reindexing() {
+                tokio::time::sleep(self.compaction_quiet_window()).await;
+            } else if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            } else {
+                match self.compact_graph_now(CompactMode::IfDue).await {
+                    Ok(None) => {}
+                    Err(e) if e.is::<CompactAbandoned>() => {}
+                    done => return done,
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Run [`Self::compact_once_quiet`] in the background, unless this store
+    /// already has such a task (#9450). The incremental persister calls it
+    /// when its own `IfDue` compaction did not run.
+    pub fn spawn_compact_once_quiet(self: Arc<Self>, index_id: String, reindexing: ReindexProbe) {
+        if self.compact.quiet_retry.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        tokio::spawn(async move {
+            match self.compact_once_quiet(&*reindexing).await {
+                Ok(Some(r)) => tracing::info!(
+                    "quiet compaction: compacted '{index_id}' ({} vectors, {} ms) (#9450)",
+                    r.vectors_after,
+                    r.elapsed_ms
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    "quiet compaction: could not compact '{index_id}' ({e:#}) — the old \
+                     graph keeps serving (#9450)"
+                ),
+            }
+            self.compact.quiet_retry.store(false, Ordering::Release);
+        });
     }
 
     /// Run [`Self::heal_on_load`] in the background for a freshly loaded
