@@ -11,7 +11,8 @@
 //! and [`inbound`] binds replies. The crate-private `state` module holds
 //! learned spaces, the ledger and the audit log; only a channel, which holds
 //! the state directory's lock, writes them. [`server`], [`tools`],
-//! [`poller`], [`doctor`] and [`cli`] make up the `gchat-mcp` binary (S2b).
+//! [`poller`], [`doctor`] and [`cli`] make up the `gchat-mcp` binary (S2b);
+//! [`subscription_lock`] keeps it the subscription's only consumer.
 //! Test: `tests/gchat_http.rs`, `tests/gchat_mcp_bin.rs` and the unit tests
 //! under `src/gchat/tests/`.
 
@@ -29,6 +30,8 @@ pub mod server;
 // #9448 review: crate-private, so nothing outside a lock-holding channel
 // opens or writes the ledger, the spaces file or the audit log.
 pub(crate) mod state;
+// #9448 review: one consumer per subscription, across project dirs.
+pub mod subscription_lock;
 pub mod tools;
 
 #[cfg(test)]

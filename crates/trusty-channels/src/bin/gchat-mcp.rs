@@ -8,10 +8,13 @@
 //! resolves the project dir (`--project-dir`, then
 //! `TRUSTY_CHANNELS_PROJECT_DIR`, then cwd) and either serves — opening the
 //! project's one `GchatChannel`, which fails with the state-lock message if
-//! another `gchat-mcp` already serves the project — or prints the doctor
-//! rows and exits non-zero when any check fails.
+//! another `gchat-mcp` already serves the project, then taking the
+//! subscription's per-user lock, which fails if another `gchat-mcp` from any
+//! project dir already polls that subscription — or prints the doctor rows
+//! and exits non-zero when any check fails.
 //! Test: `tests/gchat_mcp_bin.rs` — `second_server_on_a_locked_project_fails_with_the_lock_message`,
-//! `stdout_carries_only_json_rpc_and_logs_go_to_stderr`.
+//! `stdout_carries_only_json_rpc_and_logs_go_to_stderr`;
+//! `second_server_on_one_subscription_is_refused_from_another_project_dir`.
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new
@@ -29,6 +32,7 @@ use trusty_channels::gchat::cli::{
 };
 use trusty_channels::gchat::doctor::run_doctor;
 use trusty_channels::gchat::server::serve;
+use trusty_channels::gchat::subscription_lock::LOCK_DIR;
 use trusty_channels::gchat::{GchatChannel, StateError};
 
 fn main() -> ExitCode {
@@ -82,8 +86,12 @@ fn run(command: Command) -> anyhow::Result<ExitCode> {
         }
         Mode::Serve(poll_interval) => {
             let channel = open_channel(&dir)?;
+            // #9448 review: a per-user lock root, shared by every project dir.
+            let lock_root = trusty_common::resolve_data_dir("trusty-channels")
+                .context("cannot resolve the user data directory")?
+                .join(LOCK_DIR);
             tracing::info!(project = %dir.display(), "gchat-mcp serving");
-            runtime.block_on(serve(channel, poll_interval))?;
+            runtime.block_on(serve(channel, poll_interval, &lock_root))?;
             Ok(ExitCode::SUCCESS)
         }
     }

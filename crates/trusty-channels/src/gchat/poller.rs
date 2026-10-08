@@ -43,6 +43,16 @@ pub struct PollStatus {
     pub consecutive_failures: u64,
     /// Questions resolved by this process.
     pub answered: u64,
+    /// Pulled messages left unacknowledged because their answer or audit
+    /// line could not be written. A tick that withholds any is a failure.
+    pub withheld: u64,
+}
+
+impl PollStatus {
+    /// True while the last tick succeeded (or none has run yet).
+    pub fn is_healthy(&self) -> bool {
+        self.last_error.is_none()
+    }
 }
 
 /// A [`PollStatus`] shared between the poller and the MCP server.
@@ -86,39 +96,48 @@ impl Poller {
     /// Run one pull–process–acknowledge step and record its outcome.
     ///
     /// Why: the unit a test drives without a timer.
-    /// What: calls [`GchatChannel::poll_once`]. On success clears the error
-    /// and counts answered questions. On failure stores the error text and
-    /// logs it when it differs from the previous tick's: an add-on-format
-    /// batch at `error` level naming the "Workspace add-on" setting, a
-    /// missing configuration at `warn`, anything else at `error`.
+    /// What: calls [`GchatChannel::poll_once`] and counts answered
+    /// questions. A batch with no withheld message clears the error. A
+    /// batch that withheld any message, or a failed step, stores an error
+    /// text and logs it when it differs from the previous tick's: an
+    /// add-on-format batch at `error` level naming the "Workspace add-on"
+    /// setting, a missing configuration at `warn`, anything else at `error`.
     /// Test: `ask_then_one_poller_tick_resolves_and_answer_returns_it`,
-    /// `add_on_batch_is_a_loud_poller_error_and_shows_in_gchat_doctor`.
+    /// `add_on_batch_is_a_loud_poller_error_and_shows_in_gchat_doctor`,
+    /// `withheld_reply_makes_the_poller_unhealthy_in_gchat_doctor`.
     pub async fn tick(&self) -> Result<BatchReport, InboundError> {
         let result = self.channel.poll_once(self.max).await;
         let mut status = read_status(&self.status);
         status.ticks += 1;
         match &result {
             Ok(report) => {
-                if status.last_error.take().is_some() {
-                    tracing::info!("gchat poller recovered");
-                }
-                status.consecutive_failures = 0;
-                status.last_ok_at = Some(now_rfc3339());
                 let answered = report
                     .outcomes
                     .iter()
                     .filter(|o| matches!(o, InboundOutcome::Answered { .. }))
                     .count();
                 status.answered += answered as u64;
-            }
-            Err(e) => {
-                let text = e.to_string();
-                if status.last_error.as_deref() != Some(text.as_str()) {
-                    log_failure(e, &text);
+                if report.withheld.is_empty() {
+                    if status.last_error.take().is_some() {
+                        tracing::info!("gchat poller recovered");
+                    }
+                    status.consecutive_failures = 0;
+                    status.last_ok_at = Some(now_rfc3339());
+                } else {
+                    // #9448 review: a withheld message is a failed tick, not
+                    // a healthy one; Pub/Sub redelivers it.
+                    status.withheld += report.withheld.len() as u64;
+                    let text = format!(
+                        "{} pulled message(s) withheld unacknowledged: their answer or audit \
+                         line could not be written to the state directory",
+                        report.withheld.len()
+                    );
+                    record_failure(&mut status, text, |t| {
+                        tracing::error!("gchat poller: {t}");
+                    });
                 }
-                status.consecutive_failures += 1;
-                status.last_error = Some(text);
             }
+            Err(e) => record_failure(&mut status, e.to_string(), |t| log_failure(e, t)),
         }
         result
     }
@@ -134,6 +153,15 @@ impl Poller {
             let _ = self.tick().await;
         }
     }
+}
+
+/// Store a failed tick, logging `text` only when it changed.
+fn record_failure(status: &mut PollStatus, text: String, log: impl FnOnce(&str)) {
+    if status.last_error.as_deref() != Some(text.as_str()) {
+        log(&text);
+    }
+    status.consecutive_failures += 1;
+    status.last_error = Some(text);
 }
 
 fn log_failure(e: &InboundError, text: &str) {

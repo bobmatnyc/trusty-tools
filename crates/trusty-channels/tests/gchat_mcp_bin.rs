@@ -14,9 +14,12 @@ use std::process::{Command, Stdio};
 
 use trusty_channels::gchat::GchatChannel;
 
-fn gchat_mcp() -> Command {
+/// The binary, with its per-user data dir (the subscription-lock root)
+/// redirected under `data` so no test touches the real home directory.
+fn gchat_mcp(data: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gchat-mcp"));
     cmd.env_remove("TRUSTY_CHANNELS_PROJECT_DIR")
+        .env("TRUSTY_DATA_DIR_OVERRIDE", data)
         .env("RUST_LOG", "info")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -26,9 +29,10 @@ fn gchat_mcp() -> Command {
 #[test]
 fn second_server_on_a_locked_project_fails_with_the_lock_message() {
     let project = tempfile::tempdir().expect("project dir");
+    let data = tempfile::tempdir().expect("data dir");
     let _first = GchatChannel::open(project.path()).expect("first server's channel");
 
-    let out = gchat_mcp()
+    let out = gchat_mcp(data.path())
         .arg("--project-dir")
         .arg(project.path())
         .stdin(Stdio::null())
@@ -53,7 +57,8 @@ fn second_server_on_a_locked_project_fails_with_the_lock_message() {
 #[test]
 fn stdout_carries_only_json_rpc_and_logs_go_to_stderr() {
     let project = tempfile::tempdir().expect("project dir");
-    let mut child = gchat_mcp()
+    let data = tempfile::tempdir().expect("data dir");
+    let mut child = gchat_mcp(data.path())
         .arg("--project-dir")
         .arg(project.path())
         .stdin(Stdio::piped())

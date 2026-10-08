@@ -10,19 +10,23 @@
 //! text is a JSON object with a stable `error` kind: `refused` (with the
 //! refusal `reason`), `sent_not_recorded` (with the question id; never
 //! retried), `send_failed`, `not_found` or `invalid_arguments`. No error
-//! carries the message text. [`serve`] spawns the poller and runs the stdio
-//! loop; stdout carries JSON-RPC only and logs go to stderr.
+//! carries the message text. [`start`] takes the subscription lock and
+//! spawns the poller; [`serve`] adds the stdio loop. stdout carries JSON-RPC
+//! only and logs go to stderr.
 //! Test: `src/gchat/tests/server.rs`, `tests/gchat_mcp_bin.rs`.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use crate::gchat::channel::GchatChannel;
 use crate::gchat::doctor::report_for_channel;
-use crate::gchat::error::SendError;
+use crate::gchat::error::{SendError, StateError};
 use crate::gchat::poller::{interval_ticks, read_status, Poller, SharedPollStatus, PULL_BATCH};
+use crate::gchat::subscription_lock::{lock_subscription, SubscriptionLock};
 use crate::gchat::tools::{self, UNTRUSTED_ANSWER};
 use trusty_mcp::{error_codes, initialize_response, run_stdio_loop, Request, Response};
 
@@ -196,24 +200,79 @@ pub async fn handle_message(state: AppState, req: Value) -> Value {
     }
 }
 
-/// Serve MCP on stdio with the poller running beside it.
+/// A started server: the shared state, its poller task, and the lock that
+/// makes this process its subscription's only consumer.
 ///
-/// Why: the `gchat-mcp` server entry point; one process holds the channel,
-/// answers tools and polls (one consumer per subscription).
-/// What: spawns [`Poller::run`] on [`interval_ticks`]`(poll_interval)` and
-/// runs the stdio loop until stdin closes. Must run inside a Tokio runtime.
-/// Test: `stdout_carries_only_json_rpc_and_logs_go_to_stderr`.
-pub async fn serve(channel: GchatChannel, poll_interval: Duration) -> anyhow::Result<()> {
+/// Why: [`serve`] needs the lock and the poller to live exactly as long as
+/// the stdio loop; a test needs the same startup without stdio.
+/// What: dropping it aborts the poller, then releases the subscription lock.
+/// Test: `second_server_on_one_subscription_is_refused_from_another_project_dir`.
+#[derive(Debug)]
+pub struct Started {
+    /// The state the stdio loop dispatches against.
+    pub state: AppState,
+    poll_task: tokio::task::JoinHandle<()>,
+    _subscription_lock: Option<SubscriptionLock>,
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        self.poll_task.abort();
+    }
+}
+
+/// Claim the channel's subscription, then spawn its poller on `ticks`.
+///
+/// Why: one consumer per subscription (#9448, Architect ruling), and every
+/// worktree or clone of a project carries the same tracked `routes.toml`.
+/// What: when the channel names a subscription, takes its lock under
+/// `lock_root` ([`lock_subscription`]) before the poller is spawned, so a
+/// second server for that subscription, from any project dir, fails with
+/// [`StateError::SubscriptionInUse`] and pulls nothing. A channel with no
+/// subscription takes no lock (its poller only reports "cannot poll"). Must
+/// run inside a Tokio runtime.
+/// Test: `second_server_on_one_subscription_is_refused_from_another_project_dir`.
+pub fn start(
+    channel: GchatChannel,
+    ticks: mpsc::Receiver<()>,
+    lock_root: &Path,
+) -> Result<Started, StateError> {
+    // #9448 review: the lock is per subscription and per user, not per project.
+    let subscription_lock = channel
+        .subscription()
+        .map(|s| lock_subscription(lock_root, &s))
+        .transpose()?;
     let channel = Arc::new(channel);
     let poller = Poller::new(Arc::clone(&channel), PULL_BATCH);
     let state = AppState {
         channel,
         poll_status: poller.status(),
     };
-    let ticks = interval_ticks(poll_interval);
     let poll_task = tokio::spawn(async move { poller.run(ticks).await });
-    let result = run_stdio(state).await;
-    poll_task.abort();
+    Ok(Started {
+        state,
+        poll_task,
+        _subscription_lock: subscription_lock,
+    })
+}
+
+/// Serve MCP on stdio with the poller running beside it.
+///
+/// Why: the `gchat-mcp` server entry point; one process holds the channel,
+/// answers tools and polls (one consumer per subscription).
+/// What: [`start`] on [`interval_ticks`]`(poll_interval)` with the
+/// subscription lock under `lock_root`, then the stdio loop until stdin
+/// closes. A held subscription lock fails before anything is polled.
+/// Test: `stdout_carries_only_json_rpc_and_logs_go_to_stderr`,
+/// `second_server_on_one_subscription_is_refused_from_another_project_dir`.
+pub async fn serve(
+    channel: GchatChannel,
+    poll_interval: Duration,
+    lock_root: &Path,
+) -> anyhow::Result<()> {
+    let started = start(channel, interval_ticks(poll_interval), lock_root)?;
+    let result = run_stdio(started.state.clone()).await;
+    drop(started);
     result
 }
 

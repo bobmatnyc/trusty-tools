@@ -17,8 +17,9 @@ use super::{
     SUBSCRIPTION, THREE_ROUTES,
 };
 use crate::gchat::cli::{parse_args, resolve_project_dir, Command};
+use crate::gchat::inbound::InboundOutcome;
 use crate::gchat::poller::{interval_ticks, Poller, DEFAULT_POLL_INTERVAL};
-use crate::gchat::server::{handle_message, AppState};
+use crate::gchat::server::{handle_message, start, AppState};
 use crate::gchat::tools::TOOL_NAMES;
 
 const SENTINEL: &str = "SENTINEL-51b2-question-text";
@@ -405,4 +406,131 @@ fn project_dir_prefers_flag_then_env_then_cwd() {
     assert_eq!(resolve(None, Some("/env")), PathBuf::from("/env"));
     assert_eq!(resolve(None, Some("")), PathBuf::from("/cwd"));
     assert_eq!(resolve(None, None), PathBuf::from("/cwd"));
+}
+
+/// Ask "Ship it?" on `janet` through the tool; the reply thread is `T1`.
+async fn ask_janet(state: &AppState) {
+    let (sent, is_error) = payload(
+        &call(
+            state,
+            "gchat_ask",
+            json!({"to": "janet", "text": "Ship it?"}),
+        )
+        .await,
+    );
+    assert!(!is_error, "{sent}");
+}
+
+#[tokio::test]
+async fn second_server_on_one_subscription_is_refused_from_another_project_dir() {
+    // #9448 review: a main checkout and a worktree carry the same tracked
+    // routes.toml, so they name one subscription from two project dirs.
+    let server = MockServer::start().await;
+    let locks = tempfile::tempdir().expect("lock root");
+    let main = Project::committed(THREE_ROUTES);
+    let worktree = Project::committed(THREE_ROUTES);
+    let (_main_ticks, rx) = mpsc::channel(1);
+    let first = start(main.channel(&server), rx, locks.path()).expect("first server starts");
+
+    let (_tx, rx) = mpsc::channel(1);
+    let err = start(worktree.channel(&server), rx, locks.path())
+        .expect_err("a second server on the same subscription must be refused");
+    let text = err.to_string();
+    assert!(text.contains("another gchat-mcp already serves"), "{text}");
+    assert!(text.contains(SUBSCRIPTION), "{text}");
+
+    drop(first);
+    let (_tx, rx) = mpsc::channel(1);
+    start(worktree.channel(&server), rx, locks.path()).expect("starts once the first stops");
+}
+
+#[tokio::test]
+async fn withheld_reply_makes_the_poller_unhealthy_in_gchat_doctor() {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    mount_create(&server).await;
+    let project = Project::committed(THREE_ROUTES);
+    let (state, poller) = served(&project, &server);
+    bootstrap(&state.channel, JANET, DM_JANET);
+    ask_janet(&state).await;
+    let ledger = project.dir().join(".trusty-channels/state/questions.jsonl");
+    std::fs::set_permissions(&ledger, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+    mount_pull(
+        &server,
+        &[reply_event(&format!("{DM_JANET}/threads/T1"), "yes")],
+    )
+    .await;
+    mount_ack(&server, 0).await;
+
+    run_ticks(&poller, 1).await;
+
+    let (doctor, is_error) = payload(&call(&state, "gchat_doctor", json!({"offline": true})).await);
+    assert!(!is_error, "{doctor}");
+    let poller_json = &doctor["report"]["poller"];
+    let last = poller_json["last_error"].as_str().unwrap_or_default();
+    assert!(last.contains("withheld"), "{doctor}");
+    assert_eq!(poller_json["consecutive_failures"], 1, "{doctor}");
+    assert!(poller_json["last_ok_at"].is_null(), "{doctor}");
+    assert_eq!(
+        doctor["ok"], false,
+        "a withheld message is unhealthy: {doctor}"
+    );
+    assert!(doctor["text"]
+        .as_str()
+        .is_some_and(|t| t.ends_with("result: FAILED\n")));
+    assert!(state.channel.question(1).expect("q1").is_open());
+}
+
+#[tokio::test]
+async fn ack_failure_after_a_resolve_records_one_answer_and_one_already_resolved_drop() {
+    let server = MockServer::start().await;
+    mount_token(&server).await;
+    mount_create(&server).await;
+    let project = Project::committed(THREE_ROUTES);
+    let (state, poller) = served(&project, &server);
+    bootstrap(&state.channel, JANET, DM_JANET);
+    ask_janet(&state).await;
+    mount_pull(
+        &server,
+        &[reply_event(
+            &format!("{DM_JANET}/threads/T1"),
+            "yes, ship it",
+        )],
+    )
+    .await;
+    // The first acknowledge fails after the answer is on disk; Pub/Sub then
+    // redelivers the reply, and the second acknowledge succeeds.
+    Mock::given(method("POST"))
+        .and(path(format!("/v1/{SUBSCRIPTION}:acknowledge")))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    mount_ack(&server, 1).await;
+
+    assert!(
+        poller.tick().await.is_err(),
+        "the ack failure is a tick error"
+    );
+    let second = poller.tick().await.expect("second tick");
+
+    assert_eq!(
+        second.outcomes,
+        [InboundOutcome::Dropped {
+            reason: "already_resolved"
+        }]
+    );
+    let answer = state.channel.question(1).and_then(|q| q.answer);
+    assert_eq!(answer.map(|a| a.text).as_deref(), Some("yes, ship it"));
+    let ledger =
+        std::fs::read_to_string(project.dir().join(".trusty-channels/state/questions.jsonl"))
+            .expect("ledger");
+    assert_eq!(ledger.matches(r#""op":"resolve""#).count(), 1, "{ledger}");
+    let drops = project
+        .audit_lines()
+        .into_iter()
+        .filter(|l| l["reason"] == "already_resolved")
+        .count();
+    assert_eq!(drops, 1);
 }

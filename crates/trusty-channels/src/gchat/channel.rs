@@ -174,6 +174,13 @@ impl GchatChannel {
         self.lock().ledger.get(id).cloned()
     }
 
+    /// The Pub/Sub subscription resource name, when the routes file loaded
+    /// and names a connection.
+    pub fn subscription(&self) -> Option<String> {
+        let table = self.routes.as_ref().ok()?;
+        table.connection.as_ref().map(|c| c.subscription_name())
+    }
+
     /// The routes-file load outcome.
     pub fn load_status(&self) -> LoadStatus {
         match &self.routes {

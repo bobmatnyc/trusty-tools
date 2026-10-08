@@ -200,6 +200,18 @@ pub enum StateError {
         /// The lock-file path.
         path: PathBuf,
     },
+    /// Another `gchat-mcp`, from any project dir, already polls this Pub/Sub
+    /// subscription (#9448: one consumer per subscription).
+    #[error(
+        "another gchat-mcp already serves subscription {subscription}: the lock {path} is \
+         held. Only one server may poll a subscription; stop the other one first."
+    )]
+    SubscriptionInUse {
+        /// The subscription resource name.
+        subscription: String,
+        /// The user-level lock-file path.
+        path: PathBuf,
+    },
 }
 
 impl StateError {

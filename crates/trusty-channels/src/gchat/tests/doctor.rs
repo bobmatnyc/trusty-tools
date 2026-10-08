@@ -1,12 +1,17 @@
 //! `gchat-mcp doctor` rows (#9448 D6): one per route, a broken key fails,
-//! and a held state lock reads "in use" without failing.
+//! a held state lock reads "in use" without failing, and doctor holds no
+//! lock across its token mint.
 
 use std::os::unix::fs::PermissionsExt;
+use std::sync::{Arc, Mutex};
 
-use wiremock::MockServer;
+use serde_json::json;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-use super::{bootstrap, mount_token_expect, Project, DM_JANET, JANET};
+use super::{bootstrap, mount_token_expect, token, Project, DM_JANET, JANET};
 use crate::gchat::api::client::Endpoints;
+use crate::gchat::channel::GchatChannel;
 use crate::gchat::doctor::{run_doctor, IN_USE};
 
 /// Two routes: `janet` (both kinds) and `notices` (review notices only).
@@ -131,5 +136,39 @@ async fn doctor_fails_without_a_routes_file() {
         report.render().contains("load: failed (no routes file"),
         "{}",
         report.render()
+    );
+}
+
+#[tokio::test]
+async fn doctor_releases_the_state_lock_before_the_token_mint() {
+    // #9448 review: a gchat-mcp started while doctor mints a token must get
+    // the state lock, so doctor holds none across that network call.
+    let server = MockServer::start().await;
+    let project = Project::committed(TWO_ROUTES);
+    let dir = project.dir().to_path_buf();
+    let uri = server.uri();
+    let opened = Arc::new(Mutex::new(None));
+    let seen = Arc::clone(&opened);
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(move |_: &Request| {
+            let open = GchatChannel::open_with(&dir, Endpoints::single_host(&uri));
+            *seen.lock().expect("seen") = Some(open.map(drop).map_err(|e| e.to_string()));
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": token(), "expires_in": 3600, "token_type": "Bearer"
+            }))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let report = run_doctor(project.dir(), endpoints(&server), false).await;
+
+    assert!(report.ok(), "{}", report.render());
+    let during_mint = opened.lock().expect("opened").clone();
+    assert_eq!(
+        during_mint,
+        Some(Ok(())),
+        "a server opened during the token mint"
     );
 }

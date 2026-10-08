@@ -6,11 +6,12 @@
 //! the operator needs to see which one, per route, without reading logs.
 //! While a server holds the state lock, doctor must still report everything
 //! that needs no lock.
-//! What: [`run_doctor`] opens the project's channel; when a running
-//! `gchat-mcp` holds the state lock it reloads the routes and builds its own
-//! client instead, and the state columns read "in use by a running
-//! gchat-mcp", which is not a failure. [`report_for_channel`] builds the
-//! same report from a channel already open; the `gchat_doctor` tool uses it.
+//! What: [`run_doctor`] opens the project's channel only to read its state
+//! columns, then loads the routes and builds its own client with no lock
+//! held; when a running `gchat-mcp` holds the state lock the state columns
+//! read "in use by a running gchat-mcp", which is not a failure.
+//! [`report_for_channel`] builds the same report from a channel already
+//! open; the `gchat_doctor` tool uses it, and a poller error fails it.
 //! No check sends a message; the token mint is skipped with `offline`.
 //! Test: `doctor_prints_one_row_per_route_and_passes`,
 //! `doctor_fails_on_a_broken_key_mode`,
@@ -113,7 +114,8 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    /// True when the load and every check in every row passed.
+    /// True when the load, every check in every row, and the poller (when
+    /// the report carries one) are healthy.
     pub fn ok(&self) -> bool {
         let row_failed = |r: &DoctorRow| {
             [&r.gate, &r.key_file, &r.token, &r.space, &r.open_questions]
@@ -124,6 +126,9 @@ impl DoctorReport {
             .iter()
             .any(|c| c.is_failed())
             && !self.rows.iter().any(row_failed)
+            // #9448 review: a failing poller (withheld messages included)
+            // is not a healthy server.
+            && self.poller.as_ref().is_none_or(PollStatus::is_healthy)
     }
 
     /// The process exit code: 0 when [`DoctorReport::ok`], else 1.
@@ -160,10 +165,11 @@ impl DoctorReport {
         }
         if let Some(p) = &self.poller {
             out.push_str(&format!(
-                "poller: ticks={} answered={} last_ok_at={} consecutive_failures={} \
-                 last_error={}\n",
+                "poller: ticks={} answered={} withheld={} last_ok_at={} \
+                 consecutive_failures={} last_error={}\n",
                 p.ticks,
                 p.answered,
+                p.withheld,
                 p.last_ok_at.as_deref().unwrap_or("never"),
                 p.consecutive_failures,
                 p.last_error.as_deref().unwrap_or("none"),
@@ -188,17 +194,21 @@ enum StateView {
 /// Run doctor for `project_dir`.
 ///
 /// Why: the `gchat-mcp doctor` entry point.
-/// What: opens the channel and reports from it. When the state lock is
-/// held, reloads the routes, builds a client from the key file and reports
-/// the state columns as [`IN_USE`] (not a failure). Any other open error
-/// fails the state column.
+/// What: opens the channel only to read its state columns and closes it at
+/// once, so the state lock is never held across the token mint (a
+/// `gchat-mcp` started meanwhile would exit). A held lock reports the state
+/// columns as [`IN_USE`] (not a failure); any other open error fails the
+/// state column. The routes, client and token checks then run with no lock.
 /// Test: `doctor_prints_one_row_per_route_and_passes`,
-/// `doctor_mints_a_token_online_and_reports_in_use_state`.
+/// `doctor_mints_a_token_online_and_reports_in_use_state`,
+/// `doctor_releases_the_state_lock_before_the_token_mint`.
 pub async fn run_doctor(project_dir: &Path, endpoints: Endpoints, offline: bool) -> DoctorReport {
-    let state_error = match GchatChannel::open_with(project_dir, endpoints.clone()) {
-        Ok(channel) => return report_for_channel(&channel, offline, None).await,
-        Err(StateError::Locked { .. }) => None,
-        Err(e) => Some(e.to_string()),
+    // #9448 review: the channel (and its lock) drops at the end of this
+    // statement, before any network call.
+    let state = match GchatChannel::open_with(project_dir, endpoints.clone()) {
+        Ok(channel) => StateView::Health(channel.health()),
+        Err(StateError::Locked { .. }) => StateView::InUse,
+        Err(e) => StateView::Failed(e.to_string()),
     };
     let routes = load_routes(project_dir);
     let client = routes
@@ -212,10 +222,6 @@ pub async fn run_doctor(project_dir: &Path, endpoints: Endpoints, offline: bool)
         None => Err(no_connection()),
     };
     let token = token_cell(client_ref.as_ref().ok().copied(), offline).await;
-    let state = match state_error {
-        None => StateView::InUse,
-        Some(e) => StateView::Failed(e),
-    };
     build(
         project_dir,
         &routes,
