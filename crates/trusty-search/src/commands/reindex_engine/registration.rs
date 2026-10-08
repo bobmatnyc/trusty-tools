@@ -1,9 +1,11 @@
 //! Index registration + status helpers shared by the `init`, `index`, and
 //! `discover` flows.
 //!
-//! Why: both `Init` and `Index` need the same "POST /indexes, parse `created`"
+//! Why: both `Init` and `Index` need the same "register, parse `created`"
 //! dance, optionally forwarding per-index repo-config filters; the `--force`
 //! pre-snapshot path also needs the current chunk count before reindex begins.
+//! #9214: every call goes over the daemon socket (`search.index.create`,
+//! `search.index.status`); there is no HTTP path.
 //! What: `RegisterFilters` (filter payload), `register_index_with_daemon{,_filtered}`
 //! (idempotent register), `register_index_reporting_collision` (the same call
 //! reporting a root-path 409 as data, #7758), and `fetch_chunk_count` (status
@@ -11,15 +13,18 @@
 //! Test: `a_root_owned_by_another_index_is_reported_not_bailed` and the rest of
 //! `super::tests`; the happy path is covered indirectly by `handle_index`.
 
-use crate::commands::daemon_http::daemon_base_url;
-use anyhow::Result;
+use crate::commands::daemon_rpc::{index_status, rpc_error};
+use crate::commands::explicit_target::lookup_index_by_path;
+use anyhow::{Context as _, Result};
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
+use trusty_search::service::rpc::writes::METHOD_INDEX_CREATE;
 
 /// Register an index with the daemon (idempotent).
 ///
 /// Why: factored out of `Init` and `Index` because both flows need the same
-/// "POST /indexes, parse `created`" dance.
+/// "register, parse `created`" dance.
 /// What: returns `Ok((created, daemon_reachable))`. `daemon_reachable=false`
-/// surfaces network failures distinctly from "registered but already existed".
+/// means nothing serves the daemon socket; every other failure is an error.
 /// Test: covered indirectly by `handle_index` tests.
 pub async fn register_index_with_daemon(
     index_name: &str,
@@ -28,7 +33,7 @@ pub async fn register_index_with_daemon(
     register_index_with_daemon_filtered(index_name, project_path, &RegisterFilters::default()).await
 }
 
-/// Optional repo-config filters carried in `POST /indexes` request bodies.
+/// Optional repo-config filters carried in `search.index.create` params.
 ///
 /// Why: `trusty-search.yaml` declares per-index filter sets (`paths`,
 /// `exclude`, `languages`, `domain_terms`). The CLI loads the YAML and
@@ -55,7 +60,7 @@ pub struct RegisterFilters {
     /// Why: exposes the KG-skip flag at the CLI-to-daemon boundary so
     /// `trusty-search index --no-kg` and the YAML `skip_kg: true` field can
     /// both reach the daemon's create-index handler without extra scaffolding.
-    /// What: when `true`, the request body sent to `POST /indexes` includes
+    /// What: when `true`, the `search.index.create` params include
     /// `"skip_kg": true`. The daemon stores it in `indexes.toml`.
     /// Test: covered by `skip_kg_index_never_runs_phase3` (end-to-end).
     pub skip_kg: bool,
@@ -83,7 +88,7 @@ impl Default for RegisterFilters {
     }
 }
 
-/// What `POST /indexes` answered, for a caller that must act on the answer.
+/// What `search.index.create` answered, for a caller that must act on the answer.
 ///
 /// Why: #7758 — `register_index_with_daemon_filtered` collapsed every non-2xx
 /// into one `daemon returned {status}` bail, so `index --force` could not tell
@@ -108,8 +113,9 @@ pub enum RegisterOutcome {
         existing_id: String,
         refusal: String,
     },
-    /// The daemon did not answer at all.
-    Unreachable,
+    /// Nothing is serving the daemon socket. `reason` is the client's own
+    /// text, which names the socket (#9214).
+    Unreachable { reason: String },
 }
 
 /// Variant of [`register_index_with_daemon`] that forwards filter/domain
@@ -126,41 +132,126 @@ pub async fn register_index_with_daemon_filtered(
     project_path: &std::path::Path,
     filters: &RegisterFilters,
 ) -> Result<(bool, bool)> {
-    match register_index_reporting_collision(index_name, project_path, filters).await? {
+    legacy_pair(register_index_reporting_collision(index_name, project_path, filters).await?)
+}
+
+/// Flatten a [`RegisterOutcome`] into the historical `(created, reachable)`.
+///
+/// What: a root collision is the daemon's refusal, raised (#7758); nothing
+/// serving the socket is `(false, false)`.
+/// Test: `the_legacy_register_wrapper_still_bails_on_a_root_collision`.
+pub(super) fn legacy_pair(outcome: RegisterOutcome) -> Result<(bool, bool)> {
+    match outcome {
         RegisterOutcome::Registered { created } => Ok((created, true)),
-        // #7758: the pre-existing message, unchanged, for every caller that has
-        // no `--force` to honour.
+        // #7758: the refusal, for every caller that has no `--force` to honour.
         RegisterOutcome::RootOwnedBy { refusal, .. } => anyhow::bail!(refusal),
-        RegisterOutcome::Unreachable => Ok((false, false)),
+        RegisterOutcome::Unreachable { .. } => Ok((false, false)),
     }
 }
 
-/// `POST /indexes`, reporting a root-path collision instead of bailing on it.
+/// Register over the daemon socket, reporting a root-path collision instead
+/// of bailing on it.
 ///
 /// Why: #7758 — see [`RegisterOutcome`]. `trusty-search index <root> --force`
-/// on a root already registered under another id died here with
-/// `daemon returned 409 Conflict for POST /indexes`, contradicting the flag's
-/// own `--help` ("force a full reindex even if the index already has chunks").
-/// The daemon is right to refuse a second registration over one corpus — two
-/// indexes cannot share one `.redb` — so the fix belongs on this side: report
-/// the owning id and let `index_one_with_filters` reindex it.
-/// What: builds the JSON body from the non-empty filter fields, POSTs, and maps
-/// the response onto [`RegisterOutcome`]. A `409` carrying an `existing_id`
-/// becomes `RootOwnedBy`; every other non-2xx still bails with the historical
-/// `daemon returned {status} for POST /indexes` text, which is what the
-/// same-id-different-root refusal (a 409 with no `existing_id`) keeps getting.
+/// on a root already registered under another id died here with a bare
+/// conflict, contradicting the flag's own `--help` ("force a full reindex even
+/// if the index already has chunks"). The daemon is right to refuse a second
+/// registration over one corpus — two indexes cannot share one `.redb` — so
+/// the fix belongs on this side: report the owning id and let
+/// `index_one_with_filters` reindex it.
+/// What: resolves the daemon socket and calls [`register_on`].
 /// Test: `a_root_owned_by_another_index_is_reported_not_bailed`.
 pub async fn register_index_reporting_collision(
     index_name: &str,
     project_path: &std::path::Path,
     filters: &RegisterFilters,
 ) -> Result<RegisterOutcome> {
-    // #9214: no published address is the same outcome as a refused connect.
-    let Ok(base) = daemon_base_url() else {
-        return Ok(RegisterOutcome::Unreachable);
+    register_on(&DaemonClient::resolve()?, index_name, project_path, filters).await
+}
+
+/// `search.index.create` on `client`, mapped onto [`RegisterOutcome`].
+///
+/// Why (#9214 H2): only "nothing is serving the socket" may read as
+/// [`RegisterOutcome::Unreachable`] — a daemon that answered and broke the
+/// exchange, or refused, is a different fault. Every caller treats
+/// `Unreachable` as "start the daemon", and `init`/`discover` treat it as a
+/// soft skip, so folding every failure into it hid real refusals.
+/// What: success reads `created`. A conflict whose owner is a different id —
+/// named by the refusal's `data.existing_id` when the daemon sends one, else
+/// found by a fail-closed lookup of `project_path` — becomes
+/// [`RegisterOutcome::RootOwnedBy`]. Every other conflict, an invalid-params
+/// refusal (#8922: its message names the glob), a broken exchange, and every
+/// other refusal is an error carrying the daemon's text.
+/// Test: `a_root_owned_by_another_index_is_reported_not_bailed`,
+/// `a_conflict_without_an_existing_id_still_bails`,
+/// `a_broken_exchange_is_an_error_not_unreachable`.
+pub(crate) async fn register_on(
+    client: &DaemonClient,
+    index_name: &str,
+    project_path: &std::path::Path,
+    filters: &RegisterFilters,
+) -> Result<RegisterOutcome> {
+    let params = create_params(index_name, project_path, filters);
+    match client.call(METHOD_INDEX_CREATE, params).await {
+        Ok(body) => {
+            let created = body
+                .get("created")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(RegisterOutcome::Registered { created })
+        }
+        // #9214 H2: unreachable only; it used to be `Err(_) => Unreachable`.
+        Err(e) if e.is_unreachable() => Ok(RegisterOutcome::Unreachable {
+            reason: e.to_string(),
+        }),
+        Err(e) if e.is_conflict() => root_owner(client, index_name, project_path, e).await,
+        Err(e) => Err(rpc_error(e)),
+    }
+}
+
+/// The [`RegisterOutcome`] for a conflict refusal (#7758).
+///
+/// What: `existing_id` from the refusal's `data` when present; otherwise the
+/// registration that owns `project_path`, looked up fail-closed (an unreadable
+/// status refuses). An owner that is `index_name` itself, or no owner at all,
+/// leaves the refusal an error — the same-id-different-root and overlap
+/// conflicts name their cause in the daemon's message.
+async fn root_owner(
+    client: &DaemonClient,
+    index_name: &str,
+    project_path: &std::path::Path,
+    e: DaemonCallError,
+) -> Result<RegisterOutcome> {
+    let named = e
+        .data()
+        .and_then(|d| d.get("existing_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let refusal = rpc_error(e).to_string();
+    let existing_id = match named {
+        Some(id) => Some(id),
+        None => lookup_index_by_path(client, project_path)
+            .await
+            .with_context(|| format!("{refusal}; and the owning index could not be identified"))?
+            .map(|r| r.id)
+            .filter(|id| id != index_name),
     };
-    let client = trusty_common::server::daemon_http_client()?;
-    let create_url = format!("{}/indexes", base);
+    match existing_id {
+        Some(existing_id) => Ok(RegisterOutcome::RootOwnedBy {
+            existing_id,
+            refusal,
+        }),
+        None => anyhow::bail!(refusal),
+    }
+}
+
+/// The `search.index.create` params: id, root, and the non-default filters.
+fn create_params(
+    index_name: &str,
+    project_path: &std::path::Path,
+    filters: &RegisterFilters,
+) -> serde_json::Value {
     let mut create_body = serde_json::json!({
         "id": index_name,
         "root_path": project_path,
@@ -187,76 +278,24 @@ pub async fn register_index_reporting_collision(
     if !filters.defer_embed {
         create_body["defer_embed"] = serde_json::json!(false);
     }
-    match client.post(&create_url).json(&create_body).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let body: serde_json::Value =
-                resp.json().await.unwrap_or_else(|_| serde_json::json!({}));
-            let created = body
-                .get("created")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            Ok(RegisterOutcome::Registered { created })
-        }
-        Ok(resp) => {
-            let refusal = format!("daemon returned {} for POST /indexes", resp.status());
-            // #7758: only the root-collision 409 carries `existing_id`; it is
-            // the sole refusal a reindex can satisfy instead.
-            // #8922: a 400 (refused exclude glob) names the pattern only in its
-            // body, so it is read too.
-            let status = resp.status();
-            let body = if status == reqwest::StatusCode::CONFLICT
-                || status == reqwest::StatusCode::BAD_REQUEST
-            {
-                resp.json::<serde_json::Value>().await.ok()
-            } else {
-                None
-            };
-            let field = |key: &str| {
-                body.as_ref()
-                    .and_then(|b| b.get(key))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            };
-            if let Some(existing_id) = field("existing_id") {
-                return Ok(RegisterOutcome::RootOwnedBy {
-                    existing_id,
-                    refusal,
-                });
-            }
-            // #8727: an overlap 409 names the blocking index and its root only
-            // in its body; print that text rather than the bare status line.
-            if field("existing_index_id").is_some() {
-                if let Some(reason) = field("error") {
-                    anyhow::bail!("{refusal}: {reason}");
-                }
-            }
-            if status == reqwest::StatusCode::BAD_REQUEST {
-                if let Some(reason) = field("message").or_else(|| field("error")) {
-                    anyhow::bail!("{refusal}: {reason}");
-                }
-            }
-            anyhow::bail!(refusal)
-        }
-        Err(_) => Ok(RegisterOutcome::Unreachable),
-    }
+    create_body
 }
 
-/// Fetch chunk count for an index via /status. Returns `None` if the daemon
-/// is unreachable or the index isn't registered.
+/// Fetch an index's chunk count from its status. `None` when the status
+/// cannot be read.
 ///
 /// Why: the `--force` pre-snapshot path needs the current chunk count before
-/// the reindex begins, so the final verify message can show "(was N)".
-/// What: GETs `/indexes/:id/status` and parses `chunk_count`.
+/// the reindex begins, so the final verify message can show "(was N)". The
+/// number is cosmetic, so a failed read only drops that suffix; the kickoff
+/// that follows reports any real fault.
+/// What: `search.index.status` and its `chunk_count`.
 /// Test: covered indirectly by `run_reindex_force_opts`.
-pub async fn fetch_chunk_count(index_id: &str) -> Option<u64> {
-    let base = daemon_base_url().ok()?;
-    let url = format!("{}/indexes/{}/status", base, index_id);
-    let client = trusty_common::server::daemon_http_client().ok()?;
-    let resp = client.get(&url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
+pub async fn fetch_chunk_count(client: &DaemonClient, index_id: &str) -> Option<u64> {
+    match index_status(client, index_id).await {
+        Ok(body) => body.get("chunk_count").and_then(|v| v.as_u64()),
+        Err(e) => {
+            tracing::debug!(index_id, error = %e, "no prior chunk count");
+            None
+        }
     }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    body.get("chunk_count").and_then(|v| v.as_u64())
 }

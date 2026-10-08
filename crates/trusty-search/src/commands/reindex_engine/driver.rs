@@ -1,14 +1,14 @@
-//! Reindex driver: POST /reindex, consume the SSE progress stream, render the
-//! 4-bar UI, and run the post-`--force` health check.
+//! Reindex driver: kick off the reindex, consume its progress stream, render
+//! the 4-bar UI, and run the post-`--force` health check.
 //!
 //! Why: this is the orchestration spine shared by `index`, `reindex`, `add`,
 //! `convert`, and the doctor auto-repair path; it owns the kickoff handshake,
 //! the wait/timeout strategy, and the final summary.
 //! What: `run_reindex{,_opts,_force_opts}` are thin wrappers over
-//! `run_reindex_with`, which connects to the stream, pumps events through
-//! [`events::handle_event`], drives the [`ticker`], and finishes the UI.
-//! Test: `cargo test -p trusty-search`; live-daemon coverage under
-//! `--include-ignored`.
+//! `run_reindex_with`, which sends `search.index.reindex`, opens
+//! `search.index.reindex.stream` over the daemon socket (#9214), pumps events
+//! through [`events::handle_event`], drives the [`ticker`], and finishes the UI.
+//! Test: `driver_tests.rs`; live-daemon coverage under `--include-ignored`.
 
 use super::events::{handle_event, LoopState};
 use super::options::{ReindexOptions, ReindexOutcome};
@@ -16,17 +16,23 @@ use super::progress_state::SharedProgress;
 use super::registration::fetch_chunk_count;
 use super::ticker::spawn_ticker;
 use super::verify::verify_reindex_health;
-use crate::commands::daemon_http::daemon_base_url;
+use crate::commands::daemon_rpc::rpc_error;
 use crate::commands::format::{fmt_elapsed, format_with_commas};
 use crate::commands::reindex_ui::{print_timing_breakdown, ReindexUi};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use colored::Colorize;
-use eventsource_stream::Eventsource;
 use futures_util::stream::StreamExt;
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::streams::METHOD_INDEX_REINDEX_STREAM;
+use trusty_search::service::rpc::writes::METHOD_INDEX_REINDEX;
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;
 
 /// Plain reindex (no post-verify). Used by the doctor auto-repair path and
 /// other programmatic callers. Always uses progress-aware stall detection
@@ -95,7 +101,8 @@ pub async fn run_reindex_force_opts(
     timeout_secs: u64,
     timeout_explicit: bool,
 ) -> Result<()> {
-    let prior = fetch_chunk_count(index_id).await;
+    let client = DaemonClient::resolve()?;
+    let prior = fetch_chunk_count(&client, index_id).await;
     let opts = ReindexOptions {
         verify_after: true,
         prior_chunk_count: prior,
@@ -104,100 +111,84 @@ pub async fn run_reindex_force_opts(
         timeout_explicit,
         ..ReindexOptions::default()
     };
-    run_reindex_with(index_id, root_path, opts)
+    run_reindex_on(&client, index_id, root_path, opts)
         .await
         .map(|_| ())
 }
 
-/// Drive a reindex: POST /reindex, then connect to the SSE stream and render
+/// Drive a reindex: kick it off, then read its progress stream and render
 /// progress with a 4-bar `MultiProgress` layout (header + Crawl / Chunk /
 /// Embed / KG bars + stats line). A wall-clock ticker keeps the stats line
-/// moving even when SSE events are sparse (e.g. the embedder is mid-batch).
+/// moving even when progress events are sparse (e.g. the embedder is mid-batch).
 ///
 /// Why: the previous design used a single bar relabelled at each phase
 /// transition (issue #317). Issue #401 replaces it with 4 sequential bars so
 /// the operator can see at a glance which stage is active, which are done, and
 /// which are still pending.
 ///
-/// New SSE events added in this issue (backward-compatible; older daemons omit
+/// Progress events added by #401 (backward-compatible; older daemons omit
 /// them and the CLI falls back gracefully):
 ///
 /// - `kg_start`    — emitted just before `rebuild_symbol_graph_for_reindex`
 /// - `kg_complete` — emitted after; carries `symbol_count`, `edge_count`, `kg_ms`
 ///
-/// What: connects to the daemon's SSE reindex stream and dispatches each event
-/// to the appropriate bar update.  Returns `ReindexOutcome` on success.
-/// Test: `cargo test -p trusty-search -- --test-threads=1`
+/// What: resolves the daemon socket and runs [`run_reindex_on`].
+/// Test: `driver_tests.rs`.
 pub async fn run_reindex_with(
     index_id: &str,
     root_path: &std::path::Path,
     opts: ReindexOptions,
 ) -> Result<ReindexOutcome> {
-    let base = daemon_base_url()?;
-    let client = trusty_common::server::daemon_http_client()?;
+    run_reindex_on(&DaemonClient::resolve()?, index_id, root_path, opts).await
+}
 
-    let kickoff_url = format!("{}/indexes/{}/reindex", base, index_id);
-    let kickoff_body = serde_json::json!({
-        "root_path": root_path,
-        "force": opts.force,
+/// [`run_reindex_with`] against an explicit daemon client.
+///
+/// Why (#9214): the socket replaces the HTTP kickoff and the SSE body; a stream
+/// the daemon ends, or a socket that breaks, before the `complete` event must
+/// fail the run (Q5) rather than print success.
+/// What: `search.index.reindex {index_id, body: {root_path, force}}`, then
+/// `search.index.reindex.stream {index_id}`, one item per progress event.
+/// `not found` on the kickoff names the unregistered index; every other
+/// refusal carries the daemon's text (#8889: the running reindex).
+/// Test: `a_stream_ending_without_complete_is_an_error`,
+/// `a_complete_event_finishes_the_run`, `an_unknown_index_kickoff_names_it`.
+pub(super) async fn run_reindex_on(
+    client: &DaemonClient,
+    index_id: &str,
+    root_path: &std::path::Path,
+    opts: ReindexOptions,
+) -> Result<ReindexOutcome> {
+    let kickoff = serde_json::json!({
+        "index_id": index_id,
+        "body": { "root_path": root_path, "force": opts.force },
     });
-    let kickoff = client
-        .post(&kickoff_url)
-        .json(&kickoff_body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("could not reach daemon at {base}: {e}"))?;
-
-    if kickoff.status() == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!(
+    match client.call(METHOD_INDEX_REINDEX, kickoff).await {
+        Ok(_) => {}
+        Err(e) if e.is_not_found() => anyhow::bail!(
             "index '{}' is not registered on the daemon \u{2014} run `trusty-search index` first",
             index_id
-        );
-    }
-    if !kickoff.status().is_success() {
-        // #8889: a 409 names the reindex already running; show it.
-        let status = kickoff.status();
-        let body: serde_json::Value = kickoff.json().await.unwrap_or_default();
-        match body.get("message").and_then(|m| m.as_str()) {
-            Some(message) => {
-                anyhow::bail!("daemon returned {status} for reindex kickoff: {message}")
-            }
-            None => anyhow::bail!("daemon returned {status} for reindex kickoff"),
+        ),
+        Err(e) => {
+            return Err(rpc_error(e))
+                .with_context(|| format!("reindex kickoff for '{index_id}' failed"));
         }
     }
 
-    let kickoff_body: serde_json::Value = kickoff
-        .json()
+    // #9214: no `stream_url` to follow — the stream is its own method. A
+    // refusal before the first item arrives as the stream's one error item.
+    let frames = client
+        .stream(
+            METHOD_INDEX_REINDEX_STREAM,
+            serde_json::json!({ "index_id": index_id }),
+        )
         .await
-        .unwrap_or_else(|_| serde_json::json!({}));
-    let stream_path = kickoff_body
-        .get("stream_url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("/indexes/{}/reindex/stream", index_id));
-    let stream_url = format!("{}{}", base, stream_path);
-
-    // SSE streams must NOT use the short request timeout from
-    // `daemon_http_client()` (currently 5s) — a large repo reindex can run for
-    // minutes. We build a dedicated client with only a connect timeout so the
-    // byte stream stays open until the daemon emits the `complete` event.
-    let sse_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::MAX)
-        .build()
-        .map_err(|e| anyhow::anyhow!("could not build SSE client: {e}"))?;
-    let resp = sse_client
-        .get(&stream_url)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("could not connect to SSE stream {stream_url}: {e}"))?;
-    if !resp.status().is_success() {
-        anyhow::bail!(
-            "reindex stream returned {} \u{2014} daemon may be an older version that \
-             doesn't support /reindex/stream",
-            resp.status()
-        );
-    }
+        .map_err(rpc_error)
+        .with_context(|| format!("could not open the reindex stream for '{index_id}'"))?;
+    // `into_stream` keeps the in-flight read inside the stream's state, so the
+    // `select!` below can drop a `next()` future without losing a frame.
+    let stream = frames.into_stream();
+    tokio::pin!(stream);
 
     // Progress is shown only when stdout is a TTY. When the CLI output is
     // piped or redirected (`std::io::stdout()` is not a terminal) the bars
@@ -207,18 +198,18 @@ pub async fn run_reindex_with(
 
     // 4-bar UI: header + Crawl / Chunk / Embed / KG + stats.
     // Built eagerly so the user sees something during the 1–2s daemon warmup
-    // before the first SSE event arrives.
+    // before the first progress event arrives.
     let mut ui = ReindexUi::new(index_id, interactive);
 
     // Atomics shared with the wall-clock ticker. The ticker refreshes the
-    // stats line every second so the user sees movement even when the SSE
+    // stats line every second so the user sees movement even when the
     // stream is idle (e.g. mid-batch embedding of 256 chunks).
     let started = std::time::Instant::now();
     let progress = SharedProgress::new(started);
     let tick_done = Arc::new(AtomicBool::new(false));
 
     // Issue #744: wall-clock ticker — refreshes the stats line every second so
-    // the operator sees movement even when no SSE event has arrived (see
+    // the operator sees movement even when no progress event has arrived (see
     // `ticker::spawn_ticker` for the Files-N/total, ETA and embed/s fixes).
     let ticker = spawn_ticker(progress.clone(), ui.stats_bar(), tick_done.clone());
 
@@ -226,6 +217,8 @@ pub async fn run_reindex_with(
     let mut timed_out = false;
     // `stalled` — no progress observed for stall_secs (default 120 s).
     let mut stalled = false;
+    // #9214 (Q5): why the stream stopped short of `complete`, for the error.
+    let mut ended_early: Option<String> = None;
 
     // ── Wait / timeout strategy ──────────────────────────────────────────────
     //
@@ -257,14 +250,11 @@ pub async fn run_reindex_with(
     // advance, we detach.  Only used when `timeout_explicit` is false.
     let stall_deadline_dur = Duration::from_secs(opts.stall_secs);
 
-    // `eventsource-stream` handles SSE framing. The daemon emits walk_complete,
-    // start, embedder_init/ready, chunk_progress, batch, skip, kg_start/complete,
-    // complete, and error events (see `events::handle_event` for the full
-    // protocol and `crates/trusty-search/src/service/reindex.rs::spawn_reindex`
-    // for the emitter side).
-    let byte_stream = resp.bytes_stream();
-    let stream = byte_stream.eventsource();
-    tokio::pin!(stream);
+    // The daemon emits walk_complete, start, embedder_init/ready,
+    // chunk_progress, batch, skip, kg_start/complete, complete, and error
+    // events (see `events::handle_event` for the full protocol and
+    // `crates/trusty-search/src/service/reindex.rs::spawn_reindex` for the
+    // emitter side).
 
     // Per-run state machine (phase flags + stall clock + accumulating outcome).
     let mut state = LoopState::new(started);
@@ -283,7 +273,7 @@ pub async fn run_reindex_with(
                 }
             }
         } else {
-            // Progress-aware path: wait for the next SSE event with a 1-second
+            // Progress-aware path: wait for the next event with a 1-second
             // tick so we can check the stall window without blocking indefinitely.
             tokio::select! {
                 biased;
@@ -303,19 +293,19 @@ pub async fn run_reindex_with(
                 }
             }
         };
-        let event = match maybe_event {
+        let evt: serde_json::Value = match maybe_event {
             Some(Ok(e)) => e,
             Some(Err(e)) => {
                 ui.stats_bar()
                     .println(format!("{} stream read error: {e}", "\u{26a0}".yellow()));
+                ended_early = Some(format!("the progress stream failed: {e}"));
                 break;
             }
-            None => break,
-        };
-
-        let evt: serde_json::Value = match serde_json::from_str(event.data.trim()) {
-            Ok(v) => v,
-            Err(_) => continue,
+            None => {
+                ended_early =
+                    Some("the daemon closed the progress stream before `complete`".to_string());
+                break;
+            }
         };
         handle_event(&mut state, &mut ui, &progress, &evt, index_id);
     }
@@ -378,7 +368,13 @@ pub async fn run_reindex_with(
             "{} Reindex stream ended without completion event",
             "\u{26a0}".yellow()
         ));
-        anyhow::bail!("reindex did not complete");
+        // #9214 (Q5): a stream that ends short of `complete` is a failure.
+        anyhow::bail!(
+            "reindex of '{index_id}' did not complete: {}",
+            ended_early
+                .as_deref()
+                .unwrap_or("no `complete` event arrived")
+        );
     }
 
     // Final headline. Three cases:
@@ -429,7 +425,7 @@ pub async fn run_reindex_with(
 
     // Per-subsystem timing breakdown (rendered after `ui.finish` so indicatif
     // doesn't redraw over our printed lines). Skipped for old daemons.
-    // Pass the SSE `elapsed_ms` (wall-clock total) so the breakdown can
+    // Pass the stream's `elapsed_ms` (wall-clock total) so the breakdown can
     // print it as the single authoritative number — subsystem times overlap.
     if let Some(t) = outcome.timings {
         // Issue #929: pass defer_embed + lexical_only so the embed timing
@@ -462,7 +458,7 @@ pub async fn run_reindex_with(
 
     // Post-reindex health check (blue-green safety net).
     if opts.verify_after {
-        verify_reindex_health(&client, &base, index_id, &outcome, opts.prior_chunk_count).await?;
+        verify_reindex_health(client, index_id, &outcome, opts.prior_chunk_count).await?;
     }
 
     Ok(outcome)

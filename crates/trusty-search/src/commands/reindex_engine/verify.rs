@@ -4,13 +4,18 @@
 //! shadow slot), so a broken rebuild only surfaces as "search returns nothing"
 //! hours later; this check surfaces it immediately after a `--force`.
 //! What: `verify_reindex_health` fetches the new chunk count and runs a sanity
-//! query, erroring if either looks wrong.
-//! Test: covered indirectly by `index --force` integration tests.
+//! query over the daemon socket (#9214), erroring if either looks wrong — or
+//! if either could not be read at all.
+//! Test: `a_status_that_cannot_be_read_is_not_verified`,
+//! `a_healthy_index_verifies`.
 
 use super::options::ReindexOutcome;
+use crate::commands::daemon_rpc::{call, index_status, rpc_error};
 use crate::commands::format::format_with_commas;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::queries::METHOD_QUERY;
 
 /// After a `--force` reindex, fetch the new chunk count and run a sanity
 /// query. Exits 1 if either looks wrong.
@@ -18,49 +23,50 @@ use colored::Colorize;
 /// Why: the daemon's reindex mutates the in-memory `CodeIndexer` in place
 /// (no shadow slot). If the rebuild produces a broken index, the only signal
 /// the user has is "search returns nothing" hours later. This check surfaces
-/// that immediately.
-/// What: fetches `/status` for the chunk count, then probes the search
-/// endpoint with common tokens. Returns an error if either check fails.
-/// Test: covered indirectly by `index --force` integration tests.
+/// that immediately. #9214: a status or query that could not be READ is
+/// reported as "could not verify", never as "0 chunks" or "0 results" — that
+/// misreport told the operator a healthy index was broken.
+/// What: `search.index.status` for the chunk count, then `search.query` with
+/// common tokens. Returns an error if either check fails or cannot run.
+/// Test: `a_status_that_cannot_be_read_is_not_verified`,
+/// `a_healthy_index_verifies`.
 pub(super) async fn verify_reindex_health(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     index_id: &str,
     outcome: &ReindexOutcome,
     prior: Option<u64>,
 ) -> Result<()> {
-    // 1) Chunk count via /status.
-    let status_url = format!("{}/indexes/{}/status", base, index_id);
-    let new_chunks = match client.get(&status_url).send().await {
-        Ok(r) if r.status().is_success() => r
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v.get("chunk_count").and_then(|n| n.as_u64()))
-            .unwrap_or(0),
-        _ => 0,
-    };
+    // 1) Chunk count via the status.
+    // #9214: an unreadable status is "could not verify", not 0 chunks.
+    let status = index_status(client, index_id)
+        .await
+        .map_err(rpc_error)
+        .with_context(|| format!("could not verify index '{index_id}' after the reindex"))?;
+    let new_chunks = status
+        .get("chunk_count")
+        .and_then(|n| n.as_u64())
+        .unwrap_or(0);
 
     // 2) Sanity query: pick something that hits virtually any source tree.
-    let search_url = format!("{}/indexes/{}/search", base, index_id);
     let probes = ["fn", "function", "def", "class", "the"];
     let mut got_hit = false;
     for probe in probes {
-        let body = serde_json::json!({ "text": probe, "top_k": 1 });
-        if let Ok(resp) = client.post(&search_url).json(&body).send().await {
-            if resp.status().is_success() {
-                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                    let n = json
-                        .get("results")
-                        .and_then(|r| r.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    if n > 0 {
-                        got_hit = true;
-                        break;
-                    }
-                }
-            }
+        let params = serde_json::json!({
+            "index_id": index_id,
+            "body": { "text": probe, "top_k": 1 },
+        });
+        // #9214: a failed query is "could not verify", not "no results".
+        let json = call(client, METHOD_QUERY, params).await.with_context(|| {
+            format!("could not verify index '{index_id}': the sanity query failed")
+        })?;
+        let n = json
+            .get("results")
+            .and_then(|r| r.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if n > 0 {
+            got_hit = true;
+            break;
         }
     }
 

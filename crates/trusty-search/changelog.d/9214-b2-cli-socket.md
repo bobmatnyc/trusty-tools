@@ -1,0 +1,9 @@
+Changed
+- `trusty-search index`, `reindex`, `index-status`, `index remove`, `index relocate`, `add`'s per-file write and `init`/`discover` registration now reach the daemon over its Unix socket instead of HTTP, so they work against a `--no-http` daemon (#9214). There is no HTTP fallback; with no daemon answering they exit 1 with an error naming the socket. The reindex progress bar reads the socket's progress stream.
+- `index`, `reindex` and the doctor repair now exit 1 when the progress stream ends, or breaks, before its `complete` event, naming why (#9214).
+- `index-status` with no id, and `index relocate` with no `-i`, now exit 1 naming any index whose status could not be read, instead of skipping it and reporting "no index registered" or picking another index (#9214).
+- Registering an index (`index`, `init`, `discover`) reports "daemon not reachable" only when nothing serves the socket; a daemon that answers and breaks the exchange is now an error carrying that failure (#9214).
+- `index remove <PATH>` exits 1 without touching the allowlist or config when the daemon's index list carries no `indexes` array, a non-string id, a `parked` member that is not an array, or a parked row without `id` or `root_path`, instead of reading it as "not registered" and clearing PATH's rows as stale (#9214).
+- `index remove` pins its delete to the root it resolved and showed the operator (`expected_root_path`); when the index was relocated in between, the daemon refuses and the command exits 1 with the allowlist and config untouched (#9214).
+- `index --force`'s post-reindex check reports "could not verify" when it cannot read the index's status or run its sanity query, instead of "unhealthy index: 0 chunks" (#9214).
+- `index-status <id>` reports "not found" only for the daemon's not-found refusal; an unreachable socket or any other refusal keeps its own message (#9214).

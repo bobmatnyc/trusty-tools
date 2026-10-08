@@ -10,16 +10,19 @@
 //! explicit `-i` or PATH wins, `TRUSTY_INDEX` alone refuses, PATH plus an id
 //! defers to a daemon-backed agreement check. [`resolve_explicit_target`] runs
 //! that check; any daemon failure during it is a refusal, never a guess.
-//! #8687: the lookups also read `GET /indexes`'s `parked` rows, so a
+//! #8687: the lookups also read the index list's `parked` rows, so a
 //! cold-parked target resolves for `remove` and refuses by name for `reindex`.
+//! #9214: every lookup reaches the daemon over its socket (`daemon_rpc`).
 //! Test: `classify_explicit_target_names_the_verb`, `flag_only_index_*` below;
-//! `classify_remove_target_*` in `index_remove.rs`; the HTTP round-trips in
+//! `classify_remove_target_*` in `index_remove.rs`; the socket round-trips in
 //! `tests/index_remove_env_conflict_8175.rs`,
 //! `tests/reindex_quantize_env_conflict_8737.rs` and
 //! `tests/index_remove_residency_8687.rs`.
 
+use super::daemon_rpc::{index_status, registrations, resident_statuses, rpc_error, Registrations};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Where an explicit `-i`/`--index` value came from (issue #8175).
 ///
@@ -132,45 +135,36 @@ pub(crate) fn flag_only_index(
 /// Resolve every non-CWD [`ExplicitTarget`] against the daemon.
 ///
 /// Why: PATH-plus-id agreement is the one check that needs the daemon, and a
-/// failure to perform it (daemon down, 404, 503) must refuse rather than fall
-/// back to either value (#8737 error arms).
+/// failure to perform it (daemon down, not found, unavailable) must refuse
+/// rather than fall back to either value (#8737 error arms).
 /// What: returns `Ok(None)` for [`ExplicitTarget::CwdAutoDetect`] (the caller
 /// keeps its own default), otherwise `(id, registered_root, resolved_via)`.
 /// A PATH that resolves to a different id than `-i`/`TRUSTY_INDEX` refuses,
 /// naming both. #8687: a parked target resolves under
 /// [`ParkedTargets::Resolve`] and refuses by name under
-/// [`ParkedTargets::Refuse`].
+/// [`ParkedTargets::Refuse`]. #9214: every lookup goes over the socket.
 /// Test: `tests/reindex_quantize_env_conflict_8737.rs`,
 /// `tests/index_remove_env_conflict_8175.rs`,
 /// `reindex_of_a_parked_index_refuses_and_names_it_parked`.
 pub(crate) async fn resolve_explicit_target(
     verb: &str,
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     target: ExplicitTarget,
     parked: ParkedTargets,
 ) -> Result<Option<(String, PathBuf, &'static str)>> {
     let (registration, via) = match target {
         ExplicitTarget::CwdAutoDetect => return Ok(None),
         ExplicitTarget::Refuse(reason) => bail!(reason),
-        ExplicitTarget::Path(p) => (
-            find_index_by_path(client, base, &p).await?,
-            "the PATH argument",
-        ),
-        ExplicitTarget::Id(id) => (
-            find_index_by_id(client, base, &id).await?,
-            "the -i/--index flag",
-        ),
+        ExplicitTarget::Path(p) => (find_index_by_path(client, &p).await?, "the PATH argument"),
+        ExplicitTarget::Id(id) => (find_index_by_id(client, &id).await?, "the -i/--index flag"),
         ExplicitTarget::PathAndId(p, id) => {
-            let registration = find_index_by_path(client, base, &p)
-                .await
-                .with_context(|| {
-                    format!(
-                        "refusing to {verb}: could not confirm PATH {} agrees with \
-                         index \"{id}\"",
-                        p.display()
-                    )
-                })?;
+            let registration = find_index_by_path(client, &p).await.with_context(|| {
+                format!(
+                    "refusing to {verb}: could not confirm PATH {} agrees with \
+                     index \"{id}\"",
+                    p.display()
+                )
+            })?;
             if registration.id != id {
                 bail!(
                     "refusing to {verb}: PATH {} resolves to index \"{}\", but \
@@ -213,81 +207,35 @@ pub(crate) enum ParkedTargets {
 pub(crate) struct Registration {
     pub(crate) id: String,
     pub(crate) root: PathBuf,
-    /// Registered but not resident: listed under `GET /indexes`'s `parked`.
+    /// Registered but not resident: listed under the index list's `parked`.
     pub(crate) parked: bool,
-}
-
-/// `GET /indexes`: the resident ids and the parked `(id, root)` rows (#8727).
-async fn list_registrations(
-    client: &reqwest::Client,
-    base: &str,
-) -> Result<(Vec<String>, Vec<(String, PathBuf)>)> {
-    let list_url = format!("{base}/indexes");
-    let body: serde_json::Value = client
-        .get(&list_url)
-        .send()
-        .await
-        .with_context(|| format!("could not reach daemon at {base}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon error for {list_url}"))?
-        .json()
-        .await
-        .context("could not parse /indexes response")?;
-    let rows = |key: &str| {
-        body.get(key)
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default()
-    };
-    let ids = rows("indexes")
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    let parked = rows("parked")
-        .iter()
-        .filter_map(|row| {
-            let id = row.get("id")?.as_str()?.to_string();
-            Some((id, PathBuf::from(row.get("root_path")?.as_str()?)))
-        })
-        .collect();
-    Ok((ids, parked))
 }
 
 /// Fetch the registered root for a known index id.
 ///
 /// Why (#1087): `-i <id>` names the id, and the root is still needed. #8687: a
-/// cold-parked id answers its status with `503 index_not_resident`, so its
-/// root is read from the `parked` rows instead.
-/// What: `GET /indexes/:id/status`; on a non-2xx answer, the id's parked row;
-/// failing both, the status error.
+/// cold-parked id answers its status with an `index_not_resident` refusal, so
+/// its root is read from the `parked` rows instead.
+/// What: `search.index.status`; on a refusal, the id's parked row; failing
+/// both, the status error. An unreachable daemon is never looked past.
 /// Test: `reindex_flag_alone_targets_the_registered_root`,
 /// `reindex_of_a_parked_index_refuses_and_names_it_parked`.
-pub(crate) async fn find_index_by_id(
-    client: &reqwest::Client,
-    base: &str,
-    id: &str,
-) -> Result<Registration> {
-    let url = format!("{base}/indexes/{id}/status");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("could not reach daemon at {base}"))?;
-    if let Err(status_err) = resp.error_for_status_ref() {
-        let (_, parked) = list_registrations(client, base).await?;
-        if let Some((_, root)) = parked.into_iter().find(|(p, _)| p == id) {
-            return Ok(Registration {
-                id: id.to_string(),
-                root,
-                parked: true,
-            });
+pub(crate) async fn find_index_by_id(client: &DaemonClient, id: &str) -> Result<Registration> {
+    let body = match index_status(client, id).await {
+        Ok(body) => body,
+        Err(e) if e.is_unreachable() => return Err(rpc_error(e)),
+        Err(e) => {
+            let parked = registrations(client).await?.parked;
+            if let Some((_, root)) = parked.into_iter().find(|(p, _)| p == id) {
+                return Ok(Registration {
+                    id: id.to_string(),
+                    root,
+                    parked: true,
+                });
+            }
+            return Err(rpc_error(e)).with_context(|| format!("could not read index '{id}'"));
         }
-        return Err(status_err).with_context(|| format!("daemon returned an error for {url}"));
-    }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .context("could not parse status response")?;
+    };
     let root = body
         .get("root_path")
         .and_then(|v| v.as_str())
@@ -305,58 +253,37 @@ pub(crate) async fn find_index_by_id(
 /// Why (#8737 review): skipping an index whose status failed let the lookup
 /// match a DIFFERENT id registered at the same root. #8687: a parked
 /// registration is matched from its `parked` row, with no status call.
-/// What: reads EVERY resident id's status before deciding. A `404` means the
-/// id was deleted since the list, so it is skipped; any other unreadable
-/// status fails the whole lookup, naming each such id. Then the first
-/// resident match wins, else the first parked one. `Ok(None)` only when every
-/// registration was read and none owns `target`.
+/// What: [`registrations`] then [`resident_statuses`] over every resident id;
+/// a deleted-since-listed id is skipped, any other unreadable status fails
+/// the whole lookup, naming each such id. Then the first resident match wins,
+/// else the first parked one. `Ok(None)` only when every registration was
+/// read and none owns `target`.
 /// Test: `reindex_path_refuses_when_a_same_root_index_status_503s`,
 /// `an_unreadable_status_refuses_instead_of_reporting_not_registered`,
 /// `removing_a_parked_index_by_path_and_flag_succeeds`.
 pub(crate) async fn lookup_index_by_path(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     target: &Path,
 ) -> Result<Option<Registration>> {
-    let (ids, parked) = list_registrations(client, base).await?;
+    let Registrations { resident, parked } = registrations(client).await?;
     let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let canonical_target = canonical(target);
-    let mut matched: Option<Registration> = None;
-    let mut unreadable: Vec<String> = Vec::new();
-    for id in ids {
-        let url = format!("{base}/indexes/{id}/status");
-        let body: Option<serde_json::Value> = match client.get(&url).send().await {
-            Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => continue,
-            Ok(r) if r.status().is_success() => r.json().await.ok(),
-            _ => None,
-        };
-        // #8737: fail closed — an unread index could share this root.
-        let Some(root) = body
-            .as_ref()
-            .and_then(|b| b.get("root_path"))
-            .and_then(|v| v.as_str())
-        else {
-            unreadable.push(format!("\"{id}\""));
-            continue;
-        };
-        let root = PathBuf::from(root);
-        if matched.is_none() && canonical(&root) == canonical_target {
-            matched = Some(Registration {
-                id,
-                root,
-                parked: false,
-            });
-        }
-    }
-    if !unreadable.is_empty() {
-        bail!(
-            "could not read the status of index {} while resolving PATH {}; refusing \
-             rather than matching another index by root path",
-            unreadable.join(", "),
+    // #8737: fail closed — an unread index could share this root.
+    let read = resident_statuses(client, resident)
+        .await
+        .require_all(&format!(
+            "refusing to resolve PATH {} rather than match another index by root path",
             target.display()
-        );
-    }
-    Ok(matched.or_else(|| {
+        ))?;
+    let resident_match = read
+        .into_iter()
+        .find(|s| canonical(&s.root) == canonical_target)
+        .map(|s| Registration {
+            id: s.id,
+            root: s.root,
+            parked: false,
+        });
+    Ok(resident_match.or_else(|| {
         parked
             .into_iter()
             .find(|(_, root)| canonical(root) == canonical_target)
@@ -371,11 +298,10 @@ pub(crate) async fn lookup_index_by_path(
 /// [`lookup_index_by_path`], with "nothing owns PATH" as an error.
 /// Test: `reindex_path_alone_or_agreeing_targets_the_path_index`.
 pub(crate) async fn find_index_by_path(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     target: &Path,
 ) -> Result<Registration> {
-    lookup_index_by_path(client, base, target)
+    lookup_index_by_path(client, target)
         .await?
         .with_context(|| {
             format!(

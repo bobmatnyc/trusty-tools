@@ -7,8 +7,8 @@
 //! that gap by rendering a concise per-stage status table with live embed
 //! progress, and — with `--watch` — polls until embedding finishes.
 //!
-//! What: when an `index_id` is provided, queries `GET /indexes/:id/status`
-//! directly.  When no id is given, resolves the current working directory to
+//! What: when an `index_id` is provided, queries `search.index.status` over
+//! the daemon socket (#9214) directly.  When no id is given, resolves the current working directory to
 //! the matching index(es) via `index_cwd_resolve::resolve_cwd_indexes` and
 //! renders a table for each one.  With `--watch` and a single match the table
 //! is polled every ~1 s until `semantic.status == ready|failed`.  With
@@ -23,6 +23,7 @@ use anyhow::Result;
 use colored::Colorize;
 use std::io::IsTerminal;
 use std::time::Duration;
+use trusty_search::service::daemon_client::DaemonClient;
 
 // ─── Public entry point ───────────────────────────────────────────────────────
 
@@ -53,7 +54,7 @@ pub(crate) fn resolve_status_target(
 /// When no id is provided, defaults to the index(es) covering the current
 /// working directory — mirroring the convention used by `trusty-search index .`.
 ///
-/// What: if `index_id` is `Some`, fetches `/indexes/:id/status` and renders
+/// What: if `index_id` is `Some`, fetches its status and renders
 /// a stage table (watch polls every ~1 s).  If `index_id` is `None`, resolves
 /// the cwd to matching indexes and renders each one; `--watch` with multiple
 /// matches errors with the candidate ids so the user can pick.
@@ -70,21 +71,14 @@ pub async fn handle_index_status(index_id: Option<&str>, watch: bool, json: bool
         anyhow::bail!("`--watch` and `--json` cannot be used together");
     }
 
-    // #9214: start the daemon over its socket, then resolve its HTTP base.
-    let base = super::daemon_http::ensure_daemon_http_base().await?;
-
-    let client = trusty_common::server::daemon_http_client()?;
+    // #9214: the socket only; nothing answering is an error naming it.
+    let client = super::daemon_rpc::connect().await?;
 
     match index_id {
-        Some(id) => {
-            // Explicit id: single-index path (original behaviour).
-            let url = format!("{}/indexes/{}/status", base, id);
-            run_status_for_single(id, &url, &client, watch, json).await
-        }
-        None => {
-            // No id: resolve from cwd.
-            run_status_for_cwd(&client, &base, watch, json).await
-        }
+        // Explicit id: single-index path (original behaviour).
+        Some(id) => run_status_for_single(id, &client, watch, json).await,
+        // No id: resolve from cwd.
+        None => run_status_for_cwd(&client, watch, json).await,
     }
 }
 
@@ -100,15 +94,10 @@ pub async fn handle_index_status(index_id: Option<&str>, watch: bool, json: bool
 /// interleaved output.
 /// Test: multi-match and no-match paths exercised by unit tests in
 /// `index_cwd_resolve`; cwd single-match path exercised below.
-async fn run_status_for_cwd(
-    client: &reqwest::Client,
-    base: &str,
-    watch: bool,
-    json: bool,
-) -> Result<()> {
+async fn run_status_for_cwd(client: &DaemonClient, watch: bool, json: bool) -> Result<()> {
     use super::index_cwd_resolve::resolve_cwd_indexes;
 
-    let matches = resolve_cwd_indexes(client, base).await?;
+    let matches = resolve_cwd_indexes(client).await?;
 
     match matches.len() {
         0 => {
@@ -123,8 +112,7 @@ async fn run_status_for_cwd(
         }
         1 => {
             let m = &matches[0];
-            let url = format!("{}/indexes/{}/status", base, m.id);
-            run_status_for_single(&m.id, &url, client, watch, json).await
+            run_status_for_single(&m.id, client, watch, json).await
         }
         _ => {
             // Multiple indexes cover cwd.
@@ -170,13 +158,12 @@ async fn run_status_for_cwd(
 /// tests.
 async fn run_status_for_single(
     index_id: &str,
-    url: &str,
-    client: &reqwest::Client,
+    client: &DaemonClient,
     watch: bool,
     json: bool,
 ) -> Result<()> {
     if !watch {
-        let body = fetch_status(client, url).await?;
+        let body = fetch_status(client, index_id).await?;
         if json {
             println!("{}", serde_json::to_string_pretty(&body)?);
         } else {
@@ -188,7 +175,7 @@ async fn run_status_for_single(
     // --watch: poll every ~1 s until semantic stage settles (Ready or Failed).
     let is_tty = std::io::stdout().is_terminal();
     loop {
-        let body = fetch_status(client, url).await?;
+        let body = fetch_status(client, index_id).await?;
         let semantic_status = body
             .get("stages")
             .and_then(|s| s.get("semantic"))
@@ -221,35 +208,27 @@ async fn run_status_for_single(
     Ok(())
 }
 
-// ─── HTTP helper ─────────────────────────────────────────────────────────────
+// ─── Daemon helper ───────────────────────────────────────────────────────────
 
-/// Fetch the `/indexes/:id/status` JSON body.
+/// Fetch one index's status body over the daemon socket.
 ///
-/// Why: isolating the HTTP call lets the rendering logic be tested with
-/// synthetic JSON without hitting a live daemon.
-/// What: GETs the URL, parses the JSON response, returns an error if the
-/// daemon returns a non-2xx status (e.g. 404 when the index is not registered).
-/// Test: covered indirectly by `handle_index_status`.
-async fn fetch_status(client: &reqwest::Client, url: &str) -> Result<serde_json::Value> {
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("could not reach daemon: {e}"))?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        anyhow::bail!(
-            "index not found — run `trusty-search index` to register it first, \
-             or `trusty-search list` to see registered indexes"
-        );
+/// Why: isolating the call lets the rendering logic be tested with synthetic
+/// JSON. #9214: "index not found" is the daemon's `not found` refusal only;
+/// an unreachable socket, a broken exchange, or any other refusal keeps its
+/// own text, so a transport fault never reads as a missing index.
+/// What: `search.index.status {index_id}`; `not found` maps to the
+/// register-it-first hint, every other failure goes through `rpc_error`.
+/// Test: `an_unknown_index_reads_as_not_found`,
+/// `a_transport_or_other_refusal_is_not_reported_as_not_found`.
+async fn fetch_status(client: &DaemonClient, index_id: &str) -> Result<serde_json::Value> {
+    match super::daemon_rpc::index_status(client, index_id).await {
+        Ok(body) => Ok(body),
+        Err(e) if e.is_not_found() => anyhow::bail!(
+            "index '{index_id}' not found — run `trusty-search index` to register it \
+             first, or `trusty-search list` to see registered indexes"
+        ),
+        Err(e) => Err(super::daemon_rpc::rpc_error(e)),
     }
-    if !resp.status().is_success() {
-        anyhow::bail!("daemon returned {} for status query", resp.status());
-    }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("could not parse status response: {e}"))?;
-    Ok(body)
 }
 
 // ─── Rendering helpers ────────────────────────────────────────────────────────
@@ -578,7 +557,7 @@ mod tests {
     /// Why: the watch loop emits one JSON document per poll and, on a TTY,
     /// interleaves them with in-place cursor-up escape codes — garbled,
     /// unparseable output. The guard lives at the top of `handle_index_status`
-    /// (before `ensure_daemon_http_base`), so it fails fast without a
+    /// (before `daemon_rpc::connect`), so it fails fast without a
     /// live daemon and covers both `status <idx> --watch --json` and
     /// `index-status <idx> --watch --json`, which both delegate here.
     /// What: calls `handle_index_status` with `watch=true, json=true` and
@@ -612,5 +591,50 @@ mod tests {
             pct, 0,
             "pct must be 0 when total is 0 (checked_div returns None)"
         );
+    }
+
+    /// #9214 H6: the daemon's `not found` refusal reads as "not found".
+    #[tokio::test]
+    async fn an_unknown_index_reads_as_not_found() {
+        let daemon = crate::commands::mock_socket::mock_daemon(|_, _| {
+            Err(trusty_common::uds::server::RpcError::new(
+                trusty_search::service::rpc::error::CODE_NOT_FOUND,
+                "unknown index: ghost",
+            ))
+        })
+        .await;
+        let err = fetch_status(&daemon.client, "ghost")
+            .await
+            .expect_err("unknown index")
+            .to_string();
+        assert!(err.contains("'ghost' not found"), "{err}");
+    }
+
+    /// #9214 H6: an unreachable socket and a non-404 refusal each keep their
+    /// own text; neither reads as a missing index.
+    #[tokio::test]
+    async fn a_transport_or_other_refusal_is_not_reported_as_not_found() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let down = fetch_status(&DaemonClient::at(&socket), "x")
+            .await
+            .expect_err("nothing serves the socket")
+            .to_string();
+        assert!(down.contains("could not reach daemon"), "{down}");
+        assert!(down.contains(&socket.display().to_string()), "{down}");
+        assert!(!down.contains("not found"), "{down}");
+
+        let daemon = crate::commands::mock_socket::mock_daemon(|_, _| {
+            Err(trusty_common::uds::server::RpcError::internal(
+                "corpus read failed",
+            ))
+        })
+        .await;
+        let refused = fetch_status(&daemon.client, "x")
+            .await
+            .expect_err("refused")
+            .to_string();
+        assert!(refused.contains("corpus read failed"), "{refused}");
+        assert!(!refused.contains("not found"), "{refused}");
     }
 }

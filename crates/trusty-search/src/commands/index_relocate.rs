@@ -7,38 +7,39 @@
 //! WITHOUT clearing the hash cache, so a subsequent incremental reindex only
 //! re-embeds genuinely changed files.
 //! What: resolves the current index (from `-i` flag or CWD detection), calls
-//! `PATCH /indexes/:id` with `{ "root_path": "<new>" }`, and updates the
-//! allowlist entry to point to the new path.
-//! Test: `handle_index_relocate_rejects_missing_id` unit test below; the HTTP
-//! round-trip is covered by `tests_index::relocate_index_updates_root_path`.
+//! `search.index.relocate` over the daemon socket (#9214) with
+//! `{ "root_path": "<new>" }`, and approves the new path in the allowlist.
+//! Test: `resolve_index_id_uses_explicit_arg`,
+//! `an_unreadable_status_refuses_cwd_detection`, `approve_destination_*`.
 
 use super::explicit_target::{flag_only_index, IndexIdSource};
 use anyhow::{bail, Context, Result};
 use colored::Colorize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::writes::METHOD_INDEX_RELOCATE;
 
 /// Entry point for `trusty-search index relocate --to <new-path>`.
 ///
 /// Why: see module docs.
-/// What: resolves the current index id, canonicalizes `new_path`, calls the
-/// `PATCH /indexes/:id` endpoint, and updates the allowlist for the old path.
+/// What: resolves the current index id, canonicalizes `new_path`, approves it,
+/// and calls `search.index.relocate`; any failure withdraws the approval.
 /// `TRUSTY_INDEX` alone refuses before any network call (#8737): a relocate
 /// rewrites the index's root, so its target needs a real `-i` or CWD detection.
-/// Test: unit tests below; integration coverage in `tests_index.rs`; the
-/// #8737 refusal by `relocate_env_only_refuses_with_no_requests`.
+/// Test: unit tests below; the #8737 refusal by
+/// `relocate_env_only_refuses_with_no_requests`.
 pub async fn handle_index_relocate(
     cli_index: &Option<String>,
     index_source: Option<IndexIdSource>,
     new_path: PathBuf,
 ) -> Result<()> {
     let cli_index = &flag_only_index("relocate", cli_index, index_source)?;
-    // #9214: start the daemon over its socket, then resolve its HTTP base.
-    let base = super::daemon_http::ensure_daemon_http_base().await?;
-
-    let client = trusty_common::server::daemon_http_client()?;
+    // #9214: the socket only; nothing answering is an error naming it.
+    let client = super::daemon_rpc::connect().await?;
 
     // Resolve the index id: explicit `-i` wins, otherwise auto-detect from CWD.
-    let index_id = resolve_index_id(&client, &base, cli_index).await?;
+    let cwd = std::env::current_dir().context("could not determine current directory")?;
+    let index_id = resolve_index_id(&client, cli_index, &cwd).await?;
 
     // Canonicalize the new path early for a friendly error before hitting the
     // daemon (which will also reject non-existent paths, but the CLI message
@@ -47,43 +48,30 @@ pub async fn handle_index_relocate(
         .canonicalize()
         .with_context(|| format!("new path does not exist: {}", new_path.display()))?;
 
-    // #767: approve the destination BEFORE the PATCH — see
+    // #767: approve the destination BEFORE the relocate — see
     // `approve_destination`. `newly_approved` drives the rollback below.
     let newly_approved = approve_destination(&canonical_new, None)?;
 
-    // Call PATCH /indexes/:id
-    let patch_url = format!("{base}/indexes/{index_id}");
-    let body = serde_json::json!({ "root_path": canonical_new.to_string_lossy() });
-    // #767: bind rather than `?`. A transport failure means the relocation did
-    // not happen either, so it owes the same rollback as a non-2xx answer —
-    // `?`-ing here left a durable `allowlist.toml` entry behind with nothing on
-    // screen. Both arms now go through `withdraw_approval`.
-    let send_result = client.patch(&patch_url).json(&body).send().await;
-    let resp = match send_result {
-        Ok(r) => r,
+    // #767: every failure — refusal, broken exchange, unreachable socket —
+    // means the relocation did not happen, so each owes the same rollback via
+    // `withdraw_approval`.
+    let params = serde_json::json!({
+        "index_id": index_id,
+        "body": { "root_path": canonical_new.to_string_lossy() },
+    });
+    let result = match super::daemon_rpc::call(&client, METHOD_INDEX_RELOCATE, params).await {
+        Ok(result) => result,
         Err(e) => {
             withdraw_approval(newly_approved, &canonical_new);
-            return Err(e).with_context(|| format!("could not reach daemon at {base}"));
+            return Err(e).with_context(|| format!("could not relocate index '{index_id}'"));
         }
     };
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        withdraw_approval(newly_approved, &canonical_new);
-        bail!("daemon returned {status} for PATCH {patch_url}: {text}");
-    }
-
-    let result: serde_json::Value = resp
-        .json()
-        .await
-        .context("could not parse PATCH response")?;
     let new_root = result
         .get("new_root_path")
         .and_then(|v| v.as_str())
         .unwrap_or(canonical_new.to_str().unwrap_or("(new path)"));
 
-    // The allowlist entry for the new path was written above, before the PATCH.
+    // The allowlist entry for the new path was written above, before the relocate.
     // The OLD path's entry is deliberately left in place: this command does not
     // know whether the operator still wants that root approved, and
     // `trusty-search index remove <old>` is the verb that withdraws it.
@@ -117,7 +105,7 @@ pub async fn handle_index_relocate(
 /// suppressed for a pre-existing entry, so nothing would restore them. Nothing
 /// here needs to modify an existing approval, so it does not touch one.
 /// Returns `true` only when a new entry was written, which is exactly when the
-/// caller should withdraw it if the PATCH fails.
+/// caller should withdraw it if the relocate fails.
 /// `allowlist_path` is injectable for tests; `None` uses the real XDG path.
 /// Test: `approve_destination_adds_a_missing_entry`,
 /// `approve_destination_preserves_an_existing_entrys_settings`.
@@ -157,7 +145,7 @@ fn approve_destination(
 /// Withdraw the approval [`approve_destination`] granted, if it granted one.
 ///
 /// Why (#767): the relocation did not happen, so the approval that was written
-/// for it must not outlive the attempt. Every way the PATCH can fail owes this
+/// for it must not outlive the attempt. Every way the relocate can fail owes this
 /// — the transport error and the non-2xx answer both. Keeping it in one
 /// function is what stops the next failure arm from quietly skipping it, which
 /// is how the transport arm came to be missing one.
@@ -166,8 +154,9 @@ fn approve_destination(
 /// to STDERR as well as logging: this command talks to the operator through
 /// `println!`/`bail!`, so a tracing-only line means they see the relocate fail
 /// and never learn a stale approval was left behind.
-/// Test: `approve_destination_adds_a_missing_entry` covers the grant side;
-/// the no-op arm is asserted by
+/// Test: `a_refused_relocate_withdraws_the_new_paths_approval` (#9214) drives
+/// the withdrawal end to end; `approve_destination_adds_a_missing_entry`
+/// covers the grant side; the no-op arm is asserted by
 /// `approve_destination_preserves_an_existing_entrys_settings`.
 fn withdraw_approval(newly_approved: bool, canonical_new: &std::path::Path) {
     if !newly_approved {
@@ -257,65 +246,37 @@ mod tests_767 {
 
 /// Resolve the effective index id from the `-i` flag or CWD auto-detection.
 ///
-/// Why: `Relocate` needs a daemon-side index id to call `PATCH /indexes/:id`;
+/// Why: `Relocate` needs a daemon-side index id to call `search.index.relocate`;
 /// the `-i` flag (if present) provides it directly, otherwise we look up the
-/// index whose `root_path` contains CWD.
-/// What: if `cli_index` is `Some`, returns it verbatim. Otherwise fetches all
-/// index statuses from the daemon and returns the id of the first one whose
-/// `root_path` is an ancestor of (or equal to) CWD.
-/// Test: `resolve_index_id_uses_explicit_arg` below.
+/// index whose `root_path` contains `cwd`.
+/// What: if `cli_index` is `Some`, returns it verbatim. Otherwise reads every
+/// resident index's status and returns the id of the first one whose
+/// `root_path` is an ancestor of (or equal to) `cwd`. #9214: a status that
+/// cannot be read refuses rather than being skipped — the skipped index could
+/// be the one that owns `cwd`.
+/// Test: `resolve_index_id_uses_explicit_arg`,
+/// `an_unreadable_status_refuses_cwd_detection`.
 async fn resolve_index_id(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     cli_index: &Option<String>,
+    cwd: &Path,
 ) -> Result<String> {
     if let Some(id) = cli_index {
         return Ok(id.clone());
     }
 
     // Auto-detect from CWD.
-    let cwd = std::env::current_dir().context("could not determine current directory")?;
-    let canonical_cwd = std::fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
-
-    let list_url = format!("{base}/indexes");
-    let list_body: serde_json::Value = client
-        .get(&list_url)
-        .send()
+    let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let ids = super::daemon_rpc::registrations(client).await?.resident;
+    // #9214: H1 — a failed lookup refuses; it used to `continue`.
+    let read = super::daemon_rpc::resident_statuses(client, ids)
         .await
-        .with_context(|| format!("could not reach daemon at {base}"))?
-        .error_for_status()
-        .with_context(|| format!("daemon error for {list_url}"))?
-        .json()
-        .await
-        .context("could not parse /indexes response")?;
-
-    let empty: Vec<serde_json::Value> = Vec::new();
-    let ids: Vec<String> = list_body
-        .get("indexes")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&empty)
-        .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect();
-
-    for id in ids {
-        let url = format!("{base}/indexes/{id}/status");
-        let resp = match client.get(&url).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => continue,
-        };
-        let body: serde_json::Value = match resp.json().await {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        let root = body
-            .get("root_path")
-            .and_then(|v| v.as_str())
-            .map(std::path::PathBuf::from);
-        let Some(root) = root else { continue };
-        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+        .require_all("refusing to guess which index owns the current directory")?;
+    for status in read {
+        let canonical_root =
+            std::fs::canonicalize(&status.root).unwrap_or_else(|_| status.root.clone());
         if canonical_cwd.starts_with(&canonical_root) {
-            return Ok(id);
+            return Ok(status.id);
         }
     }
 
@@ -338,22 +299,41 @@ mod tests {
     /// What: calls `resolve_index_id` with an explicit `Some("my-index")` and
     /// asserts the returned string equals the input.
     /// Test: this test.
-    #[test]
-    fn resolve_index_id_uses_explicit_arg() {
-        // We can test the synchronous decision logic without a live daemon by
-        // constructing a dummy client and a base URL that would fail to connect.
-        // Since the explicit-id branch returns early without any network call,
-        // the client is never used.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let client = reqwest::Client::new();
-        let id = rt.block_on(resolve_index_id(
-            &client,
-            "http://127.0.0.1:0", // unreachable — should not be contacted
-            &Some("my-index".to_string()),
-        ));
-        assert!(id.is_ok());
-        assert_eq!(id.unwrap(), "my-index");
+    #[tokio::test]
+    async fn resolve_index_id_uses_explicit_arg() {
+        // The explicit-id branch returns before any daemon call, so a socket
+        // nothing serves is never dialled.
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let client = DaemonClient::at(dir.path().join("absent.sock"));
+        let id = resolve_index_id(&client, &Some("my-index".to_string()), dir.path())
+            .await
+            .expect("explicit id");
+        assert_eq!(id, "my-index");
+    }
+
+    /// #9214 H1: CWD detection with one status refused must fail naming that
+    /// index, not skip it and report "no index registered" or pick another.
+    #[tokio::test]
+    async fn an_unreadable_status_refuses_cwd_detection() {
+        let owner = tempfile::tempdir().expect("owner root");
+        let owner_root = owner.path().to_string_lossy().into_owned();
+        let daemon = crate::commands::mock_socket::mock_daemon(move |method, params| {
+            match (method, params["index_id"].as_str()) {
+                ("search.indexes.list", _) => Ok(serde_json::json!({ "indexes": ["owner"] })),
+                ("search.index.status", Some("owner")) => {
+                    Err(trusty_common::uds::server::RpcError::internal(format!(
+                        "status unavailable for {owner_root}"
+                    )))
+                }
+                _ => Err(trusty_common::uds::server::RpcError::internal("unexpected")),
+            }
+        })
+        .await;
+        let err = resolve_index_id(&daemon.client, &None, owner.path())
+            .await
+            .expect_err("an unreadable status must refuse")
+            .to_string();
+        assert!(err.contains("\"owner\""), "{err}");
+        assert!(!err.contains("no index registered"), "{err}");
     }
 }

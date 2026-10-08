@@ -20,7 +20,6 @@
 //! backward-compatibility but is no longer consumed for root selection or
 //! crawl scoping; the full tree under the chosen root is always crawled.
 
-use super::daemon_http::daemon_base_url;
 use super::reindex_engine::{
     register_index_reporting_collision, run_reindex_force_opts, run_reindex_opts, RegisterFilters,
     RegisterOutcome,
@@ -96,8 +95,8 @@ pub async fn handle_index(
 
     // 2. Auto-start the daemon (issue #24: CPU-by-default on Apple Silicon
     //    avoids ~72 GB CoreML virtual-RSS spike that jetsam kills ~14s in).
-    // #9214: start the daemon over its socket; its HTTP base is resolved below.
-    super::daemon_http::ensure_daemon_http_base_for_indexing().await?;
+    // #9214: the socket only; nothing answering is an error naming it.
+    super::daemon_rpc::connect_for_indexing().await?;
 
     // 3. Per-project dotfile config (`.trusty-search.yaml`, issue #30) loaded
     //    from CWD only — supplies `name`/`exclude` defaults. The `path:` field
@@ -390,13 +389,8 @@ enum ReindexTarget {
 fn resolve_reindex_target(outcome: RegisterOutcome, force: bool) -> Result<ReindexTarget> {
     match outcome {
         RegisterOutcome::Registered { created } => Ok(ReindexTarget::Registered { created }),
-        // #9214: an unpublished address is its own error, never a guessed URL.
-        RegisterOutcome::Unreachable => match daemon_base_url() {
-            Ok(base) => anyhow::bail!(
-                "Daemon not reachable at {base}. Start it with `trusty-search start`."
-            ),
-            Err(e) => anyhow::bail!("Daemon not reachable: {e}"),
-        },
+        // #9214: the client's own text names the socket that did not answer.
+        RegisterOutcome::Unreachable { reason } => anyhow::bail!("Daemon not reachable: {reason}"),
         RegisterOutcome::RootOwnedBy {
             existing_id,
             refusal,
