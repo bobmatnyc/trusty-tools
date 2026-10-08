@@ -233,28 +233,8 @@ fn worst(items: &[ContextItemRecord]) -> SourceState {
 /// `cap_detail_masks_a_json_quoted_authorization_header`,
 /// `cap_detail_masks_an_equals_joined_bearer_scheme`.
 pub(crate) fn cap_detail(text: &str) -> String {
-    let mut words: Vec<String> = Vec::new();
-    let mut hide_next = false;
-    for word in text.split_whitespace() {
-        match credential_word(&word.to_ascii_lowercase()) {
-            Some(Hide::Next) => {
-                words.push(word.to_string());
-                hide_next = true;
-                continue;
-            }
-            Some(Hide::After(keep)) => {
-                words.push(format!("{}[redacted]", &word[..keep]));
-                hide_next = false;
-                continue;
-            }
-            None => {}
-        }
-        if std::mem::take(&mut hide_next) {
-            words.push("[redacted]".to_string());
-            continue;
-        }
-        words.push(redact_pairs(&redact_userinfo(word)));
-    }
+    let redacted = redact_credentials(text);
+    let words: Vec<&str> = redacted.split_whitespace().collect();
     let line = crate::pipeline::reply_shape::mask_credential_shapes(&words.join(" "));
     if line.chars().count() <= MAX_DETAIL_CHARS {
         return line;
@@ -262,6 +242,54 @@ pub(crate) fn cap_detail(text: &str) -> String {
     let mut cut: String = line.chars().take(MAX_DETAIL_CHARS - 1).collect();
     cut.push('…');
     cut
+}
+
+/// `text` with every credential [`cap_detail`] hides replaced by
+/// `[redacted]`; whitespace and all other text kept, uncapped (#9431).
+///
+/// Why: error and log text that names a configured URL (the trusty-search
+/// URL, #9431) must drop its userinfo password and credential query values
+/// but stay a readable, full-length message.
+/// What: the word rules `cap_detail` applies — the value after a credential
+/// scheme or header, a URL userinfo password, a `token=`/`key=`/`secret=`/
+/// `password=`/`auth` pair — without its whitespace collapse, shape mask or
+/// length cap.
+/// Test: `redact_credentials_keeps_the_message_and_hides_url_credentials`.
+pub(crate) fn redact_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut hide_next = false;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let word_at = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
+        out.push_str(&rest[..word_at]);
+        rest = &rest[word_at..];
+        let word_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(word_len);
+        rest = tail;
+        if !word.is_empty() {
+            out.push_str(&redact_word(word, &mut hide_next));
+        }
+    }
+    out
+}
+
+/// One word of [`redact_credentials`]; `hide_next` carries a scheme or
+/// header name over to the word holding its value.
+fn redact_word(word: &str, hide_next: &mut bool) -> String {
+    match credential_word(&word.to_ascii_lowercase()) {
+        Some(Hide::Next) => {
+            *hide_next = true;
+            word.to_string()
+        }
+        Some(Hide::After(keep)) => {
+            *hide_next = false;
+            format!("{}[redacted]", &word[..keep])
+        }
+        None if std::mem::take(hide_next) => "[redacted]".to_string(),
+        None => redact_pairs(&redact_userinfo(word)),
+    }
 }
 
 /// What a credential word hides: the next word, or its own tail.

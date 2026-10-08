@@ -70,6 +70,26 @@ fn cap_detail_masks_a_url_userinfo_password() {
     );
 }
 
+/// #9431: an error message naming a credentialed URL keeps its whitespace,
+/// host, path and wording; only the password and the token value change.
+#[test]
+fn redact_credentials_keeps_the_message_and_hides_url_credentials() {
+    let text = "GET http://user:fake123fake@127.0.0.1:9/p?access_token=fake123fake/health:\n  \
+                error sending request for url (http://127.0.0.1:9/p?access_token=fake123fake/health)";
+    let shown = redact_credentials(text);
+    assert_eq!(
+        shown,
+        "GET http://user:[redacted]@127.0.0.1:9/p?access_token=[redacted]\n  error sending \
+         request for url (http://127.0.0.1:9/p?access_token=[redacted]"
+    );
+    let plain = "index `trusty-tools-4e2cf878` not found\n\tat 10.0.0.1";
+    assert_eq!(
+        redact_credentials(plain),
+        plain,
+        "nothing to hide, nothing changed"
+    );
+}
+
 /// #9194: a header value glued to its colon (`X-Api-Key:shortkey`) is
 /// hidden, as are `Token:` and `Password:` values written the same way.
 #[test]

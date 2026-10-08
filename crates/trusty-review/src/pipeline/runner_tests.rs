@@ -2838,3 +2838,7 @@ mod context_report;
 // #9194: the `external_sources` row and its per-source items.
 #[path = "runner_external_report_tests.rs"]
 mod external_report;
+
+// #9431: a credentialed trusty-search URL never reaches review output.
+#[path = "runner_credential_url_tests.rs"]
+mod credential_url;
