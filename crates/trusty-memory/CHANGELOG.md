@@ -6,6 +6,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.29.4] — 2026-10-08
+
+### Added
+
+- Recall ranks a drawer that another drawer superseded through a `superseded_by` KG edge below its replacement, on every recall surface. The superseded drawer keeps half its score when its replacement is not in the result window, so it stays recallable as history. A drawer with no edge keeps its score and rank. If the edge lookup fails or takes longer than 200 ms, recall logs a warning and answers without this demotion (#9421).
+- A ruling that `memory_recall` or `memory_recall_deep` folds in from a user-scope rulings palace is demoted the same way: each rulings palace reads the edges among its own hits from its own KG, inside the rulings leg's time bound. A failed or late read logs a warning naming that palace and skips demotion for that palace only. A superseded ruling no longer takes a reserved rulings-floor slot, so the floor cannot lift it above its replacement (#9421).
+
+### Fixed
+
+- BM25 recall no longer serves stale text for a drawer whose content changed under the same id. The coverage probe compared drawer ids only, so the startup sweep and the repair sweep reported an edited drawer as indexed and never re-indexed it. The probe now compares each drawer's current text with the indexed text, and re-indexing replaces the old postings. Existing snapshots load and serve unchanged, with no migration or full rebuild (#8246).
+- A dream cycle that merges near-duplicate drawers or adds consolidated drawers now queues its palace for BM25 repair, so the merged text is searchable after the next repair pass (default 300 s) instead of after a daemon restart. A dream cycle that fails also queues its palace, because merges it persisted before the failure have changed drawer text (#8246).
+- The rulings rank floor lifts a ruling on a query of three or fewer content terms only when the ruling holds every term. Before, two incidental matches out of three (for example "live" from "live-check" and "version" from a `--version` flag) lifted an unrelated ruling to rank 3. A four-term query now needs three shared terms, up from two (#9143).
+- The rulings rank floor keeps two-character query terms, so "ruling e1" lifts only a ruling that mentions E1. Before, `e1` was dropped and every ruling that says "ruling" answered the query. Common two-letter words (`am`, `go`, `id`, `vs`, `hi`, `oh`, `is`, `to` and others) stay stop words (#9279).
+- `memory_recall` and the other recall surfaces rank a drawer first when the query names a rare id with a digit, such as `e1`, `v2` or `#42`. A two-letter word without a digit, such as `pm` or `pr`, does not change the ranking (#9279).
+- Recall ranks tied drawers by score, then layer, then drawer id, in both the BM25 fusion sort and the stale-snapshot demotion sort. Before, tied drawers kept the vector lane's order, which a reopened palace could change (#9280).
+- The daily drawer-count snapshot no longer records palaces the daemon itself holds open as unavailable (#9283). The snapshot and the idle-evict sweep now share a gate, so a sweep cannot take a resident handle out of the registry mid-count, and an unreadable palace is re-tried three times before it is recorded. On the reporting host this was 61 of 102 palaces, which could never turn the check red.
+- A resident palace is counted from its store's `DRAWERS` rows through the daemon's own handle, the figure a disk read gives (#9283). Its in-memory list can also hold deleted L1-snapshot drawers, so a palace counted resident one day and from disk the next showed a drop no journal explains.
+- A palace whose count is still unavailable is logged at `warn` with its reason, the reason is stored on its `drawer_counts.jsonl` line, and `trusty-memory doctor` warns with `N palace(s) uncountable: <palace>: <reason>` instead of passing (#9283).
+- The drawer-count check also warns, naming the palace and the error, when a palace's deletion journal cannot be read; it used to pass with the palace listed only in a trailing note (#9283).
+- `trusty-memory doctor` no longer exits 1 on the first day of drawer-count history: one snapshot per palace is now a `baseline pending` warning, not an undetermined check (#9283).
+
 ## [0.29.3] — 2026-10-06
 
 ### Fixed
