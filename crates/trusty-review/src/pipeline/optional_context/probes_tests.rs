@@ -82,6 +82,11 @@ fn redact_credentials_keeps_the_message_and_hides_url_credentials() {
         "GET http://user:[redacted]@127.0.0.1:9/p?access_token=[redacted]\n  error sending \
          request for url (http://127.0.0.1:9/p?access_token=[redacted]"
     );
+    // #9431: a username-only userinfo is sent as Basic auth, so all of it goes.
+    assert_eq!(
+        redact_credentials("GET http://tok123@127.0.0.1:9/p: refused"),
+        "GET http://[redacted]@127.0.0.1:9/p: refused"
+    );
     let plain = "index `trusty-tools-4e2cf878` not found\n\tat 10.0.0.1";
     assert_eq!(
         redact_credentials(plain),

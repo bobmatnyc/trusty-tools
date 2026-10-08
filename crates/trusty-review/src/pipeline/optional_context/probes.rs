@@ -332,7 +332,8 @@ fn bare(s: &str) -> &str {
 }
 
 /// `word` with the password of a `scheme://user:password@host` URL replaced
-/// by `[redacted]`; the user, host and path are kept (#9194).
+/// by `[redacted]`; the user, host and path are kept (#9194). A userinfo with
+/// no colon is redacted whole (#9431).
 fn redact_userinfo(word: &str) -> String {
     let Some(start) = word.find("://").map(|i| i + 3) else {
         return word.to_string();
@@ -344,7 +345,12 @@ fn redact_userinfo(word: &str) -> String {
         return word.to_string();
     };
     let Some(colon) = word[start..at].find(':').map(|i| start + i) else {
-        return word.to_string();
+        // #9431: reqwest sends a username-only userinfo as Basic auth, so the
+        // username is the credential.
+        if at == start {
+            return word.to_string();
+        }
+        return format!("{}[redacted]{}", &word[..start], &word[at..]);
     };
     format!("{}[redacted]{}", &word[..=colon], &word[at..])
 }

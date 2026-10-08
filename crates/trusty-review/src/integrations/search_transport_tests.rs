@@ -450,4 +450,7 @@ fn describe_masks_url_credentials() {
     let shown = SearchTransport::Http(url.to_string()).describe();
     assert!(!shown.contains("fake123fake"), "secret survived: {shown}");
     assert!(shown.contains("127.0.0.1:9/p"), "host lost: {shown}");
+    // A username-only userinfo is the credential itself.
+    let shown = SearchTransport::Http("http://tok123@127.0.0.1:9/p".to_string()).describe();
+    assert_eq!(shown, "http://[redacted]@127.0.0.1:9/p");
 }

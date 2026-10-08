@@ -8,7 +8,8 @@
 //! each sink drops the secret but keeps the host.
 //! Test: `credential_url_never_reaches_result_error`,
 //! `credential_url_never_reaches_review_body`,
-//! `credential_url_never_reaches_a_log_line`.
+//! `credential_url_never_reaches_a_log_line`,
+//! `username_only_url_never_reaches_any_sink`.
 
 use std::sync::Mutex;
 
@@ -45,9 +46,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
 
 /// One degraded local-diff review against [`URL`], with its log output.
 async fn review_against_credential_url() -> (ReviewResult, String) {
+    review_against(URL).await
+}
+
+/// One degraded local-diff review against `url`, with its log output.
+async fn review_against(url: &str) -> (ReviewResult, String) {
     let (source, _tmp) = super::local_diff_source("+fn x() {}\n");
     let mut config = super::default_config();
-    config.search_url = URL.to_string();
+    config.search_url = url.to_string();
     config.context.require_search = Some(false); // degrade, so the LLM runs
     let input = ReviewInput {
         diff_source: source,
@@ -63,7 +69,7 @@ async fn review_against_credential_url() -> (ReviewResult, String) {
     let deps = ReviewDeps {
         llm: Arc::new(super::FakeLlm::approves()),
         verifier: None,
-        search: Arc::new(HttpSearchClient::new(URL).expect("client")),
+        search: Arc::new(HttpSearchClient::new(url).expect("client")),
         analyze: Some(Arc::new(super::ReadyAnalyze)),
         dedup: None,
     };
@@ -117,4 +123,20 @@ async fn credential_url_never_reaches_a_log_line() {
         leaked.len()
     );
     assert!(log.contains(HOST), "no log line names the host: {log}");
+}
+
+/// All three sinks, for a username-only userinfo: reqwest sends it as Basic
+/// auth, so the username is the credential.
+#[tokio::test]
+async fn username_only_url_never_reaches_any_sink() {
+    let (result, log) = review_against("http://tok123@127.0.0.1:9/p").await;
+    let error = result.error.expect("a degraded review records its reason");
+    for (sink, text) in [
+        ("result.error", error.as_str()),
+        ("review_body", result.review_body.as_str()),
+        ("log", log.as_str()),
+    ] {
+        assert!(!text.contains("tok123"), "username in {sink}: {text}");
+        assert!(text.contains(HOST), "host lost from {sink}: {text}");
+    }
 }
