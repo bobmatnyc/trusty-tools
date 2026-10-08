@@ -179,6 +179,17 @@ impl GchatClient {
         self
     }
 
+    /// Prove the key can obtain an access token, returning only its expiry.
+    ///
+    /// Why: doctor's token-mint column (#9448 D6) needs the check without
+    /// any caller ever holding the bearer token.
+    /// What: takes a token from the cache or mints one; returns
+    /// `expires_at` (Unix seconds) and drops the token.
+    /// Test: `doctor_mints_a_token_online_and_reports_in_use_state`.
+    pub(crate) async fn check_token(&self) -> Result<u64, GchatError> {
+        Ok(self.tokens.access_token().await?.expires_at())
+    }
+
     /// The token source (crate tests only).
     // #9448 review: crate-private, so no public call hands out a `chat.bot`
     // bearer token without the route check.

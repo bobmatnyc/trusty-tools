@@ -43,7 +43,7 @@ pub struct SpaceBook {
 
 impl SpaceBook {
     /// Read `path`, or start empty when it does not exist.
-    pub fn open(path: &Path) -> Result<Self, StateError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, StateError> {
         let spaces = match std::fs::read(path) {
             Ok(bytes) => {
                 let file: SpacesFile =

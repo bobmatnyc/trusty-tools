@@ -107,7 +107,7 @@ impl Ledger {
     /// Test: `ledger_survives_restart`,
     /// `torn_final_ledger_line_is_quarantined_and_the_channel_opens`,
     /// `malformed_ledger_line_before_the_last_still_fails_the_open`.
-    pub fn open(path: &Path) -> Result<Self, StateError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, StateError> {
         let mut ledger = Self {
             path: path.to_path_buf(),
             questions: BTreeMap::new(),

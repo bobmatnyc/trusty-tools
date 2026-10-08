@@ -13,10 +13,12 @@
 
 mod auth;
 mod client_send;
+mod doctor;
 mod egress;
 mod inbound;
 mod ledger;
 mod routes_load;
+mod server;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -233,6 +235,7 @@ pub(super) fn git(dir: &Path, args: &[&str]) {
 /// A temp project in its own git repo with a key file outside the repo.
 pub(super) struct Project {
     pub(super) root: tempfile::TempDir,
+    key: PathBuf,
     /// Held so the key file outlives the project.
     _key_dir: tempfile::TempDir,
 }
@@ -258,8 +261,14 @@ impl Project {
         std::fs::write(config.join("routes.toml"), text).expect("write routes");
         Self {
             root,
+            key,
             _key_dir: key_dir,
         }
+    }
+
+    /// The service-account key file, outside the repo.
+    pub(super) fn key_file(&self) -> &Path {
+        &self.key
     }
 
     pub(super) fn dir(&self) -> &Path {
