@@ -108,12 +108,14 @@ impl MemoryService {
     /// says how much of the estate it searched, so it moved from a bare array
     /// to an object.
     /// What: runs `recall_all_scoped` over a [`ranking_window`] of candidates,
-    /// demotes stale snapshots (#8246), cuts to `top_k`, and returns
+    /// demotes stale snapshots (#8246) and superseded drawers (#9421) in either
+    /// scope, cuts to `top_k`, and returns
     /// `{"results": [...]}` plus the D4 coverage fields. Each hit carries its
     /// palace id. A listing or search error returns `{"error": ...}`.
     /// Test: `demotion_applies_on_every_recall_surface`;
     /// `open_failure_is_reported_on_every_surface`;
-    /// `recall_all_returns_open_palaces_to_baseline`.
+    /// `recall_all_returns_open_palaces_to_baseline`;
+    /// `both_scopes_demote_a_superseded_drawer` (#9421 on both scopes).
     pub async fn recall_all_scoped(
         &self,
         query: &str,

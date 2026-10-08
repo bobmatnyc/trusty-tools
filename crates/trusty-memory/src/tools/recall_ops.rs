@@ -422,11 +422,13 @@ async fn recall_all_without_embedder(
 /// response could not say what it had missed.
 /// What: parses `q`, `top_k`, `deep` and `scope` (`resident` by default,
 /// `all` for the streamed walk; anything else is an error), runs
-/// `recall_all_scoped`, demotes stale snapshots, cuts to `top_k`, and returns
+/// `recall_all_scoped`, demotes stale snapshots and superseded drawers
+/// (#9421) in either scope, cuts to `top_k`, and returns
 /// `query`, `results` and the ADR-0071 D4 coverage fields.
 /// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`,
 /// `open_failure_is_reported_on_every_surface`,
-/// `recall_all_rejects_an_unknown_scope`.
+/// `recall_all_rejects_an_unknown_scope`,
+/// `both_scopes_demote_a_superseded_drawer`.
 pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> Result<Value> {
     let query = args
         .get("q")
