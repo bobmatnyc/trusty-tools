@@ -55,6 +55,7 @@ fn run(
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &KeepList::default,
             agent_state: &no_agents,
             in_use_now: &|| Some(LiveClaims::default()),

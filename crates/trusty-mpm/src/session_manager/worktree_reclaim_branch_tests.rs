@@ -57,6 +57,7 @@ fn reclaim_proving(
         &FreshProbes {
             prove,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(LiveClaims::default()),

@@ -484,6 +484,7 @@ fn reclaim_remove_mode_spares_a_live_agents_merged_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
@@ -526,6 +527,7 @@ fn survey_discloses_a_live_agents_spared_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &agent_live,
             in_use_now: &|| Some(nobody()),
@@ -570,6 +572,7 @@ fn survey_discloses_nothing_when_no_agent_was_spared() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1023,6 +1026,7 @@ fn reclaim_report_mode_removes_nothing() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1063,6 +1067,7 @@ fn a_dead_sessions_claim_does_not_block_the_dry_run() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(dead.clone()),
@@ -1101,6 +1106,7 @@ fn a_live_sessions_claim_still_blocks_the_dry_run() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(live.clone()),
@@ -1153,6 +1159,7 @@ fn reclaim_remove_mode_refuses_a_worktree_claimed_after_the_survey() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1193,6 +1200,7 @@ fn reclaim_remove_mode_refuses_a_worktree_dirtied_after_the_survey() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1237,6 +1245,7 @@ fn reclaim_remove_mode_refuses_a_worktree_locked_after_the_survey() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1274,6 +1283,7 @@ fn reclaim_remove_mode_refuses_when_the_pr_reopens_after_the_survey() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1304,6 +1314,7 @@ fn reclaim_remove_mode_refuses_when_the_live_set_cannot_be_read() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1403,6 +1414,7 @@ fn reclaim_remove_mode_refuses_a_worktree_keep_listed_after_the_survey() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &keep_list,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1475,6 +1487,7 @@ fn a_malformed_config_refuses_to_reclaim_a_merged_clean_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &keep_list,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1513,6 +1526,7 @@ fn reclaim_remove_mode_reclaims_a_clean_merged_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1573,6 +1587,7 @@ fn a_merged_pr_path_replaced_by_a_symlink_is_not_removed() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &in_use_now,
@@ -1615,6 +1630,7 @@ fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &inside,
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -1634,6 +1650,71 @@ fn reclaim_remove_mode_spares_a_worktree_a_process_was_launched_from() {
     assert!(
         refused.contains("launched from inside"),
         "the refusal must be REPORTED, not silent: {refused}"
+    );
+}
+
+/// Kills and reaps the child it holds when dropped, so a failed assertion does
+/// not leak a `sleep` into the host.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A worktree an UNREGISTERED live process stands in is spared (#7540).
+///
+/// Why this is the discriminating shape: the fixture is the one
+/// `reclaim_remove_mode_reclaims_a_clean_merged_worktree` deletes, nothing
+/// claims it, and the sweep's own launch directories are empty. The only thing
+/// standing between it and `git worktree remove --force` is a real `sleep`
+/// whose cwd is inside the tree — the unmanaged-shell shape. Removing the
+/// `cwd_holder` re-ask from the last-moment guard deletes the directory.
+#[test]
+fn reclaim_remove_mode_spares_a_worktree_an_unregistered_process_stands_in() {
+    let fx = GitWorktreeFixture::new();
+    let path = fx.add_worktree("live-cwd-7540");
+    land(&path);
+    let inside = path.join("crates");
+    std::fs::create_dir_all(&inside).expect("create the process's cwd");
+    let child = KillOnDrop(
+        std::process::Command::new("sleep")
+            .arg("120")
+            .current_dir(&inside)
+            .spawn()
+            .expect("spawn an unregistered process inside the worktree"),
+    );
+
+    let out = reclaim_scoped(
+        &fx.repos_root,
+        &FreshProbes {
+            prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
+            launched_from: &[],
+            cwd_holder: &crate::session_manager::worktree_liveness::process_holding,
+            keep_list: &no_keeps,
+            agent_state: &no_agents,
+            in_use_now: &|| Some(nobody()),
+            index_for: &|_: &Path| merged_index("session/live-cwd-7540", 7540),
+        },
+        ReclaimMode::Remove,
+        &[],
+        &crate::session_manager::worktree_scope::WorktreeScope::all(),
+    );
+
+    assert!(
+        path.exists(),
+        "the sweep deleted a tree a live process stands in: {out:?}"
+    );
+    assert!(out.removed.is_empty(), "outcome: {out:?}");
+    let refused = format!("{:?}", out.refused_at_recheck);
+    // A host with no `lsof` refuses every removal by design (ADR-0045); where
+    // the probe runs, the refusal must name the process it found.
+    let probe_unavailable = refused.contains("could not run") || refused.contains("exited");
+    assert!(
+        probe_unavailable || refused.contains(&format!("pid {} ", child.0.id())),
+        "the refusal must name the unregistered process: {refused}"
     );
 }
 
@@ -2107,6 +2188,7 @@ fn survey_offers_a_merged_agent_worktree_the_harness_released() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(parent_ended_claims()),
@@ -2143,6 +2225,7 @@ fn reclaim_reclaims_a_merged_agent_worktree_the_harness_released() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(parent_ended_claims()),
@@ -2171,6 +2254,7 @@ fn reclaim_never_offers_an_agent_worktree_whose_pr_is_open() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(parent_ended_claims()),
@@ -2207,6 +2291,7 @@ fn reclaim_never_offers_a_dirty_agent_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(parent_ended_claims()),
@@ -2248,6 +2333,7 @@ fn survey_discloses_a_harness_locked_agent_worktree() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &restarted_registry,
             in_use_now: &|| Some(nobody()),
@@ -2430,6 +2516,7 @@ fn prune_resolves_each_projects_repo_from_its_own_origin_7057() {
         &FreshProbes {
             prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
             launched_from: &[],
+            cwd_holder: &|_| None,
             keep_list: &no_keeps,
             agent_state: &no_agents,
             in_use_now: &|| Some(nobody()),
@@ -2503,6 +2590,7 @@ fn worktree_8109_every_surveyed_worktree_gets_one_decision_line() {
             &FreshProbes {
                 prove: &crate::session_manager::worktree_reclaim_landed::reclaim_landed_proof,
                 launched_from: &[],
+                cwd_holder: &|_| None,
                 keep_list: &no_keeps,
                 agent_state: &no_agents,
                 in_use_now: &|| Some(nobody()),

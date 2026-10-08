@@ -54,6 +54,9 @@ use super::worktree_reclaim::{
 // #7504: the worktree-launched-process gate, applied per candidate immediately
 // before its deletion alongside the five `recheck_before_delete` re-asks.
 use super::worktree_reclaim_launch::launch_refusal;
+// #7540: the OS process-table cwd probe, so a process nothing registered
+// still spares the tree it stands in.
+use super::worktree_liveness::process_holding;
 // #8301: the preview's deadline and the batched pull-request listing.
 use super::worktree_reclaim_budget::{inspect_within, reclaim_index};
 // #7267: the merged-pull-request matcher — round stem and head commit, not the
@@ -541,6 +544,19 @@ pub(crate) struct FreshProbes<'a> {
     /// OTHERS change during a minutes-long sweep; this input is the sweep's own.
     /// An empty slice is the pre-#7504 behaviour — a no-op gate.
     pub launched_from: &'a [PathBuf],
+    /// Name any live process whose cwd is inside a candidate (#7540).
+    ///
+    /// Why: `launched_from` covers only the sweeping process, and the claim
+    /// and agent gates cover only what trusty-mpm registered. An unmanaged
+    /// shell, an ad hoc build or an unregistered tool sitting in the tree is
+    /// invisible to all three, and `git worktree remove --force` would delete
+    /// its working directory out from under it.
+    /// What: asked in the last-moment guard, immediately before the removal,
+    /// because other processes' cwds DO change during a sweep. `Some(reason)`
+    /// refuses, covering both "a process stands in it" and "could not look"
+    /// (ADR-0045). Production passes [`process_holding`].
+    /// Test: `reclaim_remove_mode_spares_a_worktree_an_unregistered_process_stands_in`.
+    pub cwd_holder: &'a dyn Fn(&Path) -> Option<String>,
     /// Take a candidate's landed proof before its deletion (#8109).
     ///
     /// Production passes [`reclaim_landed_proof`]. A probe so a test can change
@@ -832,6 +848,9 @@ pub(crate) fn reclaim_scoped(
                 // #8782: identity last before the lock release, so a path
                 // replaced by a symlink is refused and nothing is unlocked.
                 let refusal = last_moment_refusal(&path, (probes.in_use_now)().as_ref())
+                    // #7540: any live process standing in the tree, asked last
+                    // before the removal so a shell that `cd`-ed in mid-sweep counts.
+                    .or_else(|| (probes.cwd_holder)(&path))
                     .or_else(|| identity_refusal(&path))
                     .or_else(|| super::worktree_owner_gate::release_stale_lock(&path).err());
                 late_refusal.set(refusal.clone());
@@ -950,6 +969,8 @@ pub(crate) fn reclaim_merged_pr_worktrees(
             agent_state,
             keep_list,
             launched_from,
+            // #7540: the real process table, read per candidate.
+            cwd_holder: &process_holding,
             prove: &reclaim_landed_proof,
         },
         mode,

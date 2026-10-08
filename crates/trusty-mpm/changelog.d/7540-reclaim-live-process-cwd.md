@@ -1,0 +1,2 @@
+Fixed
+- The merged-PR worktree reclaim (the hourly daemon sweep and `tm session prune-worktrees --merged-prs`) no longer removes a worktree that any live process has its working directory inside — an unmanaged shell or tmux pane, an ad hoc build, or a tool no session or agent registered. It asks the OS process table immediately before each removal, and a host where that table cannot be read keeps the worktree ([#7540](https://github.com/bobmatnyc/trusty-tools/issues/7540))
