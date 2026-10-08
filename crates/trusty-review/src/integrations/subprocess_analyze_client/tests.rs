@@ -55,6 +55,19 @@ async fn subprocess_client_analysis_status_carries_the_health_error() {
     assert_eq!(status.to_string(), health.to_string());
 }
 
+/// #9431: the analyze client's search-health error hides the credentials of
+/// the search URL it probed, and keeps the variant and the host.
+#[tokio::test]
+async fn subprocess_health_error_masks_search_url_credentials() {
+    let url = "http://user:fake123fake@127.0.0.1:1/p?access_token=fake123fake";
+    let client = SubprocessAnalyzeClient::new("trusty-analyze", url).expect("TLS init");
+    let err = client.health().await.expect_err("port 1 is refused");
+    assert!(matches!(err, AnalyzeClientError::Unavailable(_)), "{err:?}");
+    let shown = err.to_string();
+    assert!(!shown.contains("fake123fake"), "secret survived: {shown}");
+    assert!(shown.contains("127.0.0.1:1"), "host lost: {shown}");
+}
+
 /// has_analysis must return false (not panic) on transport error.
 #[tokio::test]
 async fn subprocess_client_has_analysis_returns_false_on_error() {
