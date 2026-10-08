@@ -60,6 +60,8 @@ pub use promotion_state::PromotionDeferred;
 mod persist_hnsw;
 mod quarantine;
 mod search;
+// #9459: a corpus closed for a normal stop refuses later writes.
+mod shutdown_detach;
 // #7920: chunks.json empty/foreign-over-populated overwrite guard.
 pub(crate) mod snapshot_guard;
 pub use snapshot_guard::SnapshotOverwriteRefused;
@@ -515,6 +517,11 @@ pub struct CodeIndexer {
     /// search and `index_file` refuse with [`IndexDeleted`].
     pub(super) deleted: bool,
 
+    /// #9459: `true` once the shutdown close took this indexer's corpus. Set
+    /// only by `take_corpus_for_shutdown`; while set, `index_file` and
+    /// `purge_file_committed` refuse.
+    pub(super) closed_for_shutdown: bool,
+
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
     /// incremental writes alone to every refused durable write.
@@ -781,6 +788,7 @@ impl CodeIndexer {
             corpus_open_failure: None,
             corpus_ever_wired: false,
             deleted: false,
+            closed_for_shutdown: false,
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,

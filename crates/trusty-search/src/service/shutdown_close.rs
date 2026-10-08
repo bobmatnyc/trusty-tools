@@ -69,7 +69,9 @@ pub struct CorpusCloseReport {
 ///
 /// An index whose reindex, relocate or embed pass is running keeps its corpus
 /// and is reported unclean. Each indexer the close takes a corpus from is left
-/// without one, and a write that finds none persists nothing. The returned
+/// without one and marked closed for shutdown, so a later `index_file` or
+/// `purge_file_committed` — the detached reconcile delta's writes — returns
+/// `Err`, and the delta does not stamp the HEAD SHA. The returned
 /// report holds the permits it took, so no reindex, relocate or embed pass
 /// starts on those indexes while the caller keeps it. Call it only when the process is about to exit, and
 /// hold the report until then.
@@ -77,7 +79,8 @@ pub struct CorpusCloseReport {
 /// Test: `a_normal_stop_leaves_every_corpus_openable_read_only`,
 /// `a_held_corpus_or_lock_cannot_stall_the_close`,
 /// `a_clone_released_inside_the_budget_is_closed_cleanly`,
-/// `a_corpus_whose_reindex_is_running_stays_attached`.
+/// `a_corpus_whose_reindex_is_running_stays_attached`,
+/// `a_reconcile_delta_after_the_close_fails_and_does_not_stamp`.
 pub async fn close_corpora_on_shutdown(
     state: &SearchAppState,
     budget: Duration,
@@ -143,8 +146,8 @@ async fn close_one(
 /// Close one index's corpus by `deadline`; the caller holds its permit.
 ///
 /// What:
-/// 1. Takes the indexer write lock and the corpus out with
-///    `take_corpus_store`.
+/// 1. Takes the indexer write lock, then marks the indexer closed for
+///    shutdown and takes the corpus out with `take_corpus_for_shutdown`.
 /// 2. Retries `Arc::try_unwrap` until this is the last reference.
 /// 3. Drops it on a blocking thread — the drop writes redb's allocator state
 ///    and fsyncs — then reopens the file read-only to confirm it closed clean.
@@ -157,7 +160,9 @@ async fn close_attached(handle: Arc<IndexHandle>, deadline: Instant) -> Result<b
     let Ok(mut indexer) = tokio::time::timeout(wait, handle.indexer.write()).await else {
         return Err(format!("{id}: the indexer lock was still held"));
     };
-    let Some(mut corpus) = indexer.take_corpus_store() else {
+    // #9459: the flag and the take share this write lock, so the detached
+    // reconcile delta's next write is refused, not kept in memory as `Ok`.
+    let Some(mut corpus) = indexer.take_corpus_for_shutdown() else {
         return Ok(false);
     };
     drop(indexer);
