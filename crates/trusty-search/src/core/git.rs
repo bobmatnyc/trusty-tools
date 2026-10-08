@@ -361,9 +361,10 @@ pub fn head_sha(root_path: &Path) -> Option<String> {
     }
 }
 
-/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+/// The prefix of the only git stderr CONSISTENT with "there is genuinely no
+/// repository here".
 ///
-/// Why: the parenthesised clause is load-bearing. Git emits
+/// Why: the opening parenthesis is load-bearing. Git emits
 /// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
 /// shorter phrase `not a git repository` matches a broken repo and a
 /// genuinely-absent one alike — and it is the broken repo that still has a live
@@ -373,12 +374,16 @@ pub fn head_sha(root_path: &Path) -> Option<String> {
 /// `.git`, where the repository is real. [`classify_probe_failure`] corroborates
 /// it with a filesystem witness first.
 ///
-/// What: verified byte-identical against git 2.54.0. Any wording drift falls
-/// through to [`WorkTree::Unknown`] — the fail-closed direction. Mirrors
-/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727); #4735
-/// extracts the shared probe both will call.
-/// Test: `probe_work_tree_is_unknown_for_a_stale_worktree_pointer`.
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+/// What: covers both wordings of git 2.54.0's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form (`: (null)`, `: '<GIT_DIR>'`). Any other
+/// wording falls through to [`WorkTree::Unknown`] — the fail-closed direction.
+/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727) still
+/// matches the first wording only; #4735 extracts the shared probe.
+/// Test: `probe_work_tree_is_unknown_for_a_stale_worktree_pointer`,
+/// `classify_probe_failure_accepts_the_mount_boundary_wording`.
+// #9475: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// What git can tell us about whether `root_path` sits in a work tree.
 ///
@@ -408,8 +413,8 @@ pub enum WorkTree {
 /// Why a failed `rev-parse` failed — the gate the mtime fallback turns on.
 ///
 /// Why: git's "no repository" message is not proof there is no repository. It
-/// emits [`NO_REPO_STDERR`] whenever discovery never got far enough to conclude
-/// otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
+/// emits [`NO_REPO_STDERR_PREFIX`] whenever discovery never got far enough to
+/// conclude otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
 /// `GIT_CEILING_DIRECTORIES` stopping the upward walk. In every one of those the
 /// repository and its `.gitignore` are real. `symlink_metadata` on an ancestor
 /// `.git` needs only the parent's search bit, so it is a witness git does not
@@ -426,7 +431,7 @@ pub enum WorkTree {
 /// Test: `classify_probe_failure_corroborates_the_no_repo_message`,
 /// `classify_probe_failure_canonicalises_before_walking_ancestors`.
 fn classify_probe_failure(root_path: &Path, stderr: &str) -> WorkTree {
-    if !stderr.contains(NO_REPO_STDERR) {
+    if !stderr.contains(NO_REPO_STDERR_PREFIX) {
         return WorkTree::Unknown;
     }
     match root_path.canonicalize() {
@@ -780,9 +785,9 @@ mod tests {
         let link = tmp.path().join("link");
         std::os::unix::fs::symlink(repo.join("sub"), &link).expect("symlink");
 
-        let msg = format!("fatal: {NO_REPO_STDERR}: .git");
+        let msg = "fatal: not a git repository (or any of the parent directories): .git";
         assert_eq!(
-            classify_probe_failure(&link, &msg),
+            classify_probe_failure(&link, msg),
             WorkTree::Unknown,
             "the real parent carries a .git — only a canonicalised ancestor walk sees it"
         );
@@ -796,12 +801,12 @@ mod tests {
     /// `probe_work_tree_is_unknown_for_a_stale_worktree_pointer`: THERE the
     /// gitlink is itself the `.git` witness, so the witness alone would refuse
     /// even with a too-broad phrase match. Only asserting the wording against a
-    /// directory with NO witness pins [`NO_REPO_STDERR`]'s narrowness.
+    /// directory with NO witness pins [`NO_REPO_STDERR_PREFIX`]'s narrowness.
     #[test]
     fn classify_probe_failure_corroborates_the_no_repo_message() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let msg = format!("fatal: {NO_REPO_STDERR}: .git");
-        assert_eq!(classify_probe_failure(tmp.path(), &msg), WorkTree::NoRepo);
+        let msg = "fatal: not a git repository (or any of the parent directories): .git";
+        assert_eq!(classify_probe_failure(tmp.path(), msg), WorkTree::NoRepo);
 
         assert_eq!(
             classify_probe_failure(tmp.path(), "fatal: not a git repository: (null)"),
@@ -811,7 +816,7 @@ mod tests {
 
         std::fs::write(tmp.path().join(".git"), "gitdir: /somewhere\n").expect("gitlink");
         assert_eq!(
-            classify_probe_failure(tmp.path(), &msg),
+            classify_probe_failure(tmp.path(), msg),
             WorkTree::Unknown,
             "a .git witness contradicts the message — a disagreement is 'cannot be asked'"
         );
@@ -821,6 +826,36 @@ mod tests {
             WorkTree::Unknown,
             "an unrecognised failure never concludes 'no repository'"
         );
+    }
+
+    /// Why: #9475 — git stops discovery at a filesystem boundary and words the
+    /// absence differently, so a plain directory on its own mount (a tmpfs
+    /// `/tmp`) classified `Unknown`. Fed as text, so it needs no mount layout.
+    /// What: the boundary wording (captured from git 2.54.0 on a separate
+    /// mount) reads as `NoRepo`; colon-form near-misses and unrelated git
+    /// failures still read as `Unknown`.
+    #[test]
+    fn classify_probe_failure_accepts_the_mount_boundary_wording() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let boundary = "fatal: not a git repository (or any parent up to mount point /Volumes)\n\
+                        Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n";
+        assert_eq!(
+            classify_probe_failure(tmp.path(), boundary),
+            WorkTree::NoRepo
+        );
+
+        for refused in [
+            "fatal: not a git repository: (null)",
+            "fatal: not a git repository: '/nonexistent/x'",
+            "fatal: detected dubious ownership in repository at '/x'",
+            "fatal: cannot change to '/x': Permission denied",
+        ] {
+            assert_eq!(
+                classify_probe_failure(tmp.path(), refused),
+                WorkTree::Unknown,
+                "{refused:?} must not read as 'no repository'"
+            );
+        }
     }
 }
 
