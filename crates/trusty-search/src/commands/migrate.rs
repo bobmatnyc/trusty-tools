@@ -10,7 +10,10 @@
 //! Test: `cargo run -- migrate mcp-vector-search --dry-run` prints the
 //! settings files and projects it would touch without modifying anything.
 
-use super::convert::{convert_one, find_all_mvs_configs, parse_mvs_config, ConvertStatus};
+use super::convert::{
+    convert_one, fail_on_failed_rows, find_all_mvs_configs, parse_mvs_config, summary_glyph,
+    ConvertStatus,
+};
 use anyhow::Result;
 use clap::ValueEnum;
 use colored::Colorize;
@@ -74,7 +77,8 @@ pub struct ConfigMigrateResult {
 /// Why: a single command that switches a machine from mcp-vector-search to
 /// trusty-search, touching both Claude MCP config and project indexes.
 /// What: runs the MCP-config phase and/or the index phase depending on the
-/// `--mcp-only` / `--indexes-only` flags.
+/// `--mcp-only` / `--indexes-only` flags. The MCP phase runs first, so a
+/// failed index row (an `Err` from the index phase, #9214) never skips it.
 /// Test: `migrate mcp-vector-search --dry-run` prints both phases' plans.
 pub async fn handle_migrate(
     target: MigrateTarget,
@@ -191,7 +195,16 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
         super::daemon_guard::ensure_daemon_up(&client).await?;
         Some(client)
     };
+    migrate_index_configs(configs, client.as_ref()).await
+}
 
+/// Register and reindex each config in `configs`, print one row each and the
+/// summary. `client: None` is a dry run.
+///
+/// Test: `migrate_index_phase_fails_when_a_conversion_failed`,
+/// `migrate_index_phase_succeeds_when_every_conversion_succeeded`.
+async fn migrate_index_configs(configs: Vec<PathBuf>, client: Option<&DaemonClient>) -> Result<()> {
+    let dry_run = client.is_none();
     let total = configs.len();
     let mut migrated = 0usize;
     let mut already = 0usize;
@@ -200,7 +213,7 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
 
     for (i, config_path) in configs.into_iter().enumerate() {
         let result = match parse_mvs_config(&config_path) {
-            Ok((root, name)) => convert_one(root, name, client.as_ref()).await,
+            Ok((root, name)) => convert_one(root, name, client).await,
             Err(e) => {
                 println!(
                     "  {} {} {} {}",
@@ -228,13 +241,13 @@ async fn run_index_phase(dry_run: bool) -> Result<()> {
     } else {
         println!(
             "{} Indexes: {} queued, {} already registered, {} failed",
-            "✓".green(),
+            summary_glyph(failed),
             migrated,
             already,
             failed
         );
     }
-    Ok(())
+    fail_on_failed_rows(failed, total)
 }
 
 /// Rewrite one Claude settings file, replacing any legacy mcp-vector-search
@@ -496,5 +509,59 @@ mod tests {
             !path.with_file_name("settings.json.bak").exists(),
             "no backup should be written for a skipped file"
         );
+    }
+
+    /// Write one mcp-vector-search config per `(name, body)` under `dir`.
+    fn mvs_configs(dir: &Path, rows: &[(&str, Option<&str>)]) -> Vec<PathBuf> {
+        rows.iter()
+            .map(|(name, body)| {
+                let cfg = dir.join(name).join(".mcp-vector-search");
+                std::fs::create_dir_all(&cfg).expect("config dir");
+                let root = dir.join(name);
+                let text = body.map_or_else(
+                    || serde_json::json!({ "project_root": root }).to_string(),
+                    str::to_string,
+                );
+                let path = cfg.join("config.json");
+                std::fs::write(&path, text).expect("config file");
+                path
+            })
+            .collect()
+    }
+
+    /// #9214 (fix-bar): an index phase with a failed row — a refused create, or
+    /// a config that does not parse — is an error after the summary.
+    #[tokio::test]
+    async fn migrate_index_phase_fails_when_a_conversion_failed() {
+        use crate::commands::mock_socket::mock_daemon;
+        use trusty_common::uds::server::RpcError;
+        use trusty_search::service::rpc::error::CODE_CONFLICT;
+
+        let refusing =
+            mock_daemon(|_, _| Err(RpcError::new(CODE_CONFLICT, "index_root_overlap"))).await;
+        let accepting =
+            mock_daemon(|_, _| Ok(serde_json::json!({ "created": true, "queued": true }))).await;
+        for (daemon, body) in [(&refusing, None), (&accepting, Some("{not json"))] {
+            let dir = tempfile::tempdir().expect("scratch dir");
+            let configs = mvs_configs(dir.path(), &[("a", body)]);
+            let err = migrate_index_configs(configs, Some(&daemon.client))
+                .await
+                .expect_err("a failed row must fail the phase");
+            assert!(err.to_string().contains("1 of 1"), "{body:?}: {err}");
+        }
+    }
+
+    /// #9214: an index phase whose every row queued still succeeds.
+    #[tokio::test]
+    async fn migrate_index_phase_succeeds_when_every_conversion_succeeded() {
+        use crate::commands::mock_socket::mock_daemon;
+
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let daemon =
+            mock_daemon(|_, _| Ok(serde_json::json!({ "created": true, "queued": true }))).await;
+        let configs = mvs_configs(dir.path(), &[("a", None), ("b", None)]);
+        migrate_index_configs(configs, Some(&daemon.client))
+            .await
+            .expect("every row queued");
     }
 }

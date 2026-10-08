@@ -337,7 +337,21 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, client: DaemonCli
         println!("{} No mcp-vector-search projects found.", "·".dimmed());
         return Ok(());
     }
+    convert_configs(configs, dry_run, concurrency, &client).await
+}
 
+/// Convert each mcp-vector-search config in `configs`, print the table and the
+/// summary.
+///
+/// What: bounded fan-out over [`convert_one`]; rows print in input order.
+/// Test: `convert_all_fails_when_a_conversion_failed`,
+/// `convert_all_succeeds_when_every_conversion_succeeded`.
+async fn convert_configs(
+    configs: Vec<std::path::PathBuf>,
+    dry_run: bool,
+    concurrency: usize,
+    client: &DaemonClient,
+) -> Result<()> {
     if dry_run {
         println!(
             "{} Dry run — would convert {} projects:\n",
@@ -411,7 +425,7 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, client: DaemonCli
     } else {
         println!(
             "{} Summary: {} queued, {} already registered (reindexing), {} failed",
-            "✓".green(),
+            summary_glyph(failed),
             queued,
             already,
             failed
@@ -420,6 +434,28 @@ async fn handle_convert_all(dry_run: bool, concurrency: usize, client: DaemonCli
             "  Reindexing in background. Run {} to see progress.",
             "trusty-search list".cyan()
         );
+    }
+    fail_on_failed_rows(failed, total)
+}
+
+/// The summary line's lead glyph: a success mark only when nothing failed.
+pub(crate) fn summary_glyph(failed: usize) -> colored::ColoredString {
+    if failed == 0 {
+        "✓".green()
+    } else {
+        "!".yellow()
+    }
+}
+
+/// `Err` when any of `total` rows failed, after the table has been printed.
+///
+/// # Errors
+///
+/// When `failed > 0`.
+pub(crate) fn fail_on_failed_rows(failed: usize, total: usize) -> Result<()> {
+    // #9214: a run whose rows failed used to exit 0 under a green summary.
+    if failed > 0 {
+        anyhow::bail!("{failed} of {total} conversions failed");
     }
     Ok(())
 }
@@ -505,5 +541,58 @@ mod tests {
     async fn convert_one_contacts_nothing_on_a_dry_run() {
         let result = convert_one("/tmp/proj".into(), "proj".into(), None).await;
         assert!(matches!(result.status, ConvertStatus::DryRun), "{result:?}");
+    }
+
+    /// Write one mcp-vector-search config per name under `dir`.
+    fn mvs_configs(dir: &std::path::Path, names: &[&str]) -> Vec<std::path::PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let cfg = dir.join(name).join(".mcp-vector-search");
+                std::fs::create_dir_all(&cfg).expect("config dir");
+                let root = dir.join(name);
+                let path = cfg.join("config.json");
+                std::fs::write(&path, json!({ "project_root": root }).to_string())
+                    .expect("config file");
+                path
+            })
+            .collect()
+    }
+
+    /// #9214 (fix-bar): `convert all` whose conversions failed — here the
+    /// daemon refuses every create — is an error after the table and summary,
+    /// not an exit 0.
+    #[tokio::test]
+    async fn convert_all_fails_when_a_conversion_failed() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let daemon =
+            mock_daemon(|_, _| Err(RpcError::new(CODE_CONFLICT, "index_root_overlap"))).await;
+
+        let err = convert_configs(
+            mvs_configs(dir.path(), &["a", "b"]),
+            false,
+            2,
+            &daemon.client,
+        )
+        .await
+        .expect_err("failed conversions must fail the run");
+
+        assert!(err.to_string().contains("2 of 2"), "{err}");
+    }
+
+    /// #9214: a `convert all` whose every conversion queued still exits 0.
+    #[tokio::test]
+    async fn convert_all_succeeds_when_every_conversion_succeeded() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let daemon = mock_daemon(|_, _| Ok(json!({ "created": true, "queued": true }))).await;
+
+        convert_configs(
+            mvs_configs(dir.path(), &["a", "b"]),
+            false,
+            2,
+            &daemon.client,
+        )
+        .await
+        .expect("every conversion queued");
     }
 }
