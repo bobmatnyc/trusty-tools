@@ -13,7 +13,7 @@ use trusty_review::models::{ContextSourceRecord, SourceState};
 use trusty_review::pipeline::ReviewOutcome;
 use trusty_review::run_output::run_json_payload;
 
-use super::super::{ledger_notes, run_json_value};
+use super::super::{ledger_notes, run_json_value, run_request};
 use super::*;
 
 /// One offline `run --local-diff <diff> [flags]` review, as `cmd_run` builds it.
@@ -67,7 +67,7 @@ async fn local_run(flags: &[&str]) -> (ReviewOutcome, bool) {
 }
 
 /// #9194 AC2: `--report-context --json` wraps the unchanged review beside
-/// all eight rows.
+/// all nine rows (#9195: `changed_files` after `claude_md`).
 #[serial_test::serial]
 #[tokio::test]
 async fn run_report_context_json_wraps_every_row() {
@@ -85,13 +85,14 @@ async fn run_report_context_json_wraps_every_row() {
             "issues",
             "spec_docs",
             "claude_md",
+            "changed_files",
             "search",
             "analyze",
             "external_sources"
         ]
     );
     assert_eq!(
-        rows[6]["state"], "unavailable",
+        rows[7]["state"], "unavailable",
         "no analyze client: {value}"
     );
 }
@@ -160,6 +161,7 @@ fn report_context_help_names_the_rows_and_states() {
         .map(ToString::to_string)
         .unwrap_or_default();
     for word in [
+        "changed_files", // #9195
         "search",
         "analyze",
         "external_sources",
@@ -168,4 +170,49 @@ fn report_context_help_names_the_rows_and_states() {
     ] {
         assert!(help.contains(word), "{word} missing from: {help}");
     }
+}
+
+/// #9195: `--changed-files` sets the flag, a new input; `--changed-files-budget`
+/// parses into the request and refuses a negative value.
+#[test]
+fn run_changed_files_flags_set_the_request() {
+    let args = RunArgs::try_parse_from(["run", "--changed-files"]).expect("parse");
+    let request = run_request(&args);
+    assert!(request.changed_files && request.requested_new());
+    assert_eq!(request.changed_files_budget, None);
+    let argv = ["run", "--changed-files", "--changed-files-budget", "5000"];
+    let args = RunArgs::try_parse_from(argv).expect("parse");
+    assert_eq!(run_request(&args).changed_files_budget, Some(5000));
+    assert!(RunArgs::try_parse_from(["run", "--changed-files-budget", "-1"]).is_err());
+}
+
+/// #9195 amendment 10: `--changed-files-budget` without `--changed-files` is
+/// inert: no new input, no ledger.
+#[test]
+fn changed_files_budget_without_flag_is_inert() {
+    let args = RunArgs::try_parse_from(["run", "--changed-files-budget", "5000"]).expect("parse");
+    let request = run_request(&args);
+    assert!(!request.changed_files);
+    assert!(!request.requested_new() && !request.ledger_enabled());
+}
+
+/// #9195: a local diff has no head SHA; `--changed-files` reports the row
+/// `unavailable` and the review runs.
+#[serial_test::serial]
+#[tokio::test]
+async fn run_changed_files_on_a_local_diff_is_unavailable() {
+    let (outcome, wants_ledger) = local_run(&["--changed-files"]).await;
+    assert!(wants_ledger);
+    let row = outcome
+        .context_sources
+        .iter()
+        .find(|r| r.source == "changed_files")
+        .unwrap_or_else(|| panic!("no changed_files row: {:?}", outcome.context_sources));
+    assert_eq!(row.state, SourceState::Unavailable);
+    assert!(
+        row.detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("no PR head SHA")
+    );
 }

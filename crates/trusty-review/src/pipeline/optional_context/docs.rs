@@ -134,7 +134,7 @@ pub(crate) async fn apply_docs(
     if kinds.is_empty() {
         return;
     }
-    let fetcher = match fetcher_for(&call) {
+    let fetcher = match fetcher_for(call.source, &call.head, call.seam.as_ref(), "docs") {
         Ok(fetcher) => fetcher,
         Err(detail) => {
             kinds
@@ -169,22 +169,33 @@ pub(crate) async fn apply_docs(
     applied.docs = corpus;
 }
 
-/// The fetcher for this call, or why no doc can be read (#9193 amendment 2).
-fn fetcher_for(call: &DocsCall<'_>) -> Result<Arc<dyn DocFetcher>, String> {
+/// The fetcher for a read at `head`, or why no `noun` can be read (#9193
+/// amendment 2; #9195: shared with the changed-file reads).
+///
+/// Test: `review_diff_spec_docs_reports_unavailable_no_head_sha`,
+/// `malformed_sha_never_fetches`, `local_diff_reports_unavailable_no_head_sha`.
+pub(super) fn fetcher_for(
+    source: &DiffSource,
+    head: &PrHead,
+    seam: Option<&Arc<dyn DocFetcher>>,
+    noun: &str,
+) -> Result<Arc<dyn DocFetcher>, String> {
     let DiffSource::Github {
         owner, repo, token, ..
-    } = call.source
+    } = source
     else {
-        return Err("no PR head SHA: a local diff has no commit to read docs at".to_string());
+        return Err(format!(
+            "no PR head SHA: a local diff has no commit to read {noun} at"
+        ));
     };
-    if !is_head_sha(&call.head.sha) {
+    if !is_head_sha(&head.sha) {
         return Err(
             "no valid PR head SHA: the PR metadata read failed or returned a malformed \
                     SHA"
             .to_string(),
         );
     }
-    if let Some(seam) = &call.seam {
+    if let Some(seam) = seam {
         return Ok(seam.clone());
     }
     GithubDocFetcher::new(owner, repo, token)
@@ -234,11 +245,7 @@ async fn read_all(fetcher: &dyn DocFetcher, paths: &[String], call: &DocsCall<'_
             Err(_) => Read::Unavailable(format!("timed out after {DOC_READ_TIMEOUT_SECS} s")),
             Ok(Ok(Some(text))) => Read::Text(text),
             // #9193 amendment 6: a fork's 404 does not prove the path is absent.
-            Ok(Ok(None)) if fork => Read::Unavailable(format!(
-                "not found at {}; the head is in a fork, so its commit may not be readable \
-                 from this repository",
-                &sha[..7]
-            )),
+            Ok(Ok(None)) if fork => Read::Unavailable(fork_not_found(sha)),
             Ok(Ok(None)) => Read::Absent(format!("not found at {}", &sha[..7])),
             Ok(Err(e)) => Read::Unavailable(e.to_string()),
         };
@@ -249,6 +256,19 @@ async fn read_all(fetcher: &dyn DocFetcher, paths: &[String], call: &DocsCall<'_
         }
     });
     join_all(reads).await
+}
+
+/// The detail for a 404 at a fork head's `sha`, which does not prove the
+/// path absent (#9193 amendment 6; #9195 fail-open arm 3).
+///
+/// Test: `fork_head_sha_unresolvable_is_unavailable_not_absent`,
+/// `fork_head_404_is_unavailable_not_absent`.
+pub(super) fn fork_not_found(sha: &str) -> String {
+    format!(
+        "not found at {}; the head is in a fork, so its commit may not be readable from \
+         this repository",
+        sha.get(..7).unwrap_or(sha)
+    )
 }
 
 /// Candidate paths from trusty-search, and why discovery failed (#9193 criterion 7).

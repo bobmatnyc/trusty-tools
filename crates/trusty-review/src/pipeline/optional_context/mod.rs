@@ -18,6 +18,9 @@ pub(crate) mod assemble;
 pub(crate) mod doc_refs; // #9193
 pub(crate) mod docs; // #9193
 pub(crate) mod docs_render; // #9193
+pub(crate) mod files; // #9195
+pub(crate) mod files_render; // #9195
+pub(crate) mod files_select; // #9195
 pub(crate) mod issues;
 pub(crate) mod ledger;
 pub(crate) mod probes; // #9194
@@ -39,6 +42,8 @@ pub(crate) use seams::PrSource;
 /// for the reviewer only, `Some` whenever the caller sent the parameter, even
 /// an empty list. `spec_docs` and `claude_md` (#9193) read ADR/spec/SLD docs
 /// and CLAUDE.md files at the PR head SHA, for the reviewer only.
+/// `changed_files` (#9195) shows the PR's changed files whole, read at the
+/// head SHA, for the reviewer only, within `changed_files_budget` bytes.
 /// `report_context` asks for the source ledger with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
 /// `requested_new_is_off_by_default_and_on_with_pr_body`,
@@ -58,6 +63,11 @@ pub struct OptionalContextRequest {
     pub spec_docs: bool,
     /// Read CLAUDE.md conventions at the head (#9193).
     pub claude_md: bool,
+    /// Show the PR's changed files whole, read at the head (#9195).
+    pub changed_files: bool,
+    /// Byte budget for `changed_files`; `None` is the default budget. Inert
+    /// without `changed_files` (#9195).
+    pub changed_files_budget: Option<usize>,
 }
 
 impl OptionalContextRequest {
@@ -108,6 +118,27 @@ impl OptionalContextRequest {
         self
     }
 
+    /// This request with `changed_files` set to `on` (#9195).
+    #[must_use]
+    pub fn with_changed_files(mut self, on: bool) -> Self {
+        self.changed_files = on;
+        self
+    }
+
+    /// This request with a `changed_files` byte budget (#9195).
+    ///
+    /// Why: Architect ruling Q1: the budget is configured per request, never
+    /// on `ReviewConfig`. 0 means diff only.
+    /// What: sets `changed_files_budget`; it does nothing unless
+    /// `changed_files` is on, and a value above `MAX_CHANGED_FILES_BUDGET` is
+    /// clamped when the review runs.
+    /// Test: `budget_without_flag_is_inert`, `a_budget_above_the_clamp_is_clamped_and_reported`.
+    #[must_use]
+    pub fn with_changed_files_budget(mut self, bytes: usize) -> Self {
+        self.changed_files_budget = Some(bytes);
+        self
+    }
+
     /// Whether any new input is on.
     ///
     /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
@@ -115,14 +146,17 @@ impl OptionalContextRequest {
     /// preamble never set `caller_text`, so they never count.
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
     /// `stdin_context_and_pr_description_never_report`,
-    /// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`.
+    /// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`,
+    /// `changed_files_flag_turns_the_ledger_on`.
     pub fn requested_new(&self) -> bool {
         // #9197: sending `issue_docs` is a new input; #9193: so is either doc flag.
+        // #9195: `changed_files` counts; its budget alone does not (amendment 10).
         self.include_pr_body
             || self.caller_text
             || self.issue_docs.is_some()
             || self.spec_docs
             || self.claude_md
+            || self.changed_files
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request

@@ -903,3 +903,7 @@ async fn mistyped_spec_docs_is_invalid_params() {
 // #9194: `report_context`, the tool schemas and the envelope.
 #[path = "tools_report_context_tests.rs"]
 mod report_context;
+
+// #9195: `changed_files` and `changed_files_budget` on both review tools.
+#[path = "tools_changed_files_tests.rs"]
+mod changed_files;
