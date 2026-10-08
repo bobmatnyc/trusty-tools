@@ -37,7 +37,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
-use trusty_common::memory_core::retrieval::CrossPalaceResult;
+use trusty_common::memory_core::retrieval::{CrossPalaceRecall, CrossPalaceResult};
 use trusty_common::memory_core::PalaceHandle;
 use uuid::Uuid;
 
@@ -114,12 +114,18 @@ pub struct RecallCoverage {
     pub top_k_zero: usize,
     /// Ids of palaces that failed to open, in walk order.
     pub open_failed: Vec<String>,
+    /// Ids of palaces that opened but whose recall errored (#9299).
+    pub search_failed: Vec<String>,
 }
 
 impl RecallCoverage {
     /// Palaces on disk that were neither searched nor skipped as empty.
     pub fn palaces_not_searched(&self) -> usize {
-        self.not_resident + self.filter_failed + self.top_k_zero + self.open_failed.len()
+        self.not_resident
+            + self.filter_failed
+            + self.top_k_zero
+            + self.open_failed.len()
+            + self.search_failed.len()
     }
 
     /// Count `cold_count` non-resident palaces from the empty check's result.
@@ -159,6 +165,7 @@ impl RecallCoverage {
         for (reason, n) in [
             ("not_resident", self.not_resident),
             ("open_failed", self.open_failed.len()),
+            ("search_failed", self.search_failed.len()),
             ("filter_failed", self.filter_failed),
             ("top_k_zero", self.top_k_zero),
         ] {
@@ -179,6 +186,7 @@ impl RecallCoverage {
         out.insert("palaces_not_searched".into(), json!(not_searched));
         out.insert("not_searched_by_reason".into(), json!(by_reason));
         out.insert("open_failed".into(), json!(self.open_failed));
+        out.insert("search_failed".into(), json!(self.search_failed));
     }
 }
 
@@ -198,8 +206,10 @@ pub(crate) struct RecallAllOutcome {
 /// What: lists the palaces on disk, then runs the resident path or the
 /// streamed walk. The whole search runs inside
 /// `PalaceHandle::without_idle_touch`, so no searched palace's idle clock is
-/// reset (ADR-0071 D2). A palace that was kept but neither searched nor failed
-/// can only come from `top_k == 0`, and is counted under `top_k_zero`.
+/// reset (ADR-0071 D2). `search` returns the merged hits and the ids of the
+/// palaces whose recall errored; those count under `search_failed`, never as
+/// searched. A palace that was kept but neither searched nor failed can only
+/// come from `top_k == 0`, and is counted under `top_k_zero`.
 /// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`,
 /// `default_scope_does_not_reset_the_idle_clock`,
 /// `open_failure_is_reported_on_every_surface`,
@@ -214,7 +224,7 @@ pub(crate) async fn recall_all_scoped<F, Fut>(
 ) -> Result<RecallAllOutcome>
 where
     F: FnMut(Vec<Arc<PalaceHandle>>) -> Fut,
-    Fut: Future<Output = Result<Vec<CrossPalaceResult>>>,
+    Fut: Future<Output = Result<CrossPalaceRecall>>,
 {
     let palaces = list_palaces_blocking(state).await?;
     PalaceHandle::without_idle_touch(async move {
@@ -229,9 +239,14 @@ where
                     .iter()
                     .map(|id| id.as_str().to_string())
                     .collect();
+                let search_failed: Vec<String> = streamed
+                    .search_failed
+                    .iter()
+                    .map(|id| id.as_str().to_string())
+                    .collect();
                 let top_k_zero = kept
                     .len()
-                    .saturating_sub(streamed.searched + open_failed.len());
+                    .saturating_sub(streamed.searched + open_failed.len() + search_failed.len());
                 Ok(RecallAllOutcome {
                     results: streamed.results,
                     coverage: RecallCoverage {
@@ -240,6 +255,7 @@ where
                         palaces_skipped,
                         top_k_zero,
                         open_failed,
+                        search_failed,
                         ..RecallCoverage::default()
                     },
                 })
@@ -259,8 +275,10 @@ where
 /// blocking pool as skipped (provably empty) or `not_resident`. If that check
 /// itself fails, they are counted under `filter_failed`. The resident handles
 /// are searched in `RECALL_PALACE_BATCH` chunks and merged with the streamed
-/// path's rule.
-/// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`.
+/// path's rule; a palace the search reports failed counts under
+/// `search_failed`.
+/// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`,
+/// `a_palace_whose_recall_fails_is_not_counted_as_searched`.
 async fn recall_resident<F, Fut>(
     state: &AppState,
     palaces: Vec<Palace>,
@@ -269,7 +287,7 @@ async fn recall_resident<F, Fut>(
 ) -> Result<RecallAllOutcome>
 where
     F: FnMut(Vec<Arc<PalaceHandle>>) -> Fut,
-    Fut: Future<Output = Result<Vec<CrossPalaceResult>>>,
+    Fut: Future<Output = Result<CrossPalaceRecall>>,
 {
     let palaces_total = palaces.len();
     let mut resident: Vec<Arc<PalaceHandle>> = Vec::new();
@@ -296,11 +314,14 @@ where
             coverage,
         });
     }
-    coverage.palaces_searched = resident.len();
     let mut merger = Merger::default();
     for batch in resident.chunks(RECALL_PALACE_BATCH) {
-        merger.add(search(batch.to_vec()).await?);
+        let found = search(batch.to_vec()).await?;
+        merger.add(found.results);
+        // #9299: a palace whose recall errored is not searched.
+        coverage.search_failed.extend(found.failed);
     }
+    coverage.palaces_searched = resident.len().saturating_sub(coverage.search_failed.len());
     Ok(RecallAllOutcome {
         results: merger.finish(window),
         coverage,
@@ -316,6 +337,8 @@ pub(crate) struct Streamed {
     pub(crate) searched: usize,
     /// Palaces that failed to open (#9299).
     pub(crate) open_failed: Vec<PalaceId>,
+    /// Palaces that opened but whose recall errored (#9299).
+    pub(crate) search_failed: Vec<PalaceId>,
 }
 
 /// How many palaces a recall-all holds open at once (issue #7125).
@@ -348,12 +371,13 @@ pub(crate) const RECALL_PALACE_BATCH: usize = 8;
 /// `release_if_unreferenced` can actually pop; a palace another task is holding
 /// stays put by that same guard. Results are merged across batches by drawer
 /// id (highest score wins), sorted by score descending, and truncated to
-/// `top_k`. The ids of palaces that failed to open are returned, not dropped
-/// (#9299).
+/// `top_k`. The ids of palaces that failed to open, and of opened palaces the
+/// search reports failed, are returned, not dropped (#9299).
 /// Test: `recall_all_returns_open_palaces_to_baseline`,
 /// `recall_all_keeps_palaces_that_were_already_open`,
 /// `recall_all_releases_every_batch_when_the_search_fails`,
-/// `recall_streamed_visits_every_palace_in_bounded_batches`.
+/// `recall_streamed_visits_every_palace_in_bounded_batches`,
+/// `a_palace_whose_recall_fails_is_not_counted_as_searched`.
 pub(crate) async fn recall_streamed<F, Fut>(
     state: &AppState,
     palaces: &[Palace],
@@ -363,12 +387,13 @@ pub(crate) async fn recall_streamed<F, Fut>(
 ) -> Result<Streamed>
 where
     F: FnMut(Vec<Arc<PalaceHandle>>) -> Fut,
-    Fut: Future<Output = Result<Vec<CrossPalaceResult>>>,
+    Fut: Future<Output = Result<CrossPalaceRecall>>,
 {
     let mut streamed = Streamed {
         results: Vec::new(),
         searched: 0,
         open_failed: Vec::new(),
+        search_failed: Vec::new(),
     };
     if palaces.is_empty() || top_k == 0 {
         return Ok(streamed);
@@ -394,8 +419,16 @@ where
         let found = search(handles).await;
         // #7125: release before `?` — an erroring search must not leak a batch.
         release_batch(state, &opened, &pinned);
-        merger.add(found?);
-        streamed.searched += opened.len();
+        let found = found?;
+        merger.add(found.results);
+        // #9299: a palace whose recall errored after opening is not searched.
+        let failed: Vec<PalaceId> = opened
+            .iter()
+            .filter(|id| found.failed.iter().any(|f| f == id.as_str()))
+            .cloned()
+            .collect();
+        streamed.searched += opened.len() - failed.len();
+        streamed.search_failed.extend(failed);
     }
 
     streamed.results = merger.finish(top_k);
@@ -570,6 +603,13 @@ mod coverage_tests {
                 "open_failed",
                 RecallCoverage {
                     open_failed: vec!["p".into()],
+                    ..base.clone()
+                },
+            ),
+            (
+                "search_failed",
+                RecallCoverage {
+                    search_failed: vec!["p".into()],
                     ..base.clone()
                 },
             ),

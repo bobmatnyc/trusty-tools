@@ -16,8 +16,8 @@
 
 use serde_json::{json, Value};
 use trusty_common::memory_core::retrieval::{
-    recall_across_palaces_with_default_embedder, recall_deep_with_default_embedder,
-    recall_with_default_embedder, RecallResult,
+    recall_across_palaces_reporting, recall_deep_with_default_embedder,
+    recall_with_default_embedder, shared_embedder, RecallResult,
 };
 
 use super::core::MemoryService;
@@ -130,12 +130,14 @@ impl MemoryService {
         let outcome = recall_all_scoped(&self.state, scope, "recall_all", window, |handles| {
             let sup = sup.clone();
             async move {
-                let hits =
-                    recall_across_palaces_with_default_embedder(&handles, query, window, deep)
+                // #9299: the reporting variant names palaces whose recall failed.
+                let embedder = shared_embedder().await?;
+                let recall =
+                    recall_across_palaces_reporting(&handles, &embedder, query, window, deep)
                         .await?;
-                let found = supersessions_across(&handles, &hits).await;
+                let found = supersessions_across(&handles, &recall.results).await;
                 sup.lock().extend(found);
-                Ok(hits)
+                Ok(recall)
             }
         })
         .await;

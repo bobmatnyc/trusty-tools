@@ -23,8 +23,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
 use trusty_common::memory_core::retrieval::{
-    recall_across_palaces, recall_deep_scoped, recall_scoped, scope_admits, PalaceHandle,
-    RecallResult, RecallScope,
+    recall_across_palaces_reporting, recall_deep_scoped, recall_scoped, scope_admits,
+    CrossPalaceRecall, PalaceHandle, RecallResult, RecallScope,
 };
 
 use crate::service::recall_stream::{recall_all_scoped, RecallAllScope};
@@ -466,7 +466,10 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
                 let hits = recall_all_without_embedder(state, &handles, query, window).await;
                 let found = supersessions_across(&handles, &hits).await;
                 sup.lock().extend(found);
-                Ok(hits)
+                Ok(CrossPalaceRecall {
+                    results: hits,
+                    failed: Vec::new(),
+                })
             }
         })
         .await?
@@ -478,10 +481,13 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
             let embedder = embedder.clone();
             let sup = sup.clone();
             async move {
-                let hits = recall_across_palaces(&handles, &embedder, query, window, deep).await?;
-                let found = supersessions_across(&handles, &hits).await;
+                // #9299: the reporting variant names palaces whose recall failed.
+                let recall =
+                    recall_across_palaces_reporting(&handles, &embedder, query, window, deep)
+                        .await?;
+                let found = supersessions_across(&handles, &recall.results).await;
                 sup.lock().extend(found);
-                Ok(hits)
+                Ok(recall)
             }
         })
         .await

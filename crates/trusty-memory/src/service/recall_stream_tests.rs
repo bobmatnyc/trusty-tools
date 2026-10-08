@@ -17,6 +17,7 @@ use chrono::Utc;
 use std::cell::RefCell;
 use std::path::Path;
 use trusty_common::memory_core::palace::{Palace, PalaceId};
+use trusty_common::memory_core::retrieval::CrossPalaceRecall;
 use trusty_common::memory_core::PalaceRegistry;
 
 /// Create `n` palaces on disk and close every handle again.
@@ -75,7 +76,7 @@ async fn recall_all_releases_every_batch_when_the_search_fails() {
             if fail {
                 Err(anyhow!("search exploded"))
             } else {
-                Ok(Vec::new())
+                Ok(CrossPalaceRecall::default())
             }
         }
     })
@@ -114,7 +115,7 @@ async fn recall_streamed_visits_every_palace_in_bounded_batches() {
         widths.borrow_mut().push(handles.len());
         seen.borrow_mut()
             .extend(handles.iter().map(|h| h.id.as_str().to_string()));
-        async move { Ok(Vec::new()) }
+        async move { Ok(CrossPalaceRecall::default()) }
     })
     .await;
 

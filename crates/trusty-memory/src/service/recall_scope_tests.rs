@@ -516,3 +516,83 @@ async fn both_scopes_demote_a_superseded_drawer() {
         );
     }
 }
+
+/// Embedder whose first call returns a wrong-dimension vector (#9299).
+///
+/// Why: the palace's own vector search then errors, which is a real recall
+/// failure after a successful open. Later calls embed normally.
+#[derive(Default)]
+struct FailFirstEmbedder {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl trusty_common::memory_core::embed::Embedder for FailFirstEmbedder {
+    async fn embed_batch(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(texts.iter().map(|_| vec![1.0; 8]).collect());
+        }
+        trusty_common::embedder::MockEmbedder::new(384)
+            .embed_batch(texts)
+            .await
+    }
+
+    fn dimension(&self) -> usize {
+        384
+    }
+}
+
+/// A palace whose recall errors after it opened is not counted as searched.
+///
+/// Why (#9299, Fail-Open Check): `recall_across_palaces` logs and skips such
+/// a palace, and both scopes counted every palace handed to the search, so
+/// coverage read `complete` while that palace's hits were missing.
+/// What: two resident palaces, a search through the real
+/// `recall_across_palaces_reporting` with an embedder that breaks the first
+/// palace's vector search, in each scope. Asserts one palace searched, the
+/// other under `search_failed`, and `coverage: "partial"`.
+/// Test: this test.
+#[tokio::test]
+async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
+    use super::recall_stream::{recall_all_scoped, RecallAllScope};
+    use std::sync::Arc;
+    use trusty_common::memory_core::embed::Embedder;
+    use trusty_common::memory_core::retrieval::recall_across_palaces_reporting;
+
+    for scope in [RecallAllScope::Resident, RecallAllScope::All] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = ready_state(tmp.path()).await;
+        resident_with(&state, "sf-a", &["a stored rust build fact about alpha"]).await;
+        resident_with(&state, "sf-b", &["a stored rust build fact about beta"]).await;
+        let embedder: Arc<dyn Embedder + Send + Sync> = Arc::new(FailFirstEmbedder::default());
+
+        let outcome = recall_all_scoped(&state, scope, "unit", 10, |handles| {
+            let embedder = embedder.clone();
+            async move {
+                recall_across_palaces_reporting(&handles, &embedder, "rust build fact", 10, false)
+                    .await
+            }
+        })
+        .await
+        .expect("recall_all_scoped");
+
+        let cov = &outcome.coverage;
+        assert_eq!(cov.search_failed.len(), 1, "{scope:?}: {cov:?}");
+        assert_eq!(cov.palaces_searched, 1, "{scope:?}: {cov:?}");
+        let failed = cov.search_failed[0].clone();
+        assert!(
+            outcome.results.iter().all(|r| r.palace_id != failed),
+            "{scope:?}: no hit can come from the failed palace"
+        );
+        let mut out = serde_json::Map::new();
+        cov.insert_into(scope, &mut out);
+        assert_eq!(out["coverage"], "partial", "{scope:?}");
+        assert_eq!(out["palaces_not_searched"], 1, "{scope:?}");
+        assert_eq!(
+            out["not_searched_by_reason"],
+            json!({ "search_failed": 1 }),
+            "{scope:?}"
+        );
+        assert_eq!(out["search_failed"], json!([failed]), "{scope:?}");
+    }
+}

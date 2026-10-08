@@ -158,7 +158,7 @@ pub(crate) fn all_tools() -> Vec<ToolDef> {
         ToolDef {
             name: "memory_recall_all".into(),
             // #9299: the default scope and `coverage` are part of the contract.
-            description: "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason` and `open_failed`. Each result includes a `palace_id` field identifying its source.".into(),
+            description: "Semantic search across palaces: by default (`scope: \"resident\"`) only the palaces already loaded in memory, opening none; with `scope: \"all\"`, every non-empty palace on disk, opened as needed, which is slower. Every response reports `coverage`: `\"complete\"` when every palace on disk was searched or skipped as empty, `\"partial\"` otherwise, with `palaces_total`, `palaces_searched`, `palaces_skipped`, `palaces_not_searched`, `not_searched_by_reason`, `open_failed` and `search_failed`. Each result includes a `palace_id` field identifying its source.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
