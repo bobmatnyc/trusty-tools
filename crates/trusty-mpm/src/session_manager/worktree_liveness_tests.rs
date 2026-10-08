@@ -7,6 +7,8 @@
 //! Test: this file.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::{process_holding, run_cwd_probe, scan_probe};
 
@@ -111,13 +113,58 @@ fn liveness_treats_a_listing_that_cannot_see_this_process_as_in_use() {
 /// over.
 #[test]
 fn liveness_treats_a_missing_lsof_as_in_use() {
-    let err = run_cwd_probe("trusty-mpm-no-such-probe-binary")
-        .expect_err("an absent probe binary must not yield a listing");
+    let err = run_cwd_probe(
+        Command::new("trusty-mpm-no-such-probe-binary"),
+        Duration::from_secs(5),
+    )
+    .expect_err("an absent probe binary must not yield a listing");
 
     assert!(
         err.contains("could not run"),
         "must say which step failed: {err}"
     );
+}
+
+/// #7540 critic round REGRESSION: a probe that outlives its ceiling is killed,
+/// reaped, and reads as IN USE.
+///
+/// Why: an unbounded `lsof` stalled on a hung network mount held the reclaim
+/// tick, and every later sweep, forever. The stand-in records its own pid and
+/// then blocks well past the ceiling; the probe must return inside the ceiling
+/// with a refusal, and the pid must be gone.
+#[cfg(unix)]
+#[test]
+fn liveness_kills_a_probe_that_outlives_its_ceiling() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pidfile = tmp.path().join("probe.pid");
+    let mut hung = Command::new("sh");
+    hung.args([
+        "-c",
+        &format!("echo $$ > {}; exec sleep 20", pidfile.display()),
+    ]);
+    let started = Instant::now();
+
+    let err = run_cwd_probe(hung, Duration::from_millis(500))
+        .expect_err("a probe past its ceiling must not yield a listing");
+
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the ceiling must fire; took {:?}",
+        started.elapsed()
+    );
+    assert!(err.contains("timed out after"), "{err}");
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("the stand-in must have recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // SAFETY: signal 0 only probes for existence; `pid` is this test's child.
+    let alive = unsafe { libc::kill(pid, 0) } == 0;
+    if alive {
+        // SAFETY: as above; never leave the stand-in behind, whatever the verdict.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    assert!(!alive, "the stalled probe (pid {pid}) was left running");
 }
 
 /// A listing carrying no working directory at all rules nothing out.
