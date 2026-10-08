@@ -47,6 +47,8 @@ pub(crate) mod helpers;
 // #8959/#9179: single-file writes mark the symbol graph stale; a ticker rebuilds.
 pub(crate) mod graph_refresh;
 mod idle_evict;
+// #9450: the idle persist, detached from the indexer lock.
+pub use idle_evict::WriteCooldownPersist;
 mod ingest;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;

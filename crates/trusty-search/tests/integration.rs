@@ -15,6 +15,9 @@
 //! mounted by no target. Run one former binary with a module filter:
 //! `cargo test -p trusty-search --test integration typeahead::`.
 
+// #9450: seeded clustered vectors shared by the HNSW recall tests.
+#[path = "../src/core/store/clustered_vectors.rs"]
+mod clustered_vectors;
 #[path = "support/real_allowlist_guard.rs"]
 mod real_allowlist_guard;
 #[path = "support/socket_daemon.rs"]
@@ -28,6 +31,8 @@ mod corpus_corruption_quarantine_4227;
 mod corpus_open_quarantine_4122;
 mod daemon_env_precedence;
 mod data_dir_forward;
+// #9450: compaction cost at 150K (ignored measurement).
+mod hnsw_compact_9450;
 mod hnsw_recall_9414;
 mod index_remove_env_conflict_8175;
 mod integration_tests;

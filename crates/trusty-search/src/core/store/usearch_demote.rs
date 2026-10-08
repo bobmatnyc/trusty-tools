@@ -243,6 +243,19 @@ impl UsearchStore {
         &self,
         cooldown: Duration,
     ) -> Result<Option<DemoteStats>> {
+        self.try_demote_after_write_cooldown_with_compaction(cooldown, true)
+            .await
+    }
+
+    /// [`Self::try_demote_after_write_cooldown`], with the #9450 compaction
+    /// before the save skipped when `compact` is false — the indexer passes
+    /// false while a staged reindex runs.
+    /// Test: `crate::core::indexer::tests::persist_compact_9450::the_idle_persist_never_compacts_during_a_reindex`.
+    pub(super) async fn try_demote_after_write_cooldown_with_compaction(
+        &self,
+        cooldown: Duration,
+        compact: bool,
+    ) -> Result<Option<DemoteStats>> {
         // A zero cooldown is the operator's "off" switch, not "demote now" —
         // see `store_config::hnsw_demote_cooldown`.
         if cooldown.is_zero() {
@@ -276,6 +289,23 @@ impl UsearchStore {
         };
 
         let started = Instant::now();
+        // #9450: the idle persist is where churn past the threshold gets a
+        // rebuilt graph, except during a staged reindex. A failed compaction
+        // must not block the save.
+        let compacted = match compact {
+            true => {
+                self.compact_graph_now(super::types::CompactMode::IfDue)
+                    .await
+            }
+            false => Ok(None),
+        };
+        if let Err(e) = compacted {
+            tracing::warn!(
+                "usearch: compaction before the write-cooldown persist of {} failed ({e:#}) — \
+                 saving the current graph (#9450)",
+                path.display()
+            );
+        }
         self.save(&path).await?;
         if !self.try_demote_to_view().await? {
             // A write landed during or after the save. The save itself is

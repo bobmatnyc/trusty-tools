@@ -108,6 +108,8 @@ mod exact_match_perf;
 mod file_lifecycle_8959;
 pub(super) mod incremental_stamp_9230;
 mod path_filter_search;
+// #9450: the persister compacts a churned graph before it saves.
+mod persist_compact_9450;
 mod persist_root_8438;
 mod persistence_and_search;
 mod ranking_and_modes;

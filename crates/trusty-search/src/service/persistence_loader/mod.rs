@@ -200,6 +200,7 @@ pub async fn build_indexer_from_entry(
     let (store, hnsw_load_failed): (Arc<dyn VectorStore>, bool) =
         build_store_for_entry(entry, dim).await?;
     // #8438: the layout is decided here, once, from the registry entry.
+    let heal_target = Arc::clone(&store);
     let mut indexer = CodeIndexer::new(index_id, root_path)
         .with_components(Arc::clone(embedder), store)
         .with_storage_layout(StorageLayout::for_entry(entry));
@@ -280,6 +281,11 @@ pub async fn build_indexer_from_entry(
         }
     }
 
+    // #9450: a pre-#9450 or churn-due snapshot is compacted once, in the
+    // background. Not for a quarantined index, which writes nothing (#4226).
+    if !indexer.corpus_open_failed {
+        heal_target.spawn_heal_on_load(index_id.clone(), indexer.reindex_staging_probe());
+    }
     restore_corpus_for_entry(&mut indexer, entry).await;
     Ok(indexer)
 }
