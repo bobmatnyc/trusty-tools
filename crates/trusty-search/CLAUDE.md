@@ -1472,7 +1472,9 @@ the daemon:
 
 The HTTP-only routes have no socket method and are unavailable: `/`, `/ui`,
 `/upgrade`, `/metrics`, `/api/chat/providers`. `status`, `list`, `add`'s
-guard, `remove` and `watch` use the socket (#9214 B2(a)). `port`,
+guard, `remove` and `watch` use the socket (#9214 B2(a)), and so do
+`config get|set`, `cleanup`, `convert` and `migrate`'s index phase (#9214
+B2(b1)); `config` and `cleanup` never start the daemon. `port`,
 `dashboard` and `monitor web` ask the daemon over the socket which HTTP
 address it bound (#9214 B2(d1)). Against a `--no-http` daemon, `port` exits 1
 with `no HTTP listener (socket-only daemon at <socket>)`; `dashboard` and
