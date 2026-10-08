@@ -2822,3 +2822,23 @@ mod grade_floor;
 // #9348: a review that does not post leaves no in-progress dedup claim.
 #[path = "runner_dedup_claim_tests.rs"]
 mod dedup_claim;
+
+// #9197: caller `issue_docs` reach the reviewer, never the verifier.
+#[path = "runner_issue_docs_tests.rs"]
+mod issue_docs;
+
+// #9193: spec/ADR/SLD docs and CLAUDE.md read at the PR head SHA.
+#[path = "runner_spec_docs_tests.rs"]
+mod spec_docs;
+
+// #9194: the context-source ledger reports every input.
+#[path = "runner_context_report_tests.rs"]
+mod context_report;
+
+// #9194: the `external_sources` row and its per-source items.
+#[path = "runner_external_report_tests.rs"]
+mod external_report;
+
+// #9431: a credentialed trusty-search URL never reaches review output.
+#[path = "runner_credential_url_tests.rs"]
+mod credential_url;

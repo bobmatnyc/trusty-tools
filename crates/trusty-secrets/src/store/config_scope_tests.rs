@@ -106,10 +106,11 @@ fn config_tracked_file_backend_is_refused_on_a_keychain_build() {
 }
 
 /// Why: #7519, owner ruling 2026-10-07 — a tracked project file may not aim
-/// a vendor CLI at an account or config directory of its choosing. Refused
-/// on every build, Keychain or not, in the brief's top-level shape and the
-/// DOC-74 §6.2 per-backend shape. The refusal never echoes the file.
-/// Red when `check_project_backend_for` lets either key through.
+/// a vendor CLI at an account or config directory of its choosing, nor
+/// choose the program run as the CLI. Refused on every build, Keychain or
+/// not, in the brief's top-level shape and the DOC-74 §6.2 per-backend
+/// shape. The refusal never echoes the file.
+/// Red when `check_project_backend_for` lets any of the keys through.
 /// Test: itself.
 #[test]
 fn config_tracked_cli_settings_are_refused_on_every_build() {
@@ -128,14 +129,23 @@ fn config_tracked_cli_settings_are_refused_on_every_build() {
             "keeper.config_path",
             "secrets:\n  keeper:\n    config_path: /tmp/SENTINEL-7519-cfg\n",
         ),
+        ("program", "secrets:\n  program: /tmp/SENTINEL-7519-op\n"),
+        (
+            "onepassword.program",
+            "secrets:\n  onepassword:\n    program: /tmp/SENTINEL-7519-op\n",
+        ),
+        (
+            "keeper.program",
+            "secrets:\n  keeper:\n    program: /tmp/SENTINEL-7519-op\n",
+        ),
     ];
     for (key, body) in cases {
         let path = write(tmp.path(), "trusty-secrets.yaml", body);
         let tracked = load_project_at(&path).unwrap().unwrap();
         let expected = format!(
             "secrets config {} is tracked and may not set `{key}`: a repository could \
-             point the CLI at an account or config directory of its choosing; remove \
-             it and set it in the machine config instead",
+             point the CLI at an account, config directory or program of its choosing; \
+             remove it and set it in the machine config instead",
             path.display()
         );
         for keychain_compiled in [true, false] {
@@ -647,4 +657,46 @@ fn scope_tracked_override_outside_the_owner_is_refused() {
         matches!(err, SecretsError::VaultOutOfScope { .. }),
         "{err:?}"
     );
+}
+
+/// Why: #7524 H1, Architect ruling on item 74 — on a Keychain build a value
+/// write into `file` needs consent from the account's own machine config,
+/// and every way that config can fail to say `file` refuses: no path (the
+/// account home is unknown), a missing file, a file that does not parse, no
+/// `secrets:` section, or a `default_backend` other than `file`. A write
+/// into any other backend, and any write on a build without a Keychain,
+/// never reads the consent config.
+/// Test: itself.
+#[cfg(feature = "server")]
+#[test]
+fn config_value_write_into_file_needs_the_consent_config() {
+    use super::config::check_value_write_for;
+    let tmp = TempDir::new().unwrap();
+    let consenting = write(
+        tmp.path(),
+        "file.yaml",
+        "secrets:\n  default_backend: file\n",
+    );
+    let refusing = [
+        None,
+        Some(tmp.path().join("missing.yaml")),
+        Some(write(tmp.path(), "corrupt.yaml", "secrets: [unclosed\n")),
+        Some(write(tmp.path(), "bare.yaml", "other: 1\n")),
+        Some(write(
+            tmp.path(),
+            "keychain.yaml",
+            "secrets:\n  default_backend: keychain\n",
+        )),
+    ];
+    let file = BackendId::file();
+    check_value_write_for(&file, Some(&consenting), true).unwrap();
+    for consent in &refusing {
+        let err = check_value_write_for(&file, consent.as_deref(), true).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::FileBackendNotSelected),
+            "{consent:?}: {err:?}"
+        );
+        check_value_write_for(&file, consent.as_deref(), false).unwrap();
+        check_value_write_for(&BackendId::keychain(), consent.as_deref(), true).unwrap();
+    }
 }

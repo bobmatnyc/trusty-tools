@@ -404,10 +404,9 @@ fn socket_path_follows_trusty_data_dir_not_home() {
     );
 }
 
-/// Why (#9214): auto-discover registers projects through `daemon_utils::daemon_base_url`,
-/// which falls back to `127.0.0.1:7878` when the daemon published no
-/// `http_addr`. A `--no-http` daemon that ran it would register into whatever
-/// holds that port. This is the Fail-Open Check for that path: the scan must
+/// Why (#9214): auto-discover registers projects over HTTP, and a `--no-http`
+/// daemon publishes no HTTP address; before B2(a) the resolver then guessed
+/// `:7878` and registered into whatever held that port. This is the Fail-Open Check for that path: the scan must
 /// be withheld, not redirected.
 /// What: a granted scan stops running once the listener is absent, and says
 /// why; the warm-boot colocated scan and the flag forwarded to the child do

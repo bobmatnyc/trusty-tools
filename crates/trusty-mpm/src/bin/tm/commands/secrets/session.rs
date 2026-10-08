@@ -16,9 +16,10 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail};
 use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde_json::Value;
+use trusty_mpm::secrets_client;
 use trusty_secrets::api::methods::{ScopeKind, ScopesResponse, method};
-use trusty_secrets::server::{ClientError, ErrorKind, OnDemandSecrets, PROJECT_FIELD};
+use trusty_secrets::server::{ClientError, ErrorKind, OnDemandSecrets};
 use trusty_secrets::{SecretKey, VaultName};
 
 use super::ValueSource;
@@ -37,21 +38,17 @@ pub(crate) struct Ctx<'a> {
     pub(crate) clipboard: &'a dyn ValueSource,
     /// The `--value -` source.
     pub(crate) stdin: &'a dyn ValueSource,
+    /// Whether this is a CI run (`CI=true`); `doctor` judges headless
+    /// readiness only then (#7519 d4 Q2).
+    pub(crate) ci: bool,
 }
 
 impl Ctx<'_> {
     /// `params` with `project` added; `params` must be an object or null.
+    // #7522: the fold is shared with the `secrets_get_ref` MCP tool.
     fn params(&self, params: Value) -> anyhow::Result<Value> {
-        let project = self
-            .project
-            .to_str()
-            .ok_or_else(|| anyhow!("tm secrets: the working directory is not UTF-8"))?;
-        let mut fields = match params {
-            Value::Object(fields) => fields,
-            _ => Map::new(),
-        };
-        fields.insert(PROJECT_FIELD.to_owned(), Value::String(project.to_owned()));
-        Ok(Value::Object(fields))
+        secrets_client::with_project(self.project, params)
+            .ok_or_else(|| anyhow!("tm secrets: the working directory is not UTF-8"))
     }
 
     /// One request with the project folded in; the raw client result.
@@ -95,22 +92,9 @@ impl Ctx<'_> {
 ///
 /// Why: the server already answers with fixed text (`ErrorKind::to_rpc`); a
 /// transport error's detail is a library message, so it is dropped.
+// #7522: the text lives in the library, shared with the MCP tool.
 pub(crate) fn describe(error: &ClientError, socket: &Path) -> String {
-    let socket = socket.display();
-    match error {
-        ClientError::Rpc(e) => format!("tm secrets: {}", e.message),
-        ClientError::Spawn(e) => format!("tm secrets: cannot start trusty-secrets: {e}"),
-        ClientError::Transport(_) => {
-            format!("tm secrets: the request did not cross the trusty-secrets socket {socket}")
-        }
-        ClientError::HomeUnavailable => "tm secrets: the home directory is unavailable".to_owned(),
-        ClientError::EmptyResponse => {
-            format!("tm secrets: trusty-secrets at {socket} answered without a result")
-        }
-        // #7521: `ClientError` is `#[non_exhaustive]`; a later variant gets
-        // fixed text, never its own detail.
-        _ => format!("tm secrets: trusty-secrets at {socket} failed"),
-    }
+    secrets_client::describe("tm secrets", error, socket)
 }
 
 /// Whether the server refused the request's project: not a checkout, no

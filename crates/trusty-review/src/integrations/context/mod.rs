@@ -34,6 +34,7 @@ pub mod config;
 pub mod confluence;
 pub mod confluence_parse;
 pub mod conformance;
+pub(crate) mod contents_at_ref; // #9193
 pub mod external_spec;
 pub mod github_issues;
 pub mod jira;

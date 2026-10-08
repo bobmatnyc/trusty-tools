@@ -11,12 +11,19 @@
 
 use std::sync::Arc;
 
+use crate::integrations::context::{ContextSource, contents_at_ref::DocFetcher};
 use crate::models::{ContextSourceRecord, ReviewResult};
 
 pub(crate) mod assemble;
+pub(crate) mod doc_refs; // #9193
+pub(crate) mod docs; // #9193
+pub(crate) mod docs_render; // #9193
+pub(crate) mod issues;
 pub(crate) mod ledger;
+pub(crate) mod probes; // #9194
 pub(crate) mod seams;
 
+pub use issues::{IssueDoc, IssueDocsError}; // #9197
 pub(crate) use seams::PrSource;
 
 /// The optional inputs a caller asked a review for (#9192).
@@ -28,10 +35,14 @@ pub(crate) use seams::PrSource;
 /// reviewer's PR description, ahead of any caller text. A local diff has no
 /// PR body; the ledger records it `unavailable` and the review runs.
 /// `caller_text` marks caller text that arrived through a new parameter (the
-/// MCP `review_pr` text params). `report_context` asks for the source ledger
-/// with no other new input.
+/// MCP `review_pr` text params). `issue_docs` (#9197) are caller issue docs
+/// for the reviewer only, `Some` whenever the caller sent the parameter, even
+/// an empty list. `spec_docs` and `claude_md` (#9193) read ADR/spec/SLD docs
+/// and CLAUDE.md files at the PR head SHA, for the reviewer only.
+/// `report_context` asks for the source ledger with no other new input.
 /// Test: `include_pr_body_reaches_reviewer_and_verifier_prompts`,
-/// `requested_new_is_off_by_default_and_on_with_pr_body`.
+/// `requested_new_is_off_by_default_and_on_with_pr_body`,
+/// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OptionalContextRequest {
@@ -41,6 +52,12 @@ pub struct OptionalContextRequest {
     pub caller_text: bool,
     /// Report the source ledger even with no other new input.
     pub report_context: bool,
+    /// Caller issue docs for the reviewer (#9197); `None` when not sent.
+    pub issue_docs: Option<Vec<IssueDoc>>,
+    /// Read the docs the PR body names, plus search hits, at the head (#9193).
+    pub spec_docs: bool,
+    /// Read CLAUDE.md conventions at the head (#9193).
+    pub claude_md: bool,
 }
 
 impl OptionalContextRequest {
@@ -65,15 +82,47 @@ impl OptionalContextRequest {
         self
     }
 
+    /// This request carrying the caller's issue docs (#9197).
+    ///
+    /// Why: Architect ruling 2026-10-06 04:47Z: issue docs enter through the
+    /// request, so no public review type gains a field.
+    /// What: sets `issue_docs`, which counts as a new input even when empty.
+    /// Test: `issue_docs_turn_the_ledger_on`.
+    #[must_use]
+    pub fn with_issue_docs(mut self, docs: Vec<IssueDoc>) -> Self {
+        self.issue_docs = Some(docs);
+        self
+    }
+
+    /// This request with `spec_docs` set to `on` (#9193).
+    #[must_use]
+    pub fn with_spec_docs(mut self, on: bool) -> Self {
+        self.spec_docs = on;
+        self
+    }
+
+    /// This request with `claude_md` set to `on` (#9193).
+    #[must_use]
+    pub fn with_claude_md(mut self, on: bool) -> Self {
+        self.claude_md = on;
+        self
+    }
+
     /// Whether any new input is on.
     ///
     /// Why: plan §3.1 (Architect ruling 2026-10-06 03:42Z): any new
     /// parameter counts. The legacy `run` text flags and a `# Context:`
     /// preamble never set `caller_text`, so they never count.
     /// Test: `requested_new_is_off_by_default_and_on_with_pr_body`,
-    /// `stdin_context_and_pr_description_never_report`.
+    /// `stdin_context_and_pr_description_never_report`,
+    /// `issue_docs_turn_the_ledger_on`, `doc_flags_turn_the_ledger_on`.
     pub fn requested_new(&self) -> bool {
-        self.include_pr_body || self.caller_text
+        // #9197: sending `issue_docs` is a new input; #9193: so is either doc flag.
+        self.include_pr_body
+            || self.caller_text
+            || self.issue_docs.is_some()
+            || self.spec_docs
+            || self.claude_md
     }
 
     /// Whether the review keeps a source ledger: a new input, or a request
@@ -89,8 +138,8 @@ impl OptionalContextRequest {
 ///
 /// Why: a default value runs the review exactly as `run_review` does, so a
 /// caller opts in to each new input and nothing else changes.
-/// What: the caller's [`OptionalContextRequest`], plus the PR seam tests
-/// inject; production leaves the seam `None`.
+/// What: the caller's [`OptionalContextRequest`], plus the PR and doc-read
+/// seams tests inject; production leaves both `None`.
 /// Test: `off_is_byte_identical_unified`,
 /// `include_pr_body_reaches_reviewer_and_verifier_prompts`.
 #[derive(Clone, Default)]
@@ -100,7 +149,14 @@ pub struct ReviewOptions {
     pub request: OptionalContextRequest,
     /// Test seam for the GitHub metadata and diff reads (#9192).
     pub(crate) pr_source: Option<Arc<dyn PrSource>>,
+    /// Test seam for the Contents API doc reads (#9193).
+    pub(crate) doc_fetcher: Option<Arc<dyn DocFetcher>>,
+    /// Test seam for the external context sources (#9194).
+    pub(crate) external_sources: Option<ExternalSources>,
 }
+
+/// Builds the external context sources a review gathers from (#9194 seam).
+pub(crate) type ExternalSources = Arc<dyn Fn() -> Vec<Box<dyn ContextSource>> + Send + Sync>;
 
 impl ReviewOptions {
     /// Options carrying `request` and the production PR reads.
@@ -108,6 +164,8 @@ impl ReviewOptions {
         Self {
             request,
             pr_source: None,
+            doc_fetcher: None,
+            external_sources: None,
         }
     }
 }

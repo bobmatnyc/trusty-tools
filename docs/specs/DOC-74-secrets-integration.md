@@ -141,7 +141,7 @@ namespace (§9.3, `SessionSecretCache`).
 **T-2. The LLM never sees a value, only a reference.** A config row, a tool
 schema, and a chat transcript may all hold `secret://<project>/<KEY>` freely —
 it is exactly as non-secret as `CredentialRef` is today (`handle.rs`, DOC-45
-§4). The MCP tool this document adds (`secrets_get_ref`, §10.3) returns
+§4). The MCP tool this document adds (`secrets_get_ref`, §10.2) returns
 references and metadata (last-import time, backend, whether a value is
 present) — **never** a value — mirroring DOC-64's "never displays a secret
 value" rule for the panel.
@@ -213,6 +213,7 @@ existing `crate_config` convention (`crate_config.rs:1-30`) exactly:
 ```yaml
 secrets:
   default_backend: keychain   # owner ruling: this is the shipped default
+  onepassword: {}             # enables the 1Password CLI backend (see below); never set by a tracked file
 ```
 
 **Project level** — inside the project's own tracked config, alongside where
@@ -221,7 +222,7 @@ secrets:
 
 ```yaml
 secrets:
-  backend: onepassword         # overrides the machine default for this project only
+  backend: keychain            # overrides the machine default for this project only
   vault: trusty/bobmatnyc/trusty-tools   # optional explicit override of §6.3's derived name
 ```
 
@@ -231,6 +232,21 @@ a project either names a backend or it doesn't). A project with zero
 `secrets:` config and a machine with zero `secrets:` config both resolve to
 `keychain` with no CLI installed and no prompt — this is what makes
 `keychain` a true zero-configuration default (owner ruling, §3 G-2).
+
+**CLI backends are enabled by the machine config alone
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519); owner ruling
+2026-10-07, "Accept gate, amend §6.1").** A CLI backend such as 1Password opens
+only when the untracked machine config enables it, through a
+`secrets.onepassword:` section (`{}` is enough) or
+`secrets.default_backend: onepassword`. A tracked project config that names
+`backend: onepassword` does not enable it. Without machine enablement the
+request fails with `backend_not_enabled` (-32078). A repository must not be
+able to steer the server to a CLI backend, and enablement makes the delete
+sweep complete, because the sweep visits every enabled backend. The `program`,
+`account` and `config_path` settings are machine-config only; a tracked file
+that sets one is refused. `program` must be an absolute path; otherwise `op` is
+looked up in a fixed list of system directories (§6.2), never on a `PATH`
+(#7524 P2-M2).
 
 This precedence picks a **backend**. It is a separate axis from the secret
 **scope** (project or owner, §15.3), which has no machine level (owner answer
@@ -262,18 +278,41 @@ either file says.
 
 ```yaml
 secrets:
-  backend: onepassword
   onepassword:
     account: my.1password.com   # `op` account shorthand, passed to `op --account`
+    program: /opt/homebrew/bin/op   # optional; absolute path to `op`
   keeper:
-    config_path: ~/.keeper/config.json   # KSM config, when not the CLI default
+    program: /usr/local/bin/keeper           # required; absolute path to Keeper Commander
+    config_path: /Users/me/.keeper/config.json   # required; Commander's config file, absolute, mode 0600
 ```
 
-Neither section ever holds a token or password — only the shape needed to
+**Where `op` comes from (#7524 P2-M2, Architect Decision A).** The machine
+config's `secrets.onepassword.program`, when set, is the program and
+overrides everything else. Without it, the backend takes the first executable
+`op` in this fixed list, in order:
+
+| OS | Directories searched |
+|---|---|
+| macOS | `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` |
+| Linux and other Unix | `/usr/local/bin`, `/usr/bin` |
+
+The `PATH` of whichever process spawned the server is never consulted: any
+directory on it is the spawner's choice, and a planted `op` there would
+receive item templates, values inside. With no pin and no `op` in the list,
+the backend fails with `cli_not_installed`, and the message names the
+`secrets.onepassword.program` setting. Keeper has no list: its `program` pin
+is required.
+
+These sections belong to the untracked machine config only (§6.1,
+[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)). Neither
+section ever holds a token or password — only the shape needed to
 invoke the CLI (account name, config path). A service-account token
-(`OP_SERVICE_ACCOUNT_TOKEN`, headless Keeper KSM config) is read from the
-external tool's own documented environment/config location, never copied into
-trusty-tools' own config file (T-1).
+(`OP_SERVICE_ACCOUNT_TOKEN`) is read from the external tool's own documented
+environment/config location, never copied into trusty-tools' own config file
+(T-1). Keeper's credential is the persistent-login device token inside the
+Commander config file that `config_path` names; the file itself is never read
+by trusty-secrets, only checked to be a regular 0600 file the account owns
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519) P3, ruling 7).
 
 ### 6.3 Vault naming
 
@@ -290,7 +329,36 @@ project file's `secrets.vault` shares a vault only among one owner's repos
 
 ## 7. Backend Detection (`detect_backends`)
 
-**API** (trusty-common):
+> **Amended 2026-10-07 (#7519 P4).** No `detect_backends` was built in
+> trusty-common, and none will be: owner ruling 2026-10-07, "Secrets should
+> have no common dependencies." Detection lives in the `secrets.doctor`
+> method of the trusty-secrets server (`crates/trusty-secrets/src/server/doctor.rs`),
+> and `tm secrets doctor` renders its reply. The API sketch below is the
+> original design; what ships is:
+>
+> - One row per backend (`keychain`, `file`, `onepassword`, `keeper`, on every
+>   build) with `available`, and, when unavailable, a typed `reason`
+>   (`not_compiled`, `not_enabled`, `cli_not_installed`, `config_invalid`,
+>   `tracked_setting_refused`) and a `detail` naming the fix. The fields are
+>   additive (`#[serde(default)]`), so an older client decodes a newer reply.
+> - `available` means the server opens the backend now. Opening reads no
+>   secret and spawns nothing, so doctor never runs `op` or `keeper` (A9) and
+>   never knows whether either is unlocked. The `KeyringStore` probe in the
+>   table below is not used: off macOS the build links no Keychain and the
+>   row is `not_compiled`.
+> - CLI-backend enablement is read from the account's own machine config
+>   (ruling 74); the selected backend from the machine config every request
+>   reads. Both paths are reported.
+> - Headless readiness is one yes/no: whether `OP_SERVICE_ACCOUNT_TOKEN` was
+>   set when the server started (§13 Q4). Keeper device approval and
+>   persistent login are not detected (#7519 P3 ruling 6).
+> - The unsupported tools in the table below (`bw`, `vault`, `pass`,
+>   `gopass`, `doppler`, `infisical`) are reported as `tools`: installed or
+>   not, and where, from the absolute entries of the `PATH` the server read
+>   at start. Nothing is run, so nothing can prompt or unlock. `ksm` and the
+>   Running/Configured columns are not probed.
+
+**API** (trusty-common, original design, not built):
 
 ```rust
 pub enum ToolStatus {
@@ -386,18 +454,92 @@ third and fourth hand-rolled `Command::new`.
 
 ```rust
 // op read "op://<vault>/<item>/<field>"  →  one value, stdout only, never argv-visible on the value side
-// op item create --category=login --vault <vault> --title <key> password=<value> --format=json  (via stdin, not argv — op supports assignment via - / stdin)
-// keeper get <record-uid> --format json   /   ksm secret get <uid> --format json
+// op item create -  (JSON item template, value inside, on stdin — #7519)
+// op item edit <id> --template <0600 file>  (template file removed after the call — #7519)
+// keeper --config <file> --batch-mode get --format json -- <record-uid>  (value on stdout — #7519 P3)
+// keeper --config <file> --batch-mode -  (stdin: one `record-add`/`record-update` line, value as $BASE64: — #7519 P3)
 ```
 
 **Delivery of the value out of the subprocess never touches argv.** `op read`
 takes a reference in argv (not a secret), and returns the secret on stdout —
 safe. Writing a *new* value (`tm secrets add`) pipes the value to the CLI's
-stdin (`op item create … password=- ` / Keeper Commander's `--from-file -`)
+stdin (`op item create -` with a JSON template on stdin; `op item edit <id>
+--template <0600 file>` for an existing item, per
+[#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519); for Keeper,
+Commander's batch mode reading commands from stdin, `keeper --batch-mode -`,
+with the value inside the command as `$BASE64:<text>`. Commander has no
+`--from-file -`; an earlier draft of this section cited one in error)
 rather than composing it into the argv this document's own `ExternalCliCommand`
 would otherwise render into a log line (see `GhCommand::argv_display`,
 `gh.rs:289`, which exists precisely so a command can be logged — the new
 commands must never call the equivalent for a value-carrying argument).
+
+**1Password (#7519 P2; #7524 part 2).**
+
+- *Program.* `op` runs by absolute path: the machine `program` pin, or the
+  first `op` in the system directories of §6.2. No `PATH` is read.
+- *Lookup.* Every operation first runs `op item list --vault <vault>`. `op`
+  answers "isn't a vault" both for a vault the account lacks and for one the
+  current identity cannot see, so that answer never proves a key absent.
+- *Missing vault.* For `get` it is a miss (`Ok(None)`); for `set` it is an
+  error naming the vault. For `delete` it is `vault_not_visible` (-32080),
+  never a miss, so the delete sweep keeps the key's index row (#7524 P2-M3,
+  Architect Decision B). A missing item in a listed vault stays a miss for
+  every operation.
+- *Stuck delete (#7524 P2-M3, Architect ruling 2026-10-07 23:54Z).* The
+  names-only index does not record which backend holds a key, so a delete
+  sweeps 1Password whenever the machine config enables it. A project that
+  keeps its keys in the Keychain or `file` usually has no 1Password vault of
+  its name, so every delete of its keys clears the local backend, keeps the
+  index row and fails with `vault_not_visible`. Its text names the two ways
+  out: create the vault in 1Password, or stop enabling 1Password by removing
+  the `secrets.onepassword` section (and any `secrets.default_backend:
+  onepassword`) from the machine config
+  `~/.trusty-tools/trusty-common/config.yaml`. A later delete then succeeds.
+- *Copy past the deadline.* A `copy` into 1Password lists in `failed` both
+  the keys it did not start and a key whose `op` write the request deadline
+  cut short (§15.2). That write may have landed, so check the vault before
+  retrying a failed key.
+
+**Keeper (#7519 P3, Architect rulings 2026-10-07 17:11Z) — shims only, and
+provisional.** No test has run against a real Keeper account; every ruling
+below is revisited when the first Keeper user exists, and the command output
+shapes and message phrases the backend reads are unconfirmed.
+
+- *CLI.* Keeper Commander (`keeper`) only. `ksm` is not used: its set command
+  takes the value in argv. `--password` is never passed.
+- *Write path.* One `record-add` or `record-update` line on stdin, the value as
+  `$BASE64:`. A 0600 batch file read with `run-batch` is the fallback should
+  the live check show stdin batch mode is unreliable; it is not built.
+- *Configuration.* `program` and `config_path` come only from the account's
+  own machine config (§6.1, ruling 74); both are absolute, and the config file
+  is a regular file with mode 0600 owned by the account. No `PATH` search, and
+  Commander's own config search (the working directory first) is never used.
+- *Layout.* One Keeper folder per trusty vault, at the vault's path (e.g.
+  `trusty/acme/web`), mirroring the 1Password vault-per-vault layout; one
+  `login` record per key, titled with the key, the value in `password`.
+- *Fail closed.* Anything other than a confirmed success is a failure. Every
+  write is read back and compared; every delete is checked by a new listing.
+  Exit 0 with text that is not the expected answer is a failure. A key is
+  missing only when a successful listing of its confirmed folder does not
+  show it, and a folder only when a successful listing of its parent shows
+  no folder of exactly that name — never because of stderr text. A folder
+  exists only when the listings from the root down show exactly one folder
+  of exactly each segment's name; nothing is read, written or removed
+  before that. A successful `ls` of the folder's own path proves nothing.
+- *Live check.* The first run against a real account pins whether
+  Commander's `ls` of a missing path exits 0 with the parent's entries that
+  match the last segment as a case-insensitive pattern (the shims assume it
+  may), and whether path resolution folds case when two sibling folders
+  differ only in case. The backend matches folder names exactly.
+- *Delete.* `rm` moves a record to Keeper's trash; that satisfies the delete
+  sweep, which includes Keeper wherever it includes 1Password.
+- *Headless limitation.* Commander works headless only after a person has
+  logged in once with that config file, approved the device, and turned on
+  persistent login (`this-device register`, `this-device persistent-login
+  on`). Until then, and after an idle timeout, every call is `backend_locked`,
+  and the error names that step. There is no service-account token for
+  Keeper.
 
 **Prerequisite (amended 2026-10-01).** A CLI runner that writes to the
 child's stdin must exist before any CLI-backed integration lands.
@@ -487,7 +629,10 @@ tm secrets copy --from <backend> --to <backend> [KEY...]
                                                # for the ACTIVE project; reads each value in-process and writes it to the destination
                                                # backend without ever printing it — the owner's "copy vars between stores" requirement
                                                # a key not copied (absent from the source, refused by the destination) is named; exits non-zero
-tm secrets doctor                              # runs detect_backends (§7), renders the table, flags a configured-but-unreachable backend
+tm secrets doctor                              # calls secrets.doctor (§7), renders the table with each unavailable backend's reason and fix
+                                               # exits non-zero when the selected backend is unavailable; when the server refused the
+                                               # project (the machine default's report is still printed); and, under CI=true (or CI=1),
+                                               # when the selected backend is 1Password with no OP_SERVICE_ACCOUNT_TOKEN at server start
 tm secrets exec [--env NAME=KEY]... [--stdin KEY] -- <command...>
                                                # resolves each named KEY from the active vault and injects the VALUE into the child's
                                                # environment (--env) or stdin (--stdin) only — never into <command...>'s own argv, never
@@ -575,6 +720,17 @@ happens only in Rust code that builds a subprocess env map or an HTTP client
 (§9.5), never through a tool call whose `ToolResult` an LLM turn could echo.
 Amended 2026-10-01: the value-returning `secrets.resolve` UDS method (§15.8
 tier 3) has no MCP tool and no console route.
+
+**`secrets_get_ref` as built (#7522).** Arguments: `project`, an absolute
+path to the checkout, and `key`, a key name or a `secret://` reference.
+The tool calls `secrets.scopes`, then `secrets.list` on each candidate vault
+(project first, then owner, per §15.3), then `secrets.doctor`. Its answer
+is `{reference, key, present, scope, vault, backend, imported_at}`.
+`backend` is the backend the project's config selects, because the
+names-only index records no per-key backend. `imported_at` is the index
+row's `updated_at`. The tool drops the row's length and its "agents may
+use" flag. An unknown key is `present: false`, not an error. Nothing calls
+the socket at session start. `secrets_list` is not built yet.
 
 ### 10.3 Where session state lives
 
@@ -680,6 +836,16 @@ coverage plus failure-path/concurrency tests and a `code-critic` round.
    **Resolved 2026-09-12** ([#7517](https://github.com/bobmatnyc/trusty-tools/issues/7517#issuecomment-5643081215)):
    accept a service-account token from an environment variable for
    1Password and Keeper; with no token, fail closed with a clear error.
+   **Amended for Keeper by #7519 P3** (§8.2): Keeper has no token path;
+   headless use needs a prior human device approval and persistent login,
+   and without them every call fails closed as `backend_locked`.
+   **Doctor exit status, owner ruling 2026-10-07 (#7519 P4, d4):** under
+   `CI=true`, `tm secrets doctor` exits non-zero when the selected backend is
+   1Password and `OP_SERVICE_ACCOUNT_TOKEN` was not set when the secrets
+   server started. Keeper and the Keychain are not judged, because doctor
+   cannot detect device approval or an unlocked Keychain without a spawn.
+   A project the server refuses (no checkout, no remote, a remote off
+   github.com) also exits non-zero, after the machine default's report.
 5. **Cross-project vault sharing.** §6.3's default vault name is per-repo. Is
    an explicit `secrets.vault:` override (already in §6.1's example) the only
    sanctioned way to share one vault across repos, or should a monorepo-style
@@ -789,6 +955,21 @@ An earlier draft placed the methods on the tm daemon's existing UDS socket
 | `secrets.copy` | Copies keys between backends inside one project (§13 Q6) | Names copied, names failed |
 | `secrets.doctor` | Runs `detect_backends` (§7) | The detection table |
 | `secrets.resolve` | Returns one value to an exec-granted caller (§15.8, S8) | A value — the only method that does |
+
+**Request deadline and client wait (#7524 P2-M1).** The server gives each
+request one whole-operation deadline, counted from its arrival: 120 s for
+`secrets.set`, `secrets.delete` and `secrets.copy`, which reach vendor CLIs,
+and 15 s for every other method. Every CLI call the request makes is bounded
+by the time left; none starts after the deadline, and one still running then
+is killed with its process group. A request that runs out answers
+`deadline_exceeded` (-32079), whose text says a backend write already under
+way may have landed; a `copy` instead lists in `failed` each key it did not
+start and each key whose write the deadline cut short (§8.2). The client
+waits the method's deadline plus 15 s. For CLI-backed calls (1Password,
+Keeper) that means the server's reply always arrives, and a client timeout
+is never followed by a silent commit. A Keychain or file backend call is not
+bounded by the deadline: one that blocks, for example on a Keychain unlock
+prompt, can still outlast the client's wait and commit after it.
 
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves

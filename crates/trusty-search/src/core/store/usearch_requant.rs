@@ -199,11 +199,12 @@ impl UsearchStore {
         let source = self.index.read().await;
         // Mirror `with_capacity_hint`'s graph tuning so a converted index keeps
         // the recall characteristics it was built with.
-        let (connectivity, expansion_add, expansion_search) = if keys.len() > 50_000 {
-            (32, 128, 64)
-        } else {
-            (0, 0, 0)
-        };
+        // #9414: the same size-scaled table, so the two paths cannot drift.
+        let super::hnsw_tuning::HnswTuning {
+            connectivity,
+            expansion_add,
+            expansion_search,
+        } = super::hnsw_tuning::hnsw_tuning(keys.len());
         let rebuilt = Index::new(&IndexOptions {
             dimensions: self.dim,
             metric: MetricKind::Cos,

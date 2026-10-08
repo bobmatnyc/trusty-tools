@@ -2,21 +2,31 @@
 //!
 //! Why: operators need to retune memory limits on a live daemon without
 //! paying the 86 MB embedder reload + warm-boot cost a full restart implies.
-//! The daemon exposes `GET /config` and `PATCH /config`; this CLI surface
-//! makes those endpoints discoverable from the shell.
+//! The daemon serves `search.config.get` and `search.config.set` on its
+//! socket (the twins of `GET /config` and `PATCH /config`); this CLI surface
+//! makes them discoverable from the shell.
 //! What: two sub-subcommands.
-//! - `trusty-search config get [<key>]` → `GET /config`, print all keys or one.
-//! - `trusty-search config set <key> <value>` → `PATCH /config` with a single
-//!   field; `0` / `off` / `none` / `disable` / `unlimited` disables the limit.
+//! - `trusty-search config get [<key>]` → `search.config.get`, print all keys
+//!   or one.
+//! - `trusty-search config set <key> <value>` → `search.config.set` with a
+//!   single field; `0` / `off` / `none` / `disable` / `unlimited` disables the
+//!   limit.
 //!
-//! Test: covered by `tests::parse_value` and end-to-end via
-//! `cargo run -- config get` against a live daemon.
+//! Neither starts the daemon: retuning a stopped daemon has nothing to act on,
+//! so a missing socket is an error naming it (#9214).
+//!
+//! Test: `config_get_reads_the_config_over_the_socket`,
+//! `config_set_patches_one_key_over_the_socket`,
+//! `config_fails_closed_when_the_socket_is_absent`.
 
-use super::daemon_utils::daemon_base_url;
-use anyhow::{anyhow, bail, Context, Result};
+use super::daemon_rpc;
+use anyhow::{anyhow, Result};
 use clap::{Subcommand, ValueEnum};
 use colored::Colorize;
 use serde_json::{json, Value};
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::admin::METHOD_CONFIG_SET;
+use trusty_search::service::rpc::reads::METHOD_CONFIG_GET;
 
 /// `trusty-search config` sub-subcommands.
 ///
@@ -128,9 +138,14 @@ fn parse_value(raw: &str) -> Result<Option<u64>> {
 }
 
 /// Format an `Option<u64>` as human-friendly text.
+///
+/// An absent field is not a disabled limit: `null` is how the daemon says
+/// "unlimited", so a missing key reads as unreported rather than as no cap.
 fn fmt_mb(v: Option<&Value>) -> String {
     match v {
-        None | Some(Value::Null) => "unlimited".to_string(),
+        // #9214: an absent field used to print "unlimited".
+        None => "not reported by the daemon".to_string(),
+        Some(Value::Null) => "unlimited".to_string(),
         Some(Value::Number(n)) => match n.as_u64() {
             Some(mb) => format!("{mb} MB"),
             None => n.to_string(),
@@ -146,7 +161,8 @@ fn fmt_mb(v: Option<&Value>) -> String {
 /// What: routes to [`handle_config_get`] or [`handle_config_set`] depending
 /// on the parsed action. Both helpers return user-friendly errors via
 /// `anyhow::bail!`.
-/// Test: end-to-end via `cargo run -- config get` against a running daemon.
+/// Test: `config_get_reads_the_config_over_the_socket`,
+/// `config_set_patches_one_key_over_the_socket`.
 pub async fn handle_config(action: ConfigAction) -> Result<()> {
     match action {
         ConfigAction::Get { key } => handle_config_get(key).await,
@@ -155,23 +171,28 @@ pub async fn handle_config(action: ConfigAction) -> Result<()> {
     }
 }
 
+/// The daemon's config — the body `GET /config` answered.
+///
+/// # Errors
+///
+/// When the socket is unreachable, or the daemon refuses the call.
+async fn fetch_config(client: &DaemonClient) -> Result<Value> {
+    daemon_rpc::call(client, METHOD_CONFIG_GET, json!({})).await
+}
+
+/// Patch the daemon's config with `body` and return the post-update values.
+///
+/// # Errors
+///
+/// When the socket is unreachable, or the daemon refuses the call.
+async fn patch_config(client: &DaemonClient, body: Value) -> Result<Value> {
+    daemon_rpc::call(client, METHOD_CONFIG_SET, body).await
+}
+
 /// `trusty-search config get` — print the daemon's current configuration.
 async fn handle_config_get(key: Option<ConfigKey>) -> Result<()> {
-    let base = daemon_base_url();
-    let client = trusty_common::server::daemon_http_client()?;
-    let url = format!("{base}/config");
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .with_context(daemon_unreachable_hint)?;
-    if !resp.status().is_success() {
-        bail!("daemon returned HTTP {} from {}", resp.status(), url);
-    }
-    let body: Value = resp
-        .json()
-        .await
-        .context("daemon returned invalid JSON from /config")?;
+    // #9214: the socket only, and no auto-start.
+    let body = fetch_config(&DaemonClient::resolve()?).await?;
 
     if let Some(k) = key {
         let field = k.json_field();
@@ -190,31 +211,9 @@ async fn handle_config_get(key: Option<ConfigKey>) -> Result<()> {
 /// configuration and print the post-update values.
 async fn handle_config_set(key: ConfigKey, raw_value: &str) -> Result<()> {
     let parsed = parse_value(raw_value)?;
-    let base = daemon_base_url();
-    let client = trusty_common::server::daemon_http_client()?;
-    let url = format!("{base}/config");
-
-    // Serialise `None` as JSON null (disable) and `Some(n)` as a number.
-    // Build the body with serde_json::json! so the field name stays in one
-    // place per ConfigKey arm.
-    let body = match parsed {
-        Some(n) => json!({ key.json_field(): n }),
-        None => json!({ key.json_field(): Value::Null }),
-    };
-
-    let resp = client
-        .patch(&url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(daemon_unreachable_hint)?;
-    if !resp.status().is_success() {
-        bail!("daemon returned HTTP {} from {}", resp.status(), url);
-    }
-    let new: Value = resp
-        .json()
-        .await
-        .context("daemon returned invalid JSON from /config")?;
+    // #9214: the socket only, and no auto-start.
+    let client = DaemonClient::resolve()?;
+    let new = patch_config(&client, patch_body(key, parsed)).await?;
 
     let pretty_after = match parsed {
         Some(n) => format!("{n} MB"),
@@ -235,21 +234,20 @@ async fn handle_config_set(key: ConfigKey, raw_value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Construct the canonical "daemon is not running" hint used when reqwest
-/// cannot reach the configured base URL.
-///
-/// Why: a connection-refused error from reqwest is opaque on its own; the
-/// most common cause by far is that the daemon is not running. Surface the
-/// remediation (`trusty-search start`) directly in the error chain so the
-/// operator does not have to guess.
-fn daemon_unreachable_hint() -> &'static str {
-    "daemon is not running (no port.lock found, or daemon unreachable). \
-     Start it with `trusty-search start`."
+/// The `search.config.set` body for one key: `None` (disable) is JSON `null`,
+/// `Some(n)` a number.
+fn patch_body(key: ConfigKey, value: Option<u64>) -> Value {
+    match value {
+        Some(n) => json!({ key.json_field(): n }),
+        None => json!({ key.json_field(): Value::Null }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::mock_socket::mock_daemon;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn parse_value_accepts_numbers_and_disable_tokens() {
@@ -292,8 +290,74 @@ mod tests {
 
     #[test]
     fn fmt_mb_renders_null_as_unlimited() {
-        assert_eq!(fmt_mb(None), "unlimited");
+        assert_eq!(fmt_mb(None), "not reported by the daemon");
         assert_eq!(fmt_mb(Some(&Value::Null)), "unlimited");
         assert_eq!(fmt_mb(Some(&json!(4096))), "4096 MB");
+    }
+
+    /// #9214: `config get` reads `search.config.get` with empty params — the
+    /// `GET /config` twin — and hands back the daemon's body.
+    #[tokio::test]
+    async fn config_get_reads_the_config_over_the_socket() {
+        let daemon = mock_daemon(|method, params| {
+            assert_eq!(method, METHOD_CONFIG_GET);
+            assert_eq!(params, json!({}));
+            Ok(json!({ "memory_limit_mb": 4096, "index_memory_limit_mb": null }))
+        })
+        .await;
+        let body = fetch_config(&daemon.client).await.expect("read");
+        assert_eq!(body["memory_limit_mb"], json!(4096));
+    }
+
+    /// #9214: `config set` sends the one-key patch as `search.config.set`'s
+    /// params — a number, or `null` to disable — exactly the `PATCH /config`
+    /// body.
+    #[tokio::test]
+    async fn config_set_patches_one_key_over_the_socket() {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let log = Arc::clone(&seen);
+        let daemon = mock_daemon(move |method, params| {
+            assert_eq!(method, METHOD_CONFIG_SET);
+            log.lock().expect("log").push(params);
+            Ok(json!({ "memory_limit_mb": null, "index_memory_limit_mb": null }))
+        })
+        .await;
+        for (key, value) in [
+            (ConfigKey::MemoryLimit, Some(16384)),
+            (ConfigKey::IndexMemoryLimit, None),
+        ] {
+            patch_config(&daemon.client, patch_body(key, value))
+                .await
+                .expect("patched");
+        }
+        assert_eq!(
+            *seen.lock().expect("log"),
+            vec![
+                json!({ "memory_limit_mb": 16384 }),
+                json!({ "index_memory_limit_mb": null }),
+            ]
+        );
+    }
+
+    /// #9214: an absent socket fails closed for both verbs, naming the socket
+    /// and no URL; nothing is started.
+    #[tokio::test]
+    async fn config_fails_closed_when_the_socket_is_absent() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let client = DaemonClient::at(&socket);
+        let errors = [
+            fetch_config(&client).await.expect_err("get"),
+            patch_config(&client, json!({ "memory_limit_mb": 1 }))
+                .await
+                .expect_err("set"),
+        ];
+        for err in errors {
+            let text = err.to_string();
+            assert!(text.starts_with("could not reach daemon"), "{text}");
+            assert!(text.contains(&socket.display().to_string()), "{text}");
+            assert!(!text.contains("http://"), "{text}");
+        }
+        assert!(!socket.exists(), "no daemon may be started");
     }
 }

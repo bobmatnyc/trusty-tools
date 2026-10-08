@@ -1,0 +1,8 @@
+{
+  "about": "Gate floor for tests/recall_eval.rs (#9281). Measured 2026-10-07 on main e225efc32e and re-measured after merging origin/main 7728a3248b (27/30, unchanged), then re-measured on 65b93851ab plus #9421 with two superseded_by groups added (27/32: the 30 earlier queries hold 27/30, and q31/q32 rank their current drawer second, below a plain drawer, not below the superseded one), with the real all-MiniLM-L6-v2 fp32 model, macOS arm64, CPU. hit@1 may rise in a reviewed diff; lowering it is a release decision. superseded_above_current is pinned at 0 in code and a file that says otherwise is refused.",
+  "model": "all-MiniLM-L6-v2",
+  "queries": 32,
+  "hit_at_1": 27,
+  "groups": 12,
+  "superseded_above_current": 0
+}

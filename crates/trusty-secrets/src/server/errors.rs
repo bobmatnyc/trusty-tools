@@ -26,85 +26,103 @@ use crate::api::SecretsError;
 /// file stay exhaustive, so a new kind fails the build until it has a kind
 /// string, a sentence and a code. A new kind must also join
 /// `ErrorKind::ALL`, or the client reads it from the wire as `None`.
+/// Every variant carries an explicit discriminant, and those values are a
+/// public contract: a new kind takes the next unused value after the last
+/// one, never a slot before it (see #7524 and the trusty-secrets 0.1.2
+/// accepted-break declaration).
 /// Test: `server_error_text_is_fixed_per_method_and_kind`,
-/// `error_kind_all_lists_every_variant_once`.
+/// `error_kind_all_lists_every_variant_once`,
+/// `error_kind_discriminants_are_pinned`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The params are not an object of the method's shape.
-    InvalidParams,
+    InvalidParams = 0,
     /// The `project` path is not an absolute path to a directory.
-    ProjectInvalid,
+    ProjectInvalid = 1,
     /// No project or owner scope could be derived for the project.
-    ProjectUnresolved,
+    ProjectUnresolved = 2,
     /// The request named a vault outside the project's scopes.
-    VaultOutOfScope,
+    VaultOutOfScope = 3,
     /// The value was refused before it reached a backend.
-    InvalidValue,
+    InvalidValue = 4,
     /// The key is not in the vault.
-    NotFound,
+    NotFound = 5,
     /// The backend cannot perform the operation.
-    Unsupported,
+    Unsupported = 6,
     /// The configured backend is not in this build.
-    UnknownBackend,
+    UnknownBackend = 7,
     /// The backend failed.
-    BackendFailed,
+    BackendFailed = 8,
     /// The backend took a new key, the index write failed, and the cleanup
     /// delete failed too: the backend may hold an entry no index row lists.
     // #9065: distinct from `BackendFailed` so a caller knows to reconcile.
-    OrphanedBackendEntry,
+    OrphanedBackendEntry = 9,
     /// The names-only index does not parse. Never reset.
-    IndexCorrupt,
+    IndexCorrupt = 10,
     /// The index lock stayed held past its wait bound.
-    IndexBusy,
+    IndexBusy = 11,
     /// A secrets file could not be read or written.
-    StorageUnavailable,
+    StorageUnavailable = 12,
     /// A `secrets:` config section does not parse.
-    ConfigInvalid,
+    ConfigInvalid = 13,
     /// `$HOME` is unknown.
-    HomeUnavailable,
+    HomeUnavailable = 14,
     /// `copy` named the same backend twice.
-    SameBackend,
+    SameBackend = 15,
     /// An agent-parent process asked for a key not flagged "agents may use".
     // #7525: its own kind so a refusal never reads as a miss or a failure.
-    AgentUseRefused,
+    AgentUseRefused = 16,
     /// An env-map entry broke a rule before any resolution started.
-    InvalidEnvEntry,
+    InvalidEnvEntry = 17,
     /// A `secret://` reference in an env map did not resolve.
-    EnvResolutionFailed,
+    EnvResolutionFailed = 18,
     /// A `.env` line is outside the supported subset.
-    DotenvSyntax,
+    DotenvSyntax = 19,
     /// The project's `origin` remote is not on github.com.
     // #9328: owner ruling 06 R3, its own kind so it never reads as a guess.
-    RemoteHostUnsupported,
+    RemoteHostUnsupported = 20,
     /// A value file or directory failed its mode, owner or symlink check.
     // #9326: its own kind so a refusal never reads as an I/O failure.
-    StorageRefused,
+    StorageRefused = 21,
     /// The tracked project config selected `file` on a Keychain build.
     // #9326: Architect ruling, basis ruling 06 R2.
-    TrackedBackendRefused,
+    TrackedBackendRefused = 22,
     /// The credential access audit record could not be guaranteed.
     // #4567: fail-closed on an allowed set, delete or copy (DOC-45 C-7.12).
-    AuditUnavailable,
+    AuditUnavailable = 23,
     /// The tracked project config tried to turn the audit off.
     // #4567: DOC-45 C-7.10 — only the untracked machine config may.
-    TrackedAuditRefused,
+    TrackedAuditRefused = 24,
     /// The tracked project config set a CLI `account` or `config_path`.
     // #7519: owner ruling 2026-10-07 — only the machine config may.
-    TrackedCliSettingRefused,
+    TrackedCliSettingRefused = 25,
     /// A CLI-backed backend's program is not installed.
     // #7519: A4 — fails closed with its own kind, never a generic failure.
-    CliNotInstalled,
+    CliNotInstalled = 26,
     /// A CLI-backed backend is locked or signed out; never a miss.
     // #7519: A3/A4.
-    BackendLocked,
+    BackendLocked = 27,
+    /// A value write into `file` on a Keychain build without the machine
+    /// config's selection.
+    // #7524 H1: owner ruling item 74.
+    FileBackendNotSelected = 28,
     /// A server-side fault, e.g. a handler task that did not finish.
-    Internal,
+    Internal = 29,
+    /// A CLI-backed backend the machine config has not enabled.
+    // #7519: P1 carry-over (a); refused before any process is spawned.
+    BackendNotEnabled = 30,
+    /// The request ran past the server's deadline for its method.
+    // #7524 P2-M1: its own kind, so a caller knows a write may have landed.
+    DeadlineExceeded = 31,
+    /// A delete found no 1Password vault visible to this identity.
+    // #7524 P2-M3 fix round: its own kind, so the wire text names the escapes.
+    VaultNotVisible = 32,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 29] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -133,7 +151,11 @@ impl ErrorKind {
         Self::TrackedCliSettingRefused,
         Self::CliNotInstalled,
         Self::BackendLocked,
+        Self::FileBackendNotSelected,
         Self::Internal,
+        Self::BackendNotEnabled,
+        Self::DeadlineExceeded,
+        Self::VaultNotVisible,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -174,6 +196,10 @@ impl ErrorKind {
             Self::TrackedCliSettingRefused => "tracked_cli_setting_refused",
             Self::CliNotInstalled => "cli_not_installed",
             Self::BackendLocked => "backend_locked",
+            Self::FileBackendNotSelected => "file_backend_not_selected",
+            Self::BackendNotEnabled => "backend_not_enabled",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::VaultNotVisible => "vault_not_visible",
             Self::Internal => "internal",
         }
     }
@@ -227,11 +253,28 @@ impl ErrorKind {
             Self::TrackedCliSettingRefused => {
                 "the project's tracked config may not set a backend `account` or `config_path`; set it in the machine config ~/.trusty-tools/trusty-common/config.yaml instead"
             }
+            // #7524 P2-M2: names the `program` pin; no backend searches PATH.
             Self::CliNotInstalled => {
-                "the secrets backend's command-line tool is not installed or not on PATH"
+                "the secrets backend's command-line tool was not found; set `secrets.<backend>.program` in the machine config ~/.trusty-tools/trusty-common/config.yaml to its absolute path (1Password also looks in fixed system directories, never PATH)"
             }
+            // #7519 P3: ruling 6 — the wire text names Keeper's one-time step.
             Self::BackendLocked => {
-                "the secrets backend is locked or signed out; unlock or sign in to it and retry"
+                "the secrets backend is locked or signed out; unlock or sign in to it and retry (Keeper first needs a person to approve this device and turn on persistent login)"
+            }
+            Self::FileBackendNotSelected => {
+                "this build has a Keychain, so a value is written to the plaintext `file` backend only when the machine config selects it; set `secrets.default_backend: file` in the machine config ~/.trusty-tools/trusty-common/config.yaml to allow it"
+            }
+            Self::BackendNotEnabled => {
+                "the secrets backend is not enabled on this machine; enable it in the machine config ~/.trusty-tools/trusty-common/config.yaml"
+            }
+            // #7524 P2-M1: a CLI killed mid-write cannot say whether it landed.
+            Self::DeadlineExceeded => {
+                "the request ran past the server's deadline and was stopped; a backend write already under way may have landed, so check the backend before retrying"
+            }
+            // #7524 P2-M3 fix round: both ways out of a delete that would
+            // otherwise fail on every call.
+            Self::VaultNotVisible => {
+                "1Password shows no vault with this name to this identity, so the key may still be held there and its index row was kept; create the vault in 1Password, or stop enabling 1Password by removing the `secrets.onepassword` section (and any `secrets.default_backend: onepassword`) from the machine config ~/.trusty-tools/trusty-common/config.yaml"
             }
             Self::Internal => "internal error",
         }
@@ -274,6 +317,14 @@ impl ErrorKind {
             Self::TrackedCliSettingRefused => -32074,
             Self::CliNotInstalled => -32075,
             Self::BackendLocked => -32076,
+            // #7524: the next unused code.
+            Self::FileBackendNotSelected => -32077,
+            // #7519: the next unused code after #7524's.
+            Self::BackendNotEnabled => -32078,
+            // #7524 P2-M1: the next unused code.
+            Self::DeadlineExceeded => -32079,
+            // #7524 P2-M3 fix round: the next unused code.
+            Self::VaultNotVisible => -32080,
         }
     }
 
@@ -318,6 +369,11 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::TrackedCliSettingRefused { .. } => Self::TrackedCliSettingRefused,
             SecretsError::CliNotInstalled { .. } => Self::CliNotInstalled,
             SecretsError::BackendLocked { .. } => Self::BackendLocked,
+            // #7524 H1: a write into `file` the machine config did not select.
+            SecretsError::FileBackendNotSelected => Self::FileBackendNotSelected,
+            SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
+            SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
+            SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
             SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.

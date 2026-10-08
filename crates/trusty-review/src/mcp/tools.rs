@@ -29,8 +29,8 @@ use crate::{
     mcp::console_metrics,
     models::{ReviewResult, ReviewStatus},
     pipeline::{
-        DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review,
-        withheld_contract::withheld_by_reason,
+        DiffSource, OptionalContextRequest, ReviewDeps, ReviewInput, ReviewOptions,
+        TriggerDecision, run_review_with, withheld_contract::withheld_by_reason,
     },
     service::{
         AppState,
@@ -131,7 +131,9 @@ pub fn tool_descriptors() -> Value {
                         "type": "string",
                         "description": "Referenced or related code the diff depends on, for \
                                        the reviewer (capped at 64,000 characters)."
-                    }
+                    },
+                    // #9197: caller issue docs, off by default.
+                    "issue_docs": context_args::issue_docs_schema()
                 }
             }
         },
@@ -160,7 +162,9 @@ pub fn tool_descriptors() -> Value {
                     "reviewer_model": {
                         "type": "string",
                         "description": "Override the reviewer model slug (same format as review_pr)."
-                    }
+                    },
+                    // #9197: caller issue docs, off by default.
+                    "issue_docs": context_args::issue_docs_schema()
                 }
             }
         },
@@ -177,6 +181,17 @@ pub fn tool_descriptors() -> Value {
     ]);
     // Append the console_metrics descriptor so the console poller discovers it.
     if let Some(arr) = tools.as_array_mut() {
+        // #9193: `spec_docs` and `claude_md` on both review tools.
+        let review = |t: &Value| t["name"] == "review_pr" || t["name"] == "review_diff";
+        for tool in arr.iter_mut().filter(|t| review(t)) {
+            if let Some(props) = tool.pointer_mut("/inputSchema/properties") {
+                for (name, schema) in context_args::doc_flag_schemas() {
+                    props[name] = schema;
+                }
+                // #9194: the context-source ledger, opt-in.
+                props[context_args::REPORT_CONTEXT] = context_args::report_context_schema();
+            }
+        }
         arr.push(console_metrics::descriptor());
     }
     tools
@@ -239,11 +254,20 @@ pub(crate) mod context_args;
 /// What: writes the diff to a named temp file, then runs the pipeline with
 /// `DiffSource::LocalFile`; a non-empty `context` argument is the
 /// `CallerContext::pr_description` (#8654). The temp file is cleaned up when
-/// it is dropped (via `NamedTempFile`'s `Drop`).
+/// it is dropped (via `NamedTempFile`'s `Drop`). #9197: `issue_docs` is
+/// parsed first, and the review runs through `run_review_with` (Architect
+/// ruling Q2); with no `issue_docs` the envelope is `wrap_result`'s.
 /// Test: `call_tool_review_diff_returns_non_empty_verdict`,
-/// `review_diff_context_reaches_the_reviewer_prompt`.
+/// `review_diff_context_reaches_the_reviewer_prompt`,
+/// `review_diff_issue_docs_reach_the_reviewer_prompt`,
+/// `review_diff_without_issue_docs_reports_no_context_sources`.
 async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolError> {
     let diff = require_str(args, "diff")?;
+    // #9197: a malformed `issue_docs` is refused before any work.
+    let request = context_args::with_issue_docs(OptionalContextRequest::default(), args)?;
+    // #9193: accepted, and reported `unavailable`: a raw diff has no head SHA.
+    let request = context_args::with_doc_flags(request, args)?;
+    let request = context_args::with_report_context_flag(request, args)?; // #9194
     let context = args.get("context").and_then(Value::as_str).unwrap_or("");
     let reviewer_model = args
         .get("reviewer_model")
@@ -284,9 +308,11 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     };
 
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");
-    let result = run_review(&state.config, input, deps).await;
+    let reported = request.ledger_enabled(); // #9194 amendment 3
+    let options = ReviewOptions::new(request); // #9197: ruling Q2
+    let outcome = run_review_with(&state.config, input, deps, options).await;
     // `tmp` is dropped here — temp file cleaned up automatically.
-    Ok(wrap_result(&result))
+    Ok(wrap_outcome(&outcome, reported))
 }
 
 // ─── review_health ────────────────────────────────────────────────────────────
@@ -615,15 +641,19 @@ fn wrap_result(result: &ReviewResult) -> Value {
 ///
 /// Why: #9192 keeps `ReviewResult` unchanged, so the ledger of optional
 /// context sources is reported on the envelope, beside `withheld`.
-/// What: adds `context_sources` (an array of records) when the outcome has
-/// any; a review that asked for no new input carries no such key.
-/// Test: `wrap_outcome_adds_context_sources_only_when_present`.
-fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome) -> Value {
+/// What: adds `context_sources` (an array of records) when `reported`, the
+/// request's `ledger_enabled()`: #9194 amendment 3, even when the list is
+/// empty (a review skipped before its context was gathered), with no row
+/// fabricated. A review that asked for nothing carries no such key. The
+/// value comes from `run_output::ledger_value`, so a serialisation failure
+/// is an `{"error": ...}` object, never `null`.
+/// Test: `wrap_outcome_adds_context_sources_only_when_present`,
+/// `envelope_status_is_error_and_mcp_status_unchanged_by_the_ledger`,
+/// `report_context_null_and_false_keep_the_envelope_plain`.
+fn wrap_outcome(outcome: &crate::pipeline::ReviewOutcome, reported: bool) -> Value {
     let mut envelope = wrap_result(&outcome.result);
-    if !outcome.context_sources.is_empty()
-        && let Some(obj) = envelope.as_object_mut()
-    {
-        let sources = serde_json::to_value(&outcome.context_sources).unwrap_or(Value::Null);
+    if reported && let Some(obj) = envelope.as_object_mut() {
+        let sources = crate::run_output::ledger_value(&outcome.context_sources);
         obj.insert("context_sources".to_string(), sources);
     }
     envelope

@@ -4,21 +4,63 @@
 //! and the map-reduce branch all read `CallerContext::pr_description`, so the
 //! PR body is merged into that one field at one write site.
 //! What: [`apply_caller_context`] records the caller fields, caps them
-//! (#8654), and merges the capped, fenced PR body when the request asks;
-//! [`refs_for_gate`] builds the corpus both review paths hand the citation
-//! gate.
+//! (#8654), merges the capped, fenced PR body when the request asks, and
+//! renders the requested issue docs (#9197); [`refs_for_review`] builds the
+//! corpus both review paths hand the citation gate.
 //! Test: `off_refs_corpus_is_byte_identical`,
-//! `refs_use_the_capped_body_when_on`, `body_and_caller_field_are_capped_separately`.
+//! `refs_use_the_capped_body_when_on`, `body_and_caller_field_are_capped_separately`,
+//! `a_gh_citation_to_a_supplied_issue_resolves`.
 
 use crate::{
     config::constants::{MAX_CALLER_CONTEXT_CHARS, MAX_PR_BODY_CHARS},
     models::{ContextItemRecord, ContextSourceRecord, SourceState},
     pipeline::{
-        caller_preamble::cap_caller_context, runner::CallerContext, withheld_contract::refs_corpus,
+        caller_preamble::cap_caller_context,
+        citation_gate::DocCorpus,
+        prompt::{ReviewContext, ReviewPrMeta},
+        runner::CallerContext,
+        withheld_contract::refs_corpus,
     },
 };
 
-use super::{OptionalContextRequest, ledger::ContextLedger};
+use super::{OptionalContextRequest, issues::issue_section, ledger::ContextLedger};
+
+/// What [`apply_caller_context`] leaves for the prompt and the refs corpus.
+///
+/// Why: #9197 must reach the reviewer prompt and the refs corpus with no new
+/// field on a public type (Architect ruling Q1(a)), and `runner.rs` has no
+/// line budget, so one value carries both B1's corpus switch and B2a's text.
+/// What: `body_in_refs` is false when `include_pr_body` put the capped body
+/// into `pr_description`; `sections` is the rendered `## Linked issues`
+/// section, empty when no issue doc reached the reviewer. #9193:
+/// `doc_sections` holds the docs and CLAUDE.md sections, for the prompt only
+/// (never the flat refs corpus); `docs` is their citable text.
+/// Test: `off_is_byte_identical_unified`, `supplied_issue_doc_reaches_the_reviewer_prompt`,
+/// `doc_text_is_not_in_the_flat_refs_corpus`.
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedContext {
+    /// Whether the raw PR body belongs in the refs corpus (#9192).
+    pub(crate) body_in_refs: bool,
+    /// The rendered issue section the reviewer sees (#9197).
+    pub(crate) sections: String,
+    /// The rendered docs and CLAUDE.md sections (#9193); prompt only.
+    pub(crate) doc_sections: String,
+    /// The doc text a `[doc:]` citation may quote (#9193).
+    pub(crate) docs: DocCorpus,
+}
+
+impl AppliedContext {
+    /// Every extra section the reviewer prompt carries: issues, then docs.
+    ///
+    /// Test: `spec_docs_on_with_zero_docs_leaves_prompt_byte_identical`.
+    pub(crate) fn prompt_sections(&self) -> String {
+        match (self.sections.is_empty(), self.doc_sections.is_empty()) {
+            (_, true) => self.sections.clone(),
+            (true, false) => self.doc_sections.clone(),
+            (false, false) => format!("{}\n\n{}", self.sections, self.doc_sections),
+        }
+    }
+}
 
 /// The heading caller text gets when it follows a merged PR body.
 pub(crate) const CALLER_TEXT_HEADING: &str = "### Additional description from caller";
@@ -53,16 +95,19 @@ impl<'a> PrBody<'a> {
 /// caps each at `MAX_CALLER_CONTEXT_CHARS` (#8654), then, when
 /// `include_pr_body` is on, writes the PR body capped at `MAX_PR_BODY_CHARS`
 /// into `pr_description`, with any caller text after it under
-/// [`CALLER_TEXT_HEADING`]. With the request off this is `cap_caller_context`.
+/// [`CALLER_TEXT_HEADING`]. #9197: then renders the requested issue docs,
+/// whose ledger row follows the B1 rows. With the request off this is
+/// `cap_caller_context` and an empty section.
 /// Test: `caller_text_follows_the_fetched_body_not_over_it`,
 /// `body_and_caller_field_are_capped_separately`,
-/// `ledger_records_pr_body_used_truncated_absent_unavailable`.
+/// `ledger_records_pr_body_used_truncated_absent_unavailable`,
+/// `ledger_records_the_issues_row_after_the_caller_row`.
 pub(crate) fn apply_caller_context(
     caller: &mut CallerContext,
     request: &OptionalContextRequest,
     body: PrBody<'_>,
     ledger: &mut ContextLedger,
-) {
+) -> AppliedContext {
     let caller_row = ledger.is_enabled().then(|| caller_record(caller));
     cap_caller_context(caller, MAX_CALLER_CONTEXT_CHARS);
     if request.include_pr_body {
@@ -70,6 +115,13 @@ pub(crate) fn apply_caller_context(
     }
     if let Some(row) = caller_row {
         ledger.push(row);
+    }
+    AppliedContext {
+        body_in_refs: !request.include_pr_body,
+        // #9197: caller issue docs, capped and fenced; never in the verifier's rationale.
+        sections: issue_section(request.issue_docs.as_deref(), ledger),
+        doc_sections: String::new(), // #9193: filled by `docs::apply_docs`
+        docs: DocCorpus::default(),
     }
 }
 
@@ -121,10 +173,18 @@ pub(crate) const PR_BODY_NOTE: &str =
 /// longest backtick run in `text`.
 /// Test: `a_hostile_body_stays_inside_its_fence`.
 fn fence_as_data(text: &str) -> String {
+    format!("{PR_BODY_NOTE}\n\n{}", fence_text(text))
+}
+
+/// `text` inside a `text` fence it cannot close (#9192, #9197).
+///
+/// Test: `a_hostile_body_stays_inside_its_fence`,
+/// `a_body_with_a_triple_backtick_cannot_close_the_fence`.
+pub(crate) fn fence_text(text: &str) -> String {
     let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat((longest + 1).max(3));
     let body = text.strip_suffix('\n').unwrap_or(text);
-    format!("{PR_BODY_NOTE}\n\n{fence}text\n{body}\n{fence}")
+    format!("{fence}text\n{body}\n{fence}")
 }
 
 /// The `caller_context` row, read before the cap so a cut has its size.
@@ -203,4 +263,35 @@ pub(crate) fn refs_for_gate(
         discussion,
         referenced,
     ])
+}
+
+/// The refs corpus for one review: [`refs_for_gate`] plus the issue section.
+///
+/// Why: both review paths call this, so the issue text a citation may match is
+/// exactly what the reviewer saw, capped (#9197, #9188 rule).
+/// What: the raw body only when `applied.body_in_refs`; the caller fields as
+/// `context` carries them to the reviewer; then `applied.sections`, when
+/// non-empty. With no issue section the string is [`refs_for_gate`]'s.
+/// Test: `off_is_byte_identical_unified`, `a_cut_off_issue_excerpt_is_withheld`,
+/// `a_gh_citation_to_an_unsupplied_issue_is_withheld`.
+pub(crate) fn refs_for_review(
+    pr_meta: &ReviewPrMeta,
+    external: &str,
+    context: &ReviewContext,
+    applied: &AppliedContext,
+) -> String {
+    let refs = refs_for_gate(
+        &pr_meta.title,
+        applied.body_in_refs.then_some(pr_meta.body.as_str()),
+        external,
+        [
+            context.pr_description.as_deref(),
+            context.pr_discussion.as_deref(),
+            context.referenced_code.as_deref(),
+        ],
+    );
+    if applied.sections.is_empty() {
+        return refs;
+    }
+    refs_corpus(&[Some(&refs), Some(&applied.sections)])
 }

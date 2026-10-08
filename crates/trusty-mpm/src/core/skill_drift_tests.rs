@@ -148,6 +148,26 @@ fn reference_falls_back_to_embedded() {
     );
 }
 
+/// #9396: with no content and no submodule, the reference names `tm content
+/// update`, and the offline `--from` install as the alternative.
+#[test]
+fn reference_without_content_names_tm_content_update() {
+    let reference = skill_reference(None, None);
+    assert!(reference.assets.is_empty());
+    assert!(
+        reference.origin.contains("run `tm content update`"),
+        "{}",
+        reference.origin
+    );
+    assert!(
+        reference
+            .origin
+            .contains("tm content install --from <dir>/<tag>.tar.gz"),
+        "{}",
+        reference.origin
+    );
+}
+
 /// #4622 review HIGH-1: the reference must be keyed by MANIFEST KEY, which for a
 /// multi-file skill's reference sibling is `<stem>/references/<file>.md`.
 ///

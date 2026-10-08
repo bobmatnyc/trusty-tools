@@ -17,6 +17,9 @@
 //! Every palace that contributed nothing comes back as a [`RulingsDegraded`]
 //! entry with a fixed [`DegradedReason`] code, which the recall envelope
 //! reports as `rulings_degraded`; the project's own hits are always returned.
+//! Each palace also reads the `superseded_by` edges among its own hits from
+//! its own KG while its handle is open (#9421), and the fold hands them to the
+//! caller's demotion.
 //! Test: `tests/recall_rulings_leg.rs`; `tools::recall_rulings_tests`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -36,6 +39,7 @@ use super::bm25::{bm25_search_optional, fuse_bm25_into_recall};
 use super::helpers::open_palace_handle;
 use super::recall_rank::is_ruling;
 use super::recall_rulings_floor::ruling_answers_query;
+use super::recall_supersede::{supersessions_for_within, Supersessions, LOOKUP_BUDGET};
 use crate::commands::prompt_context::BODY_DEADLINE;
 use crate::AppState;
 
@@ -119,7 +123,29 @@ pub struct RulingsDegraded {
 }
 
 /// What one rulings palace returned: its hits, or why it contributed nothing.
-pub(crate) type PalaceOutcome = Result<Vec<RecallResult>, RulingsDegraded>;
+pub(crate) type PalaceOutcome = Result<RulingsHits, RulingsDegraded>;
+
+/// One rulings palace's hits and the supersessions among them (#9421).
+///
+/// Why: a ruling and the ruling that replaced it both live in the rulings
+/// palace, so the `superseded_by` edge between them lives in that palace's
+/// KG. The project palace's lookup cannot see it.
+#[derive(Debug, Default)]
+pub(crate) struct RulingsHits {
+    /// The palace's ranked hits.
+    pub hits: Vec<RecallResult>,
+    /// `superseded -> replacement` among `hits`, from this palace's KG.
+    pub superseded: Supersessions,
+}
+
+impl From<Vec<RecallResult>> for RulingsHits {
+    fn from(hits: Vec<RecallResult>) -> Self {
+        Self {
+            hits,
+            superseded: Supersessions::new(),
+        }
+    }
+}
 
 /// One rulings palace's search state (#9143 review).
 ///
@@ -416,8 +442,10 @@ async fn search_one_bounded(
     search: Arc<LegSearch>,
     leg: Arc<RulingsLeg>,
     generation: u64,
-) -> Result<Vec<RecallResult>, DegradedReason> {
+) -> Result<RulingsHits, DegradedReason> {
     let timeout = leg.timeout;
+    // #9421: the edge read inside the task must end before the leg's bound.
+    let deadline = Instant::now() + timeout;
     let guard = FinishGuard {
         leg,
         palace: palace.to_string(),
@@ -426,7 +454,7 @@ async fn search_one_bounded(
     };
     // #9143: blocking pool, so a hung open or lock never blocks a worker.
     let task = tokio::task::spawn_blocking(move || {
-        let outcome = search_palace(&state, &guard.palace, &search);
+        let outcome = search_palace(&state, &guard.palace, &search, deadline);
         guard.record(outcome.as_ref().map(|_| ()).map_err(|reason| *reason));
         outcome
     });
@@ -447,6 +475,23 @@ async fn search_one_bounded(
     }
 }
 
+/// Time the edge read gets to finish before the leg's outer timeout fires.
+const EDGE_READ_MARGIN: Duration = Duration::from_millis(25);
+
+/// The budget for one rulings palace's `superseded_by` read.
+///
+/// Why (#9421): the leg's outer timeout and the edge read's own timeout round
+/// to the same timer tick, so a read allowed to run up to `deadline` can lose
+/// the race and drop the palace's rulings, not just the demotion.
+/// What: [`LOOKUP_BUDGET`] or the time from `now` to `deadline` less
+/// [`EDGE_READ_MARGIN`], whichever is shorter; zero once less than the margin
+/// is left, so the read times out and fails open.
+/// Test: `the_edge_read_budget_leaves_a_margin_before_the_leg_deadline`.
+fn edge_read_budget(deadline: Instant, now: Instant) -> Duration {
+    let remaining = deadline.saturating_duration_since(now);
+    LOOKUP_BUDGET.min(remaining.saturating_sub(EDGE_READ_MARGIN))
+}
+
 /// Open and search one rulings palace. Runs on the blocking pool.
 ///
 /// Score scale (#9143 review): the project hits carry the vector score plus an
@@ -454,14 +499,19 @@ async fn search_one_bounded(
 /// get the same fusion from that palace's own BM25 lane — one scorer, one
 /// scale. With no BM25 lane for that palace a ruling lacks the bonus (at most
 /// `1/61`), which errs toward the project hit.
-/// What: the hits; `Ok(vec![])` when the palace is an alias of the project
-/// palace. Each failure is logged with its full error chain and returned as a
-/// bare code.
+/// What: the hits, plus the `superseded_by` edges among them read from this
+/// palace's KG (#9421) within [`edge_read_budget`], which stops short of
+/// `deadline`; a failed or late edge read logs a warning
+/// and demotes nothing for this palace. Empty when the palace is an alias of
+/// the project palace. Each search failure is logged with its full error chain
+/// and returned as a bare code.
+/// Test: `a_superseded_ruling_from_a_rulings_palace_ranks_below_its_replacement`.
 fn search_palace(
     state: &AppState,
     palace: &str,
     search: &LegSearch,
-) -> Result<Vec<RecallResult>, DegradedReason> {
+    deadline: Instant,
+) -> Result<RulingsHits, DegradedReason> {
     let handle = match open_palace_handle(state, palace) {
         Ok(h) => h,
         Err(e) if PalaceRegistry::open_error_is_absent(&e) => {
@@ -475,7 +525,7 @@ fn search_palace(
         }
     };
     if handle.id == search.target {
-        return Ok(Vec::new()); // an alias of the project palace itself
+        return Ok(RulingsHits::default()); // an alias of the project palace itself
     }
     tokio::runtime::Handle::current().block_on(async {
         let mut hits = retrieve_l2_scoped(
@@ -494,7 +544,10 @@ fn search_palace(
         if let Some(bm25_hits) = lexical.await {
             fuse_bm25_into_recall(&mut hits, &bm25_hits, search.window);
         }
-        Ok(hits)
+        // #9421: read while the handle is open; never past the leg's bound.
+        let budget = edge_read_budget(deadline, Instant::now());
+        let superseded = supersessions_for_within(&handle, &hits, budget).await;
+        Ok(RulingsHits { hits, superseded })
     })
 }
 
@@ -506,6 +559,8 @@ pub(crate) struct RulingsFold {
     /// Drawer ids of folded rulings that answer the query, best first; the cut
     /// gives them reserved slots (`super::recall_rulings_floor`).
     pub floored: Vec<Uuid>,
+    /// `superseded -> replacement` edges the rulings palaces reported (#9421).
+    pub superseded: Supersessions,
 }
 
 /// Merge the rulings leg's outcomes into `results` and report the failures.
@@ -519,7 +574,8 @@ pub(crate) struct RulingsFold {
 /// hash are new — against `results` and against every earlier ruling, so one
 /// ruling stored in two palaces appears once — then the best
 /// `ceil(top_k / 3)` by score, appended as layer 1. Of those, the ones that
-/// answer `query` ([`ruling_answers_query`]) are listed in `floored`.
+/// answer `query` ([`ruling_answers_query`]) are listed in `floored`. Every
+/// palace's `superseded_by` edges are merged into `superseded` (#9421).
 /// `results` is never shortened; the caller re-sorts.
 /// Test: `a_search_error_degrades_and_keeps_every_primary_hit`,
 /// `the_same_ruling_from_two_palaces_appears_once`,
@@ -536,10 +592,16 @@ pub(crate) fn fold_rulings(
     let mut ids: HashSet<_> = results.iter().map(|r| r.drawer.id).collect();
     let mut hashes: HashSet<_> = results.iter().map(|r| r.drawer.content_hash()).collect();
     let mut rulings = Vec::new();
+    let mut superseded = Supersessions::new();
     for outcome in outcomes {
         match outcome {
             Err(failed) => degraded.push(failed),
-            Ok(hits) => {
+            Ok(RulingsHits {
+                hits,
+                superseded: edges,
+            }) => {
+                // #9421: drawer ids are UUIDs, so palaces' maps never collide.
+                superseded.extend(edges);
                 for hit in hits {
                     let admitted = is_ruling(&hit.drawer)
                         && min_score.is_none_or(|floor| hit.score >= floor)
@@ -565,7 +627,11 @@ pub(crate) fn fold_rulings(
         hit.layer = 1;
         results.push(hit);
     }
-    RulingsFold { degraded, floored }
+    RulingsFold {
+        degraded,
+        floored,
+        superseded,
+    }
 }
 
 #[cfg(test)]

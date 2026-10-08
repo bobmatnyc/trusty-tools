@@ -40,7 +40,6 @@
 //!       including the #8175 "touches neither index" proof, is exercised by
 //!       `tests/index_remove_env_conflict_8175.rs`.
 
-use super::daemon_utils::daemon_base_url;
 // #8737: the target-resolution rule moved to `explicit_target` so `reindex`,
 // `quantize` and `index relocate` share it; re-exported for existing callers.
 use super::explicit_target::{
@@ -106,8 +105,8 @@ pub async fn handle_index_remove(
     if let RemoveTarget::Refuse(reason) = &target {
         bail!("{reason}");
     }
-    let base = daemon_base_url();
-    crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
+    // #9214: start the daemon over its socket, then resolve its HTTP base.
+    let base = super::daemon_http::ensure_daemon_http_base().await?;
     let client = trusty_common::server::daemon_http_client()?;
 
     // #8175: resolve each shape against the daemon; PATH plus an id must agree

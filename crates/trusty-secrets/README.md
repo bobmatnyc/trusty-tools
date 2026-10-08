@@ -32,7 +32,16 @@ Tracking: [#9073](https://github.com/bobmatnyc/trusty-tools/issues/9073).
   (`~/.trusty-tools/trusty-common/config.yaml`) names it. A tracked project
   config naming `backend: file` is refused with
   `SecretsError::TrackedBackendRefused`. A failing Keychain never falls back
-  to files.
+  to files. The server writes a value into `file` only when the user's own
+  machine config selects it: `.trusty-tools/trusty-common/config.yaml` under
+  the home directory the password database records for the server's user.
+  A config named with `serve --machine-config`, or found under a different
+  `$HOME`, does not count. A `set` or a `copy` into `file` without that
+  selection — or when that home cannot be looked up, or the file cannot be
+  read or parsed — is refused with `SecretsError::FileBackendNotSelected`
+  (wire kind `file_backend_not_selected`), opens no backend, writes nothing,
+  and leaves one audit denial. Reading from `file` and deleting from it stay
+  allowed.
 
 An explicitly configured `keychain` stays the Keychain on every host; off
 macOS it fails with `SecretsError::UnknownBackend`.
@@ -83,6 +92,7 @@ digit or `_`.
 | `api` | yes | Validated names, `SecretRef`, the redacting `SecretValue`, the `secrets.*` request and response types, `SecretsError`. No store code. |
 | `store` | yes | The `SecretBackend` trait, `KeychainBackend`, `FileBackend` (Unix), `NamesIndex`, `SecretStore`, scope resolution, `mask_secret`, config resolution, the `secret://` resolver and the `.env` parser. Implies `api`. |
 | `server` | yes | The on-demand Unix socket and the `trusty-secrets` binary. Unix only. Implies `store`. |
+| `cli-backends` | no | The CLI runner (`store::cli`), the 1Password backend (`store::onepassword`) and the Keeper backend (`store::keeper`). Unix only. Implies `store`. |
 | `test-support` | no | `MemoryBackend`, an in-memory backend for tests. Implies `store`. |
 
 A caller that only names keys can depend on `api` alone:
@@ -114,7 +124,8 @@ trusty-secrets serve [--socket P] [--index-dir P] [--machine-config P] [--audit-
 The environment variables `TRUSTY_SECRETS_SOCKET`, `TRUSTY_SECRETS_INDEX_DIR`
 and `TRUSTY_SECRETS_IDLE_TIMEOUT_SECS` set the same values, with one limit:
 `TRUSTY_SECRETS_INDEX_DIR` is read only by a server whose socket is not the
-default one. A client passes its environment to the server it starts, and that
+default one, under `$HOME` or under the home directory the password database
+records for the server's user. A client passes its environment to the server it starts, and that
 server answers every client of the default socket, so one caller's environment
 must not move the names index for all of them. A test or sandbox on its own
 socket keeps the variable, and `--index-dir` works on any socket. Only flags
@@ -127,10 +138,155 @@ read. No method returns
 a secret value. `server::OnDemandSecrets` is the helper that starts the binary
 and sends a request.
 
+Each request has one deadline: 120 s for `set`, `delete` and `copy`, 15 s for
+the rest. A CLI call does not start after it, and one still running is
+killed; the request then fails with `deadline_exceeded`, whose text says a
+write already under way may have landed. A `copy` lists in `failed` the keys
+it did not start and any key whose write the deadline cut short, which may
+have landed. `OnDemandSecrets` waits 15 s longer than the deadline, so for a
+CLI-backed call (1Password, Keeper) it always receives the server's answer. A
+Keychain or file call is not bounded by the deadline: one blocked on a
+Keychain unlock prompt can still outlast the client's wait.
+
 `delete` removes the key from every backend this build can store values in
-(the Keychain on macOS, and the file backend), not only the configured one, so
-a value left behind by a backend switch or a `copy` is removed too. If any
-backend fails to delete, the call fails and the key stays listed.
+(the Keychain on macOS, the file backend, and 1Password or Keeper when the
+machine config enables it), not only the configured one, so a value left behind by a backend
+switch or a `copy` is removed too. If any backend fails to delete, the call
+fails and the key stays listed. On macOS this includes the Keychain when the
+project is configured for `file`, so a locked Keychain fails that delete closed:
+unlock the Keychain and retry.
+
+## Doctor
+
+`secrets.doctor` (and `tm secrets doctor`) reports the socket, the index, the
+machine config the selected backend comes from, the account's own machine
+config (the one file that can enable 1Password or Keeper), the selected
+backend and its posture, and one row per backend: `keychain`, `file`,
+`onepassword` and `keeper`, on every build. A row the server cannot open says
+why, as `reason` plus a `detail` with the fix:
+
+| `reason` | Meaning |
+|---|---|
+| `not_compiled` | This build does not link it: no Keychain off macOS, or no `cli-backends` feature. |
+| `not_enabled` | The account's own machine config does not enable it, or the account's home is unknown. |
+| `cli_not_installed` | Its CLI is missing, or `program` is not an executable file. |
+| `config_invalid` | The account's machine config or the backend's section is unreadable, does not parse, or is refused (a relative `program`, a Keeper `config_path` that is missing or not mode 0600). |
+| `tracked_setting_refused` | The project's tracked config sets something only the machine config may; every request in that project is refused. Shown on the selected row. |
+
+`available` means the server opens the backend now. Doctor runs no CLI, so
+it never knows whether 1Password or Keeper is unlocked. `headless` says only
+whether `OP_SERVICE_ACCOUNT_TOKEN` was set when the server started: yes or
+no, never the token, its length or a prefix. Keeper's device approval and
+persistent login are not detected; a headless Keeper call made before that
+human step fails as `backend_locked`. Doctor reads no secret, spawns no
+process and writes no audit record.
+
+`tools` lists secrets tools trusty-secrets has no backend for — `bw`,
+`vault`, `pass`, `gopass`, `doppler` and `infisical` — as installed or not,
+with the path found. The lookup searches only the absolute entries of the
+`PATH` the server started with, and runs nothing it finds.
+
+## 1Password
+
+With the `cli-backends` feature (Unix), the `onepassword` backend keeps values
+in 1Password through its CLI, `op`. Only the machine config can enable it:
+
+```yaml
+secrets:
+  default_backend: onepassword   # or keep another default and add the section
+  onepassword:
+    account: my.1password.com    # optional: `op --account`
+    config_path: /abs/op/config  # optional: `op --config`, an absolute path
+    program: /opt/homebrew/bin/op  # optional: `op` itself, an absolute path
+```
+
+`onepassword: {}` enables it with no settings. A project file may then select
+it with `secrets.backend: onepassword`. It may not set `account`,
+`config_path` or `program`.
+
+The backend runs `op` by absolute path only, found once when the backend
+opens. `program` names it as given: it must be an absolute path to an
+executable file, and it overrides everything else. Without `program`, the
+backend takes the first executable `op` in a fixed list of system
+directories: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin` on macOS, and
+`/usr/local/bin`, `/usr/bin` elsewhere. It never searches the server's
+`PATH`, which is whatever the spawning process had. With no such `op`, calls
+fail with `cli_not_installed`; install `op` in one of those directories or set
+`program`.
+
+- The trusty vault name is the 1Password vault's name, for example
+  `trusty/acme/web`. Create that vault first.
+- A key is a Password item titled with the key. Its `password` field holds the
+  value. An item of another category with that title is never touched.
+- The value reaches `op` only on stdin for a new item, or in a 0600 template
+  file for an existing one. The file is removed after the call, and a crashed
+  server's leftover is removed at the next start.
+- Headless, set `OP_SERVICE_ACCOUNT_TOKEN` where the server starts. At start
+  the server removes it and every other `OP_*` variable, except `op signin`
+  sessions, from its own environment, and passes the token to `op` only. With
+  no token and no session, calls fail as locked. Nothing falls back to the
+  Keychain or to files.
+- Enabling 1Password adds one `op item list` to every `delete`. When `op`
+  answers that the vault "isn't a vault", which it also says for a vault the
+  current identity cannot see, the `delete` fails with `vault_not_visible`
+  and the key's index row stays; a `get` treats the same answer as a miss.
+  The index does not record which backend holds a key, so this also refuses
+  deletes of Keychain or `file` keys while 1Password is enabled and the
+  project has no 1Password vault. The error names the two ways out: create
+  the vault in 1Password, or remove the `secrets.onepassword` section (and
+  any `secrets.default_backend: onepassword`) from the machine config.
+- `doctor` lists the backend without running `op`, and reports whether a
+  token was present at server start (see Doctor above).
+
+```bash
+cargo install trusty-secrets --version <version> --features cli-backends --locked
+```
+
+## Keeper
+
+Shims only, provisional: no test has run against a real Keeper account, so
+the command output shapes and messages below are not yet confirmed
+([#7519](https://github.com/bobmatnyc/trusty-tools/issues/7519)).
+
+With the `cli-backends` feature (Unix), the `keeper` backend keeps values in
+Keeper through Keeper Commander, `keeper`. Only the machine config can enable
+it, and both settings are required:
+
+```yaml
+secrets:
+  keeper:
+    program: /usr/local/bin/keeper            # `keeper`, an absolute path
+    config_path: /Users/me/.keeper/config.json  # Commander's config, absolute, mode 0600
+```
+
+There is no `PATH` search, and Commander's own config search is never used.
+`account` is refused: the account is the one the config file logs in to.
+
+- Headless use needs one human step first: log in with that config file,
+  approve the device, and run `this-device register` and
+  `this-device persistent-login on`. Until then, and after an idle timeout,
+  calls fail with `backend_locked`; the server never prompts. `doctor` does
+  not detect device approval or persistent login: an available row says only
+  that the server opens the backend.
+- The trusty vault name is the Keeper folder path, for example
+  `trusty/acme/web`. Create that folder first.
+- A key is a `login` record titled with the key. Its `password` field holds
+  the value. A record of another type with that title is never touched.
+- The value reaches `keeper` only on stdin, as `$BASE64:` inside a
+  `record-add` or `record-update` batch line (`keeper --batch-mode -`). It is
+  never in argv or the environment.
+- Every write is read back, and every delete is checked with a new listing;
+  anything else fails. `rm` moves a record to Keeper's trash, which counts as
+  deleted.
+- A key is reported missing only when a listing succeeded and did not show it.
+- Enabling Keeper adds a folder listing and a check listing to every `delete`.
+
+`copy` moves keys between two backends of the same project. On macOS its
+destination may be `file` only when the user's own machine config, at its
+fixed location (see above), sets `secrets.default_backend: file`. Any process
+running as the same user can call the socket, and can start a server with
+its own `--machine-config` or `$HOME`, so without that rule it could move
+Keychain values into plaintext files.
 
 ## Audit trail
 

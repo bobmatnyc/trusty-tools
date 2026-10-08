@@ -23,6 +23,8 @@ pub(crate) mod path_filter;
 #[path = "lanes_tests.rs"]
 mod lanes_tests;
 #[cfg(test)]
+mod tests_docstring_9404;
+#[cfg(test)]
 mod tests_keyword_9027;
 
 use std::collections::{HashMap, HashSet};
@@ -43,6 +45,29 @@ use super::{
 use drops::SearchDrops;
 use embed_degrade::PrecomputedQueryVector;
 use exact::ExactMatchReport;
+use materialize::PageFilters;
+
+/// #2203: a balanced intent (`Unknown`; `Keyword` since #9027) in `Code` mode
+/// down-ranks non-code files instead of dropping them, so a short NL query can
+/// never come back empty.
+fn soft_doc_downrank(intent: &QueryIntent, mode: super::SearchMode) -> bool {
+    intent.is_balanced() && matches!(mode, super::SearchMode::Code)
+}
+
+/// The mode whose file-type filter `materialize_search_results` applies, or
+/// `None` when every file type is kept.
+///
+/// Why: #9404 — the filter must run while the page is filled, so the decision
+/// of whether it applies lives with the caller rather than inside
+/// `apply_archive_downrank`, where it used to run after the `top_k` cut.
+/// What: `None` for `All` (it admits every file) and for the #2203 soft
+/// down-rank pair; `Some(mode)` otherwise.
+/// Test: `keyword_downranks_docs_in_code_mode_like_unknown`,
+/// `bugdebt_query_backfills_code_past_doc_files_filling_top_k`.
+fn hard_file_filter(intent: &QueryIntent, mode: super::SearchMode) -> Option<super::SearchMode> {
+    let keeps_all = matches!(mode, super::SearchMode::All) || soft_doc_downrank(intent, mode);
+    (!keeps_all).then_some(mode)
+}
 
 /// Everything one search produced: the page, the drop tally, and the
 /// exact-match verdict.
@@ -263,8 +288,8 @@ impl CodeIndexer {
         // Issue #2203: `Unknown` intent (short 1-3 word NL queries — the
         // `multi_noun_re` classifier requires ≥4 tokens to reach Conceptual)
         // was NOT in this upgrade set, so it stayed `Code` and BM25's correct
-        // `.md` / `.txt` hits were hard-dropped by `apply_archive_downrank`'s
-        // file-type retain below, silently returning empty/irrelevant results
+        // `.md` / `.txt` hits were hard-dropped by the file-type filter
+        // (then a retain in `apply_archive_downrank`), silently returning empty/irrelevant results
         // for exactly the queries the semantic/NL search tool is meant to
         // serve. Upgrading `Unknown` alongside `Conceptual`/`Definition` lets
         // those doc hits surface.
@@ -456,10 +481,17 @@ impl CodeIndexer {
         let all = exact::promote_candidates(all, &exact_ids);
 
         // 5) Materialise the top-k IDs into `CodeChunk`s.
-        let mut dropped = SearchDrops::default();
         // #2203: every drop below is counted so the caller can tell a short
         // result set from a small one.
-        let (mut result, unresolved) = self
+        // #9404: the file-type, docstring and `exclude_archived` filters run
+        // inside materialisation, before the `top_k` cut, so deeper candidates
+        // backfill the page.
+        let filters = PageFilters {
+            file_mode: hard_file_filter(&intent, effective_mode),
+            drop_docstrings: matches!(effective_mode, super::SearchMode::Code),
+            drop_archived: query.exclude_archived,
+        };
+        let (mut result, dropped) = self
             .materialize_search_results(
                 all,
                 &hnsw_results,
@@ -467,18 +499,12 @@ impl CodeIndexer {
                 &kg_ids,
                 branch_set.as_ref(),
                 query,
+                filters,
             )
             .await?;
-        dropped.unresolved_corpus = unresolved;
 
-        // 6) Mode-based hard file-type filter + archive downrank.
-        self.apply_archive_downrank(
-            &mut result,
-            &intent,
-            effective_mode,
-            query.exclude_archived,
-            &mut dropped,
-        );
+        // 6) Balanced-intent doc downrank + archive downrank.
+        self.apply_archive_downrank(&mut result, &intent, effective_mode, &dropped);
         // #5917: every lane above answers from the in-memory view, which the
         // rehydrate leaves EMPTY when the durable read fails. Without this the
         // query returned `results: []` at HTTP 200 beside
@@ -510,87 +536,35 @@ impl CodeIndexer {
         })
     }
 
-    /// Apply the mode-based file-type filter and the archive score penalty.
+    /// Apply the balanced-intent doc down-rank and the archive score penalty.
     ///
-    /// Why: two distinct concerns share the post-materialisation step: (1) the
-    /// `SearchMode` filter drops (or, for `Unknown` intent, down-ranks) chunks
-    /// outside the allowed file-type set; (2) the archive penalty demotes
-    /// archived/legacy/deprecated code. Combining them in one method keeps
-    /// post-processing logic consolidated.
-    /// What: (1) for genuinely code-shaped intents, retains only chunks for
-    /// which `docs_penalty::is_allowed_for_mode` returns `true` (skipped for
-    /// `All`). Issue #2203: for `Unknown` intent specifically, the hard
-    /// retain is replaced by the existing `doc_score_penalty` multiplicative
-    /// down-rank — this is defense-in-depth alongside the `Unknown`→`All`
-    /// upgrade in `search()` so a short NL query can never come back empty
-    /// even if some other caller/path leaves `mode` at `Code`. (2) runs
-    /// `archive::classify` per chunk, multiplies score by the penalty, stamps
-    /// `archive_reason`. When `exclude_archived` is `true`, chunks with
-    /// strong archive signals are dropped. Re-sorts by score desc. Each of the
-    /// three `retain`s below records how many rows it deleted into `dropped`,
-    /// which the caller publishes as `meta.dropped` (#2203) — the filters
-    /// are deliberate, but a caller could not previously tell a filtered result
-    /// set from a small one.
+    /// Why: two distinct concerns share the post-materialisation step: (1) for
+    /// a balanced intent in `Code` mode, chunks outside the allowed file-type
+    /// set are down-ranked rather than dropped; (2) the archive penalty demotes
+    /// archived/legacy/deprecated code. The hard file-type filter for every
+    /// other intent, and the `exclude_archived` filter, run in
+    /// `materialize_search_results` (#9404), so a dropped row never takes a
+    /// `top_k` slot.
+    /// What: (1) Issue #2203: for a balanced intent in `Code` mode, multiplies
+    /// each score by `doc_score_penalty` — defense-in-depth alongside the
+    /// balanced→`All` upgrade in `search()`, so a short NL query can never
+    /// come back empty even if some other caller/path leaves `mode` at `Code`.
+    /// (2) runs `archive::classify` per chunk, multiplies score by the penalty,
+    /// stamps `archive_reason`. Under `exclude_archived` the only labelled rows
+    /// left are `stale:` ones. Re-sorts by score desc, so a kept row's place
+    /// reflects its penalty; logs the `dropped` tally at debug.
     /// Test: `test_archive_downrank_demotes_deprecated_chunks`,
-    /// `test_exclude_archived_drops_archive_chunks`, `test_mode_filter_*`,
+    /// `test_exclude_archived_drops_archive_chunks`,
+    /// `exclude_archived_backfills_code_past_archived_chunks_filling_top_k`,
     /// `tests_unknown_intent::test_unknown_intent_downranks_docs_instead_of_dropping_them`,
-    /// `service::server::tests_search::search_handler_meta_reports_rows_dropped_by_the_mode_and_docstring_filters`.
+    /// `keyword_downranks_docs_in_code_mode_like_unknown`.
     fn apply_archive_downrank(
         &self,
-        results: &mut Vec<CodeChunk>,
+        results: &mut [CodeChunk],
         intent: &QueryIntent,
         mode: super::SearchMode,
-        exclude_archived: bool,
-        dropped: &mut SearchDrops,
+        dropped: &SearchDrops,
     ) {
-        if results.is_empty() {
-            return;
-        }
-        // Issue #2203: a balanced intent (`Unknown`; `Keyword` since #9027)
-        // never hard-drops non-code files when
-        // `mode` resolves to `Code` — down-rank via `doc_score_penalty`
-        // instead so NL queries can't silently come back empty. Every other
-        // intent keeps the existing hard filter (no regression for real code
-        // queries such as `Usage`/`BugDebt`/explicit `Definition`).
-        let soft_downrank_unknown = intent.is_balanced() && matches!(mode, super::SearchMode::Code);
-        if matches!(mode, super::SearchMode::Code) {
-            use crate::core::chunker::ChunkType;
-            let before = results.len();
-            results.retain(|chunk| !matches!(chunk.chunk_type, ChunkType::Docstring));
-            dropped.docstring_filtered = before - results.len();
-        }
-        if !soft_downrank_unknown {
-            let before = results.len();
-            results.retain(|chunk| docs_penalty::is_allowed_for_mode(&chunk.file, mode));
-            dropped.mode_filtered = before - results.len();
-        }
-
-        let mut markers = MarkerCache::new();
-        let mut archived_ids: HashSet<String> = HashSet::new();
-        for chunk in results.iter_mut() {
-            let (archive_mult, archive_reason_opt) =
-                archive::classify(&self.root_path, &chunk.file, &chunk.content, &mut markers);
-            let (docs_mult, docs_reason_opt) = docs_penalty::doc_score_penalty(&chunk.file, mode);
-            if archive_reason_opt.is_some() {
-                chunk.score *= archive_mult;
-            }
-            if soft_downrank_unknown {
-                chunk.score *= docs_mult;
-            }
-            if let Some(reason) = &archive_reason_opt {
-                if exclude_archived && !reason.starts_with("stale:") {
-                    archived_ids.insert(chunk.id.clone());
-                }
-            }
-            if archive_reason_opt.is_some() || docs_reason_opt.is_some() {
-                chunk.archive_reason = archive_reason_opt.or(docs_reason_opt);
-            }
-        }
-        if exclude_archived && !archived_ids.is_empty() {
-            let before = results.len();
-            results.retain(|chunk| !archived_ids.contains(&chunk.id));
-            dropped.archived = before - results.len();
-        }
         if dropped.total() > 0 {
             // Debug, not warn: unlike the unresolved-corpus drop in
             // `materialize`, these three are the requested `mode` and
@@ -604,6 +578,29 @@ impl CodeIndexer {
                 returned = results.len(),
                 "search: post-fusion filters dropped rows"
             );
+        }
+        if results.is_empty() {
+            return;
+        }
+        // #9404: every other intent's hard file-type filter, the docstring
+        // filter and the `exclude_archived` drop moved into
+        // `materialize_search_results`.
+        let soft_downrank_unknown = soft_doc_downrank(intent, mode);
+
+        let mut markers = MarkerCache::new();
+        for chunk in results.iter_mut() {
+            let (archive_mult, archive_reason_opt) =
+                archive::classify(&self.root_path, &chunk.file, &chunk.content, &mut markers);
+            let (docs_mult, docs_reason_opt) = docs_penalty::doc_score_penalty(&chunk.file, mode);
+            if archive_reason_opt.is_some() {
+                chunk.score *= archive_mult;
+            }
+            if soft_downrank_unknown {
+                chunk.score *= docs_mult;
+            }
+            if archive_reason_opt.is_some() || docs_reason_opt.is_some() {
+                chunk.archive_reason = archive_reason_opt.or(docs_reason_opt);
+            }
         }
         results.sort_by(|a, b| {
             b.score

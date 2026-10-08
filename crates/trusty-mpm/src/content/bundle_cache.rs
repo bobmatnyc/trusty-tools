@@ -29,13 +29,33 @@ use trusty_common::content::{
 };
 use trusty_common::integrity::{IntegrityError, Sha256Digest};
 
-pub use super::release_source::{FetchError, GithubReleases, Release, ReleaseSource};
+pub use super::release_source::{
+    CONTENT_REPO, FetchError, GithubReleases, Release, ReleaseSource, Retrying, github_source,
+};
 
 /// The file every writer locks exclusively, inside the cache directory.
 pub const UPDATE_LOCK_FILE: &str = ".update.lock";
 
 /// The command an operator runs when no network is reachable.
-pub const INSTALL_HINT: &str = "tm content install --from <bundle.tar.gz>";
+pub const INSTALL_HINT: &str = "tm content install --from <dir>/<tag>.tar.gz";
+
+/// The manual install, for `tag` when known (#9396).
+///
+/// Why: `gh release download` reads the release assets without the GitHub
+/// API calls that a rate limit or an API outage refuses, so it is the path
+/// that still works when `tm content update` does not.
+/// What: `gh release download <tag> --repo` [`CONTENT_REPO`], then
+/// `tm content install --from <dir>/<tag>.tar.gz`; `<tag>` stays a
+/// placeholder when the tag is unknown.
+/// Test: `a_persistent_5xx_names_the_manual_install`,
+/// `a_missing_sidecar_names_the_manual_install`.
+pub fn manual_install(tag: Option<&str>) -> String {
+    let tag = tag.unwrap_or("<tag>");
+    format!(
+        "install by hand: `gh release download {tag} --repo {CONTENT_REPO}`, then \
+         `tm content install --from <dir>/{tag}.tar.gz`"
+    )
+}
 
 /// Suffix of the sha256 sidecar the release ships beside each bundle.
 pub const SIDECAR_SUFFIX: &str = ".sha256";
@@ -56,10 +76,8 @@ impl std::fmt::Display for Fallback {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cached(tag) => write!(f, "the installed {tag} is verified and stays in use"),
-            Self::None => write!(
-                f,
-                "no verified content bundle is installed; offline, run `{INSTALL_HINT}`"
-            ),
+            // #9396: the error that carries this names the manual install.
+            Self::None => write!(f, "no verified content bundle is installed"),
         }
     }
 }
@@ -116,7 +134,8 @@ pub enum CacheError {
     /// The release carries a bundle but no sha256 sidecar; the sidecar is required.
     #[error(
         "refusing {tag}: the release has no sha256 sidecar at {url}, and a bundle is never \
-         pinned without one; {fallback}"
+         pinned without one; {fallback}; retry `tm content update` later, or {}",
+        manual_install(Some(tag))
     )]
     SidecarNotPublished {
         /// The release tag.
@@ -127,7 +146,11 @@ pub enum CacheError {
         fallback: Fallback,
     },
     /// The release, or its bundle, does not exist upstream.
-    #[error("content release {tag} was not found upstream ({url}); {fallback}")]
+    #[error(
+        "content release {tag} was not found upstream ({url}); {fallback}; run \
+         `tm content update` for the newest release, or {}",
+        manual_install(None)
+    )]
     TagNotFound {
         /// The requested tag.
         tag: String,
@@ -137,12 +160,17 @@ pub enum CacheError {
         fallback: Fallback,
     },
     /// The release could not be reached.
-    #[error("could not reach {url}: {reason}; {fallback}")]
+    #[error(
+        "could not reach {url}: {reason}; {fallback}; retry `tm content update`, or {}",
+        manual_install(tag.as_deref())
+    )]
     Network {
         /// The URL that failed.
         url: String,
         /// The transport failure.
         reason: String,
+        /// The release being fetched, once known (#9396).
+        tag: Option<String>,
         /// What stays in use.
         fallback: Fallback,
     },
@@ -298,6 +326,40 @@ pub fn update<S: ReleaseSource + ?Sized>(
         content::validate_tag(tag)?;
     }
     let _guard = UpdateGuard::acquire(cache)?;
+    update_locked(cache, source, content_ref)
+}
+
+/// Installs the newest release when, and only when, no lock is present
+/// (#9396: tm's first use, ADR-0064 decision 5).
+///
+/// Why: a fresh install has no `content-lock.toml`, so nothing composes until
+/// a release is pinned. Two first uses can race, and an operator's own
+/// `tm content update` can land between a caller's "no lock" check and this
+/// call; the pin that is already there must win.
+/// What: under the update lock, a present lock file (valid or not) answers
+/// `Ok(None)` and nothing is fetched or written. Otherwise this is
+/// [`update`] with no `content_ref`: the same release selection, sidecar
+/// check, verification and atomic writes.
+/// Test: `install_if_missing_keeps_a_lock_written_while_it_waited`,
+/// `concurrent_first_use_leaves_one_valid_lock`.
+pub fn install_if_missing<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+) -> Result<Option<UpdateOutcome>, CacheError> {
+    let _guard = UpdateGuard::acquire(cache)?;
+    // #9396: checked under the lock, so a pin written while this waited wins.
+    if cache.join(LOCK_FILE_NAME).symlink_metadata().is_ok() {
+        return Ok(None);
+    }
+    update_locked(cache, source, None).map(Some)
+}
+
+/// The body of [`update`], run while the caller holds the update lock.
+fn update_locked<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+    content_ref: Option<&str>,
+) -> Result<UpdateOutcome, CacheError> {
     let current = match read_lock(cache) {
         Ok(lock) => lock,
         Err(_) if content_ref.is_some() => None,
@@ -480,6 +542,7 @@ fn latest_tag<S: ReleaseSource + ?Sized>(
     let network = |e: FetchError| CacheError::Network {
         url: e.url,
         reason: e.reason,
+        tag: None,
         fallback: fallback.clone(),
     };
     let mut stable = Vec::new();
@@ -520,6 +583,7 @@ fn fetch<S: ReleaseSource + ?Sized>(
         .map_err(|e| CacheError::Network {
             url: e.url,
             reason: e.reason,
+            tag: Some(tag.to_owned()),
             fallback: fallback.clone(),
         })
 }

@@ -10,13 +10,14 @@
 //! `count_active_triples_returns_live_only`, `upsert_drawer_then_load_drawers_round_trips`.
 
 use crate::memory_core::palace::Drawer;
+use crate::memory_core::share::SUPERSEDED_BY;
 use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, TRIPLES, TripleValue, decode_triple_key,
-    decode_u64, decode_value, prefix_range_end, subject_prefix,
+    decode_u64, decode_value, prefix_range_end, subject_predicate_prefix, subject_prefix,
 };
 use anyhow::{Context, Result};
 use redb::{ReadableDatabase, ReadableTable};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::super::kg::Triple;
@@ -404,6 +405,56 @@ impl KgStoreRedb {
         let mut id_arr = [0u8; 16];
         id_arr.copy_from_slice(bytes);
         Ok(Some(Uuid::from_bytes(id_arr)))
+    }
+
+    /// The active `superseded_by` replacement of each drawer in `ids` (#9421).
+    ///
+    /// Why: recall demotes a drawer that another drawer superseded (ADR-0028
+    /// D6), and it asks about a whole result window at once. One read
+    /// transaction for the window keeps the cost at one snapshot plus one
+    /// b-tree seek per id, instead of one transaction per id.
+    /// What: for each id, a range scan over the `(drawer:{id}, superseded_by)`
+    /// prefix. The first active row whose object is `drawer:{uuid}`, naming a
+    /// drawer other than the subject, is that id's replacement. An id with no
+    /// such row is absent from the map. An object that is not a drawer
+    /// reference is skipped; an undecodable row is an error.
+    /// Test: `superseded_by_many_maps_only_active_drawer_edges`.
+    pub fn superseded_by_many(&self, ids: &[Uuid]) -> Result<HashMap<Uuid, Uuid>> {
+        let mut out = HashMap::new();
+        if ids.is_empty() {
+            return Ok(out);
+        }
+        let rtx = self
+            .db()
+            .begin_read()
+            .context("begin superseded_by_many txn")?;
+        let triples = rtx
+            .open_table(TRIPLES)
+            .context("open triples table for superseded_by_many")?;
+        for &id in ids {
+            let prefix = subject_predicate_prefix(&format!("drawer:{id}"), SUPERSEDED_BY);
+            let end = prefix_range_end(&prefix);
+            let range = triples
+                .range::<&[u8]>(prefix.as_slice()..end.as_slice())
+                .context("range scan for superseded_by_many")?;
+            for entry in range {
+                let (_k, v) = entry.context("read row in superseded_by_many")?;
+                let value: TripleValue =
+                    decode_value(v.value()).context("decode TripleValue in superseded_by_many")?;
+                if value.valid_to_ms.is_some() {
+                    continue;
+                }
+                let replacement = value
+                    .object
+                    .strip_prefix("drawer:")
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                if let Some(r) = replacement.filter(|r| *r != id) {
+                    out.insert(id, r);
+                    break;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Dump every triple, including closed history rows.

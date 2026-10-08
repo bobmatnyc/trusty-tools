@@ -1,0 +1,2 @@
+Security
+- `bin_resolve::resolve_binary` now searches only the absolute entries of the live `PATH` ([#7524](https://github.com/bobmatnyc/trusty-tools/issues/7524)). An empty, `.` or other relative entry names the caller's working directory, so a binary planted in a checkout — for example a fake `trusty-secrets`, which the on-demand client then started as the secrets server — was run. The well-known fallback directories are unchanged.

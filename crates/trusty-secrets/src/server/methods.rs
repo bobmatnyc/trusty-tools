@@ -9,7 +9,8 @@
 //! optional for `doctor`) beside the S1 request fields, e.g.
 //! `{"project": "/repo", "vault": "trusty/o/r", "key": "K", "value": "…"}`.
 //! No function returns a value: `set` returns S1's masked confirmation,
-//! `list` names and metadata, `copy` names, `doctor` ids and paths.
+//! `list` names and metadata, `copy` names. `doctor` lives in `doctor.rs`
+//! (#7519 P4).
 //! #4567: `set`, `delete`, `copy` and `list` run under [`audited`], which
 //! records them on the credential access audit trail; `scopes` and `doctor`
 //! read no credential and leave no record.
@@ -18,8 +19,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::audit::AuditMethod;
@@ -31,10 +32,8 @@ use crate::api::methods::{
     CopyRequest, CopyResponse, DeleteRequest, ListRequest, ListResponse, SetRequest,
 };
 use crate::api::{BackendId, SecretKey, SecretsError};
-use crate::store::{Capabilities, SecretBackend, SecretStore, local_backends};
-
-/// `secrets.doctor` — not among S1's method names.
-pub const DOCTOR: &str = "secrets.doctor";
+use crate::store::config::{MachineSecretsConfig, load_machine_at};
+use crate::store::{Capabilities, SecretBackend, SecretStore, swept_backends};
 
 /// The params field naming the project directory.
 pub const PROJECT_FIELD: &str = "project";
@@ -64,7 +63,7 @@ fn decode<T: DeserializeOwned>(fields: Map<String, Value>) -> Result<T, ErrorKin
     serde_json::from_value(Value::Object(fields)).map_err(|_| ErrorKind::InvalidParams)
 }
 
-fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
+pub(crate) fn to_json<T: Serialize>(response: &T) -> Result<Value, ErrorKind> {
     serde_json::to_value(response).map_err(|_| ErrorKind::Internal)
 }
 
@@ -108,10 +107,13 @@ pub(crate) fn list(state: &State, params: Value) -> Result<Value, ErrorKind> {
 /// What: the value goes to the project's backend through [`SecretStore`]
 /// and is dropped with the request. Neither the request nor the response is
 /// logged or formatted here. #4567: one audit record per call; the audit log
-/// is opened before the backend is touched (see `gate`).
+/// is opened before the backend is touched (see `gate`). #7524 H1: the
+/// backend opens through [`ProjectContext::open_for_write`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_malformed_set_never_echoes_its_value`,
-/// `audit_set_and_delete_write_one_record_per_call`.
+/// `audit_set_and_delete_write_one_record_per_call`,
+/// `server_set_writes_file_only_when_the_machine_config_selects_it`,
+/// `server_set_into_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Set, Recording::Once, |gate| {
         let (dir, rest) = split_project(params)?;
@@ -120,7 +122,9 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
-        let store = SecretStore::new(project.backend(state)?, state.index.clone());
+        // #7524: the `file` posture check every value write passes.
+        let backend = project.open_for_write(state, &project.resolved_config().backend)?;
+        let store = SecretStore::new(backend, state.index.clone());
         gate.admit()?;
         let response = store.set(&request.vault, &request.key, &request.value)?;
         to_json(&response)
@@ -129,13 +133,17 @@ pub(crate) fn set(state: &State, params: Value) -> Result<Value, ErrorKind> {
 
 /// `secrets.delete`: remove one key from every backend and the index.
 ///
-/// What: the scope check runs before any backend is opened. The key is
-/// then deleted from the configured backend and from [`other_backends`]
-/// through [`SecretStore::delete_across`] (#7519). #4567 — audited like
-/// [`set`].
+/// What: the scope check runs before any backend is opened. Then the
+/// account's machine config is read by [`sweep_machine`]: an error refuses
+/// the delete before any backend is touched, and the index row stays
+/// (#7519). The key is then deleted from the configured backend and from
+/// [`other_backends`] through [`SecretStore::delete_across`] (#7519).
+/// #4567 — audited like [`set`].
 /// Test: `server_set_list_delete_round_trip_over_a_real_socket`,
 /// `server_delete_after_a_backend_switch_clears_the_old_backend`,
 /// `server_delete_failure_in_an_old_backend_is_an_error_and_keeps_the_row`,
+/// `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`,
 /// `audit_set_and_delete_write_one_record_per_call`.
 pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Delete, Recording::Once, |gate| {
@@ -145,31 +153,57 @@ pub(crate) fn delete(state: &State, params: Value) -> Result<Value, ErrorKind> {
         let project = ProjectContext::resolve(state, &dir)?;
         gate.project(&project);
         project.require_in_scope(&request.vault)?;
+        // #7519: a missing account file skips 1Password; an unreadable one
+        // refuses, since a 1Password copy from when it was readable may remain.
+        let account = sweep_machine(state)?;
         let store = SecretStore::new(project.backend(state)?, state.index.clone());
         // #7519: a backend switch or a copy leaves values in other backends.
-        let others = other_backends(state, &project.resolved_config().backend)?;
+        // Ruling 74: the CLI backends swept are the ones the factory opens,
+        // so enablement comes from the account's file, not the spawner's.
+        let others = other_backends(state, &project.resolved_config().backend, account.as_ref())?;
         gate.admit()?;
         let response = store.delete_across(&request.vault, &request.key, &others)?;
         to_json(&response)
     })
 }
 
+/// The account machine config whose CLI backends a delete sweeps (#7519).
+///
+/// Why: set, get and list treat an unreadable account file as "1Password
+/// off", which fails closed for them. For a delete it fails open: a key
+/// written to 1Password while the file was readable would stay there while
+/// the index row went.
+/// What: `None` when the server knows no account file or the file is
+/// missing; a read or parse error is returned as its [`ErrorKind`].
+/// Test: `server_onepassword_is_off_when_the_account_config_is_unreadable`,
+/// `server_delete_refuses_when_the_account_config_does_not_parse`.
+fn sweep_machine(state: &State) -> Result<Option<MachineSecretsConfig>, ErrorKind> {
+    match state.file_consent_config.as_deref() {
+        Some(path) => Ok(load_machine_at(path)?),
+        None => Ok(None),
+    }
+}
+
 /// Every backend but `configured` that may hold a key (#7519).
 ///
 /// Why: A5 — a delete must clear the backend a key was set under before a
 /// switch, not only the one configured now.
-/// What: [`local_backends`] minus `configured`, each opened through the
-/// factory. A factory that answers [`SecretsError::UnknownBackend`] has no
-/// such backend, so it holds nothing and is skipped. Any other open failure
-/// is returned: that backend may still hold a value.
+/// What: [`swept_backends`] for the account's machine config — the local backends,
+/// plus each CLI backend it enables (#7519 P1 carry-over (a)) — minus
+/// `configured`, each opened through the factory. A factory that answers
+/// [`SecretsError::UnknownBackend`] has no such backend, so it holds
+/// nothing and is skipped. Any other open failure is returned: that backend
+/// may still hold a value.
 /// Test: `server_delete_after_a_backend_switch_clears_the_old_backend`,
-/// `server_delete_fails_closed_when_an_old_backend_cannot_open`.
+/// `server_delete_fails_closed_when_an_old_backend_cannot_open`,
+/// `server_delete_sweeps_onepassword_when_the_machine_enables_it`.
 fn other_backends(
     state: &State,
     configured: &BackendId,
+    machine: Option<&MachineSecretsConfig>,
 ) -> Result<Vec<Arc<dyn SecretBackend>>, ErrorKind> {
     let mut others = Vec::new();
-    for id in local_backends() {
+    for id in swept_backends(machine) {
         if id == *configured {
             continue;
         }
@@ -207,16 +241,21 @@ impl CopySelection {
 /// vault; the vault is always this project's own project vault. #9065: the
 /// destination write and its index row must not drift apart, so each key
 /// goes through [`SecretStore::set`] rather than a bare backend write.
-/// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a source without
+/// What: refuses `from == to` ([`ErrorKind::SameBackend`]), a destination
+/// [`ProjectContext::open_for_write`] refuses (#7524 H1:
+/// [`ErrorKind::FileBackendNotSelected`] for `file` on a Keychain build the
+/// account's own machine config did not opt in), and a source without
 /// `READ` or a destination without `WRITE` ([`ErrorKind::Unsupported`]),
-/// before any key moves. Each key is read from the source and written with
+/// before any key moves. The `file` refusal comes before any backend opens. Each key is read from the source and written with
 /// [`SecretStore::set`] on the destination, which takes the index lock,
 /// upserts the row and, when the publish fails, deletes a new entry again.
 /// A key the source lacks, or any other per-key failure, lands in `failed`
 /// and the copy continues. An entry that compensation could not delete
 /// aborts the copy with [`ErrorKind::OrphanedBackendEntry`] and no copied
-/// list; keys copied before it stay visible through `secrets.list`. Values
-/// are never returned. #4567: a refusal before the loop is one deny record;
+/// list; keys copied before it stay visible through `secrets.list`. #7524
+/// P2-M1: a key not started before the request's deadline is not read or
+/// written and lands in `failed` with [`ErrorKind::DeadlineExceeded`], so
+/// the reply names every key that was copied. Values are never returned. #4567: a refusal before the loop is one deny record;
 /// then the audit log is opened before the first key, and each key leaves
 /// one record — allow when copied, deny with its kind when it lands in
 /// `failed` or orphans. A record that cannot be written stops the copy
@@ -225,7 +264,10 @@ impl CopySelection {
 /// `server_copy_refuses_the_same_backend_twice`,
 /// `server_copy_compensates_a_key_whose_index_publish_fails`,
 /// `server_copy_aborts_with_orphaned_backend_entry_when_compensation_fails`,
-/// `audit_copy_writes_one_record_per_key`.
+/// `audit_copy_writes_one_record_per_key`,
+/// `server_copy_past_its_deadline_starts_no_further_key`,
+/// `server_copy_to_file_is_refused_on_a_keychain_build_without_machine_selection`,
+/// `server_copy_to_file_is_refused_when_only_a_spawner_chosen_config_selects_it`.
 pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
     audited(state, AuditMethod::Copy, Recording::PerKey, |gate| {
         let (dir, rest) = split_project(params)?;
@@ -238,8 +280,10 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         gate.project(&project);
         let vault = project.scopes().project().clone();
         gate.name(&vault, None);
+        // #7524 H1: the destination's posture check runs before any backend
+        // opens; `tm secrets copy --to file` moved Keychain values to files.
+        let destination = project.open_for_write(state, &request.to_backend)?;
         let source = (state.backends)(&request.from_backend)?;
-        let destination = (state.backends)(&request.to_backend)?;
         if !source.capabilities().contains(Capabilities::READ)
             || !destination.capabilities().contains(Capabilities::WRITE)
         {
@@ -263,13 +307,19 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         gate.admit()?;
         for key in keys {
             gate.ready()?;
-            let outcome = match source.get(&vault, &key) {
-                Ok(Some(value)) => store
-                    .set(&vault, &key, &value)
-                    .map(drop)
-                    .map_err(ErrorKind::from),
-                Ok(None) => Err(ErrorKind::NotFound),
-                Err(e) => Err(ErrorKind::from(e)),
+            // #7524 P2-M1: no key starts after the deadline, so the reply
+            // reaches the client and names everything that was copied.
+            let outcome = if crate::store::deadline::passed() {
+                Err(ErrorKind::DeadlineExceeded)
+            } else {
+                match source.get(&vault, &key) {
+                    Ok(Some(value)) => store
+                        .set(&vault, &key, &value)
+                        .map(drop)
+                        .map_err(ErrorKind::from),
+                    Ok(None) => Err(ErrorKind::NotFound),
+                    Err(e) => Err(ErrorKind::from(e)),
+                }
             };
             gate.record_key(&key, outcome)?;
             match outcome {
@@ -283,151 +333,4 @@ pub(crate) fn copy(state: &State, params: Value) -> Result<Value, ErrorKind> {
         }
         to_json(&response)
     })
-}
-
-/// `secrets.doctor` params: an optional project.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DoctorRequest {
-    #[serde(default)]
-    project: Option<PathBuf>,
-}
-
-/// One backend's row in the doctor table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct BackendStatus {
-    /// The backend id.
-    pub id: BackendId,
-    /// Whether this build can open it.
-    pub available: bool,
-    /// Its capability flags, by name.
-    pub capabilities: Vec<String>,
-}
-
-/// How the selected backend keeps values at rest (#9326).
-///
-/// Why: owner ruling f5 — the 0600 file backend is a degraded posture, and
-/// doctor must say so whether config chose it or the host has no Keychain.
-/// What: decided from the selected backend id alone. An unknown wire value
-/// decodes as [`StoragePosture::Other`].
-/// Test: `server_doctor_reports_the_file_posture`,
-/// `server_unknown_posture_decodes_as_other`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StoragePosture {
-    /// The OS Keychain holds values.
-    Keychain,
-    /// Values are plaintext 0600 files in 0700 directories: degraded.
-    FileDegraded,
-    /// Another backend; its row in [`DoctorResponse::backends`] describes it.
-    /// Also what an older client decodes a posture it does not know as.
-    // #9326: `serde(other)`, so a variant added later never fails a decode.
-    #[serde(other)]
-    Other,
-}
-
-impl StoragePosture {
-    /// The posture of backend `id`.
-    pub fn of(id: &BackendId) -> Self {
-        match id.as_str() {
-            BackendId::KEYCHAIN => Self::Keychain,
-            BackendId::FILE => Self::FileDegraded,
-            _ => Self::Other,
-        }
-    }
-}
-
-/// `secrets.doctor` response: backend availability and paths only.
-// #9073: §7 `detect_backends` grows the doctor table, so callers read it only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct DoctorResponse {
-    /// The socket this server answers on.
-    pub socket: PathBuf,
-    /// The names-only index directory.
-    pub index_root: PathBuf,
-    /// The machine config file.
-    pub machine_config: PathBuf,
-    /// The project's checkout root, when a project was named.
-    pub project_root: Option<PathBuf>,
-    /// The project config file, when a project was named.
-    pub project_config: Option<PathBuf>,
-    /// The backend the §6.1 precedence selects.
-    pub selected_backend: BackendId,
-    /// Every backend this build knows, plus the selected one.
-    pub backends: Vec<BackendStatus>,
-    /// The selected backend's at-rest posture. `None` only when decoding an
-    /// answer from a server older than #9326.
-    #[serde(default)]
-    pub posture: Option<StoragePosture>,
-}
-
-/// `secrets.doctor`: which backends this build can open, and where it looks.
-///
-/// What: S2 has no `detect_backends` yet (§7 lands with the CLI-backed
-/// integrations), so "available" means "this build opens it". Opening a
-/// backend reads no secret. Reports paths, ids and the selected backend's
-/// [`StoragePosture`] only.
-/// Test: `server_doctor_reports_backends_and_paths_only`,
-/// `server_doctor_reports_the_file_posture`.
-pub(crate) fn doctor(state: &State, params: Value) -> Result<Value, ErrorKind> {
-    let request: DoctorRequest = match params {
-        Value::Null => DoctorRequest::default(),
-        other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
-    };
-    let project = request
-        .project
-        .as_deref()
-        .map(|dir| ProjectContext::resolve(state, dir))
-        .transpose()?;
-    let selected = match &project {
-        Some(project) => project.resolved_config().backend,
-        None => {
-            let machine = crate::store::config::load_machine_at(&state.settings.machine_config)?;
-            crate::store::config::resolve(None, machine.as_ref()).backend
-        }
-    };
-    // #9326: the file backend is listed beside the Keychain.
-    let mut ids = vec![BackendId::keychain(), BackendId::file()];
-    if !ids.contains(&selected) {
-        ids.push(selected.clone());
-    }
-    let backends = ids
-        .into_iter()
-        .map(|id| {
-            let opened = (state.backends)(&id).ok();
-            BackendStatus {
-                available: opened.is_some(),
-                capabilities: opened
-                    .map(|b| capability_names(b.capabilities()))
-                    .unwrap_or_default(),
-                id,
-            }
-        })
-        .collect();
-    to_json(&DoctorResponse {
-        socket: state.settings.socket.clone(),
-        index_root: state.settings.index_root.clone(),
-        machine_config: state.settings.machine_config.clone(),
-        project_root: project.as_ref().map(|p| p.root().to_path_buf()),
-        project_config: project.as_ref().map(ProjectContext::config_path),
-        posture: Some(StoragePosture::of(&selected)),
-        selected_backend: selected,
-        backends,
-    })
-}
-
-fn capability_names(caps: Capabilities) -> Vec<String> {
-    [
-        (Capabilities::READ, "READ"),
-        (Capabilities::WRITE, "WRITE"),
-        (Capabilities::LIST_NAMES, "LIST_NAMES"),
-        (Capabilities::SYNC_TARGET, "SYNC_TARGET"),
-    ]
-    .into_iter()
-    .filter(|(flag, _)| caps.contains(*flag))
-    .map(|(_, name)| name.to_string())
-    .collect()
 }

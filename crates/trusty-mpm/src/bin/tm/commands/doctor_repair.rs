@@ -277,7 +277,8 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
         // #7423: and the managed `$CLAUDE_CONFIG_DIR` tier beside it — the copy
         // a tm-launched session actually reads, which this repair never touched.
         steps.extend(output_style_steps(
-            trusty_mpm::core::content_source::framework_content(),
+            // #9396: a doctor repair never fetches the content release.
+            trusty_mpm::core::content_source::framework_content_local(None),
             &home,
             trusty_mpm::core::trusty_tools_config::managed_claude_config_dir().as_deref(),
             mode,

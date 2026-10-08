@@ -31,6 +31,68 @@ pub(crate) fn home_dir() -> Result<PathBuf, SecretsError> {
     dirs::home_dir().ok_or(SecretsError::HomeUnavailable)
 }
 
+/// Largest buffer [`account_home_dir`] grows to for one password entry.
+#[cfg(all(feature = "server", unix))]
+const MAX_PASSWD_BUF: usize = 1024 * 1024;
+
+/// The home directory the password database records for this process's
+/// real uid. `$HOME` is never read.
+///
+/// Why: #7524 H1, Architect ruling on item 74 — `$HOME` is the spawner's to
+/// set, and [`home_dir`] reads it first, so a decision that must find the
+/// account's own file cannot rest on it.
+/// What: `getpwuid_r(getuid())`, doubling the buffer on `ERANGE` up to
+/// [`MAX_PASSWD_BUF`]. No entry, any other error, or a home that is empty or
+/// not absolute is [`SecretsError::HomeUnavailable`], so callers fail closed.
+/// Test: `server_file_consent_defaults_to_the_account_home_config`.
+#[cfg(all(feature = "server", unix))]
+pub(crate) fn account_home_dir() -> Result<PathBuf, SecretsError> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: `getuid` takes no arguments, touches no caller memory, and
+    // cannot fail (POSIX).
+    let uid = unsafe { libc::getuid() };
+    let mut len = 1024;
+    loop {
+        let mut buf: Vec<libc::c_char> = vec![0; len];
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: `entry`, `buf` (of `buf.len()` bytes) and `found` are live,
+        // writable and exclusively borrowed for the call.
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if rc == libc::ERANGE && len < MAX_PASSWD_BUF {
+            len *= 2;
+            continue;
+        }
+        if rc != 0 || found.is_null() {
+            return Err(SecretsError::HomeUnavailable);
+        }
+        // SAFETY: on success `found` points at `entry`, whose string fields
+        // point into `buf`; both outlive this read.
+        let dir = unsafe { (*found).pw_dir };
+        if dir.is_null() {
+            return Err(SecretsError::HomeUnavailable);
+        }
+        // SAFETY: `pw_dir` is a NUL-terminated string inside `buf`.
+        let bytes = unsafe { CStr::from_ptr(dir) }.to_bytes();
+        let home = PathBuf::from(OsStr::from_bytes(bytes));
+        // #7524: a relative or empty home would resolve against the cwd.
+        return if home.is_absolute() {
+            Ok(home)
+        } else {
+            Err(SecretsError::HomeUnavailable)
+        };
+    }
+}
+
 /// Seconds since the Unix epoch.
 ///
 /// What: a clock set before 1970 reads as `0`; the value is display metadata

@@ -24,9 +24,15 @@ use crate::{
     integrations::{
         context::{
             ConfluenceSource, ConformanceSource, ContextSource, GithubIssuesSource, JiraSource,
-            PrHistorySource, ReviewSubject, gather_external_context, render_sections,
+            PrHistorySource, ReviewSubject, orchestrator::gather_external_context_detailed,
+            render_sections,
         },
         github::RunMode,
+    },
+    models::ContextSourceRecord,
+    pipeline::optional_context::{
+        ExternalSources,
+        probes::{AnalyzeProbe, SearchProbe, analyze_row, external_row, search_row},
     },
     pipeline::prompt::ReviewContext,
     pipeline::runner::ReviewDeps,
@@ -70,10 +76,16 @@ pub(crate) struct UnknownIndexError {
 /// that has nothing to do with the query, so it returns
 /// `Err(UnknownIndexError)` and the runner refuses to emit a verdict. The
 /// distinction is the HTTP status, via `SearchClientError::is_unknown_index`.
+///
+/// #9194: also returns the `search` and `analyze` ledger rows, built from
+/// what these same calls returned (no extra call): zero hits and a failed
+/// query are different rows, as are a missing analyze client, an index with
+/// no analysis, and a failed hotspot or smells call.
 /// Test: `gather_context_degrades_gracefully_on_search_failure` in runner_tests.rs;
 /// `gather_context_makes_no_apex_retrieval`,
 /// `unknown_index_propagates_instead_of_emptying_the_context`,
-/// `a_failing_search_against_a_real_index_stays_fail_open` in this module.
+/// `a_failing_search_against_a_real_index_stays_fail_open` in this module;
+/// `search_failure_is_unavailable_not_absent`, `analyze_smells_error_makes_the_row_unavailable`.
 // #4999: APEX retrieval was dropped by owner ruling (0/69 citations at
 // ~0.001 relevance); this path issues exactly one search — the code context.
 pub(crate) async fn gather_context(
@@ -83,7 +95,7 @@ pub(crate) async fn gather_context(
     changed_files: &[String],
     pr_title: &str,
     _pr_description: &str,
-) -> Result<ReviewContext, UnknownIndexError> {
+) -> Result<(ReviewContext, ContextSourceRecord, ContextSourceRecord), UnknownIndexError> {
     // Build a search query from identifiers + changed files.
     let query_parts: Vec<&str> = {
         let mut parts: Vec<&str> = identifiers.iter().map(|s| s.as_str()).collect();
@@ -96,10 +108,14 @@ pub(crate) async fn gather_context(
     };
     let query = query_parts.join(" ");
 
+    // #9194: each future also reports what it saw, for the ledger rows.
     let search_fut = async {
         // #8411: an empty index is "no index" — the gate already labelled the review.
-        if query.is_empty() || config.search_index.is_empty() {
-            return Ok(Vec::new());
+        if config.search_index.is_empty() {
+            return Ok((Vec::new(), SearchProbe::NoIndex));
+        }
+        if query.is_empty() {
+            return Ok((Vec::new(), SearchProbe::EmptyQuery));
         }
         match deps
             .search
@@ -108,7 +124,8 @@ pub(crate) async fn gather_context(
         {
             Ok(results) => {
                 debug!(count = results.len(), "search context retrieved");
-                Ok(results)
+                let hits = SearchProbe::Hits(results.len());
+                Ok((results, hits))
             }
             // #6687: an index that does not exist is not a query that found
             // nothing. Every retrieval this review makes would 404 for the same
@@ -119,53 +136,67 @@ pub(crate) async fn gather_context(
             }),
             Err(e) => {
                 warn!("trusty-search query failed (proceeding with no code context): {e}");
-                Ok(Vec::new())
+                Ok((Vec::new(), SearchProbe::Failed(e.to_string())))
             }
         }
     };
 
     let analyze_fut = async {
         let Some(ref analyze) = deps.analyze else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), AnalyzeProbe::NoClient);
         };
         if config.search_index.is_empty() {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), AnalyzeProbe::NoIndex);
         }
-        if !analyze.has_analysis(&config.search_index).await {
-            debug!("trusty-analyze not available or has no index — skipping");
-            return (Vec::new(), Vec::new());
+        // #9194: `has_analysis` with its reason; the same single probe.
+        if let Err(e) = analyze.analysis_status(&config.search_index).await {
+            debug!("trusty-analyze not available or has no index — skipping: {e}");
+            return (
+                Vec::new(),
+                Vec::new(),
+                AnalyzeProbe::NotReady(e.to_string()),
+            );
         }
-        // Filter hotspots to changed files only.
-        let hotspots = match analyze
+        let in_diff = |file: &String| changed_files.iter().any(|f| f == file);
+        // Filter hotspots to changed files only. #9194: a failed call is a
+        // `warn!` (it was `debug!`), so it shows with the ledger off too.
+        let (hotspots, hotspot_probe) = match analyze
             .complexity_hotspots(&config.search_index, Some(10))
             .await
         {
-            Ok(h) => h
-                .into_iter()
-                .filter(|h| changed_files.iter().any(|f| f == &h.file))
-                .collect(),
+            Ok(h) => {
+                let kept: Vec<_> = h.into_iter().filter(|h| in_diff(&h.file)).collect();
+                let n = kept.len();
+                (kept, Ok(n))
+            }
             Err(e) => {
-                debug!("complexity_hotspots failed (optional): {e}");
-                Vec::new()
+                warn!("complexity_hotspots failed (optional): {e}");
+                (Vec::new(), Err(e.to_string()))
             }
         };
-        let smells = match analyze.smells(&config.search_index).await {
-            Ok(s) => s
-                .into_iter()
-                .filter(|s| changed_files.iter().any(|f| f == &s.file))
-                .collect(),
+        let (smells, smell_probe) = match analyze.smells(&config.search_index).await {
+            Ok(s) => {
+                let kept: Vec<_> = s.into_iter().filter(|s| in_diff(&s.file)).collect();
+                let n = kept.len();
+                (kept, Ok(n))
+            }
             Err(e) => {
-                debug!("smells failed (optional): {e}");
-                Vec::new()
+                warn!("smells failed (optional): {e}");
+                (Vec::new(), Err(e.to_string()))
             }
         };
-        (hotspots, smells)
+        let probe = AnalyzeProbe::Ran {
+            hotspots: hotspot_probe,
+            smells: smell_probe,
+        };
+        (hotspots, smells, probe)
     };
 
-    let (search_results, (complexity_hotspots, smells)) = tokio::join!(search_fut, analyze_fut);
-    let search_results = search_results?;
+    let (search, (complexity_hotspots, smells, analyze_probe)) =
+        tokio::join!(search_fut, analyze_fut);
+    let (search_results, search_probe) = search?;
 
-    Ok(ReviewContext {
+    let context = ReviewContext {
         search_results,
         complexity_hotspots,
         smells,
@@ -178,7 +209,12 @@ pub(crate) async fn gather_context(
         pr_description: None,
         pr_discussion: None,
         referenced_code: None,
-    })
+    };
+    Ok((
+        context,
+        search_row(&search_probe),
+        analyze_row(&analyze_probe),
+    ))
 }
 
 /// Gather external enrichment context (JIRA / Confluence / GitHub Issues).
@@ -197,12 +233,16 @@ pub(crate) async fn gather_context(
 /// mode), runs the sources concurrently and
 /// fail-open via the orchestrator, and renders the surviving sections to a
 /// markdown block.  Returns an empty string when no source contributes.
+/// #9194: also returns the `external_sources` ledger row (`probes::external_row`)
+/// from the same gather; `seam` replaces the source set in tests.
 /// Test: source construction is covered by each source's `from_config` tests;
 /// the orchestrator fail-open + ordering + rendering is covered in
-/// `integrations::context::orchestrator` tests.
+/// `integrations::context::orchestrator` tests;
+/// `external_row_is_worst_of_its_sources_and_names_the_failed_one`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn gather_external_context_md(
     config: &ReviewConfig,
+    seam: Option<&ExternalSources>,
     owner: &str,
     repo: &str,
     identifiers: &[String],
@@ -211,35 +251,38 @@ pub(crate) async fn gather_external_context_md(
     pr_body: &str,
     pr_number: u64,
     run_mode: RunMode,
-) -> String {
+) -> (String, ContextSourceRecord) {
     let cs = &config.context_sources;
-    let sources: Vec<Box<dyn ContextSource>> = vec![
-        Box::new(JiraSource::from_config(&cs.jira)),
-        Box::new(ConfluenceSource::from_config(&cs.confluence)),
-        Box::new(GithubIssuesSource::from_config(
-            &cs.github_issues,
-            run_mode,
-            config.clone(),
-        )),
-        // BACK gate (#1359): surfaces the resolved ticket/spec intent so the LLM
-        // can flag explicit method contradictions.  Default DISABLED (needs auth).
-        Box::new(ConformanceSource::from_config(
-            &cs.conformance,
-            run_mode,
-            config.clone(),
-        )),
-        // Prior-PR / file change-history source (T10, #1423).  Default DISABLED.
-        Box::new(PrHistorySource::from_config(
-            &cs.pr_history,
-            run_mode,
-            config.clone(),
-        )),
-    ];
+    let sources: Vec<Box<dyn ContextSource>> = match seam {
+        Some(make) => make(), // #9194: test seam; `None` in production
+        None => vec![
+            Box::new(JiraSource::from_config(&cs.jira)),
+            Box::new(ConfluenceSource::from_config(&cs.confluence)),
+            Box::new(GithubIssuesSource::from_config(
+                &cs.github_issues,
+                run_mode,
+                config.clone(),
+            )),
+            // BACK gate (#1359): surfaces the resolved ticket/spec intent so the LLM
+            // can flag explicit method contradictions.  Default DISABLED (needs auth).
+            Box::new(ConformanceSource::from_config(
+                &cs.conformance,
+                run_mode,
+                config.clone(),
+            )),
+            // Prior-PR / file change-history source (T10, #1423).  Default DISABLED.
+            Box::new(PrHistorySource::from_config(
+                &cs.pr_history,
+                run_mode,
+                config.clone(),
+            )),
+        ],
+    };
 
     // Skip the whole fan-out if nothing is enabled (no creds, no explicit opt-in).
     if !sources.iter().any(|s| s.is_enabled()) {
         debug!("no external context sources enabled — skipping enrichment");
-        return String::new();
+        return (String::new(), external_row(&sources, &[], cs, 0));
     }
 
     let subject = ReviewSubject {
@@ -252,8 +295,10 @@ pub(crate) async fn gather_external_context_md(
         pr_number,
     };
 
-    let sections = gather_external_context(&sources, &subject).await;
-    render_sections(&sections)
+    let gather = gather_external_context_detailed(&sources, &subject).await;
+    let md = render_sections(&gather.sections);
+    let row = external_row(&sources, &gather.outcomes, cs, md.chars().count());
+    (md, row)
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -501,7 +546,7 @@ mod tests {
     async fn a_failing_search_against_a_real_index_stays_fail_open() {
         let config = ReviewConfig::load(None);
         let deps = deps_with(Arc::new(FailingSearch { status: 500 }));
-        let ctx = gather_context(
+        let (ctx, ..) = gather_context(
             &config,
             &deps,
             &["foo".to_string()],
