@@ -619,3 +619,62 @@ fn classify_rev_parse_failure_canonicalises_before_walking_ancestors() {
         "the real parent carries a .git — only a canonicalised ancestor walk sees it"
     );
 }
+
+/// git's mount-boundary wording of "no repository", captured from git 2.53 on
+/// a tmpfs `/tmp`: discovery stops at the filesystem boundary instead of `/`.
+const MOUNT_BOUNDARY_STDERR: &str = "fatal: not a git repository (or any parent up to mount point /)\n\
+     Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n";
+
+/// Why: #9495 — on a tmpfs `/tmp` git prints the mount-boundary wording, which
+/// the classifier did not recognise, so a plain directory with no repository
+/// read as `Unknown` and the session launched without its allowlisted files.
+/// What: feeds the boundary wording as text (no mount layout needed) and expects
+/// `NoRepo` with no `.git` witness; the colon forms and unrelated git failures
+/// must still answer `Unknown`.
+/// Test: this test itself.
+#[test]
+fn classify_rev_parse_failure_accepts_the_mount_boundary_wording() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    assert!(
+        matches!(
+            classify_rev_parse_failure(tmp.path(), MOUNT_BOUNDARY_STDERR),
+            ExcludeTarget::NoRepo
+        ),
+        "the mount-boundary wording with no .git witness is a genuine absence"
+    );
+
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: not a git repository: '/nonexistent/x'",
+        "fatal: detected dubious ownership in repository at '/x'",
+        "fatal: cannot change to '/x': Permission denied",
+    ] {
+        assert!(
+            matches!(
+                classify_rev_parse_failure(tmp.path(), stderr),
+                ExcludeTarget::Unknown(_)
+            ),
+            "unrecognised failure must refuse, not read as no repository: {stderr:?}"
+        );
+    }
+}
+
+/// Why: #9495 Fail-Open Check — widening the accepted wording must not widen
+/// what gets copied unregistered. git prints the same boundary text when
+/// discovery is cut short above a real repository, so the ancestor `.git`
+/// witness stays the gate.
+/// What: a `.git` gitlink on the destination plus the boundary wording; expects
+/// `Unknown`, which `sync_untracked_files` turns into "copy nothing".
+/// Test: this test itself.
+#[test]
+fn classify_rev_parse_failure_refuses_the_mount_boundary_wording_under_a_real_repo() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    std::fs::write(tmp.path().join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+    assert!(
+        matches!(
+            classify_rev_parse_failure(tmp.path(), MOUNT_BOUNDARY_STDERR),
+            ExcludeTarget::Unknown(_)
+        ),
+        "an ancestor .git contradicts the boundary wording — never copy into a real repo"
+    );
+}
