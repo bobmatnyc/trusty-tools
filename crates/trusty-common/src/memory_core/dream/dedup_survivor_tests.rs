@@ -458,6 +458,11 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// nearest neighbour X while only X and Y exist, and Z once Z exists; X's own
 /// query matches neither, so A cannot fold Z in after it resumes.
 #[tokio::test]
+// #9509: A holds one of the two process-wide dream permits while it waits for
+// B to take the other. A sibling that takes permits one at a time
+// (`a_dream_cycle_waits_when_every_permit_is_held`) can grab the second first,
+// and then neither test can progress until this one's 30 s timeout fires.
+#[serial_test::serial(dream_permits)]
 async fn a_second_dream_cycle_on_a_dreaming_palace_loses_no_text() {
     use super::cycle::merge_seam;
     use super::{DreamConfig, Dreamer};
