@@ -35,6 +35,7 @@ use crate::memory_core::store::concurrent_open::{
     try_open_or_snapshot,
 };
 use crate::memory_core::store::hnsw_store::HnswStore;
+use crate::memory_core::store::hnsw_store::op_budget::OpBreaker;
 use crate::memory_core::store::kg_redb::READ_ONLY_ERROR_MSG;
 use crate::memory_core::store::write_deadline::palace_label;
 
@@ -639,6 +640,24 @@ impl UsearchStore {
     ) {
         self.inner.set_op_park(park);
     }
+
+    /// The HNSW store's op budget, breaker and counters (#9487).
+    ///
+    /// Why: the health surface names a palace whose vector store is wedged,
+    /// and reports how many operations it abandoned.
+    /// What: delegates to [`HnswStore::op_breaker`].
+    /// Test: `a_tripped_store_refuses_the_next_call_without_spawning`; the
+    /// health reader is covered in trusty-memory's health tests.
+    pub fn op_breaker(&self) -> &OpBreaker {
+        self.inner.op_breaker()
+    }
+
+    /// The wrapped store, so tests can park its locks or run a bounded
+    /// operation on it directly (#9487).
+    #[cfg(any(test, feature = "embedder-test-support"))]
+    pub fn hnsw_for_test(&self) -> &HnswStore {
+        &self.inner
+    }
 }
 
 #[async_trait]
@@ -651,48 +670,48 @@ impl VectorStore for UsearchStore {
         }
         let inner = self.inner.clone();
         let key = id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            inner
-                .upsert(&key, &embedding)
-                .with_context(|| format!("upsert vector {key}"))?;
-            Ok(())
-        })
-        .await
-        .context("upsert task panicked")??;
-        Ok(())
+        // #9487: joined within the op budget; a tripped store spawns nothing.
+        self.inner
+            .run_bounded("upsert", move || -> Result<()> {
+                inner
+                    .upsert(&key, &embedding)
+                    .with_context(|| format!("upsert vector {key}"))?;
+                Ok(())
+            })
+            .await
     }
 
     async fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<VectorHit>> {
         let inner = self.inner.clone();
         let query = query.to_vec();
-        let hits = tokio::task::spawn_blocking(move || -> Result<Vec<VectorHit>> {
-            let raw = inner.search(&query, top_k).context("hnsw search")?;
-            let mut hits = Vec::with_capacity(raw.len());
-            for (uuid_str, distance) in raw {
-                let drawer_id = match Uuid::parse_str(&uuid_str) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::warn!(key = %uuid_str, "search: unparseable uuid: {e}");
-                        continue;
-                    }
-                };
-                // `hnsw_rs` returns squared cosine distance in [0, 2]. Convert
-                // to a similarity score in [0, 1] using `1 - distance` and
-                // clamp so callers comparing to thresholds (e.g. 0.99) get
-                // clean boundaries.
-                let score = (1.0_f32 - distance).clamp(0.0, 1.0);
-                hits.push(VectorHit { drawer_id, score });
-            }
-            hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            Ok(hits)
-        })
-        .await
-        .context("search task panicked")??;
-        Ok(hits)
+        // #9487: joined within the op budget; a tripped store spawns nothing.
+        self.inner
+            .run_bounded("search", move || -> Result<Vec<VectorHit>> {
+                let raw = inner.search(&query, top_k).context("hnsw search")?;
+                let mut hits = Vec::with_capacity(raw.len());
+                for (uuid_str, distance) in raw {
+                    let drawer_id = match Uuid::parse_str(&uuid_str) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            tracing::warn!(key = %uuid_str, "search: unparseable uuid: {e}");
+                            continue;
+                        }
+                    };
+                    // `hnsw_rs` returns squared cosine distance in [0, 2]. Convert
+                    // to a similarity score in [0, 1] using `1 - distance` and
+                    // clamp so callers comparing to thresholds (e.g. 0.99) get
+                    // clean boundaries.
+                    let score = (1.0_f32 - distance).clamp(0.0, 1.0);
+                    hits.push(VectorHit { drawer_id, score });
+                }
+                hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                Ok(hits)
+            })
+            .await
     }
 
     async fn remove(&self, id: Uuid) -> Result<()> {
@@ -703,15 +722,15 @@ impl VectorStore for UsearchStore {
         }
         let inner = self.inner.clone();
         let key = id.to_string();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let _ = inner
-                .delete(&key)
-                .with_context(|| format!("delete vector {key}"))?;
-            Ok(())
-        })
-        .await
-        .context("remove task panicked")??;
-        Ok(())
+        // #9487: joined within the op budget; a tripped store spawns nothing.
+        self.inner
+            .run_bounded("remove", move || -> Result<()> {
+                let _ = inner
+                    .delete(&key)
+                    .with_context(|| format!("delete vector {key}"))?;
+                Ok(())
+            })
+            .await
     }
 }
 

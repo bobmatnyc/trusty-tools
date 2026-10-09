@@ -44,8 +44,11 @@ mod op_watch;
 pub use op_watch::OpPark;
 pub(crate) use op_watch::OpWatch;
 pub use op_watch::{HnswOp, HnswOpKind};
+// #9487 AC4: per-operation budget and sticky breaker.
+pub mod op_budget;
 mod quiet_insert;
 mod replay;
+mod row_write;
 mod stranded;
 
 /// Default HNSW connectivity. Maps to `max_nb_connection` in `hnsw_rs`.
@@ -87,6 +90,8 @@ const MAX_ALLOC_PROBES: u8 = 8;
 /// Test: Indirectly via the unit tests below (each variant is reached when
 /// the corresponding subsystem returns an error).
 #[derive(Debug, Error)]
+// #9487: `OpBudget` was a semver break; non_exhaustive keeps the next variant additive.
+#[non_exhaustive]
 pub enum HnswStoreError {
     /// Boxed so the enum stays small enough that `Result<T, HnswStoreError>`
     /// doesn't trip clippy's `result_large_err` lint. The redb error types
@@ -133,6 +138,9 @@ pub enum HnswStoreError {
          before retrying via stdio"
     )]
     ReadOnly,
+    /// #9487: an operation exceeded its budget, or the store is wedged.
+    #[error(transparent)]
+    OpBudget(#[from] op_budget::OpBudgetError),
 }
 
 mod alloc;
@@ -234,6 +242,8 @@ pub struct HnswStore {
     palace: Arc<str>,
     /// #9187: serialises graph inserts so `quiet_insert` reads an exact count.
     insert_gate: parking_lot::Mutex<()>,
+    /// #9487: the budget every bounded operation gets, and the sticky breaker.
+    breaker: Arc<op_budget::OpBreaker>,
     /// #9174: graph points a search for their own vector misses; scanned exactly.
     stranded: RwLock<Vec<stranded::StrandedGroup>>,
     /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
@@ -399,6 +409,7 @@ impl HnswStore {
             shadowed: RwLock::new(std::collections::HashSet::new()),
             palace: Arc::from("unnamed palace"),
             insert_gate: parking_lot::Mutex::new(()),
+            breaker: Arc::new(op_budget::OpBreaker::from_env()),
             stranded: RwLock::new(stranded),
             ops: Arc::default(),
             #[cfg(test)]
@@ -493,38 +504,8 @@ impl HnswStore {
         // #9487: registered on this blocking thread, so it outlives a dropped future.
         let _op = self.ops.begin(op_watch::HnswOpKind::Upsert);
 
-        let encoded: Vec<u8> = postcard::to_allocvec(&vector.to_vec())?;
-        let wtx = self.db.begin_write()?;
-        let vector_id;
-        // #5171: a re-upsert leaves the old embedding in the graph under this
-        // same id, so `search` must re-read the authoritative vector for it.
-        let shadows_previous;
-        {
-            let mut vectors = wtx.open_table(VECTORS)?;
-            let mut keys = wtx.open_table(VECTOR_KEYS)?;
-            let mut tombstones = wtx.open_table(DELETED_VECTORS)?;
-            let mut seq = wtx.open_table(VECTOR_ID_SEQ)?;
-
-            // Resolve the existing id in a scoped block so the AccessGuard
-            // (immutable borrow of `keys`) is dropped before we re-borrow
-            // `keys` mutably for `insert`.
-            let existing: Option<u64> = keys.get(uuid)?.map(|g| g.value());
-            shadows_previous = existing.is_some();
-            vector_id = match existing {
-                Some(id) => id,
-                None => {
-                    // #5005: allocate from redb, inside this txn.
-                    let id = allocate_vector_id(&mut seq, &vectors, &keys)?;
-                    keys.insert(uuid, id)?;
-                    id
-                }
-            };
-            vectors.insert(vector_id, encoded.as_slice())?;
-            // Clear any prior tombstone so a re-upsert revives the row.
-            let _ = tombstones.remove(vector_id)?;
-        }
-        wtx.commit()?;
-        self.keys.invalidate(); // #9141
+        // #9487: the redb half lives in `row_write.rs`.
+        let (vector_id, shadows_previous) = self.commit_vector_row(uuid, vector)?;
 
         // #5171: mark BEFORE the graph can serve the shadow point. The two
         // steps cannot be atomic, and the asymmetry runs one way: a search
@@ -541,8 +522,9 @@ impl HnswStore {
         }
         // #9187: the redb row is committed either way; on Err the next open
         // replays it.
-        let _gate = self.insert_gate.lock();
-        let index = self.index.read();
+        // #9487: both waits are bounded; a timeout trips the breaker.
+        let _gate = self.bounded_gate("upsert")?;
+        let index = self.bounded_graph("upsert")?;
         // #9174: the lists this insert can evict from, read before it runs.
         let before = stranded::neighbourhoods_before_insert(&index, vector);
         quiet_insert::insert_quietly(&index, vector, vector_id as usize)
@@ -621,7 +603,7 @@ impl HnswStore {
         // superseded vector evict a true neighbour. The `out.len() >= k` break
         // below does the bounding instead, on the corrected ranking.
         let mut raw: Vec<(u64, f32)> = {
-            let index = self.index.read();
+            let index = self.bounded_graph("search")?; // #9487
             if reverse.len() <= EXHAUSTIVE_SCAN_MAX_POINTS {
                 exhaustive_nearest(&index, query, tombstones)
             } else {

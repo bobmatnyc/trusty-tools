@@ -1019,3 +1019,34 @@ async fn health_stays_wedged_after_the_blocked_palace_is_evicted() {
         "got {v:?}"
     );
 }
+
+/// Why (#9487 AC4d): a palace whose HNSW op breaker tripped refuses every
+/// vector operation, so its remembers fail until it is reopened. `/health` must
+/// name it and stop reporting `ok`, or the outage is visible only in a log line.
+/// What: registers two handles, trips one breaker through its test hook, and
+/// asserts only that palace is listed, with its abandoned-op count, and that
+/// `status` is `wedged`.
+/// Test: this test.
+#[tokio::test]
+async fn health_reports_a_palace_whose_hnsw_breaker_tripped() {
+    let state = test_state();
+    let wedged = degraded_handle("hnsw-wedged", false);
+    wedged.vector_store.op_breaker().trip_for_test();
+    state.registry.register_arc(wedged);
+    state
+        .registry
+        .register_arc(degraded_handle("hnsw-healthy", false));
+
+    let v = health_body(state).await;
+
+    let listed = v["hnsw_wedged_palaces"]
+        .as_array()
+        .unwrap_or_else(|| panic!("/health must name the wedged palace; got {v:?}"));
+    assert_eq!(listed.len(), 1, "exactly one breaker is tripped; got {v:?}");
+    assert_eq!(listed[0]["id"], "hnsw-wedged");
+    assert_eq!(listed[0]["abandoned_ops"], 0);
+    assert_eq!(
+        v["status"], "wedged",
+        "a tripped breaker is not ok; got {v:?}"
+    );
+}
