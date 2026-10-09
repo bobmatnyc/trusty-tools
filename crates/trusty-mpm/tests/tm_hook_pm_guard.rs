@@ -35,6 +35,8 @@
 //! real developer `$HOME`.
 
 use crate::common;
+// #9526: the refusing-port fixture lives beside its own regression test.
+use crate::tm_hook_pm_guard_refusing_daemon_9526::RefusingDaemon;
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -99,50 +101,6 @@ fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
 /// hang to the guard's timeout instead (#9526). A test whose verdict depends on
 /// "refused", not "timed out", uses [`RefusingDaemon`].
 const UNREACHABLE_DAEMON: &str = "http://127.0.0.1:1";
-
-/// A loopback daemon URL whose connect is refused at once on every host (#9526).
-///
-/// Why: the guard classifies a refused connect as "no daemon" and a connect
-/// timeout as "a daemon that did not answer" (`classify_transport_failure`).
-/// Under WSL2 mirrored networking a SYN to a 127.0.0.1 port outside Linux's
-/// ephemeral range goes to the Windows host and hangs, so port 1 times out
-/// there and the tests for the no-daemon branch got the other branch's verdict.
-/// What: binds a loopback socket to an ephemeral port, never calls `listen`,
-/// and points the URL at it. No listener means a SYN is answered with RST on
-/// Linux, WSL2 and macOS. The socket stays bound until the value drops, with
-/// `SO_REUSEADDR` off, so no other `bind(0)` can take the port and no
-/// `connect` can pick it as a source port. A connected client's port would
-/// allow the latter, and a connect from that port to itself completes a TCP
-/// simultaneous open instead of being refused.
-/// Test: `pm_guard_allows_a_builder_when_the_daemon_cannot_be_asked`,
-/// `pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked`,
-/// `pm_guard_warns_when_no_daemon_answers_the_claim`.
-struct RefusingDaemon {
-    url: String,
-    _bound: tokio::net::TcpSocket,
-}
-
-impl RefusingDaemon {
-    fn new() -> Self {
-        // The bind stays in the constructor's statement: the no-listener gate
-        // (scripts/check_no_tcp_listeners.sh) reads only that statement for
-        // the ephemeral address.
-        let bound = tokio::net::TcpSocket::new_v4()
-            .and_then(|s| s.bind("127.0.0.1:0".parse().expect("addr")).map(|()| s))
-            .expect("bind loopback socket");
-        let addr = bound.local_addr().expect("bound addr");
-        // Precondition the three tests rest on: a refusal, not a timeout.
-        let probe = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2));
-        assert!(
-            matches!(&probe, Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused),
-            "{addr} must refuse at once, got: {probe:?}"
-        );
-        Self {
-            url: format!("http://{addr}"),
-            _bound: bound,
-        }
-    }
-}
 
 /// Spawn `tm hook --pm-guard` and hand back the running child (#5914).
 ///
