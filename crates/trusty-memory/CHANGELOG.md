@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.31.0] — 2026-10-09
+
+### Breaking
+
+- `HealthResponse` gains `hnsw_wedged_palaces` and `hnsw_abandoned_ops_in_flight`, and `PalaceLock` gains the `Hnsw` variant; consumers that construct `HealthResponse` or match `PalaceLock` exhaustively must update.
+
+### Added
+
+- A CLI contract snapshot test pins the trusty-memory clap tree (subcommand paths, flag names and short aliases, positional arity, value types, binary names and the usage-error exit code) and fails on a rename, a removal or an optional argument turning required (ADR-0066 D4, #9277). Refresh deliberately with `UPDATE_CLI_CONTRACT=1`.
+- The daemon answers `memory.protocol` with a monotonic `protocol_version`
+  (`transport::methods::protocol::PROTOCOL_VERSION`, now 1), pinned to its
+  wire surface by a test. The CLI, the hooks and the `serve --stdio` bridge
+  check it before calling the daemon and refuse a daemon from another release
+  with `MemoryProtocolError`. A daemon that predates the handshake is still
+  called, so a client installed before the daemon restarts keeps working
+  ([#9288](https://github.com/bobmatnyc/trusty-tools/issues/9288)).
+- `/health` lists open palaces whose HNSW vector store tripped its op breaker as `hnsw_wedged_palaces` (id plus abandoned-operation count), reports `hnsw_abandoned_ops_in_flight` (HNSW operations abandoned at their budget whose task still runs, across every palace), and reports `status: "wedged"` while either is non-empty or above zero (#9487). The gauge keeps `/health` from going back to `ok` when a palace with a stuck operation is evicted from the handle cache.
+
+### Fixed
+
+- `write_project_pin` re-reads the pin on disk first. It refuses to overwrite a
+  pin with a newer `schema_version`, or one it cannot read or parse, and it
+  keeps the unknown fields of the pin it replaces, so `trusty-memory link
+  --force` no longer drops a field a later release added (ADR-0067 D2, #9274).
+- `memory.health` now reports a wedge when an HNSW `upsert` or `search` has been blocked past the wedge threshold, naming the palace and `stalled_lock.lock: "hnsw"`. Before, a graph call left blocked after its timed-out future was dropped read as healthy with 0 in flight (#9487).
+- `trusty-memory doctor` names the restart for an HNSW wedge: `launchctl bootout gui/$(id -u)/com.trusty.memory`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist` (#9487).
+
 ## [0.30.0] — 2026-10-09
 
 ### Breaking

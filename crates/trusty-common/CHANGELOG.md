@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.56.0] — 2026-10-09
+
+### Breaking
+
+- `memory_rpc::MemoryRpcError` gains a public `data` field, which carries the
+  JSON-RPC error `data` member the client used to drop, and is now
+  `#[non_exhaustive]`: a struct literal outside trusty-common no longer
+  compiles, and a pattern needs `..`. The new `MemoryProtocolInfo` is
+  `#[non_exhaustive]` too; build it with `MemoryProtocolInfo::new`
+  ([#9288](https://github.com/bobmatnyc/trusty-tools/issues/9288)).
+- `HnswStoreError` gains the `OpBudget` variant (#9487) and is now `#[non_exhaustive]`. A `match` on it outside trusty-common needs a wildcard arm; later variants are no longer a breaking change.
+
+### Added
+
+- `memory_rpc::check_memory_protocol_at` and `ensure_memory_protocol_at` ask a
+  trusty-memory daemon for its `protocol_version` and refuse one outside
+  `SUPPORTED_MEMORY_PROTOCOLS` with the named `MemoryProtocolError`. A daemon
+  that predates the handshake reads as `MemoryProtocol::PreHandshake` while
+  protocol 1 is supported, and is reported once per process; any other failed
+  check is an error
+  ([#9288](https://github.com/bobmatnyc/trusty-tools/issues/9288)).
+- HNSW operations now have a time budget and a fail-closed breaker (#9487). An `upsert`, `search` or `remove` that cannot take its lock or finish its blocking task within `TRUSTY_HNSW_OP_BUDGET_SECS` returns `OpBudgetError::BudgetExceeded` through `HnswStoreError::OpBudget`, and trips that store's breaker. The default budget is twice the redb write-transaction deadline (`TRUSTY_WRITE_TXN_DEADLINE_SECS`, so 60 s by default), so an upsert waiting out one deadlined transaction on `begin_write` does not trip it; a malformed value logs a warning and uses the default. The budget clock runs in a spawned watcher, so the breaker still trips, and counts the operation exactly once, when the caller's future is dropped first (a disconnected client, the remember pipeline ceiling). Every later operation on the store returns `OpBudgetError::Wedged` at once, spawning no thread, until the palace is reopened or the process restarts. A remember whose vector step fails this way writes no drawer and no KG row. `HnswStore::op_breaker` / `UsearchStore::op_breaker` expose the breaker state and an abandoned-operation counter; `op_budget::abandoned_ops_in_flight` counts, process-wide, abandoned operations whose task is still running; `op_budget_error` recovers the typed error from an `anyhow` chain.
+
+### Fixed
+
+- The `http_client` loopback proxy tests no longer flake on the guarded
+  client: their stub server reads the request head before it answers, sends
+  `Connection: close`, and shuts down its write half, so the 200 can neither
+  reach the client on an idle connection nor be lost to a TCP reset. Test-only;
+  no library behaviour changes (#6575).
+
 ## [0.55.3] — 2026-10-09
 
 ### Added
