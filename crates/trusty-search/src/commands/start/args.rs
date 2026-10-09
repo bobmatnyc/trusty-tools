@@ -146,7 +146,8 @@ pub struct StartArgs {
     /// the shared default socket when `TRUSTY_DATA_DIR` is unset. A client
     /// whose `TRUSTY_SEARCH_SOCKET` names another path passes it here when it
     /// auto-starts the daemon, so both sides use one socket. Must be an
-    /// absolute path; the parent directory is created if it does not exist.
+    /// absolute path. A missing parent is created at `0700`; an existing one
+    /// other than the data directory is never chmodded, and is refused unless `0700`.
     /// The lockfile and the port file stay under the data directory.
     #[arg(long, value_name = "PATH", value_parser = parse_socket_path)]
     pub(crate) socket: Option<std::path::PathBuf>,

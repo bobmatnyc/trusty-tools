@@ -811,3 +811,23 @@ fn a_relative_data_dir_override_is_refused() {
         "the refusal must say why: {err:#}"
     );
 }
+
+/// #9214: a `--socket` parent that does not exist is created at `0700`, so
+/// the hardened client can dial the socket bound inside it.
+#[test]
+fn prepare_named_socket_dir_creates_a_missing_parent_at_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let parent = tmp.path().join("new").join("sock-dir");
+    super::prepare_named_socket(parent.join("ts.sock")).expect("a missing parent is created");
+    let mode = std::fs::metadata(&parent)
+        .expect("stat the created parent")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "the created parent must be 0700, got {mode:04o}"
+    );
+}

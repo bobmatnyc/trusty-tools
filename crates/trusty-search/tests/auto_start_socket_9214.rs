@@ -66,8 +66,10 @@ async fn auto_start_binds_the_socket_the_client_resolved() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let data_dir = tmp.path().join("data");
     let home = tmp.path().join("home");
+    // #9214: `start` creates the socket dir at 0700; it refuses an existing
+    // one at a wider mode rather than chmodding it, so none is pre-created.
     let socket_dir = tmp.path().join("sock");
-    for dir in [&data_dir, &home, &socket_dir] {
+    for dir in [&data_dir, &home] {
         std::fs::create_dir_all(dir).expect("create a scratch dir");
     }
     let socket = socket_dir.join("custom.sock");

@@ -690,7 +690,8 @@ pub async fn run_daemon_with(
     // behind it. A bind failure here is fatal rather than a degrade to
     // HTTP-only (the Fail-Open Check).
     // #9214: `start --socket` names the socket; otherwise the data-dir one.
-    let rpc_socket = rpc_socket.map_or_else(socket::socket_path, Ok);
+    // A named socket's parent is never narrowed unless start created it.
+    let rpc_socket = rpc_socket.map_or_else(socket::socket_path, socket::prepare_named_socket);
     let rpc_socket = rpc_socket.map_err(|e| DaemonError::Server(e.to_string()))?;
     let rpc = socket::bind(&rpc_socket)
         .await

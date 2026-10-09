@@ -183,10 +183,10 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         }
         tracing::info!("data-dir override: {}", dir.display());
     }
-    // #9214: an explicit socket gets its directory now, as `--data-dir` does.
-    if let Some(dir) = socket.as_deref().and_then(std::path::Path::parent) {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("create --socket directory: {}", dir.display()))?;
+    // #9214: an explicit socket gets its directory now, as `--data-dir` does:
+    // created at 0700, or an existing one refused unless already 0700.
+    if let Some(path) = socket.as_deref() {
+        crate::service::socket::prepare_named_socket(path.to_path_buf())?;
     }
 
     if !discovery.runs_auto_discover() && !no_auto_discover && !discovery.withheld_for_no_http() {
