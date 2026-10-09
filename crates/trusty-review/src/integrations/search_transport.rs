@@ -9,9 +9,9 @@
 //! 2. an explicit URL (`TRUSTY_SEARCH_URL` set, or a `search_url` that is not
 //!    the default) → HTTP on that URL;
 //! 3. otherwise the default socket, whether or not its file exists. The
-//!    default socket follows the daemon's own rule:
-//!    `<TRUSTY_DATA_DIR>/trusty-search.sock` when `TRUSTY_DATA_DIR` is set,
-//!    else `search_rpc::search_socket()`.
+//!    default socket is `search_rpc::search_socket()`, the rule the daemon
+//!    binds by (`<TRUSTY_DATA_DIR>/trusty-search.sock` when `TRUSTY_DATA_DIR`
+//!    is set).
 //!
 //! A missing socket file, or one whose daemon is dead, is a dial error on the
 //! socket leg. Neither falls back to HTTP (#9214: fail closed): a silent
@@ -159,7 +159,8 @@ impl SearchTransport {
 /// it gets `hermetic_socket()`, a path that never exists, so no test dials or
 /// stats the live daemon's socket.
 /// Test: `unit_tests_never_resolve_the_real_default_socket`,
-/// `unresolvable_socket_path_fails_closed`.
+/// `unresolvable_socket_path_fails_closed`,
+/// `trusty_data_dir_isolates_the_default_socket`.
 fn default_socket() -> PathBuf {
     #[cfg(test)]
     if std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_none()
@@ -167,51 +168,18 @@ fn default_socket() -> PathBuf {
     {
         return hermetic_socket();
     }
-    default_socket_path().unwrap_or_else(|reason| {
+    // #9214: search_socket() applies the daemon's TRUSTY_DATA_DIR rule itself.
+    search_rpc::search_socket().unwrap_or_else(|e| {
+        let reason = format!("{e:#}");
         tracing::warn!(%reason, "trusty-search socket path unresolved; search is unavailable");
         PathBuf::from(format!("<unresolved trusty-search socket: {reason}>"))
     })
 }
 
-/// The path the trusty-search daemon binds, by its own rule.
-///
-/// Why: an instance isolated with `TRUSTY_DATA_DIR` binds
-/// `<TRUSTY_DATA_DIR>/trusty-search.sock` (trusty-search
-/// `service::socket::resolve_socket_path`, #7801), but
-/// `search_rpc::search_socket()` honours only `TRUSTY_DATA_DIR_OVERRIDE`. Without
-/// this branch an isolated report pass would read the production daemon.
-/// What: `<TRUSTY_DATA_DIR>/trusty-search.sock` when that var is non-empty; `Err`
-/// when it is relative, which the daemon refuses, so no isolated socket exists;
-/// otherwise the shared derivation, whose error is the reason it failed.
-/// Test: `trusty_data_dir_isolates_the_default_socket`,
-/// `unresolvable_socket_path_fails_closed`.
-fn default_socket_path() -> Result<PathBuf, String> {
-    // #9214: drop once B1 makes search_rpc::search_socket() honour TRUSTY_DATA_DIR
-    if let Some(dir) = isolated_data_dir() {
-        // #9214 B1: delete
-        return if dir.is_absolute() {
-            Ok(dir.join(SEARCH_SOCKET_FILE))
-        } else {
-            Err(format!(
-                "{TRUSTY_DATA_DIR_ENV}={} is relative, which the daemon refuses",
-                dir.display()
-            ))
-        };
-    }
-    search_rpc::search_socket().map_err(|e| format!("{e:#}"))
-}
-
-// #9214: drop once B1 makes search_rpc::search_socket() honour TRUSTY_DATA_DIR
-/// The env var that isolates one trusty-search instance (the daemon's own).
-pub(crate) const TRUSTY_DATA_DIR_ENV: &str = "TRUSTY_DATA_DIR";
-
-// #9214: drop once B1 makes search_rpc::search_socket() honour TRUSTY_DATA_DIR
-/// The basename the daemon joins onto `TRUSTY_DATA_DIR`.
-const SEARCH_SOCKET_FILE: &str = "trusty-search.sock";
-
 /// `TRUSTY_DATA_DIR`, when set and non-empty (the daemon's own test).
+#[cfg(test)]
 fn isolated_data_dir() -> Option<PathBuf> {
-    std::env::var_os(TRUSTY_DATA_DIR_ENV)
+    std::env::var_os(search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV)
         .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
 }
