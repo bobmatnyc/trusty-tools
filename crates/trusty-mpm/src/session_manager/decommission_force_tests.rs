@@ -773,6 +773,70 @@ async fn force_decommission_is_never_stricter_than_plain_on_a_clean_tree() {
     }
 }
 
+/// 🔴 #9444: decommission keeps a worktree a live process stands in, under
+/// either policy, and reports the holder.
+///
+/// Why: the tree is the clean one
+/// `force_decommission_is_never_stricter_than_plain_on_a_clean_tree` removes;
+/// only a real `sleep` with its cwd at the tree root protects it.
+/// Fails before the fix: no guard asked the OS, so `git worktree remove
+/// --force` ran under the process.
+#[tokio::test]
+async fn decommission_keeps_a_worktree_a_live_process_stands_in_9444() {
+    let fx = GitWorktreeFixture::new();
+    for (name, policy) in [
+        ("decom-live-plain-9444", ProvisioningDirt::Refuse),
+        ("decom-live-force-9444", ProvisioningDirt::Discard),
+    ] {
+        let wt = fx.add_worktree(name);
+        let holder = crate::session_manager::worktree_git_fixture::StandingProcess::in_dir(&wt);
+
+        let verdict = remove(&wt, policy).await;
+
+        assert!(
+            !verdict.removed,
+            "{policy:?} removed a tree a process stands in"
+        );
+        assert!(wt.exists(), "{policy:?}: the tree must stay");
+        let reason = verdict.kept_reason.unwrap_or_default();
+        assert!(holder.named_in(&reason), "{policy:?}: {reason}");
+    }
+}
+
+/// 🔴 #9444 fail-open check: a holder probe that cannot answer keeps the
+/// tree under either policy, and says why. Fails with the probe dropped from
+/// the guard: the same clean tree is then removed.
+#[tokio::test]
+async fn decommission_keeps_a_worktree_when_the_holder_probe_fails_9444() {
+    let fx = GitWorktreeFixture::new();
+    for (name, policy) in [
+        ("decom-probe-plain-9444", ProvisioningDirt::Refuse),
+        ("decom-probe-force-9444", ProvisioningDirt::Discard),
+    ] {
+        let wt = fx.add_worktree(name);
+
+        let verdict = remove_in_project_worktree_with(
+            &ManagedSessionId::new(),
+            Some(TASK),
+            &wt,
+            policy,
+            crate::session_manager::worktree_git_fixture::probe_cannot_answer,
+        )
+        .await;
+
+        assert!(
+            !verdict.removed,
+            "{policy:?} removed on an unanswered probe"
+        );
+        assert!(wt.exists(), "{policy:?}: the tree must stay");
+        let reason = verdict.kept_reason.unwrap_or_default();
+        assert!(
+            reason.contains("could not run `lsof`"),
+            "{policy:?}: {reason}"
+        );
+    }
+}
+
 /// A worktree whose repository has NO `.gitignore`, provisioned so tm's
 /// scaffolding creates one: `?? .gitignore` holding only the managed block.
 fn untracked_gitignore_tree(fx: &GitWorktreeFixture, name: &str) -> PathBuf {

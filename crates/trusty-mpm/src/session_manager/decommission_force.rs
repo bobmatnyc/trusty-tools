@@ -45,6 +45,7 @@ use super::decommission::{
 };
 use super::provisioning_ledger;
 use super::record::{ManagedSessionId, SessionRecord};
+use super::worktree_liveness::process_holding;
 use super::worktree_ownership::SentinelOwner;
 use super::worktree_ownership_location::{
     OwnerReadError, admin_sentinel_path, legacy_sentinel_path, read_sentinel_owner_strict,
@@ -367,16 +368,32 @@ pub(super) fn gitignore_diff_only_adds(ws: &Path, accept: &dyn Fn(&str) -> bool)
 /// panicked check or a failed check keeps the worktree and returns the reason;
 /// a clean answer removes it through [`remove_session_worktree_guarded`]. Under
 /// `Discard` its guard re-asks the same questions immediately before
-/// `git worktree remove --force`. An absent path is neither removed nor kept.
+/// `git worktree remove --force`. #9444: under either policy the guard then
+/// refuses a tree a live process stands in ([`process_holding`]), and the
+/// kept reason names the holder. An absent path is neither removed nor kept.
 /// Test: `force_decommission_removes_a_provisioning_only_worktree`,
 /// `force_decommission_removes_nothing_when_the_dirty_check_cannot_complete`,
 /// `decommission_reports_why_it_kept_a_provisioned_worktree`,
-/// `force_decommission_keeps_a_task_md_edited_after_spawn`.
+/// `force_decommission_keeps_a_task_md_edited_after_spawn`,
+/// `decommission_keeps_a_worktree_a_live_process_stands_in_9444`.
 pub(super) async fn remove_in_project_worktree(
     id: &ManagedSessionId,
     task: Option<&str>,
     ws: &Path,
     policy: ProvisioningDirt,
+) -> WorkspaceVerdict {
+    remove_in_project_worktree_with(id, task, ws, policy, process_holding).await
+}
+
+/// [`remove_in_project_worktree`] with the live-process probe passed in
+/// (#9444), so a probe that cannot answer is shown to keep the tree.
+/// Test: `decommission_keeps_a_worktree_when_the_holder_probe_fails_9444`.
+pub(super) async fn remove_in_project_worktree_with(
+    id: &ManagedSessionId,
+    task: Option<&str>,
+    ws: &Path,
+    policy: ProvisioningDirt,
+    cwd_holder: fn(&Path) -> Option<String>,
 ) -> WorkspaceVerdict {
     // #7660: nothing on disk is nothing kept — an absent tree is not a refusal.
     if std::fs::symlink_metadata(ws).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
@@ -411,11 +428,15 @@ pub(super) async fn remove_in_project_worktree(
     let join = tokio::task::spawn_blocking(move || {
         // #7660: a forced removal re-asks every question — provenance, lock and
         // dirt — inside the audit window; the default path is unchanged.
-        let guard = || match policy {
-            ProvisioningDirt::Refuse => None,
-            ProvisioningDirt::Discard => {
-                keep_reason(&ws_clone, &owner, task_for_guard.as_deref(), policy)
+        let guard = || {
+            match policy {
+                ProvisioningDirt::Refuse => None,
+                ProvisioningDirt::Discard => {
+                    keep_reason(&ws_clone, &owner, task_for_guard.as_deref(), policy)
+                }
             }
+            // #9444: a live process standing in the tree keeps it.
+            .or_else(|| cwd_holder(&ws_clone))
         };
         // #7885: name the route in the audit line.
         remove_session_worktree_guarded(

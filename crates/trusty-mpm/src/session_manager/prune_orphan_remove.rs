@@ -9,7 +9,8 @@
 //! re-check lives in exactly one place.
 //! What: the #3715 canonicalize-failure streak counter, [`fresh_in_use`] (the
 //! Phase 2 active-set snapshot), [`allowed_dirt_verdict`] (the #4091 dirty gate
-//! bounded by the operator's discard allowlist), and [`remove_candidate`].
+//! bounded by the operator's discard allowlist), and [`remove_candidate`],
+//! whose last-moment guard also refuses a tree a live process stands in (#9444).
 //! Test: `a_scanned_path_replaced_by_a_symlink_is_not_removed`,
 //! `a_tree_dirtied_after_a_clean_preview_is_not_discarded`,
 //! `canonicalize_streak_escalates_at_threshold`.
@@ -22,6 +23,7 @@ use tracing::{error, info, warn};
 use super::super::decommission::WorktreeRemoval;
 use super::super::git_ceiling::with_git_ceiling;
 use super::super::record::SessionRecord;
+use super::super::worktree_liveness::process_holding;
 use super::super::worktree_removal_integrity::identity_refusal;
 use super::super::worktree_safety::{
     DirtVerdict, DirtyWorktree, DirtyWorktreePolicy, dirt_verdict,
@@ -270,18 +272,48 @@ pub(super) enum CandidateRemoval {
 /// `remove_session_worktree_guarded`, whose guard refuses a path that no
 /// longer resolves to itself (scanned candidates are canonical, so a
 /// difference means the path was replaced since the scan) immediately before
-/// git runs. A git failure that deleted content is
+/// git runs, and #9444: then a live process standing in the tree, asked of
+/// the OS by [`process_holding`]. A git failure that deleted content is
 /// [`CandidateRemoval::PartiallyRemoved`]. Every git call runs under
 /// `ceiling`, the sweep's own (#8306).
 /// Test: `a_scanned_path_replaced_by_a_symlink_is_not_removed`,
 /// `a_tree_dirtied_after_a_clean_preview_is_not_discarded`,
-/// `prune_orphaned_worktrees_store_snapshot_blocks_deletion`.
+/// `prune_orphaned_worktrees_store_snapshot_blocks_deletion`,
+/// `orphan_sweep_keeps_a_worktree_a_live_process_stands_in_9444`.
 pub(super) async fn remove_candidate(
     candidate: &Path,
     fresh_in_use: &HashSet<PathBuf>,
     policy: DirtyWorktreePolicy,
     scope: &WorktreeScope,
     ceiling: std::time::Duration,
+) -> CandidateRemoval {
+    remove_candidate_with(
+        candidate,
+        fresh_in_use,
+        policy,
+        scope,
+        ceiling,
+        process_holding,
+    )
+    .await
+}
+
+/// [`remove_candidate`] with the live-process probe passed in (#9444).
+///
+/// Why: the probe's refusal arms — a holder found, or `lsof` unable to answer
+/// — must each be shown to keep the tree, and a real `lsof` cannot be made to
+/// fail on demand.
+/// What: as [`remove_candidate`]; `cwd_holder` runs in the last-moment guard
+/// after the identity check. `Some(reason)` keeps the tree, whether it names a
+/// holder or says the probe could not complete (ADR-0045).
+/// Test: `orphan_sweep_keeps_a_worktree_when_the_holder_probe_fails_9444`.
+pub(super) async fn remove_candidate_with(
+    candidate: &Path,
+    fresh_in_use: &HashSet<PathBuf>,
+    policy: DirtyWorktreePolicy,
+    scope: &WorktreeScope,
+    ceiling: std::time::Duration,
+    cwd_holder: fn(&Path) -> Option<String>,
 ) -> CandidateRemoval {
     // #1845 item 8: a path that is gone is a skip, not a removal.
     if !candidate.exists() {
@@ -317,7 +349,8 @@ pub(super) async fn remove_candidate(
             super::super::decommission::remove_session_worktree_guarded(
                 &owned,
                 "prune-worktrees orphan sweep: no live session claims this worktree",
-                &|| identity_refusal(&owned),
+                // #9444: a live process standing in the tree keeps it.
+                &|| identity_refusal(&owned).or_else(|| cwd_holder(&owned)),
                 policy,
             )
         })

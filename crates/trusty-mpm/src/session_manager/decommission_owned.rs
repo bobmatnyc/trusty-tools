@@ -9,7 +9,7 @@
 //! What: [`remove_owned_workspace`] runs [`owned_workspace_keep_reason`] and the
 //! delete inside one audited blocking task; [`unclaimed_directory_blocks_removal`]
 //! gates the disowned-directory fallback. Every failed check keeps the
-//! directory.
+//! directory, and #9444: so does a live process standing in an owned one.
 //! Test: `decommission_owned_tests`.
 
 use std::path::Path;
@@ -27,6 +27,7 @@ use super::record::ManagedSessionId;
 use super::worktree_ignored_output::{
     ignored_output_refusal, kept_unversioned_content, unversioned_content_refusal,
 };
+use super::worktree_liveness::process_holding;
 use super::worktree_safety::{DirtyWorktreePolicy, inspect_dirt_excusing, is_worktree_root};
 
 /// Why an SM-owned workspace must be kept, or `None` when it may be deleted
@@ -121,14 +122,30 @@ pub(super) fn owned_workspace_keep_reason(
 /// `remove_dir_all` is `Err(ManagedError::Io)`, as before. A panicked task is
 /// a keep. Under `--force` a `warn!` names the provisioning files deleted with
 /// the tree.
+/// #9444: a live process standing in the workspace, or a probe that cannot
+/// answer ([`process_holding`]), keeps it, asked immediately before the delete.
 /// Test: `owned_worktree_with_an_unpushed_commit_is_kept`,
 /// `clean_owned_workspace_is_still_removed`,
-/// `decommission_prunes_the_base_repo_worktree_registry`.
+/// `decommission_prunes_the_base_repo_worktree_registry`,
+/// `owned_workspace_a_live_process_stands_in_is_kept_9444`.
 pub(super) async fn remove_owned_workspace(
     id: &ManagedSessionId,
     task: Option<&str>,
     ws: &Path,
     policy: ProvisioningDirt,
+) -> Result<WorkspaceVerdict, ManagedError> {
+    remove_owned_workspace_with(id, task, ws, policy, process_holding).await
+}
+
+/// [`remove_owned_workspace`] with the live-process probe passed in (#9444),
+/// so a probe that cannot answer is shown to keep the workspace.
+/// Test: `owned_workspace_is_kept_when_the_holder_probe_fails_9444`.
+pub(super) async fn remove_owned_workspace_with(
+    id: &ManagedSessionId,
+    task: Option<&str>,
+    ws: &Path,
+    policy: ProvisioningDirt,
+    cwd_holder: fn(&Path) -> Option<String>,
 ) -> Result<WorkspaceVerdict, ManagedError> {
     let path = ws.to_path_buf();
     let owner = *id;
@@ -144,6 +161,12 @@ pub(super) async fn remove_owned_workspace(
                 let task = task.as_deref();
                 if let Some(reason) = owned_workspace_keep_reason(&path, &owner, task, policy) {
                     return WorktreeRemoval::Kept(reason);
+                }
+                // #9444: a live process standing in the workspace keeps it.
+                if let Some(holder) = cwd_holder(&path) {
+                    return WorktreeRemoval::Kept(format!(
+                        "refused immediately before removal: {holder}"
+                    ));
                 }
                 if policy == ProvisioningDirt::Discard {
                     warn_force_losses(&path);

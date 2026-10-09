@@ -70,7 +70,9 @@ struct Word {
     /// #9344: an assignment whose value substitution closed on the line.
     closed: bool,
     /// #9344: a `closed` assignment whose value held a quote or `\`, so
-    /// the `)` or backtick read as its close may be quoted text.
+    /// the `)` or backtick read as its close may be quoted text. #9360: or
+    /// an assignment whose value substitution the line leaves open, when a
+    /// quote or `\` means bash may have closed it or never opened it.
     quoted: bool,
 }
 
@@ -108,12 +110,17 @@ pub(super) fn line_runs_a_shell(line: &str) -> bool {
 /// other name — is shell-run.
 /// #9344: and every git, gh or tm among them keeps its trust
 /// ([`reader_keeps_trust`]), and no word is `quoted`: the shell may not have
-/// closed that substitution where the scan did.
+/// closed that substitution where the scan did. #9360: or left it open.
 /// Test: `operator_lines_read_as_data_only_for_a_literal_reader_9180`,
-/// `injected_reader_lines_are_not_data_9344`.
+/// `injected_reader_lines_are_not_data_9344`,
+/// `unclosed_quoted_value_substitution_lines_are_not_data_9360`,
+/// `parameter_expansion_parens_reach_the_floor_9360`.
 pub(super) fn line_reads_as_data(line: &str) -> bool {
     let words = operator_words(line);
-    !words.iter().any(|word| word.quoted)
+    // #9360 critic round: the scan does not track `${…}`, where a paren
+    // opens or closes no substitution, so such a line is shell-run.
+    !expansion_holds_a_paren(line.as_bytes())
+        && !words.iter().any(|word| word.quoted)
         && words
             .iter()
             .enumerate()
@@ -123,6 +130,40 @@ pub(super) fn line_reads_as_data(line: &str) -> bool {
                     && DATA_READERS.contains(&&*word.text)
                     && reader_keeps_trust(&words, at)
             })
+}
+
+/// Whether a `${…}` parameter expansion on `line` holds a `(`, `)`, backtick,
+/// quote or `\`, read to the end of the line when its `}` never comes (#9360
+/// critic round).
+///
+/// Why: bash opens and closes no substitution on such a paren, but
+/// [`operator_words`] does, so `X=${x:-( cat } . f <<'O'` read `cat` as the
+/// program and the body as data.
+/// What: from each `${`, counts `{`/`}` depth to the matching `}`. Quotes are
+/// not tracked, so a `"`, `'` or `\` inside the expansion is itself a `true`:
+/// a quoted or escaped `}` (`${x:-"}"( cat }`) does not end the expansion in
+/// bash, and the walk cannot tell where it does end.
+/// Test: `parameter_expansion_parens_reach_the_floor_9360`,
+/// `plain_parameter_expansions_stay_data_9360`.
+fn expansion_holds_a_paren(line: &[u8]) -> bool {
+    let mut at = 0;
+    while let Some(start) = line[at..].windows(2).position(|w| w == b"${") {
+        let mut depth = 0usize;
+        for &byte in &line[at + start + 1..] {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                // #9360 delta critic: a quote or `\` may hide the closing `}`.
+                b'(' | b')' | b'`' | b'"' | b'\'' | b'\\' => return true,
+                _ => {}
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        at += start + 2;
+    }
+    false
 }
 
 /// git global options whose value is the next word (#9344).
@@ -285,7 +326,14 @@ fn is_shell(word: &str) -> bool {
 /// and records each word's value-substitution depth, so [`prefix`] reaches
 /// the assignment. Quotes are not tracked, so a close after a quote or `\`
 /// inside the value marks the assignment `quoted`.
-/// Test: `injected_reader_lines_are_not_data_9344`.
+/// #9360: so does a value substitution still open at the end of the line
+/// when a quote or `\` the scan cannot place — any but a plain here-document
+/// delimiter's own ([`delimiter_quotes`]) — came after it opened, or a `'`
+/// or `\` came before it in the assignment word: bash may never have opened
+/// it, and the words the scan holds inside it may be programs.
+/// Test: `injected_reader_lines_are_not_data_9344`,
+/// `unclosed_quoted_value_substitution_lines_are_not_data_9360`,
+/// `delimiter_quoted_value_substitutions_stay_data_9360`.
 fn operator_words(line: &str) -> Vec<Word> {
     let mut words = Vec::new();
     let mut word = Vec::new();
@@ -295,13 +343,16 @@ fn operator_words(line: &str) -> Vec<Word> {
     // Whether the last byte closed a `)` or a backtick.
     let mut after_close = false;
     let mut in_tick = false;
-    // #9344: per open `(`, and for the open backtick, the index of the
-    // prefix assignment whose value it opened and the `quotes` count then,
-    // so its close restores program position and marks that assignment
-    // closed, and `quoted` when a quote or `\` came between.
-    let mut parens: Vec<Option<(usize, usize)>> = Vec::new();
-    let mut tick_value: Option<(usize, usize)> = None;
-    let mut quotes = 0usize;
+    // #9344: per open `(`, and for the open backtick, the [`ValueOpen`] of
+    // the prefix assignment whose value it opened, so its close restores
+    // program position and marks that assignment closed, and `quoted` when a
+    // quote or `\` came between.
+    let mut parens: Vec<Option<ValueOpen>> = Vec::new();
+    let mut tick_value: Option<ValueOpen> = None;
+    // #9360: a `'` or `\` in the word being read.
+    let mut escaped = false;
+    let bytes = line.as_bytes();
+    let is_quote = |b: &u8| matches!(b, b'\'' | b'"' | b'\\');
     let in_value = |word: &[u8], program: bool| {
         program && strip_assignment(&String::from_utf8_lossy(word)).is_some()
     };
@@ -333,13 +384,14 @@ fn operator_words(line: &str) -> Vec<Word> {
             *program = false;
         }
     };
-    for &byte in line.as_bytes() {
+    for (i, &byte) in bytes.iter().enumerate() {
         let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
         match byte {
-            b'\'' | b'"' | b'\\' => quotes += 1,
+            b'\'' | b'"' | b'\\' => escaped |= byte != b'"',
             b' ' | b'\t' | b'\n' | b'\r' => {
                 flush(&mut words, &mut word, &mut program, &mut glued, depth);
                 after_close = false;
+                escaped = false;
             }
             b'`' if !in_tick => {
                 in_tick = true;
@@ -353,12 +405,14 @@ fn operator_words(line: &str) -> Vec<Word> {
                     glued = true;
                 }
                 flush(&mut words, &mut word, &mut program, &mut glued, depth);
-                tick_value = opens_value.then(|| (words.len() - 1, quotes));
+                tick_value = opens_value.then(|| (words.len() - 1, i, escaped));
                 program = true;
                 after_close = false;
+                escaped = false;
             }
             _ if BREAKS.contains(&byte) => {
                 let opens_value = byte == b'(' && in_value(&word, program);
+                let escaped_open = std::mem::take(&mut escaped);
                 flush(&mut words, &mut word, &mut program, &mut glued, depth);
                 // #9344: `X=$(…) git`, `X=`…` git` — the close hands back
                 // program position and marks the assignment closed.
@@ -368,16 +422,16 @@ fn operator_words(line: &str) -> Vec<Word> {
                         tick_value.take()
                     }
                     b'(' => {
-                        parens.push(opens_value.then(|| (words.len() - 1, quotes)));
+                        parens.push(opens_value.then(|| (words.len() - 1, i, escaped_open)));
                         None
                     }
                     b')' => parens.pop().flatten(),
                     _ => None,
                 };
-                if let Some((at, seen)) = closes {
+                if let Some((at, open, _)) = closes {
                     words[at].closed = true;
                     // #9344: `X=$(echo ')' cat) f` — a quoted `)` closed it.
-                    words[at].quoted = quotes != seen;
+                    words[at].quoted = bytes[open..i].iter().any(is_quote);
                     program = true;
                 }
                 after_close = matches!(byte, b')' | b'`');
@@ -394,7 +448,68 @@ fn operator_words(line: &str) -> Vec<Word> {
     }
     let depth = usize::from(tick_value.is_some()) + parens.iter().flatten().count();
     flush(&mut words, &mut word, &mut program, &mut glued, depth);
+    // #9360: `X=$(echo '(' cat) . f <<'O'`, `X='$(true' . f <<'O'` — bash
+    // closed or never opened what the scan still holds open.
+    let skip = delimiter_quotes(bytes);
+    for (at, open, escaped_open) in parens.into_iter().flatten().chain(tick_value) {
+        let loose = (open..bytes.len()).any(|k| is_quote(&bytes[k]) && !skip[k]);
+        words[at].quoted |= escaped_open || loose;
+    }
     words
+}
+
+/// The open of a prefix assignment's value substitution (#9344, #9360): the
+/// assignment's word index, the byte offset of its `(` or backtick, and
+/// whether a `'` or `\` came before that byte in the assignment word.
+type ValueOpen = (usize, usize, bool);
+
+/// Per byte of `line`, whether it is a quote or `\` of a plain here-document
+/// delimiter (#9360): `<<` or `<<-`, optional blanks, then `'NAME'`,
+/// `"NAME"` or `\NAME` with `NAME` of letters, digits, `_`, `.` and `-`.
+///
+/// Why: `msg=$(cat <<'EOF'` leaves its value substitution open by design, and
+/// the delimiter's quotes change only how the body is read, never where the
+/// substitution closes. Any other quote still counts, failing closed.
+/// Test: `delimiter_quoted_value_substitutions_stay_data_9360`.
+fn delimiter_quotes(line: &[u8]) -> Vec<bool> {
+    let mut skip = vec![false; line.len()];
+    let name = |s: &[u8]| {
+        !s.is_empty()
+            && s.iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    };
+    let mut i = 0;
+    while i + 1 < line.len() {
+        let here = line[i] == b'<'
+            && line[i + 1] == b'<'
+            && line.get(i + 2) != Some(&b'<')
+            && (i == 0 || line[i - 1] != b'<');
+        if !here {
+            i += 1;
+            continue;
+        }
+        let mut start = i + 2;
+        start += usize::from(line.get(start) == Some(&b'-'));
+        while matches!(line.get(start), Some(b' ' | b'\t')) {
+            start += 1;
+        }
+        let end = line[start..]
+            .iter()
+            .position(|b| b.is_ascii_whitespace() || BREAKS.contains(b))
+            .map_or(line.len(), |n| start + n);
+        let plain = match &line[start..end] {
+            [b'\'', inner @ .., b'\''] | [b'"', inner @ .., b'"'] => name(inner),
+            [b'\\', inner @ ..] => name(inner),
+            _ => false,
+        };
+        if plain {
+            for at in start..end {
+                skip[at] = matches!(line[at], b'\'' | b'"' | b'\\');
+            }
+        }
+        i = end.max(i + 2);
+    }
+    skip
 }
 
 /// The value of a `NAME=value` word, or `None` when `word` is no assignment.
@@ -496,6 +611,11 @@ fn defined_names(command: &str) -> Vec<String> {
 #[cfg(test)]
 #[path = "data_reader_tests.rs"]
 mod data_reader_tests;
+
+// #9360: an open value substitution the scan cannot place is no data line.
+#[cfg(test)]
+#[path = "unclosed_value_substitution_tests.rs"]
+mod unclosed_value_substitution_tests;
 
 #[cfg(test)]
 mod tests {

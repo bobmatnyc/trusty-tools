@@ -14,7 +14,9 @@ use std::process::Command;
 
 use super::decommission::{WORKTREE_SENTINEL_FILE, remove_session_worktree};
 use super::decommission_force::ProvisioningDirt;
-use super::decommission_owned::{owned_workspace_keep_reason, remove_owned_workspace};
+use super::decommission_owned::{
+    owned_workspace_keep_reason, remove_owned_workspace, remove_owned_workspace_with,
+};
 use super::manager::SessionManager;
 use super::record::{ManagedSessionId, ManagedSessionState};
 use super::worktree_git_fixture::{GitWorktreeFixture, deny_all};
@@ -99,6 +101,68 @@ fn non_git_workspace(root: &Path, leaf: &str) -> PathBuf {
     let ws = root.join("owner").join("repo").join(leaf);
     std::fs::create_dir_all(&ws).expect("mkdir workspace");
     ws
+}
+
+/// A clean owned workspace: harness files and regenerable output only, the
+/// shape `clean_owned_workspace_is_still_removed` removes (#9444).
+fn clean_owned_workspace(root: &Path, leaf: &str) -> PathBuf {
+    let ws = non_git_workspace(root, leaf);
+    for rel in [
+        WORKTREE_SENTINEL_FILE,
+        ".claude/settings.json",
+        "target/debug/app",
+    ] {
+        write(&ws, rel);
+    }
+    ws
+}
+
+/// 🔴 #9444: an owned workspace a live process stands in is kept, and the
+/// reason names the holder. Fails before the fix: `remove_dir_all` ran under
+/// the process.
+#[tokio::test]
+async fn owned_workspace_a_live_process_stands_in_is_kept_9444() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let ws = clean_owned_workspace(root.path(), "live-9444");
+    let holder = super::worktree_git_fixture::StandingProcess::in_dir(&ws.join("target/debug"));
+
+    let verdict = remove_owned_workspace(
+        &ManagedSessionId::new(),
+        None,
+        &ws,
+        ProvisioningDirt::Refuse,
+    )
+    .await
+    .expect("a refusal is not an error");
+
+    assert!(!verdict.removed, "removed a workspace a process stands in");
+    assert!(ws.join("target/debug/app").exists());
+    let reason = verdict.kept_reason.unwrap_or_default();
+    assert!(holder.named_in(&reason), "{reason}");
+}
+
+/// 🔴 #9444 fail-open check: a holder probe that cannot answer keeps the
+/// owned workspace. Fails with the probe dropped: the clean workspace is
+/// then removed.
+#[tokio::test]
+async fn owned_workspace_is_kept_when_the_holder_probe_fails_9444() {
+    let root = crate::test_support::hermetic_temp_dir();
+    let ws = clean_owned_workspace(root.path(), "probe-9444");
+
+    let verdict = remove_owned_workspace_with(
+        &ManagedSessionId::new(),
+        None,
+        &ws,
+        ProvisioningDirt::Refuse,
+        super::worktree_git_fixture::probe_cannot_answer,
+    )
+    .await
+    .expect("a refusal is not an error");
+
+    assert!(!verdict.removed, "removed on an unanswered probe");
+    assert!(ws.exists());
+    let reason = verdict.kept_reason.unwrap_or_default();
+    assert!(reason.contains("could not run `lsof`"), "{reason}");
 }
 
 /// #8663: an owned workspace that is a git worktree holding an unpushed

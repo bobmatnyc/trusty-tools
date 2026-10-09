@@ -662,3 +662,42 @@ impl GitWorktreeFixture {
         git_ok(wt, &["commit", "-m", "local only"]);
     }
 }
+
+/// A live `sleep` whose cwd is a directory under test, killed and reaped on
+/// drop so a failed assertion leaks no process (#9444).
+pub(crate) struct StandingProcess(std::process::Child);
+
+impl StandingProcess {
+    /// Spawn the process standing in `dir`.
+    pub(crate) fn in_dir(dir: &Path) -> Self {
+        let child = Command::new("sleep")
+            .arg("120")
+            .current_dir(dir)
+            .spawn()
+            .expect("fixture: spawn a process standing in the directory");
+        Self(child)
+    }
+
+    /// Whether a removal's refusal `reason` names this process, or says the
+    /// `lsof` probe could not run, which refuses by design (ADR-0045).
+    pub(crate) fn named_in(&self, reason: &str) -> bool {
+        let unavailable = reason.contains("could not run `lsof`")
+            || reason.contains("`lsof` timed out after ")
+            || (reason.contains("`lsof` exited ")
+                && reason.contains(" while checking for live processes:"));
+        unavailable || reason.contains(&format!("pid {} ", self.0.id()))
+    }
+}
+
+/// A live-process probe that could not answer, in the words
+/// `worktree_liveness::process_holding` uses when `lsof` cannot run (#9444).
+pub(crate) fn probe_cannot_answer(_: &Path) -> Option<String> {
+    Some("could not run `lsof` to check for live processes: injected failure".to_string())
+}
+
+impl Drop for StandingProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
