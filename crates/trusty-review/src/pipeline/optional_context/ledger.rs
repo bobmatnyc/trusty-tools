@@ -92,7 +92,8 @@ impl ContextLedger {
             ("caller_context", true, ""),
             (
                 "issues",
-                request.issue_docs.is_some(),
+                // #9197 B2b amendment 5: either input asks; the off detail is B2a's.
+                request.issue_docs.is_some() || request.fetch_linked_issues,
                 "no issue_docs were sent",
             ),
             ("spec_docs", request.spec_docs, "spec_docs is off"),
@@ -133,8 +134,14 @@ impl ContextLedger {
         }
     }
 
-    /// Replace the record of the same source, or append `record`.
-    fn upsert(&mut self, record: ContextSourceRecord) {
+    /// Replace the record of the same source, or append `record`, when
+    /// enabled (#9197 B2b: the linked-issue step replaces the `issues` row).
+    ///
+    /// Test: `exactly_one_issues_row_survives_finish`, `finish_does_not_duplicate_a_row`.
+    pub(crate) fn upsert(&mut self, record: ContextSourceRecord) {
+        if !self.enabled {
+            return;
+        }
         match self.records.iter_mut().find(|r| r.source == record.source) {
             Some(slot) => *slot = record,
             None => self.records.push(record),

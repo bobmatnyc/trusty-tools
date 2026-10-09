@@ -231,3 +231,15 @@ fn run_symbol_context_flag_sets_the_request() {
     assert!(!run_request(&args).symbol_context);
     assert!(RunArgs::try_parse_from(["run", "--symbol-context=yes"]).is_err());
 }
+
+/// #9197 B2b (AC13): `--fetch-linked-issues` parses, defaults off and turns
+/// the ledger on.
+#[test]
+fn run_fetch_linked_issues_flag_sets_the_request() {
+    let args = RunArgs::try_parse_from(["run", "--fetch-linked-issues"]).expect("parse");
+    let request = run_request(&args);
+    assert!(request.fetch_linked_issues && request.requested_new() && request.ledger_enabled());
+    let args = RunArgs::try_parse_from(["run"]).expect("parse");
+    assert!(!run_request(&args).fetch_linked_issues);
+    assert!(RunArgs::try_parse_from(["run", "--fetch-linked-issues=yes"]).is_err());
+}

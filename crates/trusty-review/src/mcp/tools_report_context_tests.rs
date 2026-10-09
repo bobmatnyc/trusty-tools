@@ -162,7 +162,8 @@ fn both_review_tools_list_report_context() {
 /// #9194 byte identity: `tools/list` is the golden captured before B6 once
 /// the new optional `report_context` parameter, (#9195) the
 /// `changed_files` and `changed_files_budget` parameters, and (#9196)
-/// `symbol_context` are set aside. Each
+/// `symbol_context` are set aside, and (#9197 B2b) `fetch_linked_issues`,
+/// on `review_pr` only. Each
 /// set-aside name must be listed, so a stripped property is never one the
 /// golden did not expect. `UPDATE_GOLDEN=1` rewrites the golden.
 #[test]
@@ -177,6 +178,7 @@ fn tools_list_is_unchanged_apart_from_ledger_parameters() {
     if let Some(list) = tools.as_array_mut() {
         for tool in list {
             let review = tool["name"] == "review_pr" || tool["name"] == "review_diff";
+            let review_pr = tool["name"] == "review_pr"; // #9197 B2b
             if let Some(props) = tool
                 .pointer_mut("/inputSchema/properties")
                 .and_then(Value::as_object_mut)
@@ -185,6 +187,8 @@ fn tools_list_is_unchanged_apart_from_ledger_parameters() {
                     let removed = props.remove(name).is_some();
                     assert_eq!(removed, review, "{name} listed on a review tool only");
                 }
+                let removed = props.remove("fetch_linked_issues").is_some();
+                assert_eq!(removed, review_pr, "fetch_linked_issues on review_pr only");
             }
         }
     }
