@@ -121,24 +121,42 @@ fn reviewed_change_takes_effect_on_refresh() {
 
 #[test]
 fn same_size_same_mtime_edit_is_seen_on_reload() {
-    let (repo, _home, mut loader) = loaded();
-    let path = repo.routes_file();
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .expect("mtime");
-    let before = std::fs::metadata(&path).expect("meta").len();
-    // Same length, one recipient digit changed, committed.
-    repo.commit_routes(&slack_routes("bob-dm", "U0ABCDEF9"));
-    File::options()
-        .write(true)
-        .open(&path)
-        .and_then(|f| f.set_modified(mtime))
-        .expect("set mtime");
-    assert_eq!(std::fs::metadata(&path).expect("meta").len(), before);
-    assert!(loader.refresh(), "a same-size, same-mtime edit was missed");
-    let routes = loader.policy().routes();
-    assert_eq!(routes.len(), 1);
-    assert_eq!(routes[0].recipient(), "U0ABCDEF9");
+    // An edit that keeps the length and the mtime, and moves no git ref:
+    // only the content tells it apart.
+    let rewrite = |path: &Path, text: &str| {
+        let meta = std::fs::metadata(path).expect("meta");
+        let mtime = meta.modified().expect("mtime");
+        assert_eq!(meta.len(), text.len() as u64, "the edit changes the size");
+        std::fs::write(path, text).expect("write");
+        File::options()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_modified(mtime))
+            .expect("set mtime");
+    };
+    let repo = Repo::init("main");
+    repo.commit_routes(&bob());
+    let home = Home::listing(&[repo.dir()]);
+    // A trailing space keeps `enabled: true ` as long as `enabled: false`.
+    let on = host_yaml(&[repo.dir()]).replace(
+        "slack:\n    enabled: true\n",
+        "slack:\n    enabled: true \n",
+    );
+    home.write_host(&on);
+    let mut loader = PolicyLoader::new(home.request());
+    assert_eq!(names(loader.report()), ["bob-dm"]);
+    // The project file: an unreviewed edit is seen and shown Stale.
+    rewrite(&repo.routes_file(), &slack_routes("bob-dm", "U0ABCDEF9"));
+    assert!(loader.refresh(), "a same-size project edit was missed");
+    assert_eq!(state(loader.report(), repo.dir()), FileState::Stale);
+    // The host file: a narrowing applies at once.
+    let off = on.replace("enabled: true \n", "enabled: false\n");
+    rewrite(&home.host_path(), &off);
+    assert!(loader.refresh(), "a same-size host edit was missed");
+    assert!(
+        loader.policy().is_empty(),
+        "the disabled channel kept its route"
+    );
 }
 
 #[test]
