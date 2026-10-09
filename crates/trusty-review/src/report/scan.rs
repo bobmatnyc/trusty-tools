@@ -160,9 +160,10 @@ pub fn list_tracked_files(root: &Path) -> Vec<PathBuf> {
     list_files(root)
 }
 
-/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+/// The prefix of the only git stderr CONSISTENT with "there is genuinely no
+/// repository here".
 ///
-/// Why: the parenthesised clause is load-bearing. Git emits
+/// Why: the opening parenthesis is load-bearing. Git emits
 /// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
 /// shorter phrase `not a git repository` matches a broken repo and a
 /// genuinely-absent one alike — and here the broken repo is the dangerous one,
@@ -172,12 +173,17 @@ pub fn list_tracked_files(root: &Path) -> Vec<PathBuf> {
 /// `.git` too, where the repository is real. [`classify_ls_files_failure`]
 /// corroborates it with a filesystem witness before concluding anything.
 ///
-/// What: verified byte-identical against git 2.54.0. Any wording drift falls
-/// through to [`Corpus::Refused`] — the fail-closed direction. Mirrors
-/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727); #4735
-/// extracts the shared probe both will call.
-/// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`.
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+/// What: covers both wordings of git's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form (`: (null)`, `: '<GIT_DIR>'`). Any other
+/// wording falls through to [`Corpus::Refused`] — the fail-closed direction.
+/// Mirrors `trusty-search`'s `core::git::NO_REPO_STDERR_PREFIX` (#9475);
+/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727) still
+/// matches the first wording only; #4735 extracts the shared probe.
+/// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`,
+/// `scan_tests.rs::classify_ls_files_failure_accepts_the_mount_boundary_wording`.
+// #9495: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// What `git ls-files` was able to tell us about `root`.
 ///
@@ -203,9 +209,10 @@ enum Corpus {
 /// Why a failed `git ls-files` failed — the gate the walk fallback turns on.
 ///
 /// Why: git's "no repository" message is not proof there is no repository. It
-/// emits [`NO_REPO_STDERR`] whenever discovery never got far enough to conclude
-/// otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
-/// `GIT_CEILING_DIRECTORIES` stopping the upward walk. In every one of those the
+/// emits [`NO_REPO_STDERR_PREFIX`] whenever discovery never got far enough to
+/// conclude otherwise — an unreadable `.git`, an unreadable `.git/HEAD`,
+/// `GIT_CEILING_DIRECTORIES`, or a filesystem boundary stopping the upward walk
+/// (#9495). In every one of those the
 /// repository (and its `.gitignore`) is real. `symlink_metadata` on an ancestor
 /// `.git` is a witness git does not use; if the two disagree, that disagreement
 /// IS the "cannot be asked" state.
@@ -222,9 +229,11 @@ enum Corpus {
 /// Test: `scan_tests.rs::scan_refuses_when_git_is_broken_rather_than_walking`,
 /// `scan_tests.rs::classify_ls_files_failure_corroborates_the_no_repo_message`,
 /// `scan_tests.rs::classify_ls_files_failure_rejects_near_miss_and_unknown_wordings`,
-/// `scan_tests.rs::classify_ls_files_failure_canonicalises_before_walking_ancestors`.
+/// `scan_tests.rs::classify_ls_files_failure_canonicalises_before_walking_ancestors`,
+/// `scan_tests.rs::classify_ls_files_failure_refuses_the_mount_boundary_wording_under_a_real_repo`.
 fn classify_ls_files_failure(root: &Path, stderr: &str) -> Corpus {
-    if !stderr.contains(NO_REPO_STDERR) {
+    // #9495: prefix match accepts the mount-boundary wording; the witness below stays the gate.
+    if !stderr.contains(NO_REPO_STDERR_PREFIX) {
         return Corpus::Refused;
     }
     match root.canonicalize() {

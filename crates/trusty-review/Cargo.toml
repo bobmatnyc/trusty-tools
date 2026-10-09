@@ -137,7 +137,7 @@ name        = "trusty-review"
 # #9196 lands under the same unpublished 0.38.1: additive only (a
 # `#[non_exhaustive]` request field and builder, a default-bodied
 # `SearchClient::call_chain`, a CLI flag and an MCP argument).
-version     = "0.38.1"
+version     = "0.38.2"
 edition     = "2024"
 rust-version.workspace = true
 license.workspace      = true
