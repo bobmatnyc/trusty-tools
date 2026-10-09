@@ -6,8 +6,8 @@
 //! poller, the typed wire shapes, and the pure rendering helpers here (away
 //! from the coordinator chat in `dashboard.rs`) keeps both surfaces small and
 //! independently testable.
-//! What: [`HealthClient`] is a typed `reqwest` transport for one daemon's
-//! `/health` + list endpoints; [`PanelData`] is the projected per-daemon
+//! What: [`HealthClient`] is a Unix-socket RPC client for one daemon's health
+//! and list methods (#6286, #9214); [`PanelData`] is the projected per-daemon
 //! payload; [`PanelState`] is `Connecting` / `Online` / `Offline`;
 //! [`HealthScreen`] holds both panels plus focus and renders the side-by-side
 //! layout. A background tokio task drives polling and pushes [`HealthUpdate`]s
@@ -37,16 +37,20 @@ pub use format::{
     ascii_bar, format_bytes, format_count, format_relative_time, format_rss, format_uptime,
     format_with_commas, memory_panel_lines, search_panel_lines,
 };
-pub use probes::client_for;
+pub use probes::{client_for, resolve_search_socket_or_unreachable};
 pub use render::render;
 pub use screen::{
     collections_lines, collections_lines_at_tick, header_lines, health_tab_lines, index_tab_lines,
     palace_index_tab_lines, service_name, tab_bar,
 };
 pub use types::{
-    CollectionRow, DEFAULT_SEARCH_URL, Daemon, HealthClient, HealthScreen, HealthTab, HealthUpdate,
-    LOG_BUFFER_CAP, LogBuffer, POLL_INTERVAL, PalaceActivity, PanelData, PanelState,
+    CollectionRow, Daemon, HealthClient, HealthScreen, HealthTab, HealthUpdate, LOG_BUFFER_CAP,
+    LogBuffer, POLL_INTERVAL, PalaceActivity, PanelData, PanelState,
 };
 
 #[cfg(test)]
 mod tests;
+
+// #9214: the search legs over the daemon's socket.
+#[cfg(test)]
+mod search_uds_tests;

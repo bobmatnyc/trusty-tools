@@ -1018,15 +1018,53 @@ fn compose_banner_handles_unknown_count() {
 
 /// Why: §3.1 makes probes fail-safe — a down search daemon yields `○ unreachable`
 /// and never panics or hangs the TUI.
-/// What: probes a guaranteed-dead loopback address and asserts the outcome is
-/// inactive.
+/// What: probes a socket path nothing binds (#9214) and asserts the outcome
+/// is inactive.
 /// Test: this IS the test.
 #[tokio::test]
 async fn probe_unreachable_search_is_inactive() {
-    let outcome = probe_search(Some(&dead_loopback_url())).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outcome = probe_search(Some(&dir.path().join("missing.sock"))).await;
     assert!(
         !outcome.active,
         "an unreachable search daemon must probe inactive"
+    );
+}
+
+/// Why: #9214 — the banner's search leg reaches the daemon over its socket.
+/// What: a mock answering `search.health` probes active.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_search_over_the_socket_is_active() {
+    let daemon = crate::uds_mock::spawn(crate::uds_mock::always(
+        serde_json::json!({ "version": "9.9.9" }),
+    ))
+    .await;
+    let outcome = probe_search(Some(daemon.socket())).await;
+    assert!(outcome.active, "a live search socket must probe active");
+}
+
+/// Why: #9214 Fail-Open Check — a daemon that refuses `search.health` probes
+/// unreachable, never panics.
+/// What: a mock refusing every call; asserts the probe reached it and came back
+/// inactive.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_search_on_a_refusing_daemon_is_inactive() {
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    let daemon = crate::uds_mock::spawn(move |method: &str, _params: serde_json::Value| {
+        recorder.lock().expect("recorder").push(method.to_string());
+        Box::pin(async { Err(crate::uds_mock::RpcError::internal("refused")) })
+    })
+    .await;
+    let outcome = probe_search(Some(daemon.socket())).await;
+    assert!(!outcome.active, "a refused health probe must be inactive");
+    assert_eq!(
+        *seen.lock().expect("recorder"),
+        vec!["search.health".to_string()]
     );
 }
 

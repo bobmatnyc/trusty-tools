@@ -15,12 +15,12 @@ use super::probes::{
 use super::screen::format_count_suffix;
 use super::types::HealthWire;
 use super::{
-    CollectionRow, DEFAULT_SEARCH_URL, Daemon, HealthScreen, HealthTab, HealthUpdate,
-    LOG_BUFFER_CAP, LogBuffer, PalaceActivity, PanelData, PanelState, activity_color, ascii_bar,
-    client_for, collections_lines, collections_lines_at_tick, format_bytes, format_count,
-    format_relative_time, format_rss, format_uptime, format_with_commas, header_lines,
-    health_tab_lines, index_tab_lines, memory_panel_lines, palace_activity, palace_index_tab_lines,
-    render, search_panel_lines, service_name, spinner_frame, tab_bar,
+    CollectionRow, Daemon, HealthScreen, HealthTab, HealthUpdate, LOG_BUFFER_CAP, LogBuffer,
+    PalaceActivity, PanelData, PanelState, activity_color, ascii_bar, client_for,
+    collections_lines, collections_lines_at_tick, format_bytes, format_count, format_relative_time,
+    format_rss, format_uptime, format_with_commas, header_lines, health_tab_lines, index_tab_lines,
+    memory_panel_lines, palace_activity, palace_index_tab_lines, render, search_panel_lines,
+    service_name, spinner_frame, tab_bar,
 };
 use ratatui::{Terminal, backend::TestBackend, style::Color};
 
@@ -29,6 +29,10 @@ use ratatui::{Terminal, backend::TestBackend, style::Color};
 /// `DEFAULT_MEMORY_URL` constant (issue #2030 — the real default is now
 /// resolved dynamically via discovery, not a fixed literal).
 const TEST_MEMORY_URL: &str = "http://127.0.0.1:19999";
+
+/// Test-only stand-in for the trusty-search socket: a path nothing binds
+/// (#9214 removed the TCP default this replaces).
+const TEST_SEARCH_SOCKET: &str = "/nonexistent/trusty-search/test.sock";
 
 /// A sample online search payload for rendering tests.
 fn sample_search() -> PanelData {
@@ -58,14 +62,6 @@ fn sample_memory() -> PanelData {
         count_c: 14,
         count_d: 1_200,
     }
-}
-
-#[test]
-fn default_urls_are_local() {
-    // Only the search daemon has a fixed local convention port; the memory
-    // default is resolved dynamically via discovery (issue #2030), so there
-    // is no `DEFAULT_MEMORY_URL` constant left to assert on.
-    assert_eq!(DEFAULT_SEARCH_URL, "http://127.0.0.1:7878");
 }
 
 #[test]
@@ -140,10 +136,7 @@ fn panel_state_is_online() {
 
 #[test]
 fn search_panel_lines_format_fields() {
-    let lines = search_panel_lines(
-        &PanelState::Online(sample_search()),
-        "http://127.0.0.1:7878",
-    );
+    let lines = search_panel_lines(&PanelState::Online(sample_search()), TEST_SEARCH_SOCKET);
     assert!(lines.iter().any(|l| l.contains("SEARCH [●] v0.3.67")));
     // 1280 MB renders as 1.2GB (1280 / 1024 = 1.25, rounded to one place).
     assert!(lines.iter().any(|l| l.contains("RSS: 1.2GB")));
@@ -210,7 +203,7 @@ fn new_screen_starts_connecting() {
     let screen = HealthScreen::new("http://a", "http://b");
     assert_eq!(screen.search, PanelState::Connecting);
     assert_eq!(screen.memory, PanelState::Connecting);
-    assert_eq!(screen.search_url, "http://a");
+    assert_eq!(screen.search_socket, "http://a");
     assert_eq!(screen.focus, Daemon::Search);
 }
 
@@ -256,8 +249,8 @@ fn focused_url_follows_focus() {
 
 #[test]
 fn health_client_stores_base_url() {
-    let client = client_for(Daemon::Search, "http://127.0.0.1:7878");
-    assert_eq!(client.base_url(), "http://127.0.0.1:7878");
+    let client = client_for(Daemon::Search, TEST_SEARCH_SOCKET);
+    assert_eq!(client.base_url(), TEST_SEARCH_SOCKET);
 }
 
 #[tokio::test]
@@ -604,7 +597,7 @@ fn service_name_matches_focus() {
 
 #[test]
 fn header_lines_show_focus_summary() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
+    let mut screen = HealthScreen::new(TEST_SEARCH_SOCKET, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     let lines = header_lines(&screen);
     assert!(lines[0].contains("trusty-search"));
@@ -798,7 +791,7 @@ fn ascii_bar_fills_proportionally() {
 
 #[test]
 fn health_tab_lines_show_gauges() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
+    let mut screen = HealthScreen::new(TEST_SEARCH_SOCKET, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     let lines = health_tab_lines(&screen);
     assert!(lines.iter().any(|l| l.starts_with("Memory ")));
@@ -1305,7 +1298,7 @@ fn index_tab_lines_routes_to_palace_when_focus_memory() {
 
 #[test]
 fn render_health_smoke() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
+    let mut screen = HealthScreen::new(TEST_SEARCH_SOCKET, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     screen.memory = PanelState::Offline {
         last_error: "connection refused".into(),

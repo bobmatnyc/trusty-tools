@@ -46,11 +46,13 @@ where
     // show; otherwise the coordinator chat gets the full width immediately.
     let mut state = DashboardState::default();
     let mut screen = Screen::default();
-    // #6286: the memory panel dials a derived socket rather than a discovered
-    // address. This resolved value is what the background poller uses for the
-    // TUI's lifetime.
+    // #6286 / #9214: both panels dial a derived socket rather than a
+    // discovered address. These resolved values are what the background
+    // pollers use for the TUI's lifetime.
     let mut health_screen = HealthScreen::new(
-        health::DEFAULT_SEARCH_URL,
+        health::resolve_search_socket_or_unreachable()
+            .display()
+            .to_string(),
         trusty_common::memory_rpc::resolve_memory_socket_or_unreachable()
             .display()
             .to_string(),
@@ -60,7 +62,7 @@ where
     // the loop drains without blocking.
     let (health_tx, mut health_rx) = tokio::sync::mpsc::channel::<HealthUpdate>(16);
     spawn_health_pollers(
-        health_screen.search_url.clone(),
+        health_screen.search_socket.clone(),
         health_screen.memory_socket.clone(),
         health_tx,
     );
@@ -275,7 +277,7 @@ pub(super) async fn refresh_health_data(screen: &mut health::HealthScreen) {
     // Refresh both services so a `Tab` toggle does not show stale data.
     for daemon in [health::Daemon::Search, health::Daemon::Memory] {
         let url = match daemon {
-            health::Daemon::Search => screen.search_url.clone(),
+            health::Daemon::Search => screen.search_socket.clone(),
             health::Daemon::Memory => screen.memory_socket.clone(),
         };
         let client = health::client_for(daemon, &url);

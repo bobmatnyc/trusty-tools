@@ -11,7 +11,8 @@
 //! conditions).
 //! What: the pure [`compose_banner`] (probe results + count → the exact banner
 //! text, unit-testable offline), the [`ProbeOutcome`] result type, the async
-//! [`probe_memory`] / [`probe_search`] probes (short-timeout, fail-safe), and
+//! [`probe_memory`] / [`probe_search`] socket probes (short-timeout,
+//! fail-safe; search moved off HTTP in #9214), and
 //! [`print_startup_banner`] which runs the probes and prints the banner to
 //! stderr (stdout stays clean) before the alternate screen is entered.
 //! Test: `super::tests` covers the pure composition (version, glyphs, palace
@@ -22,9 +23,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::tui::health::DEFAULT_SEARCH_URL;
+use crate::daemon::search_rpc::{METHOD_HEALTH, call_at};
+use crate::tui::health::resolve_search_socket_or_unreachable;
 
-/// Per-probe HTTP timeout for the startup backplane checks.
+/// Per-probe socket timeout for the startup backplane checks.
 ///
 /// Why: a down (or slow) memory/search daemon must not stall the operator's
 /// startup; a short timeout turns an unresponsive service into a clean
@@ -213,31 +215,30 @@ fn startup_line(active_count: Option<usize>) -> String {
     format!("{lead}  ·  {HELP_HINT}\n")
 }
 
-/// Does `base` answer a 2xx on `/health`?
-///
-/// Why: trusty-search still serves HTTP, so the banner's search leg keeps the
-/// GET it always had. The memory leg dials a socket instead since #6286.
-async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
-    matches!(
-        client.get(format!("{base}/health")).send().await,
-        Ok(resp) if resp.status().is_success()
-    )
-}
-
 /// Probe trusty-search health for the startup banner (fail-safe).
 ///
 /// Why: §3.1 requires search to be confirmed via its plain health probe; a
 /// failure must degrade to `○ unreachable` (the TUI still opens), never abort.
-/// What: GETs `<base>/health` with a short timeout; any transport or non-2xx
-/// response yields [`ProbeOutcome::unreachable`]. `base` defaults to
-/// [`DEFAULT_SEARCH_URL`] when `None`. Builds a single bounded client and reuses
-/// it for the health check.
-/// Test: `probe_unreachable_search_is_inactive` drives the dead-daemon branch;
-/// the live path is exercised by launching the TUI against a running daemon.
-pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
-    let base = base.unwrap_or(DEFAULT_SEARCH_URL);
-    let client = probe_client();
-    if health_ok_with(&client, base).await {
+/// What: calls `search.health` on the daemon's socket with a short timeout;
+/// a dead socket or a refusal yields [`ProbeOutcome::unreachable`]. `socket`
+/// defaults to the resolved trusty-search socket when `None` (#9214).
+/// Test: `probe_search_over_the_socket_is_active`,
+/// `probe_search_on_a_refusing_daemon_is_inactive`,
+/// `probe_unreachable_search_is_inactive`.
+pub async fn probe_search(socket: Option<&Path>) -> ProbeOutcome {
+    let resolved;
+    let socket = match socket {
+        Some(s) => s,
+        None => {
+            resolved = resolve_search_socket_or_unreachable();
+            resolved.as_path()
+        }
+    };
+    // #9214: the socket method replaces GET /health on the retired listener.
+    if call_at(socket, METHOD_HEALTH, serde_json::json!({}), PROBE_TIMEOUT)
+        .await
+        .is_ok()
+    {
         ProbeOutcome::active(None)
     } else {
         ProbeOutcome::unreachable(None)
@@ -336,20 +337,6 @@ pub(super) async fn ensure_user_palace_at(socket: &Path) -> bool {
     .is_ok()
 }
 
-/// Build the short-timeout HTTP client shared by the startup probes.
-///
-/// Why: every probe needs the same bounded client so a hung service cannot stall
-/// startup; centralising construction keeps the timeout single-sourced.
-/// What: a `reqwest::Client` with [`PROBE_TIMEOUT`], falling back to the default
-/// client if the builder somehow fails (it cannot in practice).
-/// Test: covered indirectly by the probe tests.
-pub(super) fn probe_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-        .unwrap_or_default()
-}
-
 /// Run the backplane probes and print the startup banner to stderr.
 ///
 /// Why: §3.1 requires the banner to render before the interactive view opens.
@@ -363,15 +350,15 @@ pub(super) fn probe_client() -> reqwest::Client {
 /// crate `CARGO_PKG_VERSION` and `active_count`, and writes it to stderr. The
 /// composed banner ends with a single trailing newline (from `startup_line`), so
 /// `eprintln!` adds exactly one blank separator after it — not two. `memory_socket`
-/// / `search_url` default to the canonical local addresses when `None`.
+/// / `search_socket` default to the resolved daemon sockets when `None`.
 /// Test: composition is unit-tested via [`compose_banner`]; this print-only glue
 /// is exercised by launching the TUI.
 pub async fn print_startup_banner(
     memory_socket: Option<&Path>,
-    search_url: Option<&str>,
+    search_socket: Option<&Path>,
     active_count: Option<usize>,
 ) {
-    let (memory, search) = tokio::join!(probe_memory(memory_socket), probe_search(search_url));
+    let (memory, search) = tokio::join!(probe_memory(memory_socket), probe_search(search_socket));
     let banner = compose_banner(env!("CARGO_PKG_VERSION"), &memory, &search, active_count);
     eprintln!("{banner}");
 }
