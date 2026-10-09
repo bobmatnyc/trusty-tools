@@ -98,7 +98,7 @@ The scripts use the Python standard library only.
 ### 2. Make the project
 
 ```sh
-dir=~/trusty-mpm-projects/architect     # any path; use it in every step
+dir=~/architect     # any path; use it in every step, and set ARCHITECT_PROJECT_DIR="$dir" if it is not the default
 mkdir -p "$dir" && git -C "$dir" init   # local repo, no remote
 printf 'profile = "supervisor"\n' > "$dir/.trusty-mpm.toml"
 ```
