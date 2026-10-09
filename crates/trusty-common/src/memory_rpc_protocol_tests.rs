@@ -286,11 +286,21 @@ fn a_pre_handshake_daemon_is_refused_once_protocol_1_is_unsupported() {
 /// called, and the operator is told to restart it — once per process, not on
 /// every call of a long-lived client.
 /// What: two such daemons on two sockets (so the verdict cache cannot hide the
-/// second check); both are called, and the process emits exactly one warning
-/// and asks `memory.health` for a version at most once.
+/// second check); both are called, and the process logs exactly one warning
+/// that names the daemon version and the restart, and asks `memory.health`
+/// for a version at most once.
 /// Test: itself.
 #[tokio::test]
 async fn a_pre_handshake_daemon_is_called_and_warned_about_once_per_process() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    // The current-thread runtime runs this body on one thread, so a
+    // thread-default subscriber sees every event `ensure_memory_protocol_at`
+    // emits.
+    let warns = WarnLog::default();
+    let logged = Arc::clone(&warns.0);
+    let _log = tracing::subscriber::set_default(tracing_subscriber::registry().with(warns));
+
     let health_calls = Arc::new(AtomicU64::new(0));
     let mut fakes = Vec::new();
     let mut status_calls = Vec::new();
@@ -330,4 +340,28 @@ async fn a_pre_handshake_daemon_is_called_and_warned_about_once_per_process() {
         "exactly one warning per process"
     );
     assert!(health_calls.load(Ordering::SeqCst) <= 1);
+    let logged = logged.lock().expect("warn log");
+    assert_eq!(logged.len(), 1, "one logged warning: {logged:?}");
+    assert!(
+        logged[0].contains("0.29.0") && logged[0].contains("Restart the trusty-memory daemon"),
+        "the warning names the daemon version and the restart: {logged:?}"
+    );
+}
+
+/// Collects the WARN events `memory_rpc` logs, for the once-per-process test.
+#[derive(Clone, Default)]
+struct WarnLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnLog {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let meta = event.metadata();
+        if *meta.level() != tracing::Level::WARN || meta.target() != "trusty_common::memory_rpc" {
+            return;
+        }
+        let mut text = String::new();
+        event.record(&mut |_: &tracing::field::Field, v: &dyn std::fmt::Debug| {
+            text.push_str(&format!("{v:?} "));
+        });
+        self.0.lock().expect("warn log").push(text);
+    }
 }
