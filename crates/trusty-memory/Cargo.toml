@@ -63,7 +63,8 @@ name = "trusty-memory"
 # changed shape.
 # 0.29.5 (Refs #9299): patch — recall_all searches resident palaces by default; 0.29.4 is live on crates.io. Additive only.
 # 0.29.6 (Refs #9433): patch — trusty-common floor moves 0.54.4 -> 0.54.5 so a locked install carries the #9433 fix. No source change.
-version = "0.31.0"
+# 0.31.1 (Refs #9340): patch — memory_list reports a read-only `fact_key` per drawer; 0.31.0 is live on crates.io. Additive only.
+version = "0.31.1"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
