@@ -68,7 +68,8 @@ pub struct ScopesResponse {
 /// Per-key metadata. Never carries characters of the value.
 ///
 /// Why: DOC-74 §15.6 — `list` shows length and `updated_at` only.
-/// What: the row the names-only index stores, as it crosses the wire.
+/// What: the index row's name, length and time, plus the backend's agents
+/// flag, as they cross the wire.
 /// Test: `store_list_reports_length_and_time_never_characters`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -80,7 +81,8 @@ pub struct KeyMeta {
     /// Last write, in seconds since the Unix epoch.
     pub updated_at: u64,
     /// Whether `exec` may inject this key into a Claude Code process tree
-    /// (DOC-74 §15.8). Default OFF.
+    /// (DOC-74 §15.8). Default OFF. #9070: taken from the backend's own
+    /// flag item, never from the index row; the index never reports it ON.
     pub agents_may_use: bool,
 }
 

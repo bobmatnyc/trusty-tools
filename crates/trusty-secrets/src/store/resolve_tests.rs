@@ -267,6 +267,129 @@ fn resolve_agent_gate_allows_a_flagged_key() {
     );
 }
 
+/// Rewrite `vault`'s index file with std::fs so `name`'s row claims
+/// `"agents_may_use": true`, as any same-uid process can (#9070).
+fn hand_flag_on(store: &SecretStore, vault: &VaultName, name: &str) {
+    let path = store.index().path_for(vault);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    json["keys"][name]["agents_may_use"] = serde_json::Value::Bool(true);
+    std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+}
+
+/// Why: #9070 — the index JSON is a 0600 file any same-uid process can
+/// edit, so a hand-set `"agents_may_use": true` must not open the agent
+/// gate. Red before the flag moved to the backend: the edit resolved.
+/// Test: itself.
+#[test]
+fn resolve_agent_gate_ignores_a_hand_edited_index_flag() {
+    let (_tmp, backend, store) = fixture();
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+
+    match resolve(&store, "secret://DEPLOY_TOKEN", true) {
+        Err(SecretsError::AgentUseRefused { key, vault }) => {
+            assert_eq!(key, "DEPLOY_TOKEN");
+            assert_eq!(vault, "trusty/acme/web");
+        }
+        other => panic!("expected AgentUseRefused, got {other:?}"),
+    }
+    assert_eq!(backend.reads(), 0, "a refused key is never read");
+}
+
+/// Why: #9070 — list and get report the flag the backend holds, so the same
+/// hand edit cannot make them show a key as agent-usable. Red before the
+/// fix: both reported the edited `true`.
+/// Test: itself.
+#[test]
+fn store_list_and_get_ignore_a_hand_edited_index_flag() {
+    let (_tmp, _backend, store) = fixture();
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+
+    let listed = store.list(&project()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].agents_may_use, "list reports the flag OFF");
+    let row = store
+        .index()
+        .get(&project(), &key("DEPLOY_TOKEN"))
+        .unwrap()
+        .unwrap();
+    assert!(!row.agents_may_use, "get reports the flag OFF");
+}
+
+/// A [`MemoryBackend`] whose flag lookups fail, standing in for a Keychain
+/// that cannot answer for the flag item (#9070).
+#[derive(Debug, Default)]
+struct FlagFaultBackend(MemoryBackend);
+
+impl SecretBackend for FlagFaultBackend {
+    fn id(&self) -> crate::api::BackendId {
+        self.0.id()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.0.get(vault, key)
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, v: &SecretValue) -> Result<(), SecretsError> {
+        self.0.set(vault, key, v)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.0.delete(vault, key)
+    }
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Err(SecretsError::Backend {
+            backend: "memory".to_string(),
+            vault: vault.to_string(),
+            key: key.to_string(),
+            reason: "flag lookup failed".to_string(),
+        })
+    }
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        self.0.set_agents_may_use(vault, key, allowed)
+    }
+}
+
+/// Why: #9070 Fail-Open Check — a flag lookup that fails must never read as
+/// ON. With the flag item present but unreadable, the agent gate returns
+/// the backend error before the value is read, and list fails rather than
+/// reporting the key.
+/// Test: itself.
+#[test]
+fn resolve_agent_gate_fails_closed_when_the_flag_read_fails() {
+    let tmp = TempDir::new().unwrap();
+    let backend = Arc::new(FlagFaultBackend::default());
+    let store = SecretStore::new(
+        Arc::clone(&backend) as Arc<dyn SecretBackend>,
+        NamesIndex::at(tmp.path().join("index")),
+    );
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    store
+        .set_agents_may_use(&project(), &key("DEPLOY_TOKEN"), true)
+        .unwrap();
+
+    let err = resolve(&store, "secret://DEPLOY_TOKEN", true).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(!format!("{err} {err:?}").contains(SENTINEL));
+    assert_eq!(backend.0.reads(), 0, "the value is never read");
+    assert!(matches!(
+        store.list(&project()),
+        Err(SecretsError::Backend { .. })
+    ));
+    // Without an agent parent the flag is not consulted.
+    assert_eq!(
+        resolve(&store, "secret://DEPLOY_TOKEN", false).unwrap(),
+        SENTINEL
+    );
+}
+
 /// Why: tier 1 and 2 — entries that are not references reach the child
 /// unchanged, in order; references resolve.
 /// Test: itself.

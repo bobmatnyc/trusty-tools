@@ -28,9 +28,11 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// vault; an explicit `<owner>/KEY` or `<owner>/<repo>/KEY` searches only
 /// that vault, which must be one of `scopes`, else
 /// [`SecretsError::VaultOutOfScope`] before any read — #9328). With
-/// `agent_parent`, a row whose "agents may use" flag is
-/// OFF is [`SecretsError::AgentUseRefused`], raised before the backend is
-/// read. A key with no index row is [`SecretsError::NotFound`] in either
+/// `agent_parent`, a key whose "agents may use" flag is OFF is
+/// [`SecretsError::AgentUseRefused`], raised before the value is read. #9070:
+/// the flag is the backend's flag item, never the index row's field; a
+/// failed flag lookup is an error, never ON. Without `agent_parent` the
+/// flag is not looked up. A key with no index row is [`SecretsError::NotFound`] in either
 /// mode, and the backend is not read. Otherwise the uncached backend read.
 /// Test: `resolve_unscoped_prefers_project_over_owner`,
 /// `resolve_explicit_reference_reads_only_its_vault`,
@@ -38,16 +40,23 @@ const UNPARSABLE: &str = "an unparsable `secret://` reference";
 /// `resolve_miss_is_not_found`,
 /// `resolve_agent_gate_refuses_flag_off_before_any_read`,
 /// `resolve_agent_gate_refuses_a_key_with_no_row_without_reading`,
-/// `resolve_agent_gate_allows_a_flagged_key`.
+/// `resolve_agent_gate_allows_a_flagged_key`,
+/// `resolve_agent_gate_ignores_a_hand_edited_index_flag`,
+/// `resolve_agent_gate_fails_closed_when_the_flag_read_fails`.
 pub fn resolve_reference(
     store: &SecretStore,
     scopes: &ScopeSet,
     reference: &SecretRef,
     agent_parent: bool,
 ) -> Result<SecretValue, SecretsError> {
+    if !agent_parent {
+        // #9070: no agent parent, no gate, so no flag lookup.
+        return store.read(reference, scopes);
+    }
     store.read_admitted(reference, scopes, |vault, row| {
-        // #7525: the flag is judged on the located row, before any read.
-        if agent_parent && !row.agents_may_use {
+        // #7525: judged on the located row, before any read. #9070: the
+        // row's flag was filled from the backend by `read_admitted`.
+        if !row.agents_may_use {
             return Err(SecretsError::AgentUseRefused {
                 key: row.name.to_string(),
                 vault: vault.to_string(),

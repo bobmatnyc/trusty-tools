@@ -370,9 +370,14 @@ one went in. A value of 8 characters or fewer shows only its length, as
 - Keep values out of agent transcripts. An agent session records everything
   typed into it, and the record goes to the model provider. Refer to a secret
   by key name or `secret://` reference, never by value.
-- Each indexed key carries an "agents may use" flag, off by default.
-  `store::resolve_reference` with `agent_parent` set refuses a key whose flag is
-  off, before it reads the backend.
+- Each indexed key carries an "agents may use" flag, off by default. The
+  backend holds it as its own item per key: on the Keychain, service
+  `trusty-secrets.agents`, account `<vault>/<key>`, present when the flag is
+  on. The names-only index never holds it, so editing the index file cannot
+  turn it on. A backend with no flag item (file, 1Password, Keeper) reads every
+  key off and refuses to turn one on. `store::resolve_reference` with
+  `agent_parent` set refuses a key whose flag is off, or whose flag cannot be
+  read, before it reads the value.
 
 ## Licence
 
