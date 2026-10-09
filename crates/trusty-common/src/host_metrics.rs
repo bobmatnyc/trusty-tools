@@ -1042,4 +1042,64 @@ mod tests {
             m.usage_pct
         );
     }
+
+    /// The first writable tmpfs mount point from `/proc/mounts`, preferring
+    /// `/dev/shm`, then `/tmp`, then any other.
+    #[cfg(target_os = "linux")]
+    fn writable_tmpfs_tempdir() -> Option<(String, tempfile::TempDir)> {
+        let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+        let mut points: Vec<String> = mounts
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let point = fields.nth(1)?;
+                (fields.next()? == "tmpfs").then(|| point.to_owned())
+            })
+            .collect();
+        points.sort_by_key(|p| match p.as_str() {
+            "/dev/shm" => 0,
+            "/tmp" => 1,
+            _ => 2,
+        });
+        points.into_iter().find_map(|point| {
+            let dir = tempfile::Builder::new()
+                .prefix("host-metrics-9523-")
+                .tempdir_in(&point)
+                .ok()?;
+            Some((point, dir))
+        })
+    }
+
+    /// Why (#9523): sysinfo omits tmpfs mounts on Linux unless its
+    ///      `linux-tmpfs` feature is on, so a path on a tmpfs `/tmp` was
+    ///      unmeasurable and the worktree disk guard refused to create a tree.
+    /// What: makes a temp dir on a writable tmpfs mount and asserts
+    ///      `mount_for_path` names a mount on that device. A host with no
+    ///      writable tmpfs returns early with a loud stderr line.
+    /// Test: this test.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mount_for_path_measures_a_path_on_a_linux_tmpfs_mount() {
+        let Some((point, dir)) = writable_tmpfs_tempdir() else {
+            eprintln!(
+                "SKIPPED mount_for_path_measures_a_path_on_a_linux_tmpfs_mount: \
+                 no writable tmpfs mount in /proc/mounts — #9523 NOT exercised"
+            );
+            return;
+        };
+        let m = mount_for_path(dir.path()).unwrap_or_else(|| {
+            panic!(
+                "a path on the tmpfs mount {point} must be measurable — \
+                 is sysinfo's `linux-tmpfs` feature on?"
+            )
+        });
+        // A bind mount (`/run/shm` for `/dev/shm`) shares the device, so the
+        // contract is the device, not the mount-point string.
+        assert_eq!(
+            device_id(Path::new(&m.mount_point)),
+            device_id(dir.path()),
+            "the selected mount {} must hold the tmpfs dir under {point}",
+            m.mount_point
+        );
+    }
 }
