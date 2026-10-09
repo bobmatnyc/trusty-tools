@@ -649,9 +649,9 @@ pub(crate) enum Command {
     /// round re-sends the agent's accumulated context. This group is the
     /// zero-inference path, and the prerequisite for issue #4834.
     /// What: the `tm memory <action>` command group — `recall`, `remember`,
-    /// `note`, `import` and `import-auto-memory`.
-    /// Test: `cli_parses_memory_import*`, `cli_parses_memory_recall` in
-    /// `tests.rs`.
+    /// `note`, `forget` (#9340), `import` and `import-auto-memory`.
+    /// Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`;
+    /// `cli_parses_memory_recall`, `cli_parses_memory_forget` in `tests.rs`.
     Memory {
         /// Action to run.
         #[command(subcommand)]

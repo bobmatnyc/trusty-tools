@@ -7,8 +7,8 @@
 //! one-way migration of Claude Code's own auto-memory store into the palace,
 //! plus `recall` / `remember` / `note` (#8352), the no-MCP palace verbs, and
 //! `forget` (#9340), which deletes one drawer by id.
-//! Test: `cli_parses_memory_import*`, `cli_parses_memory_recall*`,
-//! `cli_parses_memory_forget` in `tests.rs`.
+//! Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`;
+//! `cli_parses_memory_recall*`, `cli_parses_memory_forget` in `tests.rs`.
 
 use std::path::PathBuf;
 

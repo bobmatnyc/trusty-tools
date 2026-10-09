@@ -10,7 +10,7 @@
 //! the result either as the machine-readable JSON report (`--json`) or a
 //! per-file human summary.
 //! Exits non-zero when any file failed, so a script can gate on it.
-//! Test: `cli_parses_memory_import*` in `tests.rs`; the import behaviour is
+//! Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`; the import behaviour is
 //! covered by `core::memory_import::tests`.
 
 use anyhow::Context as _;
