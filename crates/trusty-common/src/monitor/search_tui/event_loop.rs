@@ -16,6 +16,10 @@ use super::nav::{navigate_down_visible, navigate_up_visible, new_log_lines_since
 use super::render::{SearchFocus, render};
 use super::state::SearchTuiState;
 
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod tests;
+
 /// Data-refresh interval: how often the daemon is polled.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(2000);
 
