@@ -5,7 +5,7 @@
 //! the transport (`probes`), the formatters (`format`), the line builders
 //! (`screen`), and the renderer (`render`) all depend on a single, dependency-free
 //! data layer.
-//! What: the default URLs / poll cadence / buffer-cap constants, the [`Daemon`]
+//! What: the poll cadence / buffer-cap constants, the [`Daemon`]
 //! / [`HealthTab`] / [`PalaceActivity`] tags, the [`CollectionRow`] /
 //! [`LogBuffer`] / [`PanelData`] / [`PanelState`] data structs (with their
 //! self-contained impls), the [`HealthWire`] deserialization target, the
@@ -17,14 +17,6 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-
-/// Default trusty-search daemon address used when no override is supplied.
-///
-/// Why: the health screen must always have a target to probe; the search
-/// daemon binds `127.0.0.1:7878` by convention.
-/// What: the canonical local trusty-search HTTP base URL.
-/// Test: `default_urls_are_local`.
-pub const DEFAULT_SEARCH_URL: &str = "http://127.0.0.1:7878";
 
 /// Interval between health polls for each panel.
 ///
@@ -430,19 +422,18 @@ pub struct HealthUpdate {
     pub state: PanelState,
 }
 
-/// Typed HTTP client for one daemon's health + list endpoints.
+/// Socket client for one daemon's health + list methods.
 ///
 /// Why: the background poller needs a small, testable transport that yields a
 /// projected [`PanelData`] or a clean error string; keeping it here mirrors the
 /// `trusty-common` monitor clients without depending on that crate's feature.
-/// What: holds a base URL, the [`Daemon`] tag (which decides the list
-/// endpoints), and a pooled `reqwest::Client` with a request timeout.
+/// What: holds the daemon's socket path and the [`Daemon`] tag (which decides
+/// the methods); both daemons are socket-only (#6286, #9214).
 /// Test: `health_client_stores_base_url`.
 #[derive(Debug, Clone)]
 pub struct HealthClient {
     pub(crate) base: String,
     pub(crate) daemon: Daemon,
-    pub(crate) http: reqwest::Client,
 }
 
 /// The combined search + memory health screen (`[2]`).
@@ -451,15 +442,16 @@ pub struct HealthClient {
 /// results here; a clean data struct keeps the loop terse and the rendering
 /// pure. Held alongside the chat `DashboardState` so switching screens never
 /// resets either surface.
-/// What: a [`PanelState`] and base URL per daemon, plus the focused [`Daemon`]
+/// What: a [`PanelState`] and socket path per daemon, plus the focused [`Daemon`]
 /// that the `[S]`/`[X]` keys act on.
 /// Test: `toggle_focus_cycles_panels`, `apply_update_routes_to_panel`.
 #[derive(Debug, Clone)]
 pub struct HealthScreen {
     /// The trusty-search panel state.
     pub search: PanelState,
-    /// The trusty-search daemon base URL.
-    pub search_url: String,
+    /// The trusty-search daemon socket path.
+    /// #9214: a socket PATH, not a URL — search's TCP listener is retired.
+    pub search_socket: String,
     /// The trusty-memory panel state.
     pub memory: PanelState,
     /// The trusty-memory daemon base URL.

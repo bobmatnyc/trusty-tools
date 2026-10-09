@@ -22,17 +22,17 @@ use crate::tui::health::types::{
 };
 
 impl HealthScreen {
-    /// Build a health screen targeting the two given daemon URLs.
+    /// Build a health screen targeting the two given daemon sockets.
     ///
     /// Why: the TUI resolves both daemon addresses once at startup and seeds
     /// the panels; both start `Connecting` until the first poll lands.
-    /// What: stores both URLs, sets both panels to [`PanelState::Connecting`],
+    /// What: stores both socket paths, sets both panels to [`PanelState::Connecting`],
     /// and defaults focus to the search panel.
     /// Test: `new_screen_starts_connecting`.
-    pub fn new(search_url: impl Into<String>, memory_socket: impl Into<String>) -> Self {
+    pub fn new(search_socket: impl Into<String>, memory_socket: impl Into<String>) -> Self {
         Self {
             search: PanelState::Connecting,
-            search_url: search_url.into(),
+            search_socket: search_socket.into(),
             memory: PanelState::Connecting,
             memory_socket: memory_socket.into(),
             focus: Daemon::Search,
@@ -160,14 +160,14 @@ impl HealthScreen {
         }
     }
 
-    /// The base URL of the currently-focused panel.
+    /// The socket path of the currently-focused panel.
     ///
     /// Why: the `[X]` stop action targets the focused daemon.
-    /// What: returns the search URL or the memory socket path per [`Self::focus`].
+    /// What: returns the search or the memory socket path per [`Self::focus`].
     /// Test: `focused_url_follows_focus`.
     pub fn focused_url(&self) -> &str {
         match self.focus {
-            Daemon::Search => &self.search_url,
+            Daemon::Search => &self.search_socket,
             Daemon::Memory => &self.memory_socket,
         }
     }

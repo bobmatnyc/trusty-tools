@@ -110,7 +110,10 @@ fn render_screen_draws_both_screens_without_panic() {
     // `DEFAULT_MEMORY_URL` was removed (issue #2030) — the real default is
     // resolved dynamically via discovery; an unreachable placeholder is fine
     // for a render-only smoke test.
-    let hp = HealthScreen::new(health::DEFAULT_SEARCH_URL, "http://127.0.0.1:19999");
+    let hp = HealthScreen::new(
+        "/nonexistent/trusty-search/test.sock",
+        "http://127.0.0.1:19999",
+    );
     for screen in [Screen::Chat, Screen::Health] {
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");
