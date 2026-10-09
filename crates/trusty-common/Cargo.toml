@@ -153,7 +153,8 @@ name = "trusty-common"
 # 0.56.0 (Refs #9288): minor — memory.protocol handshake; MemoryRpcError/MemoryProtocolInfo #[non_exhaustive] (semver break); 0.55.3 is live on crates.io.
 # 0.56.1 (Refs #9523): patch — host-metrics enables sysinfo's linux-tmpfs feature; no public item removed or changed; 0.56.0 is live on crates.io.
 # 0.57.0 (Refs #9214): minor — breaking: the socket-only search clients remove public API (resolve_search_url, SearchClient::base_url and others); subsumes the unpublished 0.56.1 (#9523); 0.56.0 is live on crates.io.
-version = "0.57.0"
+# 0.58.0 (Refs #9274): minor — palace format gate adds public API (additive); 0.57.0 is live on crates.io.
+version = "0.58.0"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
