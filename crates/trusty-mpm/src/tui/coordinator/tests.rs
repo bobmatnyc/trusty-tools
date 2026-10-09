@@ -1018,12 +1018,13 @@ fn compose_banner_handles_unknown_count() {
 
 /// Why: §3.1 makes probes fail-safe — a down search daemon yields `○ unreachable`
 /// and never panics or hangs the TUI.
-/// What: probes a guaranteed-dead loopback address and asserts the outcome is
-/// inactive.
+/// What: probes a socket path nothing binds (#9214) and asserts the outcome
+/// is inactive.
 /// Test: this IS the test.
 #[tokio::test]
 async fn probe_unreachable_search_is_inactive() {
-    let outcome = probe_search(Some(&dead_loopback_url())).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let outcome = probe_search(Some(&dir.path().join("missing.sock"))).await;
     assert!(
         !outcome.active,
         "an unreachable search daemon must probe inactive"
@@ -1039,8 +1040,7 @@ async fn probe_search_over_the_socket_is_active() {
         serde_json::json!({ "version": "9.9.9" }),
     ))
     .await;
-    let socket = daemon.socket().display().to_string();
-    let outcome = probe_search(Some(socket.as_str())).await;
+    let outcome = probe_search(Some(daemon.socket())).await;
     assert!(outcome.active, "a live search socket must probe active");
 }
 
@@ -1060,8 +1060,7 @@ async fn probe_search_on_a_refusing_daemon_is_inactive() {
         Box::pin(async { Err(crate::uds_mock::RpcError::internal("refused")) })
     })
     .await;
-    let socket = daemon.socket().display().to_string();
-    let outcome = probe_search(Some(socket.as_str())).await;
+    let outcome = probe_search(Some(daemon.socket())).await;
     assert!(!outcome.active, "a refused health probe must be inactive");
     assert_eq!(
         *seen.lock().expect("recorder"),

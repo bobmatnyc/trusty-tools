@@ -1,4 +1,4 @@
-//! HTTP transport and JSON projections for one daemon's health endpoints.
+//! Socket transport and JSON projections for one daemon's health surface.
 //!
 //! Why: the background poller needs a small, testable transport that yields a
 //! projected [`PanelData`] or a clean error string, plus the per-daemon list
@@ -7,13 +7,20 @@
 //! What: the [`HealthClient`] impl (poll / fetch / count / list / stop methods),
 //! the [`client_for`] constructor, and the `project_*` helpers that turn raw
 //! JSON payloads into typed counts and [`CollectionRow`]s.
+//! Both daemons are reached over their Unix sockets: memory since #6286,
+//! search since #9214 (ADR-0032 retires its TCP listener).
 //! Test: `health_client_stores_base_url`, `poll_unreachable_daemon_is_offline`,
 //! `project_memory_counts_reads_status_fields`, `project_palace_rows_reads_palaces`,
 //! `project_log_tail_reads_fields`, `project_edge_kinds_sorts_desc`.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+use crate::daemon::search_rpc::{
+    METHOD_HEALTH, METHOD_INDEX_STATUS, METHOD_INDEXES_LIST, call_at, search_socket,
+};
 
 use crate::tui::health::format::format_relative_time;
 use crate::tui::health::types::{
@@ -27,28 +34,75 @@ use crate::tui::health::types::{
 /// What: three seconds, comfortably above a healthy local round-trip.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
+// #9214: daemon methods trusty-common has no constant for. Local so this slice
+// needs no trusty-common release; names match `trusty-search` `service::rpc`.
+/// `search.graph.stats` — node/edge counts and the per-kind breakdown.
+const METHOD_GRAPH_STATS: &str = "search.graph.stats";
+/// `search.logs.tail` — the most recent N lines from the daemon's log ring.
+const METHOD_LOGS_TAIL: &str = "search.logs.tail";
+/// `search.admin.stop` — ask the daemon to shut down gracefully.
+const METHOD_ADMIN_STOP: &str = "search.admin.stop";
+
+/// The socket path handed out when the search socket cannot be resolved.
+///
+/// Why: a path nothing binds, so every call fails as "daemon unreachable" and
+/// the panel renders Offline instead of the TUI aborting (#9214).
+const UNREACHABLE_SEARCH_SOCKET: &str = "/nonexistent/trusty-search/trusty-search.sock";
+
+/// Resolve the trusty-search socket for the health screen and banner (#9214).
+///
+/// Why: the TUI must reach search over its socket, at the path
+/// `TRUSTY_SEARCH_SOCKET` or the daemon's data directory names, and a
+/// resolution failure must not take the TUI down. This mirrors trusty-common's
+/// `resolve_memory_socket_or_unreachable` for the memory panel.
+/// What: [`search_socket`], falling back to a path nothing binds on `Err`.
+/// Test: `search_poll_over_the_socket_is_online_with_index_counts`,
+/// `an_unresolvable_search_socket_falls_back_to_a_dead_path`.
+pub fn resolve_search_socket_or_unreachable() -> PathBuf {
+    socket_or_unreachable(search_socket())
+}
+
+/// The fallback half of [`resolve_search_socket_or_unreachable`], separated so
+/// the `Err` arm is testable without breaking the data directory.
+///
+/// What: `Ok` passes through; `Err` logs a warning and yields
+/// [`UNREACHABLE_SEARCH_SOCKET`]. It warns through `tracing`, not stderr,
+/// because stderr would draw over the TUI's alternate screen.
+/// Test: `an_unresolvable_search_socket_falls_back_to_a_dead_path`.
+pub(crate) fn socket_or_unreachable(resolved: anyhow::Result<PathBuf>) -> PathBuf {
+    resolved.unwrap_or_else(|e| {
+        tracing::warn!("trusty-search socket unresolved, panel will show offline: {e:#}");
+        PathBuf::from(UNREACHABLE_SEARCH_SOCKET)
+    })
+}
+
+/// The index ids in a `search.indexes.list` answer; a malformed answer is empty.
+fn index_ids(list: &Value) -> Vec<String> {
+    list.get("indexes")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl HealthClient {
     /// Build a client targeting `base` for the given `daemon`.
     ///
     /// Why: the health screen is pointed at a daemon address from a CLI flag or
     /// the documented default.
-    /// What: stores the base URL and a pooled `reqwest::Client` whose request
-    /// timeout bounds a hung daemon.
+    /// What: stores the daemon's socket path and its [`Daemon`] tag.
     /// Test: `health_client_stores_base_url`.
     pub fn new(base: impl Into<String>, daemon: Daemon) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
         Self {
             base: base.into(),
             daemon,
-            http,
         }
     }
 
-    /// The address this client targets — a base URL for trusty-search, a
-    /// socket path for trusty-memory (#6286).
+    /// The socket path this client targets (#6286 memory, #9214 search).
     ///
     /// Why: the offline panel renders the daemon address it failed to reach.
     /// Test: `health_client_stores_base_url`.
@@ -69,8 +123,7 @@ impl HealthClient {
     /// One RPC call on trusty-memory's socket (#6286).
     ///
     /// Why: this client's `base` is a socket path when `daemon` is
-    /// `Daemon::Memory`, and every memory leg below goes through here rather
-    /// than through `self.http`, which has nothing left to talk to.
+    /// `Daemon::Memory`, and every memory leg below goes through here.
     async fn memory_call(&self, method: &str, params: serde_json::Value) -> anyhow::Result<Value> {
         trusty_common::memory_rpc::call_memory_tool_at_with_timeout(
             std::path::Path::new(&self.base),
@@ -79,6 +132,14 @@ impl HealthClient {
             REQUEST_TIMEOUT,
         )
         .await
+    }
+
+    /// One RPC call on trusty-search's socket (#9214).
+    ///
+    /// Why: ADR-0032 retires search's TCP listener; every search leg below
+    /// goes through here, bounded by [`REQUEST_TIMEOUT`].
+    async fn search_call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        call_at(Path::new(&self.base), method, params, REQUEST_TIMEOUT).await
     }
 
     pub async fn poll(&self) -> PanelState {
@@ -96,20 +157,13 @@ impl HealthClient {
     /// while the happy path stays terse with `?`.
     /// What: reads the daemon's health and its list surface; for search the
     /// counts are index count + summed chunk counts, for memory they come from
-    /// `memory.status`. Since #6286 the two use different transports — search
-    /// is still HTTP, memory is the socket.
+    /// `memory.status`. Both legs use the daemons' sockets (#6286, #9214).
     /// Test: covered indirectly by `poll`; the count projections are unit-tested
     /// via `project_search_counts` / `project_memory_counts`.
     async fn fetch(&self) -> anyhow::Result<PanelData> {
         let health: HealthWire = match self.daemon {
             Daemon::Search => {
-                self.http
-                    .get(format!("{}/health", self.base))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?
+                serde_json::from_value(self.search_call(METHOD_HEALTH, json!({})).await?)?
             }
             Daemon::Memory => {
                 serde_json::from_value(self.memory_call("memory.health", json!({})).await?)?
@@ -139,28 +193,20 @@ impl HealthClient {
     /// Why: the search panel shows index count and summed chunk count; a
     /// failure to enumerate indexes degrades to zeroes rather than failing the
     /// whole poll, since the resource block already rendered.
-    /// What: GETs `/indexes`, then `/indexes/:id/status` per index, summing
-    /// `chunk_count`. Any error yields all zeroes.
-    /// Test: the JSON projection is unit-tested via `project_search_counts`.
+    /// What: calls `search.indexes.list`, then `search.index.status` per index,
+    /// summing `chunk_count`. A refused list yields all zeroes; a refused
+    /// status adds no chunks.
+    /// Test: `search_poll_over_the_socket_is_online_with_index_counts`,
+    /// `search_counts_degrade_to_zero_when_the_index_list_is_refused`.
     async fn search_counts(&self) -> (u64, u64, u64, u64) {
-        let Ok(list) = self.get_json(format!("{}/indexes", self.base)).await else {
+        // #9214: socket methods replace GET /indexes and /indexes/:id/status.
+        let Ok(list) = self.search_call(METHOD_INDEXES_LIST, json!({})).await else {
             return (0, 0, 0, 0);
         };
-        let ids = list
-            .get("indexes")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let ids = index_ids(&list);
         let mut total_chunks = 0u64;
         for id in &ids {
-            if let Ok(status) = self
-                .get_json(format!("{}/indexes/{id}/status", self.base))
-                .await
-            {
+            if let Ok(status) = self.index_status(id).await {
                 total_chunks = total_chunks.saturating_add(
                     status
                         .get("chunk_count")
@@ -187,49 +233,34 @@ impl HealthClient {
         }
     }
 
-    /// GET `url` and decode the response body as JSON.
-    ///
-    /// Why: the count probes share the same GET-and-decode shape.
-    /// What: GETs `url`, maps a non-2xx response to an error, and decodes the
-    /// body into a [`serde_json::Value`].
-    /// Test: covered indirectly by `search_counts` / `memory_counts`.
-    async fn get_json(&self, url: String) -> anyhow::Result<serde_json::Value> {
-        Ok(self
-            .http
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
+    /// `search.index.status` for one index.
+    async fn index_status(&self, id: &str) -> anyhow::Result<Value> {
+        self.search_call(METHOD_INDEX_STATUS, json!({ "index_id": id }))
+            .await
     }
 
     /// Fetch the most recent `n` log lines from the daemon.
     ///
     /// Why: the Logs tab (`[2]`) tails the daemon's in-memory log ring via
-    /// the daemon's in-memory log ring (issue #35). The two daemons no longer
-    /// share one endpoint: search still serves `GET /logs/tail?n=…`, memory
-    /// answers `memory.logs_tail` (#6286).
+    /// the daemon's in-memory log ring (issue #35). Search answers
+    /// `search.logs.tail` (#9214), memory answers `memory.logs_tail` (#6286).
     /// What: reads the daemon's log page and projects `lines` + `total`. A
     /// daemon that cannot answer yields `Ok((vec![], 0))` rather than an error,
     /// so the tab degrades to a placeholder cleanly.
-    /// Test: live behaviour is covered by the daemon suites; the projection
-    /// is unit-tested via `project_log_tail`.
+    /// Test: `search_logs_tail_over_the_socket_reads_the_page`,
+    /// `search_logs_tail_refusal_degrades_to_an_empty_page`; the projection
+    /// is unit-tested via `project_log_tail_reads_fields`.
     pub async fn logs_tail(&self, n: u32) -> anyhow::Result<(Vec<String>, u64)> {
         let raw = match self.daemon {
             Daemon::Memory => self
                 .memory_call("memory.logs_tail", json!({ "n": n }))
                 .await
                 .unwrap_or(Value::Null),
-            Daemon::Search => {
-                let url = format!("{}/logs/tail?n={n}", self.base);
-                match self.http.get(url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        resp.json::<Value>().await.unwrap_or(Value::Null)
-                    }
-                    _ => Value::Null,
-                }
-            }
+            // #9214: a refusal still degrades to an empty page, as on HTTP.
+            Daemon::Search => self
+                .search_call(METHOD_LOGS_TAIL, json!({ "n": n }))
+                .await
+                .unwrap_or(Value::Null),
         };
         Ok(project_log_tail(&raw))
     }
@@ -239,31 +270,23 @@ impl HealthClient {
     /// Why: the Collections list (left panel for the search service) wants a
     /// per-index name + chunk count so the operator can see at a glance
     /// which corpora are loaded.
-    /// What: GETs `/indexes`, then `GET /indexes/:id/status` per index,
-    /// projecting `(id, chunk_count)` into [`CollectionRow`]s. Any error
-    /// yields an empty list rather than failing.
-    /// Test: live behaviour is covered by the daemon suites; the projection
-    /// is unit-tested via `project_index_rows`.
+    /// What: calls `search.indexes.list`, then `search.index.status` and
+    /// `search.graph.stats` per index, projecting each into a
+    /// [`CollectionRow`]. A refused list yields an empty list; a refused
+    /// per-index call leaves that row's fields at zero. The community fields
+    /// stay at their defaults: `/communities` was never served and has no
+    /// socket method (#9214).
+    /// Test: `search_collections_over_the_socket_read_status_and_graph_stats`,
+    /// `search_collections_are_empty_when_the_index_list_is_refused`.
     pub async fn search_collections(&self) -> Vec<CollectionRow> {
-        let Ok(list) = self.get_json(format!("{}/indexes", self.base)).await else {
+        let Ok(list) = self.search_call(METHOD_INDEXES_LIST, json!({})).await else {
             return Vec::new();
         };
-        let ids: Vec<String> = list
-            .get("indexes")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let ids = index_ids(&list);
         let mut rows = Vec::with_capacity(ids.len());
         for id in ids {
             // Status: chunk count + last_indexed + disk bytes + context embedding.
-            let status = self
-                .get_json(format!("{}/indexes/{id}/status", self.base))
-                .await
-                .ok();
+            let status = self.index_status(&id).await.ok();
             let count = status
                 .as_ref()
                 .and_then(|v| v.get("chunk_count").and_then(|c| c.as_u64()))
@@ -283,7 +306,7 @@ impl HealthClient {
 
             // Graph stats: nodes, edges, edge kind histogram. Errors → zeroes.
             let graph = self
-                .get_json(format!("{}/indexes/{id}/graph/stats", self.base))
+                .search_call(METHOD_GRAPH_STATS, json!({ "index_id": id }))
                 .await
                 .ok();
             let node_count = graph
@@ -296,20 +319,6 @@ impl HealthClient {
                 .unwrap_or(0);
             let edge_kinds = graph.as_ref().map(project_edge_kinds).unwrap_or_default();
 
-            // Communities: only the top-level summary fields are needed.
-            let communities = self
-                .get_json(format!("{}/indexes/{id}/communities", self.base))
-                .await
-                .ok();
-            let community_count = communities
-                .as_ref()
-                .and_then(|v| v.get("community_count").and_then(|c| c.as_u64()))
-                .unwrap_or(0);
-            let modularity = communities
-                .as_ref()
-                .and_then(|v| v.get("modularity").and_then(|c| c.as_f64()))
-                .unwrap_or(0.0);
-
             let note = format_relative_time(last_indexed.as_deref());
             rows.push(CollectionRow {
                 id,
@@ -320,8 +329,6 @@ impl HealthClient {
                 node_count,
                 edge_count,
                 edge_kinds,
-                community_count,
-                modularity,
                 disk_bytes,
                 has_context_embedding,
                 ..Default::default()
@@ -371,20 +378,15 @@ impl HealthClient {
     /// Request a graceful shutdown of the daemon via its `admin/stop` endpoint.
     ///
     /// Why: the `[X]` key stops the focused daemon without the operator
-    /// resolving a PID; both daemons expose an unauthenticated stop route.
-    /// What: `POST /admin/stop` for search, `memory.admin_stop` for memory
-    /// (#6286). A refusal on either is an error.
-    /// Test: live behaviour is covered by the daemon suites; the dashboard
-    /// records the outcome string in `last_action`.
+    /// resolving a PID; both daemons expose a stop method on their socket.
+    /// What: `search.admin.stop` for search (#9214), `memory.admin_stop` for
+    /// memory (#6286). A refusal on either is an error.
+    /// Test: `search_stop_sends_the_stop_method`,
+    /// `search_stop_surfaces_a_daemon_refusal_as_err`.
     pub async fn stop(&self) -> anyhow::Result<()> {
         match self.daemon {
             Daemon::Search => {
-                self.http
-                    .post(format!("{}/admin/stop", self.base))
-                    .json(&json!({}))
-                    .send()
-                    .await?
-                    .error_for_status()?;
+                self.search_call(METHOD_ADMIN_STOP, json!({})).await?;
             }
             Daemon::Memory => {
                 self.memory_call("memory.admin_stop", json!({})).await?;
@@ -394,7 +396,7 @@ impl HealthClient {
     }
 }
 
-/// Build a [`HealthClient`] for the given daemon at the given base URL.
+/// Build a [`HealthClient`] for the given daemon at the given socket path.
 ///
 /// Why: the background poller and the `[S]`/`[X]` key handlers all need a
 /// client; centralising construction keeps the daemon→client mapping in one

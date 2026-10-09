@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::{Daemon, PanelState, client_for};
+use super::probes::socket_or_unreachable;
+use super::{Daemon, PanelState, client_for, resolve_search_socket_or_unreachable};
 use crate::uds_mock::{self, MockUdsDaemon, RpcError};
 
 /// Every `(method, params)` pair the mock daemon received, in arrival order.
@@ -90,8 +91,8 @@ fn refuses_all(_method: &str, _params: &Value) -> Result<Value, RpcError> {
 
 /// Why: acceptance criterion 2 — the poller must reach search over the socket
 /// that `TRUSTY_SEARCH_SOCKET` names, and project the index counts.
-/// What: points the env override at a mock, resolves the socket the way the
-/// TUI does, polls, and asserts `Online` with 3 indexes and 42 chunks (`gamma`'s
+/// What: points the env override at a mock, resolves the socket with
+/// [`resolve_search_socket_or_unreachable`] as the TUI does, polls, and asserts `Online` with 3 indexes and 42 chunks (`gamma`'s
 /// refused status contributes no chunks but still counts as an index).
 /// Test: this IS the test.
 #[tokio::test]
@@ -104,11 +105,10 @@ async fn search_poll_over_the_socket_is_online_with_index_counts() {
             daemon.socket(),
         );
     }
-    let resolved = trusty_common::search_rpc::search_socket();
+    let socket = resolve_search_socket_or_unreachable();
     unsafe {
         std::env::remove_var(trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
     }
-    let socket = resolved.expect("the env override resolves");
     assert_eq!(socket, daemon.socket());
 
     let state = client_for(Daemon::Search, &socket.display().to_string())
@@ -244,4 +244,47 @@ async fn search_stop_surfaces_a_daemon_refusal_as_err() {
         .await;
     assert!(outcome.is_err(), "a refused stop must be an error");
     assert_eq!(methods(&calls), vec!["search.admin.stop".to_string()]);
+}
+
+/// Why: Fail-Open Check / acceptance criterion 6 — a search socket that cannot
+/// be resolved must not panic the TUI; the panel shows Offline instead.
+/// What: feeds the fallback an `Err`, asserts it yields a path, and polls that
+/// path to `Offline`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn an_unresolvable_search_socket_falls_back_to_a_dead_path() {
+    let socket = socket_or_unreachable(Err(anyhow::anyhow!("no data dir")));
+    assert!(socket.is_absolute(), "fallback is a path: {socket:?}");
+    assert!(!socket.exists(), "nothing binds the fallback: {socket:?}");
+    let state = client_for(Daemon::Search, &socket.display().to_string())
+        .poll()
+        .await;
+    assert!(
+        matches!(state, PanelState::Offline { ref last_error } if !last_error.is_empty()),
+        "expected Offline with a reason, got {state:?}"
+    );
+}
+
+/// Why: an `Ok` resolution passes through untouched.
+/// Test: this IS the test.
+#[test]
+fn a_resolved_search_socket_passes_through() {
+    let path = std::path::PathBuf::from("/tmp/trusty-search-test.sock");
+    assert_eq!(socket_or_unreachable(Ok(path.clone())), path);
+}
+
+/// Why: a stopped search daemon renders Offline with the dial error, the
+/// branch every transport failure in `poll` takes.
+/// Test: this IS the test.
+#[tokio::test]
+async fn search_poll_over_a_missing_socket_is_offline() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("missing.sock");
+    let state = client_for(Daemon::Search, &socket.display().to_string())
+        .poll()
+        .await;
+    assert!(
+        matches!(state, PanelState::Offline { ref last_error } if !last_error.is_empty()),
+        "expected Offline with a reason, got {state:?}"
+    );
 }
