@@ -105,3 +105,31 @@ fn test_callers_are_told_apart_by_path_or_name() {
     assert!(!is_test_edge(&edge("run_review_with", "src/runner.rs:240")));
     assert!(!is_test_edge(&edge("contest", "src/contest.rs:1")));
 }
+
+/// #9196: a Rust test file is told by its path even when the caller's name has
+/// no `test_` prefix.
+#[test]
+fn rust_test_file_paths_classify_a_caller_as_a_test() {
+    let edge = |symbol: &str, location: &str| Edge {
+        symbol: symbol.to_string(),
+        location: location.to_string(),
+    };
+    for path in [
+        "crates/x/src/service/server/tests_search.rs",
+        "crates/x/src/tests.rs",
+        "crates/x/src/a/b_tests.rs",
+        "crates/x/src/a/b_test.rs",
+        "crates/x/tests/it.rs",
+    ] {
+        let caller = edge("file_is_within_root_symlinked_root", &format!("{path}:42"));
+        assert!(is_test_edge(&caller), "{path} should be a test location");
+    }
+    for path in [
+        "crates/x/src/contests.rs",
+        "crates/x/src/latest_results.rs",
+        "crates/x/src/lib.rs",
+    ] {
+        let caller = edge("file_is_within_root_symlinked_root", &format!("{path}:42"));
+        assert!(!is_test_edge(&caller), "{path} is not a test location");
+    }
+}
