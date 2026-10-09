@@ -3155,12 +3155,17 @@ fn cli_parses_memory_forget() {
             action:
                 MemoryAction::Forget {
                     drawer_id,
+                    fact_key,
                     palace,
                     json,
                     memory_socket,
                 },
         } => {
-            assert_eq!(drawer_id, "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21");
+            assert_eq!(
+                drawer_id.as_deref(),
+                Some("0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21")
+            );
+            assert_eq!(fact_key, None);
             assert_eq!(palace.as_deref(), Some("p"));
             assert_eq!(memory_socket, Some(std::path::PathBuf::from("/tmp/m.sock")));
             assert!(json);
