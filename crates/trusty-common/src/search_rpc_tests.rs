@@ -48,6 +48,44 @@ fn search_socket_honours_the_env_override() {
     );
 }
 
+/// Why: #9214 — the daemon binds `$TRUSTY_DATA_DIR/trusty-search.sock`
+/// (`trusty_search::service::socket::resolve_socket_path`), so a client that
+/// ignored the variable dialled the shared socket and could never reach an
+/// isolated daemon it ran beside.
+///
+/// It sets the variable under `crate::data_dir::ENV_LOCK`, the lock every
+/// env-mutating test in this crate shares, and restores both variables.
+/// Test: itself.
+#[test]
+fn search_socket_follows_trusty_data_dir_like_the_daemon() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let saved_dir = std::env::var_os("TRUSTY_DATA_DIR");
+    let saved_socket = std::env::var_os(TRUSTY_SEARCH_SOCKET_ENV);
+    // SAFETY: guarded by ENV_LOCK; both variables are restored below.
+    unsafe {
+        std::env::set_var("TRUSTY_DATA_DIR", tmp.path());
+        std::env::remove_var(TRUSTY_SEARCH_SOCKET_ENV);
+    }
+    let resolved = search_socket();
+    unsafe {
+        match saved_dir {
+            Some(v) => std::env::set_var("TRUSTY_DATA_DIR", v),
+            None => std::env::remove_var("TRUSTY_DATA_DIR"),
+        }
+        if let Some(v) = saved_socket {
+            std::env::set_var(TRUSTY_SEARCH_SOCKET_ENV, v);
+        }
+    }
+    assert_eq!(
+        resolved.expect("an absolute TRUSTY_DATA_DIR resolves"),
+        tmp.path().join("trusty-search.sock"),
+        "the client must dial the socket the daemon binds under TRUSTY_DATA_DIR"
+    );
+}
+
 /// Why: every probe's failure arm depends on a dead socket FAILING rather
 /// than consuming the budget — `tm doctor` must not hang on an absent
 /// daemon, and `search_index`'s registration must not stall a session launch.
