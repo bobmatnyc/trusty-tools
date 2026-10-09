@@ -249,6 +249,8 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
         anyhow::bail!(msg);
     }
+    // #9556: a sandbox never spawns a plain `tm daemon` on the host default.
+    trusty_mpm::core::refuse_daemon_spawn_when_isolated()?;
 
     // Resolve the log file under `~/.trusty-mpm/`, creating the dir if absent.
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
@@ -336,6 +338,8 @@ pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Resu
     if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
         anyhow::bail!(msg);
     }
+    // #9556: refuse before the host-wide `pkill`, not only before the spawn.
+    trusty_mpm::core::refuse_daemon_spawn_when_isolated()?;
     if daemon_healthy(client, url).await {
         print!("Stopping daemon... ");
         use std::io::Write as _;

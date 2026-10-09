@@ -332,10 +332,29 @@ pub(crate) fn tcp_probe(addr: &str) -> bool {
 /// `std::env::var(...).unwrap_or_else(...)` — also fixes a latent edge case:
 /// a whitespace-only `TRUSTY_MPM_URL` now falls through to the default instead
 /// of being probed literally.
-/// Test: `probe_default_addr_handles_url_without_port` (via the inner helper).
+/// Test: `probe_default_addr_handles_url_without_port` (via the inner helper),
+/// `probe_default_addr_skips_the_default_under_isolation`.
 fn probe_default_addr() -> Option<String> {
-    let url = trusty_mpm::core::explicit_url_from_env()
-        .unwrap_or_else(|| trusty_mpm::core::DEFAULT_DAEMON_URL.to_string());
+    probe_default_addr_from(
+        trusty_mpm::core::explicit_url_from_env(),
+        trusty_mpm::core::isolated_environment(),
+    )
+}
+
+/// [`probe_default_addr`] with the env read and the isolation check injected.
+///
+/// Why (#9556): the banner TCP-probed 127.0.0.1:7880 — the host's live daemon
+/// — from a sandbox whose own daemon had no lock.
+/// What: the explicit URL's `host:port`; with none, `None` when `isolated`,
+/// else [`trusty_mpm::core::DEFAULT_DAEMON_URL`]'s.
+/// Test: `probe_default_addr_skips_the_default_under_isolation`.
+fn probe_default_addr_from(explicit: Option<String>, isolated: bool) -> Option<String> {
+    let url = match explicit {
+        Some(url) => url,
+        // #9556: an isolated process never probes the host's default daemon.
+        None if isolated => return None,
+        None => trusty_mpm::core::DEFAULT_DAEMON_URL.to_string(),
+    };
     url_to_probe_addr(&url)
 }
 
@@ -478,6 +497,21 @@ pub(crate) fn render_info_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#9556): a sandbox banner must not TCP-probe the host default.
+    /// Test: itself.
+    #[test]
+    fn probe_default_addr_skips_the_default_under_isolation() {
+        assert_eq!(probe_default_addr_from(None, true), None);
+        assert_eq!(
+            probe_default_addr_from(None, false).as_deref(),
+            Some("127.0.0.1:7880")
+        );
+        assert_eq!(
+            probe_default_addr_from(Some("http://127.0.0.1:9911".into()), true).as_deref(),
+            Some("127.0.0.1:9911")
+        );
+    }
 
     fn online(port: u16) -> DaemonInfo {
         DaemonInfo {
