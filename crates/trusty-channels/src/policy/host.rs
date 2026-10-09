@@ -186,10 +186,211 @@ fn allowed_refs(channel: Channel) -> &'static [&'static str] {
     }
 }
 
-/// Red-commit stub: accepts any text as an empty ceiling.
-pub fn parse_host(_text: &str, _home: Option<&Path>) -> Result<HostCeiling, HostError> {
+/// Parse and validate the host ceiling from `config.yaml` text.
+///
+/// Why: a separate strict parse of the same file the lenient
+/// `TrustyToolsConfig` loader reads (#8454 plan §4, Architect Q8): that
+/// loader returns a default on error, which must never apply to routes.
+/// What: YAML to a value, take only `channels`, deserialize it with unknown
+/// keys denied at every level, then check `version`, the rate limit, each
+/// channel's kinds, projects (absolute after `~/` expansion against `home`,
+/// no `..`), gchat connection and credential ref. Other top-level keys are
+/// ignored. Pure: `home` is a parameter.
+/// Test: `host_faults_deny_all`, `host_unknown_key_denies_all`,
+/// `no_channels_section_denies_all`, `host_ceiling_parses_every_field`.
+pub fn parse_host(text: &str, home: Option<&Path>) -> Result<HostCeiling, HostError> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(text).map_err(|e| HostError::Malformed {
+            reason: e.to_string(),
+        })?;
+    let section = match value {
+        serde_yaml::Value::Null => return Err(HostError::NoChannelsSection),
+        serde_yaml::Value::Mapping(mut map) => {
+            map.remove("channels").ok_or(HostError::NoChannelsSection)?
+        }
+        _ => {
+            return Err(HostError::Malformed {
+                reason: "the top level is not a mapping".into(),
+            })
+        }
+    };
+    let raw: RawHost = serde_yaml::from_value(section).map_err(|e| HostError::Invalid {
+        reason: e.to_string(),
+    })?;
+    if raw.version != HOST_SCHEMA_VERSION {
+        return Err(HostError::Version { found: raw.version });
+    }
+    let rate_limit = match raw.rate_limit {
+        None => RateLimit::DEFAULT,
+        Some(spec) => {
+            RateLimit::from_spec(spec).map_err(|reason| HostError::RateLimit { reason })?
+        }
+    };
+    let mut channels = BTreeMap::new();
+    if let Some(g) = raw.gchat {
+        let connection = g
+            .connection
+            .map(|c| validate_connection(c, home))
+            .transpose()
+            .map_err(|e| HostError::Connection {
+                reason: e.to_string(),
+            })?;
+        let common = RawCommon {
+            enabled: g.enabled,
+            kinds: g.kinds,
+            projects: g.projects,
+        };
+        let ch = channel(Channel::Gchat, common, home)?;
+        channels.insert(
+            Channel::Gchat,
+            HostChannel {
+                gchat_connection: connection,
+                ..ch
+            },
+        );
+    }
+    for (c, raw_ch) in [
+        (Channel::Slack, raw.slack),
+        (Channel::Telegram, raw.telegram),
+    ] {
+        let Some(b) = raw_ch else { continue };
+        let credential_ref = match b.connection {
+            None => None,
+            Some(conn) => {
+                let allowed = allowed_refs(c);
+                if !allowed.contains(&conn.credential_ref.as_str()) {
+                    return Err(HostError::CredentialRef {
+                        channel: c,
+                        allowed,
+                    });
+                }
+                Some(conn.credential_ref)
+            }
+        };
+        let common = RawCommon {
+            enabled: b.enabled,
+            kinds: b.kinds,
+            projects: b.projects,
+        };
+        let ch = channel(c, common, home)?;
+        channels.insert(
+            c,
+            HostChannel {
+                credential_ref,
+                ..ch
+            },
+        );
+    }
     Ok(HostCeiling {
-        rate_limit: RateLimit::DEFAULT,
-        channels: BTreeMap::new(),
+        rate_limit,
+        channels,
     })
+}
+
+fn channel(c: Channel, raw: RawCommon, home: Option<&Path>) -> Result<HostChannel, HostError> {
+    let kinds = match raw.kinds {
+        None => MessageKind::ALL
+            .into_iter()
+            .filter(|k| c.allows_kind(*k))
+            .collect(),
+        Some(list) => {
+            let kind_err = |reason: String| HostError::Kinds { channel: c, reason };
+            if list.is_empty() {
+                return Err(kind_err(
+                    "empty; use enabled: false to turn the channel off".into(),
+                ));
+            }
+            if let Some(k) = list.iter().find(|k| !c.allows_kind(**k)) {
+                return Err(kind_err(format!("{k} is not carried on {c}")));
+            }
+            list.into_iter().collect()
+        }
+    };
+    let projects = raw
+        .projects
+        .into_iter()
+        .map(|entry| project_entry(c, entry, home))
+        .collect::<Result<_, _>>()?;
+    Ok(HostChannel {
+        enabled: raw.enabled,
+        kinds,
+        projects,
+        gchat_connection: None,
+        credential_ref: None,
+    })
+}
+
+/// #8454 plan §4: a bad `projects` entry is a ceiling fault, never skipped.
+fn project_entry(c: Channel, entry: String, home: Option<&Path>) -> Result<PathBuf, HostError> {
+    let fail = |entry: String, reason: &str| HostError::Project {
+        channel: c,
+        entry,
+        reason: reason.into(),
+    };
+    if entry.trim().is_empty() {
+        return Err(fail(entry, "is empty"));
+    }
+    let Some(path) = expand_home(&entry, home) else {
+        return Err(fail(entry, "starts with ~/ but no home directory is known"));
+    };
+    if !path.is_absolute() {
+        return Err(fail(entry, "is not an absolute path"));
+    }
+    if path.components().any(|p| matches!(p, Component::ParentDir)) {
+        return Err(fail(entry, "holds a .. component"));
+    }
+    Ok(path)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHost {
+    version: i64,
+    #[serde(default)]
+    rate_limit: Option<RateLimitSpec>,
+    #[serde(default)]
+    gchat: Option<RawGchatChannel>,
+    #[serde(default)]
+    slack: Option<RawBotChannel>,
+    #[serde(default)]
+    telegram: Option<RawBotChannel>,
+}
+
+/// The keys every channel shares, moved out of its raw struct.
+struct RawCommon {
+    enabled: bool,
+    kinds: Option<Vec<MessageKind>>,
+    projects: Vec<String>,
+}
+
+// `deny_unknown_fields` does not combine with `flatten`, so each channel
+// struct lists the common keys itself.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGchatChannel {
+    enabled: bool,
+    #[serde(default)]
+    kinds: Option<Vec<MessageKind>>,
+    #[serde(default)]
+    projects: Vec<String>,
+    #[serde(default)]
+    connection: Option<RawConnection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBotChannel {
+    enabled: bool,
+    #[serde(default)]
+    kinds: Option<Vec<MessageKind>>,
+    #[serde(default)]
+    projects: Vec<String>,
+    #[serde(default)]
+    connection: Option<RawBotConnection>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBotConnection {
+    credential_ref: String,
 }

@@ -88,10 +88,209 @@ pub struct ProjectFile {
     pub routes: Vec<ProjectRoute>,
 }
 
-/// Red-commit stub: accepts any text as an empty file.
+/// Parse and check a project route file's text.
+///
+/// Why: the strict half of the loader; S2b reads the bytes and runs the
+/// load gate, then calls this.
+/// What: reads `version` first, then parses the whole text as v1 or v2 with
+/// unknown keys denied. v1 is exactly today's gchat schema (a `[gchat]`
+/// table needs `[gchat.connection]`); v2 also takes `[[slack.routes]]`,
+/// `[[telegram.routes]]`, a per-route `rate_limit`, and an optional
+/// `[gchat.connection]` (Architect Q2). Pure: `home` is a parameter.
+/// Test: `project_file_faults_are_refused`, `v2_slack_route_requires_v2`,
+/// `v1_gchat_file_loads_unchanged`.
 pub fn parse_project_file(
-    _text: &str,
-    _home: Option<&Path>,
+    text: &str,
+    home: Option<&Path>,
 ) -> Result<ProjectFile, ProjectFileError> {
-    Ok(ProjectFile::default())
+    let probe: VersionProbe = toml_parse(text)?;
+    match probe.version {
+        1 => {
+            let raw: RawV1 = toml_parse(text)?;
+            let Some(g) = raw.gchat else {
+                return Ok(ProjectFile {
+                    version: 1,
+                    ..ProjectFile::default()
+                });
+            };
+            let connection = connection(g.connection, home)?;
+            let routes = g
+                .routes
+                .into_iter()
+                .map(|r| (r.name, r.recipient, r.kinds, r.space, None))
+                .collect();
+            Ok(ProjectFile {
+                version: 1,
+                gchat_connection: Some(connection),
+                routes: routes_of(Channel::Gchat, routes)?,
+            })
+        }
+        2 => {
+            let raw: RawV2 = toml_parse(text)?;
+            let mut file = ProjectFile {
+                version: 2,
+                ..ProjectFile::default()
+            };
+            if let Some(g) = raw.gchat {
+                file.gchat_connection = g.connection.map(|c| connection(c, home)).transpose()?;
+                let routes = g
+                    .routes
+                    .into_iter()
+                    .map(|r| (r.name, r.recipient, r.kinds, r.space, r.rate_limit))
+                    .collect();
+                file.routes = routes_of(Channel::Gchat, routes)?;
+            }
+            for (c, table) in [
+                (Channel::Slack, raw.slack),
+                (Channel::Telegram, raw.telegram),
+            ] {
+                let Some(t) = table else { continue };
+                let routes = t
+                    .routes
+                    .into_iter()
+                    .map(|r| (r.name, r.recipient, r.kinds, None, r.rate_limit))
+                    .collect();
+                file.routes.extend(routes_of(c, routes)?);
+            }
+            Ok(file)
+        }
+        found => Err(ProjectFileError::Version { found }),
+    }
+}
+
+/// (name, recipient, kinds, space, rate_limit) as parsed.
+type RawFields = (
+    String,
+    String,
+    Vec<MessageKind>,
+    Option<String>,
+    Option<RateLimitSpec>,
+);
+
+fn routes_of(channel: Channel, raw: Vec<RawFields>) -> Result<Vec<ProjectRoute>, ProjectFileError> {
+    raw.into_iter()
+        .enumerate()
+        .map(|(i, (name, recipient, kinds, space, rate_limit))| {
+            let entry = format!("{channel}.routes[{i}] {name:?}");
+            // #9448: a configured space passes the same check as a send target.
+            if let Some(s) = &space {
+                if !is_space_name(s) {
+                    return Err(ProjectFileError::Invalid {
+                        entry,
+                        reason: format!("space {s:?} must be spaces/{{space}}"),
+                    });
+                }
+            }
+            Ok(ProjectRoute {
+                spec: RouteSpec {
+                    channel,
+                    name,
+                    recipient,
+                    kinds,
+                    rate_limit,
+                },
+                space,
+                entry,
+            })
+        })
+        .collect()
+}
+
+fn connection(raw: RawConnection, home: Option<&Path>) -> Result<Connection, ProjectFileError> {
+    validate_connection(raw, home).map_err(|e| ProjectFileError::Invalid {
+        entry: "gchat.connection".into(),
+        reason: e.to_string(),
+    })
+}
+
+fn toml_parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, ProjectFileError> {
+    toml::from_str(text).map_err(|e| ProjectFileError::Parse {
+        reason: e.message().to_string(),
+    })
+}
+
+/// Reads `version` alone; every other key is checked by the versioned parse.
+#[derive(Deserialize)]
+struct VersionProbe {
+    version: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawV1 {
+    // Checked by VersionProbe; listed so deny_unknown_fields accepts it.
+    #[serde(rename = "version")]
+    _version: i64,
+    #[serde(default)]
+    gchat: Option<RawGchatV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGchatV1 {
+    connection: RawConnection,
+    #[serde(default)]
+    routes: Vec<RawRouteV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRouteV1 {
+    name: String,
+    recipient: String,
+    kinds: Vec<MessageKind>,
+    #[serde(default)]
+    space: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawV2 {
+    // Checked by VersionProbe; listed so deny_unknown_fields accepts it.
+    #[serde(rename = "version")]
+    _version: i64,
+    #[serde(default)]
+    gchat: Option<RawGchatV2>,
+    #[serde(default)]
+    slack: Option<RawTableV2>,
+    #[serde(default)]
+    telegram: Option<RawTableV2>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGchatV2 {
+    #[serde(default)]
+    connection: Option<RawConnection>,
+    #[serde(default)]
+    routes: Vec<RawGchatRouteV2>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGchatRouteV2 {
+    name: String,
+    recipient: String,
+    kinds: Vec<MessageKind>,
+    #[serde(default)]
+    space: Option<String>,
+    #[serde(default)]
+    rate_limit: Option<RateLimitSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTableV2 {
+    #[serde(default)]
+    routes: Vec<RawBotRouteV2>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBotRouteV2 {
+    name: String,
+    recipient: String,
+    kinds: Vec<MessageKind>,
+    #[serde(default)]
+    rate_limit: Option<RateLimitSpec>,
 }
