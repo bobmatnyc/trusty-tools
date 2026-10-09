@@ -20,6 +20,8 @@
 //! [`trusty_mpm::core::child_repo_scan::scan_for_child_repo`] — the same scan
 //! the `CLAUDE.md` seed guard uses — and refuse on a child repository or on a
 //! scan that could not finish.
+//! #9495: git's "no repository" wording is corroborated by an ancestor-`.git`
+//! witness before it counts as absence; see [`classify_rev_parse_failure`].
 //! Test: `auto_git_init_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -29,16 +31,21 @@ use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, scan_for_
 /// The git executable this module drives.
 const GIT_PROGRAM: &str = "git";
 
-/// The stderr phrase that means git found no repository at or above a
+/// The stderr prefix that means git found no repository at or above a
 /// directory.
 ///
 /// Why: the SHORT phrase `not a git repository` is ambiguous in this codebase —
 /// git answers `fatal: not a git repository: (null)` for a STALE WORKTREE
-/// POINTER, which is a broken repository rather than no repository at all.
-/// Matching the long phrase is the same discrimination
-/// `trusty_agents_common::agents::vcs_claim` and `trusty_review::report::scan`
-/// already make. Anything else that fails is reported, never auto-initialized.
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+/// POINTER, which is a broken repository rather than no repository at all. The
+/// opening parenthesis is what separates the two. Anything else that fails is
+/// reported, never auto-initialized.
+/// What: covers both wordings of git's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form. The same prefix `untracked_sync` matches.
+/// Test: `no_repo_stderr_matches_the_long_phrase`,
+/// `classify_accepts_the_mount_boundary_wording_with_no_git_above`.
+// #9495: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// Whether git already has a repository for the directory.
 ///
@@ -110,15 +117,17 @@ pub(crate) enum AutoInitOutcome {
 
 /// Does a failed `git rev-parse` stderr mean "there is no repository here"?
 ///
-/// Why: see [`NO_REPO_STDERR`] — a substring test on the short phrase also
-/// matches a BROKEN repository, and auto-initializing over one of those is the
-/// worst thing this module could do. Fails closed: an unrecognised failure is
-/// not "no repository".
-/// What: `true` only when the long phrase appears in `stderr`.
+/// Why: see [`NO_REPO_STDERR_PREFIX`] — a substring test on the short phrase
+/// also matches a BROKEN repository, and auto-initializing over one of those is
+/// the worst thing this module could do. Fails closed: an unrecognised failure
+/// is not "no repository". The match is necessary, not sufficient:
+/// [`classify_rev_parse_failure`] also requires no `.git` above.
+/// What: `true` only when [`NO_REPO_STDERR_PREFIX`] appears in `stderr`.
 /// Test: `no_repo_stderr_matches_the_long_phrase`,
 /// `no_repo_stderr_rejects_the_stale_worktree_pointer`.
 pub(crate) fn stderr_means_no_repository(stderr: &str) -> bool {
-    stderr.contains(NO_REPO_STDERR)
+    // #9495: the prefix also accepts git's mount-boundary wording.
+    stderr.contains(NO_REPO_STDERR_PREFIX)
 }
 
 /// Decide what to do about `dir`, given git's verdict, the home directory, and
@@ -276,9 +285,7 @@ fn run_git(program: &str, dir: &Path, args: &[&str]) -> anyhow::Result<std::proc
 /// Ask git whether `dir` already has a repository.
 ///
 /// What: `git -C <dir> rev-parse --git-dir`. Success is [`RepoContext::Present`];
-/// a failure whose stderr carries [`NO_REPO_STDERR`] is
-/// [`RepoContext::Absent`]; any other failure is an `Err` carrying git's own
-/// stderr, so an unreadable repository is reported rather than initialized over.
+/// a failure is classified by [`classify_rev_parse_failure`].
 /// Test: `auto_init_leaves_a_bare_repository_alone`,
 /// `auto_init_initializes_a_plain_directory`.
 fn repo_context(program: &str, dir: &Path) -> anyhow::Result<RepoContext> {
@@ -286,15 +293,55 @@ fn repo_context(program: &str, dir: &Path) -> anyhow::Result<RepoContext> {
     if out.status.success() {
         return Ok(RepoContext::Present);
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr_means_no_repository(&stderr) {
-        return Ok(RepoContext::Absent);
+    classify_rev_parse_failure(dir, &String::from_utf8_lossy(&out.stderr))
+}
+
+/// What a failed `git rev-parse --git-dir` means for `dir`.
+///
+/// Why: git's "no repository" message is not proof there is no repository.
+/// Git prints it whenever discovery stopped before it reached one — an
+/// unreadable `.git`, `GIT_CEILING_DIRECTORIES`, or a filesystem boundary — and
+/// a `git init` there nests a second repository inside the real checkout
+/// (#9495). `symlink_metadata` on an ancestor `.git` needs only the parent's
+/// search bit, so it is a witness git does not use. Mirrors
+/// `untracked_sync::classify_rev_parse_failure`.
+/// What: [`RepoContext::Absent`] only when [`stderr_means_no_repository`]
+/// holds AND no ancestor of the canonical `dir` (itself included) has a `.git`
+/// entry. Every other failure is an `Err` carrying git's own stderr, the same
+/// contract as any unreadable verdict: reported, never initialized over. A
+/// failed canonicalization is an `Err` too, because `Path::ancestors` walks
+/// lexically and a non-canonical chain can skip the real `.git`.
+/// Test: `auto_init_refuses_the_classic_no_repo_wording_under_a_real_git`,
+/// `classify_accepts_the_mount_boundary_wording_with_no_git_above`,
+/// `classify_refuses_the_mount_boundary_wording_under_a_real_git`,
+/// `classify_keeps_every_other_failure_an_error`.
+fn classify_rev_parse_failure(dir: &Path, stderr: &str) -> anyhow::Result<RepoContext> {
+    let cannot_tell = |why: &str| {
+        anyhow::anyhow!(
+            "cannot tell whether '{}' is a git repository: {why}{}",
+            dir.display(),
+            stderr.trim()
+        )
+    };
+    if !stderr_means_no_repository(stderr) {
+        return Err(cannot_tell(""));
     }
-    Err(anyhow::anyhow!(
-        "cannot tell whether '{}' is a git repository: {}",
-        dir.display(),
-        stderr.trim()
-    ))
+    // #9495: the wording alone is not absence; a `.git` at or above `dir` is a
+    // real repository git could not read, so it refuses rather than inits.
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| cannot_tell(&format!("could not resolve the path ({e}); git said: ")))?;
+    match canonical
+        .ancestors()
+        .find(|p| p.join(".git").symlink_metadata().is_ok())
+    {
+        None => Ok(RepoContext::Absent),
+        Some(root) => Err(cannot_tell(&format!(
+            "git reported no repository, but {} exists, so the repository is real and could \
+             not be read; git said: ",
+            root.join(".git").display()
+        ))),
+    }
 }
 
 /// Make `dir` a git repository when it is a plain directory (#6274).

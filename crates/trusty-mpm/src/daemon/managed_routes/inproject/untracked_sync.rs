@@ -356,9 +356,10 @@ enum ExcludeTarget {
     Unknown(String),
 }
 
-/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+/// The prefix of the only git stderr CONSISTENT with "there is genuinely no
+/// repository here".
 ///
-/// Why: the parenthesised clause is load-bearing. Git emits
+/// Why: the opening parenthesis is load-bearing. Git emits
 /// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
 /// shorter phrase `not a git repository` matches a broken repo and a
 /// genuinely-absent one alike — and the broken repo is the one with real history
@@ -368,12 +369,16 @@ enum ExcludeTarget {
 /// `.git`, where the repository is real. [`classify_rev_parse_failure`]
 /// corroborates it with a filesystem witness first.
 ///
-/// What: verified byte-identical against git 2.54.0. Any wording drift falls
-/// through to [`ExcludeTarget::Unknown`] — the fail-closed direction. Mirrors
-/// `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR` (#4448/#4727); #4735
-/// extracts the shared probe both will call.
-/// Test: `tests::broken_repo_copies_nothing`.
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+/// What: covers both wordings of git's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form (`: (null)`, `: '<GIT_DIR>'`). Any other
+/// wording falls through to [`ExcludeTarget::Unknown`] — the fail-closed
+/// direction. Mirrors `trusty-agents-common`'s `vcs_claim::NO_REPO_STDERR_PREFIX`
+/// (#4448/#4727/#9495); #4735 extracts the shared probe both will call.
+/// Test: `tests::broken_repo_copies_nothing`,
+/// `tests::classify_rev_parse_failure_accepts_the_mount_boundary_wording`.
+// #9495: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// Resolve the destination's real `info/exclude` path, in three states (#4733).
 ///
@@ -450,9 +455,10 @@ fn resolve_git_exclude_with(dest_worktree: &Path, git_bin: &str) -> ExcludeTarge
 /// Why a failed `rev-parse` failed — the gate copying turns on.
 ///
 /// Why: git's "no repository" message is not proof there is no repository. It
-/// emits [`NO_REPO_STDERR`] whenever discovery never got far enough to conclude
-/// otherwise — an unreadable `.git`, an unreadable `.git/HEAD`, or
-/// `GIT_CEILING_DIRECTORIES` stopping the upward walk. In every one of those the
+/// emits a [`NO_REPO_STDERR_PREFIX`] wording whenever discovery never got far
+/// enough to conclude otherwise — an unreadable `.git`, an unreadable
+/// `.git/HEAD`, `GIT_CEILING_DIRECTORIES`, or a filesystem boundary (#9495)
+/// stopping the upward walk. In every one of those the
 /// repository, and the history a committed secret would land in, are real.
 /// `symlink_metadata` on an ancestor `.git` needs only the parent's search bit,
 /// so it is a witness git does not use; a disagreement between the two IS the
@@ -468,9 +474,11 @@ fn resolve_git_exclude_with(dest_worktree: &Path, git_bin: &str) -> ExcludeTarge
 /// [`ExcludeTarget::Unknown`].
 /// Test: `tests::classify_rev_parse_failure_corroborates_the_no_repo_message`,
 /// `tests::classify_rev_parse_failure_canonicalises_before_walking_ancestors`,
+/// `tests::classify_rev_parse_failure_refuses_the_mount_boundary_wording_under_a_real_repo`,
 /// `tests::broken_repo_copies_nothing`.
 fn classify_rev_parse_failure(dest_worktree: &Path, stderr: &str) -> ExcludeTarget {
-    if !stderr.contains(NO_REPO_STDERR) {
+    // #9495: prefix match accepts the mount-boundary wording; the witness below stays the gate.
+    if !stderr.contains(NO_REPO_STDERR_PREFIX) {
         return ExcludeTarget::Unknown(format!(
             "untracked_sync: git rev-parse --git-path info/exclude failed: {}",
             stderr.trim()

@@ -1,0 +1,2 @@
+Fixed
+- Session worktrees on their own filesystem (for example a tmpfs `/tmp`) now receive their allowlisted untracked files again. git reports `not a git repository (or any parent up to mount point <dir>)` when discovery stops at a mount boundary, and the untracked-file sync only recognised the `(or any of the parent directories)` wording, so it refused to copy. An ancestor `.git` still refuses (#9495).
