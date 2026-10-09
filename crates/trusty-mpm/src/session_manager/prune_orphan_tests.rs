@@ -1460,3 +1460,64 @@ async fn a_scanned_path_replaced_by_a_symlink_is_not_removed() {
         "the scanned path itself is left as found"
     );
 }
+
+/// 🔴 #9444: the orphan sweep keeps a worktree a live process stands in.
+///
+/// Why: the fixture is a clean, owner-gone orphan the sweep would otherwise
+/// remove (`prune_orphaned_worktrees_reclaims_clean_pushed_worktree`); the
+/// only thing protecting it is a real `sleep` whose cwd is under the tree.
+/// Fails before the fix: the guard asked identity alone, so
+/// `git worktree remove --force` ran under the process.
+#[tokio::test]
+async fn orphan_sweep_keeps_a_worktree_a_live_process_stands_in_9444() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("live-cwd-9444");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+    let inside = wt.join("crates");
+    std::fs::create_dir_all(&inside).expect("create the process's cwd");
+    let _holder = crate::session_manager::worktree_git_fixture::StandingProcess::in_dir(&inside);
+
+    let outcome = remove_candidate(
+        &wt,
+        &std::collections::HashSet::new(),
+        DirtyWorktreePolicy::Skip,
+        &WorktreeScope::all(),
+        crate::session_manager::git_ceiling::GIT_CALL_TIMEOUT,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, CandidateRemoval::Kept(None)),
+        "{outcome:?}"
+    );
+    assert!(
+        inside.exists(),
+        "the sweep removed a tree a process stands in"
+    );
+}
+
+/// 🔴 #9444 fail-open check: a holder probe that cannot answer keeps the
+/// tree. Fails with the probe dropped from the guard: the same clean orphan
+/// is then removed.
+#[tokio::test]
+async fn orphan_sweep_keeps_a_worktree_when_the_holder_probe_fails_9444() {
+    let fx = GitWorktreeFixture::new();
+    let wt = fx.add_worktree("probe-fails-9444");
+    GitWorktreeFixture::stamp_reclaimable_sentinel(&wt);
+
+    let outcome = super::orphan_remove::remove_candidate_with(
+        &wt,
+        &std::collections::HashSet::new(),
+        DirtyWorktreePolicy::Skip,
+        &WorktreeScope::all(),
+        crate::session_manager::git_ceiling::GIT_CALL_TIMEOUT,
+        crate::session_manager::worktree_git_fixture::probe_cannot_answer,
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, CandidateRemoval::Kept(None)),
+        "{outcome:?}"
+    );
+    assert!(wt.exists(), "an unanswered probe must not permit removal");
+}
