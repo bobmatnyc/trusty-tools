@@ -27,9 +27,11 @@
 //! Test: `service::server::tests_index_config`, `service::server::tests_components`;
 //! the socket halves in `service::rpc::admin`'s `admin_tests.rs`.
 
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
@@ -149,6 +151,7 @@ pub struct PatchIndexConfigRequest {
 /// `IndexConfigView`, returns `200` with the JSON body or `404` for an unknown
 /// id.
 /// Test: `get_returns_current_config`, `get_unknown_index_404`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn index_config_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -216,6 +219,7 @@ pub(crate) fn index_config_report(
 /// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
 /// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
 /// for the component-toggle paths.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn patch_index_config_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

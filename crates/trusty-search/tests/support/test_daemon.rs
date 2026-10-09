@@ -71,39 +71,19 @@ impl DaemonGuard {
     /// Spawn a hermetic `start --foreground` against `data_dir`.
     ///
     /// Why each setting: `TRUSTY_DATA_DIR` and `TRUSTY_DATA_DIR_OVERRIDE` keep
-    /// the lockfile, discovery files and socket inside `data_dir`; `HOME` and
+    /// the lockfile and socket inside `data_dir`; `HOME` and
     /// `XDG_CONFIG_HOME` keep it off the operator's allowlist and config;
     /// `--no-auto-discover` registers no index; `TRUSTY_EMBEDDER=stdio` spawns
     /// no embedder until an embed request, which these tests never send.
     /// Stderr goes to a file in `data_dir`, not this process's stderr, so the
     /// daemon never holds a pipe a piped `cargo test` waits on.
-    /// What: spawns on `port` and returns the guard. Panics on a spawn failure.
+    /// What: [`Self::spawn_with`] with no extra arguments.
     /// Test: as the type.
-    pub fn spawn(data_dir: &Path, port: u16) -> Self {
-        let home = data_dir.join("home");
-        std::fs::create_dir_all(&home).expect("create the daemon's fake HOME");
-        let log = std::fs::File::create(data_dir.join("daemon.stderr.log"))
-            .expect("create the daemon's stderr log");
-        let child = command()
-            .args(["start", "--foreground", "--no-auto-discover", "--port"])
-            .arg(port.to_string())
-            .env("TRUSTY_DATA_DIR", data_dir)
-            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", &home)
-            .env("TRUSTY_EMBEDDER", "stdio")
-            .env("TRUSTY_SKIP_RAM_CHECK", "1")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .expect("spawn trusty-search start --foreground");
-        Self { child }
+    pub fn spawn(data_dir: &Path) -> Self {
+        Self::spawn_with(data_dir, &[])
     }
 
-    /// [`Self::spawn`] with no port and `extra` appended to `start`'s
-    /// arguments.
+    /// [`Self::spawn`], with `extra` appended to `start`'s arguments.
     ///
     /// Why (#9214): a test of a retired flag passes it to a real daemon.
     /// What: spawns and returns the guard. Panics on a spawn failure.

@@ -6,7 +6,8 @@
 //!
 //! What: probes the lockfile fast-path, constructs `SearchAppState`, kicks off
 //! embedder init on a background task, launches warm-boot, schema migrations,
-//! auto-discovery, and finally hands off to `run_daemon`.
+//! auto-discovery, and finally hands off to `run_daemon`, which serves the
+//! Unix socket only (#9214).
 //!
 //! Test: run `trusty-search start` twice in a row — the second invocation
 //! must exit 1 with the "another daemon is already running" message. Run with
@@ -25,7 +26,7 @@ use super::isolation::{StartPlan, DATA_DIR_ENV};
 use super::restore::restore_indexes;
 use crate::commands::prior_index_count::load_prior_index_count;
 
-/// Refusal text for a start that found another daemon holding the port.
+/// Refusal text for a start that found another daemon holding the lock.
 ///
 /// Why (#6590): naming the pid was not enough to act on. When `launchctl
 /// bootout` cuts a snapshot flush short, `KeepAlive` respawns the OLD binary,
@@ -85,7 +86,7 @@ pub(super) fn already_running_message(
         "Daemon already running (pid {pid}).\n\
          \n\
          If you just replaced the binary, this is the OLD image: a truncated \
-         shutdown leaves launchd respawning it, and it keeps the port.\n\
+         shutdown leaves launchd respawning it, and it keeps the lock.\n\
          \n\
          Remedy:  kill -TERM {pid}\n\
          Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
@@ -126,10 +127,11 @@ pub(super) fn already_running_message(
 /// `data_dir_flag_wins_over_an_inherited_env_value` and
 /// `an_explicit_data_dir_never_auto_discovers_on_any_start` pin the two
 /// resolvers; `handle_start_reads_the_plan_at_every_scan_site` pins the
-/// wiring. #9214: `no_http` runs the daemon on its RPC socket alone, is
-/// forwarded to the background child, and withholds auto-discovery
-/// (`auto_discover_needs_the_http_listener`). `socket` names the RPC socket
-/// the daemon binds instead of the data-dir one, and is forwarded too
+/// wiring. #9214: the daemon serves its RPC socket only. `port` and
+/// `no_http` (and `TRUSTY_SEARCH_NO_HTTP`) are retired: each prints a warning
+/// and is neither used nor forwarded (`retired_flags_warn_and_change_nothing`).
+/// `socket` names the RPC socket the daemon binds instead of the data-dir
+/// one, and is forwarded to the background child
 /// (`auto_start_binds_the_socket_the_client_resolved`).
 pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     let super::StartArgs {
@@ -144,10 +146,17 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         no_http,
         socket,
     } = args;
+    // #9214 (ruling D2): accepted for one release, warned about, then unused.
+    let no_http_env = std::env::var_os(super::args::RETIRED_NO_HTTP_ENV);
+    for warning in
+        super::args::retired_flag_warnings(port, no_http.as_deref(), no_http_env.as_deref())
+    {
+        eprintln!("{}", warning.yellow());
+    }
     let device = device.as_str();
     let data_dir = data_dir.as_deref();
     // Apply the data-dir override as early as possible so every per-instance
-    // path — the lockfile, the port file, `indexes.toml` and the RPC socket —
+    // path — the lockfile, `indexes.toml` and the RPC socket —
     // derives from it. #8149: an explicit `--data-dir` now wins over an
     // inherited `TRUSTY_DATA_DIR` on the foreground path too, matching the
     // background self-spawn's stated intent (#1182). Before this, a second
@@ -164,10 +173,6 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         no_auto_discover,
         auto_discover,
     )?;
-    // #9214: auto-discover registers over HTTP; without the listener it must
-    // not run: it has no HTTP address to reach.
-    // The skip is logged after tracing is up, at the spawn site below.
-    let discovery = discovery.with_http_listener(!no_http);
     if let Some(dir) = resolved_data_dir.as_deref() {
         // Create the directory now so the child daemon can acquire its
         // lockfile immediately on first start.
@@ -189,7 +194,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         crate::service::socket::prepare_named_socket(path.to_path_buf())?;
     }
 
-    if !discovery.runs_auto_discover() && !no_auto_discover && !discovery.withheld_for_no_http() {
+    if !discovery.runs_auto_discover() && !no_auto_discover {
         tracing::info!(
             "auto-discover: disabled for an explicit data dir (#8176); \
              pass --auto-discover to scan anyway"
@@ -222,10 +227,9 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         let exe = std::env::current_exe()
             .map_err(|e| anyhow::anyhow!("could not resolve current_exe: {e}"))?;
         let mut cmd = std::process::Command::new(&exe);
+        // #9214: no `--port` — the child binds no TCP port.
         cmd.arg("start")
             .arg("--foreground")
-            .arg("--port")
-            .arg(port.to_string())
             .arg("--device")
             .arg(device);
         // #8176: forward the DECISION, not the flag — see
@@ -240,10 +244,6 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         }
         if let Some(n) = fanout_concurrency {
             cmd.arg("--fanout-concurrency").arg(n.to_string());
-        }
-        // #9214: the detached child is the daemon; it must not bind HTTP.
-        if no_http {
-            cmd.arg("--no-http");
         }
         // #9214: the detached child binds the socket this invocation named.
         if let Some(path) = socket.as_deref() {
@@ -378,7 +378,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
 
     // Issue #81: detect orphan daemons whose PIDs are NOT recorded in the
     // lockfile. Reap them now so we don't end up with two daemons fighting
-    // over `bind_with_auto_port`.
+    // over the lock and the socket.
     //
     // #4395: this used to SIGTERM every process on the machine named
     // `trusty-search` with `start` in argv and SIGKILL the survivors 3 s later,
@@ -390,7 +390,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     super::reap_orphans::reap_orphans_before_start();
 
     // Construct `SearchAppState` immediately; kick off model loading on
-    // a background task, and let `run_daemon` bind the HTTP port right away.
+    // a background task, and let `run_daemon` bind the socket right away.
     // Handlers that need the embedder return `503 Service Unavailable` until
     // `state.install_embedder()` flips the watch channel.
     let cfg = crate::service::load_user_config();
@@ -414,7 +414,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     }
 
     // Issue #110 Phase 2: the embedder init runs on a dedicated background
-    // task so the HTTP listener can bind and accept requests while the ONNX
+    // task so the socket can bind and accept requests while the ONNX
     // model (or trusty-embedderd subprocess) is coming up.
     let init_timeout_secs: u64 = std::env::var("TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS")
         .ok()
@@ -462,7 +462,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
                 // the embedder slot are visible, so the orchestrator's
                 // eventual `swap_to` / `install_embedderd_pid_slot` calls
                 // race no in-progress install. Detached: never blocks the
-                // HTTP listener or the rest of this init task. No-op (never
+                // socket listener or the rest of this init task. No-op (never
                 // spawned) unless the platform is Apple Silicon (aarch64
                 // macOS) and the user did not force `TRUSTY_EMBEDDER=stdio`
                 // — see `resolve_default_embedder_mode_for`.
@@ -532,7 +532,6 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
                 if discovery.runs_auto_discover() {
                     tokio::spawn(crate::commands::discover::auto_discover_and_index());
                 } else if let Some(reason) = discovery.skip_reason() {
-                    // #9214: names --no-http when that is what withheld the scan.
                     tracing::info!("{reason}");
                 }
             }
@@ -601,13 +600,8 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     // `crates/trusty-embedderd/src/stdio_server.rs:57-60`): when this process
     // dies, the OS closes its end of the sidecar's stdin pipe, `read_line`
     // returns `Ok(0)`, and the sidecar exits cleanly on its own.
-    // #9214: `--no-http` / `TRUSTY_SEARCH_NO_HTTP` serves the socket only.
-    let http = if no_http {
-        crate::service::HttpListener::Off
-    } else {
-        crate::service::HttpListener::Bind(port)
-    };
-    match crate::service::run_daemon_with(state, http, socket).await {
+    // #9214: the socket is the daemon's only listener.
+    match crate::service::run_daemon(state, socket).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
             // Issue #126: a launchd-spawned `start` that finds a daemon

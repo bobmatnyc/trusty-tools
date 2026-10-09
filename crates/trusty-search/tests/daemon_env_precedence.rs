@@ -40,14 +40,15 @@ const CLAP_USAGE_EXIT: i32 = 2;
 /// bypass the process exits at the RAM check and the behaviour under test
 /// never runs. Centralised here so a new test cannot reintroduce the gap by
 /// spawning the binary without the flag.
-/// What: points `TRUSTY_DATA_DIR` at `data_dir` and pins `port`; the caller
-/// adds whatever per-test environment the case needs.
+/// What: points `TRUSTY_DATA_DIR` at `data_dir`; the caller adds whatever
+/// per-test environment the case needs. #9214: no `--port`, which the daemon
+/// ignores now.
 /// Test: used by every test in this file.
-fn daemon_command(data_dir: &Path, port: &str) -> Command {
+fn daemon_command(data_dir: &Path) -> Command {
     // #8900: stamped, so a daemon that boots instead of aborting dies with
     // this test binary rather than outliving the run.
     let mut cmd = test_daemon::command();
-    cmd.args(["start", "--foreground", "--port", port])
+    cmd.args(["start", "--foreground"])
         .env("TRUSTY_DATA_DIR", data_dir)
         .env("TRUSTY_SKIP_RAM_CHECK", "1");
     cmd
@@ -79,7 +80,7 @@ fn run_start(daemon_env: &str) -> (i32, String) {
     // after argument handling — no port bound, no index opened.
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    run_to_completion(daemon_command(scratch.path(), "17998").env_remove("TRUSTY_NO_AUTO_DISCOVER"))
+    run_to_completion(daemon_command(scratch.path()).env_remove("TRUSTY_NO_AUTO_DISCOVER"))
 }
 
 /// Core regression for #4827: a value in `daemon.env` must reach clap.
@@ -162,9 +163,8 @@ fn process_env_still_beats_daemon_env() {
     .expect("write daemon.env");
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    let (code, output) = run_to_completion(
-        daemon_command(scratch.path(), "17997").env("TRUSTY_NO_AUTO_DISCOVER", "1"),
-    );
+    let (code, output) =
+        run_to_completion(daemon_command(scratch.path()).env("TRUSTY_NO_AUTO_DISCOVER", "1"));
     assert_ne!(
         code, CLAP_USAGE_EXIT,
         "an exported value must outrank daemon.env; got exit {code} and \
@@ -194,7 +194,7 @@ fn daemon_env_cannot_redirect_the_data_dir() {
     .expect("write daemon.env");
     std::fs::write(scratch.path().join("daemon.lock"), b"1").expect("write daemon.lock");
 
-    let (_code, output) = run_to_completion(&mut daemon_command(scratch.path(), "17996"));
+    let (_code, output) = run_to_completion(&mut daemon_command(scratch.path()));
     assert!(
         output.contains("already running"),
         "the scratch dir's lockfile must still be the one consulted — a \

@@ -438,10 +438,12 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search start
-    ///   trusty-search start --port 7878
-    ///   trusty-search start --foreground --port 7878   # launchd / systemd
+    ///   trusty-search start --foreground               # launchd / systemd
     ///   trusty-search start --data-dir /tmp/test-daemon  # isolated data dir
-    ///   trusty-search start --no-http                  # rpc socket only, no TCP port
+    ///
+    /// #9214: the daemon serves its Unix socket only and binds no TCP port.
+    /// `--port`, `--no-http` and `TRUSTY_SEARCH_NO_HTTP` are accepted for one
+    /// release and ignored, each with a warning on stderr.
     ///
     /// #8176: an isolated instance started against an explicit data directory
     /// (`--data-dir` or `TRUSTY_DATA_DIR`) does NOT auto-discover, on its first
@@ -565,8 +567,9 @@ enum Commands {
     ///
     /// Starts the daemon if none runs, asks it over its socket which HTTP
     /// address it bound, then opens `http://<addr>/ui` in the default browser.
-    /// Falls back to printing the URL if the browser fails to launch. Errors,
-    /// naming the socket, against a socket-only (`--no-http`) daemon.
+    /// Falls back to printing the URL if the browser fails to launch. #9214:
+    /// a current daemon is socket-only and serves no dashboard, so this
+    /// errors naming the socket and trusty-console, which serves it.
     ///
     /// Examples:
     ///   trusty-search dashboard
@@ -886,15 +889,15 @@ enum Commands {
         target: MonitorTarget,
     },
 
-    /// Print the daemon's listening port (or address) to stdout.
+    /// Print the daemon's HTTP port (or address) to stdout, if it has one.
     ///
     /// Asks the running daemon over its socket which HTTP address it bound.
-    /// Useful for shell substitution:
-    ///   curl http://127.0.0.1:$(trusty-search port)/health
+    /// #9214: a current daemon binds none, so this exits 1 naming the socket;
+    /// only a daemon from an older build still reports a port.
     ///
     /// Exits 1 (with a message on stderr) when no daemon answers on the
-    /// socket, or when the daemon serves no HTTP listener (`start --no-http`),
-    /// so substitution fails cleanly. Never starts a daemon.
+    /// socket, or when the daemon serves no HTTP listener, so shell
+    /// substitution fails cleanly. Never starts a daemon.
     ///
     /// Examples:
     ///   trusty-search port               # bare port: 7879

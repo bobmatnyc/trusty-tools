@@ -8,8 +8,8 @@
 //! directory, `TRUSTY_DATA_DIR` and `HOME` isolated, and no daemon running. A
 //! daemon must answer `search.health` on the client's socket, and the CLI must
 //! then exit 0. The test fails at once when the daemon answers on the data-dir
-//! socket instead, so a red run does not wait out the CLI's 60 s budget. HTTP is
-//! off (`TRUSTY_SEARCH_NO_HTTP=1`), so the daemon binds no TCP port.
+//! socket instead, so a red run does not wait out the CLI's 60 s budget. The
+//! daemon binds no TCP port (#9214).
 //! Test: `cargo test -p trusty-search --test integration auto_start_socket_9214::`.
 
 use std::path::Path;
@@ -83,7 +83,7 @@ async fn auto_start_binds_the_socket_the_client_resolved() {
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", &home)
         .env("TRUSTY_NO_AUTO_DISCOVER", "1")
-        .env("TRUSTY_SEARCH_NO_HTTP", "1")
+        .env_remove("TRUSTY_SEARCH_NO_HTTP")
         .env("TRUSTY_EMBEDDER", "stdio")
         .env("TRUSTY_SKIP_RAM_CHECK", "1")
         .env("RUST_LOG", "warn")

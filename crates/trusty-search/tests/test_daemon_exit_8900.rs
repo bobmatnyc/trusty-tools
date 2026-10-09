@@ -9,8 +9,9 @@
 //! helper that starts a daemon the way the suites do, either through
 //! `DaemonGuard` or through a CLI that auto-starts one, then blocks. The tests
 //! SIGKILL the helper and require the daemon's pid to
-//! disappear inside [`REAP_TIMEOUT`], and its `http_addr` file with it, which
-//! only the daemon's own SIGTERM path removes. Every daemon here runs on a
+//! disappear inside [`REAP_TIMEOUT`], and its socket file with it, which
+//! only the daemon's own SIGTERM path removes (#9214: the daemon writes no
+//! `http_addr`). Every daemon here runs on a
 //! fresh temp data dir with a fake `HOME` and `--no-auto-discover`, so none
 //! touches the real daemon, its allowlist, or the resident-index cap.
 //! Test: `cargo test -p trusty-search --test test_daemon_exit_8900`.
@@ -30,7 +31,7 @@ const ENV_DATA_DIR: &str = "TRUSTY_8900_DATA_DIR";
 /// Which spawn shape the helper uses: `guard` or `cli`.
 const ENV_SHAPE: &str = "TRUSTY_8900_SHAPE";
 
-/// How long a daemon gets to boot far enough to write its `http_addr`.
+/// How long a daemon gets to boot far enough to serve its socket.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long a daemon gets to notice its spawner died and exit.
@@ -48,12 +49,6 @@ fn hard_kill(pid: u32) {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
 }
 
-/// A loopback port nothing is bound to right now.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    listener.local_addr().expect("local addr").port()
-}
-
 /// Poll until `ready` holds or `timeout` passes.
 fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
@@ -66,11 +61,14 @@ fn wait_until(timeout: Duration, mut ready: impl FnMut() -> bool) -> bool {
     true
 }
 
-/// The address the daemon wrote to `<data_dir>/http_addr` once it bound.
-fn bound_addr(data_dir: &Path) -> Option<String> {
-    let addr = std::fs::read_to_string(data_dir.join("http_addr")).ok()?;
-    let addr = addr.trim();
-    (!addr.is_empty()).then(|| addr.to_string())
+/// The daemon's socket under `data_dir` (#9214: its only listener).
+fn socket_of(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("trusty-search.sock")
+}
+
+/// True once something accepts a connection on the daemon's socket.
+fn socket_serving(data_dir: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_of(data_dir)).is_ok()
 }
 
 /// The pid the daemon recorded in `<data_dir>/daemon.lock`.
@@ -84,9 +82,9 @@ fn locked_pid(data_dir: &Path) -> Option<u32> {
 /// Why `#[ignore]`: it is not a test. The parent runs this binary filtered to
 /// it with [`ENV_DATA_DIR`] set; without that it returns at once.
 /// What: `guard` spawns through `DaemonGuard`, `cli` runs `trusty-search list`
-/// against a data dir whose `daemon.port` names a port nothing listens on, so
-/// the CLI's health probe fails and it auto-starts a detached daemon. Without
-/// that file, discovery falls back to the default port: the real daemon. Both use the stamped `test_daemon::command`.
+/// against a data dir whose socket nothing serves, so the CLI's health probe
+/// fails and it auto-starts a detached daemon on that data dir. Both use the
+/// stamped `test_daemon::command`.
 /// Test: driven by the two `*_is_killed` tests.
 #[test]
 #[ignore = "re-entry helper for the #8900 tests; does nothing when run directly"]
@@ -96,12 +94,10 @@ fn spawner_child_mode() {
     };
     let data_dir = Path::new(&dir);
     let _guard = match std::env::var(ENV_SHAPE).as_deref() {
-        Ok("guard") => Some(DaemonGuard::spawn(data_dir, free_port())),
+        Ok("guard") => Some(DaemonGuard::spawn(data_dir)),
         Ok("cli") => {
             let home = data_dir.join("home");
             std::fs::create_dir_all(&home).expect("create fake HOME");
-            std::fs::write(data_dir.join("daemon.port"), free_port().to_string())
-                .expect("seed daemon.port");
             test_daemon::command()
                 .arg("list")
                 .current_dir(data_dir)
@@ -163,7 +159,7 @@ fn assert_daemon_dies_with_its_spawner(shape: &str) {
     };
 
     let booted = wait_until(BOOT_TIMEOUT, || {
-        bound_addr(data_dir).is_some() && locked_pid(data_dir).is_some()
+        socket_serving(data_dir) && locked_pid(data_dir).is_some()
     });
     let Some(daemon_pid) = locked_pid(data_dir) else {
         kill_helper(&mut helper);
@@ -172,7 +168,7 @@ fn assert_daemon_dies_with_its_spawner(shape: &str) {
     if !booted {
         kill_helper(&mut helper);
         hard_kill(daemon_pid);
-        panic!("the {shape} helper's daemon {daemon_pid} never wrote http_addr");
+        panic!("the {shape} helper's daemon {daemon_pid} never served its socket");
     }
 
     // The point: no `Drop`, no unwind, no teardown runs in the helper.
@@ -191,8 +187,8 @@ fn assert_daemon_dies_with_its_spawner(shape: &str) {
         );
     }
     assert!(
-        !data_dir.join("http_addr").exists(),
-        "daemon {daemon_pid} exited without removing http_addr: the watchdog must route \
+        !socket_of(data_dir).exists(),
+        "daemon {daemon_pid} exited without unlinking its socket: the watchdog must route \
          through the daemon's SIGTERM shutdown, not exit the process outright"
     );
 }
@@ -220,11 +216,11 @@ fn cli_auto_started_daemon_exits_when_its_test_binary_is_killed() {
 #[test]
 fn guard_drop_ends_its_daemon() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let guard = DaemonGuard::spawn(tmp.path(), free_port());
+    let guard = DaemonGuard::spawn(tmp.path());
     let pid = guard.pid();
     assert!(
-        wait_until(BOOT_TIMEOUT, || bound_addr(tmp.path()).is_some()),
-        "daemon {pid} never wrote http_addr"
+        wait_until(BOOT_TIMEOUT, || socket_serving(tmp.path())),
+        "daemon {pid} never served its socket"
     );
     drop(guard);
     assert!(

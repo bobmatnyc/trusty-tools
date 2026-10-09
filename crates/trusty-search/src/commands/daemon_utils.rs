@@ -1,12 +1,12 @@
-//! Daemon discovery + reachability helpers shared across CLI subcommands.
+//! The MCP bridge's address file, shared across CLI subcommands.
 //!
-//! Why: every subcommand that talks to the running daemon needs the same
-//! "where is it?" logic. #5670 promoted the address-file layout to
-//! `trusty_common::daemon_guard::DaemonAddrLayout`, because `tga` has to probe
-//! this daemon and cannot depend on this crate. #9214 moved the CLI onto the
-//! daemon's socket (`service::daemon_client`); no CLI path dials TCP.
+//! Why: `serve --with-http` publishes its MCP HTTP/SSE address here. #9214
+//! moved the CLI onto the daemon's socket (`service::daemon_client`); no CLI
+//! path dials TCP, and the daemon's own port-file resolver went with its
+//! `:7878` bind (`stop` and the orphan reaper use
+//! `service::daemon_port_path` to clear a stale one).
 //!
-//! What: two path resolvers.
+//! What: one path resolver.
 //! Test: `mcp_http_addr_path_is_home_relative` below.
 
 /// Path to `~/.trusty-search/mcp_http_addr` -- the MCP HTTP/SSE listener's
@@ -25,23 +25,6 @@
 /// Test: `mcp_http_addr_path_is_home_relative` unit test below.
 pub fn mcp_http_addr_path() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".trusty-search").join("mcp_http_addr"))
-}
-
-/// Path to the daemon port file (`daemon.port` under the resolved data dir).
-///
-/// Why: the port file records which TCP port the running daemon bound, so CLI
-/// subcommands (`status`, `index`, `query`) can discover the daemon without
-/// configuration. When `TRUSTY_DATA_DIR` is set (by `--data-dir` or the env
-/// var), the port file lives in that directory so an isolated test/cert daemon
-/// does not collide with the production daemon's port file (issue #281).
-/// What: returns `$TRUSTY_DATA_DIR/daemon.port` when the env var is set,
-/// otherwise `<data_local_dir>/trusty-search/daemon.port`. #5670 moved that
-/// rule into `DaemonAddrLayout::TRUSTY_SEARCH`, which the promoted resolver
-/// reads through, so both agree by construction.
-/// Test: set `TRUSTY_DATA_DIR=/tmp/ts-x`; assert path equals
-/// `/tmp/ts-x/daemon.port`.
-pub fn daemon_port_path() -> Option<std::path::PathBuf> {
-    trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.port_file_path()
 }
 
 #[cfg(test)]

@@ -193,7 +193,7 @@ fn launchd_env_pairs(
     }
 
     // Operator tunables and everything else the unit carried: process env wins,
-    // installed unit is the fallback (#4868).
+    // installed unit is the fallback (#4868). #9214: minus the retired keys.
     pairs.extend(crate::commands::service_unit::without_retired_env(
         resolve_persisted_env(&lookup, existing, TEMPLATE_OWNED_ENV),
     ));
@@ -329,6 +329,7 @@ fn build_launchd_config(
 
     // #4823: express the operator's auto-discovery choice as a CLI flag so it
     // survives regeneration and cannot carry an unparseable env value.
+    // #9214: no `--port` / `--no-http` — see `unit_program_args`.
     let args = crate::commands::service_unit::unit_program_args(suppress_auto_discover);
 
     LaunchdConfig {

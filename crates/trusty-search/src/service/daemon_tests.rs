@@ -2,38 +2,17 @@
 //! production file under the 500-SLOC cap — mirrors the `persistence_tests.rs`
 //! split, issue #1372's pattern).
 //!
-//! Why: `daemon.rs` carries the lockfile/port-file/http_addr resolution and
-//! the `run_daemon()` entry point itself; the #3602-review fix (shared
-//! discovery registration/deregistration) plus its regression tests pushed
-//! the file over the production SLOC cap. Splitting the tests into this
-//! sibling `#[path]`-included module restores compliance without changing
-//! coverage.
-//! What: lockfile/port-file/PID-liveness/auto-port tests, the `TRUSTY_DATA_DIR`
-//! path-resolution regression tests (issue #3545), and the shared-discovery
-//! registration/deregistration regression tests (issue #3602 review).
+//! Why: `daemon.rs` carries the lockfile and data-dir resolution and the
+//! `run_daemon()` entry point itself; its tests outgrew the production SLOC
+//! cap. Splitting them into this sibling `#[path]`-included module restores
+//! compliance without changing coverage.
+//! What: lockfile/PID-liveness tests, the `TRUSTY_DATA_DIR` path-resolution
+//! regression tests (issue #3545), the shared-discovery deregistration test
+//! (issue #3602 review), and the socket-only daemon tests (#9214).
 //! Test: this module IS the tests.
 
 use super::*;
 use serial_test::serial;
-use std::net::TcpListener as StdTcpListener;
-
-#[test]
-fn http_addr_file_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("http_addr");
-    write_http_addr_file(&path, "127.0.0.1:54321").unwrap();
-    let read = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(read.trim(), "127.0.0.1:54321");
-}
-
-#[test]
-fn port_file_roundtrip() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("daemon.port");
-    write_port_file(&path, 12345).unwrap();
-    let read = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(read.trim(), "12345");
-}
 
 #[test]
 fn pid_alive_current_process_is_alive() {
@@ -70,22 +49,6 @@ fn lockfile_contention_errors() {
     let _first = acquire_lock(&path).unwrap();
     let err = acquire_lock(&path).unwrap_err();
     assert!(matches!(err, DaemonError::AlreadyRunning(_)));
-}
-
-#[tokio::test]
-async fn auto_port_walks_forward() {
-    // Bind a port, then ask the auto-port allocator to start there.
-    let occupied = StdTcpListener::bind("127.0.0.1:0").unwrap();
-    let occupied_port = occupied.local_addr().unwrap().port();
-    let next = bind_with_auto_port(occupied_port, 64).await.unwrap();
-    assert_ne!(next.local_addr().unwrap().port(), occupied_port);
-}
-
-#[tokio::test]
-async fn auto_port_zero_uses_os() {
-    // Note: port 0 is special — the shared helper delegates to the OS.
-    let l = bind_with_auto_port(0, 1).await.unwrap();
-    assert!(l.local_addr().unwrap().port() > 0);
 }
 
 /// Why: `daemon_dir()` must respect `TRUSTY_DATA_DIR` so an isolated daemon
@@ -152,107 +115,36 @@ fn daemon_paths_under_data_dir_override() {
     );
 }
 
-/// Regression for issue #3545: `http_addr_path()` must respect
-/// `TRUSTY_DATA_DIR` exactly like `daemon_dir()`/`daemon_port_path()` do,
-/// so an isolated daemon's discovery file never lands in the shared
-/// `$HOME/.trusty-search/http_addr` location used by the production daemon.
+/// Regression for issue #3545: the stale `http_addr` an older isolated
+/// daemon wrote lives under `TRUSTY_DATA_DIR`, so that is where the
+/// socket-only daemon removes it (#9214) — never the shared `$HOME` file.
 /// What: set `TRUSTY_DATA_DIR` to a tempdir; assert the returned path is
 /// `{tempdir}/http_addr`, not the `$HOME`-relative default.
-/// Test: `http_addr_path_respects_trusty_data_dir` (this test).
+/// Test: `legacy_http_addr_path_respects_trusty_data_dir` (this test).
 ///
-/// `#[serial]` for the same reason as the other `TRUSTY_DATA_DIR` tests in
-/// this module: the env var is process-global.
+/// `#[serial]`: the env var is process-global.
 #[test]
 #[serial]
-fn http_addr_path_respects_trusty_data_dir() {
+fn legacy_http_addr_path_respects_trusty_data_dir() {
     let tmp = tempfile::tempdir().unwrap();
     let override_path = tmp.path().to_path_buf();
     unsafe {
         std::env::set_var("TRUSTY_DATA_DIR", &override_path);
     }
-    let path = http_addr_path();
+    let path = legacy_http_addr_path();
     unsafe {
         std::env::remove_var("TRUSTY_DATA_DIR");
     }
-    let path = path.expect("http_addr_path should resolve with TRUSTY_DATA_DIR set");
     assert_eq!(
         path,
-        override_path.join("http_addr"),
-        "http_addr_path should land under the TRUSTY_DATA_DIR override, not $HOME"
+        Some(override_path.join("http_addr")),
+        "the stale http_addr lives under the TRUSTY_DATA_DIR override, not $HOME"
     );
 }
 
-/// Regression for the #3602 review finding: `register_shared_discovery`
-/// must populate the generic `trusty_common` registry for the default
-/// (non-isolated) instance, since `resolve_search_url`
-/// (`trusty-search monitor status`/`monitor indexes`/`monitor tui`) and
-/// trusty-installer's `resolve_base_url` have no other way to discover it.
-///
-/// Why safe: only `trusty_common::write_daemon_addr`/`read_daemon_addr`
-/// are exercised here, both redirected into a tempdir via
-/// `TRUSTY_DATA_DIR_OVERRIDE` -- this never touches `daemon_lock_path`/
-/// `daemon_port_path`/`http_addr_path` (which would resolve to a REAL
-/// production path with `TRUSTY_DATA_DIR` unset), so it cannot collide
-/// with a real running daemon on this machine.
-/// What: unset `TRUSTY_DATA_DIR`, call `register_shared_discovery`, assert
-/// the address round-trips through `trusty_common::read_daemon_addr`.
-/// Test: this function.
-#[test]
-#[serial]
-fn register_shared_discovery_writes_when_default_instance() {
-    let tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::remove_var("TRUSTY_DATA_DIR");
-        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", tmp.path());
-    }
-    let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-    register_shared_discovery(&addr);
-    let got = trusty_common::read_daemon_addr("trusty-search").unwrap();
-    unsafe {
-        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
-    }
-    assert_eq!(
-        got.as_deref(),
-        Some("127.0.0.1:54321"),
-        "default instance must populate the shared discovery registry"
-    );
-}
-
-/// Regression for the #3602 review finding: an isolated `TRUSTY_DATA_DIR`
-/// instance must NEVER populate the shared registry -- that would
-/// reintroduce the exact cross-instance pollution issue #3545 fixed.
-///
-/// Why safe: same reasoning as the sibling test above -- only the
-/// `TRUSTY_DATA_DIR_OVERRIDE`-redirected generic registry is touched.
-/// What: set both `TRUSTY_DATA_DIR` (isolation) and
-/// `TRUSTY_DATA_DIR_OVERRIDE` (safety redirect); call
-/// `register_shared_discovery`; assert the registry stays empty.
-/// Test: this function.
-#[test]
-#[serial]
-fn register_shared_discovery_noop_when_isolated() {
-    let override_tmp = tempfile::tempdir().unwrap();
-    let data_dir_tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
-        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
-    }
-    let addr: SocketAddr = "127.0.0.1:54322".parse().unwrap();
-    register_shared_discovery(&addr);
-    let got = trusty_common::read_daemon_addr("trusty-search").unwrap();
-    unsafe {
-        std::env::remove_var("TRUSTY_DATA_DIR");
-        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
-    }
-    assert!(
-        got.is_none(),
-        "isolated instance must not populate the shared discovery registry; got {got:?}"
-    );
-}
-
-/// Regression for the #3602 review finding: shutdown must clear the
-/// shared registry entry for the default instance, mirroring the
-/// `http_addr_written` cleanup.
+/// Regression for the #3602 review finding, kept by #9214: the default
+/// instance clears the shared registry entry an older build wrote, because
+/// this build publishes no address and the entry can only name a dead port.
 ///
 /// Why safe: same `TRUSTY_DATA_DIR_OVERRIDE` redirection as the writer
 /// tests above.
@@ -275,96 +167,61 @@ fn deregister_shared_discovery_removes_when_default_instance() {
     }
     assert!(
         got.is_none(),
-        "default instance must clear the shared registry on shutdown"
+        "the default instance must clear the stale shared registry entry"
     );
 }
 
-/// End-to-end regression for the #3602 review finding: a REAL isolated
-/// `run_daemon()` instance must write its own `TRUSTY_DATA_DIR`-scoped
-/// `http_addr` file (so its own CLI clients still work, issue #3545)
-/// while never touching the shared, non-isolated registry that
-/// `resolve_search_url`/`resolve_base_url` read.
+/// End-to-end regression for the #3602 review finding, under #9214: a REAL
+/// isolated `run_daemon()` must leave the shared, non-isolated discovery
+/// registry alone. The registry belongs to the default instance; an isolated
+/// daemon that cleared it would erase another daemon's entry.
 ///
-/// Why this is the only `run_daemon()` variant safe to execute directly:
-/// with `TRUSTY_DATA_DIR` set, `daemon_lock_path()`/`daemon_port_path()`/
-/// `http_addr_path()` all resolve entirely under the tempdir -- never a
-/// real production path -- so binding a real ephemeral port (`0`) and
-/// running the full daemon lifecycle here cannot collide with, or
-/// mutate, a real daemon on this machine. The mirror case (default
-/// instance actually writes) is covered above by testing
-/// `register_shared_discovery`/`deregister_shared_discovery` directly,
-/// because that variant would otherwise need `TRUSTY_DATA_DIR` unset --
-/// which would make `daemon_lock_path()` resolve to the REAL production
-/// lockfile.
-/// What: spawns `run_daemon(SearchAppState::new(..), 0)` with
-/// `TRUSTY_DATA_DIR` + `TRUSTY_DATA_DIR_OVERRIDE` both pointed at
-/// tempdirs; polls for the isolated `http_addr` file to appear; asserts
-/// the shared registry stays empty throughout; triggers graceful
-/// shutdown via `state.shutdown_tx`; asserts the isolated `http_addr`
-/// file is cleaned up.
+/// Why it is safe to run: with `TRUSTY_DATA_DIR` set, every daemon path
+/// resolves under a tempdir, and `TRUSTY_DATA_DIR_OVERRIDE` redirects the
+/// shared registry into another, so nothing touches a real daemon.
+/// What: seeds the redirected shared registry, runs the isolated daemon until
+/// its socket serves, and asserts the entry is untouched and that no
+/// `http_addr` file appeared under the data dir.
 /// Test: this function.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn run_daemon_isolated_instance_never_pollutes_shared_discovery() {
+async fn run_daemon_isolated_instance_leaves_shared_discovery_alone() {
     use crate::core::registry::IndexRegistry;
+    use crate::service::socket;
 
-    let override_tmp = tempfile::tempdir().unwrap();
-    let data_dir_tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
-        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
-    }
+    with_isolated_daemon_paths(|data_dir| async move {
+        trusty_common::write_daemon_addr("trusty-search", "127.0.0.1:1").unwrap();
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let handle = tokio::spawn(run_daemon(state, None));
 
-    let state = SearchAppState::new(IndexRegistry::new());
-    let shutdown_tx = state.shutdown_tx.clone();
-    let handle = tokio::spawn(run_daemon(state, 0));
+        let serving = wait_for_socket(&socket_path).await;
+        let shared_during = trusty_common::read_daemon_addr("trusty-search").unwrap();
+        let addr_file = data_dir.join("http_addr").exists();
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
 
-    let isolated_http_addr = data_dir_tmp.path().join("http_addr");
-    let mut seen = false;
-    for _ in 0..100 {
-        if isolated_http_addr.exists() {
-            seen = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        seen,
-        "isolated instance must still write its own TRUSTY_DATA_DIR-scoped http_addr"
-    );
-
-    let shared_during = trusty_common::read_daemon_addr("trusty-search").unwrap();
-
-    let _ = shutdown_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-
-    let isolated_gone = !isolated_http_addr.exists();
-    unsafe {
-        std::env::remove_var("TRUSTY_DATA_DIR");
-        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
-    }
-
-    assert!(
-        shared_during.is_none(),
-        "isolated instance must never appear in the shared discovery registry; got {shared_during:?}"
-    );
-    assert!(
-        isolated_gone,
-        "isolated instance's own http_addr file must be removed on shutdown"
-    );
+        assert!(serving, "the isolated daemon must serve its socket");
+        assert_eq!(
+            shared_during.as_deref(),
+            Some("127.0.0.1:1"),
+            "an isolated instance must not touch the shared discovery registry"
+        );
+        assert!(!addr_file, "the daemon must write no http_addr file");
+    })
+    .await;
 }
 
-/// #9030: `search.health` over the socket and `GET /health` over HTTP both
-/// report the transport `run_daemon` actually bound.
+/// #9030, #9214: `search.health` reports the transport `run_daemon` bound —
+/// its socket, and no HTTP address.
 ///
 /// Why: the console's search dashboard reads `health.transport` to show the
 /// live transport instead of a hardcoded port. A value the daemon did not bind
 /// would mislead it as badly as the hardcoded one did.
-/// What: runs a real isolated `run_daemon` (same isolation as
-/// `run_daemon_isolated_instance_never_pollutes_shared_discovery`), reads the
-/// bound HTTP address from its `http_addr` file, then asks each transport for
-/// its health body. Both must carry `socket_path` equal to the resolved socket
-/// path and `http_addr` equal to the published address.
+/// What: runs a real isolated `run_daemon` and asks the socket for its health
+/// body; `socket_path` must equal the resolved socket path and `http_addr`
+/// must be `null`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
@@ -372,78 +229,34 @@ async fn run_daemon_health_reports_the_transport_it_bound() {
     use crate::core::registry::IndexRegistry;
     use crate::service::socket;
 
-    let override_tmp = tempfile::tempdir().unwrap();
-    let data_dir_tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("TRUSTY_DATA_DIR_OVERRIDE", override_tmp.path());
-        std::env::set_var("TRUSTY_DATA_DIR", data_dir_tmp.path());
-    }
-    let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+    with_isolated_daemon_paths(|_data_dir| async move {
+        let socket_path = socket::socket_path().expect("resolve the isolated socket path");
+        let state = SearchAppState::new(IndexRegistry::new());
+        let shutdown_tx = state.shutdown_tx.clone();
+        let handle = tokio::spawn(run_daemon(state, None));
 
-    let state = SearchAppState::new(IndexRegistry::new());
-    let shutdown_tx = state.shutdown_tx.clone();
-    let handle = tokio::spawn(run_daemon(state, 0));
-
-    // `http_addr` is written after both binds, so its presence means both
-    // listeners are up.
-    let addr_file = data_dir_tmp.path().join("http_addr");
-    let mut http_addr = None;
-    for _ in 0..250 {
-        if let Ok(s) = std::fs::read_to_string(&addr_file) {
-            if !s.trim().is_empty() {
-                http_addr = Some(s.trim().to_string());
-                break;
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-
-    let mut over_socket = None;
-    let mut over_http = None;
-    if let Some(addr) = &http_addr {
-        let frame: Result<serde_json::Value, _> = trusty_common::uds::send_framed_request(
+        let serving = wait_for_socket(&socket_path).await;
+        let frame: Option<serde_json::Value> = trusty_common::uds::send_framed_request(
             &socket_path,
             &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": socket::METHOD_HEALTH }),
             std::time::Duration::from_secs(10),
         )
-        .await;
-        over_socket = frame.ok().map(|f| f["result"]["transport"].clone());
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/health"))
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await;
-        if let Ok(resp) = resp {
-            over_http = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .map(|b| b["transport"].clone());
-        }
-    }
+        .await
+        .ok();
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
 
-    let _ = shutdown_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
-    unsafe {
-        std::env::remove_var("TRUSTY_DATA_DIR");
-        std::env::remove_var("TRUSTY_DATA_DIR_OVERRIDE");
-    }
-
-    let http_addr = http_addr.expect("the isolated daemon must publish its http_addr");
-    let expected = serde_json::json!({
-        "socket_path": socket_path.to_string_lossy(),
-        "http_addr": http_addr,
-    });
-    assert_eq!(
-        over_socket,
-        Some(expected.clone()),
-        "search.health over the socket must report the bound transport"
-    );
-    assert_eq!(
-        over_http,
-        Some(expected),
-        "GET /health must report the bound transport"
-    );
+        assert!(serving, "the isolated daemon must serve its socket");
+        assert_eq!(
+            frame.map(|f| f["result"]["transport"].clone()),
+            Some(serde_json::json!({
+                "socket_path": socket_path.to_string_lossy(),
+                "http_addr": null,
+            })),
+            "search.health over the socket must report the bound transport"
+        );
+    })
+    .await;
 }
 
 /// The Fail-Open Check, driven through `run_daemon()` itself (#6285).
@@ -457,7 +270,7 @@ async fn run_daemon_health_reports_the_transport_it_bound() {
 /// against a socket path someone else is already serving, and must exit.
 ///
 /// What: points `TRUSTY_DATA_DIR_OVERRIDE` at a tempdir — the same isolation
-/// `run_daemon_isolated_instance_never_pollutes_shared_discovery` relies on, so
+/// `run_daemon_isolated_instance_leaves_shared_discovery_alone` relies on, so
 /// the lockfile, port file, `http_addr` file and socket all resolve under it
 /// and never a real production path. A live listener takes the socket path
 /// first, then `run_daemon` is called. Two things are asserted: it returns an
@@ -501,7 +314,7 @@ async fn run_daemon_refuses_a_socket_another_process_is_serving() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), 0).await;
+    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), None).await;
 
     let isolated_http_addr = data_dir_tmp.path().join("http_addr");
     let published = isolated_http_addr.exists();
@@ -554,7 +367,7 @@ async fn run_daemon_refuses_to_start_while_another_holder_has_the_lock() {
         .unwrap();
     holder.try_lock_exclusive().unwrap();
 
-    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), 0).await;
+    let result = run_daemon(SearchAppState::new(IndexRegistry::new()), None).await;
 
     let port_written = daemon_port_path().map(|p| p.exists()).unwrap_or(false);
     let addr_written = data_dir_tmp.path().join("http_addr").exists();
@@ -714,7 +527,7 @@ fn argv_selects_daemon_start_for_the_daemon_path() {
 }
 
 /// Point every per-instance daemon path at fresh tempdirs (the isolation
-/// `run_daemon_isolated_instance_never_pollutes_shared_discovery` uses) and run
+/// `run_daemon_isolated_instance_leaves_shared_discovery_alone` uses) and run
 /// `body`. The environment is restored on drop, so a failed assertion inside
 /// `body` cannot leak `TRUSTY_DATA_DIR` into the next `#[serial]` test.
 async fn with_isolated_daemon_paths<F, Fut>(body: F)
@@ -754,13 +567,12 @@ async fn wait_for_socket(path: &Path) -> bool {
     false
 }
 
-/// #9214: `run_daemon_with(.., HttpListener::Off)` is a real socket-only daemon.
+/// #9214: `run_daemon` is a real socket-only daemon.
 ///
-/// Why: `--no-http` is the first step of retiring TCP :7878 (ADR-0032). A
-/// daemon that still published an HTTP address, or that skipped the
-/// background tickers along with the router, would pass for socket-only while
-/// misleading every client.
-/// What: runs a real isolated daemon with the listener off and asserts: the
+/// Why: ADR-0032 retires TCP :7878. A daemon that still published an HTTP
+/// address, or that skipped the background tickers along with the router,
+/// would pass for socket-only while misleading every client.
+/// What: runs a real isolated daemon and asserts: the
 /// socket answers `search.health` with `transport.http_addr: null`; no port
 /// file, no `http_addr` file and no shared registry entry exist; the lockfile
 /// names this process, which is what `trusty-search stop` signals; the status
@@ -769,7 +581,7 @@ async fn wait_for_socket(path: &Path) -> bool {
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn run_daemon_without_http_serves_only_the_socket() {
+async fn run_daemon_serves_only_the_socket() {
     use crate::core::registry::IndexRegistry;
     use crate::service::server::DaemonEvent;
     use crate::service::socket;
@@ -779,7 +591,7 @@ async fn run_daemon_without_http_serves_only_the_socket() {
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
         let mut events = state.events.subscribe();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
+        let handle = tokio::spawn(run_daemon(state, None));
 
         let serving = wait_for_socket(&socket_path).await;
         let health: Option<serde_json::Value> = trusty_common::uds::send_framed_request(
@@ -808,7 +620,7 @@ async fn run_daemon_without_http_serves_only_the_socket() {
         let _ = shutdown_tx.send(true);
         let exit = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
 
-        assert!(serving, "the socket must serve with the HTTP listener off");
+        assert!(serving, "the daemon must serve its socket");
         let health = health.expect("search.health must answer over the socket");
         assert_eq!(
             health["result"]["transport"],
@@ -839,17 +651,17 @@ async fn run_daemon_without_http_serves_only_the_socket() {
     .await;
 }
 
-/// #9214: a socket-only start withdraws an earlier run's HTTP announcement.
+/// #9214: a start withdraws the HTTP announcement an older build left.
 ///
-/// Why: clients read `http_addr`, then `daemon.port`. Left in place after a
-/// switch to `--no-http`, either would send them to a port this daemon no
-/// longer holds — possibly one another process now owns.
-/// What: seeds both files with the live daemon's address, starts the daemon
-/// with the listener off, and asserts both are gone once the socket serves.
+/// Why: older clients read `http_addr`, then `daemon.port`. Left in place
+/// after an upgrade, either would send them to a port this daemon never
+/// holds — possibly one another process now owns.
+/// What: seeds both files with the old daemon's address, starts the daemon,
+/// and asserts both are gone once the socket serves.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn run_daemon_without_http_removes_a_stale_http_addr() {
+async fn run_daemon_removes_a_stale_http_addr() {
     use crate::core::registry::IndexRegistry;
     use crate::service::socket;
 
@@ -862,14 +674,14 @@ async fn run_daemon_without_http_removes_a_stale_http_addr() {
 
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
+        let handle = tokio::spawn(run_daemon(state, None));
         let serving = wait_for_socket(&socket_path).await;
         let addr_left = stale_addr.exists();
         let port_left = stale_port.exists();
         let _ = shutdown_tx.send(true);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
 
-        assert!(serving, "the socket must serve with the HTTP listener off");
+        assert!(serving, "the daemon must serve its socket");
         assert!(!addr_left, "the stale http_addr file must be removed");
         assert!(!port_left, "the stale port file must be removed");
     })
@@ -882,7 +694,7 @@ async fn run_daemon_without_http_removes_a_stale_http_addr() {
 /// arms of the stop wait can be ready together. An unbiased `select!` picked
 /// the serve-loop arm about half the time and reported "the rpc socket stopped
 /// serving", so a clean stop exited non-zero and
-/// `run_daemon_without_http_serves_only_the_socket` flaked.
+/// `run_daemon_serves_only_the_socket` flaked.
 /// What: forces both inputs ready — the drain cancelled and the serve task
 /// already finished — and calls the wait 50 times. Each call must return `Ok`.
 /// With either arm free to win, 50 straight `Ok`s has odds of 2^-50.
@@ -906,14 +718,14 @@ async fn a_socket_only_stop_returns_ok_when_the_serve_loop_also_ended() {
 
 /// #9459, #9477: a normal stop leaves every corpus closed cleanly.
 ///
-/// Why: the daemon leaves through `process::exit(0)` once `run_daemon_with`
+/// Why: the daemon leaves through `process::exit(0)` once `run_daemon`
 /// returns, so a corpus still open at that point never runs redb's `Drop` and
 /// is left needing repair. A read-only open then fails, and
 /// `project.resolve` loses the `reindexed_unix` stamp (#9477).
 /// What: registers one index with a stamped corpus, starts the corpus reopen
 /// sweep exactly as `handle_start` does (it holds a strong clone of the state
 /// for the life of the process), runs a real socket-only daemon and stops it
-/// through the admin-stop channel. Once `run_daemon_with` has returned, the
+/// through the admin-stop channel. Once `run_daemon` has returned, the
 /// corpus must open read-only and the resolver's stamp read must return the
 /// stamp. Before #9459 the sweep's clone kept the corpus open, so the
 /// read-only open failed.
@@ -952,7 +764,7 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
 
         let socket_path = socket::socket_path().expect("resolve the isolated socket path");
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
+        let handle = tokio::spawn(run_daemon(state, None));
         assert!(wait_for_socket(&socket_path).await, "the socket must serve");
         let _ = shutdown_tx.send(true);
         let exit = tokio::time::timeout(std::time::Duration::from_secs(20), handle).await;
@@ -1024,11 +836,7 @@ async fn run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged() {
 
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(
-            state,
-            HttpListener::Off,
-            Some(socket_path.clone()),
-        ));
+        let handle = tokio::spawn(run_daemon(state, Some(socket_path.clone())));
         // Either the daemon refuses and returns, or it binds; stop it either way.
         for _ in 0..250 {
             if handle.is_finished() || socket_path.exists() {

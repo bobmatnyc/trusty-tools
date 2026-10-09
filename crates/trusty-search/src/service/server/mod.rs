@@ -1,12 +1,16 @@
-//! HTTP daemon: axum router exposing the trusty-search REST API.
+//! The daemon's state, tickers and transport-neutral report cores, plus the
+//! retired axum router.
 //!
-//! Why: Single shared `SearchAppState` (wrapped in `Arc`) lets every handler
+//! Why: Single shared `SearchAppState` (wrapped in `Arc`) lets every caller
 //! read from the `IndexRegistry` concurrently. `DashMap` shard-locks per index
 //! so different indexes never contend, and `Arc<RwLock<CodeIndexer>>` allows
 //! many simultaneous readers per index.
 //!
 //! What: This module is a thin facade that declares submodules and re-exports
-//! the public surface. Routes implement the API described in `CLAUDE.md`.
+//! the public surface. The socket (`service::rpc`) serves the `*_report`
+//! cores. #9214 (ruling D1): the daemon binds no TCP listener, so the axum
+//! router and its handlers compile only under `cfg(test)`, where the HTTP
+//! tests still drive the cores through them; PR-B deletes them.
 //!
 //! Test: `cargo test -p trusty-search` boots the router with an in-process
 //! registry and exercises each endpoint.
@@ -33,6 +37,9 @@ mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
 mod files;
+// #9214 (D1): the `files` HTTP routes, test-only until PR-B deletes them.
+#[cfg(test)]
+mod files_http;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
 mod health;
@@ -63,6 +70,8 @@ mod status;
 mod tickers;
 mod typeahead;
 // #6688: `POST /upgrade`, split out of `health.rs` when it crossed the cap.
+// #9214: HTTP-only, so test-only with the router.
+#[cfg(test)]
 mod upgrade;
 // #6699: the vector-lane health both `/indexes/:id/status` and `/indexes` report.
 mod vector_health;
@@ -255,26 +264,39 @@ pub use routing::SearchSimilarRequest;
 pub use search_global::GlobalSearchRequest;
 pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, WarmBootSummary};
 
+use std::sync::Arc;
+
+// #9214 (ruling D1): the router and its handlers are test-only.
+#[cfg(test)]
+use admin::{
+    admin_stop_handler, get_config_handler, logs_tail_handler, patch_config_handler,
+    status_stream_handler,
+};
+#[cfg(test)]
 use axum::{
     response::Redirect,
     routing::{delete, get, post},
     Router,
 };
-use std::sync::Arc;
-
-use admin::{
-    admin_stop_handler, get_config_handler, logs_tail_handler, patch_config_handler,
-    status_stream_handler,
-};
+#[cfg(test)]
 use contrib_graph::{graph_neighbors_handler, ingest_graph_handler};
+#[cfg(test)]
 use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
+#[cfg(test)]
 use health::health_handler;
+#[cfg(test)]
 use index_config::{index_config_handler, patch_index_config_handler};
+#[cfg(test)]
 use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
+#[cfg(test)]
 use quantize_handlers::quantize_handler;
+#[cfg(test)]
 use reindex_handlers::{reindex_handler, reindex_stream_handler};
+#[cfg(test)]
 use routing::search_similar_handler;
+#[cfg(test)]
 use search::{delete_index_handler, global_search_handler, search_handler};
+#[cfg(test)]
 use status::{graph_handler, graph_stats_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
@@ -282,7 +304,9 @@ use tickers::{
     spawn_watcher_idle_suspend_ticker,
 };
 
+#[cfg(test)]
 use files::{call_chain_handler, global_grep_handler, grep_handler};
+#[cfg(test)]
 use typeahead::typeahead_handler;
 
 // Re-export for integration tests in `tests/typeahead.rs`.
@@ -298,6 +322,7 @@ pub use typeahead::{
     typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
 };
 
+#[cfg(test)]
 use self::upgrade::upgrade_handler;
 
 // #6285: the one seam `service::socket` reads the health report through, so the
@@ -374,6 +399,8 @@ pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 ///   contains reindex/index-file/remove-file which are legitimately long-running.
 ///
 /// Test: each handler test builds the router via this function using `oneshot`.
+// #9214 (ruling D1): no production path builds the router.
+#[cfg(test)]
 pub fn build_router(state: SearchAppState) -> Router {
     // #3304: loopback-only default. The daemon startup path
     // (`service::daemon`) calls `build_router_with_self_origins` with the
@@ -397,6 +424,7 @@ pub fn build_router(state: SearchAppState) -> Router {
 /// `with_standard_middleware`.
 /// Test: `admin_stop_rejects_cross_origin_write` / `_allows_loopback_write` /
 /// `_allows_missing_origin` / `read_route_allows_cross_origin` in `tests_2984`.
+#[cfg(test)]
 pub fn build_router_with_self_origins(
     state: SearchAppState,
     self_origins: trusty_common::server::SelfOrigins,
@@ -407,13 +435,13 @@ pub fn build_router_with_self_origins(
 /// Spawn every background ticker the daemon runs over `state_arc`.
 ///
 /// Why (#9214): the tickers used to start only as a side effect of building
-/// the HTTP router. A daemon run with `--no-http` builds no router, so it
-/// would have served the socket with no residency sweep, no memory-pressure
-/// enforcement and no status events.
-/// What: the nine `spawn_*` calls [`build_router_on`] made inline. Each holds a
+/// the HTTP router. The daemon builds no router, so `run_daemon` starts them
+/// here, or it would serve the socket with no residency sweep, no
+/// memory-pressure enforcement and no status events.
+/// What: the nine `spawn_*` calls `build_router_on` made inline. Each holds a
 /// `Weak`, so the tickers stop once the last `Arc` drops.
-/// Test: `run_daemon_without_http_serves_only_the_socket` waits for a
-/// `status_changed` event from a daemon that built no router.
+/// Test: `run_daemon_serves_only_the_socket` waits for a `status_changed`
+/// event from a daemon that built no router.
 pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
     spawn_status_ticker(Arc::clone(state_arc));
     spawn_disk_size_ticker(Arc::clone(state_arc));
@@ -443,6 +471,7 @@ pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
 /// [`spawn_daemon_tickers`].
 /// Test: `health_over_the_socket_matches_the_http_body` in
 /// `service::socket::tests`.
+#[cfg(test)]
 pub fn build_router_on(
     state_arc: Arc<SearchAppState>,
     self_origins: trusty_common::server::SelfOrigins,

@@ -40,9 +40,11 @@
 //!       `relocate_preserves_colocated_flag` in `tests_index.rs`;
 //!       `relocate_preserves_lru_timestamps` in `tests_index.rs`.
 
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::{IntoResponse, Json, Response},
 };
 use serde::Deserialize;
@@ -94,6 +96,7 @@ pub(crate) struct RelocateIndexRequest {
 /// `{ "id": "…", "relocated": true, "new_root_path": "…" }`.
 ///
 /// Test: `relocate_index_updates_root_path` in `tests_index.rs`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn relocate_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

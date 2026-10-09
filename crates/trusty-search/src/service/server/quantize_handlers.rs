@@ -23,9 +23,11 @@
 //! operator reads is the report of the work.
 //! Test: `super::tests_quantize_6822`.
 
+use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use serde::Deserialize;
@@ -54,6 +56,7 @@ pub struct QuantizeRequest {
     pub dry_run: Option<bool>,
 }
 
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn quantize_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,

@@ -118,7 +118,8 @@ async fn serve_index(state: &SearchAppState) -> Response {
     };
     let html_bytes = index_file.contents();
     let html = std::str::from_utf8(html_bytes).unwrap_or_default();
-    let port = state.daemon_port.unwrap_or(crate::service::DEFAULT_PORT);
+    // #9214: the daemon binds no TCP port; `0` names none rather than `:7878`.
+    let port = state.daemon_port.unwrap_or(0);
     let body = inject_runtime_config(html, port, state.openrouter_enabled);
     Response::builder()
         .status(StatusCode::OK)

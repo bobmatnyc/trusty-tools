@@ -74,9 +74,9 @@ pub enum DaemonEvent {
 /// bound, never a guessed default. Both keys always serialise, as `null` when
 /// unset — the `{socket_path: string|null, http_addr: string|null}` shape
 /// trusty-console's `ui-search/src/lib/transport.js` reads. #9214:
-/// `http_addr` is `None` on a daemon started with `--no-http`.
+/// `http_addr` is `None`: the daemon binds no HTTP listener.
 /// Test: `run_daemon_health_reports_the_transport_it_bound`,
-/// `run_daemon_without_http_serves_only_the_socket`,
+/// `run_daemon_serves_only_the_socket`,
 /// `health_reports_a_null_transport_when_no_listener_was_bound`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct DaemonTransport {

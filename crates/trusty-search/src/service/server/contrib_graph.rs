@@ -15,8 +15,11 @@
 //!
 //! Test: `tests_contrib_graph.rs` (sibling module).
 
-use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+// #9214 (D1): imports only the test-only HTTP handlers use.
+#[cfg(test)]
+use axum::extract::{Path, Query, State};
+#[cfg(test)]
 use axum::Json;
 use petgraph::Direction;
 use serde::{Deserialize, Serialize};
@@ -87,6 +90,7 @@ pub(crate) struct IngestGraphResponse {
 /// `ingest_empty_producer_400`,
 /// `ingest_reports_503_when_the_contributed_overlay_cannot_be_merged` in
 /// `tests_contrib_graph`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn ingest_graph_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
@@ -270,6 +274,7 @@ pub(super) struct NeighborEntry {
 /// What: resolves the index, snapshots the graph (lock-free reads after the
 /// Arc clone), and runs the direction-aware, kind-filtered BFS.
 /// Test: `ingest_then_neighbors_round_trip`, `neighbors_unknown_node_is_empty`.
+#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
 pub(super) async fn graph_neighbors_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
