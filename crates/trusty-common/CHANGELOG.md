@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.57.0] — 2026-10-09
+
+### Breaking
+
+- `monitor::search_client` speaks the trusty-search daemon socket only (#9214). `resolve_search_url`, `normalize_url`, `DEFAULT_SEARCH_URL`, `SearchClient::base_url` and `SearchClient::set_base_url` are removed; use `resolve_search_socket`, `SearchClient::resolve` and `SearchClient::socket`. `SearchClient::new` takes the socket path, and `SearchClient::logs_tail` returns a `Result` instead of an empty list when the daemon does not answer.
+- `monitor::search_tui::run_with_url` is renamed `run_with_socket` and takes the socket path (#9214).
+
+### Fixed
+
+- The `host-metrics` feature now enumerates Linux tmpfs mounts, so `host_metrics::mount_for_path` measures a path on a tmpfs `/tmp` instead of answering `None`, and the trusty-mpm worktree disk guard no longer refuses every worktree on such a host (#9523).
+- On Linux, trusty-console's disk gauge now lists tmpfs mounts (for example `/tmp` and `/dev/shm`) and counts them in its aggregate disk total. This lowers the reported usage percentage on a host with large, mostly empty tmpfs mounts.
+
+### Changed
+
+- Incremental per-file indexing (`index_files_best_effort`) and `probe_index_readiness` reach trusty-search over its Unix socket (`search.index.file.put`, `search.index.status`), never the retired `:7878` listener (#9214).
+- `search_rpc::search_socket` honours `TRUSTY_DATA_DIR` the way the trusty-search daemon does, so a client reaches a daemon isolated with a custom data directory; an empty value counts as unset and a relative one is refused. The rule lives in the new `search_rpc::search_socket_under` (with `TRUSTY_SEARCH_DATA_DIR_ENV`), which the daemon now resolves its own socket through (#9214).
+
 ## [0.56.0] — 2026-10-09
 
 ### Breaking
