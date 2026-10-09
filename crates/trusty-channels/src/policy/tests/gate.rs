@@ -1,12 +1,14 @@
 //! The default-branch gate (#8454 Bob Db1, Architect G2/G3): each refusal
 //! is named, and the accepted shapes load.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
-use std::process::{ExitStatus, Output};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Output};
 use std::time::Duration;
 
 use super::repo::{mkfifo, release_fifo, slack_routes, tempdir, within, Repo};
-use crate::policy::gate::{check_committed_at_head, object_id, with_git_timeout};
+use crate::policy::gate::{check_committed_at_head, object_id, run, with_git_timeout};
 use crate::policy::{check_default_branch, GateError};
 
 fn gate(repo: &Repo) -> Result<crate::policy::BranchState, GateError> {
@@ -254,4 +256,74 @@ fn git_blocked_on_a_fifo_config_include_times_out() {
         matches!(head, Err(GateError::GitTimedOut { .. })),
         "{head:?}"
     );
+}
+
+/// A `git` on a test-local PATH that starts a grandchild holding stdout
+/// open, writes the grandchild's pid to `pid_file`, then sleeps
+/// (`parent_waits`) or exits at once.
+fn grandchild_git(dir: &Path, pid_file: &Path, parent_waits: bool) {
+    let tail = if parent_waits {
+        "exec /bin/sleep 300"
+    } else {
+        "exit 0"
+    };
+    let script = format!(
+        "#!/bin/sh\n/bin/sleep 300 &\necho $! > '{}'\n{tail}\n",
+        pid_file.display()
+    );
+    let path = dir.join("git");
+    std::fs::write(&path, script).expect("write git wrapper");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// True while a process with `pid` exists.
+fn alive(pid: libc::pid_t) -> bool {
+    // SAFETY: kill(2) with signal 0 only checks the pid; no memory is touched.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+#[test]
+fn git_timeout_kills_the_whole_process_group() {
+    // #8454: a git that leaves a child holding its stdout must not leave
+    // that child running after the timeout, whether git itself still runs
+    // (poll deadline) or has exited (stdout read deadline).
+    for parent_waits in [true, false] {
+        let (_tmp, root) = tempdir();
+        let pid_file = root.join("grandchild.pid");
+        grandchild_git(&root, &pid_file, parent_waits);
+        let mut got = None;
+        // A sibling test's fork can briefly hold the new script's write fd
+        // (ETXTBSY at spawn), so an unavailable git is retried.
+        for _ in 0..5 {
+            let path = root.clone();
+            let result = within(Duration::from_secs(30), move || {
+                with_git_timeout(Duration::from_secs(1), || {
+                    run(Command::new("git").env("PATH", &path), "wrapper").map(|_| ())
+                })
+            });
+            if !matches!(result, Some(Err(GateError::GitUnavailable { .. }))) {
+                got = result;
+                break;
+            }
+        }
+        let text = std::fs::read_to_string(&pid_file).expect("grandchild pid");
+        let pid: libc::pid_t = text.trim().parse().expect("pid");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let survived = alive(pid);
+        if survived {
+            // SAFETY: as in `alive`; frees the sleep this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            matches!(got, Some(Err(GateError::GitTimedOut { step: "wrapper" }))),
+            "parent_waits={parent_waits}: {got:?}"
+        );
+        assert!(
+            !survived,
+            "parent_waits={parent_waits}: grandchild {pid} outlived the timeout"
+        );
+    }
 }

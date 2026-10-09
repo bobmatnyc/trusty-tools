@@ -372,7 +372,8 @@ fn line(out: &Output, step: &'static str) -> Result<String, GateError> {
     Ok(text.to_string())
 }
 
-fn run(cmd: &mut Command, step: &'static str) -> Result<Output, GateError> {
+/// Run one git step with no stdin; see [`run_with_input`].
+pub(super) fn run(cmd: &mut Command, step: &'static str) -> Result<Output, GateError> {
     run_with_input(cmd, step, None)
 }
 
