@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.12.3] — 2026-10-09
+
+### Changed
+
+- The header's Architect link now targets the named tab `architect-dashboard` and reuses it instead of always opening a new one, and the console names its own tab `trusty-console` so the dashboard's links reuse it (no `rel=noopener`/`noreferrer`, which would defeat name reuse) (#9474).
+
 ## [0.12.2] — 2026-10-08
 
 ### Added
