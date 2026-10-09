@@ -88,7 +88,8 @@ impl SecretStore {
     /// `store_backend_errors_are_never_downgraded`,
     /// `store_set_fails_closed_on_the_index_before_the_backend_write`,
     /// `store_set_compensates_a_new_key_when_the_index_publish_fails`,
-    /// `store_set_reports_an_orphan_when_compensation_fails`.
+    /// `store_set_reports_an_orphan_when_compensation_fails`,
+    /// `store_set_stores_no_value_when_the_flag_removal_fails`.
     pub fn set(
         &self,
         vault: &VaultName,
@@ -203,7 +204,8 @@ impl SecretStore {
     /// any backend or the index held the key.
     /// Test: `store_delete_across_removes_the_key_from_every_backend`,
     /// `store_delete_across_keeps_the_row_when_any_backend_fails`,
-    /// `store_delete_across_holds_the_index_lock_through_the_sweep`.
+    /// `store_delete_across_holds_the_index_lock_through_the_sweep`,
+    /// `store_delete_keeps_the_row_when_the_flag_removal_fails`.
     pub fn delete_across(
         &self,
         vault: &VaultName,

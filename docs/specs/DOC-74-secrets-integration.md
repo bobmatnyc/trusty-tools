@@ -1160,7 +1160,11 @@ flag. The rule covers env injection (tiers 1 and 2) and grant contents
 holds the flag as its own item per key (on the Keychain, service
 `trusty-secrets.agents`, account `<vault>/<key>`), never the names-only index,
 which any same-uid process can edit
-([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)).
+([#9070](https://github.com/bobmatnyc/trusty-tools/issues/9070)). Known
+limit (owner ruling 2026-10-09): a process running as the same uid can create
+the `trusty-secrets.agents` Keychain item with `security
+add-generic-password` and gets no prompt. This closes the index-file edit
+only; checking which program created the item is out of scope.
 
 Claude Code's env markers — `CLAUDECODE`, `CLAUDE_PID`,
 `CLAUDE_CODE_CHILD_SESSION`

@@ -821,3 +821,86 @@ fn store_default_agent_flag_reads_off_and_refuses_on() {
     );
     assert!(!store.list(&vault).unwrap()[0].agents_may_use);
 }
+
+/// A [`MemoryBackend`] whose flag removal fails, standing in for a Keychain
+/// that cannot delete a flag item (#9070).
+#[derive(Debug, Default)]
+struct FlagClearFaultBackend(MemoryBackend);
+
+impl SecretBackend for FlagClearFaultBackend {
+    fn id(&self) -> BackendId {
+        self.0.id()
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.0.get(vault, key)
+    }
+    fn set(&self, vault: &VaultName, key: &SecretKey, v: &SecretValue) -> Result<(), SecretsError> {
+        self.0.set(vault, key, v)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.0.delete(vault, key)
+    }
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.0.agents_may_use(vault, key)
+    }
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        if allowed {
+            self.0.set_agents_may_use(vault, key, true)
+        } else {
+            Err(FailingBackend::failure(vault, key))
+        }
+    }
+}
+
+/// Why: #9070 Fail-Open Check — a new key whose stale flag item cannot be
+/// removed might start ON, so `set` must fail before the value is stored
+/// and leave no index row. Ignoring the removal's result fails this test.
+/// Test: itself.
+#[test]
+fn store_set_stores_no_value_when_the_flag_removal_fails() {
+    let backend = Arc::new(FlagClearFaultBackend::default());
+    let (_tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
+    let err = store
+        .set(&project(), &key("API_KEY"), &SecretValue::new(FAKE_VALUE))
+        .unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(backend.0.is_empty(), "no value is stored");
+    assert!(
+        store.list(&project()).unwrap().is_empty(),
+        "no row is written"
+    );
+}
+
+/// Why: #9070 Fail-Open Check — a delete that cannot remove the flag item
+/// would leave the flag ON for a key set again later, so it must fail and
+/// keep the index row, as a failed value delete does. Ignoring the
+/// removal's result fails this test.
+/// Test: itself.
+#[test]
+fn store_delete_keeps_the_row_when_the_flag_removal_fails() {
+    let backend = Arc::new(FlagClearFaultBackend::default());
+    let (_tmp, store) = fixture_with(Arc::clone(&backend) as Arc<dyn SecretBackend>);
+    let (vault, name) = (project(), key("API_KEY"));
+    backend
+        .0
+        .set(&vault, &name, &SecretValue::new(FAKE_VALUE))
+        .unwrap();
+    backend.0.set_agents_may_use(&vault, &name, true).unwrap();
+    store.index().upsert(&vault, &name, 4, 1).unwrap();
+
+    let err = store.delete(&vault, &name).unwrap_err();
+    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
+    assert!(
+        store.index().get(&vault, &name).unwrap().is_some(),
+        "the row stays"
+    );
+    assert!(backend.0.agents_may_use(&vault, &name).unwrap());
+}

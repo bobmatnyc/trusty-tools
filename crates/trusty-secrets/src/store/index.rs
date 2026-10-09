@@ -233,7 +233,7 @@ impl NamesIndex {
     /// never changed.
     /// Test: `index_never_holds_the_agents_flag`.
     #[deprecated(
-        since = "0.2.0",
+        since = "0.1.3",
         note = "the flag is held by the backend; use SecretStore::set_agents_may_use (#9070)"
     )]
     pub fn set_agents_may_use(
