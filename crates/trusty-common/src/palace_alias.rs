@@ -85,6 +85,20 @@ impl PalaceAliasStore {
     /// treated as "no aliases" so a bad file can never wedge palace resolution).
     /// Test: `load_missing_is_empty`, `register_then_resolve_round_trips`.
     pub fn load_aliases(registry_dir: &Path) -> Result<BTreeMap<String, String>> {
+        Self::read_aliases(registry_dir, false)
+    }
+
+    /// Read the alias map; `strict` turns a parse failure into an error.
+    ///
+    /// Why (#9544): `rename_target` rewrites the whole map, so reading a corrupt
+    /// file as empty would overwrite every alias in it. Other callers keep the
+    /// forgiving read.
+    /// What: a missing or whitespace-only file is an empty map. Any other read
+    /// error is returned. A parse failure is logged and read as empty, or
+    /// returned when `strict` is set.
+    /// Test: `corrupt_file_degrades_to_empty`,
+    /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`.
+    fn read_aliases(registry_dir: &Path, strict: bool) -> Result<BTreeMap<String, String>> {
         let path = registry_dir.join(PALACE_ALIASES_JSON);
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
@@ -99,6 +113,10 @@ impl PalaceAliasStore {
         }
         match serde_json::from_slice::<PalaceAliasesFile>(&bytes) {
             Ok(file) => Ok(file.aliases),
+            // #9544: a rewrite of the map must not run over a corrupt file.
+            Err(e) if strict => {
+                Err(e).with_context(|| format!("parse palace aliases at {}", path.display()))
+            }
             Err(e) => {
                 // A corrupt alias file must not break palace resolution — the
                 // authoritative data is the palaces themselves. Log and degrade
@@ -157,10 +175,12 @@ impl PalaceAliasStore {
     /// reversed), repoints every `x -> old` to `x -> new`, and inserts
     /// `old -> new`. The entry takes effect only once `old` has no `palace.json`
     /// and `new` has one ([`alias_target_if_absent`]), so it is safe to write
-    /// before the directory move.
+    /// before the directory move. A corrupt alias file is an error and is left
+    /// unchanged, since rewriting it would drop every alias it holds.
     /// Test: `rename_retargets_aliases_pointing_at_the_old_id`,
     /// `rename_drops_the_alias_keyed_by_the_new_id`,
-    /// `rename_target_rejects_empty_or_equal_ids`.
+    /// `rename_target_rejects_empty_or_equal_ids`,
+    /// `rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes`.
     pub fn rename_target(registry_dir: &Path, old: &str, new: &str) -> Result<()> {
         let old = old.trim();
         let new = new.trim();
@@ -170,7 +190,9 @@ impl PalaceAliasStore {
         if old == new {
             anyhow::bail!("refusing to alias palace {old:?} to itself");
         }
-        let mut aliases = Self::load_aliases(registry_dir)?;
+        // #9544: strict read, so a corrupt file fails the rename instead of
+        // being overwritten with `{old: new}`.
+        let mut aliases = Self::read_aliases(registry_dir, true)?;
         // #9544: `new` becomes a real palace; an alias under it is inert and
         // would close an `old <-> new` cycle when a rename is reversed.
         aliases.remove(new);
@@ -260,6 +282,24 @@ impl PalaceAliasStore {
 /// `alias_target_is_none_when_the_target_is_missing`,
 /// `alias_target_is_none_without_an_alias`.
 pub fn alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Option<String> {
+    try_alias_target_if_absent(registry_dir, palace_id)
+        .ok()
+        .flatten()
+}
+
+/// [`alias_target_if_absent`], but an unreadable alias file is an error.
+///
+/// Why (#9544): the `create_palace` guard must fail closed. Reading an
+/// unreadable alias file as "no alias" lets a create through that shadows the
+/// alias for good once the read error clears.
+/// What: the same presence rule and redirect as [`alias_target_if_absent`].
+/// A missing alias file is `Ok(None)`, and a corrupt one reads as no aliases,
+/// as at open time. Any other read error on the alias file is returned.
+/// Test: `palace_create_fails_when_the_alias_file_is_unreadable`.
+pub(crate) fn try_alias_target_if_absent(
+    registry_dir: &Path,
+    palace_id: &str,
+) -> Result<Option<String>> {
     let exists = |id: &str| {
         !matches!(
             registry_dir.join(id).join("palace.json").try_exists(),
@@ -267,12 +307,10 @@ pub fn alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Option<St
         )
     };
     if exists(palace_id) {
-        return None;
+        return Ok(None);
     }
-    match PalaceAliasStore::resolve_alias(registry_dir, palace_id) {
-        Ok(Some(target)) if exists(&target) => Some(target),
-        _ => None,
-    }
+    // #9544: propagate a read error; the infallible wrapper drops it.
+    Ok(PalaceAliasStore::resolve_alias(registry_dir, palace_id)?.filter(|target| exists(target)))
 }
 
 /// The id a palace request actually reaches: the live alias target, else itself.
@@ -578,6 +616,23 @@ mod tests {
         let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all.get("keep").map(String::as_str), Some("kept"));
+    }
+
+    /// Why (#9544): a corrupt alias file may still hold aliases a person can
+    /// recover. A rename that reads it as empty and writes `{old: new}` over it
+    /// destroys them, so the rename must fail and leave the bytes as they were.
+    /// Test: itself.
+    #[test]
+    fn rename_target_refuses_a_corrupt_alias_file_and_keeps_its_bytes() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join(PALACE_ALIASES_JSON);
+        let garbage: &[u8] = br#"{"aliases": {"keep": "kept""#;
+        std::fs::write(&path, garbage).unwrap();
+        assert!(
+            PalaceAliasStore::rename_target(tmp.path(), "old-id", "new-id").is_err(),
+            "a corrupt alias file must refuse the rename"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), garbage);
     }
 
     /// Why (#9544): the old id answers "until removed"; after removal it must

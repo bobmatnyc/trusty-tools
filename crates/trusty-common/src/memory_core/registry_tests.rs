@@ -563,6 +563,42 @@ fn palace_create_refuses_a_live_alias_name() {
     );
 }
 
+/// Why (#9544): the live-alias guard must fail closed. A create that passes
+/// while the alias file cannot be read leaves a palace that shadows the alias
+/// for good once the read error clears.
+/// What: makes `palace_aliases.json` a directory, so reading it fails with
+/// EISDIR on every platform, then creates a fresh id. The create must fail and
+/// write no palace metadata.
+/// Test: this test itself.
+#[test]
+fn palace_create_fails_when_the_alias_file_is_unreadable() {
+    use crate::memory_core::palace::Palace;
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    std::fs::create_dir(data_root.join("palace_aliases.json")).unwrap();
+    let reg = PalaceRegistry::new();
+    let result = reg.create_palace(
+        data_root,
+        Palace {
+            id: PalaceId::new("fresh"),
+            name: "fresh".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("fresh"),
+        },
+    );
+    assert!(
+        result.is_err(),
+        "an unreadable alias file must refuse the create"
+    );
+    assert!(
+        !data_root.join("fresh").join("palace.json").exists(),
+        "a refused create must not write palace metadata"
+    );
+}
+
 /// Issue #463 — a `get` call promotes the accessed handle to MRU,
 /// protecting it from immediate eviction.
 ///
