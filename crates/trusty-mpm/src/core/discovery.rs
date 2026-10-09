@@ -1263,4 +1263,59 @@ mod tests {
             resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, None, &addr).await;
         assert_eq!(result, format!("http://{addr}{GATEWAY_PATH}"));
     }
+
+    // ── #9556: no host default daemon under isolation ──────────────────────
+
+    /// Why (#9556): a sandbox whose own daemon died (its dead-pid lock already
+    /// deleted) fell through to `DEFAULT_DAEMON_URL`, the live fleet. With no
+    /// explicit URL, no recorded console and no live lock, every resolver must
+    /// refuse instead. `HOME` is a temp dir, so no lock exists; the override
+    /// dir records no console, so nothing is probed.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_refuses_default_daemon_under_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let client = reqwest::Client::new();
+
+        assert_ne!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        assert_ne!(
+            resolve_daemon_url_via_gateway(&client, None).await,
+            DEFAULT_DAEMON_URL
+        );
+        for result in [
+            resolve_daemon_url_probing(&client, None).await,
+            resolve_daemon_url_for_cli(&client, None).await,
+        ] {
+            let err = result.expect_err("an isolated resolver must refuse, not fall back");
+            assert!(
+                err.to_string()
+                    .contains("no daemon reachable for this sandbox"),
+                "the refusal must say why: {err}"
+            );
+        }
+    }
+
+    /// Why (#9556): outside a sandbox the default daemon is still the answer
+    /// when no lock exists.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_keeps_default_daemon_outside_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let client = reqwest::Client::new();
+
+        assert_eq!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            resolve_daemon_url_probing(&client, None).await,
+            Ok(DEFAULT_DAEMON_URL.to_string())
+        );
+    }
 }
