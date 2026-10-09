@@ -2950,147 +2950,6 @@ fn non_git_dir_fallback_prints_help_hint() {
     );
 }
 
-/// Why (#4837): `tm memory import` is the zero-inference bulk-load path;
-/// its required `--palace` and the default (write-enabled) mode must parse.
-#[test]
-fn cli_parses_memory_import() {
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "memory",
-        "import",
-        "/tmp/mem",
-        "--palace",
-        "trusty-tools",
-    ])
-    .unwrap();
-    match cli.command.unwrap() {
-        Command::Memory {
-            action:
-                MemoryAction::Import {
-                    dir,
-                    palace,
-                    dry_run,
-                    refresh,
-                    json,
-                    allow_secret_like,
-                    memory_socket,
-                },
-        } => {
-            assert_eq!(dir, std::path::PathBuf::from("/tmp/mem"));
-            assert_eq!(palace, "trusty-tools");
-            assert!(!dry_run, "writes are the default mode");
-            assert!(!refresh, "#5044: replacing a drifted drawer stays opt-in");
-            assert!(!json);
-            assert!(!allow_secret_like);
-            assert!(
-                memory_socket.is_none(),
-                "the socket path defaults to the derived one"
-            );
-        }
-        other => panic!("expected Memory/Import, got {other:?}"),
-    }
-}
-
-/// Why (#7685): `tm memory import-auto-memory` is the migration that makes
-/// emptying Claude Code's own `MEMORY.md` safe, so its kebab-case spelling and
-/// its all-optional flags — every one of which has a derived default — must
-/// parse. A bare invocation is the common case: cwd, the project's own palace.
-#[test]
-fn cli_parses_memory_import_auto_memory() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "memory", "import-auto-memory"]).unwrap();
-    match cli.command.unwrap() {
-        Command::Memory {
-            action:
-                MemoryAction::ImportAutoMemory {
-                    project,
-                    palace,
-                    json,
-                    memory_socket,
-                },
-        } => {
-            assert!(project.is_none(), "the project defaults to the cwd");
-            assert!(palace.is_none(), "the palace defaults to the project's own");
-            assert!(!json);
-            assert!(memory_socket.is_none());
-        }
-        other => panic!("expected Memory/ImportAutoMemory, got {other:?}"),
-    }
-
-    let explicit = Cli::try_parse_from([
-        "trusty-mpm",
-        "memory",
-        "import-auto-memory",
-        "--project",
-        "/tmp/ws",
-        "--palace",
-        "trusty-tools",
-        "--json",
-    ])
-    .unwrap();
-    match explicit.command.unwrap() {
-        Command::Memory {
-            action:
-                MemoryAction::ImportAutoMemory {
-                    project,
-                    palace,
-                    json,
-                    ..
-                },
-        } => {
-            assert_eq!(project, Some(std::path::PathBuf::from("/tmp/ws")));
-            assert_eq!(palace.as_deref(), Some("trusty-tools"));
-            assert!(json);
-        }
-        other => panic!("expected Memory/ImportAutoMemory, got {other:?}"),
-    }
-}
-
-/// Why (#4837): `--dry-run` is the safety flag an operator reaches for first,
-/// and `--json` is the machine-readable report a caller verifies with — both
-/// must round-trip, together with the explicit `--memory-socket` override and
-/// `--refresh` (#5044).
-#[test]
-fn cli_parses_memory_import_dry_run_json() {
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "memory",
-        "import",
-        "/tmp/mem",
-        "--palace",
-        "p",
-        "--dry-run",
-        "--refresh",
-        "--json",
-        "--allow-secret-like",
-        "--memory-socket",
-        "/tmp/trusty-memory.sock",
-    ])
-    .unwrap();
-    match cli.command.unwrap() {
-        Command::Memory {
-            action:
-                MemoryAction::Import {
-                    dry_run,
-                    refresh,
-                    json,
-                    allow_secret_like,
-                    memory_socket,
-                    ..
-                },
-        } => {
-            assert!(dry_run);
-            assert!(refresh);
-            assert!(json);
-            assert!(allow_secret_like);
-            assert_eq!(
-                memory_socket.as_deref(),
-                Some(std::path::Path::new("/tmp/trusty-memory.sock"))
-            );
-        }
-        other => panic!("expected Memory/Import, got {other:?}"),
-    }
-}
-
 /// Why (#8352): `tm memory recall` is the fallback a PM reaches for when the
 /// `mcp__trusty-memory__*` tools are dead, so the verb, its bare form, and every
 /// flag that mirrors the `memory_recall` schema must parse. Before #8352 this
@@ -3273,6 +3132,43 @@ fn cli_parses_memory_note() {
         }
         other => panic!("expected Memory/Note, got {other:?}"),
     }
+}
+
+/// #9340: `tm memory forget <drawer-id>` takes the id positionally, plus the
+/// same `--palace`/`--memory-socket`/`--json` flags as the other verbs.
+#[test]
+fn cli_parses_memory_forget() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "forget",
+        "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21",
+        "--palace",
+        "p",
+        "--memory-socket",
+        "/tmp/m.sock",
+        "--json",
+    ])
+    .expect("`tm memory forget <drawer-id>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Forget {
+                    drawer_id,
+                    palace,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(drawer_id, "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21");
+            assert_eq!(palace.as_deref(), Some("p"));
+            assert_eq!(memory_socket, Some(std::path::PathBuf::from("/tmp/m.sock")));
+            assert!(json);
+        }
+        other => panic!("expected Memory/Forget, got {other:?}"),
+    }
+    // The id is required: a bare `forget` is a usage error, not a no-op.
+    assert!(Cli::try_parse_from(["trusty-mpm", "memory", "forget"]).is_err());
 }
 
 #[test]

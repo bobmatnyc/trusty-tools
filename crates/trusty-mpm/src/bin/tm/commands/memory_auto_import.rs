@@ -8,7 +8,7 @@
 //! renders either the JSON report (`--json`) or a per-file summary. Exits
 //! non-zero when any fact failed to store, so the operator is told the index was
 //! deliberately left intact.
-//! Test: `cli_parses_memory_import_auto_memory` in `tests.rs`; the migration
+//! Test: `cli_parses_memory_import_auto_memory` in `memory_import_cli_tests.rs`; the migration
 //! behaviour is covered by `core::auto_memory_import::tests`.
 
 use std::path::PathBuf;

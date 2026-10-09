@@ -407,3 +407,77 @@ async fn a_past_expires_at_is_refused_before_any_rpc() {
         );
     }
 }
+
+/// A drawer id in the shape trusty-memory mints (a v4 UUID).
+const DRAWER: &str = "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21";
+
+/// Why (#9340): `forget` is a write, so it reaches `memory_forget` with the
+/// resolved palace and the id under the schema's own `drawer_id` key.
+/// Test: itself.
+#[tokio::test]
+async fn forget_sends_memory_forget_with_the_drawer_id() {
+    let (daemon, calls) =
+        recording_daemon(json!({ "palace": "p", "status": "deleted", "drawer_id": DRAWER })).await;
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let verb = MemoryVerb::Forget {
+        drawer_id: DRAWER.to_string(),
+    };
+    let outcome = super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+        .await
+        .expect("the stub answers");
+
+    let (method, params) = only_call(&calls);
+    assert_eq!(method, crate::core::memory_forget::FORGET_METHOD);
+    assert_eq!(params, json!({ "palace": "p", "drawer_id": DRAWER }));
+    assert_eq!(outcome.verb, "forget");
+    assert_eq!(outcome.count, None);
+}
+
+/// Why (#9340): the daemon would refuse a non-UUID too, but its refusal comes
+/// back as "did not answer", which reads as a transport fault.
+/// Test: itself.
+#[tokio::test]
+async fn a_malformed_drawer_id_is_refused_before_any_rpc() {
+    let (daemon, calls) = recording_daemon(json!({ "status": "deleted" })).await;
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let verb = MemoryVerb::Forget {
+        drawer_id: "d1".to_string(),
+    };
+    let err = super::run_verb(&verb, &opts_at(Some("p"), daemon.socket(), cwd.path()))
+        .await
+        .expect_err("a non-UUID id must be refused");
+
+    assert!(matches!(err, MemoryVerbError::DrawerId { .. }), "{err:?}");
+    assert!(err.to_string().contains("\"d1\""), "{err}");
+    assert!(
+        calls.lock().expect("recorded calls").is_empty(),
+        "nothing may be sent"
+    );
+}
+
+/// Why (#9340): `memory_forget` answers an unknown id with a successful
+/// `status: "not_found"` body, so only `deleted` may count as success.
+/// Test: itself.
+#[test]
+fn forget_failure_accepts_only_deleted() {
+    use crate::core::memory_forget::forget_failure;
+
+    assert_eq!(
+        forget_failure(DRAWER, Some("p"), &json!({ "status": "deleted" })),
+        None
+    );
+    let not_found = forget_failure(DRAWER, Some("p"), &json!({ "status": "not_found" }))
+        .expect("not_found is a failure");
+    assert!(
+        not_found.contains(DRAWER) && not_found.contains("palace p"),
+        "{not_found}"
+    );
+    assert!(not_found.contains("nothing was deleted"), "{not_found}");
+    for body in [json!({ "status": "stored" }), json!({})] {
+        let reason = forget_failure(DRAWER, None, &body).expect("only `deleted` succeeds");
+        assert!(
+            reason.contains("did not report the drawer deleted"),
+            "{reason}"
+        );
+    }
+}
