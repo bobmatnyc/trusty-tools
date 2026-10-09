@@ -80,6 +80,32 @@ pub(super) fn index_key(
     stored_key(roots, Path::new(path)).ok_or_else(|| index_outside_root(index_id, roots, path))
 }
 
+/// Purge the copy a pre-#9510 `index-file` stored under the verbatim
+/// absolute `path`, when `path` differs from its stored `key`.
+///
+/// Why: an absolute re-add writes only `key`, so a copy left under the
+/// verbatim key kept answering unscoped searches beside the new one.
+/// What: a no-op for a relative path or one equal to `key`. Otherwise the
+/// fail-closed purge `remove-file` and the #8922 excluded-path purge use —
+/// chunks, then the content hash — and a reindex stamp once rows left redb.
+/// A failed purge is an error; the caller holds the teardown guard (#3049).
+/// Test: `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`.
+pub(super) async fn purge_verbatim_key(
+    indexer: &crate::core::CodeIndexer,
+    index_id: &crate::core::registry::IndexId,
+    path: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    if !Path::new(path).is_absolute() || path == key {
+        return Ok(());
+    }
+    let (_, committed) = indexer.purge_file_committed(index_id, path).await?;
+    if committed {
+        indexer.record_incremental_commit(path).await;
+    }
+    Ok(())
+}
+
 /// The stored key of the absolute `path`, or `None` when it names no file
 /// under any root.
 fn stored_key(roots: &IndexRoots, path: &Path) -> Option<String> {
