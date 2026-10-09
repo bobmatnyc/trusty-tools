@@ -196,19 +196,13 @@ pub fn try_resolve_daemon_url(explicit: Option<&str>) -> Result<String, DaemonUr
     }
 
     // 2. Lock file — records the actual bound address written by the daemon.
-    let isolated = isolated_environment();
-    if let Some(url) = read_lock_file_url() {
-        // #9556: under isolation a lock that belongs to the host is not this
-        // sandbox's daemon; a lock under the sandbox's own `HOME` still wins.
-        let home = dirs::home_dir();
-        let passwd_home = crate::core::host_state_gate::passwd_home_dir();
-        if !(isolated && lock_is_hosts(&url, home.as_deref(), passwd_home.as_deref())) {
-            return Ok(url);
-        }
+    //    #9556: filtered, so an isolated process never reads the host's lock.
+    if let Some(url) = client_lock_url() {
+        return Ok(url);
     }
 
     // #9556: the default is the host's daemon; an isolated process refuses it.
-    if isolated {
+    if isolated_environment() {
         return Err(DaemonUrlError::NoSandboxDaemon);
     }
 
@@ -231,7 +225,16 @@ pub fn try_resolve_daemon_url(explicit: Option<&str>) -> Result<String, DaemonUr
 /// `isolated_resolver_ignores_a_host_lock_naming_the_default`,
 /// `isolated_resolver_keeps_a_sandbox_home_lock`.
 pub fn client_lock_url() -> Option<String> {
-    read_lock_file_url()
+    let url = read_lock_file_url()?;
+    // #9556: the home lookups run only when isolated.
+    if isolated_environment() {
+        let home = dirs::home_dir();
+        let passwd_home = crate::core::host_state_gate::passwd_home_dir();
+        if lock_is_hosts(&url, home.as_deref(), passwd_home.as_deref()) {
+            return None;
+        }
+    }
+    Some(url)
 }
 
 /// Whether a daemon lock read from `home` belongs to the host (#9556).
