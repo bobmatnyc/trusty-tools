@@ -89,21 +89,23 @@ pub(super) fn index_key(
 /// fail-closed purge `remove-file` and the #8922 excluded-path purge use —
 /// chunks, then the content hash — and a reindex stamp once rows left redb.
 /// A failed purge is an error; the caller holds the teardown guard (#3049).
-/// Test: `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`.
+/// Returns the chunks removed.
+/// Test: `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
+/// `index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`.
 pub(super) async fn purge_verbatim_key(
     indexer: &crate::core::CodeIndexer,
     index_id: &crate::core::registry::IndexId,
     path: &str,
     key: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     if !Path::new(path).is_absolute() || path == key {
-        return Ok(());
+        return Ok(0);
     }
-    let (_, committed) = indexer.purge_file_committed(index_id, path).await?;
+    let (removed, committed) = indexer.purge_file_committed(index_id, path).await?;
     if committed {
         indexer.record_incremental_commit(path).await;
     }
-    Ok(())
+    Ok(removed)
 }
 
 /// The stored key of the absolute `path`, or `None` when it names no file
