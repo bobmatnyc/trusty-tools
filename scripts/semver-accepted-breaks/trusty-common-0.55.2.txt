@@ -1,0 +1,6 @@
+crate   trusty-common
+version 0.55.2
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_no_repr_variant_discriminant_changed variant PalaceResolveError::NoIdentity 4 -> 5
+accept  enum_no_repr_variant_discriminant_changed variant PalaceResolveError::PinEmpty 2 -> 3
+accept  enum_no_repr_variant_discriminant_changed variant PalaceResolveError::PinInvalid 3 -> 4
