@@ -1,0 +1,2 @@
+Added
+- `tm memory forget <drawer-id>` deletes one drawer through trusty-memory's `memory_forget`, over the same socket and palace resolution as `recall`/`remember`/`note`. It exits non-zero when the daemon is unreachable (the error names the socket), when the id is not a UUID, and when the daemon reports no such drawer (`not_found`). There is no `--fact-key` form yet: trusty-memory exposes no slot-to-drawer lookup ([#9340](https://github.com/bobmatnyc/trusty-tools/issues/9340))

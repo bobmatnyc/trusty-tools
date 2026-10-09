@@ -3275,6 +3275,43 @@ fn cli_parses_memory_note() {
     }
 }
 
+/// #9340: `tm memory forget <drawer-id>` takes the id positionally, plus the
+/// same `--palace`/`--memory-socket`/`--json` flags as the other verbs.
+#[test]
+fn cli_parses_memory_forget() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "memory",
+        "forget",
+        "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21",
+        "--palace",
+        "p",
+        "--memory-socket",
+        "/tmp/m.sock",
+        "--json",
+    ])
+    .expect("`tm memory forget <drawer-id>` must parse");
+    match cli.command.unwrap() {
+        Command::Memory {
+            action:
+                MemoryAction::Forget {
+                    drawer_id,
+                    palace,
+                    json,
+                    memory_socket,
+                },
+        } => {
+            assert_eq!(drawer_id, "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21");
+            assert_eq!(palace.as_deref(), Some("p"));
+            assert_eq!(memory_socket, Some(std::path::PathBuf::from("/tmp/m.sock")));
+            assert!(json);
+        }
+        other => panic!("expected Memory/Forget, got {other:?}"),
+    }
+    // The id is required: a bare `forget` is a usage error, not a no-op.
+    assert!(Cli::try_parse_from(["trusty-mpm", "memory", "forget"]).is_err());
+}
+
 #[test]
 fn cli_parses_shell_init() {
     // The dialect is a closed set: a typo must be refused at parse time rather
