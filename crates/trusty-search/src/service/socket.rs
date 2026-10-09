@@ -384,6 +384,8 @@ pub struct BoundSocket {
 /// directory exactly as it does without `--socket`.
 /// Test: `run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged`,
 /// `prepare_named_socket_dir_creates_a_missing_parent_at_0700`,
+/// `prepare_named_socket_refusal_names_the_chmod_remedy`,
+/// `prepare_named_socket_reports_an_unstatable_parent`,
 /// `cli_auto_started_daemon_exits_when_its_test_binary_is_killed`.
 pub fn prepare_named_socket(socket: PathBuf) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -405,12 +407,14 @@ pub fn prepare_named_socket(socket: PathBuf) -> Result<PathBuf> {
         Err(e) => Err(e).with_context(|| format!("stat --socket directory {}", dir.display())),
         Ok(meta) if meta.is_dir() => {
             let mode = meta.permissions().mode() & 0o777;
+            // #9214: the refusal names the remedy, not only the reason.
             anyhow::ensure!(
                 mode == SOCKET_DIR_MODE,
-                "--socket directory {} is mode {mode:04o}; clients refuse a socket outside a \
+                "--socket directory {dir} is mode {mode:04o}; clients refuse a socket outside a \
                  {SOCKET_DIR_MODE:04o} directory, and start does not change the mode of a \
-                 directory it did not create",
-                dir.display()
+                 directory it did not create. Run `chmod 700 {dir}`, or pass a --socket path \
+                 whose directory does not exist yet (start creates it at 0700)",
+                dir = dir.display()
             );
             Ok(())
         }

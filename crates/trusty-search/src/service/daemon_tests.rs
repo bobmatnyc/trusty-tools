@@ -1004,7 +1004,9 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
 /// Why: `--socket ~/x.sock` narrowed `$HOME` to `0700` — the bind hardens the
 /// socket's parent, and that parent already existed.
 /// What: runs a real isolated daemon with `--socket` inside an existing `0755`
-/// directory, stops it, and asserts the directory is still `0755`.
+/// directory, asserts it returned an error naming that directory (so the
+/// refusal was reached, not an earlier failure such as the lock), and asserts
+/// the directory is still `0755`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
@@ -1035,7 +1037,16 @@ async fn run_daemon_with_socket_leaves_an_existing_parent_mode_unchanged() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let _ = shutdown_tx.send(true);
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+            .await
+            .expect("the daemon must return within 10 s of shutdown")
+            .expect("the daemon task must not panic");
+        let err = outcome.expect_err("start --socket must refuse a 0755 parent it did not create");
+        let dir = parent.display().to_string();
+        assert!(
+            err.to_string().contains(&dir),
+            "the refusal must name the --socket directory {dir}: {err}"
+        );
 
         let mode = std::fs::metadata(&parent)
             .expect("stat the existing parent")
