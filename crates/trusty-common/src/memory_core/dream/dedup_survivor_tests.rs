@@ -459,9 +459,10 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// query matches neither, so A cannot fold Z in after it resumes.
 #[tokio::test]
 // #9509: A holds one of the two process-wide dream permits while it waits for
-// B to take the other. A sibling that takes permits one at a time
-// (`a_dream_cycle_waits_when_every_permit_is_held`) can grab the second first,
-// and then neither test can progress until this one's 30 s timeout fires.
+// B to take the other. A sibling that takes every permit one at a time
+// (`a_dream_cycle_waits_when_every_permit_is_held`,
+// `an_interactive_dream_errors_when_the_dreamer_is_busy`) can grab the second
+// first, and then neither test progresses until this one's 30 s timeout fires.
 #[serial_test::serial(dream_permits)]
 async fn a_second_dream_cycle_on_a_dreaming_palace_loses_no_text() {
     use super::cycle::merge_seam;
