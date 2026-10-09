@@ -175,3 +175,59 @@ async fn index_file_keeps_a_relative_path_unchanged_9510() {
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["error"], "index_file_excluded", "{body}");
 }
+
+/// Why (#9510): before the fix, an absolute `index-file` path was stored
+/// verbatim. An absolute re-add now writes only the relative key, so a
+/// pre-fix copy under the verbatim key stayed and kept answering searches.
+/// What: the file is planted under its verbatim absolute key through the
+/// indexer, as `remove_file_still_removes_a_pushed_absolute_key_9236` does,
+/// which sets the single-copy chunk total. The same file is re-added through
+/// `index-file` by that absolute path. The total stays the single-copy total,
+/// no chunk is left under the absolute key, and an unscoped search for the
+/// file's term finds only chunks whose id names the relative key. Fails
+/// before the purge: the old copy stays and the total doubles.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (root, _alias) = rooted(tmp.path());
+    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let absolute = root.join(FILE).display().to_string();
+    let term = "purge_stale_copy_9510";
+    let content = format!("fn {term}(token: &str) -> bool {{ verify(token) }}\n");
+    {
+        let handle = state.registry.get(&IndexId::new("ia")).expect("resident");
+        let indexer = handle.indexer.read().await;
+        indexer
+            .index_file(&absolute, &content)
+            .await
+            .expect("plant the pre-#9510 absolute key");
+    }
+    let single = total_chunks(&http, "ia").await;
+    assert!(single > 0, "the planted key must index something");
+
+    let put = serde_json::json!({ "path": absolute, "content": content });
+    let reply = http_ok(&http, "POST", "/indexes/ia/index-file", put).await;
+    assert_eq!(reply["indexed"], true, "{reply}");
+
+    let query = serde_json::json!({ "text": term, "top_k": 10, "expand_graph": false });
+    let body = http_ok(&http, "POST", "/indexes/ia/search", query).await;
+    let ids: Vec<String> = body["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no results array: {body}"))
+        .iter()
+        .filter(|hit| hit["content"].as_str().is_some_and(|c| c.contains(term)))
+        .map(|hit| hit["id"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        !ids.is_empty() && ids.iter().all(|id| id.starts_with(FILE)),
+        "a search must answer only the relative-key copy; got {ids:?}"
+    );
+    assert_eq!(
+        total_chunks(&http, "ia").await,
+        single,
+        "the verbatim absolute copy survived the re-add"
+    );
+    let stray = chunks_for(&state, "ia", &absolute).await;
+    assert!(stray.is_empty(), "{absolute} kept its own key: {stray:?}");
+}
