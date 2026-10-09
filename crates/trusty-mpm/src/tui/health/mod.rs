@@ -50,3 +50,7 @@ pub use types::{
 
 #[cfg(test)]
 mod tests;
+
+// #9214: the search legs over the daemon's socket.
+#[cfg(test)]
+mod search_uds_tests;
