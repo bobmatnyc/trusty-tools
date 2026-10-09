@@ -1130,6 +1130,10 @@ use startup_tasks::{daemon_state, spawn_startup_tasks};
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod cli_tests;
+// #9277: ADR-0066 CLI contract snapshot of the clap tree.
+#[cfg(test)]
+#[path = "cli_contract_tests.rs"]
+mod cli_contract_tests;
 // ---------------------------------------------------------------------------
 // Tests for spawn_startup_tasks (#474)
 // ---------------------------------------------------------------------------
