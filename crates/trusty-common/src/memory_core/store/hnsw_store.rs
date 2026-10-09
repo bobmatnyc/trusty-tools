@@ -90,6 +90,8 @@ const MAX_ALLOC_PROBES: u8 = 8;
 /// Test: Indirectly via the unit tests below (each variant is reached when
 /// the corresponding subsystem returns an error).
 #[derive(Debug, Error)]
+// #9487: `OpBudget` was a semver break; non_exhaustive keeps the next variant additive.
+#[non_exhaustive]
 pub enum HnswStoreError {
     /// Boxed so the enum stays small enough that `Result<T, HnswStoreError>`
     /// doesn't trip clippy's `result_large_err` lint. The redb error types
