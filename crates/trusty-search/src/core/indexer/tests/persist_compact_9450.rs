@@ -9,9 +9,12 @@
 //! (compaction, churn cleared, no vector lost).
 //! The idle write-cooldown persist skips the compaction the same way. A
 //! commit-spawned persist that meets unquiet writes compacts once they stop.
+//! #9478: so does a reindex that ends with compaction due.
 //! Test: `the_persister_compacts_a_churned_graph_outside_a_reindex`,
 //! `the_idle_persist_never_compacts_during_a_reindex`,
-//! `a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off`.
+//! `a_commit_spawned_persist_compacts_once_writes_stop_with_the_idle_persist_off`,
+//! `a_reindex_checkpoint_compacts_once_writes_stop_with_the_idle_persist_off`,
+//! `a_reindex_with_no_checkpoint_compacts_once_writes_stop`.
 
 use std::sync::Arc;
 
@@ -184,4 +187,103 @@ async fn the_idle_persist_never_compacts_during_a_reindex() {
     );
     assert_eq!(store.churn_since_compact(), 0, "compacts once it ends");
     assert_eq!(store.len().await.expect("len"), 139, "no vector lost");
+}
+
+/// Poll until `store` has no churn left or the quiet window plus 10 s has
+/// passed, then return the churn count (#9478). Polls; never sleeps the
+/// window as synchronisation.
+async fn churn_after_writes_stop(store: &UsearchStore) -> u64 {
+    let deadline = tokio::time::Instant::now()
+        + store.compaction_quiet_window()
+        + std::time::Duration::from_secs(10);
+    while store.churn_since_compact() != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    store.churn_since_compact()
+}
+
+/// #9478: a reindex whose checkpoint ran while staging leaves compaction
+/// due, and with the idle persist off it compacts once writes stop.
+/// Why: the persister skips compaction while `reindexing` is set, so the
+/// reindex's own checkpoints spawned no quiet-compaction task, and nothing
+/// else ran one until a later write.
+/// What: churn during a staged reindex, one forced persist with the flag
+/// set, end the reindex, then no persist and no idle persist; poll churn.
+/// Red before the fix: churn stays at 60.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_reindex_checkpoint_compacts_once_writes_stop_with_the_idle_persist_off() {
+    let fx = Fixture::new(false);
+    let store = Arc::new(UsearchStore::new(4).expect("store"));
+    let items: Vec<(String, Vec<f32>)> = (0..200).map(|i| (format!("c{i}"), vec4(i))).collect();
+    store.upsert_batch(&items).await.expect("upsert");
+    let mut indexer = CodeIndexer::new("ts-9478-checkpoint", fx.root.path())
+        .with_storage_layout(StorageLayout::Colocated);
+    indexer.set_store(store.clone());
+    // What the idle ticker passes for `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=off`.
+    assert!(indexer
+        .write_cooldown_persist(std::time::Duration::ZERO)
+        .is_none());
+
+    indexer.begin_reindex_staging();
+    for i in 0..60 {
+        store.remove(&format!("c{i}")).await.expect("remove");
+    }
+    indexer.force_incremental_persist();
+    assert!(wait_persist_task_done(&indexer).await, "persist finishes");
+    // 60 churn against a threshold of max(140 / 10, 32) = 32.
+    assert_eq!(
+        store.churn_since_compact(),
+        60,
+        "a reindex checkpoint does not compact"
+    );
+    indexer.end_reindex_staging();
+
+    assert_eq!(
+        churn_after_writes_stop(&store).await,
+        0,
+        "#9478: churn a reindex leaves due is compacted once writes stop"
+    );
+    assert_eq!(store.len().await.expect("len"), 140, "no vector lost");
+}
+
+/// #9478: a staged reindex that ends with the awaited staging save, and ran
+/// no incremental persist at all, still compacts once writes stop.
+/// Why: a short reindex (fewer than `HNSW_SNAPSHOT_BATCH_INTERVAL` batches)
+/// spawns no checkpoint; `resolve_hnsw_swap` saves through
+/// `save_vector_store`, not the persister. So the reindex end itself has to
+/// start the quiet compaction.
+/// What: churn during staging, `save_vector_store` to the staging path,
+/// end the reindex, then poll churn with no further persist.
+/// Red before the fix: churn stays at 60.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_reindex_with_no_checkpoint_compacts_once_writes_stop() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staging = dir.path().join("hnsw.usearch.staging");
+    let store = Arc::new(UsearchStore::new(4).expect("store"));
+    let items: Vec<(String, Vec<f32>)> = (0..200).map(|i| (format!("c{i}"), vec4(i))).collect();
+    store.upsert_batch(&items).await.expect("upsert");
+    let mut indexer = CodeIndexer::new("ts-9478-no-checkpoint", dir.path());
+    indexer.set_store(store.clone());
+
+    indexer.begin_reindex_staging();
+    for i in 0..60 {
+        store.remove(&format!("c{i}")).await.expect("remove");
+    }
+    assert!(
+        indexer.save_vector_store(&staging).await.expect("save"),
+        "the staging save runs"
+    );
+    assert_eq!(store.churn_since_compact(), 60, "nothing compacts yet");
+    indexer.end_reindex_staging();
+
+    assert_eq!(
+        churn_after_writes_stop(&store).await,
+        0,
+        "#9478: the reindex end starts the quiet compaction"
+    );
+    assert_eq!(store.len().await.expect("len"), 140, "no vector lost");
 }
