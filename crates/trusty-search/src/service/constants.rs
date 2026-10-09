@@ -6,8 +6,7 @@
 //! What: currently exports [`DEFAULT_PORT`], the loopback port the daemon
 //! binds when no explicit `--port` / `port.lock` override is in play.
 //! Test: integration tests start the daemon on auto-selected ports; this
-//! constant is exercised indirectly via `cli::Start::port` defaults and
-//! `read_daemon_port` fallback.
+//! constant is exercised indirectly via `cli::Start::port` defaults.
 
 /// Default loopback port for the trusty-search daemon.
 ///

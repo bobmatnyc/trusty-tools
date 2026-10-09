@@ -5,6 +5,7 @@ use super::doctor_pipeline::run_doctor_checks;
 use super::reindex_engine::run_reindex;
 use anyhow::Result;
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Why: extracted from `main()`. The diagnostic runs six independent checks
 /// and the `--fix` branch has three sub-fixes (stale lock, empty indexes,
@@ -20,10 +21,11 @@ pub async fn handle_doctor(fix: bool) -> Result<()> {
     println!("\ntrusty-search doctor\n");
     println!("Checking configuration...\n");
 
-    // #9214: start the daemon over its socket, then resolve its HTTP base.
-    let base = super::daemon_http::ensure_daemon_http_base().await?;
+    // #9214: start the daemon over its socket; every check reads it there.
+    let client = DaemonClient::resolve()?;
+    super::daemon_guard::ensure_daemon_up(&client).await?;
 
-    let (checks, empty_indexes) = run_doctor_checks(base).await;
+    let (checks, empty_indexes) = run_doctor_checks(client).await;
 
     // Print all checks (index sub-lines were already printed inline by
     // run_doctor_checks, so we skip the index summary line itself to avoid

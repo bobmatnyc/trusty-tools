@@ -2,6 +2,8 @@
 
 use anyhow::{bail, Result};
 use colored::Colorize;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::queries::{METHOD_QUERY, METHOD_QUERY_ALL};
 
 /// Classify how a query should be routed based on `--index` / `--indexes`.
 ///
@@ -9,9 +11,9 @@ use colored::Colorize;
 /// Classifying them upfront keeps the dispatch table readable.
 ///
 /// What:
-///   - `SingleIndex(id)` → `POST /indexes/<id>/search` (exact single target).
-///   - `MultiIndex(ids)` → `POST /search` with `{"indexes": [...]}` fan-out.
-///   - `AllIndexes`      → `POST /search` with no `indexes` filter (every index).
+///   - `SingleIndex(id)` → `search.query` (exact single target).
+///   - `MultiIndex(ids)` → `search.query.all` with `{"indexes": [...]}` fan-out.
+///   - `AllIndexes`      → `search.query.all` with no `indexes` filter.
 ///
 /// Test: the three paths are covered by `test_query_routing` in `query::tests`.
 enum QueryTarget {
@@ -135,14 +137,14 @@ fn render_text(query: &str, target_label: &str, body_json: &serde_json::Value, f
 /// Execute the `trusty-search query` subcommand.
 ///
 /// Why: routes single-index, multi-index, and all-index queries to the correct
-/// daemon endpoint so `--indexes "*"` and `--indexes "a,b"` work as documented.
+/// daemon method so `--indexes "*"` and `--indexes "a,b"` work as documented.
 ///
-/// What:
-///   - Single target → `POST /indexes/<id>/search`.
-///   - Comma-list or `"*"` → `POST /search` (global fan-out) with an optional `indexes` filter list.
+/// What: starts the daemon if needed, then over its Unix socket (#9214, no TCP
+/// fallback):
+///   - Single target → `search.query` (`POST /indexes/<id>/search`'s twin).
+///   - Comma-list or `"*"` → `search.query.all` with an optional `indexes` filter.
 ///
-/// Test: run `trusty-search query "x" --indexes "*"` against a multi-index daemon and
-/// assert results arrive from more than one index.
+/// Test: `query_names_the_socket_when_no_daemon_answers`.
 pub async fn handle_query(
     explicit_index: &Option<String>,
     global_json: bool,
@@ -151,71 +153,55 @@ pub async fn handle_query(
     top_k: usize,
     full: bool,
 ) -> Result<()> {
-    // #9214: start the daemon over its socket, then resolve its HTTP base.
-    let base = super::daemon_http::ensure_daemon_http_base().await?;
-    let client = trusty_common::server::daemon_http_client()?;
-
-    match classify_target(explicit_index, &indexes) {
-        QueryTarget::SingleIndex(id) => {
-            let url = format!("{}/indexes/{}/search", base, id);
-            let body = serde_json::json!({"text": query, "top_k": top_k});
-            let resp = client.post(&url).json(&body).send().await;
-            let body_json: serde_json::Value = match resp {
-                Ok(r) if r.status().is_success() => {
-                    r.json().await.unwrap_or_else(|_| serde_json::json!({}))
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                    bail!("index '{}' not found on daemon", id);
-                }
-                Ok(r) => bail!("daemon returned {}", r.status()),
-                Err(e) => bail!("could not reach daemon at {}: {e}", base),
-            };
-            if global_json {
-                println!("{}", body_json);
-            } else {
-                render_text(&query, &id, &body_json, full);
-            }
-        }
-
-        QueryTarget::MultiIndex(ids) => {
-            let url = format!("{}/search", base);
-            let body = serde_json::json!({"query": query, "top_k": top_k, "indexes": ids.clone()});
-            let resp = client.post(&url).json(&body).send().await;
-            let body_json: serde_json::Value = match resp {
-                Ok(r) if r.status().is_success() => {
-                    r.json().await.unwrap_or_else(|_| serde_json::json!({}))
-                }
-                Ok(r) => bail!("daemon returned {} for multi-index search", r.status()),
-                Err(e) => bail!("could not reach daemon at {}: {e}", base),
-            };
-            if global_json {
-                println!("{}", body_json);
-            } else {
-                let label = ids.join(",");
-                render_text(&query, &label, &body_json, full);
-            }
-        }
-
-        QueryTarget::AllIndexes => {
-            let url = format!("{}/search", base);
-            let body = serde_json::json!({"query": query, "top_k": top_k});
-            let resp = client.post(&url).json(&body).send().await;
-            let body_json: serde_json::Value = match resp {
-                Ok(r) if r.status().is_success() => {
-                    r.json().await.unwrap_or_else(|_| serde_json::json!({}))
-                }
-                Ok(r) => bail!("daemon returned {} for all-indexes search", r.status()),
-                Err(e) => bail!("could not reach daemon at {}: {e}", base),
-            };
-            if global_json {
-                println!("{}", body_json);
-            } else {
-                render_text(&query, "*", &body_json, full);
-            }
-        }
+    let client = DaemonClient::resolve()?;
+    super::daemon_guard::ensure_daemon_up(&client).await?;
+    let target = classify_target(explicit_index, &indexes);
+    let (label, body_json) = run_query(&client, &target, &query, top_k).await?;
+    if global_json {
+        println!("{}", body_json);
+    } else {
+        render_text(&query, &label, &body_json, full);
     }
-
     Ok(())
+}
+
+/// Send one query over the socket and return `(label, body)`.
+///
+/// Why: split from [`handle_query`] so the socket exchange is testable without
+/// spawning a daemon.
+/// What: `search.query` for one index, `search.query.all` otherwise. An
+/// unreachable socket is an error naming the socket path; an unknown index
+/// reads "not found"; any other refusal carries the daemon's message.
+/// Test: `query_names_the_socket_when_no_daemon_answers`.
+async fn run_query(
+    client: &DaemonClient,
+    target: &QueryTarget,
+    query: &str,
+    top_k: usize,
+) -> Result<(String, serde_json::Value)> {
+    let (label, method, params) = match target {
+        QueryTarget::SingleIndex(id) => (
+            id.clone(),
+            METHOD_QUERY,
+            serde_json::json!({"index_id": id, "body": {"text": query, "top_k": top_k}}),
+        ),
+        QueryTarget::MultiIndex(ids) => (
+            ids.join(","),
+            METHOD_QUERY_ALL,
+            serde_json::json!({"query": query, "top_k": top_k, "indexes": ids}),
+        ),
+        QueryTarget::AllIndexes => (
+            "*".to_string(),
+            METHOD_QUERY_ALL,
+            serde_json::json!({"query": query, "top_k": top_k}),
+        ),
+    };
+    match client.call(method, params).await {
+        Ok(body) => Ok((label, body)),
+        Err(e) if e.is_not_found() => bail!("index '{label}' not found on daemon"),
+        Err(e) if e.is_unreachable() => bail!("could not reach daemon: {e}"),
+        Err(e) => bail!("daemon returned {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -279,5 +265,25 @@ mod tests {
         // "a," or "a, " should not produce MultiIndex([a]) but SingleIndex(a).
         let target = classify_target(&None, "a,");
         assert!(matches!(target, QueryTarget::SingleIndex(ref s) if s == "a"));
+    }
+
+    /// #9214: no daemon on the socket is an error naming the socket, never a
+    /// dial of TCP.
+    #[tokio::test]
+    async fn query_names_the_socket_when_no_daemon_answers() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let client = DaemonClient::at(&socket);
+        for target in [
+            QueryTarget::SingleIndex("a".into()),
+            QueryTarget::MultiIndex(vec!["a".into(), "b".into()]),
+            QueryTarget::AllIndexes,
+        ] {
+            let err = run_query(&client, &target, "q", 5)
+                .await
+                .expect_err("no daemon answers")
+                .to_string();
+            assert!(err.contains(&socket.display().to_string()), "{err}");
+        }
     }
 }

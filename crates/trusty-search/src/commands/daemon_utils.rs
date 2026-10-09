@@ -4,14 +4,10 @@
 //! "where is it?" logic. #5670 promoted the address-file layout to
 //! `trusty_common::daemon_guard::DaemonAddrLayout`, because `tga` has to probe
 //! this daemon and cannot depend on this crate. #9214 moved the CLI onto the
-//! daemon's socket (`service::daemon_client`); the HTTP base resolver the
-//! remaining HTTP subcommands use now lives in `commands::daemon_http`, which
-//! fails closed rather than guessing a port.
+//! daemon's socket (`service::daemon_client`); no CLI path dials TCP.
 //!
-//! What: two path resolvers and one async TCP probe.
+//! What: two path resolvers.
 //! Test: `mcp_http_addr_path_is_home_relative` below.
-
-use std::time::Duration;
 
 /// Path to `~/.trusty-search/mcp_http_addr` -- the MCP HTTP/SSE listener's
 /// address-discovery file, written by `trusty-search serve --http`.
@@ -46,19 +42,6 @@ pub fn mcp_http_addr_path() -> Option<std::path::PathBuf> {
 /// `/tmp/ts-x/daemon.port`.
 pub fn daemon_port_path() -> Option<std::path::PathBuf> {
     trusty_common::daemon_guard::DaemonAddrLayout::TRUSTY_SEARCH.port_file_path()
-}
-
-/// Check whether a TCP port is open (non-blocking connect with 500 ms timeout).
-pub async fn port_reachable(host: &str, port: u16) -> bool {
-    let addr = format!("{}:{}", host, port);
-    tokio::time::timeout(
-        Duration::from_millis(500),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .is_some()
 }
 
 #[cfg(test)]

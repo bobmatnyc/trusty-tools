@@ -1484,9 +1484,11 @@ with `no HTTP listener (socket-only daemon at <socket>)`; `dashboard` and
 `monitor web` exit non-zero, name the socket, and open no browser, because the
 dashboard needs the HTTP listener until phase C. `port` reports "no daemon
 running" only when nothing answers on the socket, and never starts a daemon.
-The other CLI subcommands still send their requests over HTTP; against a
-`--no-http` daemon they now fail with an error naming the missing
-`http_addr`/`daemon.port` files, rather than falling back to `127.0.0.1:7878`.
+`query`, `doctor`, `monitor status`/`indexes` and the daemon's
+auto-discovery use the socket too (#9214 slice 1), so no CLI path dials TCP;
+`doctor` reports the HTTP listener the daemon says it bound instead of
+probing a port. `monitor tui` still reads over HTTP through trusty-common
+until that crate's slice. Auto-discovery is still withheld under `--no-http`.
 `--no-http` on `trusty-search serve` is a different, older flag and is still a
 no-op there.
 
@@ -1514,7 +1516,7 @@ trusty-search/
 │   ├── detect.rs                    project auto-detection
 │   ├── doctor.rs                    diagnostic checks
 │   ├── core/                        CodeIndexer, BM25, HNSW, chunking, classifier
-│   ├── service/                     axum daemon, FileWatcher, client, Svelte UI
+│   ├── service/                     axum daemon, FileWatcher, socket client, Svelte UI
 │   └── mcp/                         MCP server (stdio + HTTP/SSE)
 └── tests/
     ├── integration_tests.rs         imports `trusty_search::core::*`

@@ -10,8 +10,6 @@
 //! What: #9214 — the probe is `search.health` on the daemon's Unix socket
 //! through `DaemonClient`; this module never dials TCP. The PID-file check,
 //! the device flag for the spawned daemon and the 60s budget live here.
-//! Subcommands still on HTTP reach it through `commands::daemon_http`, which
-//! resolves their HTTP base after this guard returns.
 //!
 //! Test: `ensure_daemon_up_names_the_socket_when_it_never_answers` and the
 //! indexing-device tests.

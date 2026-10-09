@@ -8,9 +8,10 @@
 //! Test: `cargo test --workspace` — the doctor integration tests exercise
 //! these end-to-end.
 
-use super::daemon_utils::{daemon_port_path, port_reachable};
 use super::format::{dir_size_bytes, fmt_bytes, format_with_commas};
 use colored::Colorize;
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
+use trusty_search::service::rpc::reads::METHOD_INDEX_STATUS;
 
 /// Outcome of a single doctor check.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,37 +77,37 @@ pub fn fastembed_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".fastembed_cache")
 }
 
-/// Read the daemon port from the port file (or return the default port).
-pub fn read_daemon_port() -> u16 {
-    daemon_port_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| s.trim().parse::<u16>().ok())
-        .unwrap_or(trusty_search::service::DEFAULT_PORT)
+/// The daemon's `search.health` body, or `None` when the socket does not answer.
+///
+/// Why: separates the probe from the result-formatting so the formatting
+/// check can be tested without a daemon.
+/// What: one `search.health` call over the daemon socket (#9214: never TCP).
+/// Test: `probe_daemon_health_is_none_when_the_socket_is_absent`.
+pub async fn probe_daemon_health(client: &DaemonClient) -> Option<serde_json::Value> {
+    client.health().await.ok()
 }
 
-/// Why: separates the network probe from the result-formatting so the
-/// formatting check can be tested without async/HTTP.
-/// What: returns `(running, version)` by hitting `/health`.
-pub async fn probe_daemon_health(client: &reqwest::Client, base: &str) -> (bool, String) {
-    let health_result = client.get(format!("{}/health", base)).send().await;
-    match health_result {
-        Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await.unwrap_or_else(|_| serde_json::json!({}));
-            let ver = body
-                .get("version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?")
-                .to_string();
-            (true, ver)
-        }
-        _ => (false, String::new()),
-    }
+/// The daemon version a `search.health` body reports, or `"?"`.
+pub fn health_version(health: &serde_json::Value) -> String {
+    health
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string()
+}
+
+/// The HTTP address a `search.health` body reports the daemon bound, if any.
+pub fn health_http_addr(health: &serde_json::Value) -> Option<String> {
+    health
+        .pointer("/transport/http_addr")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Pure formatting of the daemon liveness verdict.
-pub fn check_daemon_running(running: bool, base: &str, version: &str) -> CheckResult {
+pub fn check_daemon_running(running: bool, location: &str, version: &str) -> CheckResult {
     if running {
-        CheckResult::Ok(format!("Daemon running at {} (v{})", base, version))
+        CheckResult::Ok(format!("Daemon running at {} (v{})", location, version))
     } else {
         CheckResult::Error("Daemon not running — run `trusty-search start`".to_string())
     }
@@ -242,47 +243,47 @@ pub fn check_lock_file(data_dir: &std::path::Path, daemon_running: bool) -> Chec
     }
 }
 
-/// GET `/indexes` and extract the names array.
-pub async fn fetch_index_names(client: &reqwest::Client, base: &str) -> Vec<String> {
-    let list = client.get(format!("{}/indexes", base)).send().await;
-    let list_body: serde_json::Value = match list {
-        Ok(r) if r.status().is_success() => {
-            r.json().await.unwrap_or_else(|_| serde_json::json!({}))
-        }
-        _ => serde_json::json!({"indexes": []}),
-    };
+/// The index names `search.indexes.list` reports.
+///
+/// # Errors
+///
+/// The list call's own failure, so no caller reads it as "no indexes".
+// #9214: a failed list used to degrade to `[]`; it now propagates.
+pub async fn fetch_index_names(client: &DaemonClient) -> anyhow::Result<Vec<String>> {
+    let list_body = super::list::fetch_index_list(client).await?;
     let empty_arr: Vec<serde_json::Value> = Vec::new();
-    list_body
+    Ok(list_body
         .get("indexes")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_arr)
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect()
+        .collect())
 }
 
-/// Concurrently fetch `/indexes/:name/status` for each name and return sorted.
+/// One index's `search.index.status` body, or the call's failure.
+pub type IndexStatus = Result<serde_json::Value, DaemonCallError>;
+
+/// Concurrently fetch `search.index.status` for each name and return sorted.
+///
+/// Each row keeps its own call result, so a caller decides whether a failed
+/// read degrades or is reported (#9214: never read as a zero-chunk index).
 pub async fn fetch_index_statuses(
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     names: &[String],
-) -> Vec<(String, serde_json::Value)> {
+) -> Vec<(String, IndexStatus)> {
     let mut joinset = tokio::task::JoinSet::new();
     for name in names {
         let n = name.clone();
-        let url = format!("{}/indexes/{}/status", base, n);
         let c = client.clone();
         joinset.spawn(async move {
-            let body: serde_json::Value = match c.get(&url).send().await {
-                Ok(r) if r.status().is_success() => {
-                    r.json().await.unwrap_or_else(|_| serde_json::json!({}))
-                }
-                _ => serde_json::json!({}),
-            };
+            let body = c
+                .call(METHOD_INDEX_STATUS, serde_json::json!({ "index_id": n }))
+                .await;
             (n, body)
         });
     }
-    let mut per_index: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut per_index: Vec<(String, IndexStatus)> = Vec::new();
     while let Some(j) = joinset.join_next().await {
         if let Ok(pair) = j {
             per_index.push(pair);
@@ -351,12 +352,18 @@ pub fn print_index_breakdown(
     }
 }
 
-/// TCP-reachability probe for the daemon port.
-pub async fn check_port_reachable(port: u16) -> CheckResult {
-    if port_reachable("127.0.0.1", port).await {
-        CheckResult::Ok(format!("Port {} is reachable", port))
-    } else {
-        CheckResult::Error(format!("Port {} is not reachable", port))
+/// The daemon's HTTP listener as `search.health` reports it.
+///
+/// Why: the listener serves only the dashboard now (#9214); every CLI path uses
+/// the socket, so a socket-only daemon is healthy, not an error.
+/// What: reports the address the daemon says it bound, or that it binds none.
+/// It dials nothing.
+/// Test: `check_http_listener_reports_the_bound_address_or_socket_only`.
+pub fn check_http_listener(running: bool, http_addr: Option<&str>) -> CheckResult {
+    match (running, http_addr) {
+        (false, _) => CheckResult::Warn("HTTP listener: skipped (daemon not running)".into()),
+        (true, Some(addr)) => CheckResult::Ok(format!("HTTP listener: {addr} (dashboard)")),
+        (true, None) => CheckResult::Ok("HTTP listener: none (socket-only daemon)".into()),
     }
 }
 

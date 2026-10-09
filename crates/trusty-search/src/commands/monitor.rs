@@ -14,7 +14,7 @@
 use anyhow::{bail, Result};
 use clap::Subcommand;
 use trusty_common::monitor::dashboard::{IndexRow, SearchData};
-use trusty_common::monitor::search_client::{resolve_search_url, SearchClient};
+use trusty_search::service::daemon_client::DaemonClient;
 
 /// Target surface for the `monitor` subcommand.
 ///
@@ -78,22 +78,74 @@ fn fmt_count(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-/// Fetch the full trusty-search dashboard payload or fail with a clear error.
+/// Fetch the trusty-search dashboard payload or fail with a clear error.
 ///
 /// Why: every monitor subcommand needs the same health + index snapshot; this
-/// centralises the daemon-URL resolution and the unreachable-daemon error so
-/// each handler stays terse.
-/// What: resolves the daemon URL from the service lock file (falling back to
-/// the default port), then calls `SearchClient::fetch_all`. A transport error
-/// becomes an `Err` so `main()` prints the red-✗ line and exits 1.
-/// Test: covered indirectly by the handler tests; live path needs a daemon.
+/// centralises the daemon lookup and the unreachable-daemon error so each
+/// handler stays terse.
+/// What: resolves the daemon socket and reads it there (#9214: never TCP, no
+/// default address). It does not start a daemon.
+/// Test: `fetch_search_data_names_the_socket_when_no_daemon_answers`.
 async fn fetch_search_data() -> Result<SearchData> {
-    let url = resolve_search_url();
-    let client = SearchClient::new(url.clone());
-    client
-        .fetch_all()
+    fetch_search_data_from(&DaemonClient::resolve()?).await
+}
+
+/// [`fetch_search_data`] against `client`.
+///
+/// Why: lets a test point the read at a socket of its choosing.
+/// What: `search.health` gives the version and uptime and must answer, and so
+/// must `search.indexes.list`; either failure is an error naming its cause. A
+/// failed `search.index.status` degrades to an all-zero row, as the HTTP read
+/// did. Rows are sorted by id.
+/// Test: `fetch_search_data_names_the_socket_when_no_daemon_answers`,
+/// `fetch_search_data_fails_when_the_index_list_fails`.
+async fn fetch_search_data_from(client: &DaemonClient) -> Result<SearchData> {
+    let health = client
+        .health()
         .await
-        .map_err(|e| anyhow::anyhow!("could not reach trusty-search daemon at {url}: {e}"))
+        .map_err(|e| anyhow::anyhow!("could not reach trusty-search daemon: {e}"))?;
+    // #9214: a failed index list is an error, never "online, 0 indexes".
+    let names = super::doctor_checks::fetch_index_names(client)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not list trusty-search indexes: {e}"))?;
+    let indexes = super::doctor_checks::fetch_index_statuses(client, &names)
+        .await
+        .into_iter()
+        .map(|(id, body)| index_row(id, &body.unwrap_or_default()))
+        .collect();
+    Ok(SearchData {
+        version: health
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        uptime_secs: health
+            .get("uptime_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        indexes,
+    })
+}
+
+/// One dashboard row from a `search.index.status` body; absent fields default.
+fn index_row(id: String, body: &serde_json::Value) -> IndexRow {
+    IndexRow {
+        id,
+        chunk_count: body
+            .get("chunk_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        root_path: body
+            .get("root_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        disk_bytes: body.get("disk_bytes").and_then(|v| v.as_u64()),
+        last_indexed: body
+            .get("last_indexed")
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        ..Default::default()
+    }
 }
 
 /// Print daemon status: health, version, index count, and total chunks.
@@ -256,5 +308,51 @@ mod tests {
         }];
         assert!(print_index_detail(&rows, "missing", false).is_err());
         assert!(print_index_detail(&rows, "known", true).is_ok());
+    }
+
+    /// #9214: no daemon on the socket is an error naming the socket, never a
+    /// dial of the default TCP address.
+    #[tokio::test]
+    async fn fetch_search_data_names_the_socket_when_no_daemon_answers() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let socket = dir.path().join("absent.sock");
+        let err = fetch_search_data_from(&DaemonClient::at(&socket))
+            .await
+            .expect_err("no daemon answers")
+            .to_string();
+        assert!(err.contains(&socket.display().to_string()), "{err}");
+    }
+
+    /// #9214: a failed `search.indexes.list` is an error naming the cause,
+    /// never an "online, 0 indexes" snapshot.
+    #[tokio::test]
+    async fn fetch_search_data_fails_when_the_index_list_fails() {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        let daemon = crate::commands::mock_socket::mock_daemon(|method, _| {
+            if method == METHOD_INDEXES_LIST {
+                Err(trusty_common::uds::server::RpcError::new(
+                    trusty_common::uds::server::CODE_INTERNAL_ERROR,
+                    "registry unreadable",
+                ))
+            } else {
+                Ok(serde_json::json!({"version": "9.9.9", "uptime_secs": 1}))
+            }
+        })
+        .await;
+        let err = fetch_search_data_from(&daemon.client)
+            .await
+            .expect_err("a failed index list is an error")
+            .to_string();
+        assert!(err.contains("registry unreadable"), "{err}");
+    }
+
+    /// `index_row` reads the status fields and defaults the absent ones.
+    #[test]
+    fn index_row_reads_the_status_body() {
+        let body = serde_json::json!({"chunk_count": 7, "root_path": "/r", "disk_bytes": 9});
+        let row = index_row("a".into(), &body);
+        assert_eq!((row.chunk_count, row.root_path.as_str()), (7, "/r"));
+        assert_eq!(row.disk_bytes, Some(9));
+        assert_eq!(index_row("b".into(), &serde_json::json!({})).chunk_count, 0);
     }
 }

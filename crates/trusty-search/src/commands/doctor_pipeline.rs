@@ -19,15 +19,16 @@ use super::doctor_checks::mcp_registration::{
     registered_exe_version, McpRegistration,
 };
 use super::doctor_checks::{
-    check_daemon_running, check_data_dir, check_lock_file, check_log_rotation, check_model_cache,
-    check_port_reachable, check_python_device_note, check_python_launcher, check_python_uv,
-    check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses,
-    print_index_breakdown, probe_daemon_health, python_embedder_enabled, read_daemon_port,
+    check_daemon_running, check_data_dir, check_http_listener, check_lock_file, check_log_rotation,
+    check_model_cache, check_python_device_note, check_python_launcher, check_python_uv,
+    check_python_venv, doctor_data_dir, fetch_index_names, fetch_index_statuses, health_http_addr,
+    health_version, print_index_breakdown, probe_daemon_health, python_embedder_enabled,
     summarize_indexes, CheckResult, EmptyIndex,
 };
 use super::setup::MCP_SERVER_KEY;
 use async_trait::async_trait;
 use std::sync::Mutex;
+use trusty_search::service::daemon_client::DaemonClient;
 
 // ── Trait + shared state ──────────────────────────────────────────────────
 
@@ -40,32 +41,40 @@ pub(crate) trait DoctorCheck: Send + Sync {
 }
 
 pub(crate) struct DoctorState {
-    pub client: reqwest::Client,
-    pub base: String,
-    pub port: u16,
+    // #9214: every daemon probe goes over the socket; `location` labels it.
+    pub client: DaemonClient,
+    pub location: String,
     pub data_dir: std::path::PathBuf,
     daemon_running: Mutex<bool>,
+    http_addr: Mutex<Option<String>>,
     daemon_version: Mutex<String>,
     empty_indexes: Mutex<Vec<EmptyIndex>>,
 }
 
 impl DoctorState {
-    // #9214: the caller resolves `base` after the daemon is up.
-    fn new(client: reqwest::Client, base: String) -> Self {
+    fn new(client: DaemonClient) -> Self {
         Self {
+            location: client.socket().display().to_string(),
             client,
-            base,
-            port: read_daemon_port(),
             data_dir: doctor_data_dir(),
             daemon_running: Mutex::new(false),
+            http_addr: Mutex::new(None),
             daemon_version: Mutex::new(String::new()),
             empty_indexes: Mutex::new(Vec::new()),
         }
     }
 
-    fn set_daemon_health(&self, running: bool, version: String) {
+    fn set_daemon_health(&self, running: bool, version: String, http_addr: Option<String>) {
         *self.daemon_running.lock().expect("doctor state poisoned") = running;
         *self.daemon_version.lock().expect("doctor state poisoned") = version;
+        *self.http_addr.lock().expect("doctor state poisoned") = http_addr;
+    }
+
+    fn http_addr(&self) -> Option<String> {
+        self.http_addr
+            .lock()
+            .expect("doctor state poisoned")
+            .clone()
     }
 
     fn daemon_running(&self) -> bool {
@@ -103,9 +112,15 @@ impl DoctorCheck for DaemonHealthCheck {
     }
 
     async fn run(&self, state: &DoctorState) -> Vec<CheckResult> {
-        let (running, version) = probe_daemon_health(&state.client, &state.base).await;
-        state.set_daemon_health(running, version.clone());
-        vec![check_daemon_running(running, &state.base, &version)]
+        let health = probe_daemon_health(&state.client).await;
+        let version = health.as_ref().map(health_version).unwrap_or_default();
+        let http_addr = health.as_ref().and_then(health_http_addr);
+        state.set_daemon_health(health.is_some(), version.clone(), http_addr);
+        vec![check_daemon_running(
+            health.is_some(),
+            &state.location,
+            &version,
+        )]
     }
 }
 
@@ -148,6 +163,12 @@ impl DoctorCheck for LockFileCheck {
     }
 }
 
+/// Lists the indexes and records the empty ones for `--fix`.
+///
+/// A failed list is an Error and a failed status read a Warn; neither feeds
+/// `--fix` (#9214).
+/// Test: `indexes_check_reports_a_failed_list_and_queues_no_reindex`,
+/// `indexes_check_never_reads_a_failed_status_as_empty`.
 pub(crate) struct IndexesCheck;
 
 #[async_trait]
@@ -163,14 +184,29 @@ impl DoctorCheck for IndexesCheck {
             )];
         }
 
-        let names = fetch_index_names(&state.client, &state.base).await;
+        // #9214: a failed list is reported as such, never "No indexes registered".
+        let names = match fetch_index_names(&state.client).await {
+            Ok(names) => names,
+            Err(e) => return vec![CheckResult::Error(format!("Indexes: list failed: {e}"))],
+        };
         if names.is_empty() {
             return vec![CheckResult::Warn(
                 "No indexes registered — run `trusty-search index` to add a project".into(),
             )];
         }
 
-        let per_index = fetch_index_statuses(&state.client, &state.base, &names).await;
+        // #9214: a failed status read is reported, never counted as a
+        // zero-chunk index (which `--fix` would reindex).
+        let mut results = Vec::new();
+        let mut per_index = Vec::new();
+        for (name, status) in fetch_index_statuses(&state.client, &names).await {
+            match status {
+                Ok(body) => per_index.push((name, body)),
+                Err(e) => results.push(CheckResult::Warn(format!(
+                    "Index '{name}': status read failed: {e}"
+                ))),
+            }
+        }
         let zero_count = per_index
             .iter()
             .filter(|(_, b)| b.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0) == 0)
@@ -181,20 +217,24 @@ impl DoctorCheck for IndexesCheck {
         print_index_breakdown(&per_index, &mut empty_buf);
         state.push_empty_indexes(empty_buf);
 
-        vec![summary]
+        results.insert(0, summary);
+        results
     }
 }
 
-pub(crate) struct PortReachableCheck;
+pub(crate) struct HttpListenerCheck;
 
 #[async_trait]
-impl DoctorCheck for PortReachableCheck {
+impl DoctorCheck for HttpListenerCheck {
     fn name(&self) -> &str {
-        "port_reachable"
+        "http_listener"
     }
 
     async fn run(&self, state: &DoctorState) -> Vec<CheckResult> {
-        vec![check_port_reachable(state.port).await]
+        vec![check_http_listener(
+            state.daemon_running(),
+            state.http_addr().as_deref(),
+        )]
     }
 }
 
@@ -291,13 +331,13 @@ impl DoctorCheck for McpRegistrationCheck {
             "Codex",
             &codex_path,
             &version_of(codex.as_ref()),
-            &state.base,
+            &state.location,
         )];
 
         results.extend(check_claude_registrations(
             &home,
             MCP_SERVER_KEY,
-            &state.base,
+            &state.location,
             &version_of,
         ));
         results
@@ -322,7 +362,7 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(DataDirCheck),
         Box::new(LockFileCheck),
         Box::new(IndexesCheck),
-        Box::new(PortReachableCheck),
+        Box::new(HttpListenerCheck),
         Box::new(LogRotationCheck),
         Box::new(PythonEmbedderCheck),
         Box::new(McpRegistrationCheck),
@@ -331,20 +371,8 @@ fn default_checks() -> Vec<Box<dyn DoctorCheck>> {
 
 /// Drive the doctor pipeline and return `(checks, empty_indexes)` for the
 /// caller (and `--fix`) to consume.
-pub(crate) async fn run_doctor_checks(base: String) -> (Vec<CheckResult>, Vec<EmptyIndex>) {
-    let client = match trusty_common::server::daemon_http_client() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                vec![CheckResult::Error(format!(
-                    "failed to build HTTP client: {e}"
-                ))],
-                Vec::new(),
-            );
-        }
-    };
-
-    let state = DoctorState::new(client, base);
+pub(crate) async fn run_doctor_checks(client: DaemonClient) -> (Vec<CheckResult>, Vec<EmptyIndex>) {
+    let state = DoctorState::new(client);
     let mut checks: Vec<CheckResult> = Vec::new();
 
     for check in default_checks() {
@@ -408,8 +436,7 @@ mod tests {
     async fn python_embedder_check_disabled_reports_single_informational_ok() {
         let _g = EnvVarGuard::remove("TRUSTY_EMBEDDER");
 
-        let client = reqwest::Client::new();
-        let state = DoctorState::new(client, String::new());
+        let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
         let results = PythonEmbedderCheck.run(&state).await;
 
         assert_eq!(
@@ -440,7 +467,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn mcp_registration_check_reports_one_result_per_client_file() {
-        let state = DoctorState::new(reqwest::Client::new(), String::new());
+        let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
         let results = McpRegistrationCheck.run(&state).await;
 
         assert!(
@@ -479,8 +506,7 @@ mod tests {
     async fn python_embedder_check_enabled_aggregates_all_four_checks_in_order() {
         let _g = EnvVarGuard::set("TRUSTY_EMBEDDER", "python");
 
-        let client = reqwest::Client::new();
-        let state = DoctorState::new(client, String::new());
+        let state = DoctorState::new(DaemonClient::at("/nonexistent/daemon.sock"));
         let results = PythonEmbedderCheck.run(&state).await;
 
         assert_eq!(
@@ -509,5 +535,57 @@ mod tests {
             ),
             other => panic!("expected Ok device note, got {other:?}"),
         }
+    }
+
+    /// A mock daemon refusing `failing` and answering every other method with
+    /// a one-index list or an empty status body.
+    async fn daemon_failing(failing: &'static str) -> crate::commands::mock_socket::MockDaemon {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        crate::commands::mock_socket::mock_daemon(move |method, _| {
+            if method == failing {
+                Err(trusty_common::uds::server::RpcError::new(
+                    trusty_common::uds::server::CODE_INTERNAL_ERROR,
+                    "registry unreadable",
+                ))
+            } else if method == METHOD_INDEXES_LIST {
+                Ok(serde_json::json!({"indexes": ["a"]}))
+            } else {
+                Ok(serde_json::json!({}))
+            }
+        })
+        .await
+    }
+
+    /// #9214: a failed list is an Error naming the cause, not "No indexes
+    /// registered", and queues nothing for `--fix`.
+    #[tokio::test]
+    async fn indexes_check_reports_a_failed_list_and_queues_no_reindex() {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        let daemon = daemon_failing(METHOD_INDEXES_LIST).await;
+        let state = DoctorState::new(daemon.client.clone());
+        state.set_daemon_health(true, "9.9.9".into(), None);
+        let results = IndexesCheck.run(&state).await;
+        assert!(
+            matches!(results.as_slice(), [CheckResult::Error(m)] if m.contains("registry unreadable")),
+            "{results:?}"
+        );
+        assert!(state.take_empty_indexes().is_empty());
+    }
+
+    /// #9214: a failed status read is a Warn, never a zero-chunk index that
+    /// `--fix` would reindex.
+    #[tokio::test]
+    async fn indexes_check_never_reads_a_failed_status_as_empty() {
+        let daemon = daemon_failing(trusty_search::service::rpc::reads::METHOD_INDEX_STATUS).await;
+        let state = DoctorState::new(daemon.client.clone());
+        state.set_daemon_health(true, "9.9.9".into(), None);
+        let results = IndexesCheck.run(&state).await;
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(r, CheckResult::Warn(m) if m.contains("status read failed"))),
+            "{results:?}"
+        );
+        assert!(state.take_empty_indexes().is_empty());
     }
 }

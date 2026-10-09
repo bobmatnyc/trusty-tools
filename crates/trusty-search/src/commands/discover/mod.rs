@@ -20,15 +20,16 @@
 //!       pipeline is exercised by the existing daemon integration tests once
 //!       auto-discovery is wired in.
 
-mod http;
 mod marker;
+mod rpc;
 
-use super::daemon_http::daemon_base_url;
 use super::reindex_engine::register_index_with_daemon;
 use crate::config::GlobalConfig;
-use http::{fetch_known_index_ids, wait_for_daemon_ready};
 use marker::{default_scan_paths, detect_project_marker, ProjectMarker};
+use rpc::{fetch_known_index_ids, wait_for_daemon_ready};
 use std::time::Duration;
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::writes::METHOD_INDEX_REINDEX;
 
 /// Discover and index Claude Code, git, and trusty-tools projects on daemon startup.
 ///
@@ -43,8 +44,8 @@ use std::time::Duration;
 ///       default), walks one level deep under each entry, and for every
 ///       directory with a project marker (`.claude/`, `CLAUDE.md`, `.git/`, or
 ///       `.trusty-tools/`) that is NOT already registered with the daemon,
-///       calls `POST /indexes` followed by `POST /indexes/:id/reindex` via
-///       the local HTTP API. The reindex POST includes `"background": true`
+///       calls `search.index.create` followed by `search.index.reindex` over
+///       the daemon socket (#9214). The reindex body carries `"background": true`
 ///       (issue #458) so these bulk startup tasks are routed through the
 ///       low-priority semaphore and cannot starve user-initiated indexing.
 ///       Directories whose `root_path` does not exist on disk are skipped
@@ -75,33 +76,25 @@ pub async fn auto_discover_and_index() {
         return;
     }
 
-    // #9214: this task races the daemon's own startup, so wait for it to
-    // publish its HTTP address rather than guessing the default port.
-    let Some(base) = wait_for_published_base(Duration::from_secs(15)).await else {
-        tracing::warn!("auto-discover: the daemon published no HTTP address within 15s — skipping");
-        return;
-    };
-    let client = match trusty_common::server::daemon_http_client() {
+    // #9214: over the daemon socket, never TCP. This task races the daemon's
+    // own startup, so wait for the socket to answer; cap the wait so a daemon
+    // that failed to bind doesn't leave the auto-discoverer spinning forever.
+    let client = match DaemonClient::resolve() {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("auto-discover: could not build HTTP client: {e:#} — skipping");
+            tracing::warn!("auto-discover: could not resolve the daemon socket: {e:#} — skipping");
             return;
         }
     };
-
-    // Wait briefly for the daemon's HTTP listener to come online. The discover
-    // task is spawned in parallel with `run_daemon`, so the listener may not
-    // be bound yet on the first iteration. Cap the wait so a daemon that
-    // failed to bind doesn't leave the auto-discoverer spinning forever.
-    if !wait_for_daemon_ready(&client, &base, Duration::from_secs(15)).await {
+    if !wait_for_daemon_ready(&client, Duration::from_secs(15)).await {
         tracing::warn!(
-            "auto-discover: daemon at {base} did not become ready within 15s — skipping"
+            "auto-discover: daemon at socket {} did not answer within 15s — skipping",
+            client.socket().display()
         );
         return;
     }
 
-    let known: std::collections::HashSet<String> = match fetch_known_index_ids(&client, &base).await
-    {
+    let known: std::collections::HashSet<String> = match fetch_known_index_ids(&client).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("auto-discover: could not list indexes: {e:#} — skipping");
@@ -193,30 +186,18 @@ pub async fn auto_discover_and_index() {
                         );
                         continue;
                     }
-                    let reindex_url = format!("{base}/indexes/{name}/reindex");
                     // Issue #458 (part 1): set `background: true` so the reindex
                     // request is routed through the low-priority semaphore. This
                     // prevents a large startup discovery (e.g. 44 projects) from
                     // starving a concurrent user-initiated `trusty-search index`.
-                    match client
-                        .post(&reindex_url)
-                        .json(&serde_json::json!({ "background": true }))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            indexed += 1;
-                        }
-                        Ok(resp) => {
-                            tracing::warn!(
-                                "auto-discover: reindex of '{name}' returned HTTP {}",
-                                resp.status()
-                            );
-                        }
+                    let params = serde_json::json!({
+                        "index_id": name,
+                        "body": { "background": true },
+                    });
+                    match client.call(METHOD_INDEX_REINDEX, params).await {
+                        Ok(_) => indexed += 1,
                         Err(e) => {
-                            tracing::warn!(
-                                "auto-discover: could not POST reindex for '{name}': {e}"
-                            );
+                            tracing::warn!("auto-discover: reindex of '{name}' failed: {e}");
                         }
                     }
                 }
@@ -243,65 +224,10 @@ pub async fn auto_discover_and_index() {
     }
 }
 
-/// Poll for the daemon's published HTTP base until `budget` elapses (#9214).
-///
-/// Why: `auto_discover_and_index` is spawned beside `run_daemon`, before the
-/// daemon writes `http_addr`. The resolver used to answer the default port
-/// then; it now errors, so the first read can come too early.
-/// What: [`daemon_base_url`] every 250 ms; `None` at the deadline.
-/// Test: `wait_for_published_base_gives_up_at_its_budget`.
-async fn wait_for_published_base(budget: Duration) -> Option<String> {
-    let deadline = tokio::time::Instant::now() + budget;
-    loop {
-        if let Ok(base) = daemon_base_url() {
-            return Some(base);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
-
-    use serial_test::serial;
-
-    use super::wait_for_published_base;
-    use crate::commands::daemon_http::tests::DataDir;
-
-    /// #9214: the published-address wait in `auto_discover_and_index` ends at
-    /// its budget with no address when the daemon published none.
-    ///
-    /// Why: the Fail-Open Check on the skip arm — the wait must neither hang
-    /// nor fall back to a guessed address such as `127.0.0.1:7878`.
-    /// What: an empty isolated data dir and a 300 ms budget; asserts `None`,
-    /// that the wait lasted the budget, and that it ended well under a second.
-    /// Test: this function.
-    #[tokio::test]
-    #[serial]
-    async fn wait_for_published_base_gives_up_at_its_budget() {
-        let dir = tempfile::tempdir().unwrap();
-        let _env = DataDir::set(dir.path());
-        let budget = Duration::from_millis(300);
-
-        let started = Instant::now();
-        let got = tokio::time::timeout(Duration::from_secs(2), wait_for_published_base(budget))
-            .await
-            .expect("the wait ends at its budget instead of hanging");
-        let elapsed = started.elapsed();
-
-        assert_eq!(got, None, "no address was published, so none is returned");
-        assert!(elapsed >= budget, "the wait gave up early: {elapsed:?}");
-        assert!(
-            elapsed < Duration::from_secs(1),
-            "the wait overran: {elapsed:?}"
-        );
-    }
 
     fn tempdir_unique(label: &str) -> PathBuf {
         let pid = std::process::id();
