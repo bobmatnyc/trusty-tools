@@ -1501,6 +1501,29 @@ mod tests {
         assert!(denied.contains("could not be built"), "{denied}");
     }
 
+    /// #9556 critic: the isolation refusal URL is "no daemon" (#5923), so it is
+    /// `Unavailable` with the sandbox message — not `Unanswered`, which denies
+    /// every tree-sharing dispatch with the wrong cause.
+    #[tokio::test]
+    async fn the_sandbox_refusal_url_is_unavailable_not_unanswered() {
+        let reply = post_shared_tree_with(
+            || reqwest::Client::builder().build(),
+            trusty_mpm::core::ISOLATED_NO_DAEMON_URL,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
+        )
+        .await;
+        let SharedTreeReply::Unavailable(detail) = &reply else {
+            panic!("the sandbox refusal must be Unavailable");
+        };
+        assert!(
+            detail.contains("no daemon reachable for this sandbox"),
+            "{detail}"
+        );
+    }
+
     /// #8492: a build that panics on its detached thread still panics the
     /// caller, as the inline build did, rather than reading as any reply.
     #[tokio::test]

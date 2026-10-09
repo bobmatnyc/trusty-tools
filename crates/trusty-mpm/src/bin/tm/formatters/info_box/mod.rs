@@ -162,7 +162,16 @@ impl ConsoleInfo {
     /// rendered halves; the address rule is covered by `console_addr_from_*` in
     /// `trusty_mpm::core::discovery`.
     pub(crate) fn from_discovery_with_probe() -> Self {
-        let addr = trusty_mpm::core::discovery::console_addr();
+        // #9556: no target (isolated, nothing recorded) means no probe at all.
+        Self::probe(trusty_mpm::core::console_addr_to_probe())
+    }
+
+    /// Probe `addr`, or report offline without probing when there is none.
+    /// Test: `console_info_without_a_target_is_offline_and_unprobed`.
+    fn probe(addr: Option<String>) -> Self {
+        let Some(addr) = addr else {
+            return ConsoleInfo::default();
+        };
         let online = tcp_probe(&addr);
         ConsoleInfo { addr, online }
     }
@@ -497,6 +506,16 @@ pub(crate) fn render_info_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#9556 critic): a sandbox banner with no recorded console reports
+    /// offline and names no address; it never dials the host's 7788.
+    /// Test: itself.
+    #[test]
+    fn console_info_without_a_target_is_offline_and_unprobed() {
+        let info = ConsoleInfo::probe(None);
+        assert!(!info.online);
+        assert!(info.addr.is_empty());
+    }
 
     /// Why (#9556): a sandbox banner must not TCP-probe the host default.
     /// Test: itself.

@@ -571,6 +571,29 @@ fn console_addr_from(recorded: Option<String>) -> String {
     recorded_console_addr(recorded).unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
 }
 
+/// The console address a client may contact, or `None` when it must not
+/// contact one.
+///
+/// Why (#9556): the `tm` banner TCP-probes the console; under isolation with
+/// no recorded console, the default is the host's live console.
+/// What: [`console_addr_to_probe_from`] over the discovery-file read and
+/// [`isolated_environment`].
+/// Test: `console_probe_target_is_none_under_isolation`.
+pub fn console_addr_to_probe() -> Option<String> {
+    console_addr_to_probe_from(
+        trusty_common::read_daemon_addr("trusty-console")
+            .ok()
+            .flatten(),
+        isolated_environment(),
+    )
+}
+
+/// Pure core of [`console_addr_to_probe`].
+/// Test: `console_probe_target_is_none_under_isolation`.
+fn console_addr_to_probe_from(recorded: Option<String>, _isolated: bool) -> Option<String> {
+    Some(console_addr_from(recorded))
+}
+
 /// Build the trusty-console's base URL on its selected port.
 ///
 /// Why: the `tm statusline` version segment is a clickable link to the
@@ -1430,6 +1453,65 @@ mod tests {
         assert_eq!(
             resolve_daemon_url_probing(&client, None).await,
             Ok(DEFAULT_DAEMON_URL.to_string())
+        );
+    }
+
+    /// Why (#9556 critic): an isolated process that inherited a home holding
+    /// the host daemon's lock read the live 127.0.0.1:7880 from it. The temp
+    /// `HOME` stands in for that host home; its lock names the default and a
+    /// live pid (this process).
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn isolated_resolver_ignores_a_host_lock_naming_the_default() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_ne!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        let err = resolve_daemon_url_probing(&reqwest::Client::new(), None)
+            .await
+            .expect_err("a host lock is not this sandbox's daemon");
+        assert!(
+            err.to_string()
+                .contains("no daemon reachable for this sandbox"),
+            "{err}"
+        );
+    }
+
+    /// Why (#9556 critic): a lock under the sandbox's own `HOME` is how
+    /// `scripts/sandbox_daemon.sh` hands a client its daemon; it still wins.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn isolated_resolver_keeps_a_sandbox_home_lock() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let sandbox_daemon = "http://127.0.0.1:17881";
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), sandbox_daemon, "");
+
+        assert_eq!(resolve_daemon_url(None), sandbox_daemon);
+    }
+
+    /// Why (#9556 critic): with isolation on and no recorded console, the
+    /// banner's console probe target is "none", never the host's 7788.
+    /// Test: itself.
+    #[test]
+    fn console_probe_target_is_none_under_isolation() {
+        assert_eq!(console_addr_to_probe_from(None, true), None);
+        assert_eq!(
+            console_addr_to_probe_from(None, false).as_deref(),
+            Some(DEFAULT_CONSOLE_ADDR)
+        );
+        assert_eq!(
+            console_addr_to_probe_from(Some(" 127.0.0.1:9911\n".into()), true).as_deref(),
+            Some("127.0.0.1:9911")
         );
     }
 
