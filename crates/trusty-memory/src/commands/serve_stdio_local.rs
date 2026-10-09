@@ -44,6 +44,13 @@
 use serde_json::{json, Value};
 use trusty_mcp::Request;
 
+/// The methods [`local_answer`] claims, which never reach the daemon.
+///
+/// #9288: the stdio bridge's protocol check skips these, so the handshake
+/// still answers while the daemon is down or from another release.
+/// Test: `every_local_method_is_answered_here`.
+pub(crate) const LOCAL_METHODS: &[&str] = &["initialize", "tools/list"];
+
 /// Answer `initialize` or `tools/list` here; decline everything else.
 ///
 /// Why: see the module docs — the handshake must not depend on a daemon the
@@ -122,6 +129,19 @@ mod tests {
             "the palace default must actually change the schema, or the \
              assertions above hold for the wrong reason"
         );
+    }
+
+    /// Why (#9288): the bridge's protocol check skips `LOCAL_METHODS`, so the
+    /// list must name exactly what `local_answer` claims.
+    /// Test: this test.
+    #[test]
+    fn every_local_method_is_answered_here() {
+        for method in LOCAL_METHODS {
+            assert!(
+                local_answer(&req(method), None).is_some(),
+                "{method} is listed as local but forwarded"
+            );
+        }
     }
 
     /// Why (#1078): a tool call needs the store, and this process must never

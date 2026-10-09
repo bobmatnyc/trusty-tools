@@ -294,6 +294,8 @@ server = [
     "trusty-common/codex-config",
     "trusty-common/uds",
     "trusty-common/machine-tier",
+    # #9288: the protocol handshake's shared client half and answer shape.
+    "trusty-common/memory-rpc",
 ]
 # Alias of `server`, kept for all of 1.x (ADR-0066 D1.4).
 daemon = ["server"]

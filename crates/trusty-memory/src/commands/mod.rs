@@ -51,6 +51,8 @@ pub mod send_message;
 pub mod serve_stdio_bridge;
 // #8351: the two MCP methods the bridge answers without the daemon.
 pub mod serve_stdio_local;
+// #9288: the protocol check in front of every forwarded call.
+pub(crate) mod serve_stdio_protocol;
 pub mod service;
 pub mod setup;
 pub mod single_instance;

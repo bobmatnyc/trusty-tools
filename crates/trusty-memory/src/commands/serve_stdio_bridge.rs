@@ -242,14 +242,30 @@ pub async fn run_stdio_bridge(palace: Option<String>) -> Result<()> {
         .map(|p| p.to_string_lossy().into_owned());
     let caller_workstream = crate::attribution::resolve_own_workstream_name(caller_cwd.as_deref());
 
-    build_bridge(socket, palace, caller_workstream, caller_cwd)
+    let bridge = build_bridge(socket, palace, caller_workstream, caller_cwd)
         // #8351: re-resolved per request, so a bridge that resolved a stale or
         // wrong path at startup heals on the next call instead of staying
         // broken for the life of the process. This is the same resolver the
         // daemon binds from, so the two cannot disagree about the path.
-        .with_socket_resolver(crate::transport::uds::socket_path)
-        .run_stdio()
-        .await
+        .with_socket_resolver(crate::transport::uds::socket_path);
+    let bridge = std::sync::Arc::new(bridge);
+
+    trusty_mcp::run_stdio_loop(move |req| {
+        let bridge = std::sync::Arc::clone(&bridge);
+        async move {
+            // #9288: a daemon of another release is refused by name before the
+            // forward. A path that will not resolve is left to `answer`, which
+            // reports that failure itself.
+            if let Ok(socket) = crate::transport::uds::socket_path() {
+                let gate = crate::commands::serve_stdio_protocol::protocol_refusal;
+                if let Some(refusal) = gate(&req, &socket).await {
+                    return refusal;
+                }
+            }
+            bridge.answer(req).await
+        }
+    })
+    .await
 }
 
 /// Inject `default_palace` into a JSON-RPC request's arguments when the
