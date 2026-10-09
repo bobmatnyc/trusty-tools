@@ -501,6 +501,73 @@ impl Drop for RestoreMode {
     }
 }
 
+// ── git's verdict versus a `.git` above the directory (#9495) ────────────────
+
+/// git's classic upward-discovery failure wording.
+const CLASSIC_NO_REPO: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
+
+/// The file the fake git writes into its `-C` directory when asked to `init`.
+const INIT_MARKER: &str = "fake-git-init-ran";
+
+/// Write a `git` stand-in that fails `rev-parse` with `stderr` and records an
+/// `init` as [`INIT_MARKER`] in the target directory.
+///
+/// Why: real git's no-repository wording depends on the host's mounts, so a
+/// test that pins one wording needs a fake, and a fake `init` keeps a real
+/// `git init` out of the fixture. #9034: exec'ing a file this process just
+/// wrote can race a sibling test's fork (ETXTBSY), so the shim is probed until
+/// it runs before the code under test sees it.
+#[cfg(unix)]
+fn fake_git(dir: &Path, stderr: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    // ETXTBSY is 26 on both Linux and macOS.
+    const ETXTBSY: i32 = 26;
+    let shim = dir.join("fake-git");
+    let script = format!(
+        "#!/bin/sh\ncase \"$3\" in\n  rev-parse) printf '%s\\n' '{stderr}' >&2; exit 128 ;;\n  \
+         init) : > \"$2/{INIT_MARKER}\"; exit 0 ;;\nesac\nexit 0\n"
+    );
+    std::fs::write(&shim, script).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..100 {
+        match Command::new(&shim).arg("probe").output() {
+            Ok(_) => return shim.to_string_lossy().into_owned(),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("fake git at {} did not run: {e}", shim.display()),
+        }
+    }
+    panic!("fake git at {} stayed busy (ETXTBSY)", shim.display());
+}
+
+/// Fail-Open Check (#9495): git's classic "no repository" wording under a real
+/// `.git` must not reach `git init`. Discovery stops short of a real repository
+/// for an unreadable `.git`, `GIT_CEILING_DIRECTORIES`, or a mount boundary,
+/// and an init there nests a second repository inside the real checkout.
+#[cfg(unix)]
+#[test]
+fn auto_init_refuses_the_classic_no_repo_wording_under_a_real_git() {
+    let tmp = hermetic_temp_dir();
+    let repo = tmp.path().join("real-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let dir = repo.join("sub");
+    std::fs::create_dir(&dir).unwrap();
+    let git = fake_git(tmp.path(), CLASSIC_NO_REPO);
+
+    let result = ensure_git_repo_with(&dir, Some(tmp.path()), &git);
+
+    assert!(
+        !dir.join(INIT_MARKER).exists(),
+        "git init must not run under a real .git, got {result:?}"
+    );
+    assert!(
+        !matches!(result, Ok(AutoInitOutcome::Initialized)),
+        "a .git above the directory must refuse the init, got {result:?}"
+    );
+}
+
 // ── What `tm launch` does after a refusal ────────────────────────────────────
 
 /// #7749 review: the route `tm launch` takes once this guard refuses, pinned
