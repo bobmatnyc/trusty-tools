@@ -17,7 +17,13 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::manifest::{PortDiscovery, ServiceDecl, ServicesManifest, expand_tilde_owned};
+use super::manifest::{
+    HealthProbe, PortDiscovery, ServiceDecl, ServicesManifest, expand_tilde_owned,
+};
+
+// #9543: trusty-search is probed over its socket, never over TCP.
+mod search_socket;
+pub use search_socket::{RealSearchSocketProber, SearchSocketProber};
 
 #[cfg(test)]
 mod tests;
@@ -316,6 +322,8 @@ pub struct Discoverer {
     port_prober: Box<dyn PortProber>,
     http_prober: Box<dyn HttpProber>,
     version_runner: Box<dyn VersionRunner>,
+    /// #9543: socket health for `health_probe: uds_search` services.
+    socket_prober: Box<dyn SearchSocketProber>,
 }
 
 impl Discoverer {
@@ -334,6 +342,7 @@ impl Discoverer {
             port_prober: Box::new(RealPortProber),
             http_prober: Box::new(RealHttpProber),
             version_runner: Box::new(RealVersionRunner),
+            socket_prober: Box::new(RealSearchSocketProber),
         }
     }
 
@@ -358,7 +367,21 @@ impl Discoverer {
             port_prober,
             http_prober,
             version_runner,
+            // #9543: no test reaches the operator's real trusty-search socket
+            // unless it injects a prober with `with_socket_prober`.
+            socket_prober: Box::new(search_socket::NoSearchDaemon),
         }
+    }
+
+    /// Replace the socket prober (for testing).
+    ///
+    /// Why (#9543): `with_probers` defaults to a prober with no daemon behind
+    /// it; a socket test injects the real prober or a fixed verdict.
+    /// Test: `uds_search_is_up_against_a_socket_only_daemon`.
+    #[cfg(test)]
+    pub fn with_socket_prober(mut self, socket_prober: Box<dyn SearchSocketProber>) -> Self {
+        self.socket_prober = socket_prober;
+        self
     }
 
     /// List status of every declared service.
@@ -401,6 +424,12 @@ impl Discoverer {
     pub fn health(&mut self, name: &str) -> Option<HealthResult> {
         let decl = self.manifest.services.get(name)?.clone();
 
+        // #9543: a socket-probed service re-probes the socket, never a URL.
+        if decl.health_probe == HealthProbe::UdsSearch {
+            let status = self.probe_uds_search(name, &decl);
+            return Some(self.finish_health(name, status));
+        }
+
         // Get a current status (uses cache for port/pid/url, then re-probes health).
         let mut status = self.probe_or_cached(name, &decl);
 
@@ -429,8 +458,13 @@ impl Discoverer {
             }
         };
 
-        status.health = fresh_health.clone();
+        status.health = fresh_health;
+        Some(self.finish_health(name, status))
+    }
 
+    /// Cache a freshly health-probed `status` and build its [`HealthResult`].
+    fn finish_health(&mut self, name: &str, status: ServiceStatus) -> HealthResult {
+        let fresh_health = status.health.clone();
         // Write back updated status to cache.
         self.cache
             .insert(name.to_string(), (Instant::now(), status));
@@ -441,11 +475,11 @@ impl Discoverer {
             HealthState::Fail { detail } => format!("unhealthy: {detail}"),
         };
 
-        Some(HealthResult {
+        HealthResult {
             name: name.to_string(),
             state: fresh_health,
             message,
-        })
+        }
     }
 
     // ─── Internal helpers ────────────────────────────────────────────────────
@@ -471,6 +505,10 @@ impl Discoverer {
     /// What: runs process, port, health, version, and uptime probes in sequence.
     /// Test: covered by the mock-based discoverer unit tests.
     fn probe(&mut self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
+        // #9543: a socket-probed service has no port, URL or HTTP probe.
+        if decl.health_probe == HealthProbe::UdsSearch {
+            return self.probe_uds_search(name, decl);
+        }
         let port = self.probe_port(decl);
         let pid = self.probe_pid(decl, port);
         let url = port.map(|p| format!("http://localhost:{p}"));
@@ -507,10 +545,7 @@ impl Discoverer {
 
         let uptime_secs = pid.and_then(|p| self.probe_uptime(p));
 
-        let log_path = decl.log_path.as_ref().and_then(|p| {
-            let expanded = expand_tilde_owned(p);
-            expanded.exists().then_some(expanded)
-        });
+        let log_path = existing_log_path(decl);
 
         ServiceStatus {
             name: name.to_string(),
@@ -590,7 +625,7 @@ impl Discoverer {
             Some(t) => t,
             None => return HealthState::Unknown,
         };
-        // Extract the port from the base URL (e.g. "http://localhost:7878").
+        // Extract the port from the base URL (e.g. "http://localhost:7880").
         let port_str = url.rsplit(':').next().unwrap_or("0");
         let health_url = template.replace("{port}", port_str);
         self.http_prober
@@ -629,4 +664,14 @@ impl Discoverer {
             .as_secs();
         Some(now.saturating_sub(start))
     }
+}
+
+/// The tilde-expanded `log_path` of `decl`, when that file exists.
+///
+/// Shared by the HTTP and the socket probe (#9543).
+fn existing_log_path(decl: &ServiceDecl) -> Option<PathBuf> {
+    decl.log_path.as_ref().and_then(|p| {
+        let expanded = expand_tilde_owned(p);
+        expanded.exists().then_some(expanded)
+    })
 }
