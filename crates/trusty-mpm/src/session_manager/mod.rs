@@ -276,6 +276,9 @@ mod dedup_tests;
 mod resume_breaker_tests;
 
 #[cfg(test)]
+mod runtime_exit_guard_tests;
+
+#[cfg(test)]
 mod runtime_exit_reconcile_tests;
 
 #[cfg(test)]
