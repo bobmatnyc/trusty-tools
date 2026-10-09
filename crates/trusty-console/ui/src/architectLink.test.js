@@ -6,8 +6,16 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { dashboardHref, fetchArchitectDashboard } from './architectLink.js';
+import {
+  ARCHITECT_WINDOW_NAME,
+  CONSOLE_WINDOW_NAME,
+  dashboardHref,
+  fetchArchitectDashboard,
+} from './architectLink.js';
 
 /** A `fetch` stand-in that answers one request with the given body. */
 function respondWith(body, { ok = true } = {}) {
@@ -72,4 +80,15 @@ test('fetchArchitectDashboard resolves to null on every failure', async () => {
     await fetchArchitectDashboard(respondWith({ url: 'http://127.0.0.1:7890/' }, { ok: false }), '127.0.0.1'),
     null,
   );
+});
+
+test('architect link targets the named window and never sets noopener', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'App.svelte'), 'utf8');
+  const anchor = src.match(/<a\b[^>]*href=\{architectHref\}[^>]*>/s)?.[0];
+  assert.ok(anchor, 'architect anchor present in App.svelte');
+  assert.equal(ARCHITECT_WINDOW_NAME, 'architect-dashboard');
+  assert.match(anchor, /target=\{ARCHITECT_WINDOW_NAME\}/);
+  assert.doesNotMatch(anchor, /_blank|rel=|noopener|noreferrer/);
+  assert.equal(CONSOLE_WINDOW_NAME, 'trusty-console');
+  assert.match(src, /window\.name = CONSOLE_WINDOW_NAME;/);
 });
