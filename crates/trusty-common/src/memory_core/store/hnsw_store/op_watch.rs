@@ -11,10 +11,13 @@
 //! RAII [`OpGuard`] is created on the blocking thread inside the store call and
 //! removes its entry when the call returns or unwinds. [`HnswStore::oldest_op`]
 //! reads the longest-running entry. Ids are issued and stamped under the same
-//! lock, so the smallest live id is the oldest op.
+//! lock, so the smallest live id is the oldest op. The registry is an `Arc` so
+//! a `PalaceRegistry` can keep a `Weak` to it past the palace's eviction: the
+//! blocked thread holds the store, so the `Weak` upgrades until the call returns.
 //! Test: `op_watch_tests.rs`.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use super::HnswStore;
@@ -45,7 +48,7 @@ struct Live {
 
 /// The per-store registry; see the module docs.
 #[derive(Debug, Default)]
-pub(super) struct OpWatch {
+pub(crate) struct OpWatch {
     live: parking_lot::Mutex<Live>,
     #[cfg(any(test, feature = "embedder-test-support"))]
     park: parking_lot::Mutex<Option<std::sync::Arc<OpPark>>>,
@@ -97,7 +100,7 @@ impl OpWatch {
     }
 
     /// The longest-running registered op, if any.
-    fn oldest(&self) -> Option<HnswOp> {
+    pub(crate) fn oldest(&self) -> Option<HnswOp> {
         self.live.lock().ops.values().next().copied()
     }
 }
@@ -114,6 +117,12 @@ impl HnswStore {
     /// `a_dropped_future_leaves_its_blocking_op_registered`.
     pub fn oldest_op(&self) -> Option<HnswOp> {
         self.ops.oldest()
+    }
+
+    /// A `Weak` to this store's in-flight registry (#9487); it upgrades while
+    /// the store lives, including after its palace handle is evicted.
+    pub(crate) fn op_watch(&self) -> Weak<OpWatch> {
+        Arc::downgrade(&self.ops)
     }
 
     /// Install (or clear, with `None`) a test hook that holds every later

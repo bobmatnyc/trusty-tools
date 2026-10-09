@@ -624,6 +624,13 @@ impl UsearchStore {
         self.inner.oldest_op()
     }
 
+    /// #9487: a `Weak` to the graph's in-flight registry; see [`HnswStore::op_watch`].
+    pub(crate) fn hnsw_op_watch(
+        &self,
+    ) -> std::sync::Weak<crate::memory_core::store::hnsw_store::OpWatch> {
+        self.inner.op_watch()
+    }
+
     /// #9487 test hook; see [`HnswStore::set_op_park`].
     #[cfg(any(test, feature = "embedder-test-support"))]
     pub fn set_hnsw_op_park(

@@ -17,6 +17,7 @@ use crate::memory_core::maintenance_lease::MaintenanceLease;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
+use crate::memory_core::store::hnsw_store::{HnswOp, OpWatch};
 use crate::memory_core::store::palace_store::{PalaceStore, PalaceStoreError};
 use crate::memory_core::timeouts::OpBudget;
 use anyhow::{Context, Result};
@@ -25,7 +26,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 /// Environment variable overriding the LRU open-handle cap
@@ -191,7 +192,14 @@ pub struct PalaceRegistry {
     /// #9173: the root the palaces live under, when the owner names it. The
     /// dream scheduler walks it to reach palaces that are not open.
     data_root: Option<PathBuf>,
+    /// #9487: the in-flight HNSW registry of every vector store this registry
+    /// registered, kept past eviction; see [`Self::oldest_hnsw_op`]. A dead
+    /// `Weak` (its store dropped) is pruned on every insert and read.
+    hnsw_ops: Arc<Mutex<HnswWatches>>,
 }
+
+/// #9487: each registered vector store's in-flight HNSW registry, by palace.
+type HnswWatches = Vec<(PalaceId, Weak<OpWatch>)>;
 
 impl Default for PalaceRegistry {
     fn default() -> Self {
@@ -232,6 +240,7 @@ impl PalaceRegistry {
             unopenable: Arc::new(DashMap::new()),
             maintenance: None,
             data_root: None,
+            hnsw_ops: Arc::default(),
         }
     }
 
@@ -368,6 +377,7 @@ impl PalaceRegistry {
     /// Test: `register_and_get_roundtrip` re-fetches by id and compares.
     pub fn register(&self, handle: PalaceHandle) {
         let id = handle.id.clone();
+        self.watch_hnsw_ops(&handle);
         let arc = Arc::new(handle);
         let _evicted = {
             let mut cache = self.handles.lock();
@@ -389,10 +399,46 @@ impl PalaceRegistry {
         // passes through, so clearing here keeps an "unopenable" record from
         // outliving the condition that produced it.
         self.unopenable.remove(&id);
+        self.watch_hnsw_ops(&handle);
         let _evicted = {
             let mut cache = self.handles.lock();
             cache.put(id, handle)
         };
+    }
+
+    /// #9487: remember `handle`'s HNSW in-flight registry past its eviction.
+    fn watch_hnsw_ops(&self, handle: &PalaceHandle) {
+        let watch = handle.vector_store.hnsw_op_watch();
+        let mut watches = self.hnsw_ops.lock();
+        watches.retain(|(_, w)| w.strong_count() > 0);
+        if !watches.iter().any(|(_, w)| w.ptr_eq(&watch)) {
+            watches.push((handle.id.clone(), watch));
+        }
+    }
+
+    /// The longest-running HNSW `upsert` or `search` on any vector store this
+    /// registry registered, with its palace id (#9487).
+    ///
+    /// Why: the blocked `spawn_blocking` thread holds only the vector store,
+    /// not the palace handle. Once a timeout drops the awaiting future, idle
+    /// eviction, `release_if_unreferenced`, `remove` or the LRU cap can drop
+    /// the handle while the call stays blocked, so a read of resident handles
+    /// reports nothing.
+    /// What: reads the `Weak` registries kept at registration, which upgrade
+    /// while their store lives, resident or not. The list lock is released
+    /// before any store registry is read, and neither lock is held across
+    /// store work, so this cannot block behind a wedged call.
+    /// Test: `registry_tests::a_blocked_hnsw_op_stays_reported_on_every_eviction_path`.
+    pub fn oldest_hnsw_op(&self) -> Option<(PalaceId, HnswOp)> {
+        let watches = {
+            let mut watches = self.hnsw_ops.lock();
+            watches.retain(|(_, w)| w.strong_count() > 0);
+            watches.clone()
+        };
+        watches
+            .into_iter()
+            .filter_map(|(id, w)| Some((id, w.upgrade()?.oldest()?)))
+            .min_by_key(|(_, op)| op.since)
     }
 
     /// Cheap clone of the `Arc` — promotes the entry to MRU position.

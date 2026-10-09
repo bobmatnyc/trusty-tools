@@ -367,32 +367,27 @@ impl Drop for ProbeToken {
     }
 }
 
-/// The longest-running HNSW graph call across every open palace (#9487).
+/// The longest-running HNSW graph call on any palace the registry opened,
+/// resident or evicted (#9487).
 ///
 /// Why: in the #9487 wedge a blocking thread stayed deadlocked inside
 /// `hnsw_rs` after the pipeline timeout dropped its future. That released
 /// `write_mutex` and the worker-liveness guard, so neither the handle-lock
 /// sweep nor the pool gauge saw anything. The vector store's own registry is
-/// the one record that outlives the dropped future.
-/// What: `peek`s each open palace (LRU order untouched) and reads its store's
-/// oldest in-flight op, live at `now` rather than through a stamp, so the
-/// report clears the moment the call returns. Every read here is infallible.
+/// the one record that outlives the dropped future, and it also outlives the
+/// palace handle's eviction.
+/// What: reads [`PalaceRegistry::oldest_hnsw_op`], live at `now` rather than
+/// through a stamp, so the report clears the moment the call returns. Every
+/// read here is infallible.
 /// Test: `health_reports_a_parked_hnsw_op_as_a_wedged_hnsw_lock`,
-/// `health_stays_wedged_after_the_awaiting_future_is_dropped`.
+/// `health_stays_wedged_after_the_awaiting_future_is_dropped`,
+/// `health_stays_wedged_after_the_blocked_palace_is_evicted`.
 pub fn oldest_hnsw_op_at(registry: &PalaceRegistry, now: Instant) -> Option<StalledLock> {
-    registry
-        .list()
-        .into_iter()
-        .filter_map(|id| {
-            let since = registry.peek(&id)?.vector_store.oldest_hnsw_op()?.since;
-            Some((id, since))
-        })
-        .min_by_key(|(_, since)| *since)
-        .map(|(id, since)| StalledLock {
-            palace: id.as_str().to_string(),
-            lock: PalaceLock::Hnsw,
-            age: now.saturating_duration_since(since),
-        })
+    registry.oldest_hnsw_op().map(|(id, op)| StalledLock {
+        palace: id.as_str().to_string(),
+        lock: PalaceLock::Hnsw,
+        age: now.saturating_duration_since(op.since),
+    })
 }
 
 /// The older of two stall reports (#9487), so health names the longest wait.

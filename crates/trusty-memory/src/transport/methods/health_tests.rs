@@ -971,3 +971,51 @@ async fn health_stays_wedged_after_the_awaiting_future_is_dropped() {
     assert_eq!(v["worker"]["stalled_lock"]["lock"], "hnsw", "got {v:?}");
     assert_eq!(v["status"], "wedged", "got {v:?}");
 }
+
+/// Releases an [`OpPark`] on drop, so a failed assertion cannot leave a
+/// blocking thread held and hang the runtime's shutdown (#9487).
+struct ReleaseOnDrop(std::sync::Arc<OpPark>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Why (#9487): the blocking thread holds only the vector store, not the
+/// palace handle. Once the timeout drops the awaiting future, the idle sweep
+/// can evict the handle, and a health read of resident handles went green
+/// while the thread stayed blocked.
+/// What: parks a vector `search`, aborts the task awaiting it, evicts the
+/// palace with the idle sweep, and asserts health still names the `hnsw` lock
+/// of that palace as the wedge.
+/// Test: this test.
+#[tokio::test]
+async fn health_stays_wedged_after_the_blocked_palace_is_evicted() {
+    let mut state = test_state();
+    state.wedge_threshold = std::time::Duration::ZERO;
+    let (park, task, entered) = park_an_hnsw_search(&state, "hnsw-evicted").await;
+    let _release = ReleaseOnDrop(park);
+    task.abort();
+    let cancelled = task.await.expect_err("aborted").is_cancelled();
+    let id = PalaceId::new("hnsw-evicted");
+    if let Some(handle) = state.registry.peek(&id) {
+        handle
+            .last_accessed
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    let evicted = state.registry.evict_idle(std::time::Duration::from_secs(1));
+
+    let v = health_body(state.clone()).await;
+
+    assert!(entered, "the search never parked");
+    assert!(cancelled, "the awaiting future was dropped");
+    assert_eq!(evicted, 1, "the idle sweep evicted the palace");
+    assert!(state.registry.peek(&id).is_none(), "the palace is evicted");
+    assert_eq!(v["status"], "wedged", "got {v:?}");
+    assert_eq!(v["worker"]["stalled_lock"]["lock"], "hnsw", "got {v:?}");
+    assert_eq!(
+        v["worker"]["stalled_lock"]["palace"], "hnsw-evicted",
+        "got {v:?}"
+    );
+}

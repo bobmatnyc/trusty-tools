@@ -42,6 +42,7 @@ use key_cache::KeyCache;
 mod op_watch;
 #[cfg(any(test, feature = "embedder-test-support"))]
 pub use op_watch::OpPark;
+pub(crate) use op_watch::OpWatch;
 pub use op_watch::{HnswOp, HnswOpKind};
 mod quiet_insert;
 mod replay;
@@ -238,7 +239,7 @@ pub struct HnswStore {
     /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
     keys: KeyCache,
     /// #9487: in-flight `upsert`/`search` calls, readable while one is wedged.
-    ops: op_watch::OpWatch,
+    ops: Arc<op_watch::OpWatch>,
     /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
     ///
     /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
@@ -399,7 +400,7 @@ impl HnswStore {
             palace: Arc::from("unnamed palace"),
             insert_gate: parking_lot::Mutex::new(()),
             stranded: RwLock::new(stranded),
-            ops: op_watch::OpWatch::default(),
+            ops: Arc::default(),
             #[cfg(test)]
             compact_race_barrier: RwLock::new(None),
             #[cfg(test)]
