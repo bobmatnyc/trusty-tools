@@ -10,8 +10,9 @@
 //! copied, the copy is fsynced and re-read, and the source is hashed again; any
 //! difference aborts. A `MANIFEST` naming each file's length and SHA-256 is
 //! written last, inside a `.tmp` directory that is then renamed into place, so
-//! a backup without a manifest is incomplete and never trusted. The two newest
-//! complete backups per palace are kept (ADR-0067 D7). This release calls it
+//! a backup without a manifest is incomplete and never trusted. Two complete
+//! backups per palace are kept (ADR-0067 D7): the one just written and the
+//! newest other. This release calls it
 //! from no migration; the 0 → 1 migration does (#9274 PR3).
 //! Test: format_backup_tests.rs, starting with
 //! `a_verified_backup_is_byte_identical_and_reused`.
@@ -167,7 +168,9 @@ pub(crate) fn ensure_with(
     sync_dir(&tmp_dir)?;
     std::fs::rename(&tmp_dir, &final_dir).map_err(|e| failed(&final_dir, e))?;
     sync_dir(&root)?;
-    prune(&root)?;
+    // #9274: the stamp order can put this backup last (a clock moved back);
+    // prune must never delete the backup this call returns.
+    prune(&root, &final_dir)?;
     Ok(final_dir)
 }
 
@@ -286,19 +289,26 @@ fn write_manifest(dir: &Path, manifest: &BackupManifest) -> Result<()> {
     std::fs::rename(&tmp, &path).map_err(|e| failed(&path, e))
 }
 
-/// Keep the [`BACKUP_KEEP`] newest complete backups; never touch others.
+/// Keep `keep` plus the newest complete backups, [`BACKUP_KEEP`] in all;
+/// never touch an incomplete one.
 ///
-/// Test: `retention_keeps_the_two_newest_complete_backups`.
-fn prune(root: &Path) -> Result<()> {
+/// Why: the stamp in a directory name is wall-clock time. After the clock
+/// moves back, older backups can carry later stamps than the one just
+/// written, and a plain newest-first cut would delete it (#9274).
+/// What: `keep` always survives and counts toward [`BACKUP_KEEP`]; the other
+/// complete backups are ranked by stamp and the oldest are removed.
+/// Test: `retention_keeps_the_two_newest_complete_backups`,
+/// `prune_never_deletes_the_backup_it_just_wrote`.
+fn prune(root: &Path, keep: &Path) -> Result<()> {
     let mut complete: Vec<(String, PathBuf)> = Vec::new();
     for dir in list_dirs(root)? {
         let name = file_name(&dir);
-        if !name.ends_with(TMP_SUFFIX) && has_manifest(&dir)? {
+        if dir != keep && !name.ends_with(TMP_SUFFIX) && has_manifest(&dir)? {
             complete.push((stamp_of(&name).to_string(), dir));
         }
     }
     complete.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, dir) in complete.into_iter().skip(BACKUP_KEEP) {
+    for (_, dir) in complete.into_iter().skip(BACKUP_KEEP.saturating_sub(1)) {
         std::fs::remove_dir_all(&dir).map_err(|e| failed(&dir, e))?;
     }
     Ok(())

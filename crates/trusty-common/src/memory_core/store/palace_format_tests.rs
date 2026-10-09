@@ -450,3 +450,51 @@ fn save_palace_keeps_the_format_mirror_and_refuses_a_newer_one() {
         std::fs::read(palace.data_dir.join(PALACE_JSON)).expect("reread")
     );
 }
+
+/// #9274: the chat-session store is a D2 primary file under the palace
+/// directory, opened by the chat_session_* tools without a palace handle. A
+/// newer palace refuses it before redb opens or writes, and the refusal is
+/// still a `PalaceStoreError` through `is_format_refusal`.
+#[test]
+fn chat_session_store_refuses_a_newer_palace_with_bytes_unchanged() {
+    use crate::memory_core::store::chat_sessions::ChatSessionStore;
+
+    let root = tempdir().expect("tempdir");
+    let palace = saved_palace(root.path(), "chat-newer");
+    populate(&palace);
+    let chat = palace.data_dir.join("chat_sessions.db");
+    // An unstamped (format 0) palace opens its chat store as before.
+    let store = ChatSessionStore::open(&chat).expect("format 0 chat store opens");
+    store
+        .create_session(Some("kept".into()))
+        .expect("seed a session");
+    drop(store);
+
+    stamp_marker(&palace.data_dir, PALACE_FORMAT_SUPPORTED + 1);
+    let before = hash_tree(&palace.data_dir);
+    assert!(
+        before.contains_key(Path::new("chat_sessions.redb")),
+        "anti-vacuous: the chat store file exists before the refused open"
+    );
+
+    let err = ChatSessionStore::open(&chat)
+        .err()
+        .expect("a newer palace must refuse the chat store");
+    assert!(
+        matches!(
+            store_error(&err),
+            PalaceStoreError::FormatTooNew {
+                found: 1,
+                supported: 0,
+                ..
+            }
+        ),
+        "{err:#}"
+    );
+    assert!(is_format_refusal(&err), "{err:#}");
+    assert_eq!(
+        before,
+        hash_tree(&palace.data_dir),
+        "the refused chat open changed a byte or a file under the palace"
+    );
+}

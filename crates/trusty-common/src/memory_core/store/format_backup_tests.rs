@@ -227,21 +227,8 @@ fn a_failed_manifest_write_leaves_no_complete_backup() {
 #[test]
 fn retention_keeps_the_two_newest_complete_backups() {
     let (root, dir) = palace();
-    let broot = backup_root(root.path(), ID);
     for stamp in ["20200101T000000.000Z", "20210101T000000.000Z"] {
-        let old = broot.join(format!("5-to-6-{stamp}"));
-        std::fs::create_dir_all(&old).expect("old backup");
-        let manifest = BackupManifest {
-            palace: ID.into(),
-            from: 5,
-            to: 6,
-            files: vec![],
-        };
-        std::fs::write(
-            old.join(MANIFEST),
-            serde_json::to_vec(&manifest).expect("json"),
-        )
-        .expect("manifest");
+        complete_backup(root.path(), stamp);
     }
     let newest = ensure_with(root.path(), ID, &dir, 0, 1, seams()).expect("backup");
     assert_eq!(
@@ -251,6 +238,48 @@ fn retention_keeps_the_two_newest_complete_backups() {
             "5-to-6-20210101T000000.000Z".to_string()
         ],
         "the 2020 backup is the oldest of three and is pruned"
+    );
+}
+
+/// A complete, empty `5-to-6-<stamp>` backup for another move.
+fn complete_backup(data_root: &Path, stamp: &str) {
+    let dir = backup_root(data_root, ID).join(format!("5-to-6-{stamp}"));
+    std::fs::create_dir_all(&dir).expect("old backup");
+    let manifest = BackupManifest {
+        palace: ID.into(),
+        from: 5,
+        to: 6,
+        files: vec![],
+    };
+    std::fs::write(
+        dir.join(MANIFEST),
+        serde_json::to_vec(&manifest).expect("json"),
+    )
+    .expect("manifest");
+}
+
+/// #9274: after the clock moves back, two existing backups carry later stamps
+/// than the one just written; prune keeps it and the returned path verifies.
+#[test]
+fn prune_never_deletes_the_backup_it_just_wrote() {
+    let (root, dir) = palace();
+    for stamp in ["29990101T000000.000Z", "29990102T000000.000Z"] {
+        complete_backup(root.path(), stamp);
+    }
+    let written = ensure_with(root.path(), ID, &dir, 0, 1, seams()).expect("backup");
+    assert!(
+        written.is_dir(),
+        "ensure_with returned {} but it was pruned",
+        written.display()
+    );
+    verify_backup(&written).expect("the returned backup verifies");
+    assert_eq!(
+        backups(root.path()),
+        vec![
+            file_name(&written),
+            "5-to-6-29990102T000000.000Z".to_string()
+        ],
+        "the backup just written and the newest other are kept"
     );
 }
 
