@@ -1,2 +1,3 @@
 Fixed
 - The orphan-worktree sweep and session decommission no longer run `git worktree remove --force` on a worktree a live process stands in. Immediately before git runs, each asks the OS (`lsof`) for a process whose current directory is the tree or under it; a holder keeps the tree and is logged, and decommission reports it as the kept reason. A probe that cannot answer (no `lsof`, a timeout, a listing that cannot see this process) also keeps the tree (#9444).
+- Session decommission of an SM-owned workspace (a clone deleted with `remove_dir_all`) asks the same question immediately before the delete. A live process standing in the workspace or under it, or a probe that cannot answer, keeps it, and the kept reason names the holder (#9444).
