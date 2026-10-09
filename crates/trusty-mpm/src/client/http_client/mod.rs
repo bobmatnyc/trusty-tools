@@ -106,6 +106,8 @@ pub struct DaemonClient {
     /// #6288: the daemon's unix socket; `Some` means every request goes there
     /// and never to `base`/`http`.
     pub(in crate::client::http_client) socket: Option<std::path::PathBuf>,
+    /// #9556: `true` when the operator named `base`; re-discovery keeps it.
+    pub(in crate::client::http_client) base_url_pinned: bool,
 }
 
 impl DaemonClient {
@@ -142,7 +144,27 @@ impl DaemonClient {
             http: client,
             home: None,
             socket: None,
+            base_url_pinned: false,
         }
+    }
+
+    /// Mark [`Self::base_url`] as operator-chosen, so TUI re-discovery keeps it.
+    ///
+    /// Why (#9556): a TUI started with `--url` / `TRUSTY_MPM_URL` re-resolved
+    /// the daemon after one failed poll and moved to whatever daemon the lock
+    /// file or the default named — under a sandbox, the live fleet.
+    /// What: records `pinned`; [`Self::base_url_pinned`] reads it back. It
+    /// does not stop an explicit [`Self::set_base_url`] call.
+    /// Test: `rediscover_daemon_keeps_explicit_url`, `rediscover_keeps_explicit_url`.
+    pub fn with_pinned_base_url(mut self, pinned: bool) -> Self {
+        self.base_url_pinned = pinned;
+        self
+    }
+
+    /// Whether the base URL came from the operator (#9556); see
+    /// [`Self::with_pinned_base_url`].
+    pub fn base_url_pinned(&self) -> bool {
+        self.base_url_pinned
     }
 
     /// Pin the user home `launch_session` prepares under (#8545), so a test

@@ -382,8 +382,38 @@ pub async fn resolve_daemon_url_via_gateway(
     client: &reqwest::Client,
     explicit: Option<&str>,
 ) -> String {
-    let console_addr = console_addr();
+    let recorded = trusty_common::read_daemon_addr("trusty-console")
+        .ok()
+        .flatten();
+    resolve_daemon_url_via_gateway_from(client, explicit, recorded, DEFAULT_CONSOLE_ADDR).await
+}
+
+/// [`resolve_daemon_url_via_gateway`] with the console discovery read and the
+/// default console address injected.
+///
+/// Why (#9556): the default console address is the live trusty-console, so a
+/// test of the fallback rule must substitute its own listener for it.
+/// What: `recorded` is the console's discovery-file address; a blank or
+/// absent one falls back to `default_console`. Then the explicit → gateway →
+/// direct precedence of [`resolve_daemon_url_via_gateway_inner`] applies.
+/// Test: `gateway_probe_skipped_under_data_dir_override`,
+/// `gateway_probe_uses_recorded_addr_under_data_dir_override`.
+async fn resolve_daemon_url_via_gateway_from(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+    recorded: Option<String>,
+    default_console: &str,
+) -> String {
+    let console_addr = recorded_console_addr(recorded).unwrap_or_else(|| default_console.into());
     resolve_daemon_url_via_gateway_inner(client, explicit, &console_addr).await
+}
+
+/// The console address a discovery-file read recorded, trimmed; `None` when
+/// absent or blank.
+fn recorded_console_addr(recorded: Option<String>) -> Option<String> {
+    recorded
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
 }
 
 /// Resolve the `host:port` the trusty-console is selected to serve on.
@@ -417,10 +447,7 @@ pub fn console_addr() -> String {
 /// Test: `console_addr_from_prefers_the_recorded_addr`,
 /// `console_addr_from_falls_back_when_absent_or_blank`.
 fn console_addr_from(recorded: Option<String>) -> String {
-    recorded
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
+    recorded_console_addr(recorded).unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
 }
 
 /// Build the trusty-console's base URL on its selected port.
@@ -1074,5 +1101,138 @@ mod tests {
         // With no discovery file this is the default; with one it is whatever
         // the console recorded. Either way the port must survive into the URL.
         assert_eq!(url, format!("http://{}", console_addr()));
+    }
+
+    // ── #9556: the gateway probe under a sandbox / data-dir override ───────
+
+    use crate::secret_source::test_env::EnvVarGuard;
+    use trusty_common::DATA_DIR_OVERRIDE_ENV;
+    use trusty_common::credentials::SANDBOX_ENV_VAR;
+
+    /// Answer one connection on `listener` with `200 OK`, so a gateway probe
+    /// against it succeeds.
+    fn serve_one_ok(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+    }
+
+    /// Whether anything connected to `listener` during the call under test.
+    /// The kernel queues a finished handshake even when nobody called
+    /// `accept`, so a probe that ran and gave up is still counted.
+    async fn was_contacted(listener: &tokio::net::TcpListener) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+            .await
+            .is_ok()
+    }
+
+    /// Why (#9556): a sandbox with no recorded console must not fall back to
+    /// the default console, which is the live one. The listener stands in for
+    /// that default, so the test never dials the real 127.0.0.1:7788.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_skipped_under_data_dir_override() {
+        let data = crate::test_support::hermetic_temp_dir();
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let recorded = trusty_common::read_daemon_addr("trusty-console")
+            .ok()
+            .flatten();
+        assert_eq!(recorded, None, "the override dir records no console");
+
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        let result =
+            resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, recorded, &addr)
+                .await;
+
+        assert_ne!(result, format!("http://{addr}{GATEWAY_PATH}"));
+        assert!(
+            !was_contacted(&default_console).await,
+            "under {DATA_DIR_OVERRIDE_ENV} the default console must get zero connections"
+        );
+    }
+
+    /// Why (#9556): `TRUSTY_SANDBOX=1` alone isolates the client the same way.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_skipped_under_sandbox_flag() {
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, None, &addr).await;
+
+        assert!(
+            !was_contacted(&default_console).await,
+            "under {SANDBOX_ENV_VAR}=1 the default console must get zero connections"
+        );
+    }
+
+    /// Why (#9556): a console the sandbox itself recorded is still a gateway
+    /// the client may use.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_uses_recorded_addr_under_data_dir_override() {
+        let data = crate::test_support::hermetic_temp_dir();
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let recorded = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = recorded.local_addr().expect("local_addr").to_string();
+        serve_one_ok(recorded);
+
+        let result = resolve_daemon_url_via_gateway_from(
+            &reqwest::Client::new(),
+            None,
+            Some(addr.clone()),
+            // Never dialled: the recorded address wins. Port 1 refuses anyway.
+            "127.0.0.1:1",
+        )
+        .await;
+        assert_eq!(result, format!("http://{addr}{GATEWAY_PATH}"));
+    }
+
+    /// Why (#9556): outside a sandbox the default console is still probed, so
+    /// the fix must not skip the gateway everywhere.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_uses_default_console_outside_isolation() {
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        serve_one_ok(default_console);
+
+        let result =
+            resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, None, &addr).await;
+        assert_eq!(result, format!("http://{addr}{GATEWAY_PATH}"));
     }
 }

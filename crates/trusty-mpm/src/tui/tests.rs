@@ -19,6 +19,29 @@ fn rediscover_is_noop_when_resolved_url_unchanged() {
     }
 }
 
+/// Why (#9556): an operator-chosen URL is never swapped for the lock-file or
+/// default daemon, which under a sandbox is the live fleet. Re-discovery
+/// itself dials nothing, so this test makes no connection.
+/// Test: itself.
+#[test]
+fn rediscover_daemon_keeps_explicit_url() {
+    let dead = crate::test_support::dead_loopback_url();
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    assert!(!rediscover_daemon(&mut client, false));
+    assert_eq!(client.base_url(), dead);
+}
+
+/// Why (#9556): without an explicit URL the TUI still follows a restarted
+/// daemon. Discovery never yields port 1, so the client must move.
+/// Test: itself.
+#[test]
+fn rediscover_daemon_follows_discovery_when_not_pinned() {
+    let dead = crate::test_support::dead_loopback_url();
+    let mut client = DaemonClient::new(dead.clone());
+    assert!(rediscover_daemon(&mut client, false));
+    assert_ne!(client.base_url(), dead);
+}
+
 #[test]
 fn coordinator_session_maps_status() {
     // The status word from the coordinator endpoint maps back to the enum.

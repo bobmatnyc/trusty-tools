@@ -860,6 +860,26 @@ async fn poll_marks_unreachable_clears_sessions() {
     );
 }
 
+/// Why (#9556): the `--single-pane` coordinator poll must report a dead
+/// explicit endpoint as unreachable instead of re-pointing at the lock-file or
+/// default daemon. With the URL pinned the poll dials only port 1.
+/// Test: itself.
+#[tokio::test]
+async fn coord_poll_keeps_explicit_url() {
+    let dead = dead_loopback_url();
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    let mut state = CoordinatorState::live();
+    state.daemon_reachable = true;
+
+    coord_poll_daemon(&mut state, &mut client).await;
+
+    assert!(
+        !state.daemon_reachable,
+        "a dead explicit URL reports unreachable"
+    );
+    assert_eq!(client.base_url(), dead, "the explicit URL is kept");
+}
+
 // ---- STUI-0 banner --------------------------------------------------------
 
 /// Why: §3.1 fixes the banner's first line to `trusty-mpm sessions v<version>`;

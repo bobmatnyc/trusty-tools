@@ -89,6 +89,21 @@ async fn poll_marks_unreachable_clears_state() {
     assert!(state.sessions_by_project.is_empty());
 }
 
+/// Why (#9556): the multipane TUI (`tm tui`'s default) re-discovered after one
+/// failed poll and replaced an explicit `--url` with the lock-file or default
+/// daemon. Re-discovery dials nothing, so this test makes no connection.
+/// Test: itself.
+#[test]
+fn rediscover_keeps_explicit_url() {
+    let dead = dead_loopback_url();
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    assert!(
+        !rediscover(&mut client, false),
+        "a pinned URL is never re-resolved"
+    );
+    assert_eq!(client.base_url(), dead);
+}
+
 fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
     let mut state = ProjectCtlState {
         projects: vec![ProjectRow {
