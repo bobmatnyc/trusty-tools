@@ -481,3 +481,64 @@ fn forget_failure_accepts_only_deleted() {
         );
     }
 }
+
+/// A fixed clock for [`crate::core::memory_forget::match_fact_key`].
+fn pinned_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-10-09T12:00:00+00:00")
+        .expect("pinned clock parses")
+        .with_timezone(&chrono::Utc)
+}
+
+/// One listed drawer holding `key`, with a raw `expires_at`.
+fn slot_drawer(id: &str, key: &str, expires_at: Option<&str>) -> Value {
+    json!({ "drawer_id": id, "fact_key": key, "expires_at": expires_at })
+}
+
+/// Run `match_fact_key` for slot `k` in palace `p`, returning the refusal detail.
+fn fact_key_refusal(listing: &Value) -> String {
+    match crate::core::memory_forget::match_fact_key("k", "p", listing, 100, pinned_now()) {
+        Err(MemoryVerbError::FactKey { key, detail }) => {
+            assert_eq!(key, "k");
+            detail
+        }
+        other => panic!("expected a FactKey refusal, got {other:?}"),
+    }
+}
+
+/// Why (#9340): an unparseable `expires_at` cannot be called live or expired,
+/// so a match carrying one refuses.
+/// Test: itself.
+#[test]
+fn match_fact_key_refuses_an_unreadable_expires_at() {
+    let alone = json!({ "palace": "p", "drawers": [slot_drawer("bad", "k", Some("soon"))] });
+    let detail = fact_key_refusal(&alone);
+    assert!(
+        detail.contains("drawer bad has an unreadable expires_at"),
+        "{detail}"
+    );
+}
+
+/// Why (#9340): beside a live match, skipping the unreadable co-claimant would
+/// forget the live drawer, so the whole resolution refuses and none is chosen.
+/// Test: itself.
+#[test]
+fn match_fact_key_refuses_an_unreadable_expires_at_beside_a_live_match() {
+    let beside_live = json!({ "palace": "p", "drawers": [
+        slot_drawer("live", "k", None),
+        slot_drawer("bad", "k", Some("soon")),
+    ] });
+    let detail = fact_key_refusal(&beside_live);
+    assert!(
+        detail.contains("drawer bad has an unreadable expires_at"),
+        "{detail}"
+    );
+}
+
+/// Why (#9340): an answer with no `drawers` array is not a listing, so it must
+/// not read as an empty palace.
+/// Test: itself.
+#[test]
+fn match_fact_key_refuses_an_answer_without_a_drawers_array() {
+    let detail = fact_key_refusal(&json!({ "palace": "p" }));
+    assert!(detail.contains("without a drawers array"), "{detail}");
+}

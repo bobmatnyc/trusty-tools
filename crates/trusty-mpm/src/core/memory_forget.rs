@@ -160,7 +160,10 @@ pub async fn resolve_fact_key(
 /// `forget_by_fact_key_with_two_matches_names_every_candidate`,
 /// `forget_by_fact_key_on_an_incomplete_listing_fails_closed`,
 /// `forget_by_fact_key_skips_an_expired_occupant`,
-/// `forget_by_fact_key_against_a_pre_fact_key_daemon_fails_closed`.
+/// `forget_by_fact_key_against_a_pre_fact_key_daemon_fails_closed`,
+/// `match_fact_key_refuses_an_unreadable_expires_at`,
+/// `match_fact_key_refuses_an_unreadable_expires_at_beside_a_live_match`,
+/// `match_fact_key_refuses_an_answer_without_a_drawers_array`.
 pub fn match_fact_key(
     fact_key: &str,
     palace: &str,
