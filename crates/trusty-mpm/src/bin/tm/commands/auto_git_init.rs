@@ -31,16 +31,21 @@ use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, scan_for_
 /// The git executable this module drives.
 const GIT_PROGRAM: &str = "git";
 
-/// The stderr phrase that means git found no repository at or above a
+/// The stderr prefix that means git found no repository at or above a
 /// directory.
 ///
 /// Why: the SHORT phrase `not a git repository` is ambiguous in this codebase —
 /// git answers `fatal: not a git repository: (null)` for a STALE WORKTREE
-/// POINTER, which is a broken repository rather than no repository at all.
-/// Matching the long phrase is the same discrimination
-/// `trusty_agents_common::agents::vcs_claim` and `trusty_review::report::scan`
-/// already make. Anything else that fails is reported, never auto-initialized.
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+/// POINTER, which is a broken repository rather than no repository at all. The
+/// opening parenthesis is what separates the two. Anything else that fails is
+/// reported, never auto-initialized.
+/// What: covers both wordings of git's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form. The same prefix `untracked_sync` matches.
+/// Test: `no_repo_stderr_matches_the_long_phrase`,
+/// `classify_accepts_the_mount_boundary_wording_with_no_git_above`.
+// #9495: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// Whether git already has a repository for the directory.
 ///
@@ -112,15 +117,17 @@ pub(crate) enum AutoInitOutcome {
 
 /// Does a failed `git rev-parse` stderr mean "there is no repository here"?
 ///
-/// Why: see [`NO_REPO_STDERR`] — a substring test on the short phrase also
-/// matches a BROKEN repository, and auto-initializing over one of those is the
-/// worst thing this module could do. Fails closed: an unrecognised failure is
-/// not "no repository".
-/// What: `true` only when the long phrase appears in `stderr`.
+/// Why: see [`NO_REPO_STDERR_PREFIX`] — a substring test on the short phrase
+/// also matches a BROKEN repository, and auto-initializing over one of those is
+/// the worst thing this module could do. Fails closed: an unrecognised failure
+/// is not "no repository". The match is necessary, not sufficient:
+/// [`classify_rev_parse_failure`] also requires no `.git` above.
+/// What: `true` only when [`NO_REPO_STDERR_PREFIX`] appears in `stderr`.
 /// Test: `no_repo_stderr_matches_the_long_phrase`,
 /// `no_repo_stderr_rejects_the_stale_worktree_pointer`.
 pub(crate) fn stderr_means_no_repository(stderr: &str) -> bool {
-    stderr.contains(NO_REPO_STDERR)
+    // #9495: the prefix also accepts git's mount-boundary wording.
+    stderr.contains(NO_REPO_STDERR_PREFIX)
 }
 
 /// Decide what to do about `dir`, given git's verdict, the home directory, and
@@ -304,7 +311,10 @@ fn repo_context(program: &str, dir: &Path) -> anyhow::Result<RepoContext> {
 /// contract as any unreadable verdict: reported, never initialized over. A
 /// failed canonicalization is an `Err` too, because `Path::ancestors` walks
 /// lexically and a non-canonical chain can skip the real `.git`.
-/// Test: `auto_init_refuses_the_classic_no_repo_wording_under_a_real_git`.
+/// Test: `auto_init_refuses_the_classic_no_repo_wording_under_a_real_git`,
+/// `classify_accepts_the_mount_boundary_wording_with_no_git_above`,
+/// `classify_refuses_the_mount_boundary_wording_under_a_real_git`,
+/// `classify_keeps_every_other_failure_an_error`.
 fn classify_rev_parse_failure(dir: &Path, stderr: &str) -> anyhow::Result<RepoContext> {
     let cannot_tell = |why: &str| {
         anyhow::anyhow!(
