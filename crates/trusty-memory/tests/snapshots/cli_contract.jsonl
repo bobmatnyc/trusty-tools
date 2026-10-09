@@ -1,0 +1,135 @@
+{"kind":"binary","name":"trusty-memory"}
+{"kind":"binary","name":"trusty-memory-mcp-bridge"}
+{"kind":"exit_code","condition":"usage_error","code":2}
+{"kind":"command","path":"trusty-memory","subcommand_required":true}
+{"kind":"arg","command":"trusty-memory","key":"--verbose","short":"v","action":"Count","min_values":0,"max_values":0,"global":true}
+{"kind":"command","path":"trusty-memory start"}
+{"kind":"command","path":"trusty-memory stop"}
+{"kind":"command","path":"trusty-memory serve"}
+{"kind":"arg","command":"trusty-memory serve","key":"--http","action":"Set","min_values":0,"max_values":1,"value_type":"SocketAddr"}
+{"kind":"arg","command":"trusty-memory serve","key":"--foreground","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory serve","key":"--stdio","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory serve","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory migrate"}
+{"kind":"arg","command":"trusty-memory migrate","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"enum","possible_values":["kuzu-data","kuzu-memory"]}
+{"kind":"arg","command":"trusty-memory migrate","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory migrate","key":"--config-only","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory migrate","key":"--from","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory migrate","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory migrate","key":"--limit","action":"Set","min_values":1,"max_values":1,"value_type":"usize"}
+{"kind":"command","path":"trusty-memory import","subcommand_required":true}
+{"kind":"command","path":"trusty-memory import kuzu"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--discover","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--root","action":"Append","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--from","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--update","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--max-depth","action":"Set","min_values":1,"max_values":1,"value_type":"usize"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--python","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory import kuzu","key":"--bridge-timeout-secs","action":"Set","min_values":1,"max_values":1,"value_type":"u64"}
+{"kind":"command","path":"trusty-memory setup"}
+{"kind":"arg","command":"trusty-memory setup","key":"--client","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory prompt-context"}
+{"kind":"command","path":"trusty-memory doctor"}
+{"kind":"arg","command":"trusty-memory doctor","key":"--fix-palaces","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory doctor","key":"--fix","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory doctor","key":"--drawer-report","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory doctor","key":"--days","action":"Set","min_values":1,"max_values":1,"value_type":"u32"}
+{"kind":"arg","command":"trusty-memory doctor","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory doctor","key":"--ack-drop","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory doctor","key":"--count","action":"Set","min_values":1,"max_values":1,"value_type":"usize"}
+{"kind":"arg","command":"trusty-memory doctor","key":"--reason","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory doctor","key":"--ack-day","action":"Set","min_values":1,"max_values":1,"value_type":"NaiveDate"}
+{"kind":"command","path":"trusty-memory service","subcommand_required":true}
+{"kind":"command","path":"trusty-memory service install"}
+{"kind":"command","path":"trusty-memory service start"}
+{"kind":"command","path":"trusty-memory service stop"}
+{"kind":"command","path":"trusty-memory service logs"}
+{"kind":"command","path":"trusty-memory monitor","subcommand_required":true}
+{"kind":"command","path":"trusty-memory monitor web"}
+{"kind":"command","path":"trusty-memory monitor tui"}
+{"kind":"command","path":"trusty-memory monitor status"}
+{"kind":"arg","command":"trusty-memory monitor status","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory monitor palaces"}
+{"kind":"arg","command":"trusty-memory monitor palaces","key":"#1","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory monitor palaces","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory send-message"}
+{"kind":"arg","command":"trusty-memory send-message","key":"--to","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory send-message","key":"--purpose","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory send-message","key":"--content","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory send-message","key":"--from","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory inbox-check"}
+{"kind":"arg","command":"trusty-memory inbox-check","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory note"}
+{"kind":"arg","command":"trusty-memory note","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory note","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory note","key":"--tag","action":"Append","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory kg-rebuild"}
+{"kind":"arg","command":"trusty-memory kg-rebuild","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory kg-rebuild","key":"--purge-stale-subjects","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory kg-rebuild","key":"--merge-punctuated-twins","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory kg-rebuild","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory rooms","subcommand_required":true}
+{"kind":"command","path":"trusty-memory rooms backfill"}
+{"kind":"arg","command":"trusty-memory rooms backfill","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory rooms backfill","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory rooms backfill","key":"--apply","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory palace","subcommand_required":true}
+{"kind":"command","path":"trusty-memory palace stats"}
+{"kind":"arg","command":"trusty-memory palace stats","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory palace stats","key":"--history-days","action":"Set","min_values":1,"max_values":1,"value_type":"i64"}
+{"kind":"arg","command":"trusty-memory palace stats","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory palace compact"}
+{"kind":"arg","command":"trusty-memory palace compact","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory palace compact","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace compact","key":"--history-days","action":"Set","min_values":1,"max_values":1,"value_type":"i64"}
+{"kind":"command","path":"trusty-memory palace legacy-kg"}
+{"kind":"arg","command":"trusty-memory palace legacy-kg","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory palace legacy-kg","key":"--apply","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace legacy-kg","key":"--no-embed","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace legacy-kg","key":"--include-content-duplicates","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace legacy-kg","key":"--allow-short","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory palace deletions"}
+{"kind":"arg","command":"trusty-memory palace deletions","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory palace deletions","key":"--drawer","action":"Set","min_values":1,"max_values":1,"value_type":"Uuid"}
+{"kind":"arg","command":"trusty-memory palace deletions","key":"--limit","action":"Set","min_values":1,"max_values":1,"value_type":"usize"}
+{"kind":"arg","command":"trusty-memory palace deletions","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory palace reclaim"}
+{"kind":"arg","command":"trusty-memory palace reclaim","key":"--dry-run","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace reclaim","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace reclaim","key":"--apply","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory palace reclaim","key":"--manifest","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory palace reclaim","key":"--purge-trash","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory audit","subcommand_required":true}
+{"kind":"command","path":"trusty-memory audit secrets"}
+{"kind":"arg","command":"trusty-memory audit secrets","key":"--count-only","required":true,"action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory audit secrets","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory audit secrets","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory backfill-report"}
+{"kind":"arg","command":"trusty-memory backfill-report","key":"--palace","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory backfill-report","key":"--limit","action":"Set","min_values":1,"max_values":1,"value_type":"usize"}
+{"kind":"arg","command":"trusty-memory backfill-report","key":"--min-injections","action":"Set","min_values":1,"max_values":1,"value_type":"u64"}
+{"kind":"arg","command":"trusty-memory backfill-report","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory backfill-report","key":"--logs-dir","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"command","path":"trusty-memory link"}
+{"kind":"arg","command":"trusty-memory link","key":"--path","action":"Set","min_values":1,"max_values":1,"value_type":"PathBuf"}
+{"kind":"arg","command":"trusty-memory link","key":"--slug","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory link","key":"--note","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory link","key":"--force","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory port"}
+{"kind":"arg","command":"trusty-memory port","key":"--addr","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory port","key":"--json","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory upgrade"}
+{"kind":"arg","command":"trusty-memory upgrade","key":"--check","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"arg","command":"trusty-memory upgrade","key":"--yes","short":"y","action":"SetTrue","min_values":0,"max_values":0}
+{"kind":"command","path":"trusty-memory config","subcommand_required":true}
+{"kind":"command","path":"trusty-memory config keys","subcommand_required":true}
+{"kind":"command","path":"trusty-memory config keys set"}
+{"kind":"arg","command":"trusty-memory config keys set","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"arg","command":"trusty-memory config keys set","key":"#2","action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory config keys list"}
+{"kind":"command","path":"trusty-memory config keys test"}
+{"kind":"arg","command":"trusty-memory config keys test","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
+{"kind":"command","path":"trusty-memory config keys unset"}
+{"kind":"arg","command":"trusty-memory config keys unset","key":"#1","required":true,"action":"Set","min_values":1,"max_values":1,"value_type":"String"}
