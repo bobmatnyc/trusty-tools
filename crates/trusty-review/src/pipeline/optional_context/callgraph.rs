@@ -154,13 +154,26 @@ fn edge(rest: &str) -> Option<Edge> {
 /// Whether a caller is a test (ruling Q11).
 ///
 /// Why: AC1 asks for tests; the call graph only carries what it indexes, so
-/// an inline `#[cfg(test)]` module in the same file is not told apart.
-/// What: the caller's file classifies as a test path, or its bare symbol
-/// name starts with `test_`.
-/// Test: `test_callers_are_told_apart_by_path_or_name`.
+/// an inline `#[cfg(test)]` module in the same file is not told apart. The
+/// call-chain report is plain text with no test marker, so the path is the
+/// only signal for a test whose name lacks a `test_` prefix.
+/// What: the caller's file classifies as a test path, or is a Rust test file
+/// (`tests_*.rs`, by whole file name), or its bare symbol name starts with
+/// `test_`.
+/// Test: `test_callers_are_told_apart_by_path_or_name`,
+/// `rust_test_file_paths_classify_a_caller_as_a_test`.
 pub(crate) fn is_test_edge(edge: &Edge) -> bool {
     let bare = edge.symbol.rsplit("::").next().unwrap_or(&edge.symbol);
-    bare.starts_with("test_") || classify(&normalize_path(edge.file()), false) == Class::Test
+    let file = normalize_path(edge.file());
+    // #9196: `classify` knows `tests.rs` and `*_tests.rs`, not `tests_*.rs`
+    // (e.g. `tests_search.rs`), so a caller there was listed as a caller.
+    let name = file
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let prefixed_test_file = name.starts_with("tests_") && name.ends_with(".rs");
+    bare.starts_with("test_") || prefixed_test_file || classify(&file, false) == Class::Test
 }
 
 #[cfg(test)]
