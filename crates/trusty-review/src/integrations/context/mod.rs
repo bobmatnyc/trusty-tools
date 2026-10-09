@@ -41,6 +41,7 @@ pub mod jira;
 pub mod jira_parse;
 pub mod orchestrator;
 pub mod pr_history;
+pub(crate) mod ticket_token; // #9197 B2b
 
 pub use config::{
     ConformanceSourceConfig, ConformanceSourceFileConfig, ContextSourcesConfig,

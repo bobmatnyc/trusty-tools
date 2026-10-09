@@ -911,3 +911,7 @@ mod changed_files;
 // #9196: `symbol_context` on both review tools.
 #[path = "tools_symbol_context_tests.rs"]
 mod symbol_context;
+
+// #9197 B2b: `fetch_linked_issues` on `review_pr` only.
+#[path = "tools_linked_issues_tests.rs"]
+mod linked_issues;

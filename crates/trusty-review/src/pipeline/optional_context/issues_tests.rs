@@ -314,3 +314,33 @@ fn a_body_with_a_triple_backtick_cannot_close_the_fence() {
             .is_empty()
     );
 }
+
+/// #9197 B2b (AC16, amendment 10): the row is the alarm: the worst item
+/// state (`omitted` reads `truncated`), `absent` only when nothing outranks
+/// it, and `detail` names every `unavailable` item.
+#[test]
+fn issues_row_state_is_worst_of_items() {
+    use SourceState::{Absent, Omitted, Truncated, Unavailable, Used};
+    let row_of = |states: &[SourceState]| {
+        let items = states.iter().enumerate();
+        let items = items.map(|(n, s)| ContextItemRecord::new(&format!("#{}", n + 1), *s, 0, 0));
+        issues_row(items.collect())
+    };
+    for (states, want) in [
+        (&[][..], Absent),
+        (&[Absent][..], Absent),
+        (&[Absent, Used][..], Used),
+        (&[Used, Truncated][..], Truncated),
+        (&[Omitted][..], Truncated),
+        (&[Absent, Omitted][..], Truncated),
+        (&[Used, Omitted, Unavailable][..], Unavailable),
+        (&[Unavailable][..], Unavailable),
+    ] {
+        let row = row_of(states);
+        assert_eq!(row.state, want, "{states:?}");
+        let failed = states.contains(&Unavailable);
+        assert_eq!(row.detail.is_some(), failed, "{states:?}");
+    }
+    let row = row_of(&[Unavailable, Used, Unavailable]);
+    assert_eq!(row.detail.as_deref(), Some("unavailable: #1, #3"));
+}

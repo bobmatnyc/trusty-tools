@@ -50,7 +50,8 @@ use crate::{
             docs::{DocsCall, apply_docs},                              // #9193
             files::{FilesCall, apply_files},                           // #9195
             ledger::ContextLedger,
-            probes::ContextRows, // #9194
+            linked_issues::{LinkedIssuesCall, apply_linked_issues}, // #9197 B2b
+            probes::ContextRows,                                    // #9194
             seams::{PrHead, load_diff_via, pr_meta_via},
             symbols_apply::{SymbolsCall, apply_symbols}, // #9196
         },
@@ -538,6 +539,9 @@ async fn run_pipeline(
     // #9193: ADR/spec/SLD docs and CLAUDE.md read at the head SHA, when asked for.
     let docs = DocsCall::new(config, &deps, options, &diff_source, &pr_meta, &filtered);
     apply_docs(&mut applied, docs.at(&head), ledger).await;
+    // #9197 B2b: the issues the raw PR body links, fetched after any supplied docs.
+    let linked = LinkedIssuesCall::new(options, &diff_source, body);
+    apply_linked_issues(&mut applied, linked, ledger).await;
     // #9195: the changed files, whole, at the head SHA, when asked for.
     let paths = (review_path, &mr_config);
     let files = FilesCall::new(options, &diff_source, &filtered, &raw_diff, paths);

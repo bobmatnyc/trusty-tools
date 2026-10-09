@@ -14,6 +14,8 @@
 //! strictly by [`with_doc_flags`]. #9194: the boolean `report_context`, on
 //! both tools, is read strictly by [`with_report_context_flag`]. #9196: the
 //! boolean `symbol_context`, on both tools, by [`with_symbol_context_flag`].
+//! #9197 B2b: the boolean `fetch_linked_issues`, on `review_pr` only, by
+//! [`with_fetch_linked_issues_flag`].
 //! Test: `review_pr_accepts_the_three_text_params`,
 //! `review_pr_ignores_a_mistyped_text_param_with_a_warning`,
 //! `review_pr_rejects_a_mistyped_include_pr_body`,
@@ -219,6 +221,52 @@ pub(crate) fn symbol_context_schema() -> Value {
     })
 }
 
+/// Fetch the issues the PR body links, on `review_pr` only (#9197, B2b).
+pub(crate) const FETCH_LINKED_ISSUES: &str = "fetch_linked_issues";
+
+/// `request` with the `fetch_linked_issues` flag (#9197, B2b).
+///
+/// Why: a new boolean with no legacy callers, so a wrong type is refused
+/// before any work, as `symbol_context` is. `review_diff` has no PR body, so
+/// it neither lists nor reads the flag (ruling Q6).
+/// What: absent or `null` is off; `true`/`false` set the flag.
+///
+/// # Errors
+///
+/// [`ToolError::InvalidParams`] naming the parameter and the type it got.
+///
+/// Test: `fetch_linked_issues_mistyped_is_invalid_params`.
+pub(crate) fn with_fetch_linked_issues_flag(
+    request: OptionalContextRequest,
+    args: &Value,
+) -> Result<OptionalContextRequest, ToolError> {
+    match args.get(FETCH_LINKED_ISSUES) {
+        None | Some(Value::Null) => Ok(request),
+        Some(Value::Bool(on)) => Ok(request.with_fetch_linked_issues(*on)),
+        Some(other) => Err(ToolError::InvalidParams(format!(
+            "'{FETCH_LINKED_ISSUES}' must be a boolean, got {}",
+            type_name(other)
+        ))),
+    }
+}
+
+/// The `fetch_linked_issues` JSON Schema `review_pr` lists (#9197, B2b).
+///
+/// Test: `only_review_pr_lists_fetch_linked_issues`.
+pub(crate) fn fetch_linked_issues_schema() -> Value {
+    serde_json::json!({
+        "type": "boolean",
+        "description": "Fetch the issues the PR body links with a keyword (Fixes #12, Refs \
+                        owner/repo#12) from this repository's GitHub issues, with the token \
+                        that read the diff, for the reviewer only (the verifier never sees \
+                        them): at most 5 issues, after any issue_docs, which win on the same \
+                        number. Same caps and [gh:] rules as issue_docs; a fetched issue is \
+                        dropped whole before a supplied one. A failed fetch (including a \
+                        typo'd number) is reported unavailable and the review runs. Default \
+                        false. The response then carries a context_sources ledger."
+    })
+}
+
 /// `review_pr`'s parsed optional context.
 #[derive(Debug, Default)]
 pub(crate) struct ParsedPrContext {
@@ -281,6 +329,7 @@ pub(crate) fn parse_review_pr_context(args: &Value) -> Result<ParsedPrContext, T
     parsed.request = with_report_context_flag(parsed.request, args)?; // #9194
     parsed.request = with_changed_files(parsed.request, args)?; // #9195
     parsed.request = with_symbol_context_flag(parsed.request, args)?; // #9196
+    parsed.request = with_fetch_linked_issues_flag(parsed.request, args)?; // #9197 B2b
     Ok(parsed)
 }
 
