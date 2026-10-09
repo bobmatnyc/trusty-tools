@@ -265,7 +265,10 @@ pub(crate) enum NameResolution {
 /// form), then a path-suffix match so a partial path anchors, then the name
 /// index. `rank` orders candidates when several match; the caller supplies node
 /// degree so the most-connected definition is chosen and the rest reported.
-/// Test: `path_qualified_entry_point_anchors_instead_of_404`.
+/// A path suffix is matched against the defining FILE, so `<path>::m` reaches
+/// a method keyed `<file>::<Type>::m`.
+/// Test: `path_qualified_entry_point_anchors_instead_of_404`,
+/// `path_qualified_impl_method_resolves_through_its_type`.
 pub(crate) fn resolve_name(
     index: &NameIndex,
     name: &str,
@@ -280,10 +283,19 @@ pub(crate) fn resolve_name(
             let mut hits: Vec<NodeIndex> = index
                 .by_key
                 .iter()
-                .filter(|(k, _)| {
-                    k.rsplit_once("::").is_some_and(|(f, s)| {
-                        (s == symbol || bare_name(s) == symbol) && f.ends_with(path)
-                    })
+                .filter(|(k, i)| {
+                    let names = |s: &str| s == symbol || bare_name(s) == symbol;
+                    // #9196: a method keyed `<file>::<Type>::<name>` matches by
+                    // its file, whatever `Type::` sits between.
+                    let by_file = index.file_of.get(*i).is_some_and(|f| {
+                        f.ends_with(path)
+                            && k.strip_prefix(f.as_str())
+                                .and_then(|r| r.strip_prefix("::"))
+                                .is_some_and(names)
+                    });
+                    by_file
+                        || k.rsplit_once("::")
+                            .is_some_and(|(f, s)| names(s) && f.ends_with(path))
                 })
                 .map(|(_, &i)| i)
                 .collect();
