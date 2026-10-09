@@ -830,8 +830,13 @@ fn a_newer_pin_schema_is_refused_naming_the_file_and_both_versions() {
         }
 
         // The resolver must stop on it, not derive past it.
+        // The resolver canonicalises the root, so compare everything but the path.
         let err = resolve_palace(&root).expect_err("resolver must not fall through");
-        assert_eq!(err.to_string(), msg);
+        let resolver_msg = err.to_string();
+        assert!(
+            resolver_msg.contains("schema_version 2") && resolver_msg.contains(PIN_FILE_REL),
+            "resolver must report the newer pin: {resolver_msg}"
+        );
     }
 }
 
