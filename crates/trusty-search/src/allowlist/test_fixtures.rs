@@ -81,3 +81,29 @@ pub(crate) fn approve(path: &Path) {
     });
     cfg.save_to(&file).expect("write test allowlist");
 }
+
+/// A real, unique, RAII-cleaned directory that `SENSITIVE_PATH_PREFIXES`
+/// denies no matter what `$TMPDIR` is, plus its canonical path.
+///
+/// Why (#9527): `tempfile::tempdir()` follows `$TMPDIR`, which is only denied
+/// when it happens to sit under a prefix (`/tmp/`, `/var/folders`). Under EVO's
+/// forced `TMPDIR=~/evo/tmp/<key>` it is not, so a test asserting the prefix
+/// refusal got no refusal. The denylist is a fixed list on purpose; the
+/// fixture is what must be explicit.
+/// What: creates `/tmp/<prefix>XXXXXX` (a unique name per call) and returns the
+/// guard with `fs::canonicalize` of it (`/private/tmp/…` on macOS, also denied).
+/// Test: `create_index_still_rejects_sensitive_path_by_default`,
+/// `allow_sensitive_path_relaxes_only_the_prefix_denylist`.
+pub(crate) fn denylisted_root(prefix: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in("/tmp")
+        .expect("create a directory under /tmp");
+    let canonical = std::fs::canonicalize(dir.path()).expect("canonicalize denylisted root");
+    assert!(
+        super::is_denied(&canonical).is_some(),
+        "fixture {} must be denylisted",
+        canonical.display()
+    );
+    (dir, canonical)
+}

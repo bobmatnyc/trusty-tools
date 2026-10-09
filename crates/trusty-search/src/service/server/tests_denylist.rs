@@ -228,16 +228,16 @@ async fn validate_root_path_accepts_safe_project_dir() {
 /// relax the default path — every pre-existing caller (auto-discovery, the
 /// CLI, MCP) must still be refused for a scratch directory unless it
 /// explicitly opts in.
-/// What: creates a REAL directory via `tempfile::tempdir()` (which on macOS
-/// resolves under `/private/var/folders/…`, a `SENSITIVE_PATH_PREFIXES`
-/// entry), calls `create_index_handler` with `allow_sensitive_path: false`,
+/// What: creates a REAL directory under `/tmp` (a `SENSITIVE_PATH_PREFIXES`
+/// entry, independent of `$TMPDIR`, #9527), calls `create_index_handler` with `allow_sensitive_path: false`,
 /// and asserts 400 with "indexing refused".
 /// Test: this test.
 #[tokio::test]
 async fn create_index_still_rejects_sensitive_path_by_default() {
     use crate::core::registry::IndexRegistry;
 
-    let tmp = tempfile::tempdir().expect("tempdir");
+    // #9527: an explicit /tmp fixture, not `tempdir()`, which follows $TMPDIR.
+    let (_tmp, tmp_root) = crate::allowlist::test_fixtures::denylisted_root("ts-9527-default-");
     let state = SearchAppState::new(IndexRegistry::new());
     let embedder: Arc<dyn Embedder> = Arc::new(crate::core::embed::MockEmbedder::new(8));
     state.install_embedder(embedder).await;
@@ -248,7 +248,7 @@ async fn create_index_still_rejects_sensitive_path_by_default() {
         Json(CreateIndexRequest {
             roots: None,
             id: "scratch-default-denied".into(),
-            root_path: tmp.path().to_path_buf(),
+            root_path: tmp_root,
             include_paths: None,
             exclude_globs: None,
             extensions: None,

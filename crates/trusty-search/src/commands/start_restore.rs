@@ -646,8 +646,19 @@ mod relocation_gate_tests_767 {
 
         // An OS temp dir is denied too — this is the case the warm-boot RESTORE
         // filter deliberately relaxes and this one deliberately does not.
-        let tmp = tempfile::tempdir().expect("tempdir");
+        // #9527: an explicit /tmp fixture, not `tempdir()`, which follows $TMPDIR.
+        // (The lib's `allowlist::test_fixtures` is cfg(test) of the lib only,
+        // so this bin-side test builds its own.)
+        let tmp = tempfile::Builder::new()
+            .prefix("ts-9527-reloc-")
+            .tempdir_in("/tmp")
+            .expect("create a directory under /tmp");
         let tmp_canonical = tmp.path().canonicalize().expect("canonicalize");
+        assert!(
+            crate::allowlist::is_denied(&tmp_canonical).is_some(),
+            "fixture {} must be denylisted",
+            tmp_canonical.display()
+        );
         let paths = approving(fx.path(), &[&tmp_canonical]);
         assert!(!relocation_candidate_is_approved(&tmp_canonical, &paths));
     }
