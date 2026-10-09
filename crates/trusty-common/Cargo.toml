@@ -149,7 +149,7 @@ name = "trusty-common"
 # 0.55.1 (Refs #9487): patch — HNSW search/upsert deadlock fix; no public item removed or changed; 0.55.0 is live on crates.io.
 # 0.55.2 (Refs #9274): patch — additive pin-schema API (refuse a newer pin, keep unknown pin fields); nothing removed or changed; 0.55.1 is live on crates.io.
 # 0.55.3 (Refs #9487): patch — additive HNSW op-watch API (`PalaceRegistry::oldest_hnsw_op`, op-watch types); nothing removed or changed; 0.55.2 is live on crates.io.
-version = "0.55.3"
+version = "0.55.4"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
