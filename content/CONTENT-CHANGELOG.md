@@ -9,6 +9,28 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.2.0] — 2026-10-09
+
+### Added
+
+- `tm-capabilities` lists the `tm secrets` command and its `set`, `list`, `remove`, `import`, `copy` and `doctor` verbs; the top-level command count is 67 (#7521).
+- `tm-capabilities` lists the `secrets_get_ref` MCP tool, its two arguments and its names-only answer; the MCP tool count is 36 (#7522).
+- `tm-capabilities` documents `tm worktrees [--json] [--no-size]` and the `worktree_registry` row of `tm doctor` (#8994).
+- `tm-session-management`, `tm-session-pause` and `tm-session-resume` tell the PM to record session resume state under `ws:<session>/resume` and PR state under `pr:<n>/state` with `tm memory remember --fact-key` (or the MCP tools' `fact_key`), so recall returns the current state instead of stale snapshots (#9142).
+- The supervisor's decisions section states the question-id rule: two lowercase hex digits, next id is the last plus 1 in hex with `ff` wrapping to `01` and `00` never used, open ids skipped, and uppercase, one-digit and prefixed forms forbidden (#9289).
+- The `tm-capabilities` CLI reference lists `tm sessions rebind <id-or-name> [--tmux <session>]` and `--all`, which re-bind a session record to its live tmux pane after a tmux server replacement (#9313).
+
+### Changed
+
+- `BASE-AGENT` credential rule names the owner-bound per-repo gh identity route, `docs/reference/environment-variables.md#per-repo-gh-identity` (#8557).
+- `secrets-manager` no longer documents unbuilt `tm secrets` verbs or 1Password/Keeper backends. It works by vault and key name or `secret://` reference only, never calls `secrets.set` or hand-rolls a socket call, and reports `vault_out_of_scope`, `remote_host_unsupported` and `agent_use_refused` to the PM (#9068).
+- The `tm-secrets` skill describes what `trusty-secrets` 0.1.0 ships (Keychain backend, own-vault scoping on github.com remotes, the names-only index, the `secrets.*` socket methods), lists each refusal kind with its action, and states the value rules as numbered imperatives (#9068).
+- `local-ops`, `vercel-ops` and the `tm-secrets` skill list Vercel env var names only, filtered at the source with `vercel env ls <env> | awk 'NR>1{print $1}'`; `--json` and the unfiltered table are forbidden (#9158).
+
+### Documentation
+
+- The `tm-capabilities` doctor reference says the `content` row names the manual install (`gh release download <tag>`, then `tm content install --from <dir>/<tag>.tar.gz`) and never fetches the release itself (#9396).
+
 ## [2.1.1] — 2026-10-05
 
 ### Added
