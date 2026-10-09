@@ -825,6 +825,11 @@ where
                 .to_string(),
         );
     }
+    // #9556: the isolation refusal URL means no daemon for this sandbox — the
+    // #5923 "no daemon" arm, not an unanswered one.
+    if let Err(refusal) = trusty_mpm::core::refuse_isolated_no_daemon(url) {
+        return SharedTreeReply::Unavailable(refusal.to_string());
+    }
     // #8492: built on a detached thread, not inside this poll, so a caller's
     // deadline (`tokio::time::timeout`) can fire while the build still runs. Not
     // the blocking pool: runtime drop joins that pool, so the process could not

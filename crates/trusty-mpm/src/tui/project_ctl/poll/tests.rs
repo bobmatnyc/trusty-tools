@@ -58,7 +58,9 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
 // winning a port race — see `crate::test_support::dead_loopback_url`.
 use crate::test_support::dead_loopback_url;
 
+// #9556: serial — resolution reads TRUSTY_DATA_DIR_OVERRIDE, which serial tests set.
 #[tokio::test]
+#[serial_test::serial]
 async fn poll_marks_unreachable_clears_state() {
     let discovered = crate::core::resolve_daemon_url(None);
     let probe = DaemonClient::new(discovered.clone());

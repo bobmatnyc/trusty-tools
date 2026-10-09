@@ -196,17 +196,51 @@ pub fn try_resolve_daemon_url(explicit: Option<&str>) -> Result<String, DaemonUr
     }
 
     // 2. Lock file — records the actual bound address written by the daemon.
+    let isolated = isolated_environment();
     if let Some(url) = read_lock_file_url() {
-        return Ok(url);
+        // #9556: under isolation a lock that belongs to the host is not this
+        // sandbox's daemon; a lock under the sandbox's own `HOME` still wins.
+        let home = dirs::home_dir();
+        let passwd_home = crate::core::host_state_gate::passwd_home_dir();
+        if !(isolated && lock_is_hosts(&url, home.as_deref(), passwd_home.as_deref())) {
+            return Ok(url);
+        }
     }
 
     // #9556: the default is the host's daemon; an isolated process refuses it.
-    if isolated_environment() {
+    if isolated {
         return Err(DaemonUrlError::NoSandboxDaemon);
     }
 
     // 3. Fall back to the compiled-in default.
     Ok(DEFAULT_DAEMON_URL.to_string())
+}
+
+/// Whether a daemon lock read from `home` belongs to the host (#9556).
+///
+/// Why: an isolated process that inherited the operator's `HOME` reads the
+/// host daemon's lock, which names the live 127.0.0.1:7880.
+/// What: `true` when the lock names [`DEFAULT_DAEMON_URL`], when either home
+/// is unknown, or when `home` and the password-database home resolve to the
+/// same directory — the comparison `tm daemon --sandbox` makes before it
+/// starts.
+/// Test: `host_lock_is_judged_by_address_and_home`,
+/// `isolated_resolver_ignores_a_host_lock_naming_the_default`,
+/// `isolated_resolver_keeps_a_sandbox_home_lock`.
+fn lock_is_hosts(
+    lock_url: &str,
+    home: Option<&std::path::Path>,
+    passwd_home: Option<&std::path::Path>,
+) -> bool {
+    if lock_url.trim_end_matches('/') == DEFAULT_DAEMON_URL {
+        return true;
+    }
+    let (Some(home), Some(account)) = (home, passwd_home) else {
+        return true;
+    };
+    let resolve =
+        |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    resolve(home) == resolve(account)
 }
 
 /// The base URL an infallible resolver hands out when an isolated process has
@@ -275,7 +309,10 @@ pub fn refuse_daemon_spawn_when_isolated() -> Result<(), DaemonUrlError> {
 /// plainly that no fallback was attempted.
 /// Test: `probing_resolver_errors_when_explicit_unreachable`,
 /// `resolve_for_cli_explicit_unreachable_errors`.
+// #9556 (owner ruling 2026-10-09 17:49Z): non-exhaustive, so a later refusal
+// kind is not another breaking change.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DaemonUrlError {
     /// The explicitly-supplied URL failed a `GET {url}/health` probe.
     #[error(
@@ -588,10 +625,12 @@ pub fn console_addr_to_probe() -> Option<String> {
     )
 }
 
-/// Pure core of [`console_addr_to_probe`].
+/// Pure core of [`console_addr_to_probe`]: the recorded address, else the
+/// default — except under isolation, where there is none (#9556).
 /// Test: `console_probe_target_is_none_under_isolation`.
-fn console_addr_to_probe_from(recorded: Option<String>, _isolated: bool) -> Option<String> {
-    Some(console_addr_from(recorded))
+fn console_addr_to_probe_from(recorded: Option<String>, isolated: bool) -> Option<String> {
+    recorded_console_addr(recorded)
+        .or_else(|| (!isolated).then(|| DEFAULT_CONSOLE_ADDR.to_string()))
 }
 
 /// Build the trusty-console's base URL on its selected port.
@@ -1497,6 +1536,23 @@ mod tests {
         crate::core::daemon_identity::write_lock_at(&lock_file_path(), sandbox_daemon, "");
 
         assert_eq!(resolve_daemon_url(None), sandbox_daemon);
+    }
+
+    /// Why (#9556 critic): the host-lock rule must reject both the default
+    /// address and a lock under the account home, and nothing else.
+    /// Test: itself.
+    #[test]
+    fn host_lock_is_judged_by_address_and_home() {
+        let sandbox = crate::test_support::hermetic_temp_dir();
+        let account = crate::test_support::hermetic_temp_dir();
+        let (sandbox, account) = (Some(sandbox.path()), Some(account.path()));
+        let other = "http://127.0.0.1:17881";
+        assert!(!lock_is_hosts(other, sandbox, account));
+        assert!(lock_is_hosts(other, account, account));
+        assert!(lock_is_hosts(DEFAULT_DAEMON_URL, sandbox, account));
+        assert!(lock_is_hosts("http://127.0.0.1:7880/", sandbox, account));
+        assert!(lock_is_hosts(other, None, account));
+        assert!(lock_is_hosts(other, sandbox, None));
     }
 
     /// Why (#9556 critic): with isolation on and no recorded console, the

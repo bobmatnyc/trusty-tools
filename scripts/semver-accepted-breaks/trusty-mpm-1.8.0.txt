@@ -13,3 +13,6 @@ accept  enum_variant_added               MemoryVerb Forget
 accept  pub_module_level_const_missing   DEFAULT_SEARCH_URL
 accept  struct_pub_field_missing         HealthScreen search_url
 accept  trait_method_added               OrchestratorBackend secrets_get_ref
+# #9556 (owner ruling Bob, 2026-10-09 17:49Z): DaemonUrlError becomes #[non_exhaustive];
+# it gains NoSandboxDaemon in the same change.
+accept  enum_marked_non_exhaustive       DaemonUrlError

@@ -227,13 +227,11 @@ fn already_running_line(_check_url: &str) -> String {
 /// (or `url` is that default too), else `url`.
 /// Test: `start_checks_the_given_url_when_the_resolver_refuses`.
 fn start_check_url(lock: Result<String, trusty_mpm::core::DaemonUrlError>, url: &str) -> String {
-    let lock_url = lock.unwrap_or_else(|_| trusty_mpm::core::ISOLATED_NO_DAEMON_URL.to_string());
-    if lock_url != trusty_mpm::core::DEFAULT_DAEMON_URL
-        || url == trusty_mpm::core::DEFAULT_DAEMON_URL
-    {
-        lock_url
-    } else {
-        url.to_string()
+    use trusty_mpm::core::DEFAULT_DAEMON_URL;
+    match lock {
+        // #9556: only a real lock counts; the isolated refusal is not one.
+        Ok(lock_url) if lock_url != DEFAULT_DAEMON_URL || url == DEFAULT_DAEMON_URL => lock_url,
+        _ => url.to_string(),
     }
 }
 

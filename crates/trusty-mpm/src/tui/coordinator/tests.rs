@@ -805,7 +805,9 @@ fn catalog_indicator_reflects_staleness() {
 // winning a port race — see `crate::test_support::dead_loopback_url`.
 use crate::test_support::dead_loopback_url;
 
+// #9556: serial — resolution reads TRUSTY_DATA_DIR_OVERRIDE, which serial tests set.
 #[tokio::test]
+#[serial_test::serial]
 async fn poll_marks_unreachable_clears_sessions() {
     // Why: `coord_poll_daemon` must, on an unreachable daemon, clear any rows it
     // previously showed and flip `daemon_reachable` to false (DOC-13 §6) so the
