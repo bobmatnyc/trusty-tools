@@ -14,6 +14,12 @@
  * from `crates/trusty-console/ui`.
  */
 
+/** Window name the console's Architect link targets; reused if a tab has it. */
+export const ARCHITECT_WINDOW_NAME = 'architect-dashboard';
+
+/** This tab's own name, set on load; the Architect dashboard links target it. */
+export const CONSOLE_WINDOW_NAME = 'trusty-console';
+
 /** The route that reports the live dashboard URL. */
 export const ARCHITECT_DASHBOARD_ROUTE = '/api/console/architect-dashboard';
 

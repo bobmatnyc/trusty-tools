@@ -35,7 +35,11 @@
   // #6908: the console's version and uptime, read from the one `/health` probe.
   import { fetchConsoleHealth } from './consoleVersion.js';
   // #9474: the Architect dashboard link, shown only while one is live here.
-  import { fetchArchitectDashboard } from './architectLink.js';
+  import {
+    ARCHITECT_WINDOW_NAME,
+    CONSOLE_WINDOW_NAME,
+    fetchArchitectDashboard,
+  } from './architectLink.js';
 
   // ── state ────────────────────────────────────────────────────────────────
 
@@ -90,6 +94,8 @@
   // stream connects; `cpu_pct` already rides on it, so the %CPU column is
   // populated on first paint and the graphs fill in as samples arrive.
   onMount(async () => {
+    // #9474: name this tab so the Architect dashboard's links reuse it.
+    window.name = CONSOLE_WINDOW_NAME;
     armIdleWatch();
     stream = createMachineStream({ onState: (next) => (history = next) });
     stream.start();
@@ -192,13 +198,14 @@
     </div>
     <div class="header-right">
       <!-- #9474: an outbound link, not a view — it opens the Architect
-           dashboard in a new tab, and exists only while one is live here. -->
+           dashboard in the tab named `architect-dashboard` (a new one only if
+           none exists). No rel=noopener/noreferrer: either forces a new context
+           and defeats name reuse. The link exists only while one is live here. -->
       {#if architectHref}
         <a
           class="header-action"
           href={architectHref}
-          target="_blank"
-          rel="noopener noreferrer"
+          target={ARCHITECT_WINDOW_NAME}
         >
           Architect ↗
         </a>
