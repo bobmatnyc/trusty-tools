@@ -124,10 +124,12 @@ struct RefusingDaemon {
 
 impl RefusingDaemon {
     fn new() -> Self {
-        let bound = tokio::net::TcpSocket::new_v4().expect("loopback socket");
-        bound
-            .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
-            .expect("bind loopback");
+        // The bind stays in the constructor's statement: the no-listener gate
+        // (scripts/check_no_tcp_listeners.sh) reads only that statement for
+        // the ephemeral address.
+        let bound = tokio::net::TcpSocket::new_v4()
+            .and_then(|s| s.bind("127.0.0.1:0".parse().expect("addr")).map(|()| s))
+            .expect("bind loopback socket");
         let addr = bound.local_addr().expect("bound addr");
         // Precondition the three tests rest on: a refusal, not a timeout.
         let probe = std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2));
