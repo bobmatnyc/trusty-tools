@@ -1,14 +1,17 @@
-//! Map a `remove-file` request path onto the index's stored file keys (#9236).
+//! Map a `remove-file` or `index-file` request path onto the index's stored
+//! file keys (#9236, #9510).
 //!
 //! Why: chunk keys are index-relative, but search answers carry absolute
 //! paths. `remove-file` matched the path exactly, so an absolute path removed
-//! nothing and answered `200 removed_chunks: 0`.
-//! What: [`remove_keys`] relativizes an absolute path against the index's
-//! roots by text (#7434: every root, keyed `@root<n>/…` under an additional
-//! one) and refuses any path that names no file under a root with a 400
-//! naming the accepted forms.
-//! Test: `remove_file_takes_an_absolute_in_root_path_9236` and its siblings
-//! in `crate::service::rpc::writes`'s tests.
+//! nothing and answered `200 removed_chunks: 0`; `index-file` stored it
+//! verbatim, beside the file's index-relative chunks.
+//! What: [`remove_keys`] and [`index_key`] relativize an absolute path against
+//! the index's roots by text (#7434: every root, keyed `@root<n>/…` under an
+//! additional one) and refuse any path that names no file under a root with a
+//! 400 naming the accepted forms.
+//! Test: `remove_file_takes_an_absolute_in_root_path_9236` and its siblings,
+//! and `index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510` and
+//! its siblings, in `crate::service::rpc::writes`'s tests.
 
 use std::path::{Component, Path};
 
@@ -23,8 +26,9 @@ use crate::core::index_roots::{stored_path_for_slot, IndexRoots};
 /// same chunks as its index-relative form, and a path naming no file under
 /// the root must be refused rather than answered as a successful no-op.
 /// What: a relative path is returned unchanged, as one key. An absolute path
-/// is relativized by [`absolute_key`]; the literal path follows as a second
-/// key, because `index-file` stores a pushed absolute path verbatim. A key
+/// is relativized by [`stored_key`]; the literal path follows as a second
+/// key, because `index-file` stored a pushed absolute path verbatim before
+/// #9510 and such keys may still be indexed. A key
 /// that is empty, only `.`, or holds a `..` segment is refused with
 /// `400 remove_file_path_outside_root`.
 /// Test: `remove_file_takes_an_absolute_in_root_path_9236`,
@@ -47,6 +51,67 @@ pub(super) fn remove_keys(
         }
         return Ok(vec![path.to_string()]);
     }
+    match stored_key(roots, Path::new(path)) {
+        Some(key) => Ok(vec![key, path.to_string()]),
+        None => Err(outside_root(index_id, roots, path)),
+    }
+}
+
+/// The stored key one `index-file` path is written under (#9510).
+///
+/// Why: an absolute path was stored verbatim, so re-adding a file by its
+/// absolute path duplicated its index-relative chunks, and no `path_prefix`
+/// search or reindex could reach the copy.
+/// What: a relative path is returned unchanged, as before #9510. An absolute
+/// path maps to the key [`remove_keys`] removes first, so the watcher, a
+/// reindex and `index-file` agree on it; one naming no file under a root is
+/// refused with `400 index_file_path_outside_root`.
+/// Test: `index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510`,
+/// `index_file_refuses_an_absolute_path_outside_the_root_9510`,
+/// `index_file_keeps_a_relative_path_unchanged_9510`.
+pub(super) fn index_key(
+    index_id: &str,
+    roots: &IndexRoots,
+    path: &str,
+) -> Result<String, (StatusCode, serde_json::Value)> {
+    if !Path::new(path).is_absolute() {
+        return Ok(path.to_string());
+    }
+    stored_key(roots, Path::new(path)).ok_or_else(|| index_outside_root(index_id, roots, path))
+}
+
+/// Purge the copy a pre-#9510 `index-file` stored under the verbatim
+/// absolute `path`, when `path` differs from its stored `key`.
+///
+/// Why: an absolute re-add writes only `key`, so a copy left under the
+/// verbatim key kept answering unscoped searches beside the new one.
+/// What: a no-op for a relative path or one equal to `key`. Otherwise the
+/// fail-closed purge `remove-file` and the #8922 excluded-path purge use —
+/// chunks, then the content hash — and a reindex stamp once rows left redb.
+/// A failed purge is an error; the caller holds the teardown guard (#3049).
+/// Returns the chunks removed.
+/// Test: `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
+/// `index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`.
+pub(super) async fn purge_verbatim_key(
+    indexer: &crate::core::CodeIndexer,
+    index_id: &crate::core::registry::IndexId,
+    path: &str,
+    key: &str,
+) -> anyhow::Result<usize> {
+    if !Path::new(path).is_absolute() || path == key {
+        return Ok(0);
+    }
+    let (removed, committed) = indexer.purge_file_committed(index_id, path).await?;
+    if committed {
+        indexer.record_incremental_commit(path).await;
+    }
+    Ok(removed)
+}
+
+/// The stored key of the absolute `path`, or `None` when it names no file
+/// under any root.
+fn stored_key(roots: &IndexRoots, path: &Path) -> Option<String> {
+    let root = roots.primary();
     // #9236: relativized by text first, so an in-root symlink keeps its key.
     // #7434: against every root, deepest first; a file under additional slot
     // `n` maps to its stored `@root<n+1>/…` key, the one the hash forget uses.
@@ -61,14 +126,14 @@ pub(super) fn remove_keys(
         .collect();
     table.sort_by_key(|(_, r)| std::cmp::Reverse(r.components().count()));
     for (slot, r) in table {
-        if let Some(rel) = absolute_key(r, Path::new(path)) {
+        if let Some(rel) = absolute_key(r, path) {
             if !names_an_in_root_file(&rel, r) {
-                break;
+                return None;
             }
-            return Ok(vec![stored_path_for_slot(slot, &rel), path.to_string()]);
+            return Some(stored_path_for_slot(slot, &rel));
         }
     }
-    Err(outside_root(index_id, roots, path))
+    None
 }
 
 /// True when the relative `key` names a file under the root.
@@ -111,15 +176,43 @@ fn absolute_key(root: &Path, path: &Path) -> Option<String> {
     Some(rel.to_string_lossy().into_owned())
 }
 
-/// The 400 a path naming no file under the index root answers.
-fn outside_root(index_id: &str, roots: &IndexRoots, path: &str) -> (StatusCode, serde_json::Value) {
-    // #7434: name every root the path could have been under.
-    let root = roots
+/// Every root the path could have been under, for a refusal message (#7434).
+fn root_list(roots: &IndexRoots) -> String {
+    roots
         .all()
         .iter()
         .map(|r| r.display().to_string())
         .collect::<Vec<_>>()
-        .join("`, `");
+        .join("`, `")
+}
+
+/// The 400 an `index-file` path naming no file under the index root answers.
+fn index_outside_root(
+    index_id: &str,
+    roots: &IndexRoots,
+    path: &str,
+) -> (StatusCode, serde_json::Value) {
+    let root = root_list(roots);
+    (
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({
+            "error": "index_file_path_outside_root",
+            "index_id": index_id,
+            "path": path,
+            "indexed": false,
+            "chunks": 0,
+            "message": format!(
+                "index-file takes an index-relative path (such as `src/lib.rs`) or an \
+                 absolute path to a file under `{root}`; `{path}` is neither, so nothing \
+                 was indexed"
+            ),
+        }),
+    )
+}
+
+/// The 400 a `remove-file` path naming no file under the index root answers.
+fn outside_root(index_id: &str, roots: &IndexRoots, path: &str) -> (StatusCode, serde_json::Value) {
+    let root = root_list(roots);
     (
         StatusCode::BAD_REQUEST,
         serde_json::json!({
