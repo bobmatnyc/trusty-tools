@@ -252,10 +252,10 @@ fn overlap_across_files_names_both_files() {
         let expected = Finding::Overlap {
             first: origin(PROJ_A, r#"slack.routes[0] "bob-dm""#),
             second: origin(PROJ_B, &second),
-            field: if field == "name" { "name" } else { "recipient" },
+            field,
             value: value.into(),
         };
-        assert_eq!(report.findings, [expected.clone()], "{field}");
+        assert_eq!(report.findings, std::slice::from_ref(&expected), "{field}");
         assert_eq!(expected.scope(), FindingScope::DenyAll);
         let msg = expected.to_string();
         assert!(
