@@ -308,3 +308,78 @@ fn read_tool_schemas_never_require_palace() {
         }
     }
 }
+
+/// Seed one palace with a drawer, then describe it with `reads`.
+///
+/// Why: both #8254 registry-error tests need the same real, open-able palace
+/// so the only thing that fails is the read under test.
+async fn row_with_reads(reads: crate::tools::palace_index::RegistryReads) -> Value {
+    let (state, _tmp) = test_state();
+    dispatch_tool(&state, "palace_create", json!({"name": "faulted"}))
+        .await
+        .expect("palace_create");
+    dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({"palace": "faulted", "text": "a drawer so the palace is not empty", "room": "Planning"}),
+    )
+    .await
+    .expect("memory_remember");
+    // Production builds rows on the blocking pool; so does this.
+    tokio::task::spawn_blocking(move || {
+        crate::tools::palace_index::palace_row_with(&state, "faulted", None, &reads)
+    })
+    .await
+    .expect("join palace row")
+}
+
+/// Why (#8254, Fail-Open Check): `list_wings().map(len).unwrap_or(0)` turned a
+/// wing-registry read error into `wing_count: 0`, which a caller reads as a
+/// palace with no wings. Under redb 4.3 a failed scan keeps failing, so that
+/// is every wing.
+/// What: describes a real palace with a wing read that fails, and asserts the
+/// row is marked `unreadable` and carries no wing count.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn palace_index_reports_a_wing_read_error_instead_of_zero_wings() {
+    let reads = crate::tools::palace_index::RegistryReads {
+        wing_count: |_| Err(anyhow::anyhow!("#8254 injected wings read fault")),
+        rooms: crate::tools::palace_index::LIVE_REGISTRY.rooms,
+    };
+    let row = row_with_reads(reads).await;
+    assert!(
+        row["unreadable"]
+            .as_str()
+            .is_some_and(|e| e.contains("list wings")),
+        "a failed wing read must mark the row unreadable, got {row}"
+    );
+    assert!(
+        row.get("wing_count").is_none(),
+        "no wing count is invented: {row}"
+    );
+}
+
+/// Why (#8254, Fail-Open Check): `list_room_summaries(..).unwrap_or_default()`
+/// turned a room-registry read error into `room_count: 0` and an empty rooms
+/// list, which a caller reads as a palace with no rooms.
+/// What: describes a real palace with a room read that fails, and asserts the
+/// row is marked `unreadable` and carries no room list.
+/// Test: this test.
+#[tokio::test(flavor = "multi_thread")]
+async fn palace_index_reports_a_room_read_error_instead_of_no_rooms() {
+    let reads = crate::tools::palace_index::RegistryReads {
+        wing_count: crate::tools::palace_index::LIVE_REGISTRY.wing_count,
+        rooms: |_| Err(anyhow::anyhow!("#8254 injected rooms read fault")),
+    };
+    let row = row_with_reads(reads).await;
+    assert!(
+        row["unreadable"]
+            .as_str()
+            .is_some_and(|e| e.contains("list rooms")),
+        "a failed room read must mark the row unreadable, got {row}"
+    );
+    assert!(
+        row.get("rooms").is_none(),
+        "no empty room list is invented: {row}"
+    );
+}

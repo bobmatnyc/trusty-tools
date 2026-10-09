@@ -42,7 +42,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use trusty_common::memory_core::decay::DecayConfig;
 use trusty_common::memory_core::palace::Drawer;
-use trusty_common::memory_core::store::rooms::list_room_summaries;
+use trusty_common::memory_core::store::kg_redb::KgStoreRedb;
+use trusty_common::memory_core::store::rooms::{list_room_summaries, RoomSummary};
 use trusty_common::memory_core::PalaceRegistry;
 
 use super::log_index::InjectionIndex;
@@ -274,17 +275,29 @@ fn content_digest(content: &str) -> String {
 /// incompatible-format store is an error, never a silently empty palace.
 /// Test: `report_writes_nothing_to_the_palace`,
 /// `incompatible_store_is_reported_not_recreated`.
-fn read_palace_drawers(
+fn read_palace_drawers(data_dir: &Path) -> Result<(Vec<Drawer>, Vec<RoomSummary>)> {
+    read_palace_drawers_with(data_dir, list_room_summaries)
+}
+
+/// [`read_palace_drawers`] with the ROOMS read supplied by the caller.
+///
+/// Why: #8254 — the ROOMS scan's `Err` used to be defaulted to an empty list,
+/// so a storage failure rendered every drawer under a short id instead of its
+/// room label and the palace reported success. The seam lets a test hand in a
+/// failing read against a real palace copy.
+/// What: loads drawers, then calls `list_rooms`; either error propagates and
+/// the census records the palace as failed.
+/// Test: `room_read_error_fails_the_palace_instead_of_dropping_labels`.
+pub(super) fn read_palace_drawers_with(
     data_dir: &Path,
-) -> Result<(
-    Vec<Drawer>,
-    Vec<trusty_common::memory_core::store::rooms::RoomSummary>,
-)> {
+    list_rooms: fn(&Arc<KgStoreRedb>) -> Result<Vec<RoomSummary>>,
+) -> Result<(Vec<Drawer>, Vec<RoomSummary>)> {
     // #4891: read a copy, never the live file.
     let read = with_store_copy(data_dir, &std::env::temp_dir(), |store| {
         let drawers = store.load_drawers().context("load drawers")?;
         let store = Arc::new(store);
-        let rooms = list_room_summaries(&store).unwrap_or_default();
+        // #8254: a failed ROOMS scan fails the palace; it is not an empty list.
+        let rooms = list_rooms(&store).context("list room summaries for the backfill report")?;
         Ok((drawers, rooms))
     })?;
     Ok(read.unwrap_or_default())
@@ -294,10 +307,7 @@ fn read_palace_drawers(
 ///
 /// ADR-0027 D1.3: labels are read from the ROOMS table, never recomputed. A
 /// drawer whose room predates the registry has no row, so the id stands in.
-fn room_label(
-    rooms: &[trusty_common::memory_core::store::rooms::RoomSummary],
-    drawer: &Drawer,
-) -> String {
+fn room_label(rooms: &[RoomSummary], drawer: &Drawer) -> String {
     rooms
         .iter()
         .find(|r| r.id == drawer.room_id)

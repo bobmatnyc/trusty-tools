@@ -381,8 +381,11 @@ impl ActivityLog {
     /// cap is enforced on every write; tests can also call it directly.
     /// What: counts rows, computes the overflow, and removes the lowest-id
     /// rows in batches of [`EVICTION_BATCH`]. On the `Discard` variant,
-    /// returns immediately — there is nothing to evict.
-    /// Test: `appends_evict_oldest_when_capped`.
+    /// returns immediately — there is nothing to evict. The id collection is
+    /// [`oldest_ids`], which propagates a storage error rather than committing
+    /// an empty batch and spinning this loop (#8254).
+    /// Test: `appends_evict_oldest_when_capped`,
+    /// `prune_propagates_a_storage_error_instead_of_dropping_the_batch`.
     pub fn prune(&self) -> Result<()> {
         let db = match self {
             Self::Redb { db, .. } => db,
@@ -403,12 +406,7 @@ impl ActivityLog {
                     .context("open_table activity (prune)")?;
                 // Collect the oldest ids first so the borrow of `table`
                 // doesn't overlap the remove calls.
-                let oldest: Vec<u64> = table
-                    .iter()
-                    .context("iter activity for prune")?
-                    .take(to_drop as usize)
-                    .filter_map(|res| res.ok().map(|(k, _)| k.value()))
-                    .collect();
+                let oldest = oldest_ids(&table, to_drop as usize)?;
                 for id in oldest {
                     let _ = table.remove(&id).context("remove activity entry")?;
                 }
@@ -447,10 +445,14 @@ impl ActivityLog {
     /// is the simplest correct strategy), and returns at most `limit` rows
     /// starting at `offset`. `limit` is clamped at the call site by the
     /// handler; this method does not clamp so tests can exercise edge cases.
-    /// On the `Discard` variant, returns an empty vec.
+    /// On the `Discard` variant, returns an empty vec. A storage error from the
+    /// iterator propagates rather than truncating the feed (#8254); a single
+    /// row whose JSON body fails to decode is still skipped with a warning,
+    /// which is a payload fault, not a storage one.
     /// Test: `list_returns_newest_first`,
     /// `list_filters_by_source_palace_and_time`,
-    /// `discard_variant_drops_writes_and_returns_empty_reads`.
+    /// `discard_variant_drops_writes_and_returns_empty_reads`,
+    /// `list_propagates_a_storage_error_instead_of_truncating`.
     pub fn list(
         &self,
         filter: &ActivityFilter,
@@ -470,13 +472,12 @@ impl ActivityLog {
         let mut skipped: usize = 0;
 
         // redb tables iterate ascending; `.rev()` walks descending.
-        for res in table
-            .iter()
-            .context("iter activity (list)")?
-            .rev()
-            .flatten()
-        {
-            let (_, bytes) = res;
+        // #8254: `.flatten()` here dropped every `Err` row, so a storage
+        // failure truncated the feed and reported success. redb 4.3.0 keeps
+        // returning an error after the first one, which turned that into the
+        // silent loss of the whole remaining feed.
+        for res in table.iter().context("iter activity (list)")?.rev() {
+            let (_, bytes) = res.context("read activity row (list)")?;
             let entry: ActivityEntry = match serde_json::from_slice(bytes.value().as_slice()) {
                 Ok(e) => e,
                 Err(e) => {
@@ -500,6 +501,29 @@ impl ActivityLog {
         }
         Ok(out)
     }
+}
+
+/// Ids of the `limit` lowest-keyed rows, in ascending key order.
+///
+/// Why: [`ActivityLog::prune`]'s FIFO eviction needs the oldest ids before it
+/// can remove them, and the borrow of `table` must end before the removes
+/// start. #8254: this used to be `filter_map(|res| res.ok())`, which discarded
+/// a `StorageError` from the iterator — prune then collected no ids, removed
+/// nothing, and committed, so `count()` was unchanged and prune's `loop` spun
+/// forever. redb 4.3.0 makes a failed iterator keep failing rather than
+/// silently skipping the unreadable entries, which turned that from a chance
+/// hang into a certain one.
+/// What: walks the table ascending, stopping after `limit` rows, and propagates
+/// the first read error instead of yielding a short batch.
+/// Test: `prune_propagates_a_storage_error_instead_of_dropping_the_batch`,
+/// `appends_evict_oldest_when_capped`.
+fn oldest_ids(table: &impl ReadableTable<u64, Vec<u8>>, limit: usize) -> Result<Vec<u64>> {
+    let mut out: Vec<u64> = Vec::with_capacity(limit);
+    for res in table.iter().context("iter activity for prune")?.take(limit) {
+        let (k, _) = res.context("read activity row for prune")?;
+        out.push(k.value());
+    }
+    Ok(out)
 }
 
 /// Predicate implementing the filter combination used by [`ActivityLog::list`].
@@ -806,3 +830,9 @@ mod tests {
         assert_eq!(log.count().unwrap(), 10);
     }
 }
+
+// #8254: redb fault-injection tests live beside this file to keep it under
+// the SLOC cap.
+#[cfg(test)]
+#[path = "activity_fault_tests.rs"]
+mod fault_tests;

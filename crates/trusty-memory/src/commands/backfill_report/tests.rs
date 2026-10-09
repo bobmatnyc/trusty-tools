@@ -680,6 +680,31 @@ fn incompatible_store_is_reported_not_recreated() {
     );
 }
 
+/// Why (#8254, Fail-Open Check): the ROOMS scan's `Err` was defaulted to an
+/// empty list, so a storage failure reported the palace as read and showed
+/// every drawer under a short id instead of its room. Under redb 4.3 a failed
+/// iterator keeps failing, so that is the whole table, not one row.
+/// What: reads a real palace copy with a ROOMS read that fails, and asserts the
+/// palace read is an error naming the rooms step.
+/// Test: this test.
+#[test]
+fn room_read_error_fails_the_palace_instead_of_dropping_labels() {
+    let root = tempfile::tempdir().expect("root");
+    fixture_palace(root.path(), "p", &[drawer("a", 0.5, 1, &[])]);
+
+    let got = super::candidates::read_palace_drawers_with(&root.path().join("p"), |_| {
+        Err(anyhow::anyhow!("#8254 injected rooms read fault"))
+    });
+
+    let err = got.err().unwrap_or_else(|| {
+        panic!("a failed ROOMS read must fail the palace, not empty its labels")
+    });
+    assert!(
+        format!("{err:#}").contains("list room summaries"),
+        "the error must come from the rooms read, got: {err:#}"
+    );
+}
+
 #[test]
 fn palace_without_a_kg_store_is_empty_not_an_error() {
     let logs = tempfile::tempdir().expect("logs");

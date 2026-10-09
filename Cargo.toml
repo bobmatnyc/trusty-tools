@@ -467,7 +467,7 @@ bytes = "1"
 clap_complete = "4"
 which = "6"
 open = "5"
-redb = "4"
+redb = "4.3"
 postcard = { version = "1", features = ["alloc"] }
 ndarray = "0.16"
 scip = "0.7"
