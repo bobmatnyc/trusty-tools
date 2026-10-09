@@ -100,7 +100,7 @@ pub(crate) fn prepare(req: &LoadRequest) -> Prepared {
         // #8454 S2b: no HOME, no cwd fallback.
         return denied(HostError::HomeUnknown);
     };
-    let host = match read_host(&req.host_path).and_then(|t| parse_host(&t, Some(home))) {
+    let host = match read_host(&req.host_path, home).and_then(|t| parse_host(&t, Some(home))) {
         Ok(h) => h,
         Err(e) => return denied(e),
     };

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::policy::fs::{read_host, read_project, ProjectRead};
 use crate::policy::gate::{branch_state, BranchState};
-use crate::policy::host::parse_host;
+use crate::policy::host::{parse_host, HostError};
 use crate::policy::load::{assemble, check_canonical, listed_dirs, prepare, LoadRequest, Prepared};
 use crate::policy::project_file::ProjectFile;
 use crate::policy::report::{FileState, Finding, LoadReport};
@@ -32,10 +32,12 @@ use crate::policy::table::ChannelPolicy;
 /// [`BranchState`], plus the canonical-path verdict over every `projects`
 /// entry on every channel, served or not, since a fresh load denies all on
 /// any of them. A read or git fault is recorded as its message, so a
-/// change of fault also reloads.
+/// change of fault also reloads; the host read includes the check that its
+/// real path is the one under the canonical home.
 /// Test: `same_size_same_mtime_edit_is_seen_on_reload`,
 /// `branch_switch_with_identical_bytes_regates`,
-/// `host_fault_on_an_unserved_entry_denies_all_on_refresh`.
+/// `host_fault_on_an_unserved_entry_denies_all_on_refresh`,
+/// `trusty_tools_becoming_a_symlink_denies_all_on_refresh`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     host: Result<String, String>,
@@ -53,7 +55,12 @@ struct ProjectPrint {
 
 impl Fingerprint {
     fn of(req: &LoadRequest) -> Self {
-        let host = read_host(&req.host_path).map_err(|e| e.to_string());
+        // #8454 Architect ruling: read_host checks the canonical path, so a
+        // ~/.trusty-tools swapped for a symlink changes the fingerprint.
+        let host = match req.home.as_deref() {
+            Some(home) => read_host(&req.host_path, home).map_err(|e| e.to_string()),
+            None => Err(HostError::HomeUnknown.to_string()),
+        };
         let ceiling = match (&host, req.home.as_deref()) {
             (Ok(text), Some(home)) => parse_host(text, Some(home)).ok(),
             _ => None,

@@ -6,11 +6,12 @@
 //! What: [`read_host`] and [`read_project`] check each named path with
 //! `symlink_metadata`, open the file with [`open_regular`] (no symlink, no
 //! wait on a FIFO), confirm the opened file is the one checked, and read at
-//! most [`MAX_FILE_BYTES`]. Every fault is a named error; nothing falls back
-//! to a default.
+//! most [`MAX_FILE_BYTES`]. [`read_host`] also requires the file's canonical
+//! path to be the one under the canonical home. Every fault is a named
+//! error; nothing falls back to a default.
 //! Test: `symlinked_file_refused`, `host_config_parent_dir_symlink_denies_all`,
-//! `host_missing_denies_all`, `oversized_files_are_refused`,
-//! `fifo_route_file_is_refused_without_blocking`.
+//! `symlinked_trusty_tools_dir_denies_all`, `host_missing_denies_all`,
+//! `oversized_files_are_refused`, `fifo_route_file_is_refused_without_blocking`.
 
 use std::fs::{File, Metadata};
 use std::io::{ErrorKind, Read as _};
@@ -22,6 +23,9 @@ use crate::policy::project_file::ProjectFileError;
 
 /// The largest host or project file read (256 KiB, S2b plan §2).
 pub const MAX_FILE_BYTES: u64 = 256 * 1024;
+
+/// The host file's place under the home directory.
+const HOST_UNDER_HOME: &str = ".trusty-tools/trusty-mpm/config.yaml";
 
 /// Why a file read failed, before it is named as a host or project fault.
 #[derive(Debug)]
@@ -35,22 +39,33 @@ pub(super) enum ReadFault {
     TooLarge,
 }
 
-/// Read `config.yaml` as text, refusing a symlinked file or parent dir.
+/// Read `config.yaml` as text, refusing a symlinked file or parent dir,
+/// and a path that does not resolve to the one under the canonical home.
 ///
 /// Why: the host file is the root of trust; a fault here denies all.
 /// What: the parent directory must be a real directory and the file a real
-/// file (no symlink at either), under the size cap, and UTF-8.
+/// file (no symlink at either); `canonicalize(path)` must equal
+/// `canonicalize(home).join(".trusty-tools/trusty-mpm/config.yaml")`; the
+/// file must be under the size cap and UTF-8.
 /// Test: `host_missing_denies_all`, `host_config_parent_dir_symlink_denies_all`,
-/// `symlinked_file_refused`.
-pub fn read_host(path: &Path) -> Result<String, HostError> {
+/// `symlinked_file_refused`, `symlinked_trusty_tools_dir_denies_all`,
+/// `trusty_tools_becoming_a_symlink_denies_all_on_refresh`.
+pub fn read_host(path: &Path, home: &Path) -> Result<String, HostError> {
     let parent = path.parent().ok_or(HostError::Missing)?;
-    let bytes = (|| {
-        // #8454 Architect review: a symlinked ~/.trusty-tools/trusty-mpm/
-        // would let another tree supply the ceiling.
-        check_dir(parent, "its parent directory")?;
-        read_regular(path, "config.yaml")
-    })()
-    .map_err(|f| match f {
+    // #8454 Architect review: a symlinked ~/.trusty-tools/trusty-mpm/
+    // would let another tree supply the ceiling.
+    check_dir(parent, "its parent directory").map_err(host_fault)?;
+    let checked = check_regular(path, "config.yaml").map_err(host_fault)?;
+    // #8454 Architect ruling: a symlinked ~/.trusty-tools passes both lstat
+    // checks above; only the canonical path refuses it, before the read.
+    check_under_home(path, home)?;
+    let bytes = read_checked(path, "config.yaml", &checked).map_err(host_fault)?;
+    String::from_utf8(bytes).map_err(|_| HostError::NotUtf8)
+}
+
+/// Name a host-file read fault.
+fn host_fault(f: ReadFault) -> HostError {
+    match f {
         ReadFault::Missing => HostError::Missing,
         ReadFault::NotRegular { what, kind } => HostError::NotRegular { what, kind },
         ReadFault::Io(kind) => HostError::Read {
@@ -59,8 +74,29 @@ pub fn read_host(path: &Path) -> Result<String, HostError> {
         ReadFault::TooLarge => HostError::TooLarge {
             limit: MAX_FILE_BYTES,
         },
+    }
+}
+
+/// Require `canonicalize(path)` to be the host file under the canonical
+/// home. A missing file is `Missing`; any other resolve error denies.
+fn check_under_home(path: &Path, home: &Path) -> Result<(), HostError> {
+    let unresolved = || HostError::NotUnderHome {
+        reason: "or the home directory cannot be resolved",
+    };
+    let real = std::fs::canonicalize(path).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => HostError::Missing,
+        _ => unresolved(),
     })?;
-    String::from_utf8(bytes).map_err(|_| HostError::NotUtf8)
+    let want = std::fs::canonicalize(home)
+        .map_err(|_| unresolved())?
+        .join(HOST_UNDER_HOME);
+    if real != want {
+        return Err(HostError::NotUnderHome {
+            reason: "does not resolve to ~/.trusty-tools/trusty-mpm/config.yaml \
+                     under the real home directory (a symlinked component)",
+        });
+    }
+    Ok(())
 }
 
 /// A project's route file, as read.
@@ -118,17 +154,27 @@ fn check_dir(path: &Path, what: &'static str) -> Result<(), ReadFault> {
 
 /// Read a regular, non-symlink file of at most [`MAX_FILE_BYTES`].
 fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
-    let not_regular = ReadFault::NotRegular { what, kind: "file" };
+    let checked = check_regular(path, what)?;
+    read_checked(path, what, &checked)
+}
+
+/// `lstat` `path` and require a regular file (no symlink).
+fn check_regular(path: &Path, what: &'static str) -> Result<Metadata, ReadFault> {
     let checked = lstat(path)?;
     if !checked.file_type().is_file() {
-        return Err(not_regular);
+        return Err(ReadFault::NotRegular { what, kind: "file" });
     }
+    Ok(checked)
+}
+
+/// Open and read `path`, which must still be the file `checked` saw.
+fn read_checked(path: &Path, what: &'static str, checked: &Metadata) -> Result<Vec<u8>, ReadFault> {
     let (mut file, opened) = open_regular(path, what)?;
     // #8454: the path was swapped for another file between the check and
     // the open; the load gate would refuse foreign bytes too. Untested: only
     // a swap inside that window reaches it, and no test can time one.
-    if !same_file(&checked, &opened) {
-        return Err(not_regular);
+    if !same_file(checked, &opened) {
+        return Err(ReadFault::NotRegular { what, kind: "file" });
     }
     let mut bytes = Vec::new();
     file.by_ref()
