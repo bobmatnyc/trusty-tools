@@ -222,7 +222,8 @@ async fn a_helper_whose_pane_runs_claude_is_not_registered() {
 
 /// Fail-Open Check, #8942 delta critic MEDIUM: a helper pane whose own
 /// process is `claude` (`tmux new -s x claude`) is not registered. Real tmux
-/// on a private `-L` server; the fake `claude` is `sleep` under that name.
+/// on a private `-L` server; the fake `claude` is a process named `claude`
+/// that sleeps.
 #[tokio::test]
 async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
     let Some((server, root, mgr)) = real_tmux_manager("claude").await else {
@@ -231,11 +232,23 @@ async fn a_helper_whose_pane_process_is_claude_is_not_registered() {
     let reg = tmux_registration(&root);
     let fake_claude = root.path().join("claude");
     // macOS names a process after the symlink it ran through and kills a
-    // copied system binary; Linux names it after the file, so copy there.
+    // copied system binary, so link there.
     #[cfg(target_os = "macos")]
     std::os::unix::fs::symlink("/bin/sleep", &fake_claude).expect("fake claude");
+    // #9525: Linux names a process after the file it executed, script
+    // included. A copied `/bin/sleep` fails on uutils' multicall binary,
+    // which picks its applet from argv[0]. No `exec`: that would rename
+    // the pane process `sleep`.
     #[cfg(not(target_os = "macos"))]
-    std::fs::copy("/bin/sleep", &fake_claude).expect("fake claude");
+    {
+        std::fs::write(&fake_claude, "#!/bin/sh\n/bin/sleep \"$1\"\nexit $?\n")
+            .expect("fake claude");
+        std::fs::set_permissions(
+            &fake_claude,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("chmod fake claude");
+    }
     let pane = helper_pane(
         &server,
         &reg,
@@ -329,6 +342,7 @@ fn tmux_registration(root: &tempfile::TempDir) -> SupervisorRegistration {
 }
 
 /// The poller's pane on `server`, in the Architect directory, running `cmd`.
+/// #9524: returned once tmux reports the pane there, not its stale first cwd.
 fn helper_pane(
     server: &PrivateTmuxServer,
     reg: &SupervisorRegistration,

@@ -132,6 +132,33 @@ fn socket_prefix(socket: Option<&str>) -> Vec<String> {
     prefix
 }
 
+/// How long a fresh pane's reported cwd may lag `new-session -c` (#9524).
+///
+/// tmux 3.6a reports the server's own cwd for about 12 ms after the create.
+/// The same bound and pause as production's `resume_workdir::verify_pane_cwd`;
+/// spelled again here because this file compiles into two targets (module docs).
+const PANE_CWD_DEADLINE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Pause between two reads while waiting out [`PANE_CWD_DEADLINE`].
+const PANE_CWD_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Re-run `read` until `settled` accepts its answer or [`PANE_CWD_DEADLINE`]
+/// passes; returns the last answer either way (#9524).
+///
+/// A test helper's wait, so the deadline is not an error: the caller's own
+/// assertion reports what the last read saw.
+/// Test: [`tests::a_session_opened_under_the_root_is_killed_on_drop`].
+fn poll_pane_cwd<T>(mut read: impl FnMut() -> T, settled: impl Fn(&T) -> bool) -> T {
+    let give_up = std::time::Instant::now() + PANE_CWD_DEADLINE;
+    loop {
+        let answer = read();
+        if settled(&answer) || std::time::Instant::now() >= give_up {
+            return answer;
+        }
+        std::thread::sleep(PANE_CWD_POLL);
+    }
+}
+
 /// Age past which a reserved-namespace session is certainly leaked (#6116).
 ///
 /// Why: no test in this suite holds a tmux session for anything close to half
@@ -300,7 +327,8 @@ impl ScratchTmuxSession {
     /// its own tests need to place a session inside — and outside — a fixture
     /// root on purpose (#6542). Every other caller wants the inherited cwd and
     /// keeps [`ScratchTmuxSession::spawn`].
-    /// What: adds `-c <cwd>` when `cwd` is `Some`; otherwise identical.
+    /// What: adds `-c <cwd>` when `cwd` is `Some`, and then waits (bounded,
+    /// #9524) until tmux reports the pane there; otherwise identical.
     /// Test: [`tests::a_session_opened_under_the_root_is_killed_on_drop`].
     ///
     /// #7848: reachable in the lib only through [`Self::spawn`], which is
@@ -377,6 +405,31 @@ impl ScratchTmuxSession {
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         );
+        if let Some(dir) = cwd {
+            // #9524: hand the session back only once tmux reports the pane in
+            // `dir`, so a caller's first cwd read is not tmux's stale one.
+            let want = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let mut args = socket_prefix(socket);
+            args.extend([
+                "display-message".to_string(),
+                "-p".to_string(),
+                "-t".to_string(),
+                trusty_common::tmux::exact_window_target(name),
+                "#{pane_current_path}".to_string(),
+            ]);
+            poll_pane_cwd(
+                || {
+                    tmux_output_owned(tmux_bin, &args)
+                        .ok()
+                        .filter(|out| out.status.success())
+                        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                },
+                |path| {
+                    path.as_deref()
+                        .is_some_and(|p| std::path::Path::new(p) == want)
+                },
+            );
+        }
         Self {
             tmux_bin: tmux_bin.to_string(),
             socket: socket.map(str::to_string),
@@ -456,37 +509,51 @@ fn live_session_names(tmux_bin: &str, socket: Option<&str>) -> std::collections:
         .collect()
 }
 
-/// Names of live sessions holding at least one pane whose working directory is
-/// inside `root`.
+/// Names of sessions absent from `preexisting` holding at least one pane whose
+/// working directory is inside `root`.
 ///
 /// What: reads `<session-name>\t<pane-path>` from `list-panes -a`. A line that
 /// does not split on the tab is SKIPPED, never selected — an unparseable line
 /// leaves a session alive rather than killing one this guard cannot identify.
 /// `Path::starts_with` compares whole components, so `/tmp/ab` does not match a
-/// pane sitting in `/tmp/abc`.
-/// Test: [`tests::a_session_outside_the_root_is_left_alone`].
+/// pane sitting in `/tmp/abc`. #9524: a new session's pane path is stale for
+/// ~12 ms, so the listing is re-read (bounded by [`PANE_CWD_DEADLINE`]) while
+/// any new pane still sits outside `root`.
+/// Test: [`tests::a_session_outside_the_root_is_left_alone`],
+/// [`tests::a_session_opened_under_the_root_is_killed_on_drop`].
 fn sessions_with_pane_under(
     tmux_bin: &str,
     socket: Option<&str>,
     root: &std::path::Path,
+    preexisting: &std::collections::BTreeSet<String>,
 ) -> std::collections::BTreeSet<String> {
     let mut args = socket_prefix(socket);
     args.push("list-panes".to_string());
     args.push("-a".to_string());
     args.push("-F".to_string());
     args.push("#{session_name}\t#{pane_current_path}".to_string());
-    let Ok(out) = tmux_output_owned(tmux_bin, &args) else {
-        return std::collections::BTreeSet::new();
+    let new_panes = || -> Vec<(String, String)> {
+        let Ok(out) = tmux_output_owned(tmux_bin, &args) else {
+            return Vec::new();
+        };
+        if !out.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.trim_end().split_once('\t'))
+            .filter(|(name, _)| !preexisting.contains(*name))
+            .map(|(name, path)| (name.to_string(), path.to_string()))
+            .collect()
     };
-    if !out.status.success() {
-        return std::collections::BTreeSet::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| line.trim_end().split_once('\t'))
-        .filter(|(_, pane_path)| std::path::Path::new(pane_path).starts_with(root))
-        .map(|(name, _)| name.to_string())
-        .collect()
+    let under = |path: &str| std::path::Path::new(path).starts_with(root);
+    poll_pane_cwd(new_panes, |panes| {
+        panes.iter().all(|(_, p)| under(p.as_str()))
+    })
+    .into_iter()
+    .filter(|(_, path)| under(path.as_str()))
+    .map(|(name, _)| name)
+    .collect()
 }
 
 /// Sessions the CODE UNDER TEST created inside a fixture directory, killed when
@@ -557,10 +624,14 @@ impl FixtureTmuxSessions {
     /// The sessions this guard currently owns — new since [`Self::watch`] and
     /// rooted under the fixture directory.
     pub(crate) fn spawned(&self) -> Vec<String> {
-        sessions_with_pane_under(&self.tmux_bin, self.socket.as_deref(), &self.root)
-            .into_iter()
-            .filter(|name| !self.preexisting.contains(name))
-            .collect()
+        sessions_with_pane_under(
+            &self.tmux_bin,
+            self.socket.as_deref(),
+            &self.root,
+            &self.preexisting,
+        )
+        .into_iter()
+        .collect()
     }
 }
 
