@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::services::manifest::{PortDiscovery, ServiceDecl, ServicesManifest};
+use crate::services::manifest::{HealthProbe, PortDiscovery, ServiceDecl, ServicesManifest};
 
 // ── Mock implementations ──
 
@@ -88,6 +88,7 @@ fn static_manifest_with_port(port: u16) -> ServicesManifest {
             port_discovery: PortDiscovery::Static,
             port_file: None,
             health_url: Some("http://localhost:{port}/health".to_string()),
+            health_probe: HealthProbe::Http,
             log_path: None,
             version_cmd: Some("echo 1.0.0".to_string()),
             process_match: Some("test-svc".to_string()),
@@ -112,6 +113,7 @@ fn file_manifest(port_file: &str) -> ServicesManifest {
             port_discovery: PortDiscovery::File,
             port_file: Some(port_file.to_string()),
             health_url: Some("http://localhost:{port}/health".to_string()),
+            health_probe: HealthProbe::Http,
             log_path: None,
             version_cmd: None,
             process_match: Some("dyn-svc".to_string()),
@@ -136,6 +138,7 @@ fn sidecar_manifest() -> ServicesManifest {
             port_discovery: PortDiscovery::Static,
             port_file: None,
             health_url: None,
+            health_probe: HealthProbe::Http,
             log_path: None,
             version_cmd: None,
             process_match: Some("sidecar-proc".to_string()),

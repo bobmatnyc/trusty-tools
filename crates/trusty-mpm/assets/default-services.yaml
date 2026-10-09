@@ -5,16 +5,23 @@ version: 1
 
 services:
   trusty-search:
-    description: "Hybrid BM25 + vector + KG code search daemon"
-    default_port: 7878
+    description: "Hybrid BM25 + vector + KG code search daemon (Unix socket)"
+    # #9543: trusty-search binds no TCP port (ADR-0032). Health is
+    # `search.health` on its RPC socket, resolved as the trusty-search client
+    # resolves it (TRUSTY_SEARCH_SOCKET, else its data directory); there is no
+    # port and no health_url.
+    health_probe: uds_search
+    default_port: null
     port_discovery: static
-    health_url: "http://localhost:{port}/health"
+    health_url: null
     log_path: "~/Library/Logs/trusty-search/stderr.log"
     version_cmd: "trusty-search --version"
-    process_match: "trusty-search"
-    start_cmd: "trusty-search start"
+    # #9543: the daemon only — a bare "trusty-search" also matches every
+    # `trusty-search serve` MCP bridge. Matches `start --foreground ...` too.
+    process_match: "trusty-search start"
+    start_cmd: "trusty-search start --no-http"
     stop_cmd: "trusty-search stop"
-    restart_cmd: "trusty-search stop && trusty-search start"
+    restart_cmd: "trusty-search stop && trusty-search start --no-http"
 
   trusty-analyze:
     description: "Code analysis sidecar daemon (complexity, smells, quality)"

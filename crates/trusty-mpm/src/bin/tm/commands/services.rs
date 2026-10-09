@@ -21,23 +21,15 @@ use crate::formatters::services::{print_service_status_block, print_services_tab
 /// Test: `cli_parses_services_*` unit tests cover argument parsing; the
 /// integration test in `tests/services_integration.rs` covers live probing.
 pub(crate) fn services(action: ServicesAction) -> anyhow::Result<()> {
-    use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};
+    use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest, load_user_manifest};
 
     // Resolve the manifest: user file if present, otherwise embedded default.
+    // #9543: a retired trusty-search entry is mapped on read, with one WARN on
+    // stderr; the user's file is never written.
     let services_yaml_path = claude_mpm_dir().join("services.yaml");
-    let manifest = if services_yaml_path.exists() {
-        let text = std::fs::read_to_string(&services_yaml_path)?;
-        let mut m: ServicesManifest = serde_yaml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("failed to parse services.yaml: {e}"))?;
-        m.validate()
-            .map_err(|e| anyhow::anyhow!("services.yaml validation failed: {e}"))?;
-        m.expand_paths()?;
-        m
-    } else {
-        ServicesManifest::default_manifest()
-    };
+    let manifest = load_user_manifest(&services_yaml_path, &mut std::io::stderr())?;
 
-    let mut discoverer = Discoverer::new(manifest);
+    let mut discoverer = Discoverer::new(manifest.clone());
 
     match action {
         ServicesAction::List { json } => {
@@ -67,32 +59,30 @@ pub(crate) fn services(action: ServicesAction) -> anyhow::Result<()> {
             }
         },
 
-        ServicesAction::Port { name } => match discoverer.status(&name) {
+        // #9543: a socket-only service has no port or URL; the error names
+        // its socket.
+        ServicesAction::Port { name } => match discoverer.port(&name) {
             None => {
                 eprintln!("unknown service: {name}");
                 std::process::exit(2);
             }
-            Some(status) => match status.port {
-                Some(port) => print!("{port}"),
-                None => {
-                    eprintln!("{name}: port unavailable (service down or no port)");
-                    std::process::exit(1);
-                }
-            },
+            Some(Ok(port)) => print!("{port}"),
+            Some(Err(reason)) => {
+                eprintln!("{reason}");
+                std::process::exit(1);
+            }
         },
 
-        ServicesAction::Url { name } => match discoverer.status(&name) {
+        ServicesAction::Url { name } => match discoverer.url(&name) {
             None => {
                 eprintln!("unknown service: {name}");
                 std::process::exit(2);
             }
-            Some(status) => match status.url {
-                Some(url) => print!("{url}"),
-                None => {
-                    eprintln!("{name}: URL unavailable (service down or no port)");
-                    std::process::exit(1);
-                }
-            },
+            Some(Ok(url)) => print!("{url}"),
+            Some(Err(reason)) => {
+                eprintln!("{reason}");
+                std::process::exit(1);
+            }
         },
 
         ServicesAction::Health { name } => match discoverer.health(&name) {
@@ -147,18 +137,9 @@ pub(crate) fn services(action: ServicesAction) -> anyhow::Result<()> {
         }
 
         ServicesAction::Restart { name } => {
-            // Look up the service in the manifest directly (no probe needed for restart).
-            let manifest_for_restart = if services_yaml_path.exists() {
-                let text = std::fs::read_to_string(&services_yaml_path)?;
-                let m: ServicesManifest = serde_yaml::from_str(&text)
-                    .map_err(|e| anyhow::anyhow!("failed to parse services.yaml: {e}"))?;
-                m.validate()
-                    .map_err(|e| anyhow::anyhow!("services.yaml validation failed: {e}"))?;
-                m
-            } else {
-                ServicesManifest::default_manifest()
-            };
-            match manifest_for_restart.services.get(&name) {
+            // Look up the service in the manifest directly (no probe needed for
+            // restart). #9543: the manifest already loaded above, not a re-read.
+            match manifest.services.get(&name) {
                 None => {
                     eprintln!("unknown service: {name}");
                     std::process::exit(2);

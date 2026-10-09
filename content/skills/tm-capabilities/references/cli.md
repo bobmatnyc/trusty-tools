@@ -156,7 +156,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `port` — Print the port number for a service (scriptable: PORT=$(tm services port X))
   - `restart` — Restart a service using its manifest `restart_cmd`
   - `status` — Show detailed status for one service
-  - `url` — Print the full base URL for a service (e.g. http://localhost:7878)
+  - `url` — Print the full base URL for a service (e.g. http://localhost:7880)
 - `sessctl` — Manage SESSCTL control-plane sessions (WI-2 #1593)
   - `auth` — Show the auth state for a session
   - `connect` — Connect to a session (writer if write-lock available, observer otherwise)

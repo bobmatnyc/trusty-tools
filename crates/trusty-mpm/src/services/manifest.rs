@@ -58,6 +58,36 @@ pub enum PortDiscovery {
     File,
 }
 
+/// How `tm services` decides whether a service is healthy.
+///
+/// Why (#9543): trusty-search serves its RPC socket and binds no TCP port
+/// (ADR-0032), so an HTTP probe of a port reports that live daemon DOWN. The
+/// default stays `Http`, so every existing manifest behaves as before.
+/// What: `Http` GETs the expanded `health_url`. `UdsSearch` calls
+/// `search.health` on the trusty-search socket, resolved as the trusty-search
+/// client resolves it; it needs no `default_port` and no `health_url`, and the
+/// service reports no port and no URL.
+/// Test: `default_manifest_declares_trusty_search_by_socket`,
+/// `uds_search_is_up_against_a_socket_only_daemon`.
+// #9543: non_exhaustive so a later probe variant is not a breaking change.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HealthProbe {
+    /// GET `health_url` with `{port}` expanded. Most services.
+    #[default]
+    Http,
+    /// `search.health` over the trusty-search Unix socket.
+    UdsSearch,
+}
+
+impl HealthProbe {
+    /// True for the default, so serialisation omits it.
+    fn is_http(&self) -> bool {
+        *self == HealthProbe::Http
+    }
+}
+
 /// Declaration of one service in the manifest.
 ///
 /// Why: all fields that could be absent for sidecar-only daemons (embedderd)
@@ -67,7 +97,10 @@ pub enum PortDiscovery {
 /// What: static metadata plus optional lifecycle commands. The discovery engine
 /// uses this to build a `ServiceStatus` at query time.
 /// Test: `manifest_parse_happy_path`, `manifest_parse_minimal_service`.
+// #9543: non_exhaustive so a later field is not a breaking change; build one
+// by deserialising a manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ServiceDecl {
     /// Human-readable description shown in `tm services list`.
     pub description: String,
@@ -89,6 +122,11 @@ pub struct ServiceDecl {
     /// None for services with no HTTP surface (sidecars).
     #[serde(default)]
     pub health_url: Option<String>,
+
+    /// How health is probed; `http` when absent. #9543: `uds_search` probes
+    /// the trusty-search socket and needs no port or `health_url`.
+    #[serde(default, skip_serializing_if = "HealthProbe::is_http")]
+    pub health_probe: HealthProbe,
 
     /// Path to the most-recent log file. Tilde is expanded at read time.
     #[serde(default)]
@@ -173,7 +211,8 @@ impl ServicesManifest {
     /// than a confusing `None` at query time.
     /// What: checks version <= 1; all ports in 1-65535; port_file present when
     /// port_discovery == File; process_match free of shell metacharacters;
-    /// health_url (when present) contains a `{port}` template token.
+    /// health_url (when present on an `http`-probed service) contains a
+    /// `{port}` template token.
     /// Test: `manifest_rejects_future_version`, `manifest_rejects_invalid_port`,
     /// `manifest_rejects_file_discovery_without_port_file`,
     /// `manifest_rejects_metacharacters_in_process_match`.
@@ -208,7 +247,9 @@ impl ServicesManifest {
             }
 
             // health_url template must contain {port} for port expansion.
-            if let Some(url) = &decl.health_url
+            // #9543: a socket-probed service never expands a port.
+            if decl.health_probe == HealthProbe::Http
+                && let Some(url) = &decl.health_url
                 && !url.contains("{port}")
             {
                 return Err(ManifestValidationError::InvalidHealthUrl(
@@ -296,9 +337,11 @@ mod tests {
         assert!(m.services.contains_key("trusty-memory"));
         assert!(m.services.contains_key("trusty-embedderd"));
 
+        // #9543: trusty-search is probed over its socket — no port, no URL.
         let ts = &m.services["trusty-search"];
-        assert_eq!(ts.default_port, Some(7878));
-        assert!(ts.health_url.as_deref().unwrap().contains("{port}"));
+        assert_eq!(ts.health_probe, HealthProbe::UdsSearch);
+        assert_eq!(ts.default_port, None);
+        assert!(ts.health_url.is_none());
 
         let mem = &m.services["trusty-memory"];
         assert_eq!(mem.port_discovery, PortDiscovery::File);

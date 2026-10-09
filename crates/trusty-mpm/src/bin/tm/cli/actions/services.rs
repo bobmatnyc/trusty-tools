@@ -42,14 +42,18 @@ pub(crate) enum ServicesAction {
     ///
     /// Prints just the port number on stdout. Exit code: 0 if port known,
     /// 1 if service is down or port unavailable, 2 if unknown service.
+    /// A socket-only service (trusty-search) has no port: exit 1, and the
+    /// error names its socket (#9543).
     Port {
         /// Service name.
         name: String,
     },
 
-    /// Print the full base URL for a service (e.g. http://localhost:7878).
+    /// Print the full base URL for a service (e.g. http://localhost:7880).
     ///
     /// Exit code: 0 if URL known, 1 if service is down, 2 if unknown service.
+    /// A socket-only service (trusty-search) has no URL: exit 1, and the error
+    /// names its socket (#9543).
     Url {
         /// Service name.
         name: String,
