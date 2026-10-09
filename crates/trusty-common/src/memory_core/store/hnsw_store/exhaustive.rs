@@ -82,8 +82,8 @@ pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 24_576;
 ///
 /// Why: see the module header — below [`EXHAUSTIVE_SCAN_MAX_POINTS`] the graph
 /// traversal can silently omit a true nearest neighbour, and a full scan cannot.
-/// What: walks the point indexation (which visits layer 0 upward and yields
-/// every stored point exactly once), skips `tombstoned` ids, evaluates the
+/// What: snapshots every stored point layer by layer, from layer 0 upward,
+/// one short read guard per layer (#9487), skips `tombstoned` ids, evaluates the
 /// index's own distance function, keeps one entry per `vector_id` so a
 /// re-upsert's shadow copy cannot occupy two result slots, and returns every
 /// surviving `(vector_id, distance)` pair sorted ascending by distance.
@@ -113,20 +113,25 @@ pub(super) const EXHAUSTIVE_SCAN_MAX_POINTS: usize = 24_576;
 /// `resolve_shadowed` corrects it.
 /// Test: `exhaustive_scan_returns_every_point_the_graph_holds`,
 /// `search_scores_a_re_upserted_drawer_by_its_current_vector`,
-/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`.
+/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`,
+/// `concurrent_search_and_upsert_never_deadlock`.
 pub(super) fn exhaustive_nearest(
     index: &Hnsw<'static, f32, DistCosine>,
     query: &[f32],
     tombstoned: &HashSet<u64>,
 ) -> Vec<(u64, f32)> {
-    // `hnsw_rs`'s point iterator unwraps the entry point (`hnsw.rs:662`), which
-    // is `None` until the first insert — iterating an empty index panics.
-    if index.get_nb_point() == 0 {
-        return Vec::new();
-    }
+    // #9487: never `for point in index.get_point_indexation()`. That iterator
+    // holds a shared guard on the point table and re-acquires it past layer 0
+    // (`hnsw.rs:661`); a queued insert writer then blocks the second acquire
+    // and waits on the first, forever. One guard per layer, released before
+    // scoring, holds no lock twice and never holds one across an acquire.
+    let points = index.get_point_indexation();
+    let snapshot: Vec<_> = (0..=index.get_max_level_observed() as usize)
+        .flat_map(|layer| points.get_layer_iterator(layer).collect::<Vec<_>>())
+        .collect();
     let dist = index.get_distance();
     let mut best: HashMap<u64, f32> = HashMap::new();
-    for point in index.get_point_indexation() {
+    for point in snapshot {
         let id = point.get_origin_id() as u64;
         if tombstoned.contains(&id) {
             continue;
@@ -176,7 +181,8 @@ pub(super) fn exhaustive_nearest(
 /// against every point.
 /// Test: `search_scores_a_re_upserted_drawer_by_its_current_vector`,
 /// `search_drops_a_shadowed_candidate_whose_vector_row_is_gone`,
-/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`.
+/// `search_keeps_a_true_neighbour_a_shadowed_decoy_would_evict`,
+/// `concurrent_search_and_upsert_never_deadlock`.
 pub(super) fn resolve_shadowed<T: ReadableTable<u64, &'static [u8]>>(
     candidates: &mut Vec<(u64, f32)>,
     shadowed: &HashSet<u64>,

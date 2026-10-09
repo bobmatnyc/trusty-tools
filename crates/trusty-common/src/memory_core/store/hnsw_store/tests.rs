@@ -2049,3 +2049,7 @@ mod latency_profile_tests;
 // #9280: reopen determinism at the exact-scan threshold, and id tiebreaks.
 #[path = "determinism_tests.rs"]
 mod determinism_tests;
+
+// #9487: concurrent search + upsert must not deadlock.
+#[path = "concurrency_tests.rs"]
+mod concurrency_tests;
