@@ -480,8 +480,9 @@ async fn main() -> anyhow::Result<()> {
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`
     // here — rather than inside the async `prune_idle` — guarantees no live async
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
+    let explicit_url = cli.url.as_deref();
     let result = match cli.command {
-        None => commands::guided::run_guided_default(&client, &url, cli.url.as_deref()).await,
+        None => commands::guided::run_guided_default(&client, &url, explicit_url).await,
         // #6288 step 1: dispatched over the socket before URL resolution.
         Some(
             Command::Status
@@ -538,9 +539,9 @@ async fn main() -> anyhow::Result<()> {
             interval_ms,
             single_pane,
         }) => {
-            let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
-            // #6483: multipane by default; `--single-pane` opts into the chat.
-            trusty_mpm::tui::run_initial_view(resolved, interval_ms, None, single_pane).await
+            // #9556: an explicit `--url` is pinned; #6483: multipane by default.
+            let client = trusty_mpm::tui::client_for(tui_url.as_deref());
+            trusty_mpm::tui::run_initial_view_with(client, interval_ms, None, single_pane).await
         }
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
@@ -635,7 +636,7 @@ async fn main() -> anyhow::Result<()> {
             target,
             json,
             single_pane,
-        }) => attach_cmd(&client, &url, &target, json, single_pane).await,
+        }) => attach_cmd(&client, &url, &target, json, single_pane, explicit_url).await,
         Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.

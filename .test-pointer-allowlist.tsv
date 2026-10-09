@@ -591,7 +591,6 @@ crates/trusty-mpm/src/telegram/focus.rs	render_inject_sent
 crates/trusty-mpm/src/telegram/focus.rs	render_summary_no_focus
 crates/trusty-mpm/src/telegram/focus.rs	render_summary_ok
 crates/trusty-mpm/src/telegram/formatter/fleet.rs	session_focus_keyboard_builds_button
-crates/trusty-mpm/src/tui/coordinator/poll.rs	rediscover_is_noop_when_reachable
 crates/trusty-mpm/src/tui/coordinator/render.rs	render_result_renders_managed_session
 crates/trusty-mpm/src/tui/coordinator/state.rs	output_log_is_bounded
 crates/trusty-mpm/src/tui/dashboard/mod.rs	sidebar_starts_visible_with_sessions

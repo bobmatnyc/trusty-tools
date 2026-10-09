@@ -805,7 +805,9 @@ fn catalog_indicator_reflects_staleness() {
 // winning a port race — see `crate::test_support::dead_loopback_url`.
 use crate::test_support::dead_loopback_url;
 
+// #9556: serial — resolution reads TRUSTY_DATA_DIR_OVERRIDE, which serial tests set.
 #[tokio::test]
+#[serial_test::serial]
 async fn poll_marks_unreachable_clears_sessions() {
     // Why: `coord_poll_daemon` must, on an unreachable daemon, clear any rows it
     // previously showed and flip `daemon_reachable` to false (DOC-13 §6) so the
@@ -858,6 +860,31 @@ async fn poll_marks_unreachable_clears_sessions() {
         0,
         "clearing the list clamps the selection back to the controller row"
     );
+}
+
+/// Why (#9556): the `--single-pane` coordinator poll must report a dead
+/// explicit endpoint as unreachable instead of re-pointing at the lock-file or
+/// default daemon. With the URL pinned the poll dials only `dead`: a bound,
+/// never-listening loopback socket, refused at once on every host, including
+/// WSL2, where port 1 hangs instead (#9526).
+/// Test: itself.
+#[tokio::test]
+async fn coord_poll_keeps_explicit_url() {
+    let bound = tokio::net::TcpSocket::new_v4()
+        .and_then(|s| s.bind("127.0.0.1:0".parse().expect("addr")).map(|()| s))
+        .expect("bind loopback socket");
+    let dead = format!("http://{}", bound.local_addr().expect("bound addr"));
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    let mut state = CoordinatorState::live();
+    state.daemon_reachable = true;
+
+    coord_poll_daemon(&mut state, &mut client).await;
+
+    assert!(
+        !state.daemon_reachable,
+        "a dead explicit URL reports unreachable"
+    );
+    assert_eq!(client.base_url(), dead, "the explicit URL is kept");
 }
 
 // ---- STUI-0 banner --------------------------------------------------------

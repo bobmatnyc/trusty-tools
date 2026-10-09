@@ -96,9 +96,26 @@ fn build_rpc_client() -> Result<reqwest::Client> {
 /// `trusty_mcp::daemon_bridge` (`no_spawn_returns_err_without_spawning`,
 /// `no_spawn_error_uses_hint_when_set`).
 fn build_bridge_config() -> DaemonBridgeConfig {
-    let no_spawn = crate::commands::launchd_probe::compute_no_spawn(
-        crate::commands::launchd_probe::launchd_may_own_daemon(),
-    );
+    build_bridge_config_for(trusty_mpm::core::isolated_environment())
+}
+
+/// [`build_bridge_config`] with the sandbox check injected.
+///
+/// Why (#9556): the bridge auto-spawns a plain `tm daemon` when nothing
+/// answers, which in a sandbox binds the host default address.
+/// What: `isolated` forces `no_spawn` and swaps the hint for the
+/// `DaemonUrlError::NoSandboxDaemon` message.
+/// Test: `build_bridge_config_never_spawns_under_isolation`.
+fn build_bridge_config_for(isolated: bool) -> DaemonBridgeConfig {
+    let no_spawn = isolated
+        || crate::commands::launchd_probe::compute_no_spawn(
+            crate::commands::launchd_probe::launchd_may_own_daemon(),
+        );
+    let no_spawn_hint = if isolated {
+        trusty_mpm::core::DaemonUrlError::NoSandboxDaemon.to_string()
+    } else {
+        mpm_no_spawn_hint()
+    };
     DaemonBridgeConfig {
         service_name: "trusty-mpm".to_string(),
         // The daemon picks its own port and records it in the lock file; no addr
@@ -116,7 +133,7 @@ fn build_bridge_config() -> DaemonBridgeConfig {
         startup_timeout: None, // shared 30s default
         poll_interval: None,   // shared 500ms default
         no_spawn,
-        no_spawn_hint: Some(mpm_no_spawn_hint()),
+        no_spawn_hint: Some(no_spawn_hint),
     }
 }
 
@@ -388,6 +405,20 @@ mod tests {
         assert_eq!(
             cfg.no_spawn, plist_exists,
             "no_spawn must track the live plist probe"
+        );
+    }
+
+    /// Why (#9556): a sandboxed bridge must fail closed with the sandbox
+    /// message instead of spawning on the host default.
+    /// Test: itself.
+    #[test]
+    fn build_bridge_config_never_spawns_under_isolation() {
+        let cfg = build_bridge_config_for(true);
+        assert!(cfg.no_spawn, "a sandboxed bridge never spawns a daemon");
+        let hint = cfg.no_spawn_hint.unwrap_or_default();
+        assert!(
+            hint.contains("no daemon reachable for this sandbox"),
+            "{hint}"
         );
     }
 

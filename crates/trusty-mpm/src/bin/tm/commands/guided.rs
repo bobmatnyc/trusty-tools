@@ -97,6 +97,12 @@ pub(crate) async fn run_guided_default(
         eprintln!("tm: {err}");
         return Err(err.into());
     }
+    // #9556: a sandbox with no daemon of its own stops before the picker, the
+    // autostart and the offline fallback.
+    if let Err(err) = trusty_mpm::core::refuse_isolated_no_daemon(url) {
+        eprintln!("tm: {err}");
+        return Err(err.into());
+    }
 
     // #2023 component C: an in-pane relaunch takes priority over EVERYTHING
     // below — project detection, the picker, the daemon-unreachable fallback.

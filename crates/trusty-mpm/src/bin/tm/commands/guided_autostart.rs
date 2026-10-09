@@ -139,6 +139,9 @@ pub(crate) async fn ensure_daemon_started(
     use super::guided_autostart_plan::{
         AutostartPlan, autostart_timeout_error, blocked_error, prepare_autostart, timeout_evidence,
     };
+    // #9556: fail closed before any launchd kickstart (the host's live daemon)
+    // or detached spawn (the host default address) in a sandbox.
+    trusty_mpm::core::refuse_daemon_spawn_when_isolated()?;
     let launchd = launchd_target();
     let run = run_launchctl;
     let identify = super::daemon_pid_identity::pid_identity;

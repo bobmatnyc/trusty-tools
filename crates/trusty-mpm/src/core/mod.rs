@@ -419,8 +419,10 @@ pub mod worktree_removal_facts;
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{
     DEFAULT_CONSOLE_ADDR, DEFAULT_DAEMON_ADDR, DEFAULT_DAEMON_URL, DaemonUrlError,
-    EXIT_DAEMON_URL_UNREACHABLE, GATEWAY_PATH, default_daemon_addr, explicit_url_from_env,
-    lock_file_path, resolve_daemon_url, resolve_daemon_url_for_cli, resolve_daemon_url_probing,
-    resolve_daemon_url_via_gateway,
+    EXIT_DAEMON_URL_UNREACHABLE, GATEWAY_PATH, ISOLATED_NO_DAEMON_URL, client_lock_url,
+    console_addr_to_probe, default_daemon_addr, explicit_url_from_env, isolated_environment,
+    lock_file_path, refuse_daemon_spawn_when_isolated, refuse_isolated_no_daemon,
+    resolve_daemon_url, resolve_daemon_url_for_cli, resolve_daemon_url_probing,
+    resolve_daemon_url_via_gateway, try_resolve_daemon_url,
 };
 pub use error::{Error, Result};

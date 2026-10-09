@@ -53,7 +53,9 @@ const PROJECT_CTL_INTERVAL_MS: u64 = 1500;
 /// [`trusty_mpm::core::explicit_url_from_env`] (a bare invocation runs BEFORE
 /// `Cli::try_parse()`, so there is no `--url` flag to read and no clap-parsed
 /// `Option<String>` field yet) — and hands off to
-/// `trusty_mpm::tui::project_ctl::run`.
+/// the multipane dashboard through
+/// `trusty_mpm::tui::run_initial_view_with`, pinning an explicit URL
+/// (#9556).
 ///
 /// Why (#2487): this call site used to pass `Some(crate::cli::DEFAULT_URL)` —
 /// the literal default URL string — relying on the resolvers' old
@@ -74,7 +76,10 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     let client = trusty_mpm::client::http_client::default_client();
     let explicit = trusty_mpm::core::explicit_url_from_env();
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, explicit.as_deref()).await;
-    trusty_mpm::tui::project_ctl::run(url, PROJECT_CTL_INTERVAL_MS).await
+    // #9556: an explicit `TRUSTY_MPM_URL` is pinned against re-discovery.
+    let daemon =
+        trusty_mpm::client::DaemonClient::new(url).with_pinned_base_url(explicit.is_some());
+    trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false).await
 }
 
 /// True when `argv` is exactly a bare `tm projects` invocation (#2118).

@@ -391,6 +391,7 @@ impl DaemonClient {
             http: config::default_client(),
             home: None,
             socket: Some(socket),
+            base_url_pinned: false,
         }
     }
 

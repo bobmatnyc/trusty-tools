@@ -17,6 +17,8 @@
 //! async glue mirrors the dashboard's `poll_daemon`.
 
 use crate::client::{CoordinatorSession, DaemonClient};
+// #9556: the one pin-aware re-discovery step every TUI poll shares (DOC-13 §6.3).
+use crate::tui::rediscover_daemon as rediscover;
 
 use super::rows::session_short_id;
 use super::state::{CoordinatorState, SessionEntry};
@@ -28,14 +30,16 @@ use super::state::{CoordinatorState, SessionEntry};
 /// duplicating the health/rediscover/map sequence. Mirrors the dashboard's
 /// `tui::poll_daemon` so both surfaces self-heal the daemon URL identically.
 /// What: probes health; if the daemon looks down, re-resolves the URL from the
-/// lock file via [`rediscover`] and retries one health probe. When reachable it
+/// lock file via [`rediscover`] (never an explicit, pinned URL — #9556) and
+/// retries one health probe. When reachable it
 /// pulls `GET /api/v1/sessions/context` and maps every session into a
 /// [`SessionEntry`]; on a transport error or an unreachable daemon it clears the
 /// rows and sets `daemon_reachable = false`. Always clamps the selection so a
 /// shrunk list never leaves `selected` past the end.
 /// Test: `poll_marks_unreachable_clears_sessions` drives the daemon-down branch
 /// against a guaranteed-dead client and asserts the rows clear + `daemon_reachable`
-/// flips false; the pure projection is covered by the `coord_session_to_entry_*`
+/// flips false; `coord_poll_keeps_explicit_url` covers a pinned URL (#9556);
+/// the pure projection is covered by the `coord_session_to_entry_*`
 /// tests. The daemon-UP path requires a live daemon, so it is exercised manually /
 /// by the daemon suites rather than unit-tested here.
 pub(crate) async fn coord_poll_daemon(state: &mut CoordinatorState, client: &mut DaemonClient) {
@@ -67,29 +71,6 @@ pub(crate) async fn coord_poll_daemon(state: &mut CoordinatorState, client: &mut
         state.sessions.clear();
     }
     state.clamp_selection();
-}
-
-/// Re-resolve the daemon URL from the lock file when the daemon is unreachable.
-///
-/// Why: [`DaemonClient`] is built once at startup; if the daemon later restarted
-/// onto a fresh ephemeral port the client would stay pinned to a stale address
-/// forever. Re-resolving on every failed poll lets the coordinator TUI self-heal
-/// exactly as the dashboard's `tui::rediscover_daemon` does (DOC-13 §6.3).
-/// What: when `reachable` is `false`, calls [`crate::core::resolve_daemon_url`]
-/// and, if it yields a different URL than the client currently holds, re-points
-/// the client and returns `true` so the caller retries one health probe.
-/// Test: `rediscover_is_noop_when_reachable`.
-fn rediscover(client: &mut DaemonClient, reachable: bool) -> bool {
-    if reachable {
-        return false;
-    }
-    let resolved = crate::core::resolve_daemon_url(None);
-    if resolved != client.base_url() {
-        client.set_base_url(resolved);
-        true
-    } else {
-        false
-    }
 }
 
 /// Project one coordinator-context session into a list [`SessionEntry`].

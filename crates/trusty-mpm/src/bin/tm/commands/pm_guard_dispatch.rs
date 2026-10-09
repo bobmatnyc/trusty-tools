@@ -825,6 +825,11 @@ where
                 .to_string(),
         );
     }
+    // #9556: the isolation refusal URL means no daemon for this sandbox — the
+    // #5923 "no daemon" arm, not an unanswered one.
+    if let Err(refusal) = trusty_mpm::core::refuse_isolated_no_daemon(url) {
+        return SharedTreeReply::Unavailable(refusal.to_string());
+    }
     // #8492: built on a detached thread, not inside this poll, so a caller's
     // deadline (`tokio::time::timeout`) can fire while the build still runs. Not
     // the blocking pool: runtime drop joins that pool, so the process could not
@@ -1499,6 +1504,29 @@ mod tests {
         assert!(detail.contains("could not be built"), "{detail}");
         let denied = owners_or_deny(reply).expect_err("the owner query must deny");
         assert!(denied.contains("could not be built"), "{denied}");
+    }
+
+    /// #9556 critic: the isolation refusal URL is "no daemon" (#5923), so it is
+    /// `Unavailable` with the sandbox message — not `Unanswered`, which denies
+    /// every tree-sharing dispatch with the wrong cause.
+    #[tokio::test]
+    async fn the_sandbox_refusal_url_is_unavailable_not_unanswered() {
+        let reply = post_shared_tree_with(
+            || reqwest::Client::builder().build(),
+            trusty_mpm::core::ISOLATED_NO_DAEMON_URL,
+            "11111111-1111-1111-1111-111111111111",
+            Path::new("/repo"),
+            &serde_json::json!({}),
+            SHARED_TREE_ROUTE,
+        )
+        .await;
+        let SharedTreeReply::Unavailable(detail) = &reply else {
+            panic!("the sandbox refusal must be Unavailable");
+        };
+        assert!(
+            detail.contains("no daemon reachable for this sandbox"),
+            "{detail}"
+        );
     }
 
     /// #8492: a build that panics on its detached thread still panics the

@@ -162,7 +162,16 @@ impl ConsoleInfo {
     /// rendered halves; the address rule is covered by `console_addr_from_*` in
     /// `trusty_mpm::core::discovery`.
     pub(crate) fn from_discovery_with_probe() -> Self {
-        let addr = trusty_mpm::core::discovery::console_addr();
+        // #9556: no target (isolated, nothing recorded) means no probe at all.
+        Self::probe(trusty_mpm::core::console_addr_to_probe())
+    }
+
+    /// Probe `addr`, or report offline without probing when there is none.
+    /// Test: `console_info_without_a_target_is_offline_and_unprobed`.
+    fn probe(addr: Option<String>) -> Self {
+        let Some(addr) = addr else {
+            return ConsoleInfo::default();
+        };
         let online = tcp_probe(&addr);
         ConsoleInfo { addr, online }
     }
@@ -332,10 +341,29 @@ pub(crate) fn tcp_probe(addr: &str) -> bool {
 /// `std::env::var(...).unwrap_or_else(...)` — also fixes a latent edge case:
 /// a whitespace-only `TRUSTY_MPM_URL` now falls through to the default instead
 /// of being probed literally.
-/// Test: `probe_default_addr_handles_url_without_port` (via the inner helper).
+/// Test: `probe_default_addr_handles_url_without_port` (via the inner helper),
+/// `probe_default_addr_skips_the_default_under_isolation`.
 fn probe_default_addr() -> Option<String> {
-    let url = trusty_mpm::core::explicit_url_from_env()
-        .unwrap_or_else(|| trusty_mpm::core::DEFAULT_DAEMON_URL.to_string());
+    probe_default_addr_from(
+        trusty_mpm::core::explicit_url_from_env(),
+        trusty_mpm::core::isolated_environment(),
+    )
+}
+
+/// [`probe_default_addr`] with the env read and the isolation check injected.
+///
+/// Why (#9556): the banner TCP-probed 127.0.0.1:7880 — the host's live daemon
+/// — from a sandbox whose own daemon had no lock.
+/// What: the explicit URL's `host:port`; with none, `None` when `isolated`,
+/// else [`trusty_mpm::core::DEFAULT_DAEMON_URL`]'s.
+/// Test: `probe_default_addr_skips_the_default_under_isolation`.
+fn probe_default_addr_from(explicit: Option<String>, isolated: bool) -> Option<String> {
+    let url = match explicit {
+        Some(url) => url,
+        // #9556: an isolated process never probes the host's default daemon.
+        None if isolated => return None,
+        None => trusty_mpm::core::DEFAULT_DAEMON_URL.to_string(),
+    };
     url_to_probe_addr(&url)
 }
 
@@ -397,14 +425,18 @@ pub(crate) fn abbreviate_home(path: &str) -> String {
 ///
 /// Why: the lock file is cheaper than an HTTP probe and tells us the daemon
 /// address before we decide whether to fire the probe.
-/// What: delegates to `core::daemon_identity::read_lock`, which rejects a
-/// record that does not carry the trusty-mpm product magic and one whose PID is
-/// no longer alive. #1731: this was the crate's third hand-rolled lock parser,
-/// and the panel would show an address taken from any TOML file at that path.
-/// Test: covered indirectly by the welcome-panel render tests; the record rules
-/// are covered in `trusty_mpm::core::daemon_identity`.
+/// What: delegates to `core::client_lock_url`, which reads the record through
+/// `core::daemon_identity::read_lock` (product magic, live PID) and, under
+/// isolation, drops a lock that belongs to the host (#9556). #1731: this was
+/// the crate's third hand-rolled lock parser, and the panel would show an
+/// address taken from any TOML file at that path.
+/// Test: `client_lock_url_ignores_a_host_lock_under_isolation` (in
+/// `trusty_mpm::core::discovery`); the record rules are covered in
+/// `trusty_mpm::core::daemon_identity`.
 fn read_lock_addr() -> Option<String> {
-    trusty_mpm::core::daemon_identity::read_lock().map(|lock| lock.addr)
+    // #9556: the filtered reader, so the banner and statusline never show the
+    // host daemon from a sandbox.
+    trusty_mpm::core::client_lock_url()
 }
 
 // ── Two-panel compositor bridge ───────────────────────────────────────────────
@@ -478,6 +510,31 @@ pub(crate) fn render_info_box(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#9556 critic): a sandbox banner with no recorded console reports
+    /// offline and names no address; it never dials the host's 7788.
+    /// Test: itself.
+    #[test]
+    fn console_info_without_a_target_is_offline_and_unprobed() {
+        let info = ConsoleInfo::probe(None);
+        assert!(!info.online);
+        assert!(info.addr.is_empty());
+    }
+
+    /// Why (#9556): a sandbox banner must not TCP-probe the host default.
+    /// Test: itself.
+    #[test]
+    fn probe_default_addr_skips_the_default_under_isolation() {
+        assert_eq!(probe_default_addr_from(None, true), None);
+        assert_eq!(
+            probe_default_addr_from(None, false).as_deref(),
+            Some("127.0.0.1:7880")
+        );
+        assert_eq!(
+            probe_default_addr_from(Some("http://127.0.0.1:9911".into()), true).as_deref(),
+            Some("127.0.0.1:9911")
+        );
+    }
 
     fn online(port: u16) -> DaemonInfo {
         DaemonInfo {
