@@ -18,6 +18,13 @@ fn assert_host_denies(what: &str, result: Result<crate::policy::HostCeiling, Hos
         "{what}: {:?}",
         report.findings
     );
+    // #8454: a token written into the host file never reaches a finding.
+    for f in &report.findings {
+        assert!(
+            !format!("{f} {f:?}").contains("xoxb"),
+            "{what}: value echoed in a finding"
+        );
+    }
     assert!(
         report
             .per_file
@@ -163,6 +170,22 @@ fn host_faults_deny_all() {
             HOST_ALL.replace("credential_ref: slack", "credential_ref: xoxb-123-pasted"),
             |e| matches!(e, HostError::CredentialRef { .. }),
         ),
+        // #8454: a type fault must not quote the value it read.
+        (
+            "token as the connection",
+            HOST_ALL.replace("connection: { credential_ref: slack }", "connection: xoxb-1"),
+            |e| matches!(e, HostError::Invalid { .. }),
+        ),
+        (
+            "token as enabled",
+            HOST_ALL.replacen("enabled: true", "enabled: xoxb-1", 1),
+            |e| matches!(e, HostError::Invalid { .. }),
+        ),
+        (
+            "token as projects",
+            HOST_ALL.replacen("projects: [/work/a, /work/b]", "projects: xoxb-1", 1),
+            |e| matches!(e, HostError::Invalid { .. }),
+        ),
     ];
     for (what, yaml, is) in cases {
         let result = host(&yaml);
@@ -175,6 +198,11 @@ fn host_faults_deny_all() {
         }
         assert_host_denies(what, result);
     }
+
+    // #8454: withholding the value keeps what the field expected.
+    let yaml = HOST_ALL.replacen("enabled: true", "enabled: xoxb-1", 1);
+    let shown = host(&yaml).expect_err("a token is not a bool").to_string();
+    assert!(shown.contains("expected a boolean"), "{shown}");
 
     // `~/` with no known home is a ceiling fault, never a cwd-relative path.
     let yaml = HOST_ALL.replacen("/work/a", "~/work/a", 1);
