@@ -1,0 +1,16 @@
+crate   trusty-mpm
+version 1.8.0
+reason  ServiceDecl gains health_probe; ServiceDecl and HealthProbe become #[non_exhaustive] (#9543). Supervisor-accepted minor; 2.0.0 reserved for G01.
+accept  constructible_struct_adds_field  ServiceDecl.health_probe
+accept  struct_marked_non_exhaustive     ServiceDecl
+# Q1 C (owner ruling, Refs #9543): the rows below name the lints and items the
+# Public API / SemVer check reports for 1.7.12 -> 1.8.0 (CI run 37947336485).
+# The two rows above name ServiceDecl.health_probe and the ServiceDecl
+# non_exhaustive lint; only the latter is reported, the former stays as written.
+accept  constructible_struct_adds_field  HealthScreen.search_socket
+accept  enum_struct_variant_field_added  MemoryVerb::Remember
+accept  enum_struct_variant_field_added  MemoryVerb::Note
+accept  enum_variant_added               MemoryVerb Forget
+accept  pub_module_level_const_missing   DEFAULT_SEARCH_URL
+accept  struct_pub_field_missing         HealthScreen search_url
+accept  trait_method_added               OrchestratorBackend secrets_get_ref
