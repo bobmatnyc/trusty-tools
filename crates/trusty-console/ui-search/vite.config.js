@@ -51,20 +51,19 @@ export default defineConfig({
     port: 5173,
     fs: { allow: ['.', FOUNDRY_COMPONENTS] },
     proxy: {
-      // Forward API calls to the trusty-search daemon during dev. The console
-      // is not in the loop here — `vite dev` serves the SPA at the origin root,
-      // so base.js derives `/` and these paths hit the daemon directly.
-      // #6285 retires that listener; this block moves to the console's
-      // `/api/search/` prefix with it.
-      '/health': 'http://127.0.0.1:7878',
-      '/status': 'http://127.0.0.1:7878',
-      '/indexes': 'http://127.0.0.1:7878',
-      '/search': 'http://127.0.0.1:7878',
-      '/chat': 'http://127.0.0.1:7878',
-      '/facts': 'http://127.0.0.1:7878',
-      '/logs': 'http://127.0.0.1:7878',
-      '/config': 'http://127.0.0.1:7878',
-      '/admin': 'http://127.0.0.1:7878',
+      // Forward API calls through the console's `/api/search` bridge, which
+      // reaches trusty-search over its Unix socket (#9214); the daemon has no
+      // TCP listener to dial. `vite dev` serves the SPA at the origin root, so
+      // base.js derives `/` and `/indexes` lands on `/api/search/indexes`.
+      // Not proxied: `/facts` (no api.js caller, no bridge row) and `/admin`
+      // (`POST /admin/stop` answers 501 from search_uds/map.rs).
+      '/health': 'http://127.0.0.1:7788/api/search',
+      '/status': 'http://127.0.0.1:7788/api/search',
+      '/indexes': 'http://127.0.0.1:7788/api/search',
+      '/search': 'http://127.0.0.1:7788/api/search',
+      '/chat': 'http://127.0.0.1:7788/api/search',
+      '/logs': 'http://127.0.0.1:7788/api/search',
+      '/config': 'http://127.0.0.1:7788/api/search',
     },
   },
   // Why: the API base-URL derivation (src/lib/base.js) reads document.baseURI,

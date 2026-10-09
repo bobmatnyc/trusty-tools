@@ -6,7 +6,7 @@
    * that doubles as a jump-off to the Indexes view.
    * What: Stat-cards grid + a recent-indexes table. All data flows through
    * the centralised state store (`state.svelte.js`).
-   * Test: `pnpm dev` in `ui/`, open http://127.0.0.1:7878/ui, confirm the
+   * Test: `pnpm dev` in `ui/`, open http://127.0.0.1:7788/tools/search/ (API via /api/search/), confirm the
    * counters render and clicking a row navigates to /indexes.
    */
   import { onMount, onDestroy } from 'svelte';

@@ -62,11 +62,6 @@ const EXEMPT: &[(&str, &str, &str)] = &[
         "moves in #9214 slice trusty-common",
     ),
     (
-        "crates/trusty-console/ui-search/vite.config.js",
-        "127.0.0.1:7878",
-        "moves in #9214 slice trusty-console",
-    ),
-    (
         "crates/trusty-search/src/commands/daemon_utils.rs",
         "DaemonAddrLayout::TRUSTY_SEARCH",
         "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",
