@@ -29,7 +29,8 @@ pub type SearchFocus = ListFocus;
 /// `test_all_selector`, `test_scroll_offset`.
 #[derive(Debug, Clone)]
 pub struct SearchTuiState {
-    /// The trusty-search daemon base URL being monitored.
+    /// The daemon being monitored, as shown in the header — the socket path
+    /// since #9214 (the field keeps its name).
     pub base_url: String,
     /// The daemon's current liveness state.
     pub daemon_status: DaemonStatus,

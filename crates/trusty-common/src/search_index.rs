@@ -31,14 +31,14 @@
 //! with no index logged `error sending request for url` and then withheld the
 //! id. It now dials [`crate::search_rpc`], the one trusty-search client, and an
 //! ABSENT socket is the fail-closed answer: nothing falls back to a port. The
-//! per-file incremental path below has not migrated and is still HTTP.
+//! per-file incremental path below speaks the socket too (#9214).
 //!
 //! Mid-task incremental re-indexing: [`ensure_project_indexed`] runs once, at
 //! task start — for a greenfield project that starts EMPTY, that means
 //! `search_code` finds nothing the engineer writes DURING the task.
 //! [`index_files_best_effort`] complements it: called after each successful
-//! file write/edit, it POSTs just that file's fresh content to the daemon's
-//! cheap per-file `POST /indexes/{id}/index-file` endpoint (never a full
+//! file write/edit, it sends just that file's fresh content to the daemon's
+//! cheap per-file `search.index.file.put` method (never a full
 //! reindex walk), so the growing codebase stays searchable within the same
 //! task. Same fail-open contract, and non-blocking by construction (hands the
 //! work to a background pool rather than relying on the caller to wrap it,
@@ -724,14 +724,13 @@ fn stop_batch_for_budget(
 /// — a spawned thread.
 /// What: derives `(root, index_id)` via [`crate::resolve_project_root`] /
 /// [`crate::derive_index_id`]; returns early (logged at debug) when the id is
-/// empty or [`crate::resolve_daemon_base_url`] finds no running daemon;
-/// otherwise builds ONE pooled HTTP client for the whole batch (issue #2785:
-/// so multiple files in a `write_files` batch reuse keep-alive connections
-/// instead of a fresh TCP connect per file) and, for each path, resolves it
+/// empty or the socket path cannot be derived; otherwise builds ONE
+/// current-thread runtime for the whole batch (#9214: the daemon's socket,
+/// never HTTP) and, for each path, resolves it
 /// against `root`, reads its current content from disk (an unreadable file —
 /// e.g. deleted since the write — is logged at debug and skipped, not fatal to
-/// the batch), and POSTs it via [`best_effort_index_one_file`] (which itself
-/// retries transient send failures with backoff). Every step fails open. The
+/// the batch), and sends it via [`best_effort_index_one_file`] (which itself
+/// retries transport failures with backoff). Every step fails open. The
 /// loop also stops early once [`BATCH_INDEX_BUDGET`] is spent (#2798) — a batch
 /// has no size limit, so without that a single large write pins a pool worker
 /// for minutes. Stopping goes through [`stop_batch_for_budget`], which counts
@@ -768,23 +767,26 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
     if refuse_daemon_write_under_test("incremental index update", &index_id) {
         return;
     }
-    let Some(base) = crate::resolve_daemon_base_url("trusty-search") else {
-        tracing::debug!(
-            "trusty-search daemon address not found; skipping incremental index \
-             update for '{index_id}' ({} file(s))",
-            paths.len()
-        );
-        return;
-    };
-
-    // One client per batch (#2785): reqwest keeps a connection pool per client,
-    // so reusing it across the batch's files lets rapid successive writes ride
-    // existing keep-alive connections instead of paying a fresh TCP connect
-    // (and its transient-failure risk) per file. Fail open if it cannot build.
-    let client = match build_index_client() {
-        Ok(c) => c,
+    // #9214: the daemon's socket, never `resolve_daemon_base_url`.
+    let socket = match crate::search_rpc::search_socket() {
+        Ok(socket) => socket,
         Err(e) => {
-            tracing::warn!("skipping incremental index update: could not build HTTP client: {e}");
+            tracing::debug!(
+                "skipping incremental index update for '{index_id}' ({} file(s)): {e:#}",
+                paths.len()
+            );
+            return;
+        }
+    };
+    // One runtime per batch (#2785): this runs on a plain pool thread, off any
+    // tokio runtime, so a current-thread runtime can drive every file's call.
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            tracing::warn!("skipping incremental index update: could not build a runtime: {e}");
             return;
         }
     };
@@ -818,7 +820,7 @@ fn index_files_inner(project_root: &Path, paths: &[std::path::PathBuf]) {
                 continue;
             }
         };
-        best_effort_index_one_file(&client, &base, &index_id, &rel, &content);
+        best_effort_index_one_file(&runtime, &socket, &index_id, &rel, &content);
     }
 }
 
@@ -842,44 +844,20 @@ fn relative_index_path(root: &Path, abs: &Path) -> String {
         .replace('\\', "/")
 }
 
-/// Build the pooled blocking HTTP client used for incremental index updates.
+/// Per-call budget for one file's `search.index.file.put` (#9214).
 ///
-/// Why: extracted so [`index_files_inner`] builds exactly ONE client per batch
-/// (issue #2785 connection reuse) and so the retry test can construct an
-/// identically-configured client.
-/// What: a `reqwest::blocking::Client` with a 2s overall / 750ms connect
-/// timeout — tight caps because this runs on a mid-task detached thread and
-/// must never stall a long task when the daemon is slow. reqwest maintains an
-/// idle-connection pool per client, so reusing the returned client across a
-/// batch's files amortises TCP/handshake setup.
-/// Test: covered indirectly by `post_index_file_retries_transient_send_failure`
-/// (which builds and drives one), and by the daemon-down fail-open path in
-/// `index_files_inner_skips_gracefully_when_daemon_down`.
-fn build_index_client() -> reqwest::Result<reqwest::blocking::Client> {
-    // #4392: trusty-search answers on loopback, so the client must not honour an
-    // exported HTTP_PROXY.
-    crate::http_client::blocking_loopback_client_builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .connect_timeout(std::time::Duration::from_millis(750))
-        .build()
-}
+/// The 2 s the retired HTTP client carried, so the transport change does not
+/// change what a slow daemon costs a batch.
+const INDEX_FILE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Max attempts (initial try + retries) for a single per-file index POST.
+/// Max attempts (initial try + retries) for a single per-file index write.
 ///
-/// Why: issue #2785 — under sustained mid-task load the per-file HTTP call sees
-/// transient send failures (connection resets / connect races under rapid
-/// repeated writes). A tiny bounded retry recovers the vast majority of them.
-/// What: 3 total attempts.
-/// Latency note: the SLEEP this adds beyond a single attempt is only
-/// [`retry_backoff`]'s sum (~200ms across 3 attempts) — cheap when failures
-/// are the fast connect-refused/reset kind this fix targets. But that is NOT
-/// the worst-case TOTAL latency: each attempt still carries
-/// [`build_index_client`]'s own per-call timeout (2s overall / 750ms connect),
-/// and a *slow-but-reachable* daemon can consume the full 2s on every attempt
-/// before erroring or hanging up. Worst case against such a daemon is
-/// therefore ~3 × 2s + ~200ms backoff ≈ **6.2s for a single file**, on the
-/// batch's detached thread — never on the tool-executor's return path, but
-/// worth knowing before shrinking timeouts or raising `MAX_INDEX_ATTEMPTS`.
+/// Why: issue #2785 — under sustained mid-task load the per-file call sees
+/// transient transport failures under rapid repeated writes. A tiny bounded
+/// retry recovers the vast majority of them.
+/// What: 3 total attempts. Worst case against a slow-but-reachable daemon is
+/// ~3 × [`INDEX_FILE_TIMEOUT`] + ~200 ms backoff ≈ 6.2 s for one file, on the
+/// batch's pool thread — never on the tool-executor's return path.
 /// Test: `retry_backoff_is_bounded_and_increasing`.
 const MAX_INDEX_ATTEMPTS: u32 = 3;
 
@@ -899,116 +877,107 @@ fn retry_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(millis)
 }
 
-/// Outcome of a per-file index POST, surfaced so tests can assert the
-/// retry-then-succeed AND retry-exhaustion paths without scraping logs.
+/// Outcome of a per-file index write, surfaced so tests can assert the
+/// retry-then-succeed, retry-exhaustion and refusal paths without logs.
 ///
-/// Why: [`post_index_file_with_retries`] is otherwise pure I/O; returning a
-/// small enum lets tests prove both that a transient send failure is retried
-/// and ultimately succeeds, and that persistent failure is reported (not
-/// silently hung or panicked) once attempts are exhausted.
-/// What: `Indexed` (2xx), `HttpStatus` (non-2xx — not retried; a 4xx/404 for an
-/// unknown index won't fix itself), or `SendFailed` (transport error on every
-/// attempt).
-/// Test: `post_index_file_retries_transient_send_failure`,
-/// `post_index_file_exhausts_retries_and_returns_send_failed`.
+/// What: `Indexed` (answered), `Refused` (the daemon answered with an error
+/// code — not retried; an unknown index won't fix itself), or `SendFailed`
+/// (no answer on every attempt).
+/// Test: `index_file_with_retries_recovers_a_transient_failure`,
+/// `index_file_with_retries_exhausts_and_returns_send_failed`,
+/// `index_file_with_retries_does_not_retry_a_refusal`.
 #[derive(Debug, PartialEq, Eq)]
 enum IndexOutcome {
     Indexed,
-    HttpStatus(u16),
+    Refused(i64),
     SendFailed,
 }
 
-/// POST a single file's `{path, content}` to `url`, retrying transient send
-/// failures with [`retry_backoff`] up to [`MAX_INDEX_ATTEMPTS`] times.
+/// Run `attempt` up to [`MAX_INDEX_ATTEMPTS`] times, retrying only transport
+/// failures, with [`retry_backoff`] between tries.
 ///
-/// Why: issue #2785 — a single transport-level `send()` failure (connection
-/// reset/connect race under rapid concurrent writes) previously dropped the
-/// update entirely. Retrying transport errors (but NOT HTTP non-2xx, which
-/// will not self-heal) recovers those transient failures.
-/// What: reuses the caller-supplied pooled `client`; on a transport `Err` it
-/// sleeps [`retry_backoff`] and retries (until attempts are exhausted → returns
-/// `SendFailed`); a 2xx returns `Indexed` immediately; any other status returns
-/// `HttpStatus` immediately (no retry). Never panics, never propagates. See
-/// [`MAX_INDEX_ATTEMPTS`]'s doc comment for the latency distinction between
-/// the ~200ms of added backoff SLEEP and the much larger (~6.2s) worst-case
-/// TOTAL wall time this function can spend against a slow-but-up daemon,
-/// since each of the 3 attempts carries its own 2s/750ms client timeout.
-/// Test: `post_index_file_retries_transient_send_failure`,
-/// `post_index_file_exhausts_retries_and_returns_send_failed`.
-fn post_index_file_with_retries(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    body: &serde_json::Value,
+/// Why: issue #2785 — one transport failure under rapid writes used to drop
+/// the update. A daemon refusal ([`crate::search_rpc::SearchRpcError`]) is an
+/// answer, so it is not retried.
+/// What: `attempt` is one `search.index.file.put` call; taking it as a closure
+/// keeps the retry policy testable without a socket.
+/// Test: `index_file_with_retries_recovers_a_transient_failure`,
+/// `index_file_with_retries_exhausts_and_returns_send_failed`,
+/// `index_file_with_retries_does_not_retry_a_refusal`.
+fn index_file_with_retries(
+    mut attempt: impl FnMut() -> anyhow::Result<serde_json::Value>,
 ) -> IndexOutcome {
-    let mut last_err: Option<reqwest::Error> = None;
-    for attempt in 0..MAX_INDEX_ATTEMPTS {
-        if attempt > 0 {
-            std::thread::sleep(retry_backoff(attempt));
+    let mut last_err = None;
+    for n in 0..MAX_INDEX_ATTEMPTS {
+        if n > 0 {
+            std::thread::sleep(retry_backoff(n));
         }
-        match client.post(url).json(body).send() {
-            Ok(resp) if resp.status().is_success() => return IndexOutcome::Indexed,
-            Ok(resp) => return IndexOutcome::HttpStatus(resp.status().as_u16()),
-            Err(e) => last_err = Some(e),
+        match attempt() {
+            Ok(_) => return IndexOutcome::Indexed,
+            Err(e) => match e.downcast_ref::<crate::search_rpc::SearchRpcError>() {
+                Some(refusal) => return IndexOutcome::Refused(refusal.code),
+                None => last_err = Some(e),
+            },
         }
     }
     if let Some(e) = &last_err {
-        tracing::debug!(
-            "per-file index POST to {url} failed after {MAX_INDEX_ATTEMPTS} attempts: {e}"
-        );
+        tracing::debug!("per-file index write failed after {MAX_INDEX_ATTEMPTS} attempts: {e:#}");
     }
     IndexOutcome::SendFailed
 }
 
-/// POST `/indexes/{id}/index-file` for a single file; failures are logged,
-/// never propagated.
+/// Send one file to `search.index.file.put`; failures are logged, never
+/// propagated.
 ///
 /// Why: mirrors [`best_effort_create_index`]'s fail-open contract for the
-/// per-file endpoint, hardened for issue #2785 (retry + connection reuse).
-/// What: delegates to [`post_index_file_with_retries`] using the pooled
-/// `client` [`index_files_inner`] built once for the batch (so rapid writes
-/// reuse keep-alive connections). Unlike [`best_effort_create_index`], this
-/// does NOT spawn-and-join its own nested OS thread: it is only ever reached
-/// from inside [`index_files_inner`] running on a [`crate::index_dispatch`]
-/// pool worker (submitted by [`index_files_best_effort`]), a plain
-/// `std::thread` that is already off any tokio runtime, so a
-/// direct blocking call here cannot trigger the "cannot drop a runtime in a
-/// context where blocking is not allowed" panic. A non-2xx response (including
-/// 404 for an unregistered/unknown index — e.g. the daemon restarted since task
-/// start) is logged at warn; a transport error surviving all retries is logged
-/// at warn. Both are swallowed.
-/// Test: exercised via `index_files_inner_skips_gracefully_when_daemon_down`
-/// (daemon-down path, never reaches this function) and
-/// `post_index_file_retries_transient_send_failure` (retry path); the live HTTP
-/// success path is covered by integration use.
+/// per-file write, hardened for issue #2785 (retry).
+/// What: sends `{index_id, body: {path, content}}` — the HTTP body in the
+/// index envelope — on the batch's `runtime`, via [`index_file_with_retries`].
+/// A refusal or a socket that never answers is logged at warn with the socket
+/// path (#9214) and swallowed.
+/// Test: `index_files_inner_writes_each_file_over_the_socket`.
 fn best_effort_index_one_file(
-    client: &reqwest::blocking::Client,
-    base: &str,
+    runtime: &tokio::runtime::Runtime,
+    socket: &Path,
     index_id: &str,
     rel_path: &str,
     content: &str,
 ) {
-    let url = format!("{base}/indexes/{index_id}/index-file");
-    let body = index_file_request_body(rel_path, content);
-
-    match post_index_file_with_retries(client, &url, &body) {
+    let params = serde_json::json!({
+        "index_id": index_id,
+        "body": index_file_request_body(rel_path, content),
+    });
+    let outcome = index_file_with_retries(|| {
+        runtime.block_on(crate::search_rpc::call_at(
+            socket,
+            METHOD_INDEX_FILE_PUT,
+            params.clone(),
+            INDEX_FILE_TIMEOUT,
+        ))
+    });
+    match outcome {
         IndexOutcome::Indexed => {
             tracing::debug!("incrementally indexed '{rel_path}' into '{index_id}'");
         }
-        IndexOutcome::HttpStatus(status) => {
+        IndexOutcome::Refused(code) => {
             tracing::warn!(
-                "incremental index update for '{rel_path}' in '{index_id}' returned HTTP {status}"
+                "incremental index update for '{rel_path}' in '{index_id}' was refused ({code})"
             );
         }
         IndexOutcome::SendFailed => {
             tracing::warn!(
-                "incremental index update for '{rel_path}' in '{index_id}' failed after \
-                 {MAX_INDEX_ATTEMPTS} attempts"
+                "incremental index update for '{rel_path}' in '{index_id}' got no answer from \
+                 the trusty-search daemon at {} after {MAX_INDEX_ATTEMPTS} attempts",
+                socket.display()
             );
         }
     }
 }
 
-/// Build the JSON body for the `POST /indexes/{id}/index-file` call.
+/// `search.index.file.put` — index or update one file (#9214).
+const METHOD_INDEX_FILE_PUT: &str = "search.index.file.put";
+
+/// Build the `body` of the `search.index.file.put` call.
 ///
 /// Why: extracted so the request shape is unit-testable without a live
 /// daemon or a spawned thread — mirrors [`create_index_request_body`].

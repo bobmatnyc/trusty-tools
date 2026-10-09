@@ -1,5 +1,6 @@
-//! Async event loop: daemon polling, SSE reindex streaming, keyboard handling.
+//! Async event loop: daemon polling, reindex streaming, keyboard handling.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -7,13 +8,17 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::monitor::dashboard::format_count;
-use crate::monitor::search_client::{ReindexEvent, SearchClient, resolve_search_url};
+use crate::monitor::search_client::{ReindexEvent, SearchClient, resolve_search_socket};
 use crate::monitor::tui_common::{enter_tui, leave_tui};
 use crate::monitor::utils::DaemonStatus;
 
 use super::nav::{navigate_down_visible, navigate_up_visible, new_log_lines_since};
 use super::render::{SearchFocus, render};
 use super::state::SearchTuiState;
+
+#[cfg(test)]
+#[path = "event_loop_tests.rs"]
+mod tests;
 
 /// Data-refresh interval: how often the daemon is polled.
 const REFRESH_INTERVAL: Duration = Duration::from_millis(2000);
@@ -90,24 +95,30 @@ pub fn apply_reindex_event(state: &mut SearchTuiState, scoped: ScopedReindexEven
 ///
 /// Why: the single entry point the `monitor tui` subcommand of `trusty-search`
 /// calls.
-/// What: resolves the daemon URL from the service lock file and delegates to
-/// [`run_with_url`].
+/// What: resolves the daemon socket (#9214: never a TCP address) and delegates
+/// to [`run_with_socket`].
+///
+/// # Errors
+///
+/// When the socket path cannot be resolved, or the terminal cannot be set up.
+///
 /// Test: the pure pieces are unit-tested; this thin glue is exercised by
 /// launching the UI.
 pub async fn run() -> anyhow::Result<()> {
-    run_with_url(resolve_search_url()).await
+    run_with_socket(resolve_search_socket()?).await
 }
 
-/// Run the search TUI against an explicit daemon URL.
+/// Run the search TUI against an explicit daemon socket.
 ///
-/// Why: separated from [`run`] so a future CLI flag can override the resolved
-/// address, and so terminal setup/teardown lives in one place.
-/// What: builds the client and state, enters raw mode + the alternate screen,
-/// runs [`run_loop`], and unconditionally restores the terminal even on error.
+/// Why: separated from [`run`] so a caller can name the socket, and so
+/// terminal setup/teardown lives in one place.
+/// What: builds the client and state (the header shows the socket path),
+/// enters raw mode + the alternate screen, runs [`run_loop`], and
+/// unconditionally restores the terminal even on error.
 /// Test: terminal glue is exercised by launching the UI.
-pub async fn run_with_url(base_url: String) -> anyhow::Result<()> {
-    let mut client = SearchClient::new(base_url.clone());
-    let mut state = SearchTuiState::new(base_url);
+pub async fn run_with_socket(socket: PathBuf) -> anyhow::Result<()> {
+    let mut state = SearchTuiState::new(socket.display().to_string());
+    let mut client = SearchClient::new(socket);
 
     let mut terminal = enter_tui()?;
     let result = run_loop(&mut terminal, &mut state, &mut client).await;
@@ -119,18 +130,11 @@ pub async fn run_with_url(base_url: String) -> anyhow::Result<()> {
 ///
 /// Why: keeps the per-poll I/O out of the event loop so the loop can re-poll
 /// on demand as well as on its timer.
-/// What: re-resolves the URL when the daemon is offline (it may have rebound a
-/// fresh port), calls `fetch_all`, and updates the status, index list, and
-/// selection clamp.
+/// What: calls `fetch_all` over the socket and updates the status, index
+/// list, and selection clamp; a failure is the offline state, naming the
+/// socket. The socket path is fixed, so there is nothing to re-resolve.
 /// Test: thin I/O glue; the pure clamp is unit-tested.
 async fn poll_daemon(state: &mut SearchTuiState, client: &mut SearchClient) {
-    if !state.daemon_status.is_online() {
-        let resolved = resolve_search_url();
-        if resolved != client.base_url() {
-            client.set_base_url(resolved.clone());
-            state.base_url = resolved;
-        }
-    }
     match client.fetch_all().await {
         Ok(data) => {
             state.daemon_status = DaemonStatus::Online {
@@ -147,7 +151,15 @@ async fn poll_daemon(state: &mut SearchTuiState, client: &mut SearchClient) {
         }
     }
 
-    let tail = client.logs_tail(50).await;
+    // #9214: an unanswered tail leaves the watermark alone; it is not "no
+    // new lines".
+    let tail = match client.logs_tail(50).await {
+        Ok(tail) => tail,
+        Err(e) => {
+            tracing::debug!("logs tail failed: {e:#}");
+            return;
+        }
+    };
     if state.log_first_poll {
         state.log_watermark = tail.last().cloned();
         state.log_first_poll = false;

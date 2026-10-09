@@ -294,8 +294,8 @@ fn index_files_inner_skips_when_index_id_empty() {
 /// error" contract the mid-task incremental re-index hook depends on. We
 /// force the daemon-down path the same way
 /// `ensure_project_indexed_returns_derived_id_when_daemon_down` does:
-/// point the data dir at an empty temp dir so `resolve_daemon_base_url`
-/// finds no address file, guaranteeing no HTTP call is attempted.
+/// point the data dir at an empty temp dir so the derived socket has no
+/// daemon behind it.
 /// What: seeds a git-rooted scratch project with one real file, calls
 /// `index_files_inner` with that file's path, and asserts it returns
 /// promptly without panicking.
@@ -775,119 +775,99 @@ fn retry_backoff_is_bounded_and_increasing() {
     assert_eq!(retry_backoff(100), Duration::from_millis(1000));
 }
 
-/// Shared driver for the two per-file-retry regression tests below: binds
-/// an ephemeral 127.0.0.1 listener, runs `server_fn` on it in a background
-/// thread (which reports how many connections it accepted via the given
-/// `Sender`), then drives [`post_index_file_with_retries`] against it.
-/// Kept as one helper (rather than duplicating the listener/client/join
-/// boilerplate per test) so both tests stay under the file's SLOC cap and
-/// so their setup can never silently drift apart.
-fn drive_retry_test(
-    server_fn: impl FnOnce(std::net::TcpListener, std::sync::mpsc::Sender<usize>) + Send + 'static,
-) -> (IndexOutcome, usize) {
-    use std::net::TcpListener;
-    use std::sync::mpsc;
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let (tx, rx) = mpsc::channel();
-    let server = std::thread::spawn(move || server_fn(listener, tx));
-
-    let client = build_index_client().unwrap();
-    let url = format!("http://{addr}/indexes/test-index/index-file");
-    let body = index_file_request_body("src/main.rs", "fn main() {}\n");
-    let outcome = post_index_file_with_retries(&client, &url, &body);
-
-    let accepted = rx
-        .recv_timeout(std::time::Duration::from_secs(5))
-        .expect("server thread should have reported an accepted-connection count");
-    let _ = server.join();
-    (outcome, accepted)
+/// A transport failure on a per-file write is retried and the update
+/// succeeds (#2785), now over the socket (#9214).
+#[test]
+fn index_file_with_retries_recovers_a_transient_failure() {
+    let mut calls = 0;
+    let outcome = index_file_with_retries(|| {
+        calls += 1;
+        if calls == 1 {
+            anyhow::bail!("call search.index.file.put: connection reset");
+        }
+        Ok(serde_json::json!({}))
+    });
+    assert_eq!((outcome, calls), (IndexOutcome::Indexed, 2));
 }
 
-/// A transient send failure on the per-file index POST is retried and the
-/// update ultimately succeeds (issue #2785 regression test).
-///
-/// Why: this is the exact failure #2785 reports — under rapid repeated
-/// writes the per-file HTTP call intermittently fails at the transport
-/// layer. Before the fix a single such failure dropped the update; the fix
-/// retries transport errors with backoff. We reproduce a transport failure
-/// deterministically via [`drive_retry_test`] with a server that drops the
-/// FIRST connection (no HTTP response → reqwest `send()` returns `Err`)
-/// then answers 200 on the SECOND.
-/// What: asserts the outcome is `Indexed` and that exactly two connections
-/// were made (one failed attempt + one successful retry).
-/// Test: this test.
+/// A socket that never answers ends in `SendFailed` after exactly
+/// [`MAX_INDEX_ATTEMPTS`] attempts — the loop terminates and fails open.
 #[test]
-fn post_index_file_retries_transient_send_failure() {
-    use std::io::{Read, Write};
-
-    let (outcome, accepted) = drive_retry_test(|listener, tx| {
-        let mut accepted = 0usize;
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else { break };
-            accepted += 1;
-            if accepted == 1 {
-                // Transient send failure: accept then close with no
-                // response, so the client's send() errors at the
-                // transport layer.
-                drop(stream);
-                continue;
-            }
-            // Successful retry: consume the request, answer 200.
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
-            let _ = stream.flush();
-            let _ = tx.send(accepted);
-            break;
-        }
+fn index_file_with_retries_exhausts_and_returns_send_failed() {
+    let mut calls = 0;
+    let outcome = index_file_with_retries(|| {
+        calls += 1;
+        anyhow::bail!("call search.index.file.put: no such file")
     });
-
-    // Must recover via retry: Indexed, with exactly 2 connections (1
-    // failed attempt + 1 successful retry).
-    assert_eq!(outcome, IndexOutcome::Indexed);
-    assert_eq!(accepted, 2);
-}
-
-/// When every attempt hits a transient send failure, `SendFailed` is
-/// reported after exactly [`MAX_INDEX_ATTEMPTS`] attempts — the retry loop
-/// terminates and fails open rather than retrying forever or panicking.
-///
-/// Why: pins the OTHER half of the fail-open contract that
-/// `post_index_file_retries_transient_send_failure` does not cover — that
-/// path only proves recovery WHEN a retry succeeds. A daemon that stays
-/// unreachable/broken for the whole attempt budget must still terminate
-/// promptly with `SendFailed`, so callers up the stack (which log-and-swallow)
-/// are never left hanging. Code-critic review on PR #2796 flagged this gap.
-/// What: via [`drive_retry_test`], with a server that accepts and
-/// immediately drops EVERY connection (no HTTP response, so `send()`
-/// errors on every attempt); asserts the outcome is `SendFailed` and that
-/// exactly [`MAX_INDEX_ATTEMPTS`] connections were accepted (one per
-/// attempt, no more, no less).
-/// Test: this test.
-#[test]
-fn post_index_file_exhausts_retries_and_returns_send_failed() {
-    let (outcome, accepted) = drive_retry_test(|listener, tx| {
-        let mut accepted = 0usize;
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { break };
-            accepted += 1;
-            // Every connection fails transiently: accept then close with
-            // no response, so the client's send() errors every time.
-            drop(stream);
-            if accepted >= MAX_INDEX_ATTEMPTS as usize {
-                let _ = tx.send(accepted);
-                break;
-            }
-        }
-    });
-
-    // Must fail open with SendFailed after exactly MAX_INDEX_ATTEMPTS
-    // attempts — no more, no less.
     assert_eq!(outcome, IndexOutcome::SendFailed);
-    assert_eq!(accepted, MAX_INDEX_ATTEMPTS as usize);
+    assert_eq!(calls, MAX_INDEX_ATTEMPTS);
+}
+
+/// A daemon refusal is an answer: reported once, never retried.
+#[test]
+fn index_file_with_retries_does_not_retry_a_refusal() {
+    let mut calls = 0;
+    let outcome = index_file_with_retries(|| {
+        calls += 1;
+        Err(anyhow::Error::new(crate::search_rpc::SearchRpcError {
+            method: "search.index.file.put".into(),
+            code: crate::search_rpc::CODE_NOT_FOUND,
+            message: "no such index".into(),
+            data: None,
+        }))
+    });
+    assert_eq!(
+        (outcome, calls),
+        (IndexOutcome::Refused(crate::search_rpc::CODE_NOT_FOUND), 1)
+    );
+}
+
+/// #9214: the incremental path writes each file to `search.index.file.put` on
+/// the socket `TRUSTY_SEARCH_SOCKET` names, in the `{index_id, body}` envelope.
+///
+/// It opts in to daemon writes (`TRUSTY_ALLOW_PRODUCTION_STATE=1`) because the
+/// daemon here is the test's own fake.
+#[test]
+fn index_files_inner_writes_each_file_over_the_socket() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let project = dir.path().join("proj");
+    fs::create_dir_all(project.join(".git")).expect("project");
+    fs::write(project.join("main.rs"), "fn main() {}\n").expect("file");
+    let socket = dir.path().join("search.sock");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let daemon = uds_mock::spawn_blocking_at(socket.clone(), move |method, params| {
+        record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((method.to_string(), params));
+        Box::pin(async move { Ok(serde_json::json!({ "chunks": 1 })) })
+    });
+    // SAFETY: guarded by ENV_LOCK; both removed below before asserting.
+    unsafe {
+        std::env::set_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV, &socket);
+        std::env::set_var(crate::test_harness::ALLOW_PRODUCTION_ENV, "1");
+    }
+    index_files_inner(&project, &[PathBuf::from("main.rs")]);
+    unsafe {
+        std::env::remove_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
+        std::env::remove_var(crate::test_harness::ALLOW_PRODUCTION_ENV);
+    }
+    drop(daemon);
+    let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let id = crate::derive_index_id(&crate::resolve_project_root(&project));
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].0, "search.index.file.put");
+    assert_eq!(
+        seen[0].1,
+        serde_json::json!({
+            "index_id": id,
+            "body": { "path": "main.rs", "content": "fn main() {}\n" },
+        })
+    );
 }
 
 /// Offer the code under test a REAL, discoverable trusty-search daemon on BOTH
@@ -899,9 +879,8 @@ fn post_index_file_exhausts_retries_and_returns_send_failed() {
 /// look identical then. Standing up a daemon that WOULD accept the write is the
 /// only arrangement where the guard is the thing making the difference. Both
 /// transports are stood up because the two callers use different ones:
-/// registration speaks the socket since #7237, the per-file incremental path is
-/// still HTTP, and a helper covering one of them would silently stop proving
-/// anything about the other.
+/// both callers speak the socket (#7237, #9214); the HTTP leg stays to prove
+/// neither falls back to the retired TCP listener.
 /// What: binds a mock UDS daemon that counts every call and a `127.0.0.1:0`
 /// listener published where `resolve_daemon_base_url("trusty-search")` reads it,
 /// points `TRUSTY_SEARCH_SOCKET` at the former, asserts BOTH are discoverable,

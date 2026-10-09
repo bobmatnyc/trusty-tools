@@ -1495,8 +1495,9 @@ running" only when nothing answers on the socket, and never starts a daemon.
 `query`, `doctor`, `monitor status`/`indexes` and the daemon's
 auto-discovery use the socket too (#9214 slice 1), so no CLI path dials TCP;
 `doctor` reports the HTTP listener the daemon says it bound instead of
-probing a port. `monitor tui` still reads over HTTP through trusty-common
-until that crate's slice. Auto-discovery is still withheld under `--no-http`.
+probing a port. `monitor tui` reads through trusty-common's socket-only
+`SearchClient` (#9214 trusty-common slice). Auto-discovery is still withheld
+under `--no-http`.
 `--no-http` on `trusty-search serve` is a different, older flag and is still a
 no-op there.
 

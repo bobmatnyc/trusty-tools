@@ -30,12 +30,15 @@
 //! reports as an unhealthy daemon.
 //!
 //! Test: `search_socket_honours_the_env_override`,
+//! `search_socket_follows_trusty_data_dir_like_the_daemon`,
+//! `search_socket_under_treats_empty_as_unset_and_refuses_relative`,
 //! `call_at_reports_a_dead_socket_rather_than_hanging`,
 //! `call_blocking_reports_a_dead_socket_rather_than_hanging`,
 //! `call_blocking_round_trips_against_a_listening_daemon`,
 //! `call_blocking_carries_the_daemons_own_error_code`,
 //! `call_blocking_reports_a_panicking_handler_rather_than_hanging`.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -59,6 +62,12 @@ mod tests;
 /// [`crate::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV`] and trusty-audit's
 /// `TRUSTY_ANALYZE_SOCKET`.
 pub const TRUSTY_SEARCH_SOCKET_ENV: &str = "TRUSTY_SEARCH_SOCKET";
+
+/// The environment variable that isolates one trusty-search instance.
+///
+/// The daemon's `--data-dir` stamps it, and the daemon's lockfile, registry and
+/// socket key off it; [`search_socket`] reads it so a client follows (#9214).
+pub const TRUSTY_SEARCH_DATA_DIR_ENV: &str = "TRUSTY_DATA_DIR";
 
 /// The app name trusty-search derives its socket path under.
 ///
@@ -161,13 +170,19 @@ impl SearchRpcError {
 
 /// Resolve the socket the trusty-search daemon binds.
 ///
+/// Why: a client must dial exactly the path the daemon binds, including a
+/// daemon isolated with `TRUSTY_DATA_DIR` (#9214).
+/// What: [`TRUSTY_SEARCH_SOCKET_ENV`] when set and non-blank; otherwise
+/// [`search_socket_under`] over [`TRUSTY_SEARCH_DATA_DIR_ENV`].
+///
 /// # Errors
 ///
-/// When the data directory cannot be resolved or created — an operator-fixable
-/// condition, distinct from "the daemon is not running", which this function
-/// cannot and does not report.
+/// When the data directory cannot be resolved or created, or when
+/// `TRUSTY_DATA_DIR` is relative — operator-fixable conditions, distinct from
+/// "the daemon is not running", which this function cannot and does not report.
 ///
-/// Test: `search_socket_honours_the_env_override`.
+/// Test: `search_socket_honours_the_env_override`,
+/// `search_socket_follows_trusty_data_dir_like_the_daemon`.
 pub fn search_socket() -> Result<PathBuf> {
     if let Ok(raw) = std::env::var(TRUSTY_SEARCH_SOCKET_ENV) {
         let trimmed = raw.trim();
@@ -175,7 +190,47 @@ pub fn search_socket() -> Result<PathBuf> {
             return Ok(PathBuf::from(trimmed));
         }
     }
-    crate::daemon_socket_path(SEARCH_APP_NAME)
+    // #9214: honour TRUSTY_DATA_DIR as the daemon does, or an isolated daemon is unreachable.
+    search_socket_under(std::env::var_os(TRUSTY_SEARCH_DATA_DIR_ENV).as_deref())
+}
+
+/// The socket trusty-search binds, with the instance override supplied rather
+/// than read.
+///
+/// Why: the daemon (`trusty_search::service::socket::resolve_socket_path`) and
+/// every client must apply one rule, or a client and a daemon sharing a custom
+/// `TRUSTY_DATA_DIR` resolve two paths and never meet (#9214, #7801). The daemon
+/// delegates here, so the rule exists once. Taking the value as a parameter
+/// lets a test pin it without mutating process-global env.
+/// What: `<override>/trusty-search.sock` when the override is present and
+/// non-empty; otherwise the shared [`crate::daemon_socket_path`] derivation.
+/// An empty value counts as unset, because joining onto `""` yields a relative
+/// path that resolves against the caller's cwd.
+///
+/// # Errors
+///
+/// When the override is not absolute, when it cannot be created, or when the
+/// shared data directory cannot be resolved.
+///
+/// Test: `search_socket_under_treats_empty_as_unset_and_refuses_relative`,
+/// `search_socket_follows_trusty_data_dir_like_the_daemon`.
+pub fn search_socket_under(data_dir_override: Option<&OsStr>) -> Result<PathBuf> {
+    let Some(dir) = data_dir_override.filter(|d| !d.is_empty()) else {
+        return crate::daemon_socket_path(SEARCH_APP_NAME);
+    };
+    let dir = PathBuf::from(dir);
+    anyhow::ensure!(
+        dir.is_absolute(),
+        "{TRUSTY_SEARCH_DATA_DIR_ENV} must be an absolute path (got: {})",
+        dir.display()
+    );
+    std::fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "create {TRUSTY_SEARCH_DATA_DIR_ENV} socket directory {}",
+            dir.display()
+        )
+    })?;
+    Ok(dir.join(format!("{SEARCH_APP_NAME}.sock")))
 }
 
 /// Call one method on the daemon at `socket` and return its `result`.

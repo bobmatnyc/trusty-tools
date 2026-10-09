@@ -42,26 +42,6 @@ const FORBIDDEN: &[&str] = &[
 /// until the last #9214 phase. Each row must still match.
 const EXEMPT: &[(&str, &str, &str)] = &[
     (
-        "crates/trusty-common/src/monitor/search_client.rs",
-        "127.0.0.1:7878",
-        "moves in #9214 slice trusty-common",
-    ),
-    (
-        "crates/trusty-common/src/monitor/search_client.rs",
-        "read_daemon_addr(\"trusty-search\")",
-        "moves in #9214 slice trusty-common",
-    ),
-    (
-        "crates/trusty-common/src/search_index.rs",
-        "resolve_daemon_base_url(\"trusty-search\")",
-        "moves in #9214 slice trusty-common",
-    ),
-    (
-        "crates/trusty-common/src/search_readiness.rs",
-        "resolve_daemon_base_url(\"trusty-search\")",
-        "moves in #9214 slice trusty-common",
-    ),
-    (
         "crates/trusty-search/src/commands/daemon_utils.rs",
         "DaemonAddrLayout::TRUSTY_SEARCH",
         "daemon's own HTTP UI; removed with the :7878 bind (#9214 final PR)",

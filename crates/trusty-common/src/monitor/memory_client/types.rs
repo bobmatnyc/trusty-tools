@@ -25,7 +25,7 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 /// Why (#6286): there is one such resolution in the workspace and it lives in
 /// [`crate::memory_rpc`]. This re-export keeps the monitor's call sites reading
 /// `memory_client::resolve_memory_socket` the way they read
-/// `search_client::resolve_search_url`, without a second copy of the rule.
+/// `search_client::resolve_search_socket`, without a second copy of the rule.
 /// Test: `resolve_memory_socket_names_the_daemon_socket`.
 pub use crate::memory_rpc::resolve_memory_socket;
 
