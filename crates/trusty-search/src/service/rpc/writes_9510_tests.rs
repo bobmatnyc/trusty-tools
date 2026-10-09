@@ -231,3 +231,42 @@ async fn index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
     let stray = chunks_for(&state, "ia", &absolute).await;
     assert!(stray.is_empty(), "{absolute} kept its own key: {stray:?}");
 }
+
+/// Why (#9510): before the fix, the #8922 gate got the raw path, so an
+/// excluded absolute re-add purged the verbatim absolute copy. The gate now
+/// gets the relative key, which left a pre-fix absolute copy of an excluded
+/// file answering searches.
+/// What: a file under the built-in `node_modules` skip dir — one the
+/// #8922 table refuses — is planted under its verbatim absolute key through
+/// the indexer, then re-added through `index-file` by that absolute path. The
+/// reply is 403 `index_file_excluded` with `removed_chunks > 0`, no chunk is
+/// left under the absolute key, and the index is empty. Fails before the
+/// fix: the planted copy survives the 403.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+async fn index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (root, _alias) = rooted(tmp.path());
+    let (state, http, _rpc) = routers(SearchAppState::new(planted_registry("ia", &root))).await;
+    let absolute = root.join("node_modules/pkg/auth.rs").display().to_string();
+    let content = "fn excluded_stale_copy_9510(token: &str) -> bool { verify(token) }\n";
+    {
+        let handle = state.registry.get(&IndexId::new("ia")).expect("resident");
+        let indexer = handle.indexer.read().await;
+        indexer
+            .index_file(&absolute, content)
+            .await
+            .expect("plant the pre-#9510 absolute key");
+    }
+    assert!(total_chunks(&http, "ia").await > 0, "the plant must index");
+
+    let put = serde_json::json!({ "path": absolute, "content": content });
+    let (status, body) = http_err(&http, "POST", "/indexes/ia/index-file", put).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"], "index_file_excluded", "{body}");
+    assert_eq!(body["path"], absolute.as_str(), "{body}");
+    assert!(body["removed_chunks"].as_u64().unwrap_or(0) > 0, "{body}");
+    let stray = chunks_for(&state, "ia", &absolute).await;
+    assert!(stray.is_empty(), "{absolute} kept its own key: {stray:?}");
+    assert_eq!(total_chunks(&http, "ia").await, 0, "a copy survived");
+}
