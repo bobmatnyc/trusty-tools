@@ -156,6 +156,29 @@ fn path_qualified_entry_point_anchors_instead_of_404() {
 }
 
 #[test]
+fn path_qualified_impl_method_resolves_through_its_type() {
+    // #9196: an impl method is keyed `<file>::<Type>::<name>`, so a
+    // `<path>::<name>` query used to find nothing.
+    let g = SymbolGraph::build_from_chunks(&[
+        fn_chunk("crates/x/src/a.rs", "Foo::m", &[]),
+        fn_chunk("crates/x/src/a.rs", "free", &[]),
+    ]);
+    let want = SymbolMatch::One("crates/x/src/a.rs::Foo::m".to_string());
+    assert_eq!(g.resolve_symbol("src/a.rs::m"), want, "path::method");
+    assert_eq!(
+        g.resolve_symbol("src/a.rs::Foo::m"),
+        want,
+        "path::Type::method"
+    );
+    assert_eq!(
+        g.resolve_symbol("src/a.rs::free"),
+        SymbolMatch::One("crates/x/src/a.rs::free".to_string()),
+        "a free function still anchors by path"
+    );
+    assert_eq!(g.resolve_symbol("src/b.rs::m"), SymbolMatch::NotFound);
+}
+
+#[test]
 fn bare_name_lookup_reports_every_candidate() {
     // Pre-fix a bare name silently resolved to one arbitrary definition.
     let g = SymbolGraph::build_from_chunks(&colliding_corpus());
