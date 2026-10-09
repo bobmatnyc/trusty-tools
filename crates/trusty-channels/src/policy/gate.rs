@@ -151,14 +151,6 @@ pub struct BranchState {
 /// Test: `project_dir_nested_in_a_parent_repo_refused`,
 /// `default_branch_unknown_refused`, `origin_head_names_the_default_branch`.
 pub fn branch_state(project_dir: &Path) -> Result<BranchState, GateError> {
-    // RED STUB (#8454 S2b): the checks land in the next commit.
-    if true {
-        return Ok(BranchState {
-            default: String::new(),
-            head: None,
-            commit: String::new(),
-        });
-    }
     let top = run(git(project_dir).args(["rev-parse", "--show-toplevel"]))?;
     if !top.status.success() {
         return Err(GateError::NotARepository);
@@ -201,10 +193,6 @@ pub fn branch_state(project_dir: &Path) -> Result<BranchState, GateError> {
 /// `routes_edit_outside_the_reviewed_source_has_no_effect`.
 pub fn check_default_branch(project_dir: &Path, bytes: &[u8]) -> Result<BranchState, GateError> {
     let state = branch_state(project_dir)?;
-    // RED STUB (#8454 S2b): the checks land in the next commit.
-    if true {
-        return Ok(state);
-    }
     let want = format!("refs/heads/{}", state.default);
     match state.head.as_deref() {
         None => return Err(GateError::DetachedHead),

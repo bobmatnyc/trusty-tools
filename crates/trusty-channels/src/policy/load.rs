@@ -96,13 +96,17 @@ pub(crate) fn prepare(req: &LoadRequest) -> Prepared {
         projects: Vec::new(),
         findings: Vec::new(),
     };
-    // RED STUB (#8454 S2b): no home or canonical check yet.
-    let home = req.home.as_deref().unwrap_or(Path::new(""));
+    let Some(home) = req.home.as_deref() else {
+        // #8454 S2b: no HOME, no cwd fallback.
+        return denied(HostError::HomeUnknown);
+    };
     let host = match read_host(&req.host_path).and_then(|t| parse_host(&t, Some(home))) {
         Ok(h) => h,
         Err(e) => return denied(e),
     };
-    let _ = check_canonical;
+    if let Err(e) = check_canonical(&host) {
+        return denied(e);
+    }
     let mut findings = Vec::new();
     let dirs = listed_dirs(&host, &req.channels, req.project.as_deref());
     if let (Some(p), true) = (&req.project, dirs.is_empty()) {
@@ -180,7 +184,7 @@ fn read_gated(dir: &Path, home: &Path) -> Option<Result<ProjectFile, ProjectFile
     }
     let parsed = String::from_utf8(bytes)
         .map_err(|_| ProjectFileError::NotUtf8)
-        .and_then(|text| parse_project_file(&text, Some(home)).or(Ok(ProjectFile::default()))); // RED STUB
+        .and_then(|text| parse_project_file(&text, Some(home)));
     Some(parsed)
 }
 

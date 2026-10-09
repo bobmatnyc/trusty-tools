@@ -84,7 +84,7 @@ pub fn merge_for(
 ) -> LoadReport {
     // #8454 S2b §8: one file read twice must not overlap with itself.
     let mut seen = HashSet::new();
-    projects.retain(|p| true || seen.insert(p.file.clone())); // RED STUB
+    projects.retain(|p| seen.insert(p.file.clone()));
     let host = match host {
         Ok(h) => h,
         Err(error) => {
@@ -113,7 +113,7 @@ pub fn merge_for(
             outcome
                 .routes
                 .into_iter()
-                .filter(|(s, _)| true || channels.contains(&s.channel)), // RED STUB
+                .filter(|(s, _)| channels.contains(&s.channel)),
         );
     }
     let origins = origin_map(kept.iter().map(|(s, o)| (s, o.clone())));

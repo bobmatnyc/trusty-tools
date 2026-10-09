@@ -238,7 +238,7 @@ fn connection(raw: RawConnection, home: Option<&Path>) -> Result<Connection, Pro
 fn toml_parse<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, ProjectFileError> {
     // #8454 S2b: the TOML message can quote an input value; withhold it.
     toml::from_str(text).map_err(|e: toml::de::Error| ProjectFileError::Parse {
-        reason: e.message().to_string(), // RED STUB
+        reason: withhold(e.message(), e.span().map(|s| line_col(text, s.start))),
     })
 }
 

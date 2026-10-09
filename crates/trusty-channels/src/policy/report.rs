@@ -66,8 +66,8 @@ impl LoadReport {
             .map(|mut s| {
                 if s.state.contributes() {
                     s.state = FileState::Withheld;
-                    // RED STUB: s.gchat_connection = None;
-                    // RED STUB: s.gchat_spaces.clear();
+                    s.gchat_connection = None;
+                    s.gchat_spaces.clear();
                 }
                 s
             })

@@ -129,8 +129,7 @@ impl PolicyLoader {
     /// `branch_switch_with_identical_bytes_regates`.
     pub fn refresh(&mut self) -> bool {
         let now = Fingerprint::of(&self.req);
-        // RED STUB (#8454 S2b): no reload yet.
-        if true || now == self.fingerprint {
+        if now == self.fingerprint {
             return false;
         }
         // Recorded before the load reads: a change in between only causes
@@ -160,8 +159,7 @@ impl PolicyLoader {
 
     fn apply(&mut self, prepared: Prepared) {
         let channels = self.req.channels.clone();
-        // RED STUB (#8454 S2b): no last-good yet.
-        if true || prepared.host.is_err() {
+        if prepared.host.is_err() {
             // #8454 Q3: the host is the master switch.
             self.last_good.clear();
             self.report = assemble(prepared, &channels);

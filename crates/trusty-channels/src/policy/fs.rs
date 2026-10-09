@@ -49,9 +49,7 @@ pub fn read_host(path: &Path) -> Result<String, HostError> {
         read_regular(path, "config.yaml")
     })()
     .map_err(|f| match f {
-        ReadFault::Missing => HostError::Read {
-            reason: "missing".into(),
-        }, // RED STUB
+        ReadFault::Missing => HostError::Missing,
         ReadFault::NotRegular { what, kind } => HostError::NotRegular { what, kind },
         ReadFault::Io(kind) => HostError::Read {
             reason: kind.to_string(),
@@ -107,15 +105,6 @@ fn lstat(path: &Path) -> Result<Metadata, ReadFault> {
 }
 
 fn check_dir(path: &Path, what: &'static str) -> Result<(), ReadFault> {
-    // RED STUB (#8454 S2b): no symlink check yet.
-    if true {
-        return std::fs::metadata(path)
-            .map(|_| ())
-            .map_err(|e| match e.kind() {
-                ErrorKind::NotFound => ReadFault::Missing,
-                kind => ReadFault::Io(kind),
-            });
-    }
     if !lstat(path)?.file_type().is_dir() {
         return Err(ReadFault::NotRegular {
             what,
@@ -127,13 +116,6 @@ fn check_dir(path: &Path, what: &'static str) -> Result<(), ReadFault> {
 
 /// Read a regular, non-symlink file of at most [`MAX_FILE_BYTES`].
 fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
-    // RED STUB (#8454 S2b): no symlink check or size cap yet.
-    if true {
-        return std::fs::read(path).map_err(|e| match e.kind() {
-            ErrorKind::NotFound => ReadFault::Missing,
-            kind => ReadFault::Io(kind),
-        });
-    }
     let not_regular = ReadFault::NotRegular { what, kind: "file" };
     let checked = lstat(path)?;
     if !checked.file_type().is_file() {
