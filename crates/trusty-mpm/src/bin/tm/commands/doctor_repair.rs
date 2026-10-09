@@ -208,7 +208,8 @@ pub(crate) fn run_repairs(apply: bool, include_frozen: bool) {
     // command is tm-owned by `is_mpm_hook_command`, so a strip that ran first
     // would delete the PM guard this pass repairs in place.
     steps.extend(repair_build_tree_binary(
-        &machine_wide_settings_files(project_dir.as_deref()),
+        // #9293: the home root is the caller's, so a test can supply a temp one.
+        &machine_wide_settings_files(project_dir.as_deref(), dirs::home_dir().as_deref()),
         mode,
     ));
     // #7617: AFTER the repoint, so a build-tree `statusLine` command is fixed by
@@ -417,17 +418,23 @@ fn rust_build_env_steps(
 /// scoped to the projects the daemon tracks (see
 /// `daemon::doctor_hooks_hygiene::candidate_settings_files`), while the repair
 /// the operator explicitly asked for pays the cost once.
+/// `home` is the walk root (`None` contributes nothing).
 /// Test: `machine_wide_settings_files_includes_the_cwd_project`.
-fn machine_wide_settings_files(project_dir: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+fn machine_wide_settings_files(
+    project_dir: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
     let mut set: std::collections::BTreeSet<std::path::PathBuf> = std::collections::BTreeSet::new();
     if let Some(dir) = project_dir {
         for name in ["settings.json", "settings.local.json"] {
             set.insert(dir.join(".claude").join(name));
         }
     }
-    if let Some(home) = dirs::home_dir() {
+    // #9293: `home` is supplied, never resolved here, so the walk root is the
+    // caller's; production passes `dirs::home_dir()`, a test passes a temp dir.
+    if let Some(home) = home {
         set.extend(trusty_common::claude_config::discover_claude_settings(
-            &home,
+            home,
             trusty_common::claude_config::default_settings_max_depth(),
         ));
     }
@@ -734,12 +741,26 @@ mod tests {
     /// other.
     #[test]
     fn machine_wide_settings_files_includes_the_cwd_project() {
+        // #9293: a temp home, so the walk never touches the real `$HOME`.
+        let home = tempfile::tempdir().expect("temp home");
+        let home_project = home.path().join("proj").join(".claude");
+        std::fs::create_dir_all(&home_project).expect("plant project");
+        let planted = home_project.join("settings.json");
+        std::fs::write(&planted, "{}").expect("plant settings");
+
         let project = std::path::Path::new("/srv/projects/acme");
-        let files = machine_wide_settings_files(Some(project));
+        let files = machine_wide_settings_files(Some(project), Some(home.path()));
 
         for name in ["settings.json", "settings.local.json"] {
             let expected = project.join(".claude").join(name);
             assert!(files.contains(&expected), "{expected:?} missing: {files:?}");
+        }
+        assert!(files.contains(&planted), "{planted:?} missing: {files:?}");
+        if let Some(real_home) = dirs::home_dir() {
+            assert!(
+                files.iter().all(|f| !f.starts_with(&real_home)),
+                "a result lies under the real home {real_home:?}: {files:?}"
+            );
         }
         // Deduplicated and ordered, so one project can never be repaired twice
         // in one run.
