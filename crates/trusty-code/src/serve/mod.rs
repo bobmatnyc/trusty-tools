@@ -445,13 +445,9 @@ mod tests {
         // (binary, port, source-of-truth pointer)
         // #6286: trusty-memory has NO ROW either, for the reason the analyze
         // note below gives — it serves a Unix socket since ADR-0032, so 7070 is
-        // not reserved by anything.
+        // not reserved by anything. #9214: nor does trusty-search, which binds
+        // no TCP port, so 7878 is free.
         let known_siblings: &[(&str, u16, &str)] = &[
-            (
-                "trusty-search",
-                7878,
-                "trusty-search/src/service/constants.rs::DEFAULT_PORT",
-            ),
             // #6287: trusty-analyze has NO ROW. It no longer binds a TCP port —
             // it serves a Unix socket (ADR-0032), so 7879 is not reserved by
             // anything and listing it would forbid a future daemon from a free

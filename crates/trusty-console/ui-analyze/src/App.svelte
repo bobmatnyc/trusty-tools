@@ -79,8 +79,8 @@
             <p>{bootError}</p>
             <p class="text-muted text-sm">
               Make sure trusty-analyzer is running with
-              <code>trusty-analyzer serve</code> and that trusty-search is
-              reachable on port 7878.
+              <code>trusty-analyzer serve</code> and that the trusty-search
+              daemon is running (<code>trusty-search status</code>).
             </p>
           </div>
         </div>
