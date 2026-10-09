@@ -12,27 +12,54 @@
 //! repo's top level, `HEAD` is a symbolic ref to the default branch, and the
 //! bytes equal the blob at that branch's commit, resolved once. Each git call
 //! has every `GIT_*` variable removed and `core.fsmonitor` off; bytes are
-//! hashed with `hash-object --no-filters`. Any git failure, a missing git or
-//! unexpected git output refuses.
+//! hashed with `hash-object --no-filters`. Any git failure, a missing git,
+//! unexpected git output or a step that outlasts [`GIT_TIMEOUT`] refuses.
 //! Test: `src/policy/tests/gate.rs`, and gchat's
 //! `load_gate_refuses_untracked_modified_and_staged`.
 
 use std::ffi::OsString;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// The route file's path inside a project repo, from its top level.
 pub const ROUTES_REL_PATH: &str = ".trusty-channels/routes.toml";
 
 /// The longest one git step may run before it is killed.
+///
+/// Why: git opens an `include.path` file with a blocking open, so a FIFO
+/// there, or any stalled git, would hold the loader and every consumer
+/// behind it (#8454).
+/// What: 10 s. A local `rev-parse`, `symbolic-ref` or `hash-object` takes
+/// milliseconds, so the bound leaves two orders of magnitude for a loaded
+/// host while keeping a stalled reload short.
+/// Test: `git_blocked_on_a_fifo_config_include_times_out`.
 pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
 
 /// Run `f` with git steps on this thread bounded by `limit`.
 #[cfg(test)]
-pub(crate) fn with_git_timeout<T>(_limit: Duration, f: impl FnOnce() -> T) -> T {
-    f()
+pub(crate) fn with_git_timeout<T>(limit: Duration, f: impl FnOnce() -> T) -> T {
+    let before = TEST_TIMEOUT.with(|t| t.replace(Some(limit)));
+    let out = f();
+    TEST_TIMEOUT.with(|t| t.set(before));
+    out
+}
+
+/// [`GIT_TIMEOUT`], or a test's shorter bound.
+fn git_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(limit) = TEST_TIMEOUT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    GIT_TIMEOUT
 }
 
 /// Why a route file's bytes were refused by a load gate.
@@ -127,9 +154,12 @@ pub fn check_committed_at_head(path: &Path, bytes: &[u8]) -> Result<(), GateErro
     };
     let mut spec = OsString::from("HEAD:./");
     spec.push(file);
-    let committed = run(git(dir)
-        .args(["rev-parse", "--verify", "--quiet"])
-        .arg(&spec))?;
+    let committed = run(
+        git(dir)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(&spec),
+        "rev-parse",
+    )?;
     let at = || "HEAD".to_string();
     if !committed.status.success() {
         return Err(GateError::NotCommitted { at: at() });
@@ -167,7 +197,10 @@ pub struct BranchState {
 /// Test: `project_dir_nested_in_a_parent_repo_refused`,
 /// `default_branch_unknown_refused`, `origin_head_names_the_default_branch`.
 pub fn branch_state(project_dir: &Path) -> Result<BranchState, GateError> {
-    let top = run(git(project_dir).args(["rev-parse", "--show-toplevel"]))?;
+    let top = run(
+        git(project_dir).args(["rev-parse", "--show-toplevel"]),
+        "rev-parse --show-toplevel",
+    )?;
     if !top.status.success() {
         return Err(GateError::NotARepository);
     }
@@ -181,7 +214,10 @@ pub fn branch_state(project_dir: &Path) -> Result<BranchState, GateError> {
     let default = default_branch(project_dir)?;
     let head = symbolic_ref(project_dir, "HEAD")?;
     let spec = format!("refs/heads/{default}^{{commit}}");
-    let commit = run(git(project_dir).args(["rev-parse", "--verify", "--quiet", &spec]))?;
+    let commit = run(
+        git(project_dir).args(["rev-parse", "--verify", "--quiet", &spec]),
+        "rev-parse <default>",
+    )?;
     if !commit.status.success() {
         return Err(GateError::NoDefaultCommit { branch: default });
     }
@@ -221,7 +257,10 @@ pub fn check_default_branch(project_dir: &Path, bytes: &[u8]) -> Result<BranchSt
         Some(_) => {}
     }
     let spec = format!("{}:{ROUTES_REL_PATH}", state.commit);
-    let committed = run(git(project_dir).args(["rev-parse", "--verify", "--quiet", &spec]))?;
+    let committed = run(
+        git(project_dir).args(["rev-parse", "--verify", "--quiet", &spec]),
+        "rev-parse <blob>",
+    )?;
     let at = || state.default.clone();
     if !committed.status.success() {
         return Err(GateError::NotCommitted { at: at() });
@@ -262,7 +301,7 @@ fn default_branch(dir: &Path) -> Result<String, GateError> {
 /// `git symbolic-ref -q <name>`: `Some(target)`, or `None` when the ref is
 /// absent, detached or not symbolic (exit 1). Any other status refuses.
 fn symbolic_ref(dir: &Path, name: &str) -> Result<Option<String>, GateError> {
-    let out = run(git(dir).args(["symbolic-ref", "-q", name]))?;
+    let out = run(git(dir).args(["symbolic-ref", "-q", name]), "symbolic-ref")?;
     match out.status.code() {
         Some(0) => {
             let target = line(&out, "symbolic-ref")?;
@@ -282,7 +321,10 @@ fn symbolic_ref(dir: &Path, name: &str) -> Result<Option<String>, GateError> {
 
 /// `git show-ref --verify -q <name>`: exit 0 present, 1 absent.
 fn ref_exists(dir: &Path, name: &str) -> Result<bool, GateError> {
-    let out = run(git(dir).args(["show-ref", "--verify", "-q", name]))?;
+    let out = run(
+        git(dir).args(["show-ref", "--verify", "-q", name]),
+        "show-ref",
+    )?;
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -293,22 +335,11 @@ fn ref_exists(dir: &Path, name: &str) -> Result<bool, GateError> {
 /// `git hash-object --no-filters --stdin` over `bytes`, in `dir`'s repo (so
 /// the repository's object format applies).
 fn hash_bytes(dir: &Path, bytes: &[u8]) -> Result<Output, GateError> {
-    let spawn = || -> std::io::Result<Output> {
-        let mut child = git(dir)
-            .args(["hash-object", "--no-filters", "--stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        // Dropping the handle after the write closes stdin, so git sees EOF.
-        let written = match child.stdin.take() {
-            Some(mut stdin) => stdin.write_all(bytes),
-            None => Err(std::io::Error::other("git stdin unavailable")),
-        };
-        let output = child.wait_with_output()?;
-        written.map(|()| output)
-    };
-    let out = spawn().map_err(unavailable)?;
+    let out = run_with_input(
+        git(dir).args(["hash-object", "--no-filters", "--stdin"]),
+        "hash-object",
+        Some(bytes),
+    )?;
     if !out.status.success() {
         return Err(GateError::GitFailed {
             step: "hash-object",
@@ -341,8 +372,110 @@ fn line(out: &Output, step: &'static str) -> Result<String, GateError> {
     Ok(text.to_string())
 }
 
-fn run(cmd: &mut Command) -> Result<Output, GateError> {
-    cmd.stdin(Stdio::null()).output().map_err(unavailable)
+fn run(cmd: &mut Command, step: &'static str) -> Result<Output, GateError> {
+    run_with_input(cmd, step, None)
+}
+
+/// Run one git step, feeding it `input` (or no stdin) and capturing stdout,
+/// and kill it once [`git_timeout`] has passed.
+///
+/// Why: #8454: a git that blocks (a FIFO in its config) must not block the
+/// caller; std's `output()` waits forever.
+/// What: stdin and stdout each get a thread, so a full pipe never stalls
+/// the wait; the child is polled until the deadline, then killed and
+/// reaped. stderr is discarded. A thread that cannot start kills the child.
+/// Test: `git_blocked_on_a_fifo_config_include_times_out`.
+fn run_with_input(
+    cmd: &mut Command,
+    step: &'static str,
+    input: Option<&[u8]>,
+) -> Result<Output, GateError> {
+    let deadline = Instant::now() + git_timeout();
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    let mut child = cmd
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(unavailable)?;
+    let (tx_in, rx_in) = mpsc::channel();
+    let (tx_out, rx_out) = mpsc::channel();
+    let feed = match (child.stdin.take(), input) {
+        (Some(mut pipe), Some(bytes)) => {
+            let bytes = bytes.to_vec();
+            // Dropping the pipe after the write closes stdin: git sees EOF.
+            thread::Builder::new()
+                .spawn(move || {
+                    let _ = tx_in.send(pipe.write_all(&bytes));
+                })
+                .map(drop)
+        }
+        _ => {
+            let _ = tx_in.send(Ok(()));
+            Ok(())
+        }
+    };
+    let piped = feed.and_then(|()| match child.stdout.take() {
+        Some(mut pipe) => thread::Builder::new()
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = tx_out.send(pipe.read_to_end(&mut buf).map(|_| buf));
+            })
+            .map(drop),
+        None => Err(std::io::Error::other("git stdout unavailable")),
+    });
+    let status = match piped.and_then(|()| wait_until(&mut child, deadline)) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            kill(&mut child);
+            return Err(GateError::GitTimedOut { step });
+        }
+        Err(e) => {
+            kill(&mut child);
+            return Err(unavailable(e));
+        }
+    };
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let written = rx_in.recv_timeout(left());
+    let stdout = rx_out.recv_timeout(left());
+    match (written, stdout) {
+        (Ok(Ok(())), Ok(Ok(stdout))) => Ok(Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        }),
+        (Ok(Err(e)), _) | (_, Ok(Err(e))) => Err(unavailable(e)),
+        (Err(RecvTimeoutError::Timeout), _) | (_, Err(RecvTimeoutError::Timeout)) => {
+            Err(GateError::GitTimedOut { step })
+        }
+        _ => Err(GateError::GitFailed { step }),
+    }
+}
+
+/// Poll `child` until it exits (`Some`) or `deadline` passes (`None`).
+fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<ExitStatus>> {
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(pause.min(deadline - now));
+        pause = (pause * 2).min(Duration::from_millis(20));
+    }
+}
+
+/// Kill and reap a git step that is no longer wanted.
+fn kill(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn unavailable(e: std::io::Error) -> GateError {

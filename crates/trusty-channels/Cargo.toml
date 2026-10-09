@@ -45,6 +45,9 @@ chrono = { workspace = true }
 serde_yaml = { workspace = true }
 # #8454 S2b: the home directory for the host file and `~/` entries.
 dirs = { workspace = true }
+# #8454 S2b: O_NOFOLLOW and O_NONBLOCK for opening a route or host file;
+# std names neither. Already in the graph via tokio.
+libc = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

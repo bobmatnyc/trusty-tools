@@ -150,7 +150,7 @@ pub(crate) fn listed_dirs(
 
 /// #8454 S2 plan §4: every `projects` entry, on every channel, must be its
 /// own canonical path. A missing dir is not refused here: it has no file.
-fn check_canonical(host: &HostCeiling) -> Result<(), HostError> {
+pub(crate) fn check_canonical(host: &HostCeiling) -> Result<(), HostError> {
     for c in Channel::ALL {
         let Some(ch) = host.channel(c) else { continue };
         for (index, p) in ch.projects().iter().enumerate() {

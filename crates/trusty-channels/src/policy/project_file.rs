@@ -207,9 +207,11 @@ fn routes_of(channel: Channel, raw: Vec<RawFields>) -> Result<Vec<ProjectRoute>,
             // #9448: a configured space passes the same check as a send target.
             if let Some(s) = &space {
                 if !is_space_name(s) {
+                    // #8454: the error repeats no input value, not even the
+                    // route name; a token typed into either must not leak.
                     return Err(ProjectFileError::Invalid {
-                        entry,
-                        reason: format!("space {s:?} must be spaces/{{space}}"),
+                        entry: format!("{channel}.routes[{i}]"),
+                        reason: "space must be spaces/{space}".into(),
                     });
                 }
             }

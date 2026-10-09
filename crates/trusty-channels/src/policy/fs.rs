@@ -4,11 +4,13 @@
 //! host ceiling or a project's routes (#8454 S2 plan §4; the Architect's
 //! review extends the host check to its parent directory).
 //! What: [`read_host`] and [`read_project`] check each named path with
-//! `symlink_metadata`, open the file, confirm the opened file is the one
-//! checked, and read at most [`MAX_FILE_BYTES`]. Every fault is a named
-//! error; nothing falls back to a default.
+//! `symlink_metadata`, open the file with [`open_regular`] (no symlink, no
+//! wait on a FIFO), confirm the opened file is the one checked, and read at
+//! most [`MAX_FILE_BYTES`]. Every fault is a named error; nothing falls back
+//! to a default.
 //! Test: `symlinked_file_refused`, `host_config_parent_dir_symlink_denies_all`,
-//! `host_missing_denies_all`, `oversized_files_are_refused`.
+//! `host_missing_denies_all`, `oversized_files_are_refused`,
+//! `fifo_route_file_is_refused_without_blocking`.
 
 use std::fs::{File, Metadata};
 use std::io::{ErrorKind, Read as _};
@@ -123,7 +125,8 @@ fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
     }
     let (mut file, opened) = open_regular(path, what)?;
     // #8454: the path was swapped for another file between the check and
-    // the open; the load gate would refuse foreign bytes too.
+    // the open; the load gate would refuse foreign bytes too. Untested: only
+    // a swap inside that window reaches it, and no test can time one.
     if !same_file(&checked, &opened) {
         return Err(not_regular);
     }
@@ -138,15 +141,44 @@ fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
     Ok(bytes)
 }
 
-/// Open `path` and return the handle with its metadata.
+/// Open `path` for reading without following a symlink or waiting on a
+/// FIFO, and require a regular file on the opened handle.
+///
+/// Why: the `lstat` before the open cannot stop a swap in between, and a
+/// plain open of a FIFO blocks until a writer appears (#8454).
+/// What: opens with `O_NOFOLLOW | O_NONBLOCK`; a symlink (`ELOOP`) or a
+/// handle whose `fstat` is not a regular file is `NotRegular`.
+/// Test: `fifo_route_file_is_refused_without_blocking`.
 pub(super) fn open_regular(path: &Path, what: &'static str) -> Result<(File, Metadata), ReadFault> {
-    let _ = what;
-    let file = File::open(path).map_err(|e| match e.kind() {
+    let not_regular = || ReadFault::NotRegular { what, kind: "file" };
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).map_err(|e| match e.kind() {
         ErrorKind::NotFound => ReadFault::Missing,
+        _ if is_symlink_loop(&e) => not_regular(),
         kind => ReadFault::Io(kind),
     })?;
     let opened = file.metadata().map_err(|e| ReadFault::Io(e.kind()))?;
+    if !opened.file_type().is_file() {
+        return Err(not_regular());
+    }
     Ok((file, opened))
+}
+
+/// `O_NOFOLLOW` refuses a symlink with `ELOOP`.
+#[cfg(unix)]
+fn is_symlink_loop(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(libc::ELOOP)
+}
+
+#[cfg(not(unix))]
+fn is_symlink_loop(_: &std::io::Error) -> bool {
+    false
 }
 
 #[cfg(unix)]

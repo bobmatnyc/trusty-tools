@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::policy::fs::{read_host, read_project, ProjectRead};
 use crate::policy::gate::{branch_state, BranchState};
 use crate::policy::host::parse_host;
-use crate::policy::load::{assemble, listed_dirs, prepare, LoadRequest, Prepared};
+use crate::policy::load::{assemble, check_canonical, listed_dirs, prepare, LoadRequest, Prepared};
 use crate::policy::project_file::ProjectFile;
 use crate::policy::report::{FileState, Finding, LoadReport};
 use crate::policy::table::ChannelPolicy;
@@ -29,13 +29,17 @@ use crate::policy::table::ChannelPolicy;
 /// What: the exact bytes of the host file and each listed project file
 /// (each capped at 256 KiB, so the bytes are the fingerprint and no hash
 /// collision can hide an edit), each dir's canonical path, and its
-/// [`BranchState`]. A read or git fault is recorded as its message, so a
+/// [`BranchState`], plus the canonical-path verdict over every `projects`
+/// entry on every channel, served or not, since a fresh load denies all on
+/// any of them. A read or git fault is recorded as its message, so a
 /// change of fault also reloads.
 /// Test: `same_size_same_mtime_edit_is_seen_on_reload`,
-/// `branch_switch_with_identical_bytes_regates`.
+/// `branch_switch_with_identical_bytes_regates`,
+/// `host_fault_on_an_unserved_entry_denies_all_on_refresh`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     host: Result<String, String>,
+    canonical: Option<Result<(), String>>,
     projects: Vec<ProjectPrint>,
 }
 
@@ -54,11 +58,19 @@ impl Fingerprint {
             (Ok(text), Some(home)) => parse_host(text, Some(home)).ok(),
             _ => None,
         };
+        // #8454 Q3: an entry this consumer never reads still denies all.
+        let canonical = ceiling
+            .as_ref()
+            .map(|c| check_canonical(c).map_err(|e| e.to_string()));
         let dirs = ceiling
             .map(|c| listed_dirs(&c, &req.channels, req.project.as_deref()))
             .unwrap_or_default();
         let projects = dirs.into_iter().map(|dir| ProjectPrint::of(&dir)).collect();
-        Self { host, projects }
+        Self {
+            host,
+            canonical,
+            projects,
+        }
     }
 }
 

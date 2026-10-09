@@ -11157,6 +11157,7 @@ dependencies = [
  "comrak",
  "dirs 5.0.1",
  "jsonwebtoken",
+ "libc",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
