@@ -63,8 +63,17 @@ pub(super) async fn index_file_handler(
 /// HTTP status beside its body. #8976: `indexed` is `true` only when chunks
 /// landed (or a tombstone removed them); a zero-chunk write answers
 /// `indexed: false` with a `reason`, and every body carries `chunks`. #8922:
-/// a path the walker excludes, or sops content, is refused with 403.
-/// Test: `index_file_over_the_socket_matches_the_http_body`,
+/// a path the walker excludes, or sops content, is refused with 403. #9510:
+/// the path goes through [`super::remove_path::index_key`] first, so an
+/// absolute in-root path replaces the file's root-relative chunks and one
+/// outside the root answers 400; `path` in the reply echoes the request. A
+/// copy stored under the verbatim absolute key before #9510 is purged first,
+/// and on an excluded-path 403 too.
+/// Test: `index_file_by_an_absolute_in_root_path_replaces_its_chunks_9510`,
+/// `index_file_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
+/// `index_file_excluded_by_an_absolute_path_purges_a_pre_fix_verbatim_key_9510`,
+/// `index_file_refuses_an_absolute_path_outside_the_root_9510`,
+/// `index_file_over_the_socket_matches_the_http_body`,
 /// `pushed_write_to_an_excluded_path_is_refused_and_purged`,
 /// `index_file_reports_chunks_and_never_indexes_an_empty_file`,
 /// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
@@ -80,37 +89,59 @@ pub(crate) async fn index_file_report(
     let handle = super::index_resolve::resolve_or_load_index(state, &index_id)
         .await
         .map_err(|(status, body)| (status, body.0))?;
+    // #9510: an absolute in-root path is written under its root-relative key,
+    // the one the watcher and reindex store; one outside the root is a 400.
+    let key = super::remove_path::index_key(&index_id.0, &handle.roots(), &req.path)?;
     // #3049: hold the teardown lock's shared side across the write so a
     // concurrent DELETE cannot remove_dir_all this index's data mid-write.
     let _teardown_guard = crate::service::reindex::acquire_index_teardown_read(&index_id).await;
     let indexer = handle.indexer.read().await;
+    let failed = |e: anyhow::Error| {
+        // #5061: a write that failed must say so — the caller cannot infer
+        // it from a bare 500, and it has no other signal that the file it
+        // just pushed never landed.
+        tracing::warn!(
+            index_id = %index_id,
+            path = %req.path,
+            error = %e,
+            "index-file failed"
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({
+                "error": "index_file_failed",
+                "index_id": index_id.0,
+                "path": req.path,
+                // #8976: the error body says outright that nothing landed.
+                "indexed": false,
+                "message": e.to_string(),
+            }),
+        )
+    };
     // #8922: the walker's admission decision gates a pushed write too.
-    crate::service::write_admission::gate(&handle, &indexer, &req.path, &req.content).await?;
-    let outcome = indexer
-        .index_file_outcome(&req.path, &req.content)
+    let gated = crate::service::write_admission::gate(&handle, &indexer, &key, &req.content).await;
+    if let Err((status, mut body)) = gated {
+        // #9510: a refusal echoes the path as sent, not the stored key, and an
+        // excluded one also purges the verbatim key; a failed purge is a 500.
+        body["path"] = req.path.as_str().into();
+        if body["reason"] == "excluded_path" {
+            let purge =
+                super::remove_path::purge_verbatim_key(&indexer, &index_id, &req.path, &key);
+            let removed = purge.await.map_err(failed)? as u64;
+            body["removed_chunks"] =
+                (body["removed_chunks"].as_u64().unwrap_or(0) + removed).into();
+        }
+        return Err((status, body));
+    }
+    // #9510: purge a pre-fix copy under the verbatim absolute key first, under
+    // this guard; a failed purge is a 500 and nothing is written.
+    super::remove_path::purge_verbatim_key(&indexer, &index_id, &req.path, &key)
         .await
-        .map_err(|e| {
-            // #5061: a write that failed must say so — the caller cannot infer
-            // it from a bare 500, and it has no other signal that the file it
-            // just pushed never landed.
-            tracing::warn!(
-                index_id = %index_id,
-                path = %req.path,
-                error = %e,
-                "index-file failed"
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({
-                    "error": "index_file_failed",
-                    "index_id": index_id.0,
-                    "path": req.path,
-                    // #8976: the error body says outright that nothing landed.
-                    "indexed": false,
-                    "message": e.to_string(),
-                }),
-            )
-        })?;
+        .map_err(failed)?;
+    let outcome = indexer
+        .index_file_outcome(&key, &req.content)
+        .await
+        .map_err(failed)?;
     // #8922: sops content is refused like an excluded path, not a quiet 200.
     if outcome == crate::core::indexer::IndexFileOutcome::SopsEncrypted {
         use crate::service::write_admission::{refusal, Refusal};

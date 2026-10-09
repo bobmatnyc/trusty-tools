@@ -795,6 +795,14 @@ Add or replace one file in the index.
     `removed: true`. It is the one reply where `indexed: true` comes with zero
     chunks.
   - `chunks` (#8976): chunks the write committed.
+  - `path` (#9510) is index-relative, or absolute under the index root. An
+    absolute path is stored under the same key `remove-file` maps it to, the
+    root-relative key the watcher and reindex use, so re-adding a file by
+    its absolute path replaces its chunks. A relative path is stored as
+    sent. `path` in the reply echoes the request.
+- **Response 400** `index_file_path_outside_root` (#9510): an absolute path
+  outside every root, or the root itself. Nothing is indexed (`indexed:
+  false`, `chunks: 0`); `message` names both accepted forms.
 - **Response 403** `index_file_excluded` (#8922): the write is refused and
   nothing is indexed. `reason` is `excluded_path` — the reindex walker would
   skip this path (`exclude_globs`, `extensions`, `include_paths`,
@@ -828,7 +836,7 @@ Remove a file (and all its chunks) from the index.
     and the canonical root; only when both fail is its parent directory
     canonicalized. The last component is never resolved, so an in-root
     symlink removes its own key, not its target's. A key stored verbatim by
-    an absolute `index-file` write is removed too. `path` in the reply echoes
+    an absolute `index-file` write before #9510 is removed too. `path` in the reply echoes
     the request.
   - A successful removal also drops the file's content hash, so the next
     reindex indexes the file again.
