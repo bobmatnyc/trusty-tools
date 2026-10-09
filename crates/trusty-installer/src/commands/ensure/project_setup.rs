@@ -291,8 +291,73 @@ mod tests {
     use crate::commands::test_support::{
         clear_data_dir_override, stub_data_dir, stub_empty_data_dir, stub_memory_socket, stub_once,
     };
+    use crate::commands::test_support::{clear_env, search_stub, set_env, tcp_tripwire};
     use serde_json::Value;
+    use std::sync::atomic::Ordering;
+    use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
     use trusty_common::uds::server::RpcError;
+
+    /// Why (#9214): the index stage must dial trusty-search's socket, never the
+    /// TCP address a stale `http_addr` names — that listener is going away.
+    /// What: a stub socket answering `search.index.create`, and a counting TCP
+    /// tripwire behind a planted `http_addr`; assert `changed`, the exact method
+    /// literal and `{id, root_path}` params, and zero TCP connections.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn register_index_dials_the_socket_not_http_addr() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (seen, daemon) = search_stub(
+            "search.index.create",
+            Ok(json!({ "id": "proj", "created": true })),
+        )
+        .await;
+        let (addr, hits) = tcp_tripwire().await;
+        let dir = stub_data_dir(SEARCH_APP, &addr);
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, daemon.socket());
+        let client = build_client().unwrap();
+        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
+            .await
+            .unwrap();
+        clear_env(&[TRUSTY_SEARCH_SOCKET_ENV]);
+        clear_data_dir_override(&dir);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the stale http_addr was dialled"
+        );
+        assert!(out.ok && out.changed, "detail: {}", out.detail);
+        assert_eq!(
+            *seen.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![(
+                "search.index.create".to_string(),
+                json!({ "id": "proj", "root_path": "/tmp/proj" })
+            )]
+        );
+    }
+
+    /// Why (#9214): with no `http_addr` and no TCP listener at all, a serving
+    /// socket is the whole story — the stage must still register.
+    /// What: an empty data dir and a stub socket; assert `ok` + `changed`.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn register_index_created_over_the_socket_without_http_addr() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_seen, daemon) = search_stub(
+            "search.index.create",
+            Ok(json!({ "id": "proj", "created": true })),
+        )
+        .await;
+        let dir = stub_empty_data_dir("tctl-ensure-uds");
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, daemon.socket());
+        let client = build_client().unwrap();
+        let out = register_index(&client, std::path::Path::new("/tmp/proj"))
+            .await
+            .unwrap();
+        clear_env(&[TRUSTY_SEARCH_SOCKET_ENV]);
+        clear_data_dir_override(&dir);
+        assert_eq!(out.stage, STAGE_INDEX);
+        assert!(out.ok && out.changed, "detail: {}", out.detail);
+    }
 
     /// Why: a fresh registration (`created:true`) must report `changed = true`.
     /// What: stub returns `{"created":true}`; assert the outcome.

@@ -138,37 +138,42 @@ async fn serve_fixed(
     listener: tokio::net::TcpListener,
     responses: Vec<(&'static str, &'static str)>,
 ) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     for (status_line, body) in responses {
-        let Ok((mut sock, _)) = listener.accept().await else {
+        let Ok((sock, _)) = listener.accept().await else {
             break;
         };
-        // Drain the request up to (and including) the end-of-headers marker
-        // before replying. A single fixed-size read can split a request whose
-        // body is long, which used to race the write and flake CI; reading until
-        // `\r\n\r\n` (or EOF) consumes the whole header block deterministically.
-        // We don't need the body — only that the request is fully sent.
-        let mut acc = Vec::with_capacity(2048);
-        let mut chunk = [0u8; 2048];
-        loop {
-            match sock.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    acc.extend_from_slice(&chunk[..n]);
-                    if acc.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        let resp = format!(
-            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        );
-        let _ = sock.write_all(resp.as_bytes()).await;
-        let _ = sock.shutdown().await;
+        answer_one(sock, status_line, body).await;
     }
+}
+
+/// Drain one request's headers from `sock`, then write one fixed response.
+async fn answer_one(mut sock: tokio::net::TcpStream, status_line: &str, body: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Drain the request up to (and including) the end-of-headers marker
+    // before replying. A single fixed-size read can split a request whose
+    // body is long, which used to race the write and flake CI; reading until
+    // `\r\n\r\n` (or EOF) consumes the whole header block deterministically.
+    // We don't need the body — only that the request is fully sent.
+    let mut acc = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+    loop {
+        match sock.read(&mut chunk).await {
+            Ok(0) => break,
+            Ok(n) => {
+                acc.extend_from_slice(&chunk[..n]);
+                if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let resp = format!(
+        "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = sock.write_all(resp.as_bytes()).await;
+    let _ = sock.shutdown().await;
 }
 
 /// [`stub_seq`], but hosted on its own thread and callable from sync code
@@ -394,7 +399,8 @@ pub(crate) fn clear_data_dir_override(dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A stand-in trusty-memory daemon on a temp Unix socket (#6286).
+/// A stand-in trusty-memory (#6286) or trusty-search (#9214) daemon on a temp
+/// Unix socket.
 ///
 /// Why: `ensure`'s palace stage moved off loopback HTTP onto the socket
 /// ADR-0032 gave trusty-memory, so [`stub_once`] and [`stub_data_dir`] cannot
@@ -405,25 +411,25 @@ pub(crate) fn clear_data_dir_override(dir: &std::path::Path) {
 /// What: [`stub_memory_socket`] binds a socket under a `TempDir`, mounts
 /// `handler` as the router's catch-all through the same
 /// [`trusty_common::uds::server`] pieces the real daemon uses, and serves until
-/// the returned [`StubMemoryDaemon`] drops. The handler answers a `result` value
+/// the returned [`StubDaemon`] drops. The handler answers a `result` value
 /// directly; `Err` is how a test makes the daemon refuse, which is the arm
 /// `create_palace`'s not-found fast-path branches on.
 ///
 /// Test: `ensure::project_setup::tests::create_palace_*`.
-pub(crate) struct StubMemoryDaemon {
+pub(crate) struct StubDaemon {
     socket: std::path::PathBuf,
     _dir: tempfile::TempDir,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
-impl StubMemoryDaemon {
+impl StubDaemon {
     /// The path a client under test should dial.
     pub(crate) fn socket(&self) -> &std::path::Path {
         &self.socket
     }
 }
 
-impl Drop for StubMemoryDaemon {
+impl Drop for StubDaemon {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -435,7 +441,7 @@ impl Drop for StubMemoryDaemon {
 ///
 /// Boxed rather than generic so a handler can capture state and await; the real
 /// daemon's answers are not pure functions of their arguments either.
-pub(crate) type StubMemoryFuture = std::pin::Pin<
+pub(crate) type StubFuture = std::pin::Pin<
     Box<
         dyn std::future::Future<
                 Output = Result<serde_json::Value, trusty_common::uds::server::RpcError>,
@@ -444,14 +450,14 @@ pub(crate) type StubMemoryFuture = std::pin::Pin<
 >;
 
 /// The catch-all that hands every method to the test's closure.
-struct StubMemoryFallback<F> {
+struct StubFallback<F> {
     handler: F,
 }
 
 #[async_trait::async_trait]
-impl<F> trusty_common::uds::server::RpcFallback for StubMemoryFallback<F>
+impl<F> trusty_common::uds::server::RpcFallback for StubFallback<F>
 where
-    F: Fn(&str, serde_json::Value) -> StubMemoryFuture + Send + Sync + 'static,
+    F: Fn(&str, serde_json::Value) -> StubFuture + Send + Sync + 'static,
 {
     async fn call(
         &self,
@@ -467,17 +473,120 @@ where
 /// # Panics
 ///
 /// When the socket cannot be bound — a test-only failure with no recovery.
-pub(crate) async fn stub_memory_socket<F>(handler: F) -> StubMemoryDaemon
+pub(crate) async fn stub_memory_socket<F>(handler: F) -> StubDaemon
 where
-    F: Fn(&str, serde_json::Value) -> StubMemoryFuture + Send + Sync + 'static,
+    F: Fn(&str, serde_json::Value) -> StubFuture + Send + Sync + 'static,
+{
+    stub_socket_named("trusty-memory.sock", handler).await
+}
+
+/// Start a stub trusty-search daemon answering every method through `handler`.
+///
+/// Why: #9214 moved `ensure`'s index stage and `--wait` probe onto
+/// trusty-search's socket; this is the [`stub_memory_socket`] vehicle for it.
+/// The handler sees the method literal and params, so a test can fail a wrong
+/// method name rather than answer it.
+///
+/// # Panics
+///
+/// When the socket cannot be bound — a test-only failure with no recovery.
+pub(crate) async fn stub_search_socket<F>(handler: F) -> StubDaemon
+where
+    F: Fn(&str, serde_json::Value) -> StubFuture + Send + Sync + 'static,
+{
+    stub_socket_named("trusty-search.sock", handler).await
+}
+
+/// Every `(method, params)` a stub daemon was called with, in order.
+pub(crate) type SeenCalls = std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>;
+
+/// A stub trusty-search daemon that answers `answer` to exactly one method.
+///
+/// Why: a client that dials a wrong method literal must fail, as it would
+/// against the real daemon, rather than be answered by a catch-all.
+/// What: records every call into the returned [`SeenCalls`]; `method` gets
+/// `answer`, anything else gets JSON-RPC `-32601` method-not-found.
+pub(crate) async fn search_stub(
+    method: &'static str,
+    answer: Result<serde_json::Value, trusty_common::uds::server::RpcError>,
+) -> (SeenCalls, StubDaemon) {
+    let seen = SeenCalls::default();
+    let recorder = std::sync::Arc::clone(&seen);
+    let daemon = stub_search_socket(move |m: &str, params: serde_json::Value| {
+        recorder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((m.to_string(), params));
+        let out = if m == method {
+            answer.clone()
+        } else {
+            Err(trusty_common::uds::server::RpcError::new(
+                -32601,
+                format!("method not found: {m}"),
+            ))
+        };
+        Box::pin(async move { out })
+    })
+    .await;
+    (seen, daemon)
+}
+
+/// Point a socket-override env var (`TRUSTY_SEARCH_SOCKET`,
+/// `TRUSTY_MEMORY_SOCKET`) at `path`.
+///
+/// # Preconditions
+/// The caller MUST be holding [`ENV_TEST_LOCK`]; teardown is [`clear_env`].
+pub(crate) fn set_env(var: &str, path: &std::path::Path) {
+    unsafe {
+        // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
+        std::env::set_var(var, path);
+    }
+}
+
+/// Remove each env var in `vars`. The caller is still holding [`ENV_TEST_LOCK`].
+pub(crate) fn clear_env(vars: &[&str]) {
+    for var in vars {
+        unsafe {
+            // SAFETY: serialised by ENV_TEST_LOCK; no concurrent env access in this crate's tests.
+            std::env::remove_var(var);
+        }
+    }
+}
+
+/// A loopback TCP listener that counts every connection it accepts.
+///
+/// Why: #9214's contract is that `ensure` never dials trusty-search over TCP.
+/// Planting this behind a stale `http_addr` turns any such dial into a non-zero
+/// count. It answers `200 {"created":true}` so a TCP client would otherwise
+/// look healthy — the count is the only thing that can catch it.
+/// What: binds an ephemeral port, spawns an accept loop that bumps the counter
+/// and answers each connection, and returns the address and the counter.
+pub(crate) async fn tcp_tripwire() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&hits);
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            answer_one(sock, "HTTP/1.1 200 OK", r#"{"created":true}"#).await;
+        }
+    });
+    (addr, hits)
+}
+
+/// Bind a stub daemon on `file_name` under a fresh `TempDir`.
+async fn stub_socket_named<F>(file_name: &str, handler: F) -> StubDaemon
+where
+    F: Fn(&str, serde_json::Value) -> StubFuture + Send + Sync + 'static,
 {
     use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
     let dir = tempfile::TempDir::new().expect("tempdir for the stub socket");
-    let socket = dir.path().join("trusty-memory.sock");
+    let socket = dir.path().join(file_name);
     let listener = trusty_common::uds::bind_hardened(&socket).expect("bind the stub socket");
 
-    let router = std::sync::Arc::new(RpcRouter::new().fallback(StubMemoryFallback { handler }));
+    let router = std::sync::Arc::new(RpcRouter::new().fallback(StubFallback { handler }));
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         serve_until(&listener, router, RpcServeOptions::default(), async {
@@ -486,7 +595,7 @@ where
         .await;
     });
 
-    StubMemoryDaemon {
+    StubDaemon {
         socket,
         _dir: dir,
         shutdown: Some(tx),

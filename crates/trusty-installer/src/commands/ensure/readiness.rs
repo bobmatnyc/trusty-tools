@@ -164,10 +164,149 @@ pub async fn probe_ready(client: &reqwest::Client) -> bool {
 }
 
 #[cfg(test)]
+// The socket tests hold ENV_TEST_LOCK across awaits on purpose; see
+// `project_setup::tests` for why that is safe.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+    use crate::commands::ensure::report::{EnsureReport, EXIT_WAIT_TIMEOUT};
     use crate::commands::ensure::ENV_TEST_LOCK;
+    use crate::commands::test_support::{
+        clear_data_dir_override, clear_env, search_stub, set_env, stub_data_dir,
+        stub_empty_data_dir, stub_memory_socket, tcp_tripwire, StubDaemon,
+    };
+    use serde_json::json;
     use std::cell::Cell;
+    use std::sync::atomic::Ordering;
+    use trusty_common::memory_rpc::TRUSTY_MEMORY_SOCKET_ENV;
+    use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+
+    const SOCKET_ENVS: &[&str] = &[TRUSTY_SEARCH_SOCKET_ENV, TRUSTY_MEMORY_SOCKET_ENV];
+
+    /// A serving memory stub, with `TRUSTY_MEMORY_SOCKET` pointed at it.
+    async fn serve_memory() -> StubDaemon {
+        let memory = stub_memory_socket(|_m: &str, _p| Box::pin(async { Ok(json!({})) })).await;
+        set_env(TRUSTY_MEMORY_SOCKET_ENV, memory.socket());
+        memory
+    }
+
+    /// Why (#9214): readiness is the search SOCKET answering its health method
+    /// plus a live memory socket — no `http_addr`, no TCP listener.
+    /// What: an empty data dir, a stub answering only `search.health`, and a
+    /// memory stub; assert ready and that the health literal was called.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn probe_ready_is_true_with_only_the_search_and_memory_sockets() {
+        let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = stub_empty_data_dir("tctl-ready-uds");
+        let (seen, search) = search_stub("search.health", Ok(json!({ "status": "ok" }))).await;
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, search.socket());
+        let _memory = serve_memory().await;
+        let ready = probe_ready(&super::super::daemon::build_client().unwrap()).await;
+        clear_env(SOCKET_ENVS);
+        clear_data_dir_override(&dir);
+        assert!(ready, "a serving search socket + memory socket is ready");
+        let calls = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(calls.first().map(|c| c.0.as_str()), Some("search.health"));
+    }
+
+    /// Why (#9214): an absent search socket is not ready, even when a stale
+    /// `http_addr` points at a live TCP server that would answer `/health`.
+    /// What: a counting tripwire behind a planted `http_addr`, the search env
+    /// at a path nothing binds, a serving memory stub; assert not ready and
+    /// zero TCP connections.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn probe_ready_is_false_without_the_search_socket_despite_a_live_http_addr() {
+        let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (addr, hits) = tcp_tripwire().await;
+        let dir = stub_data_dir(super::super::daemon::SEARCH_APP, &addr);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, &tmp.path().join("absent.sock"));
+        let _memory = serve_memory().await;
+        let ready = probe_ready(&super::super::daemon::build_client().unwrap()).await;
+        clear_env(SOCKET_ENVS);
+        clear_data_dir_override(&dir);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the stale http_addr was dialled"
+        );
+        assert!(!ready, "no search socket means not ready");
+    }
+
+    /// Why (#9214): `--wait` against a down search daemon must still give up
+    /// at its budget and map to exit 4.
+    /// What: polls the real probe with a 200 ms budget and no search socket;
+    /// assert not ready, a bounded wall-clock, and `EXIT_WAIT_TIMEOUT`.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn wait_times_out_with_exit_4_when_search_is_down() {
+        let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = stub_empty_data_dir("tctl-wait-down");
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, &tmp.path().join("absent.sock"));
+        let _memory = serve_memory().await;
+        let client = super::super::daemon::build_client().unwrap();
+        let cfg = PollConfig {
+            interval: Duration::from_millis(10),
+            timeout: Duration::from_millis(200),
+        };
+        let start = Instant::now();
+        let ready = poll_until_ready(cfg, || probe_ready(&client)).await;
+        let elapsed = start.elapsed();
+        clear_env(SOCKET_ENVS);
+        clear_data_dir_override(&dir);
+        assert!(!ready);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "budget overrun: {elapsed:?}"
+        );
+        let report = EnsureReport::build(Vec::new(), Vec::new(), true, ready);
+        assert_eq!(report.exit_code(), EXIT_WAIT_TIMEOUT);
+    }
+
+    /// Why (#9214): `--wait` must return as soon as the search socket starts
+    /// serving, not wait out its budget.
+    /// What: the search env names a path nothing binds; a spawned task binds a
+    /// health stub after 100 ms and repoints the env. Runs on the
+    /// current-thread runtime, so the env write never races the probe's read.
+    /// Assert ready, after the bind and well inside the 5 s budget.
+    /// Test: This is the test.
+    #[tokio::test]
+    async fn wait_returns_once_the_search_socket_serves() {
+        let _g = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = stub_empty_data_dir("tctl-wait-late");
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        set_env(TRUSTY_SEARCH_SOCKET_ENV, &tmp.path().join("absent.sock"));
+        let _memory = serve_memory().await;
+        let late = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (_seen, search) = search_stub("search.health", Ok(json!({}))).await;
+            set_env(TRUSTY_SEARCH_SOCKET_ENV, search.socket());
+            search
+        });
+        let client = super::super::daemon::build_client().unwrap();
+        let cfg = PollConfig {
+            interval: Duration::from_millis(20),
+            timeout: Duration::from_secs(5),
+        };
+        let start = Instant::now();
+        let ready = poll_until_ready(cfg, || probe_ready(&client)).await;
+        let elapsed = start.elapsed();
+        let _search = late.await.expect("late binder");
+        clear_env(SOCKET_ENVS);
+        clear_data_dir_override(&dir);
+        assert!(ready, "the socket served within budget");
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "ready before bind: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "waited out the budget: {elapsed:?}"
+        );
+    }
 
     /// Why: defaults must hold when no env overrides are set.
     /// What: a config built with no env vars present yields the default knobs.
