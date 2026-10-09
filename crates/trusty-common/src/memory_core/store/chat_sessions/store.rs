@@ -19,6 +19,7 @@ use super::types::{
     parse_timestamp,
 };
 use crate::memory_core::store::kg_store::SESSIONS;
+use crate::memory_core::store::palace_format;
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
 use std::cmp::Reverse;
@@ -52,14 +53,30 @@ impl ChatSessionStore {
     /// What:
     /// 1. Resolves the redb path. `chat_sessions.db` is rewritten to
     ///    `chat_sessions.redb` next to it; other extensions are kept as-is.
-    /// 2. Creates parent directories if missing.
-    /// 3. Opens (or creates) the redb database and touches the SESSIONS
+    /// 2. Refuses a palace directory whose format is newer than this binary
+    ///    (`palace_format::gate_palace`); the `PalaceStoreError` is the root
+    ///    of the returned error, so `is_format_refusal` matches it. An
+    ///    unstamped directory, or one that does not exist yet, is format 0.
+    /// 3. Creates parent directories if missing.
+    /// 4. Opens (or creates) the redb database and touches the SESSIONS
     ///    table in a write transaction so range scans on a fresh file
     ///    succeed.
     ///
     /// Test: `create_then_get_session_round_trips`,
-    /// `roundtrip_persists_across_reopen`.
+    /// `roundtrip_persists_across_reopen`,
+    /// `chat_session_store_refuses_a_newer_palace_with_bytes_unchanged`.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        // #9274: ADR-0067 D3 rule 1 — gate before the open and its init
+        // write transaction touch `chat_sessions.redb`, a D2 primary file.
+        if let Some(dir) = resolve_redb_path(path).parent()
+            && !dir.as_os_str().is_empty()
+        {
+            let label = dir.file_name().map_or_else(
+                || dir.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            palace_format::gate_palace(dir, &label)?;
+        }
         Self::open_inner(path).map_err(anyhow::Error::from)
     }
 

@@ -29,8 +29,11 @@ const IDENTITY_TXT: &str = "identity.txt";
 /// variant for missing metadata files.
 /// Test: `load_palace_missing_returns_not_found` pins which absences earn
 /// `NotFound`; `load_palace_propagates_an_unstattable_palace_json` pins that an
-/// undeterminable one earns `Io` instead.
+/// undeterminable one earns `Io` instead. The #9274 format and backup arms are
+/// covered in palace_format_tests.rs and format_backup_tests.rs.
+// #9274: `non_exhaustive` so later format arms are not a semver break.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PalaceStoreError {
     #[error("io error at {path}: {source}")]
     Io {
@@ -46,9 +49,117 @@ pub enum PalaceStoreError {
     },
     #[error("palace metadata missing at {0}")]
     NotFound(PathBuf),
+    /// #9274 (ADR-0067 D3 rule 1): a marker names a format newer than ours.
+    #[error(
+        "FormatTooNew: palace {palace} is at format {found}, newer than the format {supported} \
+         this binary reads; upgrade trusty-memory to a release that reads format {found}"
+    )]
+    FormatTooNew {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D3 rule 2): the palace is one format behind.
+    #[error(
+        "FormatNeedsMigration: palace {palace} is at format {found}, one behind the format \
+         {supported} this binary reads; start the trusty-memory daemon so it can migrate the palace"
+    )]
+    FormatNeedsMigration {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D3 rule 2): the palace is two or more formats behind.
+    #[error(
+        "FormatTooOld: palace {palace} is at format {found}, more than one behind the format \
+         {supported} this binary reads; open it first with a release that reads format {}",
+        .found + 1
+    )]
+    FormatTooOld {
+        palace: String,
+        found: u32,
+        supported: u32,
+    },
+    /// #9274 (ADR-0067 D1): the kg.redb marker and the palace.json mirror differ.
+    #[error(
+        "FormatMarkerMismatch: palace {palace} has kg.redb format {marker} but palace.json \
+         format {mirror}; refusing to open it"
+    )]
+    FormatMarkerMismatch {
+        palace: String,
+        marker: u32,
+        mirror: u32,
+    },
+    /// #9274: a format marker exists but could not be read; fail closed.
+    #[error("FormatMarkerUnreadable: palace {palace} format marker at {path}: {reason}")]
+    FormatMarkerUnreadable {
+        palace: String,
+        path: PathBuf,
+        reason: String,
+    },
+    /// #9274 (ADR-0067 D3 rule 3): a format-migration backup step failed.
+    #[error("BackupFailed: format-migration backup at {path}: {source}")]
+    BackupFailed {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// #9274: a backup copy, or its source, did not hash to the expected value.
+    #[error("BackupVerifyMismatch: {file}: expected sha256 {expected}, got {actual}")]
+    BackupVerifyMismatch {
+        file: PathBuf,
+        expected: String,
+        actual: String,
+    },
+    /// #9274: the backup filesystem lacks the 1.1x headroom the copy needs.
+    #[error(
+        "InsufficientSpace: format-migration backup at {path} needs {needed} bytes, \
+         {available} available"
+    )]
+    InsufficientSpace {
+        path: PathBuf,
+        needed: u64,
+        available: u64,
+    },
 }
 
 impl PalaceStoreError {
+    /// Whether this error refuses a palace over its on-disk format (#9274).
+    ///
+    /// Why: retry loops and the MCP error mapping must tell a refusal that no
+    /// wait can change from a transient failure.
+    /// What: `true` for the five `Format*` variants.
+    /// Test: `format_errors_are_not_retried`.
+    pub fn is_format_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::FormatTooNew { .. }
+                | Self::FormatNeedsMigration { .. }
+                | Self::FormatTooOld { .. }
+                | Self::FormatMarkerMismatch { .. }
+                | Self::FormatMarkerUnreadable { .. }
+        )
+    }
+
+    /// The variant's name, for callers that report it on the wire (#9274).
+    ///
+    /// Test: `every_new_error_arm_names_its_variant`.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::Io { .. } => "Io",
+            Self::Json { .. } => "Json",
+            Self::NotFound(_) => "NotFound",
+            Self::FormatTooNew { .. } => "FormatTooNew",
+            Self::FormatNeedsMigration { .. } => "FormatNeedsMigration",
+            Self::FormatTooOld { .. } => "FormatTooOld",
+            Self::FormatMarkerMismatch { .. } => "FormatMarkerMismatch",
+            Self::FormatMarkerUnreadable { .. } => "FormatMarkerUnreadable",
+            Self::BackupFailed { .. } => "BackupFailed",
+            Self::BackupVerifyMismatch { .. } => "BackupVerifyMismatch",
+            Self::InsufficientSpace { .. } => "InsufficientSpace",
+        }
+    }
+
     fn io(path: impl Into<PathBuf>, source: std::io::Error) -> Self {
         Self::Io {
             path: path.into(),
@@ -77,6 +188,10 @@ struct PalaceJson {
     /// Schema version for forward compatibility.
     #[serde(default = "default_schema_version")]
     schema_version: u32,
+    /// #9274 (ADR-0067 D1): the palace-format mirror. Absent means format 0;
+    /// `save_palace` carries an existing value forward and never invents one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format_version: Option<u32>,
 }
 
 fn default_schema_version() -> u32 {
@@ -92,6 +207,7 @@ impl From<&Palace> for PalaceJson {
             created_at: p.created_at,
             data_dir: p.data_dir.clone(),
             schema_version: 1,
+            format_version: None,
         }
     }
 }
@@ -124,8 +240,11 @@ impl PalaceStore {
     /// Why: Crash-safety — if the daemon dies mid-write we must not leave a
     /// half-written `palace.json` that cannot deserialize.
     /// What: Creates `data_dir`, writes JSON to `palace.json.tmp`, fsyncs and
-    /// renames over `palace.json`.
-    /// Test: `palace_store_roundtrip` save + load round-trips all fields.
+    /// renames over `palace.json`. #9274: an existing `format_version` mirror
+    /// is written back unchanged, and a mirror newer than this binary's format
+    /// refuses the rewrite with `FormatTooNew`.
+    /// Test: `palace_store_roundtrip` save + load round-trips all fields;
+    /// `save_palace_keeps_the_format_mirror_and_refuses_a_newer_one`.
     pub fn save_palace(palace: &Palace) -> Result<()> {
         let data_dir = palace.data_dir.clone();
         std::fs::create_dir_all(&data_dir).map_err(|e| PalaceStoreError::io(&data_dir, e))?;
@@ -133,7 +252,10 @@ impl PalaceStore {
         let target = data_dir.join(PALACE_JSON);
         let tmp = data_dir.join(format!("{PALACE_JSON}.tmp"));
 
-        let json: PalaceJson = palace.into();
+        let mut json: PalaceJson = palace.into();
+        // #9274: keep the format mirror, and refuse to rewrite a newer palace.
+        json.format_version =
+            super::palace_format::mirror_to_preserve(&data_dir, palace.id.as_str())?;
         let bytes = serde_json::to_vec_pretty(&json)
             .map_err(|e| PalaceStoreError::json(target.clone(), e))?;
 

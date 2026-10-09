@@ -13,6 +13,9 @@ use crate::memory_core::store::kg_store::{
     ACTIVE_SUBJECT_COUNTS, DRAWERS, DRAWERS_BY_FACT_KEY, KG_SCHEMA, ROOM_KEYS, ROOMS, TRIPLES,
     TRIPLES_BY_OBJECT, WING_KEYS, WINGS,
 };
+use crate::memory_core::store::palace_format::{
+    gate_kg_post_open, gate_kg_pre_open, is_format_refusal,
+};
 use crate::memory_core::store::write_deadline::{DeadlinedWrite, palace_label};
 use crate::memory_core::timeouts;
 use anyhow::{Context, Result};
@@ -68,9 +71,12 @@ impl KgStoreRedb {
     /// this function makes a single intent-passing call and does not double-
     /// retry. Opens the file, then in a single write transaction touches
     /// every table so the file always carries a stable schema even when no
-    /// data has been written.
+    /// data has been written. #9274: a palace-format marker above this
+    /// binary's format refuses the open before that transaction, without
+    /// retrying.
     /// Test: `open_then_reopen_persists_state`,
-    /// `writer_intent_open_fails_loud_on_locked_file`.
+    /// `writer_intent_open_fails_loud_on_locked_file`,
+    /// `a_direct_kg_open_of_an_n_plus_one_file_is_refused`.
     pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -112,6 +118,10 @@ impl KgStoreRedb {
         // `u8::from(bool)` keeps this a single non-`if` expression (fmt-stable).
         let max_attempts = RETRIES * u8::from(intent != OpenIntent::Writer);
 
+        // #9274: refuse a newer palace format before `Database::create` writes
+        // the header. A file this process already holds was gated when opened.
+        let marker_checked = Self::is_cached(path) || gate_kg_pre_open(path)?;
+
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..=max_attempts {
             // Check in-process cache first — avoids re-opening the same
@@ -135,7 +145,15 @@ impl KgStoreRedb {
             // snapshot are rejected via `READ_ONLY_ERROR_MSG`. In-process TOCTOU
             // races resolve on the next retry cycle (the aborting task drops
             // the lock within the exponential-backoff window).
-            match try_open_or_snapshot(path, intent) {
+            // #9274: a deferred marker read runs on the opened database,
+            // before the init transaction below writes anything.
+            let opened = try_open_or_snapshot(path, intent).and_then(|o| {
+                if !marker_checked {
+                    gate_kg_post_open(&*o.0, path)?;
+                }
+                Ok(o)
+            });
+            match opened {
                 Ok((db, snapshot_guard, mode)) => {
                     // Touch every table in a single write txn so they exist
                     // on disk even before the first write. Skip in snapshot
@@ -214,7 +232,8 @@ impl KgStoreRedb {
                 Err(e) => {
                     // #4911: an incompatible on-disk format never resolves by
                     // waiting, unlike the lock races this loop exists for.
-                    if is_incompatible_format_refusal(&e) {
+                    // #9274: nor does a palace-format refusal.
+                    if is_incompatible_format_refusal(&e) || is_format_refusal(&e) {
                         return Err(e);
                     }
                     last_err = Some(e);
@@ -236,6 +255,14 @@ impl KgStoreRedb {
             }
         }
         Err(last_err.expect("at least one attempt was made"))
+    }
+
+    /// Whether this process already holds a live handle on `path` (#9274).
+    fn is_cached(path: &Path) -> bool {
+        let cache = db_cache().lock().expect("db_cache poisoned");
+        cache
+            .get(&canonical_key(path))
+            .is_some_and(|weak| weak.strong_count() > 0)
     }
 
     /// Whether this store is operating against a read-only snapshot.

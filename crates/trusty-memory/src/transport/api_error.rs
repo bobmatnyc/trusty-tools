@@ -17,6 +17,7 @@
 //! `api_error_message_survives_the_conversion`.
 
 use trusty_common::memory_core::palace::PalaceId;
+use trusty_common::memory_core::store::palace_format::is_format_refusal;
 use trusty_common::memory_core::PalaceRegistry;
 #[cfg_attr(not(test), allow(unused_imports))]
 use trusty_common::uds::server::{
@@ -181,9 +182,11 @@ impl From<crate::service::ServiceError> for ApiError {
 /// deleted palace when what they had was a denied read or a jammed redb lock.
 /// What: calls `PalaceRegistry::open_palace`, then asks
 /// `PalaceRegistry::open_error_is_absent` which failure it got —
-/// [`ApiError::not_found`] only for a genuine absence, [`ApiError::internal`]
-/// otherwise.
-/// Test: `unreadable_palace_is_internal_not_not_found_at_open_handle`.
+/// [`ApiError::not_found`] only for a genuine absence, `Refused` for a
+/// palace-format refusal (#9274; the message leads with the variant name),
+/// [`ApiError::internal`] otherwise.
+/// Test: `unreadable_palace_is_internal_not_not_found_at_open_handle`,
+/// `format_too_new_maps_to_refused_error_naming_variant`.
 pub fn open_handle(
     state: &AppState,
     id: &str,
@@ -194,6 +197,9 @@ pub fn open_handle(
         .map_err(|e| {
             if PalaceRegistry::open_error_is_absent(&e) {
                 ApiError::not_found(format!("palace not found: {id} ({e:#})"))
+            } else if is_format_refusal(&e) {
+                // #9274: a format refusal no retry can clear is not internal.
+                ApiError::conflict(format!("palace refused: {id} ({e:#})"))
             } else {
                 ApiError::internal(format!("palace could not be loaded: {id} ({e:#})"))
             }
@@ -290,6 +296,43 @@ mod tests {
             failure.kind,
             ErrorKind::Internal,
             "a palace that is present but unreadable must not report as absent: {}",
+            failure.message
+        );
+    }
+
+    /// Why (#9274): a palace written by a newer release is refused, and a
+    /// client told "internal" would retry what no retry can fix.
+    /// What: saves a palace whose `palace.json` mirror names a newer format,
+    /// opens it by id, and asserts `Refused` with the variant in the message.
+    /// Test: itself.
+    #[tokio::test]
+    async fn format_too_new_maps_to_refused_error_naming_variant() {
+        use trusty_common::memory_core::palace::Palace;
+        use trusty_common::memory_core::store::PalaceStore;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = AppState::new(tmp.path().to_path_buf());
+        let dir = tmp.path().join("newer");
+        PalaceStore::save_palace(&Palace {
+            id: PalaceId::new("newer"),
+            name: "newer".into(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: dir.clone(),
+        })
+        .expect("save palace");
+        let path = dir.join("palace.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        json["format_version"] = serde_json::json!(u32::MAX);
+        std::fs::write(&path, serde_json::to_vec(&json).expect("encode")).expect("write");
+
+        let failure = open_handle(&state, "newer")
+            .err()
+            .expect("a palace newer than this binary is refused");
+        assert_eq!(failure.kind, ErrorKind::Refused, "{}", failure.message);
+        assert!(
+            failure.message.contains("FormatTooNew"),
+            "{}",
             failure.message
         );
     }
