@@ -811,3 +811,126 @@ fn a_relative_data_dir_override_is_refused() {
         "the refusal must say why: {err:#}"
     );
 }
+
+/// Points `TRUSTY_DATA_DIR` at a fresh tempdir for one test, then restores it.
+///
+/// Why: `prepare_named_socket` calls `socket_path()`, which reads the ambient
+/// `TRUSTY_DATA_DIR` and creates that directory — unset, the real platform
+/// data dir. Every user is `#[serial_test::serial]` with the crate's other env
+/// mutators, which is what makes the `set_var` sound.
+struct IsolatedDataDir {
+    prior: Option<std::ffi::OsString>,
+    _dir: TempDir,
+}
+
+impl IsolatedDataDir {
+    fn new() -> Self {
+        let dir = TempDir::new().expect("a data-dir tempdir must be creatable");
+        let prior = std::env::var_os("TRUSTY_DATA_DIR");
+        // SAFETY: every caller is `#[serial]` with the other env mutators.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", dir.path()) };
+        Self { prior, _dir: dir }
+    }
+}
+
+impl Drop for IsolatedDataDir {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe {
+            match self.prior.take() {
+                Some(v) => std::env::set_var("TRUSTY_DATA_DIR", v),
+                None => std::env::remove_var("TRUSTY_DATA_DIR"),
+            }
+        }
+    }
+}
+
+/// #9214: a `--socket` parent that does not exist is created at `0700`, so
+/// the hardened client can dial the socket bound inside it.
+#[test]
+#[serial_test::serial]
+fn prepare_named_socket_dir_creates_a_missing_parent_at_0700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _data_dir = IsolatedDataDir::new();
+    let tmp = TempDir::new().expect("tempdir");
+    let parent = tmp.path().join("new").join("sock-dir");
+    super::prepare_named_socket(parent.join("ts.sock")).expect("a missing parent is created");
+    let mode = std::fs::metadata(&parent)
+        .expect("stat the created parent")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        mode, 0o700,
+        "the created parent must be 0700, got {mode:04o}"
+    );
+}
+
+/// #9214: refusing an existing non-`0700` `--socket` parent names the remedy,
+/// and leaves the directory's mode unchanged.
+#[test]
+#[serial_test::serial]
+fn prepare_named_socket_refusal_names_the_chmod_remedy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _data_dir = IsolatedDataDir::new();
+    let tmp = TempDir::new().expect("tempdir");
+    let parent = tmp.path().join("existing");
+    std::fs::create_dir(&parent).expect("create the existing parent");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod the existing parent to 0755");
+
+    let err = super::prepare_named_socket(parent.join("x.sock"))
+        .expect_err("an existing 0755 parent must be refused");
+    let text = err.to_string();
+    let dir = parent.display().to_string();
+    assert!(text.contains(&dir), "the refusal must name {dir}: {text}");
+    assert!(
+        text.contains(&format!("chmod 700 {dir}")),
+        "the refusal must name the chmod remedy: {text}"
+    );
+    let mode = std::fs::metadata(&parent)
+        .expect("stat the existing parent")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o755, "the refusal changed the mode to {mode:04o}");
+}
+
+/// #9214: a `--socket` parent that cannot be stat'ed for any reason other than
+/// absence is an error naming the directory, never a silent pass.
+#[test]
+#[serial_test::serial]
+fn prepare_named_socket_reports_an_unstatable_parent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Restores the ancestor's mode, even when an assertion below panics.
+    struct RestoreMode<'a>(&'a Path);
+    impl Drop for RestoreMode<'_> {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // Root ignores directory permissions, so the stat would succeed.
+    if nix::unistd::geteuid().is_root() {
+        return;
+    }
+    let _data_dir = IsolatedDataDir::new();
+    let tmp = TempDir::new().expect("tempdir");
+    let ancestor = tmp.path().join("locked");
+    std::fs::create_dir(&ancestor).expect("create the ancestor");
+    std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o000))
+        .expect("chmod the ancestor to 0000");
+    let _restore = RestoreMode(&ancestor);
+
+    let dir = ancestor.join("sub");
+    let err = super::prepare_named_socket(dir.join("x.sock"))
+        .expect_err("an unstatable parent must be an error");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains(&format!("stat --socket directory {}", dir.display())),
+        "the error must name the stat failure and the directory: {text}"
+    );
+}

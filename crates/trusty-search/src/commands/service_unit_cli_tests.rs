@@ -106,3 +106,30 @@ fn no_http_flag_spellings_parse() {
     assert_eq!(parse(&["trusty-search", "start", "--no-http=0"]), Ok(false));
     assert!(parse(&["trusty-search", "start", "--no-http=ture"]).is_err());
 }
+
+/// Why: #9214 — `start --socket` names the socket the daemon binds; a relative
+/// path would resolve against the daemon's cwd, so it is refused at parse time.
+/// What: an absolute path parses; a relative one fails with an error naming
+/// `--socket` and the absolute-path rule.
+/// Test: this function.
+#[test]
+fn start_socket_flag_takes_an_absolute_path_and_refuses_a_relative_one() {
+    let parse = |args: &[&str]| {
+        Cli::try_parse_from(args)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    assert_eq!(
+        parse(&[
+            "trusty-search",
+            "start",
+            "--socket",
+            "/tmp/ts-9214/custom.sock"
+        ]),
+        Ok(())
+    );
+    let err = parse(&["trusty-search", "start", "--socket", "rel/custom.sock"])
+        .expect_err("a relative --socket must be refused");
+    assert!(err.contains("--socket"), "{err}");
+    assert!(err.contains("absolute"), "{err}");
+}

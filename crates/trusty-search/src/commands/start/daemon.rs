@@ -128,7 +128,9 @@ pub(super) fn already_running_message(
 /// resolvers; `handle_start_reads_the_plan_at_every_scan_site` pins the
 /// wiring. #9214: `no_http` runs the daemon on its RPC socket alone, is
 /// forwarded to the background child, and withholds auto-discovery
-/// (`auto_discover_needs_the_http_listener`).
+/// (`auto_discover_needs_the_http_listener`). `socket` names the RPC socket
+/// the daemon binds instead of the data-dir one, and is forwarded too
+/// (`auto_start_binds_the_socket_the_client_resolved`).
 pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     let super::StartArgs {
         port,
@@ -140,6 +142,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         fanout_concurrency,
         serial,
         no_http,
+        socket,
     } = args;
     let device = device.as_str();
     let data_dir = data_dir.as_deref();
@@ -179,6 +182,11 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
             std::env::set_var(DATA_DIR_ENV, dir);
         }
         tracing::info!("data-dir override: {}", dir.display());
+    }
+    // #9214: an explicit socket gets its directory now, as `--data-dir` does:
+    // created at 0700, or an existing one refused unless already 0700.
+    if let Some(path) = socket.as_deref() {
+        crate::service::socket::prepare_named_socket(path.to_path_buf())?;
     }
 
     if !discovery.runs_auto_discover() && !no_auto_discover && !discovery.withheld_for_no_http() {
@@ -236,6 +244,10 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
         // #9214: the detached child is the daemon; it must not bind HTTP.
         if no_http {
             cmd.arg("--no-http");
+        }
+        // #9214: the detached child binds the socket this invocation named.
+        if let Some(path) = socket.as_deref() {
+            cmd.arg("--socket").arg(path);
         }
         // Issue #1182: pass --data-dir explicitly so the CLI flag wins even
         // when TRUSTY_DATA_DIR was already set in the parent environment.
@@ -595,7 +607,7 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     } else {
         crate::service::HttpListener::Bind(port)
     };
-    match crate::service::run_daemon_with(state, http).await {
+    match crate::service::run_daemon_with(state, http, socket).await {
         Ok(()) => {}
         Err(crate::service::DaemonError::AlreadyRunning(p)) => {
             // Issue #126: a launchd-spawned `start` that finds a daemon
