@@ -76,6 +76,7 @@ mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
 mod tm_hook_pm_guard_operator_checkouts;
 mod tm_hook_pm_guard_pem_consumers;
+mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
 mod tm_hook_pm_guard_stdin_7975;
 mod tm_hook_pm_guard_supervisor_8453;
