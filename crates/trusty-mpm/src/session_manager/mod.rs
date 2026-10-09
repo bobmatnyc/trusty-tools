@@ -53,6 +53,8 @@ pub(crate) mod resume_in_flight;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;
+/// #9034: the runtime-exit reap's read and re-check, with no guard across tmux.
+mod runtime_exit_guard;
 /// #8935: whether a live tmux session is a record's own, by its `%N` pane.
 pub mod runtime_identity;
 pub mod search_gc;

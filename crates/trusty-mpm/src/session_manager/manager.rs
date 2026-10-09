@@ -736,26 +736,22 @@ impl SessionManager {
     /// `daemon::managed_routes::residency`'s route tests asserts the #7087
     /// residency bump;
     /// `the_reaper_leaves_a_session_whose_resume_is_in_flight_alone` asserts the
-    /// #8233 in-flight refusal below.
+    /// #8233 in-flight refusal below;
+    /// `list_not_blocked_by_stalled_runtime_exit_capture_9034` and
+    /// `a_record_changed_during_the_runtime_exit_capture_is_not_written_9034`
+    /// assert the #9034 guard release and re-check.
     ///
-    /// CAS guard (#2453 review finding 3): the pre-fix implementation read
-    /// the record via [`Self::get`] (which acquires and releases the store's
-    /// write lock internally), then — AFTER that lock was released — did a
-    /// SECOND, separate `self.store.write().await` to upsert. A concurrent
-    /// `decommission`/`stop` landing in the gap between those two lock
-    /// acquisitions would be silently clobbered: this function would blindly
-    /// write back a `Stopped` record built from the stale pre-decommission
-    /// read, resurrecting a session that had just been torn down. This
-    /// implementation now holds ONE write-lock guard across the entire
-    /// read-check-write sequence and re-validates the record is STILL
-    /// `Active` immediately before mutating it — a state change that landed
-    /// while we were not holding the lock (there is no other window) is
-    /// therefore impossible to observe as anything but the CURRENT state,
-    /// and a record that is no longer `Active` (already reconciled,
-    /// decommissioned, or errored by a concurrent caller) is rejected
-    /// with [`ManagedError::InvalidState`] rather than overwritten. The
-    /// periodic `runtime_reap` tick and the `#2453` reconcile-then-reactivate
-    /// path both call this SAME function, so the guard protects both.
+    /// CAS guard (#2453 review finding 3): a `decommission`/`stop` that lands
+    /// between this function's read and its write must win, never be
+    /// overwritten by a `Stopped` copy of the stale read. #9034: no store
+    /// guard is held across the tmux calls (pane gate, capture, pane-id read)
+    /// or the scrollback write, because one stalled tmux subprocess queued
+    /// every `list()`/`get()` behind it. The record is read under one guard,
+    /// then re-read under a fresh guard before the write. A record that is
+    /// gone, no longer `Active`, or changed in any field since the first read
+    /// is refused with the same error a reap of it would get, and nothing is
+    /// written: no upsert, no breaker death, no residency bump. A racing reap
+    /// may still refresh the best-effort scrollback file on disk.
     pub async fn mark_runtime_exited_stopped(
         &self,
         id: &ManagedSessionId,
@@ -769,27 +765,12 @@ impl SessionManager {
         if self.is_resume_in_flight(id) {
             return Err(ManagedError::ResumeInFlight(id.to_string()));
         }
-        let mut guard = self.store.write().await;
-        if let Err(e) = guard.reload_if_changed().await {
-            // Reload failed (transient I/O): do NOT surface as "not found" —
-            // fall through to the last-known in-memory record, mirroring
-            // `Self::get`'s own tolerance for a transient reload error.
-            warn!(id = %id, "mark_runtime_exited_stopped: reload failed: {e}; using last-known record");
-        }
-        let mut record = guard.cached_get(id).map_err(|e| match e {
-            StoreError::NotFound(k) => ManagedError::SessionNotFound(k),
-            other => ManagedError::Store(other),
-        })?;
-        if record.state != ManagedSessionState::Active {
-            return Err(ManagedError::InvalidState(
-                id.to_string(),
-                format!(
-                    "cannot mark runtime-exited-stopped: session is '{}', not 'active' — \
-                     a concurrent operation already changed its state",
-                    record.state
-                ),
-            ));
-        }
+        // #9034: read under a short guard; the tmux work below runs with none.
+        let observed = {
+            let mut guard = self.store.write().await;
+            super::runtime_exit_guard::active_for_runtime_exit(&mut guard, id).await?
+        };
+        let mut record = observed.clone();
         // #9101: the scrollback read and the id publish below reach the pane
         // only when it is proven this record's; the Stopped transition is
         // record-only and runs either way.
@@ -826,6 +807,20 @@ impl SessionManager {
         // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
             record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+        }
+        // #9034: re-check under a fresh guard; a failed re-check writes nothing.
+        let mut guard = self.store.write().await;
+        if self.is_resume_in_flight(id) {
+            return Err(ManagedError::ResumeInFlight(id.to_string()));
+        }
+        let current = super::runtime_exit_guard::active_for_runtime_exit(&mut guard, id).await?;
+        if !super::runtime_exit_guard::unchanged(&observed, &current) {
+            return Err(ManagedError::InvalidState(
+                id.to_string(),
+                "cannot mark runtime-exited-stopped: the record changed while its pane \
+                 was read — a concurrent operation already updated it"
+                    .into(),
+            ));
         }
         record.state = ManagedSessionState::Stopped;
         // #6194: nothing asked for this stop — the runtime exited on its own —
