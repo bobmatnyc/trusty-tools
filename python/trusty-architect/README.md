@@ -66,3 +66,165 @@ a start that fails fails the command.
 
 The relay tooling, the question collector, the review, drift-check and
 provision skills, and `fleet-restart` stay in the prototype for now (#8536).
+
+## Provision by hand
+
+For a PM whose `tm` lacks `tm fleet init`, or whose `tm fleet init` fails.
+Try `tm fleet init` first (`tm fleet --help` lists it). When it works, stop
+here: it does every step below. When it fails, read its error and fix that
+cause first. The hand procedure below makes the same project, but it skips
+the preflight checks `init` makes. Do not run it beside a working Architect.
+
+Rules:
+
+- One Architect per user. Run `tmux has-session -t =tm-architect` first. If it
+  succeeds, an Architect exists. Stop.
+- Never add a git remote to the Architect's repo.
+- Never set `TRUSTY_MPM_PM_UNRESTRICTED`. The `supervisor` profile replaces it.
+- Never copy another installation's `CLAUDE.md`, `records/` or `inbox/`. Write
+  them for this user.
+- Launch the session only when the owner says so.
+
+### 1. Check the prerequisites
+
+| Need | Check |
+| --- | --- |
+| `tm`, `claude`, `tmux`, `gh`, `python3` on `PATH` | `command -v tm claude tmux gh python3` |
+| trusty-memory and trusty-search healthy | `tm doctor`: the `memory` and `search` rows |
+| A copy of this directory | A trusty-tools checkout. Below, `<src>` is its `python/trusty-architect/`. |
+
+The scripts use the Python standard library only.
+
+### 2. Make the project
+
+```sh
+dir=~/trusty-mpm-projects/architect     # any path; use it in every step
+mkdir -p "$dir" && git -C "$dir" init   # local repo, no remote
+printf 'profile = "supervisor"\n' > "$dir/.trusty-mpm.toml"
+```
+
+`git -C "$dir" remote` must print nothing.
+
+### 3. Place the files
+
+Copy each file only if the target is absent. Never overwrite an edited one.
+
+```sh
+src=<src>
+mkdir -p "$dir/scripts" "$dir/records/projects" \
+  "$dir/.claude/skills/tm-fleet-check" "$dir/.claude/skills/tm-context-refresh"
+cp -n "$src/templates/CLAUDE.md"        "$dir/CLAUDE.md"
+cp -n "$src/templates/gitignore"        "$dir/.gitignore"
+cp -n "$src/templates/records/state.md" "$src/templates/records/actions.md" "$dir/records/"
+cp -n "$src"/scripts/*.py "$src"/scripts/*.sh "$dir/scripts/"
+cp -n "$src/skills/tm-fleet-check.md"     "$dir/.claude/skills/tm-fleet-check/SKILL.md"
+cp -n "$src/skills/tm-context-refresh.md" "$dir/.claude/skills/tm-context-refresh/SKILL.md"
+chmod 755 "$dir/scripts/fleet-poll.py" "$dir/scripts/input-state.py" \
+  "$dir/scripts/start-fleet-poll.sh"
+```
+
+This is the same set `tm fleet init` writes. The setup skill
+`skills/tm-architect-setup.md` is not copied here. It is a PM skill that tm
+ships to every project.
+
+### 4. Write the instance layer
+
+Edit `$dir/CLAUDE.md` for this user. Do not copy it from elsewhere.
+
+- Replace `<Name>` with the user's name for the relay marker.
+- Fill the watch set: one line per PM session, with its tmux session name,
+  project path and goal.
+- Set the cadence only if the owner wants a value other than the default.
+
+`records/state.md` and `records/actions.md` stay as seeded. The Architect
+fills them. Commit the project:
+
+```sh
+git -C "$dir" add -- CLAUDE.md .gitignore .trusty-mpm.toml records scripts .claude
+git -C "$dir" commit -m "chore: seed the Architect project"
+```
+
+### 5. Grant the profile
+
+Add the absolute path of `$dir` to the user-level allowlist,
+`~/.trusty-mpm/config.toml`. Extend an existing `[supervisor]` table; do not
+add a second one:
+
+```toml
+[supervisor]
+projects = ["/absolute/path/to/architect"]
+```
+
+Without this entry a launch runs the PM profile, not `supervisor`.
+
+Do not grant direct action on other panes (a pm-guard lift) or twin mode
+(`[supervisor.twin]`). Each is the owner's decision. Ask. `tm fleet init`
+sets neither.
+
+Give the Architect its own memory palace and search index. Both are named
+`architect`. Do not name them `supervisor`: that is the profile, not the project.
+
+```sh
+trusty-memory link --path "$dir" --slug architect   # pins the palace in .trusty-tools/trusty-memory.yaml
+trusty-search index "$dir" --name architect         # registers and indexes the project
+```
+
+```sh
+git -C "$dir" add -- .trusty-tools
+git -C "$dir" commit -m "chore: pin the Architect palace"
+```
+
+### 6. Check before launch
+
+From `$dir`:
+
+```sh
+tm doctor | grep session_profile    # says a launch here runs the `supervisor` profile
+tm fleet status --dir "$dir"        # only on a tm that has `tm fleet`; reports the pre-launch checks
+python3 scripts/fleet-poll.py --dry-run   # one cycle: classifies panes, writes nothing, sends no keys
+python3 scripts/input-state.py %<pane>    # prints `<pane> <empty|suggestion|typed|no-prompt> | <text>`
+```
+
+Pick `%<pane>` from `tmux list-panes -a -F '#{pane_id} #{session_name}'`.
+Before the launch, `tm fleet status` shows `allowlist` and `profile` as `ok`.
+It shows `session`, `launch_stamp`, `binding` and `this_session` as failing
+until the launch, and exits 1. That is expected.
+
+### 7. Launch (the owner's instruction only)
+
+The Architect runs on Opus in tmux session `tm-architect`, or the name in
+`ARCHITECT_SESSION`. Set `ARCHITECT_SESSION` in the poller's environment if
+you choose another name (step 8 shows how).
+
+```sh
+tmux new-session -d -s tm-architect -c "$dir"
+tmux send-keys -t =tm-architect "tm launch '$dir'" Enter
+```
+
+`tm launch` reads the allowlist entry and runs the `supervisor` profile on
+its model. After the launch, `/model` in the pane must show Opus. If it shows
+the PM profile, return to step 5.
+
+### 8. Start the poller
+
+```sh
+"$dir/scripts/start-fleet-poll.sh"   # prints `started: tm-architect-poll` or `running: ...`
+```
+
+The poller runs in tmux session `<ARCHITECT_SESSION>-poll`. With a custom
+name, run `ARCHITECT_SESSION=<name> "$dir/scripts/start-fleet-poll.sh"`.
+The script is idempotent. Pass `--interval N` to change the cycle length.
+
+### 9. Verify after launch
+
+- `ls "$dir/inbox/"` shows `poll.log` and `poll-state.json`. The poller
+  appends `alerts.jsonl` when it raises its first alert.
+- Run from `$dir`:
+  `python3 -c "import importlib.util as u; s=u.spec_from_file_location('c','scripts/self-ctx.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print(m.self_ctx_tokens())"`
+  prints a token count once the Architect has a transcript. It prints `None`
+  before that.
+- `tm fleet status --dir "$dir"` exits 0 and prints `complete`.
+- The Architect's first supervision pass appends an entry to
+  `records/actions.md`.
+
+When a step fails, report it to the owner. Do not start a second Architect.
