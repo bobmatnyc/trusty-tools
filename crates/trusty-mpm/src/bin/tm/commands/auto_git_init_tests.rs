@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{
-    AutoInitOutcome, AutoInitPlan, AutoInitRefusal, RepoContext, ensure_git_repo_with,
-    initialized_message, missing_git_error, plan_auto_init, refusal_message,
+    AutoInitOutcome, AutoInitPlan, AutoInitRefusal, RepoContext, classify_rev_parse_failure,
+    ensure_git_repo_with, initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
 use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete};
@@ -498,6 +498,147 @@ impl Drop for RestoreMode {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+// ── git's verdict versus a `.git` above the directory (#9495) ────────────────
+
+/// git's classic upward-discovery failure wording.
+const CLASSIC_NO_REPO: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
+
+/// The file the fake git writes into its `-C` directory when asked to `init`.
+const INIT_MARKER: &str = "fake-git-init-ran";
+
+/// Write a `git` stand-in that fails `rev-parse` with `stderr` and records an
+/// `init` as [`INIT_MARKER`] in the target directory.
+///
+/// Why: real git's no-repository wording depends on the host's mounts, so a
+/// test that pins one wording needs a fake, and a fake `init` keeps a real
+/// `git init` out of the fixture. #9034: exec'ing a file this process just
+/// wrote can race a sibling test's fork (ETXTBSY), so the shim is probed until
+/// it runs before the code under test sees it.
+#[cfg(unix)]
+fn fake_git(dir: &Path, stderr: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    // ETXTBSY is 26 on both Linux and macOS.
+    const ETXTBSY: i32 = 26;
+    let shim = dir.join("fake-git");
+    let script = format!(
+        "#!/bin/sh\ncase \"$3\" in\n  rev-parse) printf '%s\\n' '{stderr}' >&2; exit 128 ;;\n  \
+         init) : > \"$2/{INIT_MARKER}\"; exit 0 ;;\nesac\nexit 0\n"
+    );
+    std::fs::write(&shim, script).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..100 {
+        match Command::new(&shim).arg("probe").output() {
+            Ok(_) => return shim.to_string_lossy().into_owned(),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("fake git at {} did not run: {e}", shim.display()),
+        }
+    }
+    panic!("fake git at {} stayed busy (ETXTBSY)", shim.display());
+}
+
+/// Fail-Open Check (#9495): git's classic "no repository" wording under a real
+/// `.git` must not reach `git init`. Discovery stops short of a real repository
+/// for an unreadable `.git`, `GIT_CEILING_DIRECTORIES`, or a mount boundary,
+/// and an init there nests a second repository inside the real checkout.
+#[cfg(unix)]
+#[test]
+fn auto_init_refuses_the_classic_no_repo_wording_under_a_real_git() {
+    let tmp = hermetic_temp_dir();
+    let repo = tmp.path().join("real-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let dir = repo.join("sub");
+    std::fs::create_dir(&dir).unwrap();
+    let git = fake_git(tmp.path(), CLASSIC_NO_REPO);
+
+    let result = ensure_git_repo_with(&dir, Some(tmp.path()), &git);
+
+    assert!(
+        !dir.join(INIT_MARKER).exists(),
+        "git init must not run under a real .git, got {result:?}"
+    );
+    let err = result.expect_err("a .git above the directory must be an error, never an init");
+    let expected = repo.canonicalize().unwrap().join(".git");
+    assert!(
+        err.to_string().contains(&expected.display().to_string()),
+        "the error must name the .git it found: {err}"
+    );
+}
+
+/// git's wording when upward discovery stops at a filesystem boundary, as on a
+/// `/tmp` that is its own mount.
+const MOUNT_BOUNDARY_NO_REPO: &str = "fatal: not a git repository (or any parent up to mount point /)\n\
+     Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).";
+
+/// FAILS BEFORE #9495: the mount-boundary wording did not match the full
+/// "(or any of the parent directories)" clause, so a plain directory on its
+/// own mount read as an unreadable verdict and every `tm` run there errored.
+#[test]
+fn classify_accepts_the_mount_boundary_wording_with_no_git_above() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, MOUNT_BOUNDARY_NO_REPO);
+
+    assert_eq!(context.ok(), Some(RepoContext::Absent));
+}
+
+/// The classic wording with no `.git` above is still absence (#9495 keeps it).
+#[test]
+fn classify_accepts_the_classic_wording_with_no_git_above() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, CLASSIC_NO_REPO);
+
+    assert_eq!(context.ok(), Some(RepoContext::Absent));
+}
+
+/// Fail-Open Check (#9495): the mount-boundary wording under a real `.git` is
+/// discovery stopping short of a real repository, never absence.
+#[test]
+fn classify_refuses_the_mount_boundary_wording_under_a_real_git() {
+    let tmp = hermetic_temp_dir();
+    let repo = tmp.path().join("real-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let dir = repo.join("sub");
+    std::fs::create_dir(&dir).unwrap();
+
+    let context = classify_rev_parse_failure(&dir, MOUNT_BOUNDARY_NO_REPO);
+
+    assert!(
+        context.is_err(),
+        "a .git above must not classify as Absent, got {context:?}"
+    );
+}
+
+/// Every other `rev-parse` failure stays an error, as before #9495: the colon
+/// forms name a broken repository, and the rest are not about discovery.
+#[test]
+fn classify_keeps_every_other_failure_an_error() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: not a git repository: '/srv/project/.git'",
+        "fatal: detected dubious ownership in repository at '/srv/project'",
+        "fatal: cannot change to '/srv/project': Permission denied",
+        "error: could not open '.git/HEAD': Permission denied",
+    ] {
+        let context = classify_rev_parse_failure(&dir, stderr);
+        assert!(
+            context.is_err(),
+            "{stderr:?} must stay an error, got {context:?}"
+        );
     }
 }
 
