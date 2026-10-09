@@ -1,4 +1,4 @@
-//! `tm memory recall|remember|note` — the no-MCP palace verbs (#8352).
+//! `tm memory recall|remember|note|forget` — the no-MCP palace verbs (#8352).
 //!
 //! Why: a thin translation layer, the same shape `commands::memory` uses for
 //! `import` — clap args in, one library call out, one report rendered. The verbs
@@ -9,9 +9,11 @@
 //! non-zero exit — when the palace could not be resolved, the socket could not
 //! be derived, or the daemon did not answer. Exits
 //! [`EXIT_SLOT_REFUSED`] (3) when a write was stored but its `--fact-key` slot
-//! was refused (#9142).
+//! was refused (#9142). A forget the daemon did not report `deleted` is an
+//! `Err` too (#9340).
 //! Test: `cli_parses_memory_recall`, `cli_parses_memory_remember_with_tags`,
-//! `cli_parses_memory_note` in `tests.rs`; the socket behaviour is covered by
+//! `cli_parses_memory_note`, `cli_parses_memory_forget` in `tests.rs`; the
+//! socket behaviour is covered by
 //! `tests/memory_verbs_socket.rs`.
 
 use std::path::PathBuf;
@@ -20,6 +22,7 @@ use std::io::Write as _;
 
 use anyhow::Context as _;
 use serde_json::Value;
+use trusty_mpm::core::memory_forget::forget_failure;
 use trusty_mpm::core::memory_verbs::{
     EXIT_SLOT_REFUSED, MemoryVerb, MemoryVerbOptions, MemoryVerbOutcome, run_verb, slot_refusal,
 };
@@ -35,7 +38,9 @@ const SNIPPET_CHARS: usize = 160;
 /// Why: keeps `commands::memory`'s dispatcher one arm per action.
 /// What: see the module doc. A refused slot prints a warning (stderr under
 /// `--json`, whose stdout is unchanged) and exits [`EXIT_SLOT_REFUSED`]; the
-/// stored drawer is left as it is and nothing is retried.
+/// stored drawer is left as it is and nothing is retried. A forget answered
+/// with anything but `deleted` prints the envelope under `--json`, no human
+/// summary, and returns `Err` (#9340).
 /// Test: `tests/memory_verbs_socket.rs`.
 pub(crate) async fn run(
     verb: MemoryVerb,
@@ -49,6 +54,18 @@ pub(crate) async fn run(
         cwd: None,
     };
     let outcome = run_verb(&verb, &opts).await?;
+    // #9340: `not_found` is a successful daemon answer; it must not exit 0.
+    if let MemoryVerb::Forget { drawer_id } = &verb
+        && let Some(reason) = forget_failure(drawer_id, outcome.palace.as_deref(), &outcome.result)
+    {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&outcome).context("serialise the memory envelope")?
+            );
+        }
+        anyhow::bail!(reason);
+    }
     // #9142: a refused slot still stores the drawer; make that loud.
     let refusal = slot_refusal(&verb, &outcome.result);
     if json {

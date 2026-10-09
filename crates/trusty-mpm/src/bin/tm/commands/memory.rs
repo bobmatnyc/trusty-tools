@@ -5,11 +5,12 @@
 //! [`trusty_mpm::core::memory_import`] so it is testable without a CLI.
 //! What: [`memory`] routes [`MemoryAction`] — `import` here,
 //! `import-auto-memory` (#7685) in [`super::memory_auto_import`], and the no-MCP
-//! `recall`/`remember`/`note` verbs (#8352) in [`super::memory_verbs`] — and renders
+//! `recall`/`remember`/`note` verbs (#8352) and `forget` (#9340) in
+//! [`super::memory_verbs`] — and renders
 //! the result either as the machine-readable JSON report (`--json`) or a
 //! per-file human summary.
 //! Exits non-zero when any file failed, so a script can gate on it.
-//! Test: `cli_parses_memory_import*` in `tests.rs`; the import behaviour is
+//! Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`; the import behaviour is
 //! covered by `core::memory_import::tests`.
 
 use anyhow::Context as _;
@@ -129,6 +130,16 @@ pub(crate) async fn memory(action: MemoryAction) -> anyhow::Result<()> {
                     expires_at,
                 },
             };
+            super::memory_verbs::run(verb, palace, memory_socket, json).await
+        }
+        // #9340: delete one drawer by id over the same socket.
+        MemoryAction::Forget {
+            drawer_id,
+            palace,
+            json,
+            memory_socket,
+        } => {
+            let verb = MemoryVerb::Forget { drawer_id };
             super::memory_verbs::run(verb, palace, memory_socket, json).await
         }
     }

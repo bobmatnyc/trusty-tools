@@ -5,8 +5,10 @@
 //! 622k tokens for 120 files; this command group is the zero-inference path.
 //! What: [`MemoryAction`] — `import`, plus `import-auto-memory` (#7685), the
 //! one-way migration of Claude Code's own auto-memory store into the palace,
-//! plus `recall` / `remember` / `note` (#8352), the no-MCP palace verbs.
-//! Test: `cli_parses_memory_import*`, `cli_parses_memory_recall*` in `tests.rs`.
+//! plus `recall` / `remember` / `note` (#8352), the no-MCP palace verbs, and
+//! `forget` (#9340), which deletes one drawer by id.
+//! Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`;
+//! `cli_parses_memory_recall*`, `cli_parses_memory_forget` in `tests.rs`.
 
 use std::path::PathBuf;
 
@@ -116,6 +118,26 @@ pub(crate) enum MemoryAction {
         /// and omitted, trusty-memory applies a 24-hour default.
         #[arg(long)]
         expires_at: Option<String>,
+        /// Print the machine-readable envelope instead of the human summary.
+        #[arg(long)]
+        json: bool,
+        /// trusty-memory socket path. Defaults to the derived one.
+        #[arg(long)]
+        memory_socket: Option<PathBuf>,
+    },
+
+    /// Delete one drawer by id — the no-MCP `memory_forget` (#9340).
+    ///
+    /// For cleaning up test or throwaway drawers. Exits non-zero when the
+    /// daemon is unreachable, and when it reports no drawer with that id in the
+    /// palace — an unknown id is never reported as deleted. There is no
+    /// `--fact-key` form yet: trusty-memory exposes no slot-to-drawer lookup.
+    Forget {
+        /// UUID of the drawer to delete, as `remember`/`note`/`recall` print it.
+        drawer_id: String,
+        /// Palace to delete from. Defaults to the session's own.
+        #[arg(long)]
+        palace: Option<String>,
         /// Print the machine-readable envelope instead of the human summary.
         #[arg(long)]
         json: bool,

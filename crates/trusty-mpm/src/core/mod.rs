@@ -228,6 +228,8 @@ pub mod memory_reachable;
 // #8352: `tm memory recall|remember|note` — palace access over the daemon
 // socket, so a dead MCP connection does not cut the session off from memory.
 pub mod memory_verbs;
+// #9340: `tm memory forget` — the forget-specific half of `memory_verbs`.
+pub mod memory_forget;
 pub mod model_inject;
 pub mod names;
 pub mod oauth_token;

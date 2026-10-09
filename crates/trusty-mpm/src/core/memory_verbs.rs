@@ -22,6 +22,9 @@
 //! read-only snapshot fallback would need exactly that edge, behind a
 //! non-default feature, to answer a question a running daemon already answers).
 //!
+//! #9340: `memory_forget` rides the same path; its own checks live in
+//! `core::memory_forget`.
+//!
 //! Test: `memory_verbs_tests.rs`, plus `tests/memory_verbs_socket.rs` for the
 //! end-to-end binary path.
 
@@ -95,6 +98,14 @@ pub enum MemoryVerbError {
     ExpiresAtPast {
         /// The value the caller passed.
         value: String,
+    },
+    /// #9340: the drawer id to forget is not a UUID; nothing was sent.
+    #[error("drawer id must be a UUID, got {value:?}: {detail}")]
+    DrawerId {
+        /// The value the caller passed.
+        value: String,
+        /// What the parser reported.
+        detail: String,
     },
 }
 
@@ -196,7 +207,8 @@ impl FactSlot {
 /// argument keys — which are trusty-memory's own MCP schema keys — in one
 /// place to audit against `crates/trusty-memory/src/tools/definitions.rs`.
 /// What: [`Self::Recall`] mirrors `memory_recall`, [`Self::Remember`]
-/// `memory_remember`, [`Self::Note`] `memory_note`.
+/// `memory_remember`, [`Self::Note`] `memory_note`, [`Self::Forget`]
+/// `memory_forget` (#9340).
 /// Test: `arguments_carry_only_the_schema_keys_supplied`.
 #[derive(Debug, Clone)]
 pub enum MemoryVerb {
@@ -235,6 +247,11 @@ pub enum MemoryVerb {
         /// #9142: the Tier C slot, if any.
         slot: FactSlot,
     },
+    /// #9340: delete one drawer by id; see `core::memory_forget`.
+    Forget {
+        /// UUID of the drawer to delete.
+        drawer_id: String,
+    },
 }
 
 impl MemoryVerb {
@@ -244,6 +261,7 @@ impl MemoryVerb {
             Self::Recall { .. } => RECALL_METHOD,
             Self::Remember { .. } => REMEMBER_METHOD,
             Self::Note { .. } => NOTE_METHOD,
+            Self::Forget { .. } => super::memory_forget::FORGET_METHOD,
         }
     }
 
@@ -259,7 +277,7 @@ impl MemoryVerb {
     /// The Tier C slot a write carries; `None` for a recall.
     fn slot(&self) -> Option<&FactSlot> {
         match self {
-            Self::Recall { .. } => None,
+            Self::Recall { .. } | Self::Forget { .. } => None,
             Self::Remember { slot, .. } | Self::Note { slot, .. } => Some(slot),
         }
     }
@@ -308,6 +326,9 @@ impl MemoryVerb {
                 insert_tags(&mut args, tags);
                 slot.insert_into(&mut args); // #9142
             }
+            Self::Forget { drawer_id } => {
+                args.insert("drawer_id".into(), json!(drawer_id.trim())); // #9340
+            }
         }
         args
     }
@@ -350,7 +371,7 @@ pub struct MemoryVerbOptions {
 /// Test: `json_envelope_keys_are_always_present`.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryVerbOutcome {
-    /// `recall` / `remember` / `note`.
+    /// `recall` / `remember` / `note` / `forget` (#9340).
     pub verb: String,
     /// The palace the call named, when one was resolved.
     pub palace: Option<String>,
@@ -412,6 +433,8 @@ pub fn resolve_verb_palace(
 /// [`MemoryVerbError::ExpiresAt`] / [`MemoryVerbError::ExpiresAtPast`] when
 /// `--expires-at` is not RFC 3339 or not in the future — raised
 /// before the palace or socket is resolved, so nothing is sent (#9142);
+/// [`MemoryVerbError::DrawerId`] when a forget's id is not a UUID, likewise
+/// before anything is sent (#9340);
 /// [`MemoryVerbError::Palace`] when a write has no palace,
 /// [`MemoryVerbError::Socket`] when the socket path cannot be derived, and
 /// [`MemoryVerbError::Call`] — naming the socket — when nothing answers it or
@@ -428,6 +451,10 @@ pub async fn run_verb(
     // #9142: an unparseable expiry fails here, before any RPC.
     if let Some(slot) = verb.slot() {
         slot.validate()?;
+    }
+    // #9340: a malformed drawer id fails here too, before any RPC.
+    if let MemoryVerb::Forget { drawer_id } = verb {
+        super::memory_forget::validate_drawer_id(drawer_id)?;
     }
     let palace = resolve_verb_palace(verb, opts)?;
     let socket = match opts.socket.clone() {
@@ -478,6 +505,7 @@ fn verb_label(verb: &MemoryVerb) -> &'static str {
         MemoryVerb::Recall { .. } => "recall",
         MemoryVerb::Remember { .. } => "remember",
         MemoryVerb::Note { .. } => "note",
+        MemoryVerb::Forget { .. } => "forget",
     }
 }
 

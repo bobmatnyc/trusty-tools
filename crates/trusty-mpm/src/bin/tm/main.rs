@@ -59,6 +59,11 @@ mod tests;
 #[path = "tests_behavior_a_tests.rs"]
 mod tests_behavior_a;
 
+// #9340: the `tm memory import*` parse tests, split so `tests.rs` stays capped.
+#[cfg(test)]
+#[path = "memory_import_cli_tests.rs"]
+mod memory_import_cli_tests;
+
 // #6887: the divert CLI pair, split out so `tests_behavior_a_tests.rs` stays capped.
 #[cfg(test)]
 #[path = "divert_cli_tests.rs"]

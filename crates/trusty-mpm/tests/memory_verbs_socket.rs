@@ -297,3 +297,106 @@ async fn a_refused_slot_warns_and_exits_with_the_refusal_code() {
         }
     }
 }
+
+/// A drawer id in the shape trusty-memory mints (#9340).
+const DRAWER: &str = "0b6f3c1e-8a52-4c1d-9e0f-2a7b5c4d3e21";
+
+/// Why (#9340): `forget` must leave as `memory_forget` on the same socket, in
+/// the same palace, as the other verbs — and a `deleted` answer exits 0.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_sends_memory_forget_over_the_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("memory.sock");
+    let (_stop, calls) = serve(
+        &socket,
+        json!({ "palace": "session-palace", "status": "deleted", "drawer_id": DRAWER }),
+    )
+    .await;
+
+    let out = run_tm(&socket, Some("session-palace"), &["forget", DRAWER]).await;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (method, params) = only_call(&calls);
+    assert_eq!(method, "memory_forget");
+    assert_eq!(
+        params,
+        json!({ "palace": "session-palace", "drawer_id": DRAWER })
+    );
+    assert!(
+        stdout.contains("deleted") && stdout.contains(DRAWER),
+        "{stdout}"
+    );
+}
+
+/// Why (#9340): `memory_forget` answers an unknown id with a SUCCESSFUL body,
+/// `status: "not_found"`. The CLI must exit non-zero and say nothing was
+/// deleted; under `--json` it still prints the daemon's envelope.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_drawer_exits_non_zero_and_says_nothing_was_deleted() {
+    for json_flag in [false, true] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("memory.sock");
+        let (_stop, calls) = serve(
+            &socket,
+            json!({ "palace": "p", "status": "not_found", "drawer_id": DRAWER }),
+        )
+        .await;
+
+        let mut args = vec!["forget", DRAWER];
+        if json_flag {
+            args.push("--json");
+        }
+        let out = run_tm(&socket, Some("p"), &args).await;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "json={json_flag}: an unknown id must not exit 0"
+        );
+        assert!(
+            stderr.contains(&format!("drawer {DRAWER} not found in palace p"))
+                && stderr.contains("nothing was deleted"),
+            "json={json_flag}: {stderr}"
+        );
+        assert_eq!(only_call(&calls).0, "memory_forget");
+        if json_flag {
+            let envelope: Value = serde_json::from_slice(&out.stdout).expect("parseable JSON");
+            assert_eq!(envelope["verb"], json!("forget"));
+            assert_eq!(envelope["result"]["status"], json!("not_found"));
+        } else {
+            assert!(
+                out.stdout.is_empty(),
+                "no success line may be printed: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+    }
+}
+
+/// Why (#9340): with the daemon down, `forget` must fail and name the socket
+/// and the method — never print a deletion.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn forget_with_a_dead_daemon_exits_non_zero_naming_the_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("absent.sock");
+
+    let out = run_tm(&socket, Some("session-palace"), &["forget", DRAWER]).await;
+
+    assert!(!out.status.success(), "a dead daemon must not exit 0");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&socket.display().to_string()) && stderr.contains("memory_forget"),
+        "the error must name the socket and the method: {stderr}"
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "nothing may be printed as deleted: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
