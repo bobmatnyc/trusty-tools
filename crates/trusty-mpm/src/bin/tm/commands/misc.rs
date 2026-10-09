@@ -777,6 +777,7 @@ pub(crate) async fn attach_cmd(
     target: &str,
     json: bool,
     single_pane: bool,
+    explicit: Option<&str>,
 ) -> anyhow::Result<()> {
     use trusty_mpm::core::{ResolveResult, SessionSummary, resolve_target};
 
@@ -819,7 +820,10 @@ pub(crate) async fn attach_cmd(
             // Launch the TUI focused on this session. #6483: the multipane
             // dashboard is the default; the single-pane chat is opt-in.
             let resolved_url = trusty_mpm::core::resolve_daemon_url(Some(url));
-            trusty_mpm::tui::run_initial_view(resolved_url, 1000, Some(id), single_pane).await
+            // #9556: an explicit `--url` / `TRUSTY_MPM_URL` survives a failed poll.
+            let daemon = trusty_mpm::client::DaemonClient::new(resolved_url)
+                .with_pinned_base_url(explicit.is_some_and(|u| !u.is_empty()));
+            trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane).await
         }
         ResolveResult::Ambiguous(ids) => {
             eprintln!(

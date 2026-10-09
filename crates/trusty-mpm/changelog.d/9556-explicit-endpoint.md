@@ -1,0 +1,3 @@
+Fixed
+- A TUI started with `--url` or `TRUSTY_MPM_URL` (`tm tui`, `tm tui --single-pane`, `tm session tui`, `tm attach`, bare `tm projects`) keeps that daemon after a failed health poll and reports it unreachable; it no longer re-discovers and moves to the daemon the lock file or the default names ([#9556](https://github.com/bobmatnyc/trusty-tools/issues/9556))
+- Under `TRUSTY_SANDBOX=1` or `TRUSTY_DATA_DIR_OVERRIDE`, `tm` no longer probes the default trusty-console at 127.0.0.1:7788 when the sandbox records no console address, so a sandboxed `tm` is not routed through the live console to the live daemon; a console address recorded in the sandbox data dir is still used ([#9556](https://github.com/bobmatnyc/trusty-tools/issues/9556))

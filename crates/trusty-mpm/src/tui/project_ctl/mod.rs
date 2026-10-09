@@ -83,7 +83,16 @@ pub async fn run_focused(
     interval_ms: u64,
     focus_id: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut client = DaemonClient::new(url);
+    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id).await
+}
+
+/// [`run_focused`] against a caller-built client, so a pinned URL (#9556)
+/// reaches the poll loop.
+pub(crate) async fn run_focused_with_client(
+    mut client: DaemonClient,
+    interval_ms: u64,
+    focus_id: Option<String>,
+) -> anyhow::Result<()> {
     let mut state = ProjectCtlState::default();
     project_ctl_poll_daemon(&mut state, &mut client).await;
     if let Some(id) = focus_id.as_deref() {

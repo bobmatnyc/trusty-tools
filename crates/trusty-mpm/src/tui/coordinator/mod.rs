@@ -72,8 +72,19 @@ const KEY_POLL: Duration = Duration::from_millis(50);
 /// Test: terminal glue is exercised by launching the TUI; the loop's pure
 /// pieces (key dispatch, layout text, session mapping) are unit-tested.
 pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
-    tracing::info!(%url, interval_ms, "launching coordinator TUI");
-    let mut client = DaemonClient::new(url);
+    run_with_client(DaemonClient::new(url), interval_ms).await
+}
+
+/// [`run`] against a caller-built [`DaemonClient`].
+///
+/// Why (#9556): `tm session tui` pins an operator-chosen `--url` /
+/// `TRUSTY_MPM_URL` on the client, and only a caller-built client carries
+/// that pin into [`coord_poll_daemon`].
+/// What: the same banner, terminal and loop sequence as [`run`].
+/// Test: `coord_poll_keeps_explicit_url` covers the pinned poll; this
+/// terminal glue is exercised by launching the TUI.
+pub async fn run_with_client(mut client: DaemonClient, interval_ms: u64) -> anyhow::Result<()> {
+    tracing::info!(url = %client.base_url(), interval_ms, "launching coordinator TUI");
 
     // STUI-0: prime the fleet state with one poll BEFORE the alternate screen so
     // the startup banner can report the active-session count (or `daemon

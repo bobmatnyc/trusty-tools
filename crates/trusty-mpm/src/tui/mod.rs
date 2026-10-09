@@ -116,9 +116,43 @@ pub async fn run_initial_view(
     focus_id: Option<String>,
     single_pane: bool,
 ) -> anyhow::Result<()> {
+    run_initial_view_with(DaemonClient::new(url), interval_ms, focus_id, single_pane).await
+}
+
+/// Build a TUI's daemon client from the operator's `--url` / `TRUSTY_MPM_URL`.
+///
+/// Why (#9556): every TUI launch must agree on which URL counts as explicit,
+/// because only an explicit one is pinned against re-discovery.
+/// What: resolves via [`crate::core::resolve_daemon_url`] and pins the client
+/// when `explicit` is `Some` and non-empty — the same test that resolver
+/// applies.
+/// Test: `client_for_pins_only_an_explicit_url`.
+pub fn client_for(explicit: Option<&str>) -> DaemonClient {
+    let pinned = explicit.is_some_and(|u| !u.is_empty());
+    DaemonClient::new(crate::core::resolve_daemon_url(explicit)).with_pinned_base_url(pinned)
+}
+
+/// [`run_initial_view`] against a caller-built [`DaemonClient`].
+///
+/// Why (#9556): `tm tui` pins an operator-chosen `--url` /
+/// `TRUSTY_MPM_URL` on the client ([`DaemonClient::with_pinned_base_url`]),
+/// and only a caller-built client carries that pin into the poll loop.
+/// What: the same routing as [`run_initial_view`], handing `client` to the
+/// chosen surface.
+/// Test: the pin is honoured by [`rediscover_daemon`]
+/// (`rediscover_daemon_keeps_explicit_url`); this await glue is exercised by
+/// launching the TUI.
+pub async fn run_initial_view_with(
+    client: DaemonClient,
+    interval_ms: u64,
+    focus_id: Option<String>,
+    single_pane: bool,
+) -> anyhow::Result<()> {
     match initial_view(single_pane) {
-        TuiView::Multipane => project_ctl::run_focused(url, interval_ms, focus_id).await,
-        TuiView::SinglePane => run_focused(url, interval_ms, focus_id).await,
+        TuiView::Multipane => {
+            project_ctl::run_focused_with_client(client, interval_ms, focus_id).await
+        }
+        TuiView::SinglePane => run_focused_with_client(client, interval_ms, focus_id).await,
     }
 }
 
@@ -147,12 +181,19 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
 ///
 /// Why: `DaemonClient` is built once at startup; if the daemon later restarted
 /// onto a fresh ephemeral port, the client would stay pinned to a stale address
-/// forever. Re-resolving on every failed poll lets the TUI self-heal.
-/// What: when `reachable` is `false`, calls [`crate::core::resolve_daemon_url`]
-/// and, if it yields a different URL, re-points the client and returns `true`.
-/// Test: `rediscover_is_noop_when_daemon_reachable`.
-fn rediscover_daemon(client: &mut DaemonClient, reachable: bool) -> bool {
-    if reachable {
+/// forever. Re-resolving on every failed poll lets the TUI self-heal. #9556:
+/// an operator-chosen URL is never replaced — re-discovery would move a TUI
+/// pointed at daemon A to whatever daemon the lock file or the default names.
+/// What: the one re-discovery step for every TUI poll loop (dashboard,
+/// coordinator, multipane). When `reachable` is `false` and the client's URL
+/// is not pinned, calls [`crate::core::resolve_daemon_url`] and, if it yields
+/// a different URL, re-points the client and returns `true`.
+/// Test: `rediscover_is_noop_when_daemon_reachable`,
+/// `rediscover_daemon_keeps_explicit_url`,
+/// `rediscover_daemon_follows_discovery_when_not_pinned`.
+pub(crate) fn rediscover_daemon(client: &mut DaemonClient, reachable: bool) -> bool {
+    // #9556: a pinned (explicit) URL stays; the poll reports it unreachable.
+    if reachable || client.base_url_pinned() {
         return false;
     }
     let resolved = crate::core::resolve_daemon_url(None);
@@ -176,8 +217,16 @@ pub async fn run_focused(
     interval_ms: u64,
     focus_id: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut client = DaemonClient::new(url);
+    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id).await
+}
 
+/// [`run_focused`] against a caller-built client, so a pinned URL (#9556)
+/// reaches the poll loop.
+async fn run_focused_with_client(
+    mut client: DaemonClient,
+    interval_ms: u64,
+    focus_id: Option<String>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;

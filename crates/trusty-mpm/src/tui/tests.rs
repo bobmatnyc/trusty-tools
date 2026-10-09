@@ -34,6 +34,18 @@ fn rediscover_daemon_keeps_explicit_url() {
     assert_eq!(client.base_url(), dead);
 }
 
+/// Why (#9556): only an operator-supplied, non-empty URL is pinned; an empty
+/// or absent one keeps the lock-file / default discovery.
+/// Test: itself.
+#[test]
+fn client_for_pins_only_an_explicit_url() {
+    let explicit = client_for(Some(EXPLICIT_URL));
+    assert!(explicit.base_url_pinned());
+    assert_eq!(explicit.base_url(), EXPLICIT_URL);
+    assert!(!client_for(Some("")).base_url_pinned());
+    assert!(!client_for(None).base_url_pinned());
+}
+
 /// Why (#9556): without an explicit URL the TUI still follows a restarted
 /// daemon. Discovery never yields port 1, so the client must move.
 /// Test: itself.

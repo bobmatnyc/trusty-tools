@@ -356,7 +356,9 @@ pub async fn resolve_daemon_url_for_cli(
 ///   b) Gateway probe: read the console address from its discovery file
 ///      (falling back to `DEFAULT_CONSOLE_ADDR`). Construct
 ///      `http://{console}/api/mpm` and probe `GET .../health` with a 500 ms
-///      timeout. If it returns 200 → return the gateway base URL.
+///      timeout. If it returns 200 → return the gateway base URL. #9556: under
+///      `TRUSTY_SANDBOX=1` or `TRUSTY_DATA_DIR_OVERRIDE` with no recorded
+///      console, this step is skipped — the default is the host's console.
 ///   c) Direct fallback: delegate to `resolve_daemon_url_probing` (lock file →
 ///      `DEFAULT_DAEMON_URL`). This path is taken whenever the console is
 ///      absent or the gateway probe fails.
@@ -391,21 +393,47 @@ pub async fn resolve_daemon_url_via_gateway(
 /// [`resolve_daemon_url_via_gateway`] with the console discovery read and the
 /// default console address injected.
 ///
-/// Why (#9556): the default console address is the live trusty-console, so a
-/// test of the fallback rule must substitute its own listener for it.
-/// What: `recorded` is the console's discovery-file address; a blank or
-/// absent one falls back to `default_console`. Then the explicit → gateway →
-/// direct precedence of [`resolve_daemon_url_via_gateway_inner`] applies.
+/// Why (#9556): the default console is the live trusty-console. A sandboxed
+/// `tm` that probed it was routed through the live console to the live
+/// daemon. The default is injected so a test can substitute a listener.
+/// What: `recorded` is the console's discovery-file address. A blank or
+/// absent one falls back to `default_console`, except in an
+/// [`isolated_environment`], where the gateway is skipped and
+/// [`resolve_daemon_url`] answers without a probe. Otherwise the explicit →
+/// gateway → direct precedence of [`resolve_daemon_url_via_gateway_inner`]
+/// applies.
 /// Test: `gateway_probe_skipped_under_data_dir_override`,
-/// `gateway_probe_uses_recorded_addr_under_data_dir_override`.
+/// `gateway_probe_skipped_under_sandbox_flag`,
+/// `gateway_probe_uses_recorded_addr_under_data_dir_override`,
+/// `gateway_probe_uses_default_console_outside_isolation`.
 async fn resolve_daemon_url_via_gateway_from(
     client: &reqwest::Client,
     explicit: Option<&str>,
     recorded: Option<String>,
     default_console: &str,
 ) -> String {
-    let console_addr = recorded_console_addr(recorded).unwrap_or_else(|| default_console.into());
+    let console_addr = match recorded_console_addr(recorded) {
+        Some(addr) => addr,
+        // #9556: an isolated client never falls back to the host's console.
+        None if isolated_environment() => return resolve_daemon_url(explicit),
+        None => default_console.to_string(),
+    };
     resolve_daemon_url_via_gateway_inner(client, explicit, &console_addr).await
+}
+
+/// Whether this process runs isolated from the host's trusty-* services.
+///
+/// Why (#9556): `scripts/sandbox_daemon.sh` sets both variables; either one
+/// alone means the operator asked to stay off the host's default endpoints.
+/// What: `true` when `TRUSTY_SANDBOX` is exactly `1` (the rule
+/// `trusty_common::credentials::sandbox_flag_set` owns) or
+/// `TRUSTY_DATA_DIR_OVERRIDE` is set and non-empty.
+/// Test: `gateway_probe_skipped_under_data_dir_override`,
+/// `gateway_probe_skipped_under_sandbox_flag`.
+fn isolated_environment() -> bool {
+    use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
+    sandbox_flag_set(std::env::var_os(SANDBOX_ENV_VAR).as_deref())
+        || std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty())
 }
 
 /// The console address a discovery-file read recorded, trimmed; `None` when
