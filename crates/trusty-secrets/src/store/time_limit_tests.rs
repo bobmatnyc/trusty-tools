@@ -4,7 +4,7 @@
 //! Test: itself.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, mpsc};
 use std::time::Instant;
 
 use tempfile::TempDir;
@@ -187,7 +187,17 @@ fn time_limited_store_list_and_set_time_out_and_set_leaves_no_row() {
         ),
         "{listed:?}"
     );
-    assert!(matches!(set, Err(SecretsError::Timeout { .. })), "{set:?}");
+    // A new key's stale flag item is cleared first, so that call times out.
+    assert!(
+        matches!(
+            set,
+            Err(SecretsError::Timeout {
+                operation: "set_agents_may_use",
+                ..
+            })
+        ),
+        "{set:?}"
+    );
     let rows = index().list(&vault).unwrap();
     assert_eq!(rows.len(), 1, "a timed-out set wrote an index row");
     assert_eq!(rows[0].name, key);
@@ -252,4 +262,189 @@ fn time_limited_call_is_not_started_after_the_request_deadline() {
         0,
         "the call was started"
     );
+}
+
+/// A backend whose first call blocks until [`FirstCallBlocks::release`],
+/// then returns or panics. Every later call goes straight to a
+/// [`MemoryBackend`].
+#[derive(Debug, Default)]
+struct FirstCallBlocks {
+    released: Mutex<bool>,
+    wake: Condvar,
+    panic_on_release: bool,
+    calls: AtomicUsize,
+    store: MemoryBackend,
+}
+
+impl FirstCallBlocks {
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+
+    fn enter(&self) {
+        if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
+            return;
+        }
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.wake.wait(released).unwrap();
+        }
+        drop(released);
+        assert!(!self.panic_on_release, "the abandoned call panics");
+    }
+}
+
+impl SecretBackend for FirstCallBlocks {
+    fn id(&self) -> BackendId {
+        BackendId::from_static("first-call-blocks")
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::READ | Capabilities::WRITE
+    }
+
+    fn get(&self, v: &VaultName, k: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        self.enter();
+        self.store.get(v, k)
+    }
+
+    fn set(&self, v: &VaultName, k: &SecretKey, value: &SecretValue) -> Result<(), SecretsError> {
+        self.enter();
+        self.store.set(v, k, value)
+    }
+
+    fn delete(&self, v: &VaultName, k: &SecretKey) -> Result<bool, SecretsError> {
+        self.enter();
+        self.store.delete(v, k)
+    }
+
+    fn agents_may_use(&self, v: &VaultName, k: &SecretKey) -> Result<bool, SecretsError> {
+        self.enter();
+        self.store.agents_may_use(v, k)
+    }
+
+    fn set_agents_may_use(
+        &self,
+        v: &VaultName,
+        k: &SecretKey,
+        on: bool,
+    ) -> Result<(), SecretsError> {
+        self.enter();
+        self.store.set_agents_may_use(v, k, on)
+    }
+}
+
+/// Why: #7524 P2-L7 fix round — an abandoned write lands outside the index
+/// lock, so a timed-out `set(v1)` or `delete` could land after a later
+/// successful `set(v2)` on the same item and silently replace it.
+/// What: while the abandoned `set` on an item hangs, a `delete` on that item
+/// fails at once with `Timeout` and is never started; another key and the
+/// same key's flag item still work. Once the abandoned call ends (by
+/// returning, or by panicking), the item works again.
+/// Test: itself.
+#[test]
+fn time_limited_item_with_an_abandoned_call_fails_fast_until_that_call_ends() {
+    for panic_on_release in [false, true] {
+        let (vault, key) = names();
+        let other = SecretKey::new("OTHER_KEY").unwrap();
+        let value = SecretValue::new("sk-fake-7524");
+        let backend = Arc::new(FirstCallBlocks {
+            panic_on_release,
+            ..FirstCallBlocks::default()
+        });
+        let limited = TimeLimited::new(Arc::clone(&backend) as Arc<dyn SecretBackend>, LIMIT);
+
+        let (b, v, k, val) = (limited.clone(), vault.clone(), key.clone(), value.clone());
+        let (first, _) = returns_in_time(move || b.set(&v, &k, &val));
+        assert!(
+            matches!(
+                first,
+                Err(SecretsError::Timeout {
+                    operation: "set",
+                    ..
+                })
+            ),
+            "{first:?}"
+        );
+
+        let (b, v, k) = (limited.clone(), vault.clone(), key.clone());
+        let (second, took) = returns_in_time(move || b.delete(&v, &k));
+        assert!(
+            matches!(
+                second,
+                Err(SecretsError::Timeout {
+                    operation: "delete",
+                    ..
+                })
+            ),
+            "a call on an item with an abandoned call must fail fast: {second:?}"
+        );
+        assert!(took < LIMIT, "the call on the pending item waited {took:?}");
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "it was started");
+
+        limited.set(&vault, &other, &value).unwrap();
+        assert!(!limited.agents_may_use(&vault, &key).unwrap());
+
+        backend.release();
+        let until = Instant::now() + MARGIN;
+        loop {
+            match limited.get(&vault, &key) {
+                Ok(_) => break,
+                Err(SecretsError::Timeout { .. }) if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => panic!("panic_on_release={panic_on_release}: never usable: {other:?}"),
+            }
+        }
+        let newer = SecretValue::new("sk-fake-7524-v2");
+        limited.set(&vault, &key, &newer).unwrap();
+        let read = limited.get(&vault, &key).unwrap().unwrap();
+        assert_eq!(read.expose(), "sk-fake-7524-v2");
+    }
+}
+
+/// A backend whose every call panics.
+#[derive(Debug)]
+struct Panics;
+
+impl SecretBackend for Panics {
+    fn id(&self) -> BackendId {
+        BackendId::from_static("panics")
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::READ | Capabilities::WRITE
+    }
+
+    fn get(&self, _: &VaultName, _: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        panic!("backend call panicked")
+    }
+
+    fn set(&self, _: &VaultName, _: &SecretKey, _: &SecretValue) -> Result<(), SecretsError> {
+        panic!("backend call panicked")
+    }
+
+    fn delete(&self, _: &VaultName, _: &SecretKey) -> Result<bool, SecretsError> {
+        panic!("backend call panicked")
+    }
+}
+
+/// Why: a call that panics returned nothing, so it is neither a value, a
+/// miss nor a success.
+/// What: the caller gets a `Backend` failure that says so.
+/// Test: itself.
+#[test]
+fn time_limited_call_that_panics_is_a_backend_failure() {
+    let (vault, key) = names();
+    let limited = TimeLimited::new(Arc::new(Panics), MARGIN);
+    match limited.get(&vault, &key) {
+        Err(SecretsError::Backend {
+            backend, reason, ..
+        }) => {
+            assert_eq!(backend, "panics");
+            assert!(reason.contains("ended with no result"), "{reason}");
+        }
+        other => panic!("expected a Backend failure, got {other:?}"),
+    }
 }

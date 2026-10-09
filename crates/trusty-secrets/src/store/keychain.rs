@@ -34,9 +34,8 @@ use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 /// leaves a person time to answer a prompt.
 /// What: the default and only limit; a server request's earlier deadline
 /// cuts it further. Not configurable.
-/// Test: `time_limited_call_that_never_returns_times_out_on_every_operation`
-/// (the limit), `keychain_backend_fails_closed_off_macos` (every call goes
-/// through it).
+/// Test: `keychain_backend_runs_every_call_under_the_time_limit`,
+/// `time_limited_call_that_never_returns_times_out_on_every_operation`.
 pub const KEYCHAIN_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The Keychain service holding the "agents may use" flag items (#9070).
