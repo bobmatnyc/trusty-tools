@@ -40,6 +40,8 @@ base64 = { workspace = true }
 toml = { workspace = true }
 url = { workspace = true }
 chrono = { workspace = true }
+# #8454 S2a: strict parse of the host `channels:` section of config.yaml.
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

@@ -110,7 +110,9 @@ impl fmt::Display for Channel {
 /// What: `question` (a reply binds to its id) and `review_notice` (gchat
 /// only, no reply expected).
 /// Test: `kind_not_listed_denies`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+// #8454 S2a: route files and the host ceiling spell kinds in snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageKind {
     /// A question; a reply binds to its question id.
     Question,
@@ -152,7 +154,8 @@ pub const MAX_WINDOW_SECS: u32 = 86_400;
 /// value, so validation can refuse it rather than the type hiding it.
 /// What: at most `limit` admits in any window of `window_secs` seconds.
 /// Test: `bucket_zero_or_out_of_range_params_fail_build`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitSpec {
     /// Admits allowed per window; valid range `1..=10_000`.
     pub limit: i64,

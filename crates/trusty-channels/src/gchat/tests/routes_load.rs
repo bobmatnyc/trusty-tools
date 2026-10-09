@@ -105,10 +105,10 @@ async fn refused_load_refuses_every_send() {
     assert_eq!(lines[0]["reason"], "routes_unavailable");
 }
 
-#[test]
-fn load_rules_refuse_each_invalid_file() {
+/// Files the schema-1 load rules refuse; shared with the #8454 golden.
+fn invalid_cases() -> Vec<(&'static str, String)> {
     let janet = route("janet", JANET, "[\"question\"]");
-    let cases: Vec<(&str, String)> = vec![
+    vec![
         (
             "version 2",
             format!("{}{janet}", CONN.replace("version = 1", "version = 2")),
@@ -168,8 +168,13 @@ fn load_rules_refuse_each_invalid_file() {
             "version as a string",
             CONN.replace("version = 1", "version = \"1\"") + &janet,
         ),
-    ];
-    for (what, text) in cases {
+    ]
+}
+
+#[test]
+fn load_rules_refuse_each_invalid_file() {
+    let janet = route("janet", JANET, "[\"question\"]");
+    for (what, text) in invalid_cases() {
         assert!(parse(&text).is_err(), "{what} loaded:\n{text}");
     }
     assert!(
@@ -297,4 +302,117 @@ fn load_gate_checks_the_bytes_read_not_the_file_after() {
     assert!(matches!(err, RouteError::NotCommitted { .. }), "{err:?}");
     let clean = std::fs::read(&path).expect("read clean");
     check_committed(&path, &clean).expect("the committed bytes pass");
+}
+
+/// #8454 S2a golden: every fixture above gets the same verdict, and every
+/// accepted one the same routes, from the channel-neutral policy loader.
+#[test]
+fn v1_gchat_file_loads_unchanged() {
+    use crate::policy::{merge, parse_host, parse_project_file, FileState, ProjectInput};
+
+    let home = Path::new("/home/t");
+    let ceiling = "channels:\n  version: 1\n  gchat: { enabled: true, projects: [/proj] }\n";
+    let mut corpus: Vec<(&str, String)> = vec![
+        ("three routes", THREE_ROUTES.replace("{KEY}", "/k.json")),
+        (
+            "space routes",
+            super::space_routes::SPACE_ROUTES.replace("{KEY}", "~/k.json"),
+        ),
+        (
+            "home key, mixed case, repeated kind",
+            CONN.replace("/k.json", "~/keys/sa.json")
+                + &route(
+                    "janet",
+                    "Janet@Example.com",
+                    "[\"question\", \"review_notice\", \"question\"]",
+                )
+                + &route("notices", "rev@example.com", "[\"review_notice\"]"),
+        ),
+        ("no gchat table", "version = 1\n".into()),
+        ("gchat table, no routes", CONN.to_string()),
+        (
+            "duplicate name",
+            format!(
+                "{CONN}{}{}",
+                route("a", JANET, "[\"question\"]"),
+                route("a", "x@example.com", "[\"question\"]")
+            ),
+        ),
+        (
+            "duplicate recipient by case",
+            format!(
+                "{CONN}{}{}",
+                route("a", "Janet@Example.com", "[\"question\"]"),
+                route("b", JANET, "[\"question\"]")
+            ),
+        ),
+    ];
+    // Version 2 is the one intended difference: gchat refuses it, S2 reads it.
+    corpus.extend(
+        invalid_cases()
+            .into_iter()
+            .filter(|(what, _)| *what != "version 2"),
+    );
+    for (what, text) in corpus {
+        let old = parse_routes(Path::new("routes.toml"), &text, Some(home));
+        let new = parse_project_file(&text, Some(home));
+        let report = merge(
+            parse_host(ceiling, Some(home)),
+            vec![ProjectInput {
+                project_dir: "/proj".into(),
+                file: "/proj/.trusty-channels/routes.toml".into(),
+                parsed: new.clone(),
+            }],
+        );
+        let status = &report.per_file[0];
+        let Ok(old) = old else {
+            assert_eq!(
+                status.state,
+                FileState::Refused,
+                "{what}: refused today, loaded by S2"
+            );
+            continue;
+        };
+        assert_eq!(
+            status.state,
+            FileState::Effective {
+                routes: old.routes.len()
+            },
+            "{what}: {:?}",
+            report.findings
+        );
+        assert!(report.findings.is_empty(), "{what}: {:?}", report.findings);
+        let new = new.expect("parsed");
+        assert_eq!(new.gchat_connection, old.connection, "{what}");
+        let got: Vec<(String, String, Vec<&str>)> = report
+            .policy
+            .routes()
+            .iter()
+            .map(|r| {
+                let kinds = r.kinds().iter().map(|k| k.as_str()).collect();
+                (r.name().to_string(), r.recipient().to_string(), kinds)
+            })
+            .collect();
+        let want: Vec<(String, String, Vec<&str>)> = old
+            .routes
+            .iter()
+            .map(|r| {
+                let kinds = r.kinds.iter().map(|k| k.as_str()).collect();
+                (r.name.clone(), r.recipient.clone(), kinds)
+            })
+            .collect();
+        assert_eq!(got, want, "{what}");
+        let spaces: std::collections::BTreeMap<String, String> = old
+            .routes
+            .iter()
+            .filter_map(|r| Some((r.name.clone(), r.space.clone()?)))
+            .collect();
+        assert_eq!(status.gchat_spaces, spaces, "{what}");
+        let conn = if old.routes.is_empty() {
+            None
+        } else {
+            old.connection
+        };
+        assert_eq!(status.gchat_connection, conn, "{what}");
+    }
 }
