@@ -14,9 +14,9 @@ use super::{
 };
 use crate::config::ReviewConfig;
 use crate::integrations::search_client::IndexInfo;
+use crate::integrations::search_transport::TRUSTY_SEARCH_URL_ENV;
 use crate::integrations::search_transport::fixture::{EnvGuard, FakeSearchSocket, healthy};
-use crate::integrations::search_transport::{TRUSTY_DATA_DIR_ENV, TRUSTY_SEARCH_URL_ENV};
-use trusty_common::search_rpc::TRUSTY_SEARCH_SOCKET_ENV;
+use trusty_common::search_rpc::{TRUSTY_SEARCH_DATA_DIR_ENV, TRUSTY_SEARCH_SOCKET_ENV};
 
 #[test]
 fn search_client_trait_object_compiles() {
@@ -47,7 +47,7 @@ fn from_config_with_pinned_env(config: &ReviewConfig) -> HttpSearchClient {
     let _env = [
         EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
         EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
-        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_DATA_DIR_ENV),
     ];
     HttpSearchClient::from_config(config).expect("TLS init should succeed")
 }

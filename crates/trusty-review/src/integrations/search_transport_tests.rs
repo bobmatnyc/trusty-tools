@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use trusty_common::search_rpc::TRUSTY_SEARCH_DATA_DIR_ENV;
 
 use super::fixture::{EnvGuard, FakeSearchSocket, healthy};
 use super::*;
@@ -42,7 +43,7 @@ fn isolated(dir: &tempfile::TempDir) -> [EnvGuard; 4] {
         EnvGuard::set(DATA_DIR_OVERRIDE, &dir.path().to_string_lossy()),
         EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
         EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
-        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_DATA_DIR_ENV),
     ]
 }
 
@@ -173,7 +174,7 @@ async fn missing_socket_fails_closed_on_the_config_leg() {
 async fn missing_socket_fails_closed_without_tcp_on_the_advertised_leg() {
     let dir = short_tempdir();
     let _env = isolated(&dir);
-    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, &dir.path().to_string_lossy());
+    let _iso = EnvGuard::set(TRUSTY_SEARCH_DATA_DIR_ENV, &dir.path().to_string_lossy());
     let (addr, hits) = tcp_tripwire().await;
     std::fs::write(dir.path().join("http_addr"), &addr).expect("write http_addr");
     let missing = dir.path().join("trusty-search.sock");
@@ -209,7 +210,7 @@ async fn missing_socket_fails_closed_without_tcp_on_the_advertised_leg() {
 async fn unresolvable_socket_path_fails_closed() {
     let dir = short_tempdir();
     let _env = isolated(&dir);
-    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, "relative-data-dir");
+    let _iso = EnvGuard::set(TRUSTY_SEARCH_DATA_DIR_ENV, "relative-data-dir");
 
     for transport in [
         SearchTransport::resolve(&default_config()),
@@ -219,14 +220,16 @@ async fn unresolvable_socket_path_fails_closed() {
             panic!("an unresolvable socket must not fall back to HTTP: {transport:?}");
         };
         assert!(
-            path.display().to_string().contains("is relative"),
+            path.display()
+                .to_string()
+                .contains("must be an absolute path"),
             "the path names the reason: {}",
             path.display()
         );
         let client = HttpSearchClient::with_transport(transport.clone()).expect("client builds");
         let err = client.health().await.expect_err("nothing serves it");
         assert!(
-            matches!(err, SearchClientError::Unavailable(ref m) if m.contains("is relative")),
+            matches!(err, SearchClientError::Unavailable(ref m) if m.contains("must be an absolute path")),
             "unavailable, naming the reason: {err}"
         );
     }
@@ -324,7 +327,7 @@ fn unit_tests_never_resolve_the_real_default_socket() {
         EnvGuard::unset(DATA_DIR_OVERRIDE),
         EnvGuard::unset(TRUSTY_SEARCH_SOCKET_ENV),
         EnvGuard::unset(TRUSTY_SEARCH_URL_ENV),
-        EnvGuard::unset(TRUSTY_DATA_DIR_ENV),
+        EnvGuard::unset(TRUSTY_SEARCH_DATA_DIR_ENV),
     ];
     for resolved in [
         SearchTransport::resolve(&default_config()),
@@ -347,11 +350,14 @@ fn unit_tests_never_resolve_the_real_default_socket() {
 /// `TRUSTY_DATA_DIR` isolates the default socket, as the daemon's own rule does.
 ///
 /// Why: the daemon of an instance started with `TRUSTY_DATA_DIR` binds
-/// `<TRUSTY_DATA_DIR>/trusty-search.sock`; `search_rpc::search_socket()` ignores
-/// that var, so without the local rule an isolated run read the shared daemon.
-/// What: a fake "shared" daemon at `search_socket()`'s path (moved into a temp
-/// dir by `TRUSTY_DATA_DIR_OVERRIDE`) and the isolated instance's own socket;
-/// both resolvers must pick the isolated one.
+/// `<TRUSTY_DATA_DIR>/trusty-search.sock`, and rule 3 takes its path from
+/// `search_rpc::search_socket()` alone (#9214), so an isolated run reaches
+/// its own daemon only while that function honours the var.
+/// What: a fake "shared" daemon at the default path with `TRUSTY_DATA_DIR`
+/// unset (moved into a temp dir by `TRUSTY_DATA_DIR_OVERRIDE`), then
+/// `TRUSTY_DATA_DIR` set and the isolated instance's own socket; both
+/// resolvers must pick `<TRUSTY_DATA_DIR>/trusty-search.sock`. A
+/// `search_socket()` that ignored the var would answer the shared path.
 /// Test: this test.
 #[serial_test::serial]
 #[tokio::test]
@@ -359,9 +365,17 @@ async fn trusty_data_dir_isolates_the_default_socket() {
     let shared_dir = short_tempdir();
     let isolated_dir = short_tempdir();
     let _env = isolated(&shared_dir);
-    let _iso = EnvGuard::set(TRUSTY_DATA_DIR_ENV, &isolated_dir.path().to_string_lossy());
     let shared = FakeSearchSocket::serve(&default_socket(), health_only);
+    let _iso = EnvGuard::set(
+        TRUSTY_SEARCH_DATA_DIR_ENV,
+        &isolated_dir.path().to_string_lossy(),
+    );
     let own = FakeSearchSocket::serve(&isolated_dir.path().join("trusty-search.sock"), health_only);
+    assert!(
+        shared.path.starts_with(shared_dir.path()),
+        "the shared fake sits under TRUSTY_DATA_DIR_OVERRIDE: {}",
+        shared.path.display()
+    );
 
     for resolved in [
         SearchTransport::resolve(&default_config()),

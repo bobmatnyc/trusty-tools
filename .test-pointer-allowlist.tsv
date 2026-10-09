@@ -878,7 +878,6 @@ crates/trusty-common/src/memory_core/retrieval/types.rs	deferred_embed_backfills
 crates/trusty-common/src/memory_core/store/payload_store/types.rs	iter_segment
 crates/trusty-common/src/memory_core/store/vector.rs	default_palace_used_when_arg_omitted
 crates/trusty-common/src/monitor/memory_tui/render.rs	test_render_with_drawer_pane_focus_marker
-crates/trusty-common/src/monitor/search_client.rs	test_push_new_log_lines
 crates/trusty-common/src/search_index_tests.rs	never_writes_to_a_daemon_under_test
 crates/trusty-common/src/stdio_mcp_client/mod.rs	plugin_log_path_uses_home
 crates/trusty-common/src/symgraph/contracts/edge_kind.rs	edge_kind_tag_round_trip
