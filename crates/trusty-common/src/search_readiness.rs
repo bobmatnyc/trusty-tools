@@ -156,46 +156,34 @@ pub fn parse_readiness(index_id: &str, status: &serde_json::Value) -> IndexReadi
 /// query is fully warm or still building — but must NEVER be blocked or aborted
 /// by a slow/absent daemon (the same fail-open contract the warming path
 /// honours). Returning `Option` (not `Result`) keeps every failure mode — no
-/// daemon, undrivable id, HTTP error, non-2xx, unparseable body — a quiet
+/// daemon, undrivable id, refused call, unanswered socket — a quiet
 /// `None` at the call site.
 /// What: resolves the canonical `(root, index_id)` the way
 /// [`crate::search_index::ensure_project_indexed`] does (so this always targets
-/// the same index the warming path created), discovers the daemon base URL, and
-/// — on a dedicated OS thread with a ~1.5s overall / 750ms connect cap (safe
-/// from inside a tokio runtime, mirroring the `search_index` HTTP helpers) —
-/// does one `GET {base}/indexes/{id}/status`, parsing a 2xx body via
-/// [`parse_readiness`]. `None` on any non-success, transport error, or when the
-/// id/daemon can't be resolved.
-/// Test: `probe_index_readiness_none_when_daemon_down` (daemon-down path); the
-/// parse of a live body is covered by [`parse_readiness`]'s own tests.
+/// the same index the warming path created), then makes one
+/// `search.index.status` call on the daemon's socket with a 1.5 s budget, on a
+/// dedicated OS thread ([`crate::search_rpc::call_blocking`], safe from inside
+/// a tokio runtime), parsing the answer via [`parse_readiness`]. `None` when
+/// the id is undrivable or the call fails; a failed call is logged at debug
+/// with the socket path (#9214: never a TCP address, never "ready").
+/// Test: `probe_index_readiness_none_when_daemon_down` (daemon-down path),
+/// `probe_index_readiness_reads_the_status_over_the_socket` (socket path).
 pub fn probe_index_readiness(project_root: &Path) -> Option<IndexReadiness> {
     let root = crate::resolve_project_root(project_root);
     let index_id = crate::derive_index_id(&root);
     if index_id.trim().is_empty() {
         return None;
     }
-    let base = crate::resolve_daemon_base_url("trusty-search")?;
-    let status_url = format!("{base}/indexes/{index_id}/status");
-
-    // Blocking reqwest inside a tokio runtime panics on runtime drop; run it on
-    // a dedicated OS thread (joined here) exactly like search_index's helpers.
-    let body: serde_json::Value = std::thread::spawn(move || {
-        // #4392: trusty-search answers on loopback, so the client must not
-        // honour an exported HTTP_PROXY.
-        let client = crate::http_client::blocking_loopback_client_builder()
-            .timeout(std::time::Duration::from_millis(1500))
-            .connect_timeout(std::time::Duration::from_millis(750))
-            .build()
-            .ok()?;
-        let resp = client.get(&status_url).send().ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        resp.json::<serde_json::Value>().ok()
-    })
-    .join()
-    .ok()
-    .flatten()?;
+    // #9214: the socket, not `resolve_daemon_base_url("trusty-search")`.
+    let socket = crate::search_rpc::search_socket().ok()?;
+    let body = crate::search_rpc::call_blocking(
+        &socket,
+        crate::search_rpc::METHOD_INDEX_STATUS,
+        serde_json::json!({ "index_id": index_id }),
+        std::time::Duration::from_millis(1500),
+    )
+    .inspect_err(|e| tracing::debug!("index readiness probe failed: {e:#}"))
+    .ok()?;
 
     Some(parse_readiness(&index_id, &body))
 }
@@ -358,8 +346,8 @@ mod tests {
 
     #[test]
     fn probe_index_readiness_none_when_daemon_down() {
-        // Point the data dir at an empty temp dir so `resolve_daemon_base_url`
-        // finds no address file ⇒ daemon-down path returns `None`, never an
+        // Point the data dir at an empty temp dir so the derived socket has no
+        // daemon behind it ⇒ daemon-down path returns `None`, never an
         // error. `ENV_LOCK` serialises the process-global override against
         // sibling env-mutating tests, matching `search_index`'s tests.
         let _guard = crate::data_dir::ENV_LOCK
@@ -387,5 +375,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
 
         assert_eq!(readiness, None, "daemon down ⇒ None, never an error");
+    }
+
+    /// #9214: the probe reads `search.index.status` from the socket
+    /// `TRUSTY_SEARCH_SOCKET` names, with the project's derived index id.
+    #[test]
+    fn probe_index_readiness_reads_the_status_over_the_socket() {
+        let _guard = crate::data_dir::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join(".git")).expect("project");
+        let socket = dir.path().join("search.sock");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let _daemon = crate::uds_mock::spawn_blocking_at(socket.clone(), move |method, params| {
+            record
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((method.to_string(), params));
+            Box::pin(async move {
+                Ok(json!({ "status": "ready", "chunk_count": 9,
+                           "search_capabilities": ["bm25", "vector"] }))
+            })
+        });
+        // SAFETY: guarded by ENV_LOCK; removed below before asserting.
+        unsafe {
+            std::env::set_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV, &socket);
+        }
+        let readiness = probe_index_readiness(&project);
+        unsafe {
+            std::env::remove_var(crate::search_rpc::TRUSTY_SEARCH_SOCKET_ENV);
+        }
+        let readiness = readiness.expect("the fake daemon answered");
+        assert_eq!(readiness.chunk_count, 9);
+        assert!(readiness.semantic_ready);
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "search.index.status");
+        assert_eq!(seen[0].1, json!({ "index_id": readiness.index_id }));
     }
 }

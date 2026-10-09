@@ -25,7 +25,7 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use event_loop::{ScopedReindexEvent, apply_reindex_event, run, run_with_url};
+pub use event_loop::{ScopedReindexEvent, apply_reindex_event, run, run_with_socket};
 pub use nav::{
     filtered_sorted_indexes, navigate_down_visible, navigate_up_visible, new_log_lines_since,
     visible_index_ids, visible_selected_row,
