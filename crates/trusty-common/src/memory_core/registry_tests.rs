@@ -509,6 +509,60 @@ fn open_palace_prefers_real_palace_over_alias() {
     );
 }
 
+/// Issue #9544 — creating a palace under a live alias name is refused and the
+/// alias keeps resolving.
+///
+/// Why: a real palace always wins over an alias of the same name, so a create
+/// that succeeded would silently split that name off the palace it pointed at.
+/// What: creates `alias-target`, aliases `alias-name` to it, then asserts the
+/// create of `alias-name` fails with `LiveAliasError`, writes no `palace.json`,
+/// and an open of `alias-name` still reaches `alias-target`.
+/// Test: this test itself.
+#[test]
+fn palace_create_refuses_a_live_alias_name() {
+    use crate::memory_core::palace::Palace;
+    use crate::palace_alias::{LiveAliasError, PalaceAliasStore};
+    use chrono::Utc;
+
+    let dir = tempdir().unwrap();
+    let data_root = dir.path();
+    let reg = PalaceRegistry::new();
+    let palace = |id: &str| Palace {
+        id: PalaceId::new(id),
+        name: id.to_string(),
+        description: None,
+        created_at: Utc::now(),
+        data_dir: data_root.join(id),
+    };
+    reg.create_palace(data_root, palace("alias-target"))
+        .expect("create target palace");
+    PalaceAliasStore::register_alias(data_root, "alias-name", "alias-target")
+        .expect("register alias");
+
+    let result = reg.create_palace(data_root, palace("alias-name"));
+    assert!(
+        result.is_err(),
+        "creating a live alias name must be refused"
+    );
+    assert!(
+        !data_root.join("alias-name").join("palace.json").exists(),
+        "a refused create must not write palace metadata"
+    );
+    let handle = reg
+        .open_palace(data_root, &PalaceId::new("alias-name"))
+        .expect("the alias still resolves");
+    assert_eq!(handle.id, PalaceId::new("alias-target"));
+    let err = result.err().expect("refused");
+    assert_eq!(
+        err.downcast_ref::<LiveAliasError>(),
+        Some(&LiveAliasError {
+            alias: "alias-name".to_string(),
+            target: "alias-target".to_string(),
+        }),
+        "the refusal is typed so callers can map it to a conflict: {err:#}"
+    );
+}
+
 /// Issue #463 — a `get` call promotes the accessed handle to MRU,
 /// protecting it from immediate eviction.
 ///

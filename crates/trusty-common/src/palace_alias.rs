@@ -21,8 +21,9 @@
 //! lives beside the per-palace subdirectories.
 //!
 //! Test: `crate::palace_alias::tests` covers round-trip register/resolve, the
-//! missing-file default, idempotent re-registration, self-alias rejection, and
-//! the `palace_registry_dir_from` subdir resolution.
+//! missing-file default, idempotent re-registration, self-alias rejection, the
+//! rename retarget and alias removal (#9544), and the `palace_registry_dir_from`
+//! subdir resolution.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -68,7 +69,8 @@ fn default_alias_schema_version() -> u32 {
 /// Why: like [`crate::memory_core::store::palace_store::PalaceStore`], alias
 /// persistence has no state of its own — every operation is a pure function over
 /// a registry directory. Grouping under a unit struct gives a stable import path.
-/// What: `load_aliases` / `register_alias` / `resolve_alias`.
+/// What: `load_aliases` / `register_alias` / `resolve_alias`, plus (#9544)
+/// `rename_target` / `remove_alias`.
 /// Test: this module's `tests`.
 pub struct PalaceAliasStore;
 
@@ -138,12 +140,76 @@ impl PalaceAliasStore {
             );
         }
 
-        std::fs::create_dir_all(registry_dir)
-            .with_context(|| format!("create registry dir {}", registry_dir.display()))?;
-
         let mut aliases = Self::load_aliases(registry_dir)?;
         aliases.insert(alias.to_string(), target.to_string());
+        Self::write_aliases(registry_dir, aliases)
+    }
 
+    /// Point a renamed palace's old id, and every alias of it, at the new id.
+    ///
+    /// Why (#9544): a palace id rename must keep the old id answering. Writing
+    /// `old -> new` alone would strand an older alias `x -> old` on a name that
+    /// no longer owns a palace, and a separate retarget write would leave a
+    /// window where the map names a dead target. One write covers both.
+    /// What: rejects empty operands and `old == new`. Then, in one atomic write:
+    /// drops any entry keyed by `new` (that id becomes a real palace, so an alias
+    /// under it is inert and would form an `old <-> new` cycle when a rename is
+    /// reversed), repoints every `x -> old` to `x -> new`, and inserts
+    /// `old -> new`. The entry takes effect only once `old` has no `palace.json`
+    /// and `new` has one ([`alias_target_if_absent`]), so it is safe to write
+    /// before the directory move.
+    /// Test: `rename_retargets_aliases_pointing_at_the_old_id`,
+    /// `rename_drops_the_alias_keyed_by_the_new_id`,
+    /// `rename_target_rejects_empty_or_equal_ids`.
+    pub fn rename_target(registry_dir: &Path, old: &str, new: &str) -> Result<()> {
+        let old = old.trim();
+        let new = new.trim();
+        if old.is_empty() || new.is_empty() {
+            anyhow::bail!("palace rename ids must both be non-empty (old={old:?}, new={new:?})");
+        }
+        if old == new {
+            anyhow::bail!("refusing to alias palace {old:?} to itself");
+        }
+        let mut aliases = Self::load_aliases(registry_dir)?;
+        // #9544: `new` becomes a real palace; an alias under it is inert and
+        // would close an `old <-> new` cycle when a rename is reversed.
+        aliases.remove(new);
+        for target in aliases.values_mut() {
+            if target == old {
+                *target = new.to_string();
+            }
+        }
+        aliases.insert(old.to_string(), new.to_string());
+        Self::write_aliases(registry_dir, aliases)
+    }
+
+    /// Remove one alias so its name stops resolving.
+    ///
+    /// Why (#9544): a renamed palace's old id answers "until removed"; this is
+    /// the removal.
+    /// What: loads the map, removes the entry keyed by `alias` (trimmed), and
+    /// writes the map back only when an entry was removed. Returns whether one
+    /// was. The target palace is never touched.
+    /// Test: `alias_remove_stops_old_id_resolving`.
+    pub fn remove_alias(registry_dir: &Path, alias: &str) -> Result<bool> {
+        let mut aliases = Self::load_aliases(registry_dir)?;
+        if aliases.remove(alias.trim()).is_none() {
+            return Ok(false);
+        }
+        Self::write_aliases(registry_dir, aliases)?;
+        Ok(true)
+    }
+
+    /// Persist the whole alias map with a tmp + rename write.
+    ///
+    /// Why: every mutation must publish a complete map, never a partial one.
+    /// What: creates `registry_dir`, writes `palace_aliases.json.tmp`, renames
+    /// it over `palace_aliases.json`. The tmp name is fixed, so concurrent
+    /// writers must be serialised by the caller.
+    /// Test: `register_then_resolve_round_trips`.
+    fn write_aliases(registry_dir: &Path, aliases: BTreeMap<String, String>) -> Result<()> {
+        std::fs::create_dir_all(registry_dir)
+            .with_context(|| format!("create registry dir {}", registry_dir.display()))?;
         let file = PalaceAliasesFile {
             version: default_alias_schema_version(),
             aliases,
@@ -208,6 +274,49 @@ pub fn alias_target_if_absent(registry_dir: &Path, palace_id: &str) -> Option<St
         _ => None,
     }
 }
+
+/// The id a palace request actually reaches: the live alias target, else itself.
+///
+/// Why (#9544): every caller that keys state by palace id (write locks, session
+/// stores, lexical-lane dirs) must agree on one id per palace, or an
+/// alias-addressed write and a canonical write take different locks for one
+/// store. This names that id with the same rule the registry's open follows.
+/// What: [`alias_target_if_absent`] when it names a redirect, `palace_id`
+/// unchanged otherwise. Never fails.
+/// Test: `canonical_palace_id_follows_only_a_live_alias`.
+pub fn canonical_palace_id(registry_dir: &Path, palace_id: &str) -> String {
+    alias_target_if_absent(registry_dir, palace_id).unwrap_or_else(|| palace_id.to_string())
+}
+
+/// A palace create refused because the id is a live alias.
+///
+/// Why (#9544): creating a palace under a name that currently redirects would
+/// shadow the alias (a real palace always wins), silently splitting reads and
+/// writes for that name off the palace it pointed at.
+/// What: carries the alias and the palace it resolves to. Returned, inside an
+/// `anyhow::Error`, by `PalaceRegistry::create_palace`; callers downcast it to
+/// map the refusal to a conflict. Hand-rolled because `thiserror` is optional
+/// in this crate and this module is always compiled.
+/// Test: `palace_create_refuses_a_live_alias_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveAliasError {
+    /// The requested palace id, which is a live alias.
+    pub alias: String,
+    /// The palace the alias resolves to.
+    pub target: String,
+}
+
+impl std::fmt::Display for LiveAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "palace id {:?} is an alias of palace {:?}; remove the alias before creating a palace with that id",
+            self.alias, self.target
+        )
+    }
+}
+
+impl std::error::Error for LiveAliasError {}
 
 /// Resolve the directory that holds the per-palace subdirectories for a data dir.
 ///
@@ -413,6 +522,99 @@ mod tests {
     fn alias_target_is_none_without_an_alias() {
         let tmp = tempdir().unwrap();
         assert_eq!(alias_target_if_absent(tmp.path(), "anything"), None);
+    }
+
+    /// Why (#9544): after a rename, an older alias of the old id must reach the
+    /// new id in the same write that makes the old id an alias, so no alias is
+    /// left naming a palace id that no longer exists.
+    /// Test: itself.
+    #[test]
+    fn rename_retargets_aliases_pointing_at_the_old_id() {
+        let tmp = tempdir().unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "older", "old-id").unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "unrelated", "elsewhere").unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "old-id", "new-id").unwrap();
+        let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
+        assert_eq!(all.get("old-id").map(String::as_str), Some("new-id"));
+        assert_eq!(all.get("older").map(String::as_str), Some("new-id"));
+        assert_eq!(all.get("unrelated").map(String::as_str), Some("elsewhere"));
+        assert_eq!(all.len(), 3);
+
+        // Once the directory has moved, both names resolve to the new palace.
+        seed_palace(tmp.path(), "new-id");
+        assert_eq!(canonical_palace_id(tmp.path(), "old-id"), "new-id");
+        assert_eq!(canonical_palace_id(tmp.path(), "older"), "new-id");
+    }
+
+    /// Why (#9544): reversing a rename (`a -> b`, then `b` back to `a`) must not
+    /// leave `a -> b` and `b -> a` in the map; the new id owns a palace, so any
+    /// alias keyed by it goes.
+    /// Test: itself.
+    #[test]
+    fn rename_drops_the_alias_keyed_by_the_new_id() {
+        let tmp = tempdir().unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "first", "second").unwrap();
+        PalaceAliasStore::rename_target(tmp.path(), "second", "first").unwrap();
+        let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
+        assert_eq!(all.get("second").map(String::as_str), Some("first"));
+        assert_eq!(
+            all.get("first"),
+            None,
+            "no alias may be keyed by the new id"
+        );
+        assert!(all.iter().all(|(k, v)| k != v), "no self-alias: {all:?}");
+    }
+
+    /// Why (#9544): a blank id or a rename onto itself is a caller bug; it must
+    /// fail and leave the map as it was.
+    /// Test: itself.
+    #[test]
+    fn rename_target_rejects_empty_or_equal_ids() {
+        let tmp = tempdir().unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "keep", "kept").unwrap();
+        assert!(PalaceAliasStore::rename_target(tmp.path(), "", "b").is_err());
+        assert!(PalaceAliasStore::rename_target(tmp.path(), "a", "  ").is_err());
+        assert!(PalaceAliasStore::rename_target(tmp.path(), "same", " same ").is_err());
+        let all = PalaceAliasStore::load_aliases(tmp.path()).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.get("keep").map(String::as_str), Some("kept"));
+    }
+
+    /// Why (#9544): the old id answers "until removed"; after removal it must
+    /// stop redirecting while every other alias stays.
+    /// Test: itself.
+    #[test]
+    fn alias_remove_stops_old_id_resolving() {
+        let tmp = tempdir().unwrap();
+        seed_palace(tmp.path(), "new-id");
+        PalaceAliasStore::register_alias(tmp.path(), "old-id", "new-id").unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "other", "new-id").unwrap();
+        assert_eq!(canonical_palace_id(tmp.path(), "old-id"), "new-id");
+
+        assert!(PalaceAliasStore::remove_alias(tmp.path(), " old-id ").unwrap());
+        assert_eq!(canonical_palace_id(tmp.path(), "old-id"), "old-id");
+        assert_eq!(canonical_palace_id(tmp.path(), "other"), "new-id");
+        assert!(
+            !PalaceAliasStore::remove_alias(tmp.path(), "old-id").unwrap(),
+            "a second removal finds nothing"
+        );
+    }
+
+    /// Why (#9544): the canonical id is the alias target only while the redirect
+    /// is live; a real palace or a dead target keeps the requested id.
+    /// Test: itself.
+    #[test]
+    fn canonical_palace_id_follows_only_a_live_alias() {
+        let tmp = tempdir().unwrap();
+        seed_palace(tmp.path(), "target");
+        PalaceAliasStore::register_alias(tmp.path(), "live", "target").unwrap();
+        PalaceAliasStore::register_alias(tmp.path(), "dead", "gone").unwrap();
+        assert_eq!(canonical_palace_id(tmp.path(), "live"), "target");
+        assert_eq!(canonical_palace_id(tmp.path(), "dead"), "dead");
+        assert_eq!(canonical_palace_id(tmp.path(), "target"), "target");
+
+        seed_palace(tmp.path(), "live");
+        assert_eq!(canonical_palace_id(tmp.path(), "live"), "live");
     }
 
     /// Why: absent a `palaces/` subdir the data dir itself is the registry root
