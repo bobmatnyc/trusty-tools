@@ -21,7 +21,7 @@ const OTHER_SPACE: &str = "spaces/OTHER";
 
 /// `bob` and `janet` share `spaces/SHARED`; `other` is configured on
 /// `spaces/OTHER`; `asker` is a DM route with no `space`.
-const SPACE_ROUTES: &str = r#"version = 1
+pub(super) const SPACE_ROUTES: &str = r#"version = 1
 
 [gchat.connection]
 project_id = "test-project"

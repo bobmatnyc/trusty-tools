@@ -309,7 +309,17 @@ fn validate_route(entry: &str, raw: RawRoute) -> Result<Route, RouteError> {
     })
 }
 
-fn validate_connection(raw: RawConnection, home: Option<&Path>) -> Result<Connection, RouteError> {
+/// Validate a `[gchat.connection]` table.
+///
+/// Why: #8454 S2a validates the host ceiling's and the project file's gchat
+/// connection with the same rule as this layer.
+/// What: id-shaped `project_id` and `subscription`; `key_file` a path, never
+/// key material, with `~/` expanded against `home`.
+/// Test: `load_rules_refuse_each_invalid_file`, `v1_gchat_file_loads_unchanged`.
+pub(crate) fn validate_connection(
+    raw: RawConnection,
+    home: Option<&Path>,
+) -> Result<Connection, RouteError> {
     const ENTRY: &str = "gchat.connection";
     let id_ok = |s: &str| {
         !s.is_empty()
@@ -394,9 +404,10 @@ struct RawGchat {
     routes: Vec<RawRoute>,
 }
 
+/// `[gchat.connection]` as parsed; also the host ceiling's (#8454 S2a).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawConnection {
+pub(crate) struct RawConnection {
     project_id: String,
     subscription: String,
     key_file: String,
