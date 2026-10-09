@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.57.3] — 2026-10-09
+
+### Fixed
+
+- A staged reindex that leaves the HNSW graph due for compaction now starts the background rebuild when it ends, so the graph is rebuilt once writes stop even with `TRUSTY_HNSW_DEMOTE_COOLDOWN_SECS=off` or `TRUSTY_HNSW_REVIEW_IDLE=off`. Before, nothing rebuilt it until a later write ([#9478](https://github.com/bobmatnyc/trusty-tools/issues/9478))
+
 ## [0.57.2] — 2026-10-09
 
 ### Fixed
