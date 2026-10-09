@@ -779,7 +779,7 @@ async fn run_daemon_without_http_serves_only_the_socket() {
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
         let mut events = state.events.subscribe();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
 
         let serving = wait_for_socket(&socket_path).await;
         let health: Option<serde_json::Value> = trusty_common::uds::send_framed_request(
@@ -862,7 +862,7 @@ async fn run_daemon_without_http_removes_a_stale_http_addr() {
 
         let state = SearchAppState::new(IndexRegistry::new());
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
         let serving = wait_for_socket(&socket_path).await;
         let addr_left = stale_addr.exists();
         let port_left = stale_port.exists();
@@ -952,7 +952,7 @@ async fn a_normal_stop_leaves_every_corpus_openable_read_only() {
 
         let socket_path = socket::socket_path().expect("resolve the isolated socket path");
         let shutdown_tx = state.shutdown_tx.clone();
-        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off));
+        let handle = tokio::spawn(run_daemon_with(state, HttpListener::Off, None));
         assert!(wait_for_socket(&socket_path).await, "the socket must serve");
         let _ = shutdown_tx.send(true);
         let exit = tokio::time::timeout(std::time::Duration::from_secs(20), handle).await;

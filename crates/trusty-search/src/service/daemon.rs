@@ -646,7 +646,7 @@ pub enum HttpListener {
 /// What: [`run_daemon_with`] with [`HttpListener::Bind`]; unchanged for every
 /// existing caller.
 pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<(), DaemonError> {
-    run_daemon_with(state, HttpListener::Bind(requested_port)).await
+    run_daemon_with(state, HttpListener::Bind(requested_port), None).await
 }
 
 /// Start the daemon: acquire the lock, bind the RPC socket and (unless `http`
@@ -658,11 +658,16 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
 /// What: with `Off` it binds no TCP listener, writes no port or `http_addr`
 /// file, removes stale ones, and registers nothing in the shared discovery
 /// registry; `search.health` reports `transport.http_addr: null`. The socket
-/// bind stays fatal in both modes.
+/// bind stays fatal in both modes. `rpc_socket` (`start --socket`) replaces
+/// [`socket::socket_path`] as the socket to bind.
 /// Test: `run_daemon_without_http_serves_only_the_socket`,
 /// `run_daemon_without_http_removes_a_stale_http_addr`,
 /// `run_daemon_health_reports_the_transport_it_bound`.
-pub async fn run_daemon_with(state: SearchAppState, http: HttpListener) -> Result<(), DaemonError> {
+pub async fn run_daemon_with(
+    state: SearchAppState,
+    http: HttpListener,
+    rpc_socket: Option<std::path::PathBuf>,
+) -> Result<(), DaemonError> {
     let lock_path = daemon_lock_path()?;
     let port_path = daemon_port_path()?;
 
@@ -684,7 +689,9 @@ pub async fn run_daemon_with(state: SearchAppState, http: HttpListener) -> Resul
     // bind hands every consumer of the retire slice an address with nothing
     // behind it. A bind failure here is fatal rather than a degrade to
     // HTTP-only (the Fail-Open Check).
-    let rpc_socket = socket::socket_path().map_err(|e| DaemonError::Server(e.to_string()))?;
+    // #9214: `start --socket` names the socket; otherwise the data-dir one.
+    let rpc_socket = rpc_socket.map_or_else(socket::socket_path, Ok);
+    let rpc_socket = rpc_socket.map_err(|e| DaemonError::Server(e.to_string()))?;
     let rpc = socket::bind(&rpc_socket)
         .await
         .map_err(|e| DaemonError::Server(format!("{e:#}")))?;
