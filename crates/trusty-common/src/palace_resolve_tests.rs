@@ -797,6 +797,91 @@ fn with_note_round_trips_through_yaml() {
 }
 
 // ---------------------------------------------------------------------------
+// Pin schema version and unknown fields (#9274, ADR-0067 D2)
+// ---------------------------------------------------------------------------
+
+/// Why (#9274): a pin written by a newer release must be refused, not read as
+/// if it were current. Before the fix the reader never looked at
+/// `schema_version`, so both shapes below were either accepted (the first) or
+/// misreported as malformed (the second, whose newer layout has no `palace`).
+#[test]
+fn a_newer_pin_schema_is_refused_naming_the_file_and_both_versions() {
+    let newer_shapes = [
+        "schema_version: 2\npalace: future-name\nproject_uuid: 0f3c\n",
+        "schema_version: 2\npalaces:\n  - future-name\n",
+    ];
+    for raw in newer_shapes {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(TRUSTY_TOOLS_DIR)).unwrap();
+        let pin_path = root.join(PIN_FILE_REL);
+        fs::write(&pin_path, raw).unwrap();
+
+        let err = read_project_pin(&root).expect_err("a newer pin must be refused");
+        assert!(
+            !matches!(err, PalaceResolveError::PinMalformed { .. }),
+            "a newer pin is not a malformed one: {err:?}"
+        );
+        let msg = err.to_string();
+        let path_text = pin_path.display().to_string();
+        for needle in [path_text.as_str(), "schema_version 2", "schema_version 1"] {
+            assert!(msg.contains(needle), "`{msg}` must name `{needle}`");
+        }
+
+        // The resolver must stop on it, not derive past it.
+        // The resolver canonicalises the root, so compare everything but the path.
+        let err = resolve_palace(&root).expect_err("resolver must not fall through");
+        let resolver_msg = err.to_string();
+        assert!(
+            resolver_msg.contains("schema_version 2") && resolver_msg.contains(PIN_FILE_REL),
+            "resolver must report the newer pin: {resolver_msg}"
+        );
+    }
+}
+
+/// Why (#9274): a field a later release adds to the pin must survive this
+/// binary reading the pin and writing it back. Before the fix `ProjectPin` had
+/// no catch-all, so serialising the parsed pin dropped both keys below.
+#[test]
+fn unknown_pin_fields_survive_a_read_and_rewrite() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(tmp.path().join(TRUSTY_TOOLS_DIR)).unwrap();
+    fs::write(
+        tmp.path().join(PIN_FILE_REL),
+        "schema_version: 1\npalace: canonical-name\nproject_uuid: 0f3c\nsync:\n  enabled: true\n",
+    )
+    .unwrap();
+
+    let pin = read_project_pin(tmp.path()).expect("ok").expect("some");
+    assert_eq!(pin.palace, "canonical-name");
+    let rewritten: serde_yaml::Value =
+        serde_yaml::from_str(&serde_yaml::to_string(&pin).expect("serialise")).expect("parse");
+    assert_eq!(rewritten["project_uuid"].as_str(), Some("0f3c"));
+    assert_eq!(rewritten["sync"]["enabled"].as_bool(), Some(true));
+    assert_eq!(rewritten["palace"].as_str(), Some("canonical-name"));
+}
+
+/// Why (#9274): a freshly built pin replacing one on disk takes the old pin's
+/// unknown keys, but never its known fields — the new `palace` must win.
+#[test]
+fn preserving_unknown_fields_of_copies_only_the_unknown_keys() {
+    let on_disk: ProjectPin = serde_yaml::from_str(
+        "schema_version: 1\npalace: old-name\nnote: old note\nproject_uuid: 0f3c\n",
+    )
+    .expect("parse");
+
+    let pin = ProjectPin::new("new-name").preserving_unknown_fields_of(&on_disk);
+
+    assert_eq!(pin.palace, "new-name");
+    assert_eq!(pin.note, None);
+    let written: serde_yaml::Value =
+        serde_yaml::from_str(&serde_yaml::to_string(&pin).expect("serialise")).expect("parse");
+    assert_eq!(written["project_uuid"].as_str(), Some("0f3c"));
+    assert!(written.get("note").is_none(), "a known field is not copied");
+}
+
+// ---------------------------------------------------------------------------
 // Non-project callers stay resolvable
 // ---------------------------------------------------------------------------
 
