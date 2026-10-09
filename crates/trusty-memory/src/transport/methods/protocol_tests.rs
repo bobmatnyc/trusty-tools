@@ -171,3 +171,16 @@ fn protocol_version_is_pinned_to_its_wire_surface() {
         );
     }
 }
+
+/// Why (#9288): `FOLDED_METHODS` is ungated and spells the handshake as a
+/// literal, because `trusty_common::memory_rpc` exists only with the
+/// `memory-rpc` feature. The literal must stay the shared constant.
+/// Test: itself.
+#[test]
+fn folded_protocol_name_is_the_shared_constant() {
+    assert!(
+        FOLDED_METHODS.contains(&trusty_common::memory_rpc::METHOD_PROTOCOL),
+        "FOLDED_METHODS must list {}",
+        trusty_common::memory_rpc::METHOD_PROTOCOL
+    );
+}

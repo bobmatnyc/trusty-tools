@@ -39,8 +39,8 @@ pub const PROTOCOL_VERSION: u64 = 1;
 ///
 /// Only a serialisation failure, which this fixed shape cannot produce.
 pub async fn protocol(_state: &AppState, _params: NoParams) -> Result<Value, ApiError> {
-    super::to_value(MemoryProtocolInfo {
-        protocol_version: PROTOCOL_VERSION,
-        daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-    })
+    super::to_value(MemoryProtocolInfo::new(
+        PROTOCOL_VERSION,
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    ))
 }

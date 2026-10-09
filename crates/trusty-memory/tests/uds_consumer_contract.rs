@@ -469,10 +469,10 @@ async fn shared_client_handshake_reads_the_real_daemon_as_supported() {
     assert_eq!(
         verdict,
         trusty_common::memory_rpc::MemoryProtocol::Supported(
-            trusty_common::memory_rpc::MemoryProtocolInfo {
-                protocol_version: trusty_memory::transport::methods::protocol::PROTOCOL_VERSION,
-                daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            }
+            trusty_common::memory_rpc::MemoryProtocolInfo::new(
+                trusty_memory::transport::methods::protocol::PROTOCOL_VERSION,
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            )
         )
     );
 }

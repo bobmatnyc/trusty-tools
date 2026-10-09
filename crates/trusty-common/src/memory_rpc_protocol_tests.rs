@@ -88,10 +88,7 @@ async fn protocol_check_accepts_a_daemon_in_the_supported_range() {
 
     assert_eq!(
         verdict,
-        MemoryProtocol::Supported(MemoryProtocolInfo {
-            protocol_version: version,
-            daemon_version: Some("9.9.9".to_string()),
-        })
+        MemoryProtocol::Supported(MemoryProtocolInfo::new(version, Some("9.9.9".to_string())))
     );
 }
 
@@ -257,4 +254,80 @@ async fn memory_rpc_error_keeps_the_data_member() {
         .expect("a typed refusal");
 
     assert_eq!(typed.data.as_ref(), Some(&detail));
+}
+
+/// Why (#9288): a daemon that predates the handshake speaks protocol 1, so it
+/// is callable only while this client supports protocol 1.
+/// Test: itself.
+#[test]
+fn a_pre_handshake_daemon_is_refused_once_protocol_1_is_unsupported() {
+    let socket = Path::new("/tmp/pre-handshake.sock");
+
+    assert_eq!(
+        pre_handshake_verdict(socket, &(1..=2)).expect("protocol 1 is supported"),
+        MemoryProtocol::PreHandshake
+    );
+    let err = pre_handshake_verdict(socket, &(2..=3)).expect_err("protocol 1 is dropped");
+    assert!(
+        matches!(
+            err,
+            MemoryProtocolError::Unsupported {
+                daemon: 1,
+                min: 2,
+                max: 3,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+/// Why (#9288, supervisor ruling): a daemon that predates the handshake is
+/// called, and the operator is told to restart it — once per process, not on
+/// every call of a long-lived client.
+/// What: two such daemons on two sockets (so the verdict cache cannot hide the
+/// second check); both are called, and the process emits exactly one warning
+/// and asks `memory.health` for a version at most once.
+/// Test: itself.
+#[tokio::test]
+async fn a_pre_handshake_daemon_is_called_and_warned_about_once_per_process() {
+    let health_calls = Arc::new(AtomicU64::new(0));
+    let mut fakes = Vec::new();
+    let mut status_calls = Vec::new();
+    for _ in 0..2 {
+        let health = Arc::clone(&health_calls);
+        let status = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&status);
+        let router = RpcRouter::new()
+            .typed::<Value, Value, _, _>("memory.health", move |_| {
+                health.fetch_add(1, Ordering::SeqCst);
+                async { Ok(json!({ "status": "ok", "version": "0.29.0" })) }
+            })
+            .typed::<Value, Value, _, _>("memory.status", move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                async { Ok(json!({ "ok": true })) }
+            });
+        fakes.push(serve(router));
+        status_calls.push(status);
+    }
+
+    for fake in &fakes {
+        let verdict = ensure_memory_protocol_at(&fake.socket, BUDGET)
+            .await
+            .expect("a pre-handshake daemon is callable");
+        assert_eq!(verdict, MemoryProtocol::PreHandshake);
+        call_memory_tool_at(&fake.socket, "memory.status", json!({}))
+            .await
+            .expect("the call proceeds");
+    }
+
+    for status in &status_calls {
+        assert_eq!(status.load(Ordering::SeqCst), 1, "each daemon is called");
+    }
+    assert_eq!(
+        PRE_HANDSHAKE_WARNINGS.load(Ordering::SeqCst),
+        1,
+        "exactly one warning per process"
+    );
+    assert!(health_calls.load(Ordering::SeqCst) <= 1);
 }

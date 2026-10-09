@@ -89,8 +89,10 @@ pub const METHOD_HEALTH: &str = "memory.health";
 /// Test: `rpc_router_registers_every_documented_method`.
 pub const FOLDED_METHODS: &[&str] = &[
     METHOD_HEALTH,
-    // #9288: the protocol handshake every first-party client calls first.
-    trusty_common::memory_rpc::METHOD_PROTOCOL,
+    // #9288: the protocol handshake every first-party client calls first. A
+    // literal: this table is ungated and `memory_rpc` needs the `memory-rpc`
+    // feature. `folded_protocol_name_is_the_shared_constant` pins it.
+    "memory.protocol",
     "memory.status",
     "memory.config",
     "memory.palace_get",

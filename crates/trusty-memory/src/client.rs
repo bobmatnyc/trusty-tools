@@ -164,15 +164,45 @@ mod tests {
         );
     }
 
-    /// Serve `router` on a temp socket until the returned sender drops.
-    fn serve_fake(
-        router: trusty_common::uds::server::RpcRouter,
-    ) -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        use trusty_common::uds::server::{serve_until, RpcServeOptions};
+    /// A fake daemon: `memory.protocol` answers through `protocol`, and every
+    /// `memory.status` it receives is counted.
+    struct Fake {
+        _dir: tempfile::TempDir,
+        socket: std::path::PathBuf,
+        _stop: tokio::sync::oneshot::Sender<()>,
+        status_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Fake {
+        fn status_calls(&self) -> usize {
+            self.status_calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    fn serve_fake<F, Fut>(protocol: Option<F>) -> Fake
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<Value, trusty_common::uds::server::RpcError>>
+            + Send
+            + 'static,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
+
+        let status_calls = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&status_calls);
+        let mut router = RpcRouter::new().typed::<Value, Value, _, _>("memory.status", move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async { Ok(json!({ "ok": true })) }
+        });
+        // `None` is a daemon that predates the handshake: no such method.
+        if let Some(protocol) = protocol {
+            router = router.typed::<Value, Value, _, _>(
+                trusty_common::memory_rpc::METHOD_PROTOCOL,
+                move |_| protocol(),
+            );
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("fake-memory.sock");
         let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
@@ -180,7 +210,7 @@ mod tests {
         tokio::spawn(async move {
             serve_until(
                 &listener,
-                std::sync::Arc::new(router),
+                Arc::new(router),
                 RpcServeOptions::default(),
                 async {
                     let _ = shutdown.await;
@@ -188,38 +218,36 @@ mod tests {
             )
             .await;
         });
-        (dir, socket, stop)
+        Fake {
+            _dir: dir,
+            socket,
+            _stop: stop,
+            status_calls,
+        }
     }
 
     /// Why (#9288): the CLI and hooks must refuse a daemon from another release
     /// by name, before the call whose reply they would misparse is sent.
-    /// What: a fake daemon reports a protocol past this build's range and
-    /// counts `memory.status` calls; the client must refuse and send none.
+    /// What: the fake reports a protocol past this build's range; the client
+    /// must refuse and send no `memory.status`.
     /// Test: itself.
     #[tokio::test]
     async fn client_refuses_an_unsupported_daemon_before_calling_it() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-        use trusty_common::memory_rpc::{
-            MemoryProtocolError, METHOD_PROTOCOL, SUPPORTED_MEMORY_PROTOCOLS,
-        };
+        use trusty_common::memory_rpc::{MemoryProtocolError, SUPPORTED_MEMORY_PROTOCOLS};
 
-        let calls = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&calls);
         let newer = SUPPORTED_MEMORY_PROTOCOLS.end() + 1;
-        let router = trusty_common::uds::server::RpcRouter::new()
-            .typed::<Value, Value, _, _>(METHOD_PROTOCOL, move |_| async move {
-                Ok(json!({ "protocol_version": newer }))
-            })
-            .typed::<Value, Value, _, _>("memory.status", move |_| {
-                counted.fetch_add(1, Ordering::SeqCst);
-                async { Ok(json!({ "ok": true })) }
-            });
-        let (_dir, socket, _stop) = serve_fake(router);
+        let fake = serve_fake(Some(move || async move {
+            Ok(json!({ "protocol_version": newer }))
+        }));
 
-        let err = call_at(&socket, "memory.status", json!({}), Duration::from_secs(10))
-            .await
-            .expect_err("an unsupported daemon is refused");
+        let err = call_at(
+            &fake.socket,
+            "memory.status",
+            json!({}),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect_err("an unsupported daemon is refused");
 
         assert!(
             matches!(
@@ -228,7 +256,89 @@ mod tests {
             ),
             "expected the named protocol error, got {err:#}"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "the call must not be sent");
+        assert_eq!(fake.status_calls(), 0, "the call must not be sent");
+    }
+
+    /// Why (#9288, Fail-Open Check): only method-not-found reads as a daemon
+    /// that predates the handshake. Any other refusal of the version query
+    /// must stop the call.
+    /// Test: itself.
+    #[tokio::test]
+    async fn client_refuses_when_the_version_query_is_refused() {
+        use trusty_common::memory_rpc::MemoryProtocolError;
+        use trusty_common::uds::server::RpcError;
+
+        for refusal in [
+            RpcError::internal("handshake handler failed"),
+            RpcError::invalid_params("bad params"),
+        ] {
+            let code = refusal.code;
+            let fake = serve_fake(Some(move || {
+                let refusal = refusal.clone();
+                async move { Err(refusal) }
+            }));
+
+            let err = call_at(
+                &fake.socket,
+                "memory.status",
+                json!({}),
+                Duration::from_secs(10),
+            )
+            .await
+            .expect_err("a refused version query stops the call");
+
+            assert!(
+                matches!(
+                    err.downcast_ref::<MemoryProtocolError>(),
+                    Some(MemoryProtocolError::HandshakeFailed { .. })
+                ),
+                "code {code}: expected HandshakeFailed, got {err:#}"
+            );
+            assert_eq!(
+                fake.status_calls(),
+                0,
+                "code {code}: the call must not be sent"
+            );
+        }
+    }
+
+    /// Why (#9288, Fail-Open Check): a version query that never answers is not
+    /// evidence of a compatible daemon.
+    /// What: the fake's handshake outlives the call's budget; the client must
+    /// refuse inside it and send no `memory.status`.
+    /// Test: itself.
+    #[tokio::test]
+    async fn client_refuses_when_the_version_query_times_out() {
+        use trusty_common::memory_rpc::MemoryProtocolError;
+
+        let fake = serve_fake(Some(|| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(json!({ "protocol_version": 1 }))
+        }));
+
+        let started = std::time::Instant::now();
+        let err = call_at(
+            &fake.socket,
+            "memory.status",
+            json!({}),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("a silent version query stops the call");
+
+        assert!(
+            matches!(
+                err.downcast_ref::<MemoryProtocolError>(),
+                Some(MemoryProtocolError::HandshakeFailed { .. })
+            ),
+            "expected HandshakeFailed, got {err:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(fake.status_calls(), 0, "the call must not be sent");
     }
 
     /// Why (#9288): during a rolling upgrade the installed client meets a
@@ -236,14 +346,20 @@ mod tests {
     /// Test: itself.
     #[tokio::test]
     async fn client_calls_a_daemon_that_predates_the_handshake() {
-        let router = trusty_common::uds::server::RpcRouter::new()
-            .typed::<Value, Value, _, _>("memory.status", |_| async { Ok(json!({ "ok": true })) });
-        let (_dir, socket, _stop) = serve_fake(router);
+        type NoProtocol =
+            fn() -> std::future::Ready<Result<Value, trusty_common::uds::server::RpcError>>;
+        let fake = serve_fake::<NoProtocol, _>(None);
 
-        let answer = call_at(&socket, "memory.status", json!({}), Duration::from_secs(10))
-            .await
-            .expect("a pre-handshake daemon is still called");
+        let answer = call_at(
+            &fake.socket,
+            "memory.status",
+            json!({}),
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("a pre-handshake daemon is still called");
 
         assert_eq!(answer, json!({ "ok": true }));
+        assert_eq!(fake.status_calls(), 1);
     }
 }
