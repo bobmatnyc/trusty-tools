@@ -476,7 +476,11 @@ fn tracked_secret_is_not_overwritten_in_worktree() {
     );
 }
 
-/// Why: git prints [`NO_REPO_STDERR`] for an unreadable `.git` just as readily
+/// git's classic wording of "no repository": discovery reached `/`.
+const PARENT_DIRS_STDERR: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
+
+/// Why: git prints [`PARENT_DIRS_STDERR`] for an unreadable `.git` just as readily
 /// as for a genuinely empty directory, so the message is a necessary and never a
 /// sufficient condition; the filesystem witness decides.
 /// What: asserts the classifier refuses when an ancestor carries a `.git` entry
@@ -486,11 +490,11 @@ fn tracked_secret_is_not_overwritten_in_worktree() {
 #[test]
 fn classify_rev_parse_failure_corroborates_the_no_repo_message() {
     let tmp = tempfile::TempDir::new().expect("tmp dir");
-    let msg = format!("fatal: {NO_REPO_STDERR}: .git");
+    let msg = PARENT_DIRS_STDERR;
 
     assert!(
         matches!(
-            classify_rev_parse_failure(tmp.path(), &msg),
+            classify_rev_parse_failure(tmp.path(), msg),
             ExcludeTarget::NoRepo
         ),
         "no ancestor .git witness → the message is believed"
@@ -506,7 +510,7 @@ fn classify_rev_parse_failure_corroborates_the_no_repo_message() {
     std::fs::write(tmp.path().join(".git"), "gitdir: /somewhere\n").expect("gitlink");
     assert!(
         matches!(
-            classify_rev_parse_failure(tmp.path(), &msg),
+            classify_rev_parse_failure(tmp.path(), msg),
             ExcludeTarget::Unknown(_)
         ),
         "a .git witness contradicts the message — a disagreement is 'cannot be asked'"
@@ -613,7 +617,7 @@ fn classify_rev_parse_failure_canonicalises_before_walking_ancestors() {
 
     assert!(
         matches!(
-            classify_rev_parse_failure(&link, &format!("fatal: {NO_REPO_STDERR}: .git")),
+            classify_rev_parse_failure(&link, PARENT_DIRS_STDERR),
             ExcludeTarget::Unknown(_)
         ),
         "the real parent carries a .git — only a canonicalised ancestor walk sees it"
