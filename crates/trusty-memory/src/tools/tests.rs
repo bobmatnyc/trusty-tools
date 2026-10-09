@@ -564,6 +564,8 @@ mod embed_audit_tests;
 mod kg_retract_tests;
 // #6424: the console's Last Used column, end to end through the dispatcher.
 mod last_used_tests;
+// #9340: memory_list reports each drawer's Tier C `fact_key`.
+mod list_fact_key_tests;
 // #8733: the maintenance tools refuse without the maintenance lease.
 mod lease_refusal_tests;
 // #6318: the no-palace palace index, and the read/write split that bounds it.

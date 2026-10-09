@@ -281,7 +281,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             {
                 "name": "memory_list",
-                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error.",
+                "description": "List drawers in a palace, optionally filtered by wing, room type, or tag. #6318: with no `palace` and no server default this returns a palace index (ids, counts, rooms, `hint`) as a successful result instead of an error. #9340: each drawer carries a read-only `fact_key`, always present: the ADR-0028 Tier C slot the drawer currently holds, or null when it holds none. A drawer displaced by a later write to its slot reads null.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
