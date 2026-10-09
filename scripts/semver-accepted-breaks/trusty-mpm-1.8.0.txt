@@ -1,12 +1,11 @@
 crate   trusty-mpm
 version 1.8.0
-reason  ServiceDecl gains health_probe; ServiceDecl and HealthProbe become #[non_exhaustive] (#9543). Supervisor-accepted minor; 2.0.0 reserved for G01.
+reason  Owner ruling Da2 (2026-10-09): accept all four under the 1.8.0 minor — ServiceDecl gains health_probe and ServiceDecl/HealthProbe become #[non_exhaustive] (#9543); MemoryVerb gains Forget and a slot field on Remember/Note (#9531); HealthScreen drops search_url for search_socket and DEFAULT_SEARCH_URL is removed (#9530); OrchestratorBackend gains secrets_get_ref. 2.0.0 reserved for G01.
 accept  constructible_struct_adds_field  ServiceDecl.health_probe
 accept  struct_marked_non_exhaustive     ServiceDecl
-# Q1 C (owner ruling, Refs #9543): the rows below name the lints and items the
+# Da2 (owner ruling, Refs #9543): the rows below name the lints and items the
 # Public API / SemVer check reports for 1.7.12 -> 1.8.0 (CI run 37947336485).
-# The two rows above name ServiceDecl.health_probe and the ServiceDecl
-# non_exhaustive lint; only the latter is reported, the former stays as written.
+# The ServiceDecl.health_probe row above matched nothing in that run and is kept.
 accept  constructible_struct_adds_field  HealthScreen.search_socket
 accept  enum_struct_variant_field_added  MemoryVerb::Remember
 accept  enum_struct_variant_field_added  MemoryVerb::Note
