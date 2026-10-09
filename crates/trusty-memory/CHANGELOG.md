@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.30.0] — 2026-10-09
+
+### Breaking
+
+- The daemon, the CLI and every server module now sit behind a default `server` feature; `daemon` stays as its alias for all of 1.x. A `default-features = false` build no longer compiles `MemoryMcpService`, `AppState`, the tool handlers or any `commands::*` item, and its dependency tree carries no trusty-mcp, clap or rusqlite. Both binaries, `trusty-memory-mcp-bridge` included, now have `required-features = ["server"]`. Breaking: `default-features = false` builds no longer include the daemon/server API, so enable `server` or `mcp-schema` (#9269).
+
+### Changed
+
+- Requires trusty-common 0.55.1, so a locked install carries the HNSW exact-scan deadlock fix ([#9487](https://github.com/bobmatnyc/trusty-tools/issues/9487), [#9492](https://github.com/bobmatnyc/trusty-tools/pull/9492)).
+
+### Added
+
+- New `mcp-schema` feature: compiles only the MCP tool schema (`tools::tool_definitions*`, `openrpc`) and `MemoryMcpService`, for a host that merges the schema into its own `rpc.discover` without linking the daemon. `server` implies it. The default build and its generated README tool table are unchanged (#9269).
+
 ## [0.29.6] — 2026-10-08
 
 ### Changed
