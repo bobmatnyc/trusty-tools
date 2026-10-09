@@ -383,9 +383,12 @@ pub(super) fn run(cmd: &mut Command, step: &'static str) -> Result<Output, GateE
 /// Why: #8454: a git that blocks (a FIFO in its config) must not block the
 /// caller; std's `output()` waits forever.
 /// What: stdin and stdout each get a thread, so a full pipe never stalls
-/// the wait; the child is polled until the deadline, then killed and
-/// reaped. stderr is discarded. A thread that cannot start kills the child.
-/// Test: `git_blocked_on_a_fifo_config_include_times_out`.
+/// the wait; the child runs in its own process group and is polled until
+/// the deadline, then the group is killed and the child reaped. A stdout
+/// read that outlasts the deadline after git exits kills the group too.
+/// stderr is discarded. A thread that cannot start kills the group.
+/// Test: `git_blocked_on_a_fifo_config_include_times_out`,
+/// `git_timeout_kills_the_whole_process_group`.
 fn run_with_input(
     cmd: &mut Command,
     step: &'static str,
@@ -397,6 +400,12 @@ fn run_with_input(
     } else {
         Stdio::null()
     };
+    // #8454: its own group, so a timeout reaches every process git started.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(stdin)
         .stdout(Stdio::piped())
@@ -451,6 +460,8 @@ fn run_with_input(
         }),
         (Ok(Err(e)), _) | (_, Ok(Err(e))) => Err(unavailable(e)),
         (Err(RecvTimeoutError::Timeout), _) | (_, Err(RecvTimeoutError::Timeout)) => {
+            // #8454: git has exited; a process it left holds stdout open.
+            kill_group(child.id());
             Err(GateError::GitTimedOut { step })
         }
         _ => Err(GateError::GitFailed { step }),
@@ -473,11 +484,34 @@ fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<Ex
     }
 }
 
-/// Kill and reap a git step that is no longer wanted.
+/// Kill a git step's whole process group, then reap the step.
 fn kill(child: &mut Child) {
+    kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
+
+/// SIGKILL every process in the group `pgid`, which [`run_with_input`]
+/// gave each git step (its id is the step's pid).
+///
+/// Why: #8454: a hook, helper or subprocess git started outlives a kill of
+/// git alone and can hold its stdout open.
+/// What: `kill(-pgid, SIGKILL)`; a group already gone is ignored.
+/// Test: `git_timeout_kills_the_whole_process_group`.
+#[cfg(unix)]
+fn kill_group(pgid: u32) {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return;
+    };
+    // SAFETY: kill(2) takes two integers and touches no memory. While any
+    // member lives, the group id is not reused as another process's pid.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_group(_: u32) {}
 
 fn unavailable(e: std::io::Error) -> GateError {
     GateError::GitUnavailable {
