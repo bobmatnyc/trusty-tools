@@ -11,6 +11,8 @@
 //! What: One module per channel, each with an MCP binary under `src/bin/`:
 //! [`slack`], [`telegram`], and [`gchat`] — the Google Chat API layer, its
 //! routes, egress gate, question ledger, and the `gchat-mcp` server (#9448).
+//! [`policy`] is the channel-neutral route table, checks and rate limiter
+//! (#8454).
 //! Test: `cargo test -p trusty-channels` covers each channel's client, MCP
 //! handshake, and tool registry.
 
@@ -21,5 +23,6 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod gchat;
+pub mod policy;
 pub mod slack;
 pub mod telegram;
