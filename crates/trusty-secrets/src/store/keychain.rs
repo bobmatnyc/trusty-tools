@@ -12,12 +12,31 @@
 //! `keyring` (#9064), and every operation fails closed with
 //! [`SecretsError::UnknownBackend`] rather than reaching `keyring`'s
 //! in-memory mock store.
+//! #7524 P2-L7: every call runs under [`KEYCHAIN_CALL_TIMEOUT`] (see
+//! `store::time_limit`), so an unanswered access prompt cannot hold the
+//! caller.
 //! Test: `keychain_tests.rs` beside this file (error mapping and the
 //! no-backend arm, no OS access); the ignored
 //! `keychain_real_roundtrip_store_list_remove` touches the OS.
 
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
+use super::time_limit::TimeLimited;
 use super::{Capabilities, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
+
+/// How long one Keychain call may run before the caller gets
+/// [`SecretsError::Timeout`] (#7524 P2-L7).
+///
+/// Why: a Keychain call waits on an OS access prompt for as long as the
+/// prompt is open. 60 s matches one vendor CLI call's budget, which also
+/// leaves a person time to answer a prompt.
+/// What: the default and only limit; a server request's earlier deadline
+/// cuts it further. Not configurable.
+/// Test: `keychain_backend_runs_every_call_under_the_time_limit`,
+/// `time_limited_call_that_never_returns_times_out_on_every_operation`.
+pub const KEYCHAIN_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The Keychain service holding the "agents may use" flag items (#9070).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -54,6 +73,21 @@ impl KeychainBackend {
         Self::default()
     }
 
+    /// The OS Keychain behind [`KEYCHAIN_CALL_TIMEOUT`].
+    // #7524 P2-L7: one process-wide wrapper, so every `KeychainBackend`
+    // sees which items still have an abandoned call running.
+    fn limited() -> &'static TimeLimited {
+        static KEYCHAIN: LazyLock<TimeLimited> =
+            LazyLock::new(|| TimeLimited::new(Arc::new(OsKeychain), KEYCHAIN_CALL_TIMEOUT));
+        &KEYCHAIN
+    }
+}
+
+/// The unbounded `keyring` calls; reached only through [`TimeLimited`].
+#[derive(Debug, Clone, Copy)]
+struct OsKeychain;
+
+impl OsKeychain {
     #[cfg(target_os = "macos")]
     fn entry(&self, vault: &VaultName, key: &SecretKey) -> Result<keyring::Entry, SecretsError> {
         keyring::Entry::new(vault.as_str(), key.as_str()).map_err(|e| failure(vault, key, &e))
@@ -159,7 +193,49 @@ pub(crate) fn map_flag(
     }
 }
 
+// #7524 P2-L7: each call goes through `TimeLimited`, never to `keyring`
+// directly. `list_names` keeps the trait default: the Keychain cannot list.
 impl SecretBackend for KeychainBackend {
+    fn id(&self) -> BackendId {
+        BackendId::keychain()
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::READ | Capabilities::WRITE
+    }
+
+    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
+        Self::limited().get(vault, key)
+    }
+
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &SecretValue,
+    ) -> Result<(), SecretsError> {
+        Self::limited().set(vault, key, value)
+    }
+
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Self::limited().delete(vault, key)
+    }
+
+    fn agents_may_use(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        Self::limited().agents_may_use(vault, key)
+    }
+
+    fn set_agents_may_use(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        allowed: bool,
+    ) -> Result<(), SecretsError> {
+        Self::limited().set_agents_may_use(vault, key, allowed)
+    }
+}
+
+impl SecretBackend for OsKeychain {
     fn id(&self) -> BackendId {
         BackendId::keychain()
     }

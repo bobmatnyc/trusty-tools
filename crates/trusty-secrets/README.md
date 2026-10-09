@@ -144,9 +144,15 @@ killed; the request then fails with `deadline_exceeded`, whose text says a
 write already under way may have landed. A `copy` lists in `failed` the keys
 it did not start and any key whose write the deadline cut short, which may
 have landed. `OnDemandSecrets` waits 15 s longer than the deadline, so for a
-CLI-backed call (1Password, Keeper) it always receives the server's answer. A
-Keychain or file call is not bounded by the deadline: one blocked on a
-Keychain unlock prompt can still outlast the client's wait.
+CLI-backed call (1Password, Keeper) it always receives the server's answer.
+Each Keychain call has a time limit, `KEYCHAIN_CALL_TIMEOUT` (60 s), cut to
+the request's deadline when that is sooner. A call blocked on an unanswered
+Keychain access prompt fails with `backend_timeout` (`SecretsError::Timeout`
+in the library), never as a miss or a success. The call is abandoned, not
+stopped: its thread stays blocked until the prompt ends, and a write it
+started may still land then. Until it ends, every later call on the same
+Keychain item fails at once with `backend_timeout`, so that late write cannot
+replace a newer one. A file call is not bounded by the deadline.
 
 `delete` removes the key from every backend this build can store values in
 (the Keychain on macOS, the file backend, and 1Password or Keeper when the

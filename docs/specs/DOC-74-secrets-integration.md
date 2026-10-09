@@ -967,9 +967,15 @@ way may have landed; a `copy` instead lists in `failed` each key it did not
 start and each key whose write the deadline cut short (§8.2). The client
 waits the method's deadline plus 15 s. For CLI-backed calls (1Password,
 Keeper) that means the server's reply always arrives, and a client timeout
-is never followed by a silent commit. A Keychain or file backend call is not
-bounded by the deadline: one that blocks, for example on a Keychain unlock
-prompt, can still outlast the client's wait and commit after it.
+is never followed by a silent commit. Each Keychain call is bounded too
+(#7524 P2-L7): by `KEYCHAIN_CALL_TIMEOUT` (60 s), or by the time left before
+the deadline when that is less, and none starts after the deadline. One that
+blocks, for example on an unanswered Keychain access prompt, answers
+`backend_timeout` (-32081), never a miss or a success. That call is abandoned,
+not stopped: its thread stays blocked until the prompt ends, and a write it
+started may still land then. Until it ends, every later call on the same
+Keychain item answers `backend_timeout` at once, so the late write cannot
+replace a newer one. A file backend call is not bounded by the deadline.
 
 **No method returns a value to the console.** `secrets.resolve` has no console
 route (the bridge answers 501) and no MCP tool. `tm secrets exec` resolves
