@@ -146,7 +146,8 @@ name = "trusty-common"
 # 0.54.2 (Refs #9222): patch — CredentialSandbox git-config fix; no public item removed or changed.
 # 0.54.4 (Refs #9299): patch — additive public `recall_across_palaces_reporting`; 0.54.3 is live on crates.io.
 # 0.55.0 (Refs #9197): minor — adds `intent_source::{IssueRef, extract_issue_refs}`; nothing removed or changed.
-version = "0.55.0"
+# 0.55.1 (Refs #9487): patch — HNSW search/upsert deadlock fix; no public item removed or changed; 0.55.0 is live on crates.io.
+version = "0.55.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
