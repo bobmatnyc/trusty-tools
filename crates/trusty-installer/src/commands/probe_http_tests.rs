@@ -998,6 +998,36 @@ async fn a_pre_socket_search_is_healthy_over_http_alone() {
     );
 }
 
+/// REGRESSION (#9214): trusty-search is probed over its socket alone; a
+/// recorded `http_addr` is never dialled.
+///
+/// Why: the daemon binds no TCP port, so whatever answers on an old
+/// `http_addr` is not trusty-search. Reading it as the daemon would report a
+/// stranger as healthy and hide a search daemon that is down. Every published
+/// trusty-search since 0.50 serves the socket, so the #6285 HTTP leg has no
+/// installed daemon left to protect.
+/// What: no socket bound, a live HTTP stub on the recorded `http_addr`;
+/// asserts the verdict is NOT `Serving` — it is the socket's refusal.
+/// Test: This is the test.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn search_never_dials_a_recorded_http_addr() {
+    let _guard = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = stub_once(OK_LINE, REAL_SEARCH).await;
+    let dir = short_data_dir("9214");
+    trusty_common::write_daemon_addr("trusty-search", &recorded).expect("plant http_addr");
+    let socket = uds_socket_for("trusty-search").expect("search resolves a socket");
+    let _ = std::fs::remove_file(&socket);
+
+    let outcome = probe_daemon_http("trusty-search", "trusty-search").await;
+    crate::commands::test_support::clear_data_dir_override(&dir);
+
+    assert!(
+        !matches!(outcome, ProbeOutcome::Serving { .. }),
+        "an HTTP stub on a stale http_addr must not read as trusty-search: {outcome:?}"
+    );
+}
+
 /// REGRESSION (#6285): a trusty-search that serves the socket is read off it.
 ///
 /// Why: the other half of the window. Once the listener ships, the socket is

@@ -47,8 +47,28 @@ use crate::service::PERSISTED_ENV_VARS;
 pub const NO_AUTO_DISCOVER_ENV: &str = "TRUSTY_NO_AUTO_DISCOVER";
 
 /// The CLI spelling written into the generated plist's `ProgramArguments`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub const NO_AUTO_DISCOVER_ARG: &str = "--no-auto-discover";
+
+/// The `ProgramArguments` the generated unit runs, after the executable.
+///
+/// Test: `generated_unit_carries_no_retired_port_input`.
+#[cfg(any(target_os = "macos", test))]
+pub fn unit_program_args(suppress_auto_discover: bool) -> Vec<String> {
+    let mut args = vec!["start".to_string(), "--foreground".to_string()];
+    if suppress_auto_discover {
+        args.push(NO_AUTO_DISCOVER_ARG.to_string());
+    }
+    args
+}
+
+/// The env pairs the generated unit carries; unchanged today.
+///
+/// Test: `generated_unit_carries_no_retired_port_input`.
+#[cfg(any(target_os = "macos", test))]
+pub fn without_retired_env(pairs: Vec<(String, String)>) -> Vec<(String, String)> {
+    pairs
+}
 
 /// Parse a boolean written the way operators actually write booleans.
 ///
@@ -434,3 +454,7 @@ mod launchd_unit_tests;
 #[cfg(test)]
 #[path = "service_unit_cli_tests.rs"]
 mod cli_tests;
+
+#[cfg(test)]
+#[path = "service_unit_9214_tests.rs"]
+mod retired_unit_tests;

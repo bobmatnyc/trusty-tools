@@ -102,6 +102,35 @@ impl DaemonGuard {
         Self { child }
     }
 
+    /// [`Self::spawn`] with no port and `extra` appended to `start`'s
+    /// arguments.
+    ///
+    /// Why (#9214): a test of a retired flag passes it to a real daemon.
+    /// What: spawns and returns the guard. Panics on a spawn failure.
+    /// Test: `daemon_binds_no_tcp_listener`.
+    pub fn spawn_with(data_dir: &Path, extra: &[&str]) -> Self {
+        let home = data_dir.join("home");
+        std::fs::create_dir_all(&home).expect("create the daemon's fake HOME");
+        let log = std::fs::File::create(data_dir.join("daemon.stderr.log"))
+            .expect("create the daemon's stderr log");
+        let child = command()
+            .args(["start", "--foreground", "--no-auto-discover"])
+            .args(extra)
+            .env("TRUSTY_DATA_DIR", data_dir)
+            .env("TRUSTY_DATA_DIR_OVERRIDE", data_dir)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("TRUSTY_EMBEDDER", "stdio")
+            .env("TRUSTY_SKIP_RAM_CHECK", "1")
+            .env("RUST_LOG", "warn")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log)
+            .spawn()
+            .expect("spawn trusty-search start --foreground");
+        Self { child }
+    }
+
     /// The daemon's pid.
     pub fn pid(&self) -> u32 {
         self.child.id()
