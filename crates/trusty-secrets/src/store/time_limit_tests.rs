@@ -124,9 +124,11 @@ const OPS: [(&str, Op); 7] = [
 fn time_limited_call_that_never_returns_times_out_on_every_operation() {
     let (vault, key) = names();
     let hangs = Arc::new(Hangs::default());
-    let limited = TimeLimited::new(Arc::clone(&hangs) as Arc<dyn SecretBackend>, LIMIT);
     for (name, op) in OPS {
-        let (b, v, k) = (limited.clone(), vault.clone(), key.clone());
+        // A fresh wrapper per operation: the abandoned call before it would
+        // otherwise make this one fail fast without waiting.
+        let limited = TimeLimited::new(Arc::clone(&hangs) as Arc<dyn SecretBackend>, LIMIT);
+        let (b, v, k) = (limited, vault.clone(), key.clone());
         let (result, took) = returns_in_time(move || op(&b, &v, &k));
         match result {
             Err(SecretsError::Timeout {

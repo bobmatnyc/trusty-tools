@@ -19,7 +19,7 @@
 //! no-backend arm, no OS access); the ignored
 //! `keychain_real_roundtrip_store_list_remove` touches the OS.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use super::time_limit::TimeLimited;
@@ -74,8 +74,12 @@ impl KeychainBackend {
     }
 
     /// The OS Keychain behind [`KEYCHAIN_CALL_TIMEOUT`].
-    fn limited() -> TimeLimited {
-        TimeLimited::new(Arc::new(OsKeychain), KEYCHAIN_CALL_TIMEOUT)
+    // #7524 P2-L7: one process-wide wrapper, so every `KeychainBackend`
+    // sees which items still have an abandoned call running.
+    fn limited() -> &'static TimeLimited {
+        static KEYCHAIN: LazyLock<TimeLimited> =
+            LazyLock::new(|| TimeLimited::new(Arc::new(OsKeychain), KEYCHAIN_CALL_TIMEOUT));
+        &KEYCHAIN
     }
 }
 

@@ -150,7 +150,9 @@ the request's deadline when that is sooner. A call blocked on an unanswered
 Keychain access prompt fails with `backend_timeout` (`SecretsError::Timeout`
 in the library), never as a miss or a success. The call is abandoned, not
 stopped: its thread stays blocked until the prompt ends, and a write it
-started may still land then. A file call is not bounded by the deadline.
+started may still land then. Until it ends, every later call on the same
+Keychain item fails at once with `backend_timeout`, so that late write cannot
+replace a newer one. A file call is not bounded by the deadline.
 
 `delete` removes the key from every backend this build can store values in
 (the Keychain on macOS, the file backend, and 1Password or Keeper when the

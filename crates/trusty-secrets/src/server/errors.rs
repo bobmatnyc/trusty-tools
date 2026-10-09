@@ -284,7 +284,7 @@ impl ErrorKind {
             }
             // #7524 P2-L7: the abandoned call may still complete.
             Self::BackendTimeout => {
-                "the secrets backend did not answer in time, for example while a Keychain access prompt waits; the call was abandoned, not stopped, so a write may still land; check the backend before retrying"
+                "the secrets backend did not answer in time, for example while a Keychain access prompt waits; the call was abandoned, not stopped, so a write may still land, and that key refuses further calls until the abandoned call ends; check the backend before retrying"
             }
             Self::Internal => "internal error",
         }
