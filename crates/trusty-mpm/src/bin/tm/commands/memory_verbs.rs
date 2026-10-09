@@ -10,7 +10,8 @@
 //! be derived, or the daemon did not answer. Exits
 //! [`EXIT_SLOT_REFUSED`] (3) when a write was stored but its `--fact-key` slot
 //! was refused (#9142). A forget the daemon did not report `deleted` is an
-//! `Err` too (#9340).
+//! `Err` too (#9340), and so is a `--fact-key` that does not resolve to
+//! exactly one live drawer.
 //! Test: `cli_parses_memory_recall`, `cli_parses_memory_remember_with_tags`,
 //! `cli_parses_memory_note`, `cli_parses_memory_forget` in `tests.rs`; the
 //! socket behaviour is covered by
@@ -22,7 +23,7 @@ use std::io::Write as _;
 
 use anyhow::Context as _;
 use serde_json::Value;
-use trusty_mpm::core::memory_forget::forget_failure;
+use trusty_mpm::core::memory_forget::{forget_failure, resolve_fact_key};
 use trusty_mpm::core::memory_verbs::{
     EXIT_SLOT_REFUSED, MemoryVerb, MemoryVerbOptions, MemoryVerbOutcome, run_verb, slot_refusal,
 };
@@ -84,6 +85,36 @@ pub(crate) async fn run(
         std::process::exit(EXIT_SLOT_REFUSED);
     }
     Ok(())
+}
+
+/// Run `tm memory forget --fact-key <key>`.
+///
+/// Why (#9340): an operator knows a slot (`pr:<n>/state`), not the UUID of the
+/// drawer holding it; the supervisor ruled the CLI resolves one from the other.
+/// What: [`resolve_fact_key`] lists the palace and picks the one live occupant,
+/// refusing every unprovable case before anything is deleted. The forget then
+/// goes through [`run`] as the id form, pinned to the palace and socket the
+/// listing used, so its checks and output are the id form's own.
+/// Not atomic: a write to the slot between the listing and the forget retires
+/// the listed drawer, and the forget then removes that retired drawer.
+/// Test: `forget_by_fact_key_forgets_the_one_listed_occupant`,
+/// `forget_by_fact_key_with_no_match_fails_closed`.
+pub(crate) async fn run_forget_fact_key(
+    fact_key: &str,
+    palace: Option<String>,
+    memory_socket: Option<PathBuf>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let opts = MemoryVerbOptions {
+        palace,
+        socket: memory_socket,
+        cwd: None,
+    };
+    let target = resolve_fact_key(fact_key, &opts).await?;
+    let verb = MemoryVerb::Forget {
+        drawer_id: target.drawer_id,
+    };
+    run(verb, Some(target.palace), Some(target.socket), json).await
 }
 
 /// Render the human summary.

@@ -99,6 +99,14 @@ pub enum MemoryVerbError {
         /// The value the caller passed.
         value: String,
     },
+    /// #9340: `--fact-key` did not resolve to exactly one live drawer.
+    #[error("cannot resolve --fact-key {key:?}: {detail}; nothing was deleted")]
+    FactKey {
+        /// The slot key the caller passed.
+        key: String,
+        /// Why no single drawer could be chosen.
+        detail: String,
+    },
     /// #9340: the drawer id to forget is not a UUID; nothing was sent.
     #[error("drawer id must be a UUID, got {value:?}: {detail}")]
     DrawerId {
@@ -400,6 +408,16 @@ pub fn resolve_verb_palace(
     verb: &MemoryVerb,
     opts: &MemoryVerbOptions,
 ) -> Result<Option<String>, MemoryVerbError> {
+    resolve_palace_for(verb.is_write(), opts)
+}
+
+/// [`resolve_verb_palace`] keyed on read/write alone.
+///
+/// #9340: `forget --fact-key` resolves its palace before it has a verb.
+pub(crate) fn resolve_palace_for(
+    is_write: bool,
+    opts: &MemoryVerbOptions,
+) -> Result<Option<String>, MemoryVerbError> {
     if let Some(explicit) = opts.palace.as_ref().map(|p| p.trim())
         && !explicit.is_empty()
     {
@@ -411,7 +429,7 @@ pub fn resolve_verb_palace(
     };
     match resolve_palace(&cwd) {
         Ok(resolution) => Ok(Some(resolution.id)),
-        Err(e) if verb.is_write() => Err(MemoryVerbError::Palace {
+        Err(e) if is_write => Err(MemoryVerbError::Palace {
             cwd: cwd.display().to_string(),
             detail: e.to_string(),
         }),
@@ -457,26 +475,14 @@ pub async fn run_verb(
         super::memory_forget::validate_drawer_id(drawer_id)?;
     }
     let palace = resolve_verb_palace(verb, opts)?;
-    let socket = match opts.socket.clone() {
-        Some(socket) => socket,
-        None => resolve_memory_socket().map_err(|e| MemoryVerbError::Socket {
-            detail: format!("{e:#}"),
-        })?,
-    };
+    let socket = resolve_verb_socket(opts)?;
 
     let mut args = verb.arguments();
     if let Some(palace) = palace.clone() {
         args.insert("palace".to_string(), Value::String(palace));
     }
 
-    let method = verb.method();
-    let result = call_memory_tool_at(&socket, method, Value::Object(args))
-        .await
-        .map_err(|e| MemoryVerbError::Call {
-            method,
-            socket: socket.display().to_string(),
-            detail: format!("{e:#}"),
-        })?;
+    let result = call_method(&socket, verb.method(), Value::Object(args)).await?;
 
     let count = if verb.is_write() {
         None
@@ -497,6 +503,31 @@ pub async fn run_verb(
         count,
         result,
     })
+}
+
+/// The socket a verb dials: `--memory-socket`, else the derived path.
+pub(crate) fn resolve_verb_socket(opts: &MemoryVerbOptions) -> Result<PathBuf, MemoryVerbError> {
+    match opts.socket.clone() {
+        Some(socket) => Ok(socket),
+        None => resolve_memory_socket().map_err(|e| MemoryVerbError::Socket {
+            detail: format!("{e:#}"),
+        }),
+    }
+}
+
+/// One direct-method call, its failure a [`MemoryVerbError::Call`] naming the socket.
+pub(crate) async fn call_method(
+    socket: &std::path::Path,
+    method: &'static str,
+    params: Value,
+) -> Result<Value, MemoryVerbError> {
+    call_memory_tool_at(socket, method, params)
+        .await
+        .map_err(|e| MemoryVerbError::Call {
+            method,
+            socket: socket.display().to_string(),
+            detail: format!("{e:#}"),
+        })
 }
 
 /// The CLI name of a verb, as `--json` reports it.
