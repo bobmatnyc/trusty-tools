@@ -325,6 +325,16 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     Ok(out)
 }
 
+/// List the drawers of one palace, optionally narrowed by wing, room or tag.
+///
+/// Why (#9340): `tm memory forget --fact-key` resolves a Tier C slot to its
+/// drawer id from this listing, so each drawer reports the slot it holds.
+/// What: one JSON object per drawer. `fact_key` is always present: the slot
+/// key, or `null` for an unslotted drawer and for one a later write to its
+/// slot displaced (retirement clears the displaced drawer's own key).
+/// Test: `memory_list_reports_a_slotted_drawers_fact_key`,
+/// `memory_list_reports_null_fact_key_for_an_unslotted_drawer`,
+/// `memory_list_reports_the_key_only_on_the_slots_current_occupant`.
 pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<Value> {
     // #6318: no palace and no default is answered with an index, not an error.
     let palace = match resolve_palace_or_index(state, &args, "memory_list").await? {
@@ -356,6 +366,8 @@ pub(crate) async fn handle_memory_list(state: &AppState, args: Value) -> Result<
                 "created_at": d.created_at.to_rfc3339(),
                 "drawer_type": d.drawer_type.as_str(),
                 "expires_at": d.expires_at.map(|t| t.to_rfc3339()),
+                // #9340: read-only slot report; `null` when the drawer holds no slot.
+                "fact_key": d.fact_key,
             })
         })
         .collect();
