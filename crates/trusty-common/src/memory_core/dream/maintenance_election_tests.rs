@@ -57,6 +57,12 @@ async fn wait_dreamed(data_dir: &Path, within: Duration) -> bool {
 /// must still have no pass. Then the holder goes away (its loop stops and its
 /// lease drops, as a crash would release it) and the survivor takes over.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+// #9509: every dream pass needs one of the two process-wide dream permits. The
+// other `dream_permits` tests hold both permits or queue ten cycles ahead of
+// this one; the 30 s permit deadlock fixed in `dedup_survivor_tests` held both
+// and expired this test's 15 s wait. Outside the group the "no second pass"
+// check could also pass only because no permit was free for the loser.
+#[serial_test::serial(dream_permits)]
 async fn two_maintainers_on_one_root_run_one_dream_pass() {
     let root = tempfile::tempdir().expect("tempdir");
     let config = DreamConfig {
