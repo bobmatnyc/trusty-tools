@@ -8,16 +8,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.55.3] — 2026-10-09
 
-### Breaking
-
-- trusty-common 0.55.2 ships a public-API break under the internal numbering
-  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-common-0.55.2.txt` (Refs #8699).
-
 ### Added
 
 - `HnswStore::oldest_op` and `UsearchStore::oldest_hnsw_op` report the longest-running in-flight `upsert` or `search` (`HnswOp`, `HnswOpKind`). The entry is registered on the blocking thread, so it stays visible after the awaiting future is dropped by a timeout. `OpPark` (behind `embedder-test-support`) holds a call inside that section for tests (#9487).
 
 ## [0.55.2] — 2026-10-09
+
+### Breaking
+
+- trusty-common 0.55.2 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-common-0.55.2.txt` (Refs #8699).
 
 ### Fixed
 
