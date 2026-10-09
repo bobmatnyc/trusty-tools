@@ -296,9 +296,11 @@ mod tests {
         assert!(m.services.contains_key("trusty-memory"));
         assert!(m.services.contains_key("trusty-embedderd"));
 
+        // #9543: trusty-search is probed over its socket — no port, no URL.
         let ts = &m.services["trusty-search"];
-        assert_eq!(ts.default_port, Some(7878));
-        assert!(ts.health_url.as_deref().unwrap().contains("{port}"));
+        assert_eq!(ts.health_probe, HealthProbe::UdsSearch);
+        assert_eq!(ts.default_port, None);
+        assert!(ts.health_url.is_none());
 
         let mem = &m.services["trusty-memory"];
         assert_eq!(mem.port_discovery, PortDiscovery::File);

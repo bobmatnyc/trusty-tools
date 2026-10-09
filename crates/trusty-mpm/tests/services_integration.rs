@@ -1,27 +1,29 @@
 //! Integration smoke tests for `tm services` discovery.
 //!
 //! Why: unit tests mock all probers to avoid I/O; these integration tests
-//! verify the full pipeline (real pgrep + real HTTP) against an actually
-//! running daemon. They are gated with `#[ignore]` so CI does not require
-//! live daemons.
-//! What: creates a minimal manifest pointing at `trusty-search` on :7878,
-//! then calls `Discoverer::list()` and `Discoverer::health()` and asserts
-//! the expected fields.
-//! Test: run with:
+//! verify the full pipeline (real pgrep + the real socket prober) against an
+//! actually running daemon. They are gated with `#[ignore]` so CI does not
+//! require live daemons.
+//! What (#9543): uses the embedded default manifest, which probes trusty-search
+//! by calling `search.health` on its Unix socket (`TRUSTY_SEARCH_SOCKET`, else
+//! the daemon's data directory), then calls `Discoverer::list()` and
+//! `Discoverer::health()` and asserts the socket-only shape: running, healthy,
+//! no TCP port and no URL.
+//! Test: start a socket-only daemon (`trusty-search start --no-http`), then run:
 //!   cargo test -p trusty-mpm --test integration services_integration:: -- --include-ignored --nocapture
 
 use trusty_mpm::services::{Discoverer, HealthState, ServicesManifest};
 
-/// Verify `tm services list` finds trusty-search when it is running on :7878.
+/// Verify `tm services list` finds a socket-only trusty-search.
 ///
 /// Why: this test catches regressions where the manifest or discovery engine
 /// breaks the end-to-end probe cycle against a real daemon.
-/// What: parses the embedded default manifest (which includes trusty-search at
-/// port 7878), calls `Discoverer::list()`, and asserts `trusty-search` appears
-/// with `running=true` and `port=Some(7878)`.
-/// Test: requires `trusty-search start` before running. Gated `#[ignore]`.
+/// What: parses the embedded default manifest, calls `Discoverer::list()`, and
+/// asserts `trusty-search` appears running and healthy with `port` and `url`
+/// both `None` — it binds no TCP port (#9543).
+/// Test: requires a live trusty-search daemon on its socket. Gated `#[ignore]`.
 #[test]
-#[ignore = "requires live trusty-search daemon on :7878"]
+#[ignore = "requires a live trusty-search daemon on its Unix socket"]
 fn smoke_test_services_list_against_live_trusty_search() {
     let manifest = ServicesManifest::default_manifest();
     let mut d = Discoverer::new(manifest);
@@ -35,21 +37,23 @@ fn smoke_test_services_list_against_live_trusty_search() {
     assert!(ts.declared, "trusty-search should be declared");
     assert!(
         ts.running,
-        "trusty-search should be running (start it before this test)"
+        "trusty-search should be running (start it before this test): {:?}",
+        ts.health
     );
-    assert_eq!(ts.port, Some(7878), "trusty-search should be on port 7878");
-    assert!(ts.url.is_some(), "trusty-search url should be populated");
+    assert_eq!(ts.health, HealthState::Ok, "search.health over the socket");
+    assert_eq!(ts.port, None, "trusty-search binds no TCP port (#9543)");
+    assert_eq!(ts.url, None, "trusty-search has no HTTP URL (#9543)");
     println!("trusty-search status: {:?}", ts);
 }
 
-/// Verify health probe returns Ok for a running trusty-search.
+/// Verify the health probe returns Ok for a running trusty-search.
 ///
 /// Why: `health_bypasses_cache` is tested with a mock; this test verifies the
-/// real HTTP prober reaches the actual `/health` endpoint.
+/// real socket prober reaches the daemon's `search.health` method (#9543).
 /// What: calls `Discoverer::health("trusty-search")` and asserts `HealthState::Ok`.
-/// Test: requires `trusty-search start` before running. Gated `#[ignore]`.
+/// Test: requires a live trusty-search daemon on its socket. Gated `#[ignore]`.
 #[test]
-#[ignore = "requires live trusty-search daemon on :7878"]
+#[ignore = "requires a live trusty-search daemon on its Unix socket"]
 fn smoke_test_services_health_against_live_trusty_search() {
     let manifest = ServicesManifest::default_manifest();
     let mut d = Discoverer::new(manifest);
@@ -64,6 +68,6 @@ fn smoke_test_services_health_against_live_trusty_search() {
     assert_eq!(
         result.state,
         HealthState::Ok,
-        "trusty-search /health should return 2xx when daemon is running"
+        "trusty-search should answer search.health on its socket when running"
     );
 }

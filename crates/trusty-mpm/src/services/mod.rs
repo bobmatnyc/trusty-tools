@@ -12,6 +12,10 @@
 pub mod discoverer;
 pub mod manifest;
 
+// #9543: trusty-search found by socket health, never by TCP.
+#[cfg(test)]
+mod uds_search_tests;
+
 pub use discoverer::{
     CACHE_TTL, Discoverer, HEALTH_PROBE_TIMEOUT, HealthResult, HealthState, ServiceStatus,
 };
