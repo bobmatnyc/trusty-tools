@@ -2,7 +2,6 @@ pub mod boot_markers;
 pub mod call_chain;
 #[cfg(feature = "candle")]
 pub mod candle_embedder;
-pub mod client;
 pub mod colocated_storage;
 pub mod concurrency;
 pub mod config;

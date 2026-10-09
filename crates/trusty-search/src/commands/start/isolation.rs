@@ -156,11 +156,11 @@ impl Discovery {
     /// This decision for a daemon that does (or, with `--no-http`, does not)
     /// bind its HTTP listener.
     ///
-    /// Why (#9214): `auto_discover_and_index` registers projects through
-    /// HTTP; a socket-only daemon publishes no HTTP address, so the scan has
-    /// nothing to reach (`daemon_http::daemon_base_url` errors rather than
-    /// guessing `:7878`). Withholding the scan is the refusal; the warm-boot colocated scan
-    /// runs in process and is unaffected, as is the flag forwarded to the child.
+    /// Why (#9214): withholds auto-discover from a socket-only daemon. The
+    /// scan registered projects over HTTP when this gate was added; it now
+    /// uses the socket, so the gate is kept only until the `--no-http`
+    /// default flips. The warm-boot colocated scan runs in process and is
+    /// unaffected, as is the flag forwarded to the child.
     /// What: records whether the listener exists; [`Self::runs_auto_discover`]
     /// then requires it.
     /// Test: `auto_discover_needs_the_http_listener`.
