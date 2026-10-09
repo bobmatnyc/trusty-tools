@@ -362,4 +362,25 @@ pub enum SecretsError {
         /// The key the delete named.
         key: String,
     },
+
+    /// A backend call did not return within its time limit. Never a miss,
+    /// an empty value or a success.
+    // #7524 P2-L7: after `VaultNotVisible`, so no discriminant moves. The
+    // call is abandoned, not stopped, so a write it started may still land.
+    #[error(
+        "the {backend} backend did not finish {operation} for {key} in {vault} within \
+         {waited:?}; the call was abandoned, not stopped, so a write it started may still land"
+    )]
+    Timeout {
+        /// Backend id, e.g. `keychain`.
+        backend: String,
+        /// The backend operation that timed out, e.g. `get` or `set`.
+        operation: &'static str,
+        /// The vault the call served.
+        vault: String,
+        /// The key the call served, or `(none)`.
+        key: String,
+        /// The limit that ran out.
+        waited: Duration,
+    },
 }
