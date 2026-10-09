@@ -86,6 +86,30 @@ fn search_socket_follows_trusty_data_dir_like_the_daemon() {
     );
 }
 
+/// Why: #9214 — the shared rule's two edge arms. `var_os` reports an
+/// exported-but-empty `TRUSTY_DATA_DIR` as `Some("")`, which must fall back to
+/// the shared socket; a relative value would resolve against the cwd, so it is
+/// refused. Holds `ENV_LOCK` because the shared arm reads
+/// `TRUSTY_DATA_DIR_OVERRIDE`, which other tests set under that lock.
+/// Test: itself.
+#[test]
+fn search_socket_under_treats_empty_as_unset_and_refuses_relative() {
+    let _guard = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let shared = search_socket_under(None).expect("the shared path resolves");
+    let empty = std::ffi::OsString::new();
+    assert_eq!(
+        search_socket_under(Some(empty.as_os_str())).expect("empty is not fatal"),
+        shared,
+        "an empty override must be treated as unset"
+    );
+    let relative = std::ffi::OsString::from("relative/data-dir");
+    let err = search_socket_under(Some(relative.as_os_str()))
+        .expect_err("a relative override must be refused");
+    assert!(err.to_string().contains("absolute"), "{err:#}");
+}
+
 /// Why: every probe's failure arm depends on a dead socket FAILING rather
 /// than consuming the budget — `tm doctor` must not hang on an absent
 /// daemon, and `search_index`'s registration must not stall a session launch.
