@@ -15,15 +15,14 @@
 //!
 //! Test: `cargo test -p trusty-analyze`.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use axum::Router;
 use tempfile::TempDir;
 use trusty_common::uds::server::{RpcResponse, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND};
 
 use super::*;
+use crate::core::fake_search::FakeSearchSocket;
 use crate::core::{FactStore, ScipOverlayStore, TrustySearchClient};
 use crate::service::events::{AnalyzerAppState, CODE_NOT_FOUND};
 
@@ -42,25 +41,26 @@ pub(crate) fn make_state() -> (AnalyzerAppState, TempDir) {
 /// stand-in for stopping and restarting the daemon. `make_state` hides its
 /// `TempDir`, so it cannot express that.
 /// What: opens both redb stores under `dir` and returns state around a search
-/// client pointed at port 1 (nothing listening), matching `make_state`.
+/// client pointed at a socket path nobody serves, matching `make_state`.
 /// Test: used by `rpc_scip_overlay_survives_state_rebuild`.
 pub(crate) fn state_in(dir: &Path) -> AnalyzerAppState {
-    state_in_with_search(dir, "http://127.0.0.1:1")
+    // #9214: an absent socket, not a dead TCP port.
+    state_in_with_search(dir, dir.join("absent-search.sock"))
 }
 
-/// `state_in`, but pointed at an arbitrary trusty-search base URL.
+/// `state_in`, but pointed at an arbitrary trusty-search socket.
 ///
 /// Why (#5049): `analyze.graph` fetches chunks before it ever reads the
 /// overlay, so with the unreachable default client every graph request fails
 /// upstream and the overlay-merge path is untestable. Tests that need the graph
 /// point this at a local stub instead.
 ///
-/// trusty-search is still an HTTP daemon, which is why these stubs are still
-/// axum: #6287 moved trusty-analyze's OWN transport, not the one it consumes.
-pub(crate) fn state_in_with_search(dir: &Path, search_base: &str) -> AnalyzerAppState {
+/// #9214: trusty-search is reached over its Unix socket, so the stubs are
+/// `FakeSearchSocket`s and `search` is anything that names a socket path.
+pub(crate) fn state_in_with_search(dir: &Path, search: impl AsRef<Path>) -> AnalyzerAppState {
     let facts = FactStore::open(&dir.join("facts.redb")).unwrap();
     let overlays = ScipOverlayStore::open(&dir.join("scip_overlays.redb")).unwrap();
-    let search = TrustySearchClient::new(search_base);
+    let search = TrustySearchClient::new(search.as_ref());
     AnalyzerAppState::new(search, facts, overlays)
 }
 
@@ -695,17 +695,8 @@ fn lookup_frameworks_reads_stored_facts() {
 /// needs a reachable search daemon. An always-empty corpus keeps the
 /// tree-sitter half of the graph at zero nodes, which is precisely the "empty
 /// graph" a caller could not previously tell apart from "no SCIP data".
-async fn spawn_empty_chunk_search() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let stub = Router::new().route(
-        "/indexes/{id}/chunks",
-        axum::routing::get(|| async { axum::response::Json(serde_json::json!({ "chunks": [] })) }),
-    );
-    tokio::spawn(async move {
-        axum::serve(listener, stub).await.ok();
-    });
-    format!("http://{addr}")
+async fn spawn_empty_chunk_search() -> FakeSearchSocket {
+    spawn_paged_chunk_search(serde_json::json!({ "chunks": [] })).await
 }
 
 /// Stand-in trusty-search serving one code chunk and one Markdown chunk.
@@ -713,7 +704,7 @@ async fn spawn_empty_chunk_search() -> String {
 /// Why (#5317/#5320): both defects are about what the analyzer does with a
 /// non-code file and how a caller reads a truncated result, and neither is
 /// observable without a corpus that mixes the two.
-async fn spawn_mixed_corpus_search() -> String {
+async fn spawn_mixed_corpus_search() -> FakeSearchSocket {
     let mut branchy = String::from("/// doc\nfn m(a: u32) {\n");
     for _ in 0..30 {
         branchy.push_str("    if a == 1 { return; }\n");
@@ -748,7 +739,7 @@ async fn spawn_mixed_corpus_search() -> String {
 /// Why (#5067): `spawn_empty_chunk_search` short-circuits clustering before it
 /// ever reaches the embedder, so it cannot show that the surviving BOW path
 /// still produces usable vectors. Clustering needs actual content.
-async fn spawn_chunk_search_with_corpus() -> String {
+async fn spawn_chunk_search_with_corpus() -> FakeSearchSocket {
     let bodies = [
         "fn authenticate(user: User) -> Result<Session> { verify_password(user) }",
         "fn authorize(session: Session) -> bool { session.scopes.contains(\"admin\") }",
@@ -778,32 +769,19 @@ async fn spawn_chunk_search_with_corpus() -> String {
 /// Why: the client pages the corpus with a concurrent window, so the stub must
 /// honour `after` — answering every offset with the same page would multiply
 /// the corpus by the window width.
-async fn spawn_paged_chunk_search(first_page: serde_json::Value) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let stub = Router::new().route(
-        "/indexes/{id}/chunks",
-        axum::routing::get(
-            move |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
-                let body = first_page.clone();
-                async move {
-                    let first = q
-                        .get("after")
-                        .map(|c: &String| c.is_empty())
-                        .unwrap_or(true);
-                    axum::response::Json(if first {
-                        body
-                    } else {
-                        serde_json::json!({ "chunks": [] })
-                    })
-                }
-            },
-        ),
-    );
-    tokio::spawn(async move {
-        axum::serve(listener, stub).await.ok();
-    });
-    format!("http://{addr}")
+async fn spawn_paged_chunk_search(first_page: serde_json::Value) -> FakeSearchSocket {
+    // #9214: a fake socket answering `search.chunks.list`, keyed on `after`.
+    FakeSearchSocket::serve(move |method, params| {
+        if method != "search.chunks.list" {
+            return Err((-32601, format!("unexpected {method}")));
+        }
+        let first = params["after"].as_str().is_none_or(str::is_empty);
+        Ok(if first {
+            first_page.clone()
+        } else {
+            serde_json::json!({ "chunks": [] })
+        })
+    })
 }
 
 // ─── analysis over a live corpus ─────────────────────────────────────────────
