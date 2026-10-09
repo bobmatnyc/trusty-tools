@@ -401,6 +401,57 @@ async fn rehydrate_gate_clears_after_a_panic_in_the_commit_phase() {
     );
 }
 
+/// Evict both lanes of a freshly indexed two-file indexer.
+async fn indexed_and_evicted(redb_path: &std::path::Path) -> CodeIndexer {
+    let idx = make_indexer_with_corpus(redb_path);
+    idx.index_files_batch(&[
+        ("src/auth.rs".into(), "fn authenticate() {}".into()),
+        ("src/token.rs".into(), "fn verify_token() {}".into()),
+    ])
+    .await
+    .expect("index batch");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    idx.evict_bm25_entities_if_idle(Duration::from_nanos(1))
+        .await;
+    idx.evict_chunks_if_idle(Duration::from_nanos(1)).await;
+    assert!(idx.bm25_entities_evicted.load(Ordering::Relaxed));
+    idx
+}
+
+/// #9513: the commit-phase panic injection must reach only the indexer that
+/// armed it. While indexer A is armed, an unarmed indexer B rehydrating in the
+/// same process (the shape of `warm::tests::warm_corpus_rehydrates_an_evicted_index`
+/// running beside the panic test) must complete normally.
+#[tokio::test]
+#[serial_test::serial]
+async fn commit_phase_panic_injection_reaches_only_the_armed_indexer() {
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let armed = indexed_and_evicted(&dir_a.path().join("index.redb")).await;
+    let unarmed = indexed_and_evicted(&dir_b.path().join("index.redb")).await;
+
+    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(true, Ordering::Relaxed);
+
+    unarmed.ensure_bm25_entities_loaded().await;
+    let unarmed_rehydrated = !unarmed.bm25_entities_evicted.load(Ordering::Relaxed);
+
+    armed.ensure_bm25_entities_loaded().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let armed_still_evicted = armed.bm25_entities_evicted.load(Ordering::Relaxed);
+
+    super::idle_evict::TEST_PANIC_IN_COMMIT_PHASE.store(false, Ordering::Relaxed);
+
+    assert!(
+        unarmed_rehydrated,
+        "an indexer that never armed the commit-phase panic must rehydrate \
+         normally while another indexer has it armed (#9513)"
+    );
+    assert!(
+        armed_still_evicted,
+        "the armed indexer's rehydrate must still hit the injected panic"
+    );
+}
+
 /// Finding 2 (HIGH): a concurrent evict/reclaim landing mid-rehydrate must
 /// invalidate the rehydrate's pending commit instead of being silently
 /// overwritten. Uses `TEST_DELAY_BEFORE_COMMIT_MS` to force a deterministic
