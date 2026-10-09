@@ -134,9 +134,12 @@ name        = "trusty-review"
 # methods, a CLI flag and MCP arguments. The root `[workspace.dependencies]`
 # row stays `version = "0.38"`, which 0.38.1 satisfies.
 #
-# #9196 lands under the same unpublished 0.38.1: additive only (a
-# `#[non_exhaustive]` request field and builder, a default-bodied
-# `SearchClient::call_chain`, a CLI flag and an MCP argument).
+# #9196 landed additively in 0.38.1 (a `#[non_exhaustive]` request field and
+# builder, a default-bodied `SearchClient::call_chain`, a CLI flag and an MCP
+# argument).
+#
+# 0.38.1 -> 0.38.2 (#9495, #9503, #9196): PATCH. 0.38.1 is live on crates.io;
+# 0.38.2 carries fixes only, with no public item added or changed.
 version     = "0.38.2"
 edition     = "2024"
 rust-version.workspace = true
