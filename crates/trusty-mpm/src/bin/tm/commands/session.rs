@@ -122,8 +122,9 @@ pub(crate) async fn session(
             // `resolve_daemon_url` honours an explicit `--url`, then the lock
             // file, then the default — so we resolve from this subcommand's own
             // `--url`/`TRUSTY_MPM_URL` flag rather than the dispatcher's `url`.
-            let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
-            trusty_mpm::tui::coordinator::run(resolved, interval_ms).await?;
+            // #9556: an explicit `--url` / `TRUSTY_MPM_URL` is pinned.
+            let client = trusty_mpm::tui::client_for(tui_url.as_deref());
+            trusty_mpm::tui::coordinator::run_with_client(client, interval_ms).await?;
         }
         SessionAction::Clean { dir } => {
             // `dir` is accepted for symmetry; the daemon reaps globally.

@@ -19,6 +19,44 @@ fn rediscover_is_noop_when_resolved_url_unchanged() {
     }
 }
 
+/// An explicit URL no discovery source ever yields. Re-discovery dials
+/// nothing, so the #9556 tests below never connect to it.
+const EXPLICIT_URL: &str = "http://127.0.0.1:1";
+
+/// Why (#9556): an operator-chosen URL is never swapped for the lock-file or
+/// default daemon, which under a sandbox is the live fleet.
+/// Test: itself.
+#[test]
+fn rediscover_daemon_keeps_explicit_url() {
+    let dead = EXPLICIT_URL.to_string();
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    assert!(!rediscover_daemon(&mut client, false));
+    assert_eq!(client.base_url(), dead);
+}
+
+/// Why (#9556): only an operator-supplied, non-empty URL is pinned; an empty
+/// or absent one keeps the lock-file / default discovery.
+/// Test: itself.
+#[test]
+fn client_for_pins_only_an_explicit_url() {
+    let explicit = client_for(Some(EXPLICIT_URL));
+    assert!(explicit.base_url_pinned());
+    assert_eq!(explicit.base_url(), EXPLICIT_URL);
+    assert!(!client_for(Some("")).base_url_pinned());
+    assert!(!client_for(None).base_url_pinned());
+}
+
+/// Why (#9556): without an explicit URL the TUI still follows a restarted
+/// daemon. Discovery never yields port 1, so the client must move.
+/// Test: itself.
+#[test]
+fn rediscover_daemon_follows_discovery_when_not_pinned() {
+    let dead = EXPLICIT_URL.to_string();
+    let mut client = DaemonClient::new(dead.clone());
+    assert!(rediscover_daemon(&mut client, false));
+    assert_ne!(client.base_url(), dead);
+}
+
 #[test]
 fn coordinator_session_maps_status() {
     // The status word from the coordinator endpoint maps back to the enum.

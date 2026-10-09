@@ -169,24 +169,150 @@ pub fn explicit_url_from_env() -> Option<String> {
 ///    to equal [`DEFAULT_DAEMON_URL`] verbatim. There is no longer a
 ///    string-equality heuristic trying to guess intent from the value.
 /// 2. Lock file `~/.trusty-mpm/daemon.lock` (if present and PID alive)
-/// 3. `DEFAULT_DAEMON_URL`
+/// 3. `DEFAULT_DAEMON_URL` — except in an [`isolated_environment`], which
+///    gets [`ISOLATED_NO_DAEMON_URL`] instead (#9556; see
+///    [`try_resolve_daemon_url`]).
 pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
+    try_resolve_daemon_url(explicit).unwrap_or_else(isolated_refusal_url)
+}
+
+/// [`resolve_daemon_url`], reporting an isolated miss as an error.
+///
+/// Why (#9556): a sandbox whose own daemon died has its dead-pid lock deleted,
+/// so resolution fell through to [`DEFAULT_DAEMON_URL`] — the live fleet.
+/// What: explicit (non-empty) → lock file → [`DEFAULT_DAEMON_URL`], except
+/// that in an [`isolated_environment`] the last step is
+/// `Err(DaemonUrlError::NoSandboxDaemon)`. Reads one file; never probes.
+/// Test: `resolve_refuses_default_daemon_under_isolation`,
+/// `resolve_keeps_default_daemon_outside_isolation`.
+pub fn try_resolve_daemon_url(explicit: Option<&str>) -> Result<String, DaemonUrlError> {
     // 1. Explicit override always wins when present and non-empty — the
     //    caller (a CLI field or the shared env-read helper) already collapsed
     //    "not supplied" to `None`, so there is nothing left to disambiguate.
     if let Some(url) = explicit
         && !url.is_empty()
     {
-        return url.to_string();
+        return Ok(url.to_string());
     }
 
     // 2. Lock file — records the actual bound address written by the daemon.
-    if let Some(url) = read_lock_file_url() {
-        return url;
+    //    #9556: filtered, so an isolated process never reads the host's lock.
+    if let Some(url) = client_lock_url() {
+        return Ok(url);
+    }
+
+    // #9556: the default is the host's daemon; an isolated process refuses it.
+    if isolated_environment() {
+        return Err(DaemonUrlError::NoSandboxDaemon);
     }
 
     // 3. Fall back to the compiled-in default.
-    DEFAULT_DAEMON_URL.to_string()
+    Ok(DEFAULT_DAEMON_URL.to_string())
+}
+
+/// The daemon lock file's URL as this process may use it (#9556).
+///
+/// Why: every reader of the lock — the resolver, the `tm` banner and the
+/// statusline — must agree that an isolated process never sees the host
+/// daemon's lock, or the banner shows the live 127.0.0.1:7880 as "online".
+/// What: the lock's address (product magic and a live pid, as
+/// `daemon_identity::read_lock` checks), dropped when the process is in an
+/// [`isolated_environment`] and the lock belongs to the host by
+/// [`lock_is_hosts`]. Outside isolation it is exactly `read_lock`'s address,
+/// and no home lookup runs.
+/// Test: `client_lock_url_ignores_a_host_lock_under_isolation`,
+/// `client_lock_url_is_read_lock_outside_isolation`,
+/// `isolated_resolver_ignores_a_host_lock_naming_the_default`,
+/// `isolated_resolver_keeps_a_sandbox_home_lock`.
+pub fn client_lock_url() -> Option<String> {
+    let url = read_lock_file_url()?;
+    // #9556: the home lookups run only when isolated.
+    if isolated_environment() {
+        let home = dirs::home_dir();
+        let passwd_home = crate::core::host_state_gate::passwd_home_dir();
+        if lock_is_hosts(&url, home.as_deref(), passwd_home.as_deref()) {
+            return None;
+        }
+    }
+    Some(url)
+}
+
+/// Whether a daemon lock read from `home` belongs to the host (#9556).
+///
+/// Why: an isolated process that inherited the operator's `HOME` reads the
+/// host daemon's lock, which names the live 127.0.0.1:7880.
+/// What: `true` when the lock names [`DEFAULT_DAEMON_URL`], when either home
+/// is unknown, or when `home` and the password-database home resolve to the
+/// same directory — the comparison `tm daemon --sandbox` makes before it
+/// starts.
+/// Test: `host_lock_is_judged_by_address_and_home`,
+/// `isolated_resolver_ignores_a_host_lock_naming_the_default`,
+/// `isolated_resolver_keeps_a_sandbox_home_lock`.
+fn lock_is_hosts(
+    lock_url: &str,
+    home: Option<&std::path::Path>,
+    passwd_home: Option<&std::path::Path>,
+) -> bool {
+    if lock_url.trim_end_matches('/') == DEFAULT_DAEMON_URL {
+        return true;
+    }
+    let (Some(home), Some(account)) = (home, passwd_home) else {
+        return true;
+    };
+    let resolve =
+        |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    resolve(home) == resolve(account)
+}
+
+/// The base URL an infallible resolver hands out when an isolated process has
+/// no daemon of its own (#9556).
+///
+/// Why: [`resolve_daemon_url`] and [`resolve_daemon_url_via_gateway`] return a
+/// `String`, and their callers include fail-open paths (`tm hook`). They must
+/// still never answer [`DEFAULT_DAEMON_URL`] in a sandbox.
+/// What: a non-HTTP scheme. `reqwest` rejects it before any DNS or TCP work
+/// ("builder error … URL scheme is not allowed"), and the error names this
+/// URL, which states the remedy.
+/// Test: `resolve_refuses_default_daemon_under_isolation`.
+pub const ISOLATED_NO_DAEMON_URL: &str = "tm-sandbox-no-daemon://set-TRUSTY_MPM_URL";
+
+/// Turn [`ISOLATED_NO_DAEMON_URL`] back into the error it stands for (#9556).
+///
+/// Why: a caller holding an infallible resolver's answer (bare `tm`'s guided
+/// default) must stop with the sandbox message, not misread the refused
+/// request as a slow daemon.
+/// What: `Err(DaemonUrlError::NoSandboxDaemon)` for the sentinel, else `Ok(())`.
+/// Test: `isolated_no_daemon_url_maps_back_to_the_refusal`.
+pub fn refuse_isolated_no_daemon(url: &str) -> Result<(), DaemonUrlError> {
+    if url == ISOLATED_NO_DAEMON_URL {
+        Err(DaemonUrlError::NoSandboxDaemon)
+    } else {
+        Ok(())
+    }
+}
+
+/// Map an isolated refusal onto [`ISOLATED_NO_DAEMON_URL`], logging why.
+fn isolated_refusal_url(err: DaemonUrlError) -> String {
+    tracing::warn!("{err}");
+    ISOLATED_NO_DAEMON_URL.to_string()
+}
+
+/// Refuse a client-side daemon spawn in an [`isolated_environment`] (#9556).
+///
+/// Why: `tm start` and the bare-`tm` autostart spawn a plain `tm daemon`, or
+/// kickstart the host's launchd job, when nothing answers. In a sandbox that
+/// daemon would bind the default 127.0.0.1:7880 (or fall back to an ephemeral
+/// port) and write its lock under the inherited `HOME`; the launchd job is the
+/// live daemon itself. The only sanctioned sandbox daemon is
+/// `scripts/sandbox_daemon.sh` (#9121).
+/// What: `Err(DaemonUrlError::NoSandboxDaemon)` when isolated, else `Ok(())`.
+/// Test: `daemon_spawn_refused_only_under_isolation`.
+pub fn refuse_daemon_spawn_when_isolated() -> Result<(), DaemonUrlError> {
+    if isolated_environment() {
+        Err(DaemonUrlError::NoSandboxDaemon)
+    } else {
+        Ok(())
+    }
 }
 
 /// Error returned when an operator-supplied daemon URL cannot be reached.
@@ -204,7 +330,10 @@ pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
 /// plainly that no fallback was attempted.
 /// Test: `probing_resolver_errors_when_explicit_unreachable`,
 /// `resolve_for_cli_explicit_unreachable_errors`.
+// #9556 (owner ruling 2026-10-09 17:49Z): non-exhaustive, so a later refusal
+// kind is not another breaking change.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DaemonUrlError {
     /// The explicitly-supplied URL failed a `GET {url}/health` probe.
     #[error(
@@ -216,6 +345,15 @@ pub enum DaemonUrlError {
         /// The URL that was probed and found unreachable.
         url: String,
     },
+    /// #9556: an isolated process found no explicit URL, no recorded console
+    /// and no live lock, and refuses the host's default daemon.
+    #[error(
+        "no daemon reachable for this sandbox: TRUSTY_SANDBOX=1 or TRUSTY_DATA_DIR_OVERRIDE is \
+         set, and no --url/TRUSTY_MPM_URL, recorded console or live daemon lock names one; \
+         refusing the host default daemon (127.0.0.1:7880) — start one with \
+         scripts/sandbox_daemon.sh and pass its URL"
+    )]
+    NoSandboxDaemon,
 }
 
 /// Process exit code for a [`DaemonUrlError::Unreachable`] at the CLI boundary.
@@ -277,8 +415,9 @@ pub async fn resolve_daemon_url_probing(
         };
     }
 
-    // No explicit override: delegate to the sync resolver (lock file → default).
-    Ok(resolve_daemon_url(explicit))
+    // No explicit override: lock file → default; #9556: an isolated process
+    // gets `Err(NoSandboxDaemon)` instead of the default.
+    try_resolve_daemon_url(explicit)
 }
 
 /// Resolve the daemon URL for a CLI command that wants strict
@@ -326,7 +465,8 @@ pub async fn resolve_daemon_url_for_cli(
     if explicit.is_some_and(|url| !url.is_empty()) {
         resolve_daemon_url_probing(client, explicit).await
     } else {
-        Ok(resolve_daemon_url_via_gateway(client, explicit).await)
+        // #9556: an isolated miss is an error here, not the default daemon.
+        try_resolve_daemon_url_via_gateway(client, explicit).await
     }
 }
 
@@ -356,7 +496,9 @@ pub async fn resolve_daemon_url_for_cli(
 ///   b) Gateway probe: read the console address from its discovery file
 ///      (falling back to `DEFAULT_CONSOLE_ADDR`). Construct
 ///      `http://{console}/api/mpm` and probe `GET .../health` with a 500 ms
-///      timeout. If it returns 200 → return the gateway base URL.
+///      timeout. If it returns 200 → return the gateway base URL. #9556: under
+///      `TRUSTY_SANDBOX=1` or `TRUSTY_DATA_DIR_OVERRIDE` with no recorded
+///      console, this step is skipped — the default is the host's console.
 ///   c) Direct fallback: delegate to `resolve_daemon_url_probing` (lock file →
 ///      `DEFAULT_DAEMON_URL`). This path is taken whenever the console is
 ///      absent or the gateway probe fails.
@@ -382,8 +524,75 @@ pub async fn resolve_daemon_url_via_gateway(
     client: &reqwest::Client,
     explicit: Option<&str>,
 ) -> String {
-    let console_addr = console_addr();
+    try_resolve_daemon_url_via_gateway(client, explicit)
+        .await
+        .unwrap_or_else(isolated_refusal_url)
+}
+
+/// [`resolve_daemon_url_via_gateway`], reporting an isolated miss as an error
+/// (#9556) — the fallible form [`resolve_daemon_url_for_cli`] returns.
+async fn try_resolve_daemon_url_via_gateway(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+) -> Result<String, DaemonUrlError> {
+    let recorded = trusty_common::read_daemon_addr("trusty-console")
+        .ok()
+        .flatten();
+    resolve_daemon_url_via_gateway_from(client, explicit, recorded, DEFAULT_CONSOLE_ADDR).await
+}
+
+/// [`resolve_daemon_url_via_gateway`] with the console discovery read and the
+/// default console address injected.
+///
+/// Why (#9556): the default console is the live trusty-console. A sandboxed
+/// `tm` that probed it was routed through the live console to the live
+/// daemon. The default is injected so a test can substitute a listener.
+/// What: `recorded` is the console's discovery-file address. A blank or
+/// absent one falls back to `default_console`, except in an
+/// [`isolated_environment`], where the gateway is skipped and
+/// [`resolve_daemon_url`] answers without a probe. Otherwise the explicit →
+/// gateway → direct precedence of [`resolve_daemon_url_via_gateway_inner`]
+/// applies.
+/// Test: `gateway_probe_skipped_under_data_dir_override`,
+/// `gateway_probe_skipped_under_sandbox_flag`,
+/// `gateway_probe_uses_recorded_addr_under_data_dir_override`,
+/// `gateway_probe_uses_default_console_outside_isolation`.
+async fn resolve_daemon_url_via_gateway_from(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+    recorded: Option<String>,
+    default_console: &str,
+) -> Result<String, DaemonUrlError> {
+    let console_addr = match recorded_console_addr(recorded) {
+        Some(addr) => addr,
+        // #9556: an isolated client never falls back to the host's console.
+        None if isolated_environment() => return try_resolve_daemon_url(explicit),
+        None => default_console.to_string(),
+    };
     resolve_daemon_url_via_gateway_inner(client, explicit, &console_addr).await
+}
+
+/// Whether this process runs isolated from the host's trusty-* services.
+///
+/// Why (#9556): `scripts/sandbox_daemon.sh` sets both variables; either one
+/// alone means the operator asked to stay off the host's default endpoints.
+/// What: `true` when `TRUSTY_SANDBOX` is exactly `1` (the rule
+/// `trusty_common::credentials::sandbox_flag_set` owns) or
+/// `TRUSTY_DATA_DIR_OVERRIDE` is set and non-empty.
+/// Test: `gateway_probe_skipped_under_data_dir_override`,
+/// `gateway_probe_skipped_under_sandbox_flag`.
+pub fn isolated_environment() -> bool {
+    use trusty_common::credentials::{SANDBOX_ENV_VAR, sandbox_flag_set};
+    sandbox_flag_set(std::env::var_os(SANDBOX_ENV_VAR).as_deref())
+        || std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty())
+}
+
+/// The console address a discovery-file read recorded, trimmed; `None` when
+/// absent or blank.
+fn recorded_console_addr(recorded: Option<String>) -> Option<String> {
+    recorded
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
 }
 
 /// Resolve the `host:port` the trusty-console is selected to serve on.
@@ -417,10 +626,32 @@ pub fn console_addr() -> String {
 /// Test: `console_addr_from_prefers_the_recorded_addr`,
 /// `console_addr_from_falls_back_when_absent_or_blank`.
 fn console_addr_from(recorded: Option<String>) -> String {
-    recorded
-        .map(|a| a.trim().to_string())
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
+    recorded_console_addr(recorded).unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string())
+}
+
+/// The console address a client may contact, or `None` when it must not
+/// contact one.
+///
+/// Why (#9556): the `tm` banner TCP-probes the console; under isolation with
+/// no recorded console, the default is the host's live console.
+/// What: [`console_addr_to_probe_from`] over the discovery-file read and
+/// [`isolated_environment`].
+/// Test: `console_probe_target_is_none_under_isolation`.
+pub fn console_addr_to_probe() -> Option<String> {
+    console_addr_to_probe_from(
+        trusty_common::read_daemon_addr("trusty-console")
+            .ok()
+            .flatten(),
+        isolated_environment(),
+    )
+}
+
+/// Pure core of [`console_addr_to_probe`]: the recorded address, else the
+/// default — except under isolation, where there is none (#9556).
+/// Test: `console_probe_target_is_none_under_isolation`.
+fn console_addr_to_probe_from(recorded: Option<String>, isolated: bool) -> Option<String> {
+    recorded_console_addr(recorded)
+        .or_else(|| (!isolated).then(|| DEFAULT_CONSOLE_ADDR.to_string()))
 }
 
 /// Build the trusty-console's base URL on its selected port.
@@ -448,7 +679,7 @@ async fn resolve_daemon_url_via_gateway_inner(
     client: &reqwest::Client,
     explicit: Option<&str>,
     console_addr: &str,
-) -> String {
+) -> Result<String, DaemonUrlError> {
     // a) Explicit override — any non-empty `Some` bypasses the gateway
     //    entirely, whether or not the value happens to equal
     //    `DEFAULT_DAEMON_URL` (#2487). Callers only pass `Some` when the
@@ -456,7 +687,7 @@ async fn resolve_daemon_url_via_gateway_inner(
     if let Some(url) = explicit
         && !url.is_empty()
     {
-        return url.to_string();
+        return Ok(url.to_string());
     }
 
     // b) Gateway probe — build the gateway base URL and probe its /health.
@@ -484,7 +715,7 @@ async fn resolve_daemon_url_via_gateway_inner(
 
     let gateway_base = format!("http://{console_addr}{GATEWAY_PATH}");
     if probe_url(&probe_client, &gateway_base).await {
-        return gateway_base;
+        return Ok(gateway_base);
     }
 
     // c) Direct fallback — console absent or gateway probe failed. Delegate to
@@ -493,11 +724,10 @@ async fn resolve_daemon_url_via_gateway_inner(
     //    always `None`/empty by this point (step (a) already returned for any
     //    real override), so `resolve_daemon_url_probing` can never produce
     //    `Err(DaemonUrlError::Unreachable)` here (#1737) — that variant is
-    //    only reachable via its explicit-URL probe branch.
-    resolve_daemon_url_probing(client, explicit).await.expect(
-        "explicit is None/empty at this call site (step (a) already returned \
-         otherwise), so resolve_daemon_url_probing cannot error here",
-    )
+    //    only reachable via its explicit-URL probe branch. #9556: it can
+    //    produce `Err(NoSandboxDaemon)` in an isolated process with no live
+    //    lock, which is passed up rather than replaced by the default.
+    resolve_daemon_url_probing(client, explicit).await
 }
 
 /// Probe a URL for reachability with a short timeout.
@@ -550,9 +780,13 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn default_returned_when_no_lock_and_no_explicit() {
         // If no lock file exists this returns DEFAULT_DAEMON_URL.
         // We can't guarantee no lock file exists, so just check it's a valid URL.
+        // #9556: an isolated process refuses the default; run outside one.
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
         let result = resolve_daemon_url(None);
         assert!(result.starts_with("http"));
     }
@@ -699,7 +933,11 @@ mod tests {
     /// depending on local state, which the test does not control).
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn probing_resolver_implicit_none_falls_back_ok() {
+        // #9556: an isolated process refuses the default; run outside one.
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
         let client = reqwest::Client::new();
         let result = resolve_daemon_url_probing(&client, None).await;
         let url = result.expect("implicit resolution must never error");
@@ -747,7 +985,11 @@ mod tests {
     /// with a valid HTTP URL.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn resolve_for_cli_implicit_falls_back() {
+        // #9556: an isolated process refuses the default; run outside one.
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
         let client = reqwest::Client::new();
         let result = resolve_daemon_url_for_cli(&client, None).await;
         let url = result.expect("implicit resolution must never error");
@@ -771,7 +1013,8 @@ mod tests {
         let result =
             resolve_daemon_url_via_gateway_inner(&client, Some(explicit), "127.0.0.1:1").await;
         assert_eq!(
-            result, explicit,
+            result.as_deref(),
+            Ok(explicit),
             "explicit override must win over gateway probe"
         );
     }
@@ -822,7 +1065,8 @@ mod tests {
                 .await;
 
         assert_eq!(
-            result, DEFAULT_DAEMON_URL,
+            result.as_deref(),
+            Ok(DEFAULT_DAEMON_URL),
             "TRUSTY_MPM_URL equal to the default must win outright, never the gateway URL"
         );
         // Give any (incorrect) in-flight probe a moment to land before asserting
@@ -881,7 +1125,8 @@ mod tests {
 
         let expected_gateway = format!("http://{console_addr}{GATEWAY_PATH}");
         assert_eq!(
-            result, expected_gateway,
+            result,
+            Ok(expected_gateway),
             "gateway URL must be returned when console probe succeeds"
         );
 
@@ -903,14 +1148,20 @@ mod tests {
     /// result is a valid HTTP URL and NOT the failed gateway URL.
     /// Test: this test.
     #[tokio::test]
+    #[serial_test::serial]
     async fn resolve_via_gateway_falls_back_to_direct_on_probe_failure() {
+        // #9556: an isolated process refuses the default; run outside one.
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(200))
             .build()
             .expect("build client");
         // Port 1 is reserved and never listening — probe must fail immediately.
         let dead_console = "127.0.0.1:1";
-        let result = resolve_daemon_url_via_gateway_inner(&client, None, dead_console).await;
+        let result = resolve_daemon_url_via_gateway_inner(&client, None, dead_console)
+            .await
+            .expect("outside isolation the direct fallback never errors");
 
         let gateway_url = format!("http://{dead_console}{GATEWAY_PATH}");
         assert!(
@@ -1074,5 +1325,365 @@ mod tests {
         // With no discovery file this is the default; with one it is whatever
         // the console recorded. Either way the port must survive into the URL.
         assert_eq!(url, format!("http://{}", console_addr()));
+    }
+
+    // ── #9556: the gateway probe under a sandbox / data-dir override ───────
+
+    use crate::secret_source::test_env::EnvVarGuard;
+    use trusty_common::DATA_DIR_OVERRIDE_ENV;
+    use trusty_common::credentials::SANDBOX_ENV_VAR;
+
+    /// Answer one connection on `listener` with `200 OK`, so a gateway probe
+    /// against it succeeds.
+    fn serve_one_ok(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+    }
+
+    /// Whether anything connected to `listener` during the call under test.
+    /// The kernel queues a finished handshake even when nobody called
+    /// `accept`, so a probe that ran and gave up is still counted.
+    async fn was_contacted(listener: &tokio::net::TcpListener) -> bool {
+        tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+            .await
+            .is_ok()
+    }
+
+    /// Why (#9556): a sandbox with no recorded console must not fall back to
+    /// the default console, which is the live one. The listener stands in for
+    /// that default, so the test never dials the real 127.0.0.1:7788.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_skipped_under_data_dir_override() {
+        let data = crate::test_support::hermetic_temp_dir();
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let recorded = trusty_common::read_daemon_addr("trusty-console")
+            .ok()
+            .flatten();
+        assert_eq!(recorded, None, "the override dir records no console");
+
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        let result =
+            resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, recorded, &addr)
+                .await;
+
+        assert_ne!(result, Ok(format!("http://{addr}{GATEWAY_PATH}")));
+        assert!(
+            !was_contacted(&default_console).await,
+            "under {DATA_DIR_OVERRIDE_ENV} the default console must get zero connections"
+        );
+    }
+
+    /// Why (#9556): `TRUSTY_SANDBOX=1` alone isolates the client the same way.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_skipped_under_sandbox_flag() {
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        let _ =
+            resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, None, &addr).await;
+
+        assert!(
+            !was_contacted(&default_console).await,
+            "under {SANDBOX_ENV_VAR}=1 the default console must get zero connections"
+        );
+    }
+
+    /// Why (#9556): a console the sandbox itself recorded is still a gateway
+    /// the client may use.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_uses_recorded_addr_under_data_dir_override() {
+        let data = crate::test_support::hermetic_temp_dir();
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let recorded = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = recorded.local_addr().expect("local_addr").to_string();
+        serve_one_ok(recorded);
+
+        let result = resolve_daemon_url_via_gateway_from(
+            &reqwest::Client::new(),
+            None,
+            Some(addr.clone()),
+            // Never dialled: the recorded address wins. Port 1 refuses anyway.
+            "127.0.0.1:1",
+        )
+        .await;
+        assert_eq!(result, Ok(format!("http://{addr}{GATEWAY_PATH}")));
+    }
+
+    /// Why (#9556): outside a sandbox the default console is still probed, so
+    /// the fix must not skip the gateway everywhere.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn gateway_probe_uses_default_console_outside_isolation() {
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let default_console = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = default_console
+            .local_addr()
+            .expect("local_addr")
+            .to_string();
+        serve_one_ok(default_console);
+
+        let result =
+            resolve_daemon_url_via_gateway_from(&reqwest::Client::new(), None, None, &addr).await;
+        assert_eq!(result, Ok(format!("http://{addr}{GATEWAY_PATH}")));
+    }
+
+    // ── #9556: no host default daemon under isolation ──────────────────────
+
+    /// Why (#9556): a sandbox whose own daemon died (its dead-pid lock already
+    /// deleted) fell through to `DEFAULT_DAEMON_URL`, the live fleet. With no
+    /// explicit URL, no recorded console and no live lock, every resolver must
+    /// refuse instead. `HOME` is a temp dir, so no lock exists; the override
+    /// dir records no console, so nothing is probed.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_refuses_default_daemon_under_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let client = reqwest::Client::new();
+
+        assert_ne!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        assert_ne!(
+            resolve_daemon_url_via_gateway(&client, None).await,
+            DEFAULT_DAEMON_URL
+        );
+        for result in [
+            resolve_daemon_url_probing(&client, None).await,
+            resolve_daemon_url_for_cli(&client, None).await,
+        ] {
+            let err = result.expect_err("an isolated resolver must refuse, not fall back");
+            assert!(
+                err.to_string()
+                    .contains("no daemon reachable for this sandbox"),
+                "the refusal must say why: {err}"
+            );
+        }
+    }
+
+    /// Why (#9556): outside a sandbox the default daemon is still the answer
+    /// when no lock exists.
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn resolve_keeps_default_daemon_outside_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        let client = reqwest::Client::new();
+
+        assert_eq!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        assert_eq!(
+            resolve_daemon_url_probing(&client, None).await,
+            Ok(DEFAULT_DAEMON_URL.to_string())
+        );
+    }
+
+    /// Why (#9556 critic): an isolated process that inherited a home holding
+    /// the host daemon's lock read the live 127.0.0.1:7880 from it. The temp
+    /// `HOME` stands in for that host home; its lock names the default and a
+    /// live pid (this process).
+    /// Test: itself.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn isolated_resolver_ignores_a_host_lock_naming_the_default() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_ne!(resolve_daemon_url(None), DEFAULT_DAEMON_URL);
+        let err = resolve_daemon_url_probing(&reqwest::Client::new(), None)
+            .await
+            .expect_err("a host lock is not this sandbox's daemon");
+        assert!(
+            err.to_string()
+                .contains("no daemon reachable for this sandbox"),
+            "{err}"
+        );
+    }
+
+    /// Why (#9556 delta critic): the banner and statusline read the lock
+    /// through [`client_lock_url`]; with `TRUSTY_DATA_DIR_OVERRIDE` set and a
+    /// host lock in `HOME`, they showed the live daemon online. The temp
+    /// `HOME` stands in for the inherited home; its lock names the default and
+    /// a live pid (this process).
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn client_lock_url_ignores_a_host_lock_under_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_eq!(client_lock_url(), None, "a host lock is not this sandbox's");
+    }
+
+    /// Why (#9556 delta critic): outside isolation the filtered reader is
+    /// exactly `read_lock`'s address, the default included.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn client_lock_url_is_read_lock_outside_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_eq!(client_lock_url().as_deref(), Some(DEFAULT_DAEMON_URL));
+        assert_eq!(
+            client_lock_url(),
+            crate::core::daemon_identity::read_lock().map(|lock| lock.addr)
+        );
+    }
+
+    /// Why (#9556 critic): a lock under the sandbox's own `HOME` is how
+    /// `scripts/sandbox_daemon.sh` hands a client its daemon; it still wins.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn isolated_resolver_keeps_a_sandbox_home_lock() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        let sandbox_daemon = "http://127.0.0.1:17881";
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), sandbox_daemon, "");
+
+        assert_eq!(resolve_daemon_url(None), sandbox_daemon);
+    }
+
+    /// Why (#9556 critic): the host-lock rule must reject both the default
+    /// address and a lock under the account home, and nothing else.
+    /// Test: itself.
+    #[test]
+    fn host_lock_is_judged_by_address_and_home() {
+        let sandbox = crate::test_support::hermetic_temp_dir();
+        let account = crate::test_support::hermetic_temp_dir();
+        let (sandbox, account) = (Some(sandbox.path()), Some(account.path()));
+        let other = "http://127.0.0.1:17881";
+        assert!(!lock_is_hosts(other, sandbox, account));
+        assert!(lock_is_hosts(other, account, account));
+        assert!(lock_is_hosts(DEFAULT_DAEMON_URL, sandbox, account));
+        assert!(lock_is_hosts("http://127.0.0.1:7880/", sandbox, account));
+        assert!(lock_is_hosts(other, None, account));
+        assert!(lock_is_hosts(other, sandbox, None));
+    }
+
+    /// Why (#9556 critic): with isolation on and no recorded console, the
+    /// banner's console probe target is "none", never the host's 7788.
+    /// Test: itself.
+    #[test]
+    fn console_probe_target_is_none_under_isolation() {
+        assert_eq!(console_addr_to_probe_from(None, true), None);
+        assert_eq!(
+            console_addr_to_probe_from(None, false).as_deref(),
+            Some(DEFAULT_CONSOLE_ADDR)
+        );
+        assert_eq!(
+            console_addr_to_probe_from(Some(" 127.0.0.1:9911\n".into()), true).as_deref(),
+            Some("127.0.0.1:9911")
+        );
+    }
+
+    /// Why (#9556): `tm start` and the bare-`tm` autostart must fail closed in
+    /// a sandbox rather than spawn a daemon on the host default, and still
+    /// spawn outside one.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn daemon_spawn_refused_only_under_isolation() {
+        let data = crate::test_support::hermetic_temp_dir();
+        {
+            let _sandbox = EnvVarGuard::set(SANDBOX_ENV_VAR, "1");
+            let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+            assert_eq!(
+                refuse_daemon_spawn_when_isolated(),
+                Err(DaemonUrlError::NoSandboxDaemon)
+            );
+        }
+        {
+            let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+            let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+            assert_eq!(
+                refuse_daemon_spawn_when_isolated(),
+                Err(DaemonUrlError::NoSandboxDaemon)
+            );
+        }
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        assert_eq!(refuse_daemon_spawn_when_isolated(), Ok(()));
+    }
+
+    /// Why (#9556): bare `tm` turns the sentinel back into the refusal instead
+    /// of reading a refused request as a slow daemon.
+    /// Test: itself.
+    #[test]
+    fn isolated_no_daemon_url_maps_back_to_the_refusal() {
+        assert_eq!(
+            refuse_isolated_no_daemon(ISOLATED_NO_DAEMON_URL),
+            Err(DaemonUrlError::NoSandboxDaemon)
+        );
+        assert_eq!(refuse_isolated_no_daemon(DEFAULT_DAEMON_URL), Ok(()));
+    }
+
+    /// Why (#9556): a fail-open caller handed the sentinel reaches nothing.
+    /// Test: itself.
+    #[tokio::test]
+    async fn isolated_no_daemon_url_is_refused_before_any_io() {
+        let err = reqwest::Client::new()
+            .get(format!("{ISOLATED_NO_DAEMON_URL}/health"))
+            .send()
+            .await
+            .expect_err("a non-HTTP scheme is never sent");
+        assert!(
+            err.is_builder(),
+            "refused while building, not on the wire: {err}"
+        );
+        assert!(err.to_string().contains(ISOLATED_NO_DAEMON_URL), "{err}");
     }
 }

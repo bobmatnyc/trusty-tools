@@ -218,18 +218,28 @@ fn already_running_line(_check_url: &str) -> String {
 /// covered by `launchd_probe`'s `daemon_label_*` and `cli_spawn_refusal_*` tests;
 /// the spawn/wait path is exercised by running `tm start` against a clean
 /// environment.
+/// The URL `tm start` health-checks: the lock's, else the one it was given.
+///
+/// Why (#9556): in a sandbox with no lock the resolver refuses; that refusal
+/// is not a lock, so an explicit `--url` naming a live sandbox daemon must be
+/// the one checked.
+/// What: `lock` when it is `Ok` and not [`trusty_mpm::core::DEFAULT_DAEMON_URL`]
+/// (or `url` is that default too), else `url`.
+/// Test: `start_checks_the_given_url_when_the_resolver_refuses`.
+fn start_check_url(lock: Result<String, trusty_mpm::core::DaemonUrlError>, url: &str) -> String {
+    use trusty_mpm::core::DEFAULT_DAEMON_URL;
+    match lock {
+        // #9556: only a real lock counts; the isolated refusal is not one.
+        Ok(lock_url) if lock_url != DEFAULT_DAEMON_URL || url == DEFAULT_DAEMON_URL => lock_url,
+        _ => url.to_string(),
+    }
+}
+
 pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Prefer the lock file URL — it's the address our daemon actually bound to,
     // not whatever default URL the CLI was given (which may point at a different
     // process on the same port, e.g. code-intelligence on :7880).
-    let lock_url = trusty_mpm::core::resolve_daemon_url(None);
-    let check_url = if lock_url != trusty_mpm::core::DEFAULT_DAEMON_URL
-        || url == trusty_mpm::core::DEFAULT_DAEMON_URL
-    {
-        lock_url.clone()
-    } else {
-        url.to_string()
-    };
+    let check_url = start_check_url(trusty_mpm::core::try_resolve_daemon_url(None), url);
     if daemon_healthy(client, &check_url).await {
         // #6869: the resolved URL goes to the log, not to the operator.
         tracing::debug!("daemon already running at {check_url}");
@@ -249,6 +259,8 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
         anyhow::bail!(msg);
     }
+    // #9556: a sandbox never spawns a plain `tm daemon` on the host default.
+    trusty_mpm::core::refuse_daemon_spawn_when_isolated()?;
 
     // Resolve the log file under `~/.trusty-mpm/`, creating the dir if absent.
     let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
@@ -336,6 +348,8 @@ pub(crate) async fn restart(client: &reqwest::Client, url: &str) -> anyhow::Resu
     if let Some(msg) = crate::commands::launchd_probe::cli_spawn_refusal() {
         anyhow::bail!(msg);
     }
+    // #9556: refuse before the host-wide `pkill`, not only before the spawn.
+    trusty_mpm::core::refuse_daemon_spawn_when_isolated()?;
     if daemon_healthy(client, url).await {
         print!("Stopping daemon... ");
         use std::io::Write as _;
@@ -552,6 +566,28 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#9556 critic): an isolated `tm start --url <live sandbox>` with no
+    /// lock checked the refusal sentinel's health instead of its own URL.
+    /// Test: itself.
+    #[test]
+    fn start_checks_the_given_url_when_the_resolver_refuses() {
+        use trusty_mpm::core::{DEFAULT_DAEMON_URL, DaemonUrlError};
+        let sandbox = "http://127.0.0.1:17881";
+        assert_eq!(
+            start_check_url(Err(DaemonUrlError::NoSandboxDaemon), sandbox),
+            sandbox
+        );
+        // A real lock still wins over a default `url`, as before.
+        assert_eq!(
+            start_check_url(Ok(sandbox.to_string()), DEFAULT_DAEMON_URL),
+            sandbox
+        );
+        assert_eq!(
+            start_check_url(Ok(DEFAULT_DAEMON_URL.to_string()), sandbox),
+            sandbox
+        );
+    }
 
     /// Why (#6869): `tm start` was the third site still printing the daemon's
     /// address, after the welcome banner and the `tm daemon` startup guard.

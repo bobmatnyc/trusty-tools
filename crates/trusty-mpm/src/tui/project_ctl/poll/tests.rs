@@ -58,7 +58,9 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
 // winning a port race — see `crate::test_support::dead_loopback_url`.
 use crate::test_support::dead_loopback_url;
 
+// #9556: serial — resolution reads TRUSTY_DATA_DIR_OVERRIDE, which serial tests set.
 #[tokio::test]
+#[serial_test::serial]
 async fn poll_marks_unreachable_clears_state() {
     let discovered = crate::core::resolve_daemon_url(None);
     let probe = DaemonClient::new(discovered.clone());
@@ -87,6 +89,22 @@ async fn poll_marks_unreachable_clears_state() {
     assert!(!state.daemon_reachable);
     assert!(state.projects.is_empty());
     assert!(state.sessions_by_project.is_empty());
+}
+
+/// Why (#9556): the multipane TUI (`tm tui`'s default) re-discovered after one
+/// failed poll and replaced an explicit `--url` with the lock-file or default
+/// daemon.
+/// Test: itself.
+#[test]
+fn rediscover_keeps_explicit_url() {
+    // Never dialled: re-discovery only compares and re-points URLs.
+    let dead = "http://127.0.0.1:1".to_string();
+    let mut client = DaemonClient::new(dead.clone()).with_pinned_base_url(true);
+    assert!(
+        !rediscover(&mut client, false),
+        "a pinned URL is never re-resolved"
+    );
+    assert_eq!(client.base_url(), dead);
 }
 
 fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
