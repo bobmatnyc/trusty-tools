@@ -10,7 +10,7 @@
 
 use super::format::{dir_size_bytes, fmt_bytes, format_with_commas};
 use colored::Colorize;
-use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::daemon_client::{DaemonCallError, DaemonClient};
 use trusty_search::service::rpc::reads::METHOD_INDEX_STATUS;
 
 /// Outcome of a single doctor check.
@@ -243,26 +243,35 @@ pub fn check_lock_file(data_dir: &std::path::Path, daemon_running: bool) -> Chec
     }
 }
 
-/// The index names `search.indexes.list` reports; empty when the call fails.
-pub async fn fetch_index_names(client: &DaemonClient) -> Vec<String> {
-    let list_body = super::list::fetch_index_list(client)
-        .await
-        .unwrap_or_else(|_| serde_json::json!({"indexes": []}));
+/// The index names `search.indexes.list` reports.
+///
+/// # Errors
+///
+/// The list call's own failure, so no caller reads it as "no indexes".
+// #9214: a failed list used to degrade to `[]`; it now propagates.
+pub async fn fetch_index_names(client: &DaemonClient) -> anyhow::Result<Vec<String>> {
+    let list_body = super::list::fetch_index_list(client).await?;
     let empty_arr: Vec<serde_json::Value> = Vec::new();
-    list_body
+    Ok(list_body
         .get("indexes")
         .and_then(|v| v.as_array())
         .unwrap_or(&empty_arr)
         .iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
-        .collect()
+        .collect())
 }
 
+/// One index's `search.index.status` body, or the call's failure.
+pub type IndexStatus = Result<serde_json::Value, DaemonCallError>;
+
 /// Concurrently fetch `search.index.status` for each name and return sorted.
+///
+/// Each row keeps its own call result, so a caller decides whether a failed
+/// read degrades or is reported (#9214: never read as a zero-chunk index).
 pub async fn fetch_index_statuses(
     client: &DaemonClient,
     names: &[String],
-) -> Vec<(String, serde_json::Value)> {
+) -> Vec<(String, IndexStatus)> {
     let mut joinset = tokio::task::JoinSet::new();
     for name in names {
         let n = name.clone();
@@ -270,12 +279,11 @@ pub async fn fetch_index_statuses(
         joinset.spawn(async move {
             let body = c
                 .call(METHOD_INDEX_STATUS, serde_json::json!({ "index_id": n }))
-                .await
-                .unwrap_or_else(|_| serde_json::json!({}));
+                .await;
             (n, body)
         });
     }
-    let mut per_index: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut per_index: Vec<(String, IndexStatus)> = Vec::new();
     while let Some(j) = joinset.join_next().await {
         if let Ok(pair) = j {
             per_index.push(pair);

@@ -216,7 +216,7 @@ async fn probe_daemon_health_is_none_when_the_socket_is_absent() {
     let dir = tempfile::tempdir().expect("scratch dir");
     let client = DaemonClient::at(dir.path().join("absent.sock"));
     assert!(probe_daemon_health(&client).await.is_none());
-    assert!(fetch_index_names(&client).await.is_empty());
+    assert!(fetch_index_names(&client).await.is_err());
 }
 
 /// Issue #3697: this test previously cleared the process-global

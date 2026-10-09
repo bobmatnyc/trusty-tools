@@ -163,6 +163,12 @@ impl DoctorCheck for LockFileCheck {
     }
 }
 
+/// Lists the indexes and records the empty ones for `--fix`.
+///
+/// A failed list is an Error and a failed status read a Warn; neither feeds
+/// `--fix` (#9214).
+/// Test: `indexes_check_reports_a_failed_list_and_queues_no_reindex`,
+/// `indexes_check_never_reads_a_failed_status_as_empty`.
 pub(crate) struct IndexesCheck;
 
 #[async_trait]
@@ -178,14 +184,29 @@ impl DoctorCheck for IndexesCheck {
             )];
         }
 
-        let names = fetch_index_names(&state.client).await;
+        // #9214: a failed list is reported as such, never "No indexes registered".
+        let names = match fetch_index_names(&state.client).await {
+            Ok(names) => names,
+            Err(e) => return vec![CheckResult::Error(format!("Indexes: list failed: {e}"))],
+        };
         if names.is_empty() {
             return vec![CheckResult::Warn(
                 "No indexes registered — run `trusty-search index` to add a project".into(),
             )];
         }
 
-        let per_index = fetch_index_statuses(&state.client, &names).await;
+        // #9214: a failed status read is reported, never counted as a
+        // zero-chunk index (which `--fix` would reindex).
+        let mut results = Vec::new();
+        let mut per_index = Vec::new();
+        for (name, status) in fetch_index_statuses(&state.client, &names).await {
+            match status {
+                Ok(body) => per_index.push((name, body)),
+                Err(e) => results.push(CheckResult::Warn(format!(
+                    "Index '{name}': status read failed: {e}"
+                ))),
+            }
+        }
         let zero_count = per_index
             .iter()
             .filter(|(_, b)| b.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0) == 0)
@@ -196,7 +217,8 @@ impl DoctorCheck for IndexesCheck {
         print_index_breakdown(&per_index, &mut empty_buf);
         state.push_empty_indexes(empty_buf);
 
-        vec![summary]
+        results.insert(0, summary);
+        results
     }
 }
 
@@ -513,5 +535,57 @@ mod tests {
             ),
             other => panic!("expected Ok device note, got {other:?}"),
         }
+    }
+
+    /// A mock daemon refusing `failing` and answering every other method with
+    /// a one-index list or an empty status body.
+    async fn daemon_failing(failing: &'static str) -> crate::commands::mock_socket::MockDaemon {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        crate::commands::mock_socket::mock_daemon(move |method, _| {
+            if method == failing {
+                Err(trusty_common::uds::server::RpcError::new(
+                    trusty_common::uds::server::CODE_INTERNAL_ERROR,
+                    "registry unreadable",
+                ))
+            } else if method == METHOD_INDEXES_LIST {
+                Ok(serde_json::json!({"indexes": ["a"]}))
+            } else {
+                Ok(serde_json::json!({}))
+            }
+        })
+        .await
+    }
+
+    /// #9214: a failed list is an Error naming the cause, not "No indexes
+    /// registered", and queues nothing for `--fix`.
+    #[tokio::test]
+    async fn indexes_check_reports_a_failed_list_and_queues_no_reindex() {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        let daemon = daemon_failing(METHOD_INDEXES_LIST).await;
+        let state = DoctorState::new(daemon.client.clone());
+        state.set_daemon_health(true, "9.9.9".into(), None);
+        let results = IndexesCheck.run(&state).await;
+        assert!(
+            matches!(results.as_slice(), [CheckResult::Error(m)] if m.contains("registry unreadable")),
+            "{results:?}"
+        );
+        assert!(state.take_empty_indexes().is_empty());
+    }
+
+    /// #9214: a failed status read is a Warn, never a zero-chunk index that
+    /// `--fix` would reindex.
+    #[tokio::test]
+    async fn indexes_check_never_reads_a_failed_status_as_empty() {
+        let daemon = daemon_failing(trusty_search::service::rpc::reads::METHOD_INDEX_STATUS).await;
+        let state = DoctorState::new(daemon.client.clone());
+        state.set_daemon_health(true, "9.9.9".into(), None);
+        let results = IndexesCheck.run(&state).await;
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(r, CheckResult::Warn(m) if m.contains("status read failed"))),
+            "{results:?}"
+        );
+        assert!(state.take_empty_indexes().is_empty());
     }
 }

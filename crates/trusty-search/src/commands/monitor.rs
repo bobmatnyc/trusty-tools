@@ -93,20 +93,25 @@ async fn fetch_search_data() -> Result<SearchData> {
 /// [`fetch_search_data`] against `client`.
 ///
 /// Why: lets a test point the read at a socket of its choosing.
-/// What: `search.health` gives the version and uptime and must answer; the
-/// index list and each `search.index.status` degrade to an empty row, as the
-/// HTTP read did. Rows are sorted by id.
-/// Test: `fetch_search_data_names_the_socket_when_no_daemon_answers`.
+/// What: `search.health` gives the version and uptime and must answer, and so
+/// must `search.indexes.list`; either failure is an error naming its cause. A
+/// failed `search.index.status` degrades to an all-zero row, as the HTTP read
+/// did. Rows are sorted by id.
+/// Test: `fetch_search_data_names_the_socket_when_no_daemon_answers`,
+/// `fetch_search_data_fails_when_the_index_list_fails`.
 async fn fetch_search_data_from(client: &DaemonClient) -> Result<SearchData> {
     let health = client
         .health()
         .await
         .map_err(|e| anyhow::anyhow!("could not reach trusty-search daemon: {e}"))?;
-    let names = super::doctor_checks::fetch_index_names(client).await;
+    // #9214: a failed index list is an error, never "online, 0 indexes".
+    let names = super::doctor_checks::fetch_index_names(client)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not list trusty-search indexes: {e}"))?;
     let indexes = super::doctor_checks::fetch_index_statuses(client, &names)
         .await
         .into_iter()
-        .map(|(id, body)| index_row(id, &body))
+        .map(|(id, body)| index_row(id, &body.unwrap_or_default()))
         .collect();
     Ok(SearchData {
         version: health
@@ -316,6 +321,29 @@ mod tests {
             .expect_err("no daemon answers")
             .to_string();
         assert!(err.contains(&socket.display().to_string()), "{err}");
+    }
+
+    /// #9214: a failed `search.indexes.list` is an error naming the cause,
+    /// never an "online, 0 indexes" snapshot.
+    #[tokio::test]
+    async fn fetch_search_data_fails_when_the_index_list_fails() {
+        use trusty_search::service::rpc::reads::METHOD_INDEXES_LIST;
+        let daemon = crate::commands::mock_socket::mock_daemon(|method, _| {
+            if method == METHOD_INDEXES_LIST {
+                Err(trusty_common::uds::server::RpcError::new(
+                    trusty_common::uds::server::CODE_INTERNAL_ERROR,
+                    "registry unreadable",
+                ))
+            } else {
+                Ok(serde_json::json!({"version": "9.9.9", "uptime_secs": 1}))
+            }
+        })
+        .await;
+        let err = fetch_search_data_from(&daemon.client)
+            .await
+            .expect_err("a failed index list is an error")
+            .to_string();
+        assert!(err.contains("registry unreadable"), "{err}");
     }
 
     /// `index_row` reads the status fields and defaults the absent ones.
