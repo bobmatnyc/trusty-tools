@@ -196,13 +196,28 @@ fn host_faults_deny_all() {
             "channels:\n  version: 1\n  xoxb-1: a\n  xoxb-1: b\n".into(),
             |e| matches!(e, HostError::Malformed { .. }),
         ),
+        // #8454: a rejected projects entry is named by position, not value.
+        (
+            "token as a project entry",
+            HOST_ALL.replacen("projects: [/work/a, /work/b]", "projects: [xoxb-1]", 1),
+            |e| matches!(e, HostError::Project { .. }),
+        ),
+        // #8454: an unquoted duplicate key must not keep its key path.
+        (
+            "unquoted repeated key under a token key",
+            "channels:\n  xoxb-1:\n    1: a\n    1: b".into(),
+            |e| matches!(e, HostError::Malformed { .. }),
+        ),
     ];
     for (what, yaml, is) in cases {
         let result = host(&yaml);
         match &result {
             Err(e) => {
                 assert!(is(e), "{what}: wrong error {e:?}");
-                assert!(!e.to_string().contains("xoxb"), "{what}: value echoed: {e}");
+                assert!(
+                    !format!("{e} {e:?}").contains("xoxb"),
+                    "{what}: value echoed: {e:?}"
+                );
             }
             Ok(_) => panic!("{what}: loaded\n{yaml}"),
         }
