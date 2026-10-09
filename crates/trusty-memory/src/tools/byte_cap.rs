@@ -33,11 +33,16 @@
 //!
 //! Test: `byte_cap_tests.rs`.
 
-use anyhow::{anyhow, Result};
-use serde::Serialize;
-use serde_json::{Map, Value};
-
-use super::recall_projection::FIRST_FILTERABLE_LAYER;
+use serde_json::Value;
+// #9269: the fold is `server`-only; the table and `annotate_capped_tools` also
+// build under `mcp-schema`, because `tool_definitions_with` reads them.
+#[cfg(feature = "server")]
+use {
+    super::recall_projection::FIRST_FILTERABLE_LAYER,
+    anyhow::{anyhow, Result},
+    serde::Serialize,
+    serde_json::Map,
+};
 
 /// Default ceiling on a serialized tool response: 48 KiB.
 ///
@@ -57,6 +62,8 @@ const RECALL_HINT: &str =
     "a smaller `top_k`, a `min_score` floor, or `full: true` retrieves the rest";
 
 /// One capped tool: where its droppable entries live, and how its notice reads.
+// #9269: only the fold reads the per-entry fields.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
 struct CappedTool {
     /// MCP tool name, as the dispatcher and `tools/list` spell it.
     name: &'static str,
@@ -154,6 +161,7 @@ fn capped_tool(tool: &str) -> Option<&'static CappedTool> {
 /// [`apply`] needs them, and the dispatch itself consumes them.
 /// What: membership in [`CAPPED_TOOLS`].
 /// Test: `an_uncapped_tool_is_returned_untouched`.
+#[cfg(feature = "server")]
 pub(super) fn is_capped(tool: &str) -> bool {
     capped_tool(tool).is_some()
 }
@@ -162,7 +170,7 @@ pub(super) fn is_capped(tool: &str) -> bool {
 ///
 /// A hardcoded copy in a test passes while the table, the descriptors and the
 /// router disagree, which is the drift the test exists to catch.
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 pub(super) fn capped_tool_names() -> Vec<&'static str> {
     CAPPED_TOOLS.iter().map(|t| t.name).collect()
 }
@@ -177,6 +185,7 @@ pub(super) fn capped_tool_names() -> Vec<&'static str> {
 /// What: serializes with `serde_json` and returns the byte length, mapping a
 /// serialization failure onto an error the caller sees instead of a body.
 /// Test: `a_measurement_failure_returns_an_error_not_an_unmeasured_body`.
+#[cfg(feature = "server")]
 pub(super) fn measure<T: Serialize + ?Sized>(value: &T) -> Result<usize> {
     serde_json::to_string(value).map(|s| s.len()).map_err(|e| {
         anyhow!(
@@ -188,6 +197,7 @@ pub(super) fn measure<T: Serialize + ?Sized>(value: &T) -> Result<usize> {
 
 /// The effective ceiling for one call.
 #[derive(Clone, Copy)]
+#[cfg(feature = "server")]
 struct Bounds {
     ceiling: usize,
     /// `true` when the caller's `max_bytes` was above [`HARD_MAX_BYTES`].
@@ -196,6 +206,7 @@ struct Bounds {
     full: bool,
 }
 
+#[cfg(feature = "server")]
 impl Bounds {
     /// Read `max_bytes` and `full` off the tool arguments.
     ///
@@ -251,6 +262,7 @@ impl Bounds {
 /// withheld to keep this response under N bytes" about a response that is OVER
 /// N bytes is false.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg(feature = "server")]
 enum Fit {
     /// Everything fits.
     Whole,
@@ -263,6 +275,7 @@ enum Fit {
 
 /// One response mid-fold: the fields outside the entries array, the entries,
 /// and the ceiling they have to fit under.
+#[cfg(feature = "server")]
 struct Fold<'a> {
     spec: &'a CappedTool,
     base: Map<String, Value>,
@@ -281,6 +294,7 @@ struct Fold<'a> {
 ///
 /// Test: `identity_and_essential_hits_survive_a_cap_that_drops_l2`,
 /// `protected_hits_ship_over_the_ceiling_when_they_alone_exceed_it`.
+#[cfg(feature = "server")]
 fn is_protected(spec: &CappedTool, item: &Value) -> bool {
     spec.protect_layers
         && item
@@ -289,6 +303,7 @@ fn is_protected(spec: &CappedTool, item: &Value) -> bool {
             .is_some_and(|layer| layer < u64::from(FIRST_FILTERABLE_LAYER))
 }
 
+#[cfg(feature = "server")]
 impl Fold<'_> {
     /// How many entries may be dropped at all.
     fn droppable(&self) -> usize {
@@ -381,6 +396,7 @@ impl Fold<'_> {
 /// and never folding a non-empty result set to an empty one. Propagates a
 /// measurement failure instead of returning an unmeasured body.
 /// Test: `byte_cap_tests.rs`.
+#[cfg(feature = "server")]
 pub(super) fn apply(tool: &str, args: &Value, resp: &mut Value) -> Result<()> {
     let Some(spec) = capped_tool(tool) else {
         return Ok(());

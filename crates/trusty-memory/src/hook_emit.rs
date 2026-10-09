@@ -178,7 +178,7 @@ mod tests {
     /// [`post_hook_event_at`], flushes, and reads the row back through
     /// `memory.activity` filtered to `source=hook`.
     /// Test: itself.
-    #[cfg(feature = "daemon")]
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn hook_fired_activity_emit_smoke() {
         let daemon = crate::test_daemon::TestDaemon::start().await;

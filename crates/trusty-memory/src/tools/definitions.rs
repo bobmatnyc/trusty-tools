@@ -476,7 +476,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "required": []
                 }
             },
-            crate::console_metrics::descriptor()
+            // #9269: from the schema module, so `mcp-schema` builds it.
+            super::console_metrics_definitions::descriptor()
         ]
     });
     // spec-001 Phase 4 (issue #1722) + DOC-53 (2026-07-23): splice task and

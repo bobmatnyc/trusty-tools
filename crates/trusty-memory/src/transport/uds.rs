@@ -42,29 +42,29 @@
 //!
 //! Test: `uds_tests.rs` — `rpc_*`, over a real socket.
 
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use std::sync::Arc;
 
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use anyhow::Context as _;
 use anyhow::Result;
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use async_trait::async_trait;
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use serde_json::Value;
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use tracing::info;
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use trusty_common::uds::server::{serve_until, RpcError, RpcFallback, RpcRouter, RpcServeOptions};
 
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use crate::transport::methods::{activity, admin, chat, health, kg, palaces};
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use crate::transport::rpc::{dispatch, JsonRpcRequest};
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 use crate::{is_data_dir_override_active, AppState};
 
 /// The method `trusty-console`'s connector and `tctl`'s probe dial.
@@ -167,12 +167,12 @@ pub const MAX_FRAME_BYTES: u64 = 32 * 1024 * 1024;
 ///
 /// Test: `rpc_dispatcher_method_answers_through_the_fallback`,
 /// `rpc_reports_method_not_found_for_an_unknown_method`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 struct DispatchFallback {
     state: AppState,
 }
 
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 #[async_trait]
 impl RpcFallback for DispatchFallback {
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
@@ -203,7 +203,7 @@ impl RpcFallback for DispatchFallback {
 /// from an assumption into something an operator can read.
 ///
 /// Test: `rpc_reports_the_dispatcher_surface_size`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub fn dispatcher_method_count() -> usize {
     crate::transport::rpc::method_names().len()
 }
@@ -232,7 +232,7 @@ pub fn dispatcher_method_count() -> usize {
 /// `Copy` fields — not the stores themselves.
 ///
 /// Test: `rpc_router_registers_every_documented_method`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub fn build_router(state: AppState) -> RpcRouter {
     macro_rules! bind {
         ($router:expr, $name:expr, $req:ty, $handler:path) => {{
@@ -387,7 +387,7 @@ pub fn build_router(state: AppState) -> RpcRouter {
 /// makes a multi-minute `memory.dream_run` compatible with a 30-second guard
 /// against a peer that connects and never writes — and what lets `memory.chat`
 /// take as long as the model does between token frames.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 fn serve_options() -> RpcServeOptions {
     RpcServeOptions {
         max_frame_bytes: MAX_FRAME_BYTES,
@@ -428,7 +428,7 @@ pub fn socket_path() -> Result<PathBuf> {
 ///
 /// Test: `rpc_health_answers_over_a_real_socket`,
 /// `rpc_unlinks_its_socket_on_shutdown`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
     // Deliberately OUTSIDE `serve_with_shutdown`: it resolves the real `$HOME`
     // and the real data directory, so a test that drove it would delete a
@@ -464,7 +464,7 @@ pub async fn serve(state: AppState, socket: &Path) -> Result<()> {
 ///
 /// Test: `rpc_unlinks_its_socket_on_shutdown`,
 /// `rpc_serves_concurrent_connections`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub async fn serve_with_shutdown(
     state: AppState,
     socket: &Path,
@@ -533,7 +533,7 @@ pub async fn serve_with_shutdown(
 /// warns and names the budget.
 /// Test: `an_exit_flush_that_overruns_the_reserve_is_abandoned`,
 /// `a_prompt_exit_flush_is_not_cut_short`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 async fn flush_within_reserve<F>(flush: F, budget: std::time::Duration) -> bool
 where
     F: std::future::Future<Output = ()>,
@@ -566,7 +566,7 @@ where
 /// Deliberately NOT called from any test: it resolves the real data directory
 /// and the real `$HOME`. The removal itself is [`remove_if_present`], which is
 /// tested against a temp path.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 fn remove_retired_discovery_files() {
     if let Ok(dir) = trusty_common::resolve_data_dir("trusty-memory") {
         remove_if_present(&dir.join("http_addr"));
@@ -590,7 +590,7 @@ fn remove_retired_discovery_files() {
 /// silent — logging it would put a line in every start-up for a non-event.
 ///
 /// Test: `remove_if_present_deletes_a_stale_file_and_tolerates_an_absent_one`.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 fn remove_if_present(path: &Path) {
     match std::fs::remove_file(path) {
         Ok(()) => tracing::info!(
@@ -606,6 +606,6 @@ fn remove_if_present(path: &Path) {
     }
 }
 
-#[cfg(all(test, feature = "daemon"))]
+#[cfg(all(test, feature = "server"))]
 #[path = "uds_tests.rs"]
 mod tests;

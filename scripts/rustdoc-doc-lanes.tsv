@@ -77,7 +77,7 @@ LANE	features	trusty-common/content-resolver,trusty-common/integrity
 # reaches the module cleanly.
 LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
-LANE	features	trusty-memory/daemon
+LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server
 LANE	features	trusty-mpm/bedrock,trusty-mpm/daemon,trusty-mpm/manager-memory,trusty-mpm/mcp,trusty-mpm/slack,trusty-mpm/sm-memory,trusty-mpm/swagger-ui,trusty-mpm/telegram,trusty-mpm/tui
 LANE	features	trusty-review/http-server,trusty-review/mcp,trusty-review/report
 LANE	features	trusty-search/candle,trusty-search/clustering,trusty-search/ner,trusty-search/test-support

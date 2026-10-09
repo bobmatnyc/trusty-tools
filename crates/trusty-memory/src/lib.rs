@@ -16,6 +16,12 @@
 //! What: [`transport::uds::serve`] is the daemon body, and [`AppState`] carries
 //! the shared `PalaceRegistry`, the on-disk data root and a lazily-initialised
 //! embedder.
+//!
+//! Features (#9269, ADR-0066 D1.4): `server` (default; `daemon` is its alias)
+//! compiles the daemon, the CLI and every module above. `mcp-schema` compiles
+//! only `tools::tool_definitions*`, `openrpc` and `MemoryMcpService`. A
+//! `--no-default-features` build carries neither, and no trusty-mcp, clap or
+//! rusqlite; it keeps `socket_path` for clients.
 //! Test: `cargo test -p trusty-memory` — `transport::uds::tests` for the wire,
 //! `tests/serve_stdio_e2e.rs` for the bridge end to end.
 
@@ -23,20 +29,25 @@
 // so a broken intra-doc link is baked into that version forever and only a new
 // release can correct it. Deny keeps this crate at zero rather than letting the
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
-#![deny(rustdoc::broken_intra_doc_links)]
+// #9269: denied on the `server` build, the one docs.rs and that script
+// document; the slim builds drop the server items the prose links to.
+#![cfg_attr(feature = "server", deny(rustdoc::broken_intra_doc_links))]
 
-use crate::session_store_cache::SessionStoreCache;
-use anyhow::Result;
-use serde_json::{json, Value};
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::{broadcast, OnceCell, RwLock};
-use trusty_common::memory_core::embed::Embedder;
-use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
-use trusty_common::ChatProvider;
-use trusty_mcp::initialize_response;
+// #9269: everything below except `transport::socket_path`, `tools` and
+// `mcp_service` is the serving surface, compiled only under `server`.
+#[cfg(feature = "server")]
+use {
+    crate::session_store_cache::SessionStoreCache,
+    anyhow::Result,
+    std::net::SocketAddr,
+    std::path::PathBuf,
+    std::sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+    std::sync::{Arc, OnceLock},
+    tokio::sync::{broadcast, OnceCell, RwLock},
+    trusty_common::memory_core::embed::Embedder,
+    trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry},
+    trusty_common::ChatProvider,
+};
 
 /// Two-phase daemon readiness state (issues #910/#911, revised by #1970).
 ///
@@ -57,6 +68,7 @@ use trusty_mcp::initialize_response;
 ///       (`remember_succeeds_and_defers_embedding_while_state_is_warming`,
 ///       `recall_falls_back_to_bm25_and_l0_l1_while_warming`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "server")]
 pub enum DaemonReadiness {
     /// Embedder cold-init (and/or pin scan) still in progress.
     Warming = 0,
@@ -64,6 +76,7 @@ pub enum DaemonReadiness {
     Ready = 1,
 }
 
+#[cfg(feature = "server")]
 impl DaemonReadiness {
     /// Decode the raw atomic value.
     ///
@@ -81,48 +94,87 @@ impl DaemonReadiness {
     }
 }
 
+#[cfg(feature = "server")]
 pub mod activity;
+#[cfg(feature = "server")]
 pub mod attribution;
+#[cfg(feature = "server")]
 pub mod authz;
+#[cfg(feature = "server")]
 pub mod bm25_backfill;
+#[cfg(feature = "server")]
 pub mod bm25_index;
+#[cfg(feature = "server")]
 pub mod bm25_lane;
+#[cfg(feature = "server")]
 pub mod bm25_repair;
+#[cfg(feature = "server")]
 pub mod bootstrap;
+#[cfg(feature = "server")]
 pub mod dream_scheduler;
 // #9283: daily per-palace drawer-count history for the doctor stability check.
+#[cfg(feature = "server")]
 pub mod drawer_counts;
+#[cfg(feature = "server")]
 pub mod exit_runtime;
+#[cfg(feature = "server")]
 pub mod fd_metrics;
+#[cfg(feature = "server")]
 pub mod idle_evict;
+#[cfg(feature = "server")]
 pub mod worker_liveness;
 // #4001: stall detection for handle locks whose holders never register.
+#[cfg(feature = "server")]
 pub mod lock_stall;
+// #9269: `handle_message` moved out of this file to keep it under the
+// 500-SLOC cap once the feature gates landed; re-exported below.
+#[cfg(feature = "server")]
+mod mcp_message;
+#[cfg(feature = "server")]
+pub use mcp_message::handle_message;
 // Why (issue #226): `chat` drives an LLM provider and a tool loop that only
-//      the daemon serves. Gating it behind `daemon` is what lets a library
+//      the daemon serves. Gating it behind `server` (#9269) is what lets a library
 //      consumer linking only `MemoryMcpService` — trusty-agents — keep it out
 //      of its build graph.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub mod chat;
+#[cfg(feature = "server")]
 pub mod client;
+#[cfg(feature = "server")]
 pub mod commands;
+#[cfg(feature = "server")]
 pub mod console_metrics;
+#[cfg(feature = "server")]
 pub mod discovery;
+#[cfg(feature = "server")]
 mod events;
+#[cfg(feature = "server")]
 pub mod hook_emit;
+#[cfg(feature = "server")]
 pub mod kg_extract;
 // #5524: the single entry point every caller-supplied KG assert routes through.
+#[cfg(feature = "server")]
 pub mod kg_write;
+#[cfg(feature = "mcp-schema")]
 pub mod mcp_service;
+#[cfg(feature = "server")]
 pub mod messaging;
+#[cfg(feature = "mcp-schema")]
 pub mod openrpc;
+#[cfg(feature = "server")]
 pub mod palace_id_derive;
 // #6424: the durable per-palace "last used" stamp the console column reads.
+#[cfg(feature = "server")]
 pub mod palace_last_used;
+#[cfg(feature = "server")]
 pub mod project_root;
+#[cfg(feature = "server")]
 pub mod prompt_facts;
+#[cfg(feature = "server")]
 pub mod prompt_log;
+#[cfg(feature = "server")]
 pub mod service;
+#[cfg(feature = "server")]
 pub mod session_store_cache;
 /// Bounds on how much of the palace estate startup work holds open (#7106).
 ///
@@ -133,34 +185,42 @@ pub mod session_store_cache;
 /// What: [`startup_budget::StartupOpenGate`], the shared semaphore all three
 /// jobs draw on, and [`startup_budget::release_after_sweep`].
 /// Test: `cargo test -p trusty-memory -- startup_budget::`.
+#[cfg(feature = "server")]
 pub mod startup_budget;
+#[cfg(feature = "server")]
 pub mod startup_scan;
 // A real daemon on a temp socket, shared by every in-crate test that has to
 // prove a caller and the daemon agree (#6286). Never shipped.
-#[cfg(all(test, feature = "daemon"))]
+#[cfg(all(test, feature = "server"))]
 pub(crate) mod test_daemon;
+#[cfg(feature = "mcp-schema")]
 pub mod tools;
 pub mod transport;
+#[cfg(feature = "server")]
 pub mod wordnet_pos;
 
+#[cfg(feature = "server")]
 pub use activity::{ActivityEntry, ActivityFilter, ActivityLog, ActivitySource};
+#[cfg(feature = "server")]
 pub use attribution::{CreatorInfo, CreatorSource};
 
 // Re-export the event types so the crate's public API is unchanged after the
 // #1195 split (`trusty_memory::DaemonEvent`, etc.). `open_activity_log_with_fallback`
 // stays crate-internal but is re-exported so `AppState::new` and `lib_tests`
 // reach it by its bare name via `super::*`.
+#[cfg(feature = "server")]
 pub(crate) use events::open_activity_log_with_fallback;
 // #3434: test-only seam so `lib_tests` can force the tempdir-fallback path
 // via an explicit parameter instead of mutating the process-global `TMPDIR`.
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 pub(crate) use events::open_activity_log_with_fallback_in;
+#[cfg(feature = "server")]
 pub use events::{DaemonEvent, HookType, InjectionKind};
 
 // The daemon's serving surface. `run_http`, `run_http_dynamic`, `run_http_on`,
 // `bind_dynamic_port`, `http_addr_path` and `DEFAULT_HTTP_PORT` went with the
 // listener (#6286); `serve` and `socket_path` are what replace them.
-#[cfg(feature = "daemon")]
+#[cfg(feature = "server")]
 pub use transport::serve;
 pub use transport::socket_path;
 
@@ -180,6 +240,7 @@ pub use transport::socket_path;
 /// `is_data_dir_override_inactive_when_unset`,
 /// `is_data_dir_override_inactive_when_blank`.
 #[inline]
+#[cfg(feature = "server")]
 pub fn is_data_dir_override_active() -> bool {
     matches!(
         std::env::var(trusty_common::DATA_DIR_OVERRIDE_ENV),
@@ -196,6 +257,7 @@ pub fn is_data_dir_override_active() -> bool {
 /// `drawer_content_preview` convention so dashboard rows render uniformly.
 /// What: 80 characters; longer prompts are truncated with a trailing `…`.
 /// Test: `hook_excerpt_truncates_long_prompts`.
+#[cfg(feature = "server")]
 pub const HOOK_PROMPT_EXCERPT_CHARS: usize = 80;
 
 /// Reduce a triggering prompt to the short excerpt embedded on a
@@ -209,6 +271,7 @@ pub const HOOK_PROMPT_EXCERPT_CHARS: usize = 80;
 /// returns an empty string.
 /// Test: `hook_excerpt_truncates_long_prompts`,
 /// `hook_excerpt_collapses_whitespace`.
+#[cfg(feature = "server")]
 pub fn hook_prompt_excerpt(prompt: &str) -> String {
     let normalised: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalised.chars().count() <= HOOK_PROMPT_EXCERPT_CHARS {
@@ -222,7 +285,9 @@ pub fn hook_prompt_excerpt(prompt: &str) -> String {
     }
 }
 
+#[cfg(feature = "mcp-schema")]
 pub use mcp_service::MemoryMcpService;
+#[cfg(feature = "mcp-schema")]
 pub use tools::MemoryMcpServer;
 
 /// Resolve the directory that actually holds the per-palace subdirectories.
@@ -244,6 +309,7 @@ pub use tools::MemoryMcpServer;
 /// `load_palaces_from_disk`) consistent without forcing a data migration.
 /// Test: `tests::resolve_palace_registry_dir_prefers_palaces_subdir` and
 /// `resolve_palace_registry_dir_falls_back_to_data_dir`.
+#[cfg(feature = "server")]
 pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
     // Issue #1939: the subdir-choice logic is hoisted into trusty-common
     // (`palace_alias::palace_registry_dir_from`) so trusty-mpm's alias-registration
@@ -269,6 +335,7 @@ pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
 /// embedder is reached via [`AppState::embedder`].
 /// Test: `app_state_default_constructs` confirms construction without panic.
 #[derive(Clone)]
+#[cfg(feature = "server")]
 pub struct AppState {
     pub version: String,
     /// What machine this daemon is on, and the memory budget that follows
@@ -689,6 +756,7 @@ pub struct AppState {
     pub write_pipeline_budget: std::time::Duration,
 }
 
+#[cfg(feature = "server")]
 impl AppState {
     /// Construct an `AppState` rooted at the given on-disk data directory.
     ///
@@ -1445,6 +1513,7 @@ impl AppState {
     }
 }
 
+#[cfg(feature = "server")]
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
@@ -1455,108 +1524,9 @@ impl std::fmt::Debug for AppState {
     }
 }
 
-/// Handle a single MCP JSON-RPC message and produce its response.
-///
-/// Why: Pulled out of the stdio loop so unit tests can drive every method
-/// without touching real stdin/stdout.
-/// What: Routes `initialize`, `tools/list`, `tools/call`, `ping`, and the
-/// `notifications/initialized` notification (which returns `Value::Null`).
-/// Test: See unit tests below — initialize/list/call all return expected
-/// JSON-RPC envelopes; notifications return `Null` (no response written).
-pub async fn handle_message(state: &AppState, msg: Value) -> Value {
-    let id = msg.get("id").cloned().unwrap_or(Value::Null);
-    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-
-    match method {
-        "initialize" => {
-            let extra = state
-                .default_palace
-                .as_ref()
-                .map(|dp| json!({ "default_palace": dp }));
-            let result = initialize_response("trusty-memory", &state.version, extra);
-            // Why (issue #42): prompt-facts now flow through the
-            // per-message `get_prompt_context` tool rather than MCP
-            // prompts, so we no longer advertise the `prompts` capability.
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": result,
-            })
-        }
-        // Notifications must NOT receive a response.
-        "notifications/initialized" | "notifications/cancelled" => Value::Null,
-        "tools/list" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": tools::tool_definitions_with(state.default_palace.is_some())
-        }),
-        // OpenRPC 1.3.2 discovery — see `openrpc.rs`. Returns the full
-        // service description so orchestrators (trusty-agents, etc.) can
-        // introspect every tool and its required `memory.read`/`memory.write`
-        // scope without bespoke per-server adapters.
-        "rpc.discover" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": openrpc::build_discover_response(
-                &state.version,
-                state.default_palace.is_some(),
-            ),
-        }),
-        "tools/call" => {
-            let params = msg.get("params").cloned().unwrap_or_default();
-            let tool_name = params
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let args = params.get("arguments").cloned().unwrap_or_default();
-            match tools::dispatch_tool(state, &tool_name, args).await {
-                Ok(content) => {
-                    // Why: tools that return a bare JSON string (e.g.
-                    // `get_prompt_context` returning the formatted
-                    // Markdown block) should surface as plain text in the
-                    // MCP `content[0].text` field — wrapping in
-                    // `Value::to_string()` would re-quote the payload and
-                    // force every caller to strip outer quotes.
-                    let text = match &content {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "content": [{"type": "text", "text": text}]
-                        }
-                    })
-                }
-                Err(e) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    // Why: anyhow's `{:#}` alternate format walks the full
-                    // `Caused by:` chain so MCP clients see actionable
-                    // detail (e.g. "PalaceHandle::remember_with_options:
-                    // filter rejected: too short") instead of just the
-                    // outermost context label.
-                    "error": {"code": -32603, "message": format!("{e:#}")}
-                }),
-            }
-        }
-        "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": format!("Method not found: {method}")
-            }
-        }),
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod lib_tests;
 
 /// #5937: every env-writing lib test holds `commands::env_test_lock()`.
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod env_lock_ratchet_tests;

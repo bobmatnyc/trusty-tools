@@ -28,17 +28,24 @@
 //!
 //! Test: `uds::tests` for the wire, `rpc::tests` for the dispatcher.
 
+// #9269: the dispatcher and the folded handlers run against `AppState`, so they
+// are part of the `server` surface.
+#[cfg(feature = "server")]
 pub mod api_error;
+#[cfg(feature = "server")]
 pub mod methods;
+#[cfg(feature = "server")]
 pub mod rpc;
 pub mod uds;
 
+#[cfg(feature = "server")]
 pub use api_error::{ApiError, ErrorKind, CODE_NOT_FOUND, CODE_REFUSED};
+#[cfg(feature = "server")]
 pub use rpc::{dispatch, JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 pub use uds::{socket_path, FOLDED_METHODS, METHOD_HEALTH, STREAM_METHODS};
-// The serving half needs the `daemon` feature: it registers `memory.chat`, whose
-// handler lives in the `daemon`-gated `crate::chat`. A slim library consumer
-// (trusty-agents links `MemoryMcpService` with `default-features = false`) still
-// gets `socket_path` and the method-name tables, which is what a CLIENT needs.
-#[cfg(feature = "daemon")]
+// The serving half needs the `server` feature: it registers `memory.chat`, whose
+// handler lives in the `server`-gated `crate::chat`. A slim library consumer
+// (`default-features = false`, with or without `mcp-schema`) still gets
+// `socket_path` and the method-name tables, which is what a CLIENT needs.
+#[cfg(feature = "server")]
 pub use uds::{build_router, serve};

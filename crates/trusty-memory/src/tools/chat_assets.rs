@@ -1,12 +1,17 @@
 //! Explicit asset capability and session-owned image RPCs (#7370).
-use crate::AppState;
-use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::store::chat_sessions::ChatImageAsset;
+// #9269: the handler is `server`-only; `definitions` also builds under `mcp-schema`.
+#[cfg(feature = "server")]
+use {
+    crate::AppState,
+    anyhow::{Context, Result},
+    trusty_common::memory_core::store::chat_sessions::ChatImageAsset,
+};
 
 /// Why: durable image bytes belong to trusty-memory rather than an assistant-local store.
 /// What: dispatch versioned capability, bounded image creation and session-owned reads in the resolved palace.
 /// Test: trusty-common `asset_ownership_and_restart_are_enforced` exercises the delegated storage boundary.
+#[cfg(feature = "server")]
 pub(crate) async fn handle(state: &AppState, operation: &str, args: Value) -> Result<Value> {
     if operation == "chat_asset_capabilities" {
         return Ok(json!({"version":1,"typed_history_attachments":true,"max_image_bytes":5242880}));

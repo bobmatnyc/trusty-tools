@@ -624,14 +624,19 @@ This crate has no embedded UI and no HTTP listener
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `daemon` | **enabled** | Compiles the socket-serving surface (`transport::uds`, `serve` / `start`). Disable with `default-features = false` when embedding only the in-process MCP tools (e.g. from `trusty-agents`). Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
+| `server` | **enabled** | Compiles the daemon, the CLI and both binaries: the socket-serving surface (`transport::uds`, `serve` / `start`), the tool handlers and every server module. Implies `mcp-schema`. Added by [#9269](https://github.com/bobmatnyc/trusty-tools/issues/9269) ([ADR-0066](https://github.com/bobmatnyc/trusty-tools/blob/main/docs/adr/0066-trusty-memory-1x-compatibility-contract.md) D1.4). |
+| `daemon` | via `server` | Alias of `server`, kept for all of 1.x. Named `axum-server` before [#6286](https://github.com/bobmatnyc/trusty-tools/issues/6286) removed the HTTP listener the old name described. |
+| `mcp-schema` | via `server` | Compiles only the MCP tool schema (`tools::tool_definitions*`, `openrpc`) and `MemoryMcpService`, for a host that merges the schema into its own `rpc.discover` without linking the daemon (e.g. `trusty-agents`). |
+
+A `--no-default-features` build carries no trusty-mcp, clap or rusqlite and
+compiles no binary.
 
 ```toml
-# Full daemon build — no change needed (daemon is on by default)
+# Full daemon build — no change needed (server is on by default)
 trusty-memory = { workspace = true }
 
-# rlib consumer — omit the socket-serving surface
-trusty-memory = { workspace = true, default-features = false }
+# rlib consumer that merges the MCP schema — no serving surface
+trusty-memory = { workspace = true, default-features = false, features = ["mcp-schema"] }
 ```
 
 ## Migration

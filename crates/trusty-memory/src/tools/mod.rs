@@ -7,6 +7,10 @@
 //! real `PalaceRegistry` + retrieval / KG APIs.
 //! Test: `cargo test -p trusty-memory-mcp` validates the schema and dispatch.
 //!
+//! #9269: the `*_definitions` schema modules (and the `byte_cap` table the
+//! schema reads) build under `mcp-schema`; the handlers and the dispatcher
+//! build under `server` only.
+//!
 //! Tools exposed:
 //! - `memory_remember(palace, text, room?, tags?)` -> drawer_id
 //! - `memory_recall(palace, query, top_k?)`        -> Vec<Drawer> (L0+L1+L2)
@@ -27,85 +31,109 @@
 //! - `wing_create(palace, label)`                   -> wing_id (idempotent)
 //! - `wing_rename(palace, wing, new_label)`         -> WingSummary
 
+#[cfg(feature = "server")]
 pub mod bm25;
 // #7493: the serialized-response byte ceiling every result-returning tool
 // folds to, applied once in `dispatch_tool`.
 mod byte_cap;
 mod chat_assets;
 pub mod chat_definitions;
+// #9269: the `console_metrics` descriptor, beside the other schemas.
+#[cfg(feature = "server")]
 pub mod chat_ops;
+pub mod console_metrics_definitions;
 pub mod definitions;
+#[cfg(feature = "server")]
 pub mod dream_ops;
 // #5000 / #4786: answer "is this findable?" per id and per estate.
+#[cfg(feature = "server")]
 pub mod embed_audit;
 pub mod embed_audit_definitions;
+#[cfg(feature = "server")]
 pub mod helpers;
+#[cfg(feature = "server")]
 pub mod kg_ops;
+#[cfg(feature = "server")]
 pub mod memory_ops;
 // #6318: the no-palace fallback every palace-scoped READ tool shares.
+#[cfg(feature = "server")]
 pub mod palace_index;
+#[cfg(feature = "server")]
 pub mod palace_ops;
 // Owner ruling 2026-09-14: the recall read family, split out of `memory_ops`
 // at the 500-SLOC cap, plus the projection that shapes what a hit shows.
+#[cfg(feature = "server")]
 pub mod recall_ops;
+#[cfg(feature = "server")]
 pub mod recall_projection;
 // #8246 / #9143: stale-snapshot demotion and the user-scope rulings leg.
+#[cfg(feature = "server")]
 pub(crate) mod recall_rank;
+#[cfg(feature = "server")]
 pub mod recall_rulings;
 // #9421: `superseded_by` demotion, read from the palace KG.
+#[cfg(feature = "server")]
 pub(crate) mod recall_supersede;
 // #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
+#[cfg(feature = "server")]
 pub(crate) mod recall_rulings_floor;
 pub mod room_definitions;
+#[cfg(feature = "server")]
 pub mod room_ops;
 pub mod task_definitions;
+#[cfg(feature = "server")]
 pub mod task_ops;
 // ADR-0027 T9 (#4809): the wing surface ships WITH the wing entity — a level
 // nobody reads is the defect the ADR exists to correct.
 pub mod wing_definitions;
+#[cfg(feature = "server")]
 pub mod wing_ops;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
 // resolving exactly as they did against the former monolithic module.
+#[cfg(feature = "server")]
 pub use bm25::{spawn_bm25_index_worker, Bm25IndexRequest, BM25_INDEX_QUEUE_CAPACITY};
 pub use definitions::{tool_definitions, tool_definitions_with, MemoryMcpServer};
+#[cfg(feature = "server")]
 pub(crate) use helpers::{auto_extract_and_assert, room_label};
 
 // Re-exports used only by the in-crate test module (`super::*`).
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 pub(crate) use bm25::{bm25_hits_to_recall_results, bm25_index_enqueue};
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 pub(crate) use helpers::{blocklist_gate, content_gate, dedup_gate, open_palace_handle};
 
-use crate::AppState;
-use anyhow::Result;
-use serde_json::Value;
-
-use chat_ops::{
-    handle_chat_session_add_turn, handle_chat_session_create, handle_chat_session_delete,
-    handle_chat_session_get, handle_chat_session_list, handle_chat_session_recall,
-    handle_chat_turn_append,
+#[cfg(feature = "server")]
+use {
+    crate::AppState,
+    anyhow::Result,
+    chat_ops::{
+        handle_chat_session_add_turn, handle_chat_session_create, handle_chat_session_delete,
+        handle_chat_session_get, handle_chat_session_list, handle_chat_session_recall,
+        handle_chat_turn_append,
+    },
+    dream_ops::{handle_dream_consolidate_room, handle_palace_dream},
+    kg_ops::{
+        handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
+        handle_kg_bootstrap, handle_kg_gaps, handle_kg_list_subjects, handle_kg_query,
+        handle_kg_retract_triple, handle_list_prompt_facts, handle_remove_prompt_fact,
+        handle_upgrade_tool,
+    },
+    memory_ops::{
+        handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_remember,
+        handle_memory_send_message,
+    },
+    palace_ops::{
+        handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
+        handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
+    },
+    recall_ops::{handle_memory_recall, handle_memory_recall_all, handle_memory_recall_deep},
+    room_ops::{handle_room_create, handle_room_list, handle_room_rename},
+    serde_json::Value,
+    task_ops::{handle_task_add, handle_task_complete, handle_task_list},
+    wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename},
 };
-use dream_ops::{handle_dream_consolidate_room, handle_palace_dream};
-use kg_ops::{
-    handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
-    handle_kg_bootstrap, handle_kg_gaps, handle_kg_list_subjects, handle_kg_query,
-    handle_kg_retract_triple, handle_list_prompt_facts, handle_remove_prompt_fact,
-    handle_upgrade_tool,
-};
-use memory_ops::{
-    handle_memory_forget, handle_memory_list, handle_memory_note, handle_memory_remember,
-    handle_memory_send_message,
-};
-use palace_ops::{
-    handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
-    handle_palace_list, handle_palace_reembed, handle_palace_unalias, handle_palace_update,
-};
-use recall_ops::{handle_memory_recall, handle_memory_recall_all, handle_memory_recall_deep};
-use room_ops::{handle_room_create, handle_room_list, handle_room_rename};
-use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
-use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 
 /// Dispatch a tool call by name to its real handler.
 ///
@@ -124,6 +152,7 @@ use wing_ops::{handle_wing_create, handle_wing_list, handle_wing_rename};
 /// unbounded by forgetting to fold its own body. [`byte_cap::apply`] is a
 /// no-op for every uncapped tool; a measurement failure propagates as a tool
 /// error rather than returning an unmeasured body.
+#[cfg(feature = "server")]
 pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<Value> {
     // #6424: a successful recall, remember or note is what the console's Last
     // Used column means by "used". The args are cloned only for those four
@@ -154,6 +183,7 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
 /// nothing about any one of them.
 /// Test: `dispatch_remember_and_recall_stamp_last_used`,
 /// `dispatch_palace_info_does_not_stamp_last_used` in `tools::tests`.
+#[cfg(feature = "server")]
 const USE_STAMPING_TOOLS: &[&str] = &[
     "memory_remember",
     "memory_note",
@@ -183,6 +213,7 @@ const USE_STAMPING_TOOLS: &[&str] = &[
 /// used the alias.
 /// Test: `dispatch_remember_and_recall_stamp_last_used`,
 /// `an_alias_addressed_recall_stamps_the_canonical_palace`.
+#[cfg(feature = "server")]
 fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
     let Ok(palace) = helpers::resolve_palace(state, args, tool) else {
         return;
@@ -204,6 +235,7 @@ fn stamp_palace_use(state: &AppState, args: &Value, tool: &str) {
 }
 
 /// The name -> handler match, unwrapped from [`dispatch_tool`]'s stamping.
+#[cfg(feature = "server")]
 async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Result<Value> {
     match name {
         "memory_remember" => handle_memory_remember(state, args).await,
@@ -274,9 +306,9 @@ async fn dispatch_tool_inner(state: &AppState, name: &str, args: Value) -> Resul
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod tests;
 // #7493: the serialized-response byte ceiling, its truncation notice, and the
 // descriptor/router consistency the enforcement table owns.
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod byte_cap_tests;
