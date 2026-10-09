@@ -999,12 +999,10 @@ pub use crate::service::shutdown_flush::{
 ///
 /// Why: separate from `write_port_file` because the format and location differ
 /// — port file stores `12345`, http_addr stores `127.0.0.1:12345`. Both write
-/// atomically via tmp-file + rename so partial reads are impossible. Exported
-/// (issue #3602 review) so the CLI resolver's (`commands::daemon_http::daemon_base_url()`)
-/// reachability-probe refresh writes through the same atomic path instead of
-/// a bare `std::fs::write`, which could tear a concurrent reader's view of the
-/// file that `trusty-console`/`trusty-mpm`'s daemon discovery trust as ground
-/// truth.
+/// atomically via tmp-file + rename so partial reads are impossible, which
+/// keeps a concurrent reader's view of the file that
+/// `trusty-console`/`trusty-mpm`'s daemon discovery trust as ground truth
+/// whole (issue #3602 review).
 /// What: delegates to `trusty_common::daemon_guard::write_addr_file_atomic`,
 /// which creates the parent directory if missing and writes via temp + rename.
 /// #5670 moved the write there so the daemon's write and the shared resolver's

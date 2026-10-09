@@ -47,16 +47,12 @@ const HTTP_MARKERS: &[&str] = &[
 /// `index_relocate`, `index_remove(_stale)`, `index_status`, `reindex` and
 /// `reindex_engine/*` off it; [`the_b2b2_cli_paths_dial_no_http`] keeps them
 /// off.
-const NOT_YET_MOVED: &[&str] = &[
-    "src/commands/daemon_http.rs",
-    "src/commands/discover/http.rs",
-    "src/commands/discover/mod.rs",
-    "src/commands/doctor.rs",
-    "src/commands/doctor_checks/mod.rs",
-    "src/commands/doctor_pipeline.rs",
-    "src/commands/query.rs",
-    "src/commands/start/tests.rs",
-];
+///
+/// #9214 slice 1 moved `query`, `doctor*`, auto-discover and the `monitor`
+/// status reads off it and deleted `daemon_http.rs`;
+/// [`the_slice1_cli_paths_dial_no_http`] keeps them off. The one row left is a
+/// test that drives the daemon's own HTTP listener, which goes with the bind.
+const NOT_YET_MOVED: &[&str] = &["src/commands/start/tests.rs"];
 
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -180,6 +176,24 @@ fn the_b2b2_cli_paths_dial_no_http() {
         "reindex_engine/file_ops.rs",
         "reindex_engine/registration.rs",
         "reindex_engine/verify.rs",
+    ]);
+}
+
+/// #9214 slice 1: `query`, `doctor`, auto-discover and the `monitor` status
+/// reads stay on the socket, under the same rule as
+/// [`the_b2a_cli_paths_dial_no_http`].
+/// Test: this test.
+#[test]
+fn the_slice1_cli_paths_dial_no_http() {
+    assert_moved_off_http(&[
+        "discover/mod.rs",
+        "discover/rpc.rs",
+        "doctor.rs",
+        "doctor_checks/mod.rs",
+        "doctor_checks/tests.rs",
+        "doctor_pipeline.rs",
+        "monitor.rs",
+        "query.rs",
     ]);
 }
 

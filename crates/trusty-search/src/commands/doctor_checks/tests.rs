@@ -18,10 +18,10 @@ fn check_result_classifiers() {
 
 #[test]
 fn check_daemon_running_ok_branch() {
-    let r = check_daemon_running(true, "http://127.0.0.1:7878", "0.3.27");
+    let r = check_daemon_running(true, "/tmp/ts/daemon.sock", "0.3.27");
     match r {
         CheckResult::Ok(msg) => {
-            assert!(msg.contains("127.0.0.1:7878"));
+            assert!(msg.contains("/tmp/ts/daemon.sock"));
             assert!(msg.contains("0.3.27"));
         }
         other => panic!("expected Ok, got {:?}", other),
@@ -30,7 +30,7 @@ fn check_daemon_running_ok_branch() {
 
 #[test]
 fn check_daemon_running_error_branch() {
-    let r = check_daemon_running(false, "http://127.0.0.1:7878", "");
+    let r = check_daemon_running(false, "/tmp/ts/daemon.sock", "");
     assert!(r.is_error());
     match r {
         CheckResult::Error(msg) => assert!(msg.contains("trusty-search start")),
@@ -190,22 +190,33 @@ fn fix_stale_lock_leaves_a_held_lock_in_place() {
     assert!(lock_path.exists(), "doctor --fix unlinked a held lock file");
 }
 
-#[tokio::test]
-async fn check_port_reachable_unbound_port_errors() {
-    // Port 65535 is unlikely to be bound; assert we get an Error variant.
-    let r = check_port_reachable(65535).await;
-    assert!(r.is_error(), "unbound port should be Error: {:?}", r);
+/// #9214: the listener check reads what `search.health` reports; it dials
+/// nothing, and a socket-only daemon is healthy.
+#[test]
+fn check_http_listener_reports_the_bound_address_or_socket_only() {
+    let bound = serde_json::json!({"transport": {"http_addr": "127.0.0.1:7001"}});
+    let addr = health_http_addr(&bound);
+    assert_eq!(addr.as_deref(), Some("127.0.0.1:7001"));
+    assert!(matches!(
+        check_http_listener(true, addr.as_deref()),
+        CheckResult::Ok(m) if m.contains("127.0.0.1:7001")
+    ));
+    let socket_only = serde_json::json!({"transport": {"http_addr": null}});
+    assert_eq!(health_http_addr(&socket_only), None);
+    assert!(matches!(
+        check_http_listener(true, None),
+        CheckResult::Ok(m) if m.contains("socket-only")
+    ));
+    assert!(check_http_listener(false, None).is_warn());
 }
 
-#[test]
-fn read_daemon_port_returns_some_u16() {
-    // Smoke-test: returns a port (default or from file). Function should
-    // never panic and should return a value in the valid port range.
-    let p = read_daemon_port();
-    // Default port path can include 0 if the port file held garbage that
-    // parses as 0, but normally it's > 0. Just assert it returns a u16
-    // (trivially true) and doesn't panic.
-    let _ = p;
+/// #9214: no daemon on the socket reads as "not running", never a TCP dial.
+#[tokio::test]
+async fn probe_daemon_health_is_none_when_the_socket_is_absent() {
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let client = DaemonClient::at(dir.path().join("absent.sock"));
+    assert!(probe_daemon_health(&client).await.is_none());
+    assert!(fetch_index_names(&client).await.is_empty());
 }
 
 /// Issue #3697: this test previously cleared the process-global

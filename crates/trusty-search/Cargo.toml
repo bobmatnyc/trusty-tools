@@ -178,6 +178,10 @@ name = "quarantine_durable_writes_4226"
 path = "tests/quarantine_durable_writes_4226.rs"
 
 [[test]]
+name = "no_tcp_search_client_9214"
+path = "tests/no_tcp_search_client_9214.rs"
+
+[[test]]
 name = "reindex_stage_profile"
 path = "tests/reindex_stage_profile.rs"
 
