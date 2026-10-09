@@ -309,10 +309,19 @@ fn check(golden: &[Record], root: &Command, binaries: &[String]) -> Report {
             Record::Binary { .. } => {}
         }
     }
+    // #9277: canonical paths of the golden commands. A new subcommand is
+    // additive, so only its pre-existing commands can gain a breaking arg.
+    let golden_commands: BTreeSet<String> = golden
+        .iter()
+        .filter_map(|r| match r {
+            Record::Command { path, .. } => canonical_path(&built, path),
+            _ => None,
+        })
+        .collect();
     for record in current.iter().filter(|r| !golden.contains(r)) {
         if let Record::Arg(c) = record {
             let known = matched.contains(&(c.command.clone(), c.key.clone()));
-            if !known && c.required {
+            if !known && c.required && golden_commands.contains(&c.command) {
                 report.breaks.push(format!(
                     "new argument `{}` of `{}` is required",
                     c.key, c.command
@@ -587,6 +596,10 @@ fn cli_contract_allows_additive_changes_and_aliased_renames() {
         (
             "new subcommand",
             Box::new(|c| c.subcommand(Command::new("stats"))),
+        ),
+        (
+            "new subcommand with a required positional",
+            Box::new(|c| c.subcommand(Command::new("forget").arg(Arg::new("id").required(true)))),
         ),
         (
             "new optional flag",
