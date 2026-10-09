@@ -125,16 +125,16 @@ fn invalid_recipient_or_name_fails_build() {
 }
 
 #[test]
-fn bucket_zero_or_nan_params_fail_build() {
+fn bucket_zero_or_out_of_range_params_fail_build() {
     let bad = [
-        limit(0, 1.0),
-        limit(-1, 1.0),
-        limit(10_001, 1.0),
-        limit(10, 0.0),
-        limit(10, -1.0),
-        limit(10, f64::NAN),
-        limit(10, f64::INFINITY),
-        limit(10, 10_000.5),
+        limit(0, 60),
+        limit(-1, 60),
+        limit(10_001, 60),
+        limit(i64::MAX, 60),
+        limit(10, 0),
+        limit(10, -60),
+        limit(10, 86_401),
+        limit(10, i64::MIN),
     ];
     for l in bad {
         // As the policy default.
@@ -156,36 +156,63 @@ fn bucket_zero_or_nan_params_fail_build() {
             "route {l:?}: {err}"
         );
     }
+    // The bounds themselves are accepted.
+    for l in [limit(1, 1), limit(10_000, 86_400)] {
+        assert!(
+            ChannelPolicy::build(PolicySpec {
+                rate_limit: Some(l),
+                routes: Vec::new(),
+            })
+            .is_ok(),
+            "{l:?}"
+        );
+    }
 }
 
 #[test]
 fn route_cannot_raise_rate_limit() {
-    for (raised, field) in [
-        (limit(101, 1.0), "capacity"),
-        (limit(50, 2.0), "refill_per_sec"),
+    // Default: 100 per 60 s.
+    for (raised, field, route_value) in [
+        (limit(101, 60), "limit", 101),
+        (limit(101, 600), "limit", 101),
+        // A shorter window admits the same count more often.
+        (limit(100, 59), "window_secs", 59),
+        (limit(50, 30), "window_secs", 30),
     ] {
         let mut route = spec(Channel::Slack, "bob-dm", BOB_SLACK, &[Question]);
         route.rate_limit = Some(raised);
         let err = build(vec![route]).expect_err("a raised limit must fail");
         assert!(
-            matches!(&err, PolicyError::RateLimitRaised { field: f, .. } if *f == field),
-            "{err}"
+            matches!(
+                &err,
+                PolicyError::RateLimitRaised { field: f, route, .. }
+                    if *f == field && *route == route_value
+            ),
+            "{raised:?}: {err}"
         );
     }
     // Lower in both parameters is accepted and becomes the route's limit.
     let mut route = spec(Channel::Slack, "bob-dm", BOB_SLACK, &[Question]);
-    route.rate_limit = Some(limit(10, 0.5));
+    route.rate_limit = Some(limit(10, 120));
     let p = policy(vec![route]);
-    assert_eq!(p.routes()[0].rate_limit().capacity(), 10);
-    assert_eq!(p.routes()[0].rate_limit().refill_per_sec(), 0.5);
+    assert_eq!(p.routes()[0].rate_limit().limit(), 10);
+    assert_eq!(p.routes()[0].rate_limit().window_secs(), 120);
+}
+
+#[test]
+fn equal_route_limit_is_not_a_raise() {
+    let mut route = spec(Channel::Slack, "bob-dm", BOB_SLACK, &[Question]);
+    route.rate_limit = Some(limit(100, 60));
+    let p = build(vec![route]).expect("a limit equal to the default is not a raise");
+    assert_eq!(p.routes()[0].rate_limit(), RateLimit::DEFAULT);
 }
 
 #[test]
 fn absent_rate_limit_uses_builtin_not_unlimited() {
     let p = policy(three_routes());
     assert_eq!(p.default_rate_limit(), RateLimit::DEFAULT);
-    assert_eq!(p.default_rate_limit().capacity(), 100);
-    assert!((p.default_rate_limit().refill_per_sec() * 60.0 - 100.0).abs() < 1e-9);
+    assert_eq!(p.default_rate_limit().limit(), 100);
+    assert_eq!(p.default_rate_limit().window_secs(), 60);
     for r in p.routes() {
         assert_eq!(r.rate_limit(), RateLimit::DEFAULT, "{}", r.name());
     }

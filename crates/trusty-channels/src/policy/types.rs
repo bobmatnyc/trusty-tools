@@ -1,6 +1,6 @@
 //! Policy value types: channels, message kinds, rate limits and routes.
 //!
-//! Why: the route table, the checks and the token bucket share one
+//! Why: the route table, the checks and the rate limiter share one
 //! vocabulary across gchat, Slack and Telegram (#8454 S1).
 //! What: [`Channel`], [`MessageKind`], the already-parsed input specs
 //! ([`RouteSpec`], [`RateLimitSpec`]) and their validated forms ([`Route`],
@@ -10,6 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::time::Duration;
 
 /// A chat channel a route can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -136,74 +137,99 @@ impl fmt::Display for MessageKind {
     }
 }
 
-/// The largest bucket capacity a rate limit may set.
-pub const MAX_CAPACITY: u32 = 10_000;
-/// The largest refill rate a rate limit may set, in tokens per second.
-pub const MAX_REFILL_PER_SEC: f64 = 10_000.0;
+/// The largest `limit` a rate limit may set. It also bounds each window's
+/// admit log, so one binding holds at most this many timestamps.
+pub const MAX_LIMIT: u32 = 10_000;
+/// The longest `window_secs` a rate limit may set: one day.
+///
+/// Why: a longer window would hold an admit against a sender for days, and
+/// no channel use needs it; the log size is bounded by [`MAX_LIMIT`] either way.
+pub const MAX_WINDOW_SECS: u32 = 86_400;
 
 /// Rate-limit parameters as parsed, before validation.
 ///
-/// Why: a parser hands over what the file says, including a negative or NaN
+/// Why: a parser hands over what the file says, including a zero or negative
 /// value, so validation can refuse it rather than the type hiding it.
-/// What: `capacity` in tokens; `refill_per_sec` in tokens per second.
-/// Test: `bucket_zero_or_nan_params_fail_build`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What: at most `limit` admits in any window of `window_secs` seconds.
+/// Test: `bucket_zero_or_out_of_range_params_fail_build`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimitSpec {
-    /// Bucket capacity in whole tokens; valid range `1..=10_000`.
-    pub capacity: i64,
-    /// Refill rate in tokens per second; valid range `(0, 10_000]`.
-    pub refill_per_sec: f64,
+    /// Admits allowed per window; valid range `1..=10_000`.
+    pub limit: i64,
+    /// Window length in seconds; valid range `1..=86_400`.
+    pub window_secs: i64,
 }
 
-/// A validated rate limit.
+/// A validated rate limit: at most `limit` admits in any `window_secs`.
 ///
-/// Why: the bucket must never run with a zero, negative, NaN or unbounded
+/// Why: the window must never run with a zero, negative or unbounded
 /// parameter, so the only way to hold one is through validation.
-/// What: capacity `1..=MAX_CAPACITY`, refill rate finite in
-/// `(0, MAX_REFILL_PER_SEC]`. [`RateLimit::DEFAULT`] is 100 tokens refilled
-/// at 100 per 60 s (#7457).
-/// Test: `bucket_zero_or_nan_params_fail_build`,
+/// What: `limit` in `1..=MAX_LIMIT`, `window_secs` in `1..=MAX_WINDOW_SECS`.
+/// [`RateLimit::DEFAULT`] is 100 admits per 60 s (#7457).
+/// Test: `bucket_zero_or_out_of_range_params_fail_build`,
 /// `absent_rate_limit_uses_builtin_not_unlimited`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RateLimit {
-    capacity: u32,
-    refill_per_sec: f64,
+    limit: u32,
+    window_secs: u32,
 }
 
 impl RateLimit {
-    /// The built-in default: capacity 100, refill 100 per 60 s.
+    /// The built-in default: 100 admits in any 60 s.
     pub const DEFAULT: RateLimit = RateLimit {
-        capacity: 100,
-        refill_per_sec: 100.0 / 60.0,
+        limit: 100,
+        window_secs: 60,
     };
 
-    /// Bucket capacity in tokens.
-    pub fn capacity(self) -> u32 {
-        self.capacity
+    /// Admits allowed in any one window.
+    pub fn limit(self) -> u32 {
+        self.limit
     }
 
-    /// Refill rate in tokens per second.
-    pub fn refill_per_sec(self) -> f64 {
-        self.refill_per_sec
+    /// The window length in seconds.
+    pub fn window_secs(self) -> u32 {
+        self.window_secs
+    }
+
+    /// The window length.
+    pub fn window(self) -> Duration {
+        Duration::from_secs(u64::from(self.window_secs))
     }
 
     /// Validate a parsed spec; the error is the reason text.
     pub(crate) fn from_spec(spec: RateLimitSpec) -> Result<Self, String> {
-        let capacity = u32::try_from(spec.capacity)
-            .ok()
-            .filter(|c| (1..=MAX_CAPACITY).contains(c))
-            .ok_or_else(|| format!("capacity {} is outside 1..={MAX_CAPACITY}", spec.capacity))?;
-        let r = spec.refill_per_sec;
-        // #8454: NaN fails every comparison, so test the accepted range.
-        if !(r > 0.0 && r <= MAX_REFILL_PER_SEC) {
-            return Err(format!(
-                "refill_per_sec {r} is outside (0, {MAX_REFILL_PER_SEC}]"
-            ));
+        let in_range = |v: i64, max: u32| u32::try_from(v).ok().filter(|v| (1..=max).contains(v));
+        let limit = in_range(spec.limit, MAX_LIMIT)
+            .ok_or_else(|| format!("limit {} is outside 1..={MAX_LIMIT}", spec.limit))?;
+        let window_secs = in_range(spec.window_secs, MAX_WINDOW_SECS).ok_or_else(|| {
+            format!(
+                "window_secs {} is outside 1..={MAX_WINDOW_SECS}",
+                spec.window_secs
+            )
+        })?;
+        Ok(Self { limit, window_secs })
+    }
+
+    /// The first parameter in which `self` is looser than `default`, as
+    /// `(field, self's value, default's value)`; `None` when it is not.
+    ///
+    /// Why: a route may lower the default, never raise it (#8454 Q6). A raise
+    /// is defined so that a route never admits more than the default in ANY
+    /// window: the route's `limit` must not exceed the default's, and its
+    /// `window_secs` must not be shorter. A pure admits-per-second compare
+    /// was rejected: 200 per 240 s is a lower rate than 100 per 60 s but
+    /// admits 200 in one burst. Requiring the same window was rejected as
+    /// needlessly strict: 100 per 120 s is strictly tighter.
+    /// What: `limit` first, then `window_secs`; an equal limit is no raise.
+    /// Test: `route_cannot_raise_rate_limit`, `equal_route_limit_is_not_a_raise`.
+    pub(crate) fn looser_than(self, default: RateLimit) -> Option<(&'static str, u32, u32)> {
+        if self.limit > default.limit {
+            return Some(("limit", self.limit, default.limit));
         }
-        Ok(Self {
-            capacity,
-            refill_per_sec: r,
-        })
+        if self.window_secs < default.window_secs {
+            return Some(("window_secs", self.window_secs, default.window_secs));
+        }
+        None
     }
 }
 

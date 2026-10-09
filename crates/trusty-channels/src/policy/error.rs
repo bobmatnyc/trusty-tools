@@ -6,7 +6,7 @@
 //! What: [`PolicyError`]. An `entry` names the input route as
 //! `routes[<index>] <channel> "<name>"`, or `rate_limit` for the default.
 //! Test: `overlapping_routes_fail_build_and_name_both`,
-//! `bucket_zero_or_nan_params_fail_build`.
+//! `bucket_zero_or_out_of_range_params_fail_build`.
 
 use crate::policy::types::{Channel, MessageKind};
 
@@ -17,8 +17,8 @@ use crate::policy::types::{Channel, MessageKind};
 /// Test: `overlapping_routes_fail_build_and_name_both`,
 /// `empty_kinds_fails_build`, `review_notice_on_slack_or_telegram_fails_build`,
 /// `invalid_recipient_or_name_fails_build`,
-/// `bucket_zero_or_nan_params_fail_build`, `route_cannot_raise_rate_limit`.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+/// `bucket_zero_or_out_of_range_params_fail_build`, `route_cannot_raise_rate_limit`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
     /// Two routes share a name, or a (channel, recipient) pair.
     #[error("{first} and {second} share the {field} {value:?}")]
@@ -56,7 +56,7 @@ pub enum PolicyError {
         /// What is wrong.
         reason: String,
     },
-    /// A rate-limit parameter is zero, negative, NaN or out of range.
+    /// A rate-limit parameter is zero, negative or out of range.
     #[error("{entry}: rate limit {reason}")]
     InvalidRateLimit {
         /// `rate_limit`, or the route entry.
@@ -64,16 +64,17 @@ pub enum PolicyError {
         /// What is wrong.
         reason: String,
     },
-    /// A route sets a rate limit above the default.
-    #[error("{entry}: rate limit {field} {route} is above the default {default}")]
+    /// A route sets a rate limit looser than the default: a higher `limit`
+    /// or a shorter `window_secs`.
+    #[error("{entry}: rate limit {field} {route} is looser than the default {default}")]
     RateLimitRaised {
         /// The route entry.
         entry: String,
-        /// `capacity` or `refill_per_sec`.
+        /// `limit` or `window_secs`.
         field: &'static str,
         /// The route's value.
-        route: f64,
+        route: u32,
         /// The default's value.
-        default: f64,
+        default: u32,
     },
 }

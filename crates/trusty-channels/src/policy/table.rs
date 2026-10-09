@@ -56,13 +56,15 @@ impl ChannelPolicy {
     /// What: validates the default rate limit, then each route in order:
     /// name `[A-Za-z0-9_-]+`, the channel's recipient shape, a non-empty kind
     /// list whose kinds the channel carries, and an optional rate limit no
-    /// higher than the default in either parameter. A name shared by two
+    /// looser than the default (a higher `limit` or a shorter `window_secs`).
+    /// A name shared by two
     /// routes, or a (channel, recipient) pair shared after normalization,
     /// fails with both entries named.
     /// Test: `overlapping_routes_fail_build_and_name_both`,
     /// `empty_kinds_fails_build`, `review_notice_on_slack_or_telegram_fails_build`,
     /// `invalid_recipient_or_name_fails_build`,
-    /// `bucket_zero_or_nan_params_fail_build`, `route_cannot_raise_rate_limit`.
+    /// `bucket_zero_or_out_of_range_params_fail_build`,
+    /// `route_cannot_raise_rate_limit`, `equal_route_limit_is_not_a_raise`.
     pub fn build(spec: PolicySpec) -> Result<Self, PolicyError> {
         let default_rate_limit = match spec.rate_limit {
             None => RateLimit::DEFAULT,
@@ -181,27 +183,16 @@ fn validate_route(entry: &str, raw: RouteSpec, default: RateLimit) -> Result<Rou
     })
 }
 
-/// #8454 Q6: a route may lower the default limit, never raise it.
+/// #8454 Q6: a route may lower the default limit, never raise it; see
+/// `RateLimit::looser_than` for what counts as a raise.
 fn check_not_raised(entry: &str, route: RateLimit, default: RateLimit) -> Result<(), PolicyError> {
-    let raised = |field, route: f64, default: f64| PolicyError::RateLimitRaised {
-        entry: entry.to_string(),
-        field,
-        route,
-        default,
-    };
-    if route.capacity() > default.capacity() {
-        return Err(raised(
-            "capacity",
-            f64::from(route.capacity()),
-            f64::from(default.capacity()),
-        ));
+    match route.looser_than(default) {
+        None => Ok(()),
+        Some((field, route, default)) => Err(PolicyError::RateLimitRaised {
+            entry: entry.to_string(),
+            field,
+            route,
+            default,
+        }),
     }
-    if route.refill_per_sec() > default.refill_per_sec() {
-        return Err(raised(
-            "refill_per_sec",
-            route.refill_per_sec(),
-            default.refill_per_sec(),
-        ));
-    }
-    Ok(())
 }

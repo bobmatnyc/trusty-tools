@@ -9,7 +9,7 @@
 //! What: S1 is loader-free. [`ChannelPolicy::build`] validates
 //! already-parsed [`PolicySpec`] data; [`ChannelPolicy::check_egress`] and
 //! [`ChannelPolicy::check_inbound`] are pure checks; [`RateLimiter`] holds
-//! the in-memory token buckets. Reading and parsing a policy file is S2.
+//! the in-memory sliding-window logs. Reading and parsing a policy file is S2.
 //! Test: `src/policy/tests/`.
 
 mod bucket;
@@ -21,13 +21,12 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use bucket::{BucketDecision, Clock, MonotonicClock, RateLimiter, TokenBucket};
+pub use bucket::{BucketDecision, Clock, MonotonicClock, RateLimiter, SlidingWindow};
 pub use check::{
     DenyReason, DropReason, EgressDecision, InboundDecision, QuestionId, QuestionState,
 };
 pub use error::PolicyError;
 pub use table::{ChannelPolicy, PolicySpec};
 pub use types::{
-    Channel, MessageKind, RateLimit, RateLimitSpec, Route, RouteSpec, MAX_CAPACITY,
-    MAX_REFILL_PER_SEC,
+    Channel, MessageKind, RateLimit, RateLimitSpec, Route, RouteSpec, MAX_LIMIT, MAX_WINDOW_SECS,
 };

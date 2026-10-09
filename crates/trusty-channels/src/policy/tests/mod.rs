@@ -59,11 +59,8 @@ pub(super) fn policy(routes: Vec<RouteSpec>) -> ChannelPolicy {
 }
 
 /// A rate-limit spec.
-pub(super) fn limit(capacity: i64, refill_per_sec: f64) -> RateLimitSpec {
-    RateLimitSpec {
-        capacity,
-        refill_per_sec,
-    }
+pub(super) fn limit(limit: i64, window_secs: i64) -> RateLimitSpec {
+    RateLimitSpec { limit, window_secs }
 }
 
 /// A clock the test sets by hand.
