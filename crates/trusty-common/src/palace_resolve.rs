@@ -56,7 +56,10 @@ pub const TRUSTY_TOOLS_DIR: &str = ".trusty-tools";
 /// Relative path of the palace pin file within a project root.
 pub const PIN_FILE_REL: &str = ".trusty-tools/trusty-memory.yaml";
 
-/// Pin-file schema version. Always `1`.
+/// The newest pin-file schema version this binary reads and writes.
+///
+/// A pin carrying a higher `schema_version` is refused, never rewritten
+/// (ADR-0067 D2, #9274).
 pub const PIN_SCHEMA_VERSION: u32 = 1;
 
 /// File names that mark a directory as a project root.
@@ -84,11 +87,13 @@ pub const PROJECT_MARKERS: &[&str] = &[
 /// this project's", so it needs a typed schema rather than ad-hoc string
 /// scraping — a field that silently deserialises to the wrong type would
 /// redirect a project's memory.
-/// What: `schema_version` (always [`PIN_SCHEMA_VERSION`]), `palace` (the pinned
+/// What: `schema_version` (at most [`PIN_SCHEMA_VERSION`]), `palace` (the pinned
 /// slug, stored verbatim and never re-slugified — resolution rejects one that is
-/// not a valid palace id rather than rewriting it, #6418), and an optional human
-/// `note`.
-/// Test: `reads_a_valid_pin`, plus trusty-memory's `write_and_read_pin_round_trips`.
+/// not a valid palace id rather than rewriting it, #6418), an optional human
+/// `note`, and every key this binary does not know, kept verbatim so a rewrite
+/// does not drop a field a later release added (ADR-0067 D2, #9274).
+/// Test: `reads_a_valid_pin`, `unknown_pin_fields_survive_a_read_and_rewrite`,
+/// plus trusty-memory's `write_and_read_pin_round_trips`.
 ///
 /// `#[non_exhaustive]` because a future schema field must not be a breaking
 /// change for the crates.io consumers of this crate. That closes struct-literal
@@ -103,6 +108,9 @@ pub struct ProjectPin {
     /// Optional human note (e.g. "pinned before drive reorg 2026-06").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    // #9274: keys this binary does not know, in file order, re-emitted on write.
+    #[serde(flatten)]
+    unknown_fields: serde_yaml::Mapping,
 }
 
 impl ProjectPin {
@@ -118,6 +126,7 @@ impl ProjectPin {
             schema_version: PIN_SCHEMA_VERSION,
             palace: palace.into(),
             note: None,
+            unknown_fields: serde_yaml::Mapping::new(),
         }
     }
 
@@ -128,6 +137,33 @@ impl ProjectPin {
         self.note = note;
         self
     }
+
+    /// Carry over the unknown fields of the pin already on disk.
+    ///
+    /// Why (#9274, ADR-0067 D2): a writer that builds a fresh pin (`link
+    /// --force`) would otherwise drop every field a later release added to the
+    /// file it replaces.
+    /// What: copies each key of `on_disk` that this binary does not know and
+    /// `self` does not already carry. Known fields of `self` are untouched.
+    /// Test: `preserving_unknown_fields_of_copies_only_the_unknown_keys`.
+    #[must_use]
+    pub fn preserving_unknown_fields_of(mut self, on_disk: &ProjectPin) -> Self {
+        for (key, value) in &on_disk.unknown_fields {
+            if !self.unknown_fields.contains_key(key) {
+                self.unknown_fields.insert(key.clone(), value.clone());
+            }
+        }
+        self
+    }
+}
+
+/// The one field read before the full pin parse.
+///
+/// Why (#9274): a newer pin may have a shape the full [`ProjectPin`] parse
+/// rejects, and that must report "too new", not "malformed".
+#[derive(Deserialize)]
+struct PinSchemaProbe {
+    schema_version: u64,
 }
 
 /// Which precedence level produced a resolution.
@@ -173,10 +209,11 @@ pub struct PalaceResolution {
 /// and fall through to git derivation, so a typo in a committed pin silently
 /// redirected a project's memory to a different palace. Returning an error
 /// instead makes the caller decide, and makes the failure testable.
-/// What: four pin-trust failures plus the exhausted-derivation case.
+/// What: five pin-trust failures plus the exhausted-derivation case.
 /// Test: `malformed_pin_is_an_error_not_a_fallthrough`,
 /// `empty_pin_palace_is_an_error`, `unreadable_pin_is_an_error`,
-/// `a_pin_naming_an_invalid_palace_id_is_an_error`.
+/// `a_pin_naming_an_invalid_palace_id_is_an_error`,
+/// `a_newer_pin_schema_is_refused_naming_the_file_and_both_versions`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PalaceResolveError {
@@ -196,6 +233,21 @@ pub enum PalaceResolveError {
         path: PathBuf,
         /// Underlying deserialisation error text.
         detail: String,
+    },
+
+    /// The pin file carries a `schema_version` newer than this binary reads.
+    /// #9274: refused, never parsed further or rewritten (ADR-0067 D2).
+    #[error(
+        "palace pin {} has schema_version {found}, but this binary reads pin schema_version {supported} or older — upgrade to a release that reads pin schema_version {found}",
+        path.display()
+    )]
+    PinSchemaTooNew {
+        /// Path of the pin file carrying the newer version.
+        path: PathBuf,
+        /// The `schema_version` the file declares.
+        found: u64,
+        /// The newest version this binary reads ([`PIN_SCHEMA_VERSION`]).
+        supported: u32,
     },
 
     /// The pin file parses but its `palace` field is empty.
@@ -334,25 +386,42 @@ fn resolve_against(base: &Path, path: &Path) -> PathBuf {
 /// writes to the wrong palace.
 /// What: reads `root/.trusty-tools/trusty-memory.yaml`. `Ok(None)` when the
 /// file does not exist; `Ok(Some(pin))` when it parses; `Err` on any other I/O
-/// failure or on a parse failure.
+/// failure or on a parse failure. `schema_version` is read first, on its own,
+/// so a pin newer than [`PIN_SCHEMA_VERSION`] is
+/// [`PalaceResolveError::PinSchemaTooNew`] whatever its other fields look like
+/// (#9274).
 /// Test: `reads_a_valid_pin`, `absent_pin_is_ok_none`,
-/// `malformed_pin_is_an_error_not_a_fallthrough`.
+/// `malformed_pin_is_an_error_not_a_fallthrough`,
+/// `a_newer_pin_schema_is_refused_naming_the_file_and_both_versions`.
 pub fn read_project_pin(root: &Path) -> Result<Option<ProjectPin>, PalaceResolveError> {
     let pin_path = root.join(PIN_FILE_REL);
-    match std::fs::read_to_string(&pin_path) {
-        Ok(raw) => match serde_yaml::from_str::<ProjectPin>(&raw) {
-            Ok(pin) => Ok(Some(pin)),
-            Err(e) => Err(PalaceResolveError::PinMalformed {
+    let raw = match std::fs::read_to_string(&pin_path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(PalaceResolveError::PinUnreadable {
                 path: pin_path,
                 detail: e.to_string(),
-            }),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(PalaceResolveError::PinUnreadable {
+            });
+        }
+    };
+    // #9274: refuse a newer pin before the full parse. A probe failure falls
+    // through, so a pin with no usable version still reports PinMalformed.
+    if let Ok(probe) = serde_yaml::from_str::<PinSchemaProbe>(&raw)
+        && probe.schema_version > u64::from(PIN_SCHEMA_VERSION)
+    {
+        return Err(PalaceResolveError::PinSchemaTooNew {
+            path: pin_path,
+            found: probe.schema_version,
+            supported: PIN_SCHEMA_VERSION,
+        });
+    }
+    serde_yaml::from_str::<ProjectPin>(&raw)
+        .map(Some)
+        .map_err(|e| PalaceResolveError::PinMalformed {
             path: pin_path,
             detail: e.to_string(),
-        }),
-    }
+        })
 }
 
 /// Accept a pin's `palace` field only when it is a usable palace id.
