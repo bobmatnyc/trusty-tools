@@ -230,9 +230,10 @@ fn report_round_trips_json() {
 
 #[tokio::test]
 async fn analyze_diff_with_client_errors_when_search_down() {
-    // Client points at a dead port; the search fetch must fail with
-    // ReviewError::Search rather than panicking.
-    let client = TrustySearchClient::new("http://127.0.0.1:1");
+    // Client points at a socket nobody serves (#9214: was a dead TCP port);
+    // the search fetch must fail with ReviewError::Search rather than panicking.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let client = TrustySearchClient::new(dir.path().join("absent-search.sock"));
     let diff = "+++ b/foo.rs\n@@ -0,0 +1,1 @@\n+fn f() {}\n";
     let err = analyze_diff_with_client(diff, &client, "idx")
         .await

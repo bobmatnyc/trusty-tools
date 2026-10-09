@@ -70,6 +70,10 @@ pub use tools::{
     DeadlineCutoff, DiagnosticsReport, Severity as DiagnosticSeverity, StaticTool, ToolDiagnostic,
 };
 
+// #9214: one fake trusty-search socket, shared with the integration tests.
+#[cfg(test)]
+#[path = "../../tests/support/fake_search.rs"]
+pub(crate) mod fake_search;
 #[cfg(test)]
 mod integration_tests;
 #[cfg(test)]

@@ -227,7 +227,7 @@ the path):
 - `review_diff` → `analyze.review` — analyze a git diff
 - `review_github_pr` → `analyze.review_github_pr` — analyze a GitHub PR by number
 
-Ensure trusty-search is running on port 7878 and trusty-analyze is serving its
+Ensure trusty-search is running (on its Unix socket) and trusty-analyze is serving its
 socket. Run `trusty-analyze status` to confirm.
 "#;
 

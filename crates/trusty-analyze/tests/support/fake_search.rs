@@ -14,7 +14,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+// `Value` alone: this file is formatted under two editions (trusty-analyze and
+// trusty-crate-contracts), which sort a mixed-case import list differently.
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// A canned answer: a `result`, or an `error` as `(code, message)`.
@@ -58,9 +60,9 @@ impl FakeSearchSocket {
                         .push((method.clone(), params.clone()));
                     let frame = match reply(&method, &params) {
                         Ok(result) => {
-                            json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+                            serde_json::json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
                         }
-                        Err((code, message)) => json!({
+                        Err((code, message)) => serde_json::json!({
                             "jsonrpc": "2.0", "id": request["id"],
                             "error": {"code": code, "message": message}
                         }),
@@ -83,7 +85,7 @@ impl FakeSearchSocket {
     pub fn healthy() -> Self {
         Self::serve(|method, _| match method {
             "search.health" => Ok(healthy()),
-            "search.indexes.list" => Ok(json!({ "indexes": [] })),
+            "search.indexes.list" => Ok(serde_json::json!({ "indexes": [] })),
             other => Err((-32601, format!("fake has no {other}"))),
         })
     }
@@ -93,14 +95,14 @@ impl FakeSearchSocket {
         &self.path
     }
 
+    /// Every `(method, params)` received so far, in arrival order.
+    pub fn calls(&self) -> Vec<(String, Value)> {
+        self.calls.lock().expect("calls lock").clone()
+    }
+
     /// The methods received so far, in arrival order.
     pub fn methods(&self) -> Vec<String> {
-        self.calls
-            .lock()
-            .expect("calls lock")
-            .iter()
-            .map(|(m, _)| m.clone())
-            .collect()
+        self.calls().into_iter().map(|(m, _)| m).collect()
     }
 }
 
@@ -118,5 +120,5 @@ impl Drop for FakeSearchSocket {
 
 /// A minimal healthy `search.health` result.
 pub fn healthy() -> Value {
-    json!({"status": "ok", "version": "test", "indexes": 0, "embedder": "ready"})
+    serde_json::json!({"status": "ok", "version": "test", "indexes": 0, "embedder": "ready"})
 }
