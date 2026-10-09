@@ -327,3 +327,46 @@ async fn github_issues_makes_no_search_call_for_the_local_owner() {
 async fn github_issues_still_searches_for_a_real_owner() {
     assert_eq!(search_calls(&subject()).await, 1);
 }
+
+// ─── free-text query cost (#9503) ────────────────────────────────────────────
+
+/// GitHub's cost of the free-text part of `q`: its characters plus about 2 per
+/// space-separated term. Qualifier tokens (`repo:…`, `is:issue`) are excluded.
+fn free_text_cost(free_text: &str) -> usize {
+    free_text.chars().count() + 2 * free_text.split(' ').count()
+}
+
+#[test]
+fn query_free_text_cost_within_budget_and_single_line_9503() {
+    // #9503: the real PR #9486 title + body, as `keyword_query` folds them.
+    let subj = ReviewSubject {
+        owner: "bobmatnyc".to_string(),
+        repo: "trusty-tools".to_string(),
+        title: "feat(trusty-review): fetch_linked_issues fetches the issues a PR body links"
+            .to_string(),
+        body: concat!(
+            "review_pr gains a strict fetch_linked_issues boolean and run gains\n",
+            "--fetch-linked-issues. The review reads the keyword-linked refs of the\n",
+            "raw PR body, fetches at most 5 same-repository issues with the diff\n",
+            "read's token, and renders them under ## Linked issues after any\n\n",
+            "issue_docs, for the reviewer and the [gh:] corpus only. Supplied docs\n",
+            "are kept first; the fetched tail is dropped whole. Every failure is an\n",
+            "item or row state, and error text reaches the ledger only through\n",
+            "cap_detail. The issues row now reads its worst item."
+        )
+        .to_string(),
+        identifiers: vec!["fetch_linked_issues".to_string(), "cap_detail".to_string()],
+        ..Default::default()
+    };
+    let q = GithubIssuesSource::build_query(&subj).expect("signal");
+    let free_text = q
+        .strip_prefix("repo:bobmatnyc/trusty-tools is:issue ")
+        .expect("qualifier prefix kept");
+    assert!(
+        !q.contains(['\n', '\r', '\t']) && !free_text.contains("  "),
+        "whitespace not collapsed: {q:?}"
+    );
+    // 200 = the budget; GitHub's real limit is 256 (422 above it).
+    let cost = free_text_cost(free_text);
+    assert!(cost <= 200, "free-text cost {cost} > 200: {free_text:?}");
+}
