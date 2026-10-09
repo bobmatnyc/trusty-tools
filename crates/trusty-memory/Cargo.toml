@@ -63,7 +63,7 @@ name = "trusty-memory"
 # changed shape.
 # 0.29.5 (Refs #9299): patch — recall_all searches resident palaces by default; 0.29.4 is live on crates.io. Additive only.
 # 0.29.6 (Refs #9433): patch — trusty-common floor moves 0.54.4 -> 0.54.5 so a locked install carries the #9433 fix. No source change.
-version = "0.30.1"
+version = "0.31.0"
 edition = "2021"
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -153,7 +153,7 @@ trusty-mcp = { workspace = true, optional = true }
 # #9269: only the engine's `memory-core` is unconditional; every feature the
 # serving surface needs is switched on by `server` below (`config-cli` is what
 # pulls in clap).
-trusty-common = { path = "../trusty-common", version = "0.55.1", default-features = false, features = ["memory-core"] }
+trusty-common = { path = "../trusty-common", version = "0.56", default-features = false, features = ["memory-core"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
 # is no longer bundled into trusty-memory (single-owner-per-binary); the
@@ -249,7 +249,7 @@ tracing-subscriber = { workspace = true }
 # `memory-rpc` (#6286): `tests/uds_consumer_contract.rs` drives the SHARED
 # client against a real daemon on a temp socket — the one place the two halves
 # of this migration are proven to agree.
-trusty-common = { path = "../trusty-common", version = "0.55.1", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
+trusty-common = { path = "../trusty-common", version = "0.56", default-features = false, features = ["memory-core", "embedder-test-support", "docgen", "memory-rpc"] }
 chrono = { workspace = true }
 # #8341: the `trusty-installer` dev-dependency was REMOVED. Its only user was
 # the #6555 arm of `tests/uds_consumer_contract.rs` — `tctl`'s real

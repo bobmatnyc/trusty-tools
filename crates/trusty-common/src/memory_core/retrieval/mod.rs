@@ -41,6 +41,8 @@ mod write_pipeline;
 pub(crate) mod embed_repair_tests;
 // #9433: `pub(crate)` so `tier_c_tests` can reuse its log `Capture`.
 #[cfg(test)]
+mod op_budget_remember_tests;
+#[cfg(test)]
 pub(crate) mod recall_log_tests;
 #[cfg(test)]
 mod tests;

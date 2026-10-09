@@ -21,6 +21,7 @@
 
 use trusty_common::memory_core::palace::{Palace, PalaceId, RoomType};
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
+use trusty_common::memory_core::store::hnsw_store::op_budget::abandoned_ops_in_flight;
 use uuid::Uuid;
 
 /// Persistent content stored in the probe palace as an always-present
@@ -212,6 +213,34 @@ pub struct HealthResponse {
     /// `health_drawer_degraded_check_opens_no_palace`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub drawer_degraded_palaces: Vec<String>,
+    /// Open palaces whose HNSW vector store tripped its op breaker (#9487).
+    ///
+    /// Why: a tripped store refuses every vector operation until the palace is
+    /// reopened, so remembers on it fail. Without this field the only trace is
+    /// an error line in the daemon log.
+    /// What: cache-only, like `drawer_degraded_palaces`; sorted by id and
+    /// omitted when empty. Any entry turns an `ok` status into `wedged`.
+    /// Test: `health_reports_a_palace_whose_hnsw_breaker_tripped`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hnsw_wedged_palaces: Vec<HnswWedgedPalace>,
+    /// HNSW operations abandoned at their budget whose task still runs (#9487).
+    ///
+    /// Why: a detached operation holds the vector store, not the palace
+    /// handle, so idle eviction can drop a tripped palace from the cache and
+    /// with it `hnsw_wedged_palaces`, while the stuck thread and lock remain.
+    /// What: the process-wide `abandoned_ops_in_flight` gauge. Above zero
+    /// turns an `ok` status into `wedged`, whether or not the palace is cached.
+    /// Test: `health_stays_not_ok_after_a_palace_with_an_abandoned_op_is_evicted`.
+    pub hnsw_abandoned_ops_in_flight: u64,
+}
+
+/// One open palace whose HNSW op breaker is tripped (#9487).
+#[derive(serde::Serialize)]
+pub struct HnswWedgedPalace {
+    /// The palace id.
+    pub id: String,
+    /// HNSW operations abandoned at their budget since the palace opened.
+    pub abandoned_ops: u64,
 }
 
 /// One palace the daemon has on disk but could not open (issue #4911).
@@ -537,6 +566,48 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         );
     }
 
+    // #9487: a tripped HNSW breaker fails every write on that palace.
+    let mut hnsw_wedged_palaces: Vec<HnswWedgedPalace> = state
+        .registry
+        .list()
+        .into_iter()
+        .filter_map(|id| {
+            let breaker_handle = state.registry.peek(&id)?;
+            let breaker = breaker_handle.vector_store.op_breaker();
+            breaker.is_tripped().then(|| HnswWedgedPalace {
+                id: id.as_str().to_string(),
+                abandoned_ops: breaker.abandoned_ops(),
+            })
+        })
+        .collect();
+    hnsw_wedged_palaces.sort_by(|a, b| a.id.cmp(&b.id));
+    let (status, detail) = match hnsw_wedged_palaces.first() {
+        Some(first) if status == "ok" => (
+            "wedged".to_string(),
+            Some(format!(
+                "palace '{}' HNSW vector store exceeded its operation budget and \
+                 refuses every vector operation until the palace is reopened or \
+                 the daemon restarts",
+                first.id
+            )),
+        ),
+        _ => (status, detail),
+    };
+    // #9487 F5: abandoned ops outlive their palace's cache entry; read the
+    // process-wide gauge so eviction cannot clear the alarm.
+    let hnsw_abandoned_ops_in_flight = abandoned_ops_in_flight();
+    let (status, detail) = if hnsw_abandoned_ops_in_flight > 0 && status == "ok" {
+        (
+            "wedged".to_string(),
+            Some(format!(
+                "{hnsw_abandoned_ops_in_flight} HNSW operation(s) abandoned at \
+                 their budget are still running; a palace's vector store is stuck"
+            )),
+        )
+    } else {
+        (status, detail)
+    };
+
     to_value(HealthResponse {
         status,
         detail,
@@ -553,6 +624,8 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         worker,
         unopenable_palaces,
         drawer_degraded_palaces,
+        hnsw_wedged_palaces,
+        hnsw_abandoned_ops_in_flight,
     })
 }
 
