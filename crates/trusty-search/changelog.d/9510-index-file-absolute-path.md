@@ -1,0 +1,2 @@
+Fixed
+- `index-file` (HTTP `POST /indexes/{id}/index-file` and the socket method `search.index.file.put`) now stores an absolute path under the index root by its root-relative key, the key the watcher and reindex use. Re-adding a file by its absolute path replaces its chunks instead of adding a second copy, and a `path_prefix` search finds them. An absolute path outside the root answers `400 index_file_path_outside_root`; a relative path is unchanged ([#9510](https://github.com/bobmatnyc/trusty-tools/issues/9510))

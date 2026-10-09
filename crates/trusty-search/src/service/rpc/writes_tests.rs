@@ -1498,10 +1498,12 @@ async fn remove_file_refuses_a_path_outside_the_root_9236() {
     }
 }
 
-/// Why (#9236): `index-file` stores a pushed absolute path verbatim, so
-/// normalizing it away would strand those chunks — nothing could remove them.
-/// What: an absolute in-root `index-file` write is removed by the same
-/// absolute path. Fails with the literal key dropped from `remove_keys`.
+/// Why (#9236): `index-file` stored a pushed absolute path verbatim before
+/// #9510, so normalizing it away would strand those chunks — nothing could
+/// remove them.
+/// What: a verbatim absolute key, planted through the indexer because
+/// `index-file` no longer writes one (#9510), is removed by the same absolute
+/// path. Fails with the literal key dropped from `remove_keys`.
 /// Test: this function IS the test.
 #[tokio::test(flavor = "multi_thread")]
 async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
@@ -1509,8 +1511,14 @@ async fn remove_file_still_removes_a_pushed_absolute_key_9236() {
     let (state, http, _rpc) =
         routers(SearchAppState::new(planted_registry("rp", tmp.path()))).await;
     let absolute = tmp.path().join(FILE).display().to_string();
-    let put = serde_json::json!({ "path": absolute, "content": CONTENT });
-    http_ok(&http, "POST", "/indexes/rp/index-file", put).await;
+    {
+        let handle = state.registry.get(&IndexId::new("rp")).expect("resident");
+        let indexer = handle.indexer.read().await;
+        indexer
+            .index_file(&absolute, CONTENT)
+            .await
+            .expect("plant the pre-#9510 absolute key");
+    }
     assert!(!chunks_for(&state, "rp", &absolute).await.is_empty());
 
     let body = serde_json::json!({ "path": absolute });
