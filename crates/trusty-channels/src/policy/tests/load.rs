@@ -368,3 +368,25 @@ fn fifo_route_file_is_refused_without_blocking() {
         })
     );
 }
+
+#[test]
+fn symlinked_route_file_open_is_refused_as_not_regular() {
+    // #8454: the open alone, as when a symlink is swapped in after the
+    // lstat: O_NOFOLLOW fails with ELOOP, and that arm names the file.
+    let (_tmp, root) = tempdir();
+    let target = root.join("real.toml");
+    std::fs::write(&target, b"").expect("write target");
+    let link = root.join("routes.toml");
+    symlink(&target, &link).expect("symlink");
+    let opened = open_regular(&link, "routes.toml").map(|_| ());
+    assert!(
+        matches!(
+            opened,
+            Err(ReadFault::NotRegular {
+                what: "routes.toml",
+                kind: "file"
+            })
+        ),
+        "{opened:?}"
+    );
+}
