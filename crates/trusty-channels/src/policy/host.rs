@@ -59,6 +59,14 @@ pub enum HostError {
         /// `file` or `directory`.
         kind: &'static str,
     },
+    /// config.yaml does not resolve to `.trusty-tools/trusty-mpm/config.yaml`
+    /// under the canonical home: a symlinked `~/.trusty-tools` would let
+    /// another tree supply the ceiling (#8454 Architect ruling).
+    #[error("config.yaml {reason}; every channel is denied")]
+    NotUnderHome {
+        /// What failed: the paths did not match, or one did not resolve.
+        reason: &'static str,
+    },
     /// config.yaml could not be read.
     #[error("config.yaml could not be read: {reason}")]
     Read {

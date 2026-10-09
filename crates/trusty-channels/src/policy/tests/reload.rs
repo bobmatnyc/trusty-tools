@@ -9,7 +9,7 @@ use std::path::Path;
 use super::repo::{host_yaml, slack_routes, tempdir, Home, Repo};
 use super::{names, TestClock};
 use crate::policy::{
-    load_effective, BucketDecision, Channel, FileState, Finding, GateError, LoadReport,
+    load_effective, BucketDecision, Channel, FileState, Finding, GateError, HostError, LoadReport,
     PolicyLoader, ProjectFileError, RateLimit, RateLimiter,
 };
 
@@ -244,6 +244,32 @@ fn host_fault_on_reload_denies_all_at_once() {
     assert!(loader.refresh());
     assert!(loader.policy().is_empty());
     assert_eq!(state(loader.report(), repo.dir()), FileState::Refused);
+}
+
+#[test]
+fn trusty_tools_becoming_a_symlink_denies_all_on_refresh() {
+    // #8454 Architect ruling: the host file's bytes do not change, so only
+    // the canonical-path check in the fingerprint can see the swap.
+    let (_repo, home, mut loader) = loaded();
+    let (_out, outside) = tempdir();
+    let tools = home.home.join(".trusty-tools");
+    let moved = outside.join("trusty-tools");
+    std::fs::rename(&tools, &moved).expect("move");
+    symlink(&moved, &tools).expect("symlink .trusty-tools");
+    assert!(loader.refresh(), "the swap to a symlink was not seen");
+    let report = loader.report();
+    assert!(report.denied, "{:#?}", report.findings);
+    assert!(loader.policy().is_empty(), "a host fault kept routes");
+    assert!(
+        report.findings.iter().any(|f| matches!(
+            f,
+            Finding::HostRefused {
+                error: HostError::NotUnderHome { reason },
+            } if reason.contains("symlinked component")
+        )),
+        "{:#?}",
+        report.findings
+    );
 }
 
 #[test]

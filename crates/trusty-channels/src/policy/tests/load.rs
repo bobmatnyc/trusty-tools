@@ -147,6 +147,30 @@ fn host_config_parent_dir_symlink_denies_all() {
 }
 
 #[test]
+fn symlinked_trusty_tools_dir_denies_all() {
+    // #8454 Architect ruling: `~/.trusty-tools` is a symlink to another
+    // tree holding a valid ceiling; the file and its parent are real, so
+    // only the canonical-path check can refuse it.
+    let (_a, _b, home) = two_projects();
+    let (_out, outside) = tempdir();
+    let tools = home.home.join(".trusty-tools");
+    let moved = outside.join("trusty-tools");
+    std::fs::rename(&tools, &moved).expect("move");
+    symlink(&moved, &tools).expect("symlink .trusty-tools");
+    let report = load_effective(&home.request());
+    assert!(report.denied, "{:#?}", report.findings);
+    assert!(report.policy.is_empty(), "routes survived a deny");
+    assert!(
+        matches!(
+            host_error(&report),
+            Some(HostError::NotUnderHome { reason }) if reason.contains("symlinked component")
+        ),
+        "{:#?}",
+        report.findings
+    );
+}
+
+#[test]
 fn symlinked_project_entry_refused() {
     let (a, _b, home) = two_projects();
     let (_out, outside) = tempdir();
