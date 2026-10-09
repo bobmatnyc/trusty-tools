@@ -3,6 +3,8 @@
 //!
 //! Moved out of `hnsw_store.rs` to keep it under the 500-SLOC cap (#9487).
 
+use redb::ReadableTable;
+
 use super::{
     DELETED_VECTORS, HnswStore, Result, VECTOR_ID_SEQ, VECTOR_KEYS, VECTORS, allocate_vector_id,
 };
