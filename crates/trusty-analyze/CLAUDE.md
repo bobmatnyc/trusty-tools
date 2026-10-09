@@ -1,7 +1,7 @@
 # trusty-analyze
 
 Sidecar code-analysis daemon for trusty-search. Reads chunk corpora from
-trusty-search via HTTP, runs static analysis, and serves results as JSON-RPC
+trusty-search over its Unix socket, runs static analysis, and serves results as JSON-RPC
 over `<data dir>/trusty-analyze/trusty-analyze.sock` and via an MCP stdio
 server.
 
@@ -71,8 +71,12 @@ certain design decisions were made.
 > trusty-search is unreachable.**
 >
 > There is no standalone or offline mode. Every `serve` invocation performs a
-> startup health check against `GET <search-url>/health` before binding its own
-> port. If the check fails the process prints a clear error and exits with code 1.
+> startup health check (`search.health`) over the trusty-search Unix socket before
+> binding its own socket. If the socket is missing or the daemon does not answer,
+> the process prints an error naming the socket path, tells you to start the
+> daemon (`trusty-search daemon`), and exits with code 1. The socket path is
+> `TRUSTY_SEARCH_SOCKET` when set, otherwise the trusty-search default,
+> `<data dir>/trusty-search/trusty-search.sock`.
 
 ---
 
@@ -275,13 +279,13 @@ C, C++
 ## Architecture
 
 ```
-trusty-search daemon (port 7878)          trusty-analyze (trusty-analyze.sock)
-  GET /indexes/:id/chunks  ─────────────► src/core/  (analysis engines)
+trusty-search daemon (trusty-search.sock) trusty-analyze (trusty-analyze.sock)
+  JSON-RPC over UDS        ─────────────► src/core/  (analysis engines)
   (bulk corpus export)                      complexity.rs   — cyclomatic/cognitive
                                             blame.rs        — git temporal decay
                                             quality.rs      — grade aggregation
                                             facts.rs        — FactStore (redb)
-                                            client.rs       — HTTP client to trusty-search
+                                            client.rs       — UDS client to trusty-search
                                           src/service/  (JSON-RPC over UDS)
                                           src/mcp/      (MCP stdio)
 ```
@@ -359,7 +363,7 @@ crates/trusty-analyze/
 │   │                                   EdgeKind, FactRecord, graph types
 │   ├── core/                           analysis engines — complexity(.rs/_ts.rs),
 │   │                                   blame, quality, facts (redb FactStore),
-│   │                                   client (HTTP → trusty-search), concept_cluster,
+│   │                                   client (UDS → trusty-search), concept_cluster,
 │   │                                   explain, github, linker
 │   ├── lang/                           LanguageAnalyzer trait, detection, and
 │   │   └── adapters/                   tree-sitter adapters (15: rust, python, java,
@@ -380,7 +384,7 @@ Documentation lives at the workspace top level under
 
 JSON-RPC 2.0 over `<data dir>/trusty-analyze/trusty-analyze.sock`, one
 newline-terminated frame per request, 32 MiB request budget. trusty-search must
-be running on port 7878. `service::rpc::METHODS` is the authoritative list and
+be running and listening on its Unix socket. `service::rpc::METHODS` is the authoritative list and
 `rpc_router_registers_every_documented_method` keeps it equal to what
 `build_router` registers.
 
@@ -528,7 +532,7 @@ Matches trusty-search conventions where applicable for consistency.
 ```
 trusty-search  ──path dep──►  trusty-common  (types only)
 trusty-analyze──path dep──►  trusty-common  (types only)
-trusty-analyze──HTTP──────►  trusty-search  (chunk corpus at runtime)
+trusty-analyze──UDS───────►  trusty-search  (chunk corpus at runtime)
 ```
 
 trusty-common must never depend on trusty-search or trusty-analyze.
@@ -543,13 +547,13 @@ trusty-common must never depend on trusty-search or trusty-analyze.
 
 ```bash
 # Step 1 — start trusty-search first (REQUIRED; analyzer will not start without it)
-trusty-search start   # port 7878
+trusty-search daemon   # listens on its Unix socket
 
 # Step 2 — build everything
 cargo build
 
 # Step 3 — run the analyzer sidecar (development)
-RUST_LOG=debug cargo run -- serve --search-url http://127.0.0.1:7878
+RUST_LOG=debug cargo run -- serve
 
 # Analyze a named index
 cargo run -- analyze <index-id> --top-k 20
@@ -574,7 +578,8 @@ cargo check --workspace
 ### Environment Variables
 
 ```bash
-TRUSTY_SEARCH_URL=http://127.0.0.1:7878   # default; override for non-standard port
+TRUSTY_SEARCH_SOCKET=/path/to.sock         # trusty-search socket; the default is
+                                           # <data dir>/trusty-search/trusty-search.sock
 TRUSTY_ANALYZE_SOCKET=/path/to.sock        # trusty-audit's guard override; the
                                            # default is derived from the data dir
 RUST_LOG=debug                             # enable debug tracing
@@ -621,7 +626,7 @@ tree-sitter adapters are all functional.
 - JSON-RPC sidecar (`src/service/`) on `trusty-analyze.sock` (#6287)
 - MCP stdio server (`src/mcp/`) — see [MCP Tools](#mcp-tools)
 - CLI subcommands: `serve`, `analyze`, `facts list/upsert`, `health`
-- Daemon PID lockfile (fs4), graceful shutdown, `--search-url` flag
+- Daemon PID lockfile (fs4), graceful shutdown
 - `LanguageAnalyzer` trait + 15 tree-sitter adapters, all implemented:
   rust, python, java, go, typescript, javascript, c, cpp, csharp, kotlin,
   php, ruby, scala, swift (see `src/lang/adapters/`)
