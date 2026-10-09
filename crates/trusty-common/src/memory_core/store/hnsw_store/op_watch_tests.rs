@@ -96,11 +96,17 @@ async fn a_dropped_future_leaves_its_blocking_op_registered() {
 #[test]
 fn a_panicking_op_unregisters_on_unwind() {
     let watch = OpWatch::default();
+    let mut during = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _op = watch.begin(HnswOpKind::Upsert);
-        assert!(watch.oldest().is_some());
+        during = watch.oldest();
         panic!("graph insert panicked");
     }));
     assert!(result.is_err());
+    assert_eq!(
+        during.map(|o| o.kind),
+        Some(HnswOpKind::Upsert),
+        "the op was registered before the panic"
+    );
     assert_eq!(watch.oldest(), None, "unwind removed the op");
 }
