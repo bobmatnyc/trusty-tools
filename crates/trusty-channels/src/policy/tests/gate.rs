@@ -1,7 +1,12 @@
 //! The default-branch gate (#8454 Bob Db1, Architect G2/G3): each refusal
 //! is named, and the accepted shapes load.
 
-use super::repo::{slack_routes, tempdir, Repo};
+use std::os::unix::process::ExitStatusExt as _;
+use std::process::{ExitStatus, Output};
+use std::time::Duration;
+
+use super::repo::{mkfifo, release_fifo, slack_routes, tempdir, within, Repo};
+use crate::policy::gate::{check_committed_at_head, object_id, with_git_timeout};
 use crate::policy::{check_default_branch, GateError};
 
 fn gate(repo: &Repo) -> Result<crate::policy::BranchState, GateError> {
@@ -183,4 +188,70 @@ fn gchat_gate_behaviour_unchanged() {
     crate::gchat::load_gate::check_committed(&repo.routes_file(), &bytes)
         .expect("gchat's HEAD-only gate accepts a HEAD commit");
     assert!(check_default_branch(repo.dir(), &bytes).is_err());
+}
+
+#[test]
+fn origin_head_outside_the_origin_remote_is_unknown() {
+    // #8454 G2: origin/HEAD names a default branch only through
+    // refs/remotes/origin/; a target elsewhere names none.
+    let repo = Repo::init("main");
+    repo.commit_routes(&routes());
+    repo.git(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/heads/main",
+    ]);
+    assert_eq!(gate(&repo), Err(GateError::DefaultBranchUnknown));
+}
+
+#[test]
+fn object_id_refuses_empty_or_non_hex_output() {
+    let out = |stdout: &str| Output {
+        status: ExitStatus::from_raw(0),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: Vec::new(),
+    };
+    let hex = "0123456789abcdef0123456789abcdef01234567";
+    assert_eq!(object_id(&out(&format!("{hex}\n")), "step"), Ok(hex));
+    for (what, stdout) in [("empty", String::new()), ("non-hex", "g".repeat(40))] {
+        assert_eq!(
+            object_id(&out(&stdout), "step"),
+            Err(GateError::GitFailed { step: "step" }),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn git_blocked_on_a_fifo_config_include_times_out() {
+    // #8454: git opens an include.path file with a blocking open, so a FIFO
+    // there stops every git call until a writer appears.
+    let repo = Repo::init("main");
+    repo.commit_routes(&routes());
+    let bytes = std::fs::read(repo.routes_file()).expect("read");
+    let (_tmp, root) = tempdir();
+    let fifo = root.join("include");
+    mkfifo(&fifo);
+    let config = repo.dir().join(".git/config");
+    let mut text = std::fs::read_to_string(&config).expect("read config");
+    text.push_str(&format!("[include]\n\tpath = {}\n", fifo.display()));
+    std::fs::write(&config, text).expect("write config");
+    let (dir, file) = (repo.dir().to_path_buf(), repo.routes_file());
+    let got = within(Duration::from_secs(30), move || {
+        with_git_timeout(Duration::from_secs(1), || {
+            (
+                check_default_branch(&dir, &bytes),
+                check_committed_at_head(&file, &bytes),
+            )
+        })
+    });
+    let Some((db1, head)) = got else {
+        release_fifo(&fifo);
+        panic!("a git call blocked on the FIFO past 30s");
+    };
+    assert!(matches!(db1, Err(GateError::GitTimedOut { .. })), "{db1:?}");
+    assert!(
+        matches!(head, Err(GateError::GitTimedOut { .. })),
+        "{head:?}"
+    );
 }

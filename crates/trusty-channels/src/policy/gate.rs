@@ -21,9 +21,19 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 /// The route file's path inside a project repo, from its top level.
 pub const ROUTES_REL_PATH: &str = ".trusty-channels/routes.toml";
+
+/// The longest one git step may run before it is killed.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `f` with git steps on this thread bounded by `limit`.
+#[cfg(test)]
+pub(crate) fn with_git_timeout<T>(_limit: Duration, f: impl FnOnce() -> T) -> T {
+    f()
+}
 
 /// Why a route file's bytes were refused by a load gate.
 ///
@@ -48,6 +58,12 @@ pub enum GateError {
     /// output.
     #[error("git {step} failed or printed unexpected output")]
     GitFailed {
+        /// The git step.
+        step: &'static str,
+    },
+    /// A git step ran longer than [`GIT_TIMEOUT`] and was killed.
+    #[error("git {step} did not finish in time and was stopped")]
+    GitTimedOut {
         /// The git step.
         step: &'static str,
     },
@@ -302,7 +318,7 @@ fn hash_bytes(dir: &Path, bytes: &[u8]) -> Result<Output, GateError> {
 }
 
 /// The object id a successful git call printed: 40 or 64 lowercase hex.
-fn object_id<'a>(out: &'a Output, step: &'static str) -> Result<&'a str, GateError> {
+pub(super) fn object_id<'a>(out: &'a Output, step: &'static str) -> Result<&'a str, GateError> {
     let id =
         std::str::from_utf8(out.stdout.trim_ascii()).map_err(|_| GateError::GitFailed { step })?;
     // #8454: unexpected git output refuses; it never compares equal by accident.

@@ -199,3 +199,19 @@ fn project_parse_errors_withhold_input_values() {
         assert!(!shown.contains("xoxb"), "{what}: {shown}");
     }
 }
+
+#[test]
+fn project_file_errors_withhold_a_token_typed_into_space() {
+    // #8454: a token typed into `space` (or a route name) must not reach a
+    // finding, as for the host file.
+    const TOKEN: &str = "xoxb-1";
+    let text = B_V1.replace("name = \"janet\"", &format!("name = \"{TOKEN}\""))
+        + &format!("space = \"{TOKEN}\"\n");
+    let err = parse(&text).expect_err("a malformed space is refused");
+    assert!(
+        matches!(&err, ProjectFileError::Invalid { entry, .. } if entry.starts_with("gchat.routes[0]")),
+        "{err:?}"
+    );
+    let shown = format!("{err} {err:?}");
+    assert!(!shown.contains("xoxb"), "{shown}");
+}

@@ -23,7 +23,7 @@ pub const MAX_FILE_BYTES: u64 = 256 * 1024;
 
 /// Why a file read failed, before it is named as a host or project fault.
 #[derive(Debug)]
-enum ReadFault {
+pub(super) enum ReadFault {
     Missing,
     NotRegular {
         what: &'static str,
@@ -121,11 +121,7 @@ fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
     if !checked.file_type().is_file() {
         return Err(not_regular);
     }
-    let mut file = File::open(path).map_err(|e| match e.kind() {
-        ErrorKind::NotFound => ReadFault::Missing,
-        kind => ReadFault::Io(kind),
-    })?;
-    let opened = file.metadata().map_err(|e| ReadFault::Io(e.kind()))?;
+    let (mut file, opened) = open_regular(path, what)?;
     // #8454: the path was swapped for another file between the check and
     // the open; the load gate would refuse foreign bytes too.
     if !same_file(&checked, &opened) {
@@ -140,6 +136,17 @@ fn read_regular(path: &Path, what: &'static str) -> Result<Vec<u8>, ReadFault> {
         return Err(ReadFault::TooLarge);
     }
     Ok(bytes)
+}
+
+/// Open `path` and return the handle with its metadata.
+pub(super) fn open_regular(path: &Path, what: &'static str) -> Result<(File, Metadata), ReadFault> {
+    let _ = what;
+    let file = File::open(path).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => ReadFault::Missing,
+        kind => ReadFault::Io(kind),
+    })?;
+    let opened = file.metadata().map_err(|e| ReadFault::Io(e.kind()))?;
+    Ok((file, opened))
 }
 
 #[cfg(unix)]

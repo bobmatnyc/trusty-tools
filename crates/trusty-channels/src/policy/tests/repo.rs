@@ -6,10 +6,13 @@
 //! What: [`git`] runs with every `GIT_*` variable cleared and a fixed
 //! identity; [`Repo`] is a repo made with `git init -b <branch>`; [`Home`]
 //! is a temp home holding `.trusty-tools/trusty-mpm/config.yaml`.
+//! [`within`], [`mkfifo`] and [`release_fifo`] bound a call that could
+//! block on a FIFO.
 //! Test: this module is test support.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::policy::{Channel, LoadRequest};
 
@@ -150,4 +153,58 @@ pub(super) fn slack_routes(name: &str, recipient: &str) -> String {
     format!(
         "version = 2\n\n[[slack.routes]]\nname = \"{name}\"\nrecipient = \"{recipient}\"\nkinds = [\"question\"]\n"
     )
+}
+
+/// Run `f` on its own thread; `None` when it has not returned within
+/// `limit`. A panic in `f` panics here.
+pub(super) fn within<T: Send + 'static>(
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(v) => Some(v),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the call panicked"),
+    }
+}
+
+/// Make a FIFO at `path`.
+pub(super) fn mkfifo(path: &Path) {
+    let out = Command::new("mkfifo")
+        .arg(path)
+        .output()
+        .expect("run mkfifo");
+    assert!(out.status.success(), "mkfifo failed");
+}
+
+/// Free a reader blocked opening the FIFO at `path`, then leave a regular
+/// empty file there, so a call that hung in a failing test can finish.
+pub(super) fn release_fifo(path: &Path) {
+    let path = path.to_path_buf();
+    std::thread::spawn(move || {
+        // Blocks until a reader opens the FIFO; a hung reader already has.
+        let writer = std::fs::OpenOptions::new().write(true).open(&path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::write(&path, b"");
+        drop(writer);
+    });
+}
+
+/// True when the tests run as root, which reads a mode-000 file.
+pub(super) fn running_as_root() -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let (_tmp, dir) = tempdir();
+    let probe = dir.join("probe");
+    std::fs::write(&probe, b"").expect("write probe");
+    std::fs::metadata(&probe).expect("probe metadata").uid() == 0
+}
+
+/// Set `path`'s permission bits.
+pub(super) fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod");
 }

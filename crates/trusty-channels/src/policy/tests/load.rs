@@ -3,9 +3,14 @@
 
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::names;
-use super::repo::{host_yaml, slack_routes, tempdir, Home, Repo};
+use super::repo::{
+    host_yaml, mkfifo, release_fifo, running_as_root, set_mode, slack_routes, tempdir, within,
+    Home, Repo,
+};
+use crate::policy::fs::{open_regular, ReadFault};
 use crate::policy::{
     load_effective, Channel, FileState, Finding, GateError, HostError, LoadReport,
     ProjectFileError, MAX_FILE_BYTES,
@@ -261,4 +266,81 @@ fn consumer_channels_limit_the_routes_loaded() {
     let report = load_effective(&req);
     assert!(!report.denied);
     assert!(report.policy.is_empty(), "slack routes in a gchat load");
+}
+
+#[test]
+fn host_file_not_utf8_denies_all() {
+    let (_a, _b, home) = two_projects();
+    std::fs::write(home.host_path(), b"channels:\n  version: 1\n# \xff\n").expect("write");
+    assert_host_denied(&load_effective(&home.request()), &HostError::NotUtf8);
+}
+
+#[test]
+fn unreadable_host_file_denies_all_with_read() {
+    if running_as_root() {
+        eprintln!("skipped: root reads a mode-000 file, so no read can fail");
+        return;
+    }
+    let (_a, _b, home) = two_projects();
+    set_mode(&home.host_path(), 0o000);
+    assert_host_denied(
+        &load_effective(&home.request()),
+        &HostError::Read {
+            reason: "permission denied".into(),
+        },
+    );
+}
+
+#[test]
+fn unreadable_project_file_is_refused_with_read() {
+    if running_as_root() {
+        eprintln!("skipped: root reads a mode-000 file, so no read can fail");
+        return;
+    }
+    let (a, _b, home) = two_projects();
+    set_mode(&a.routes_file(), 0o000);
+    let report = load_effective(&home.request());
+    assert_eq!(names(&report), ["b-dm"]);
+    assert_eq!(
+        file_error(&report, &a.routes_file()),
+        Some(&ProjectFileError::Read {
+            reason: "permission denied".into()
+        })
+    );
+}
+
+#[test]
+fn fifo_route_file_is_refused_without_blocking() {
+    let (a, _b, home) = two_projects();
+    std::fs::remove_file(a.routes_file()).expect("rm");
+    mkfifo(&a.routes_file());
+    // The open alone, as when a FIFO is swapped in after the lstat: it must
+    // not wait for a writer.
+    let path = a.routes_file();
+    let opened = within(Duration::from_secs(30), move || {
+        open_regular(&path, "routes.toml").map(|_| ())
+    });
+    let Some(opened) = opened else {
+        release_fifo(&a.routes_file());
+        panic!("opening a FIFO blocked past 30s");
+    };
+    assert!(
+        matches!(
+            opened,
+            Err(ReadFault::NotRegular {
+                what: "routes.toml",
+                kind: "file"
+            })
+        ),
+        "{opened:?}"
+    );
+    let report = load_effective(&home.request());
+    assert_eq!(names(&report), ["b-dm"]);
+    assert_eq!(
+        file_error(&report, &a.routes_file()),
+        Some(&ProjectFileError::NotRegular {
+            what: "routes.toml",
+            kind: "file"
+        })
+    );
 }

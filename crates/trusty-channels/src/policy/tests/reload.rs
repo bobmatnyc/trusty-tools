@@ -3,13 +3,14 @@
 //! branch, and the rate-limit logs survive.
 
 use std::fs::File;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
-use super::repo::{host_yaml, slack_routes, Home, Repo};
+use super::repo::{host_yaml, slack_routes, tempdir, Home, Repo};
 use super::{names, TestClock};
 use crate::policy::{
-    BucketDecision, FileState, Finding, GateError, LoadReport, PolicyLoader, ProjectFileError,
-    RateLimit, RateLimiter,
+    load_effective, BucketDecision, Channel, FileState, Finding, GateError, LoadReport,
+    PolicyLoader, ProjectFileError, RateLimit, RateLimiter,
 };
 
 fn state(report: &LoadReport, dir: &Path) -> FileState {
@@ -269,4 +270,49 @@ fn valid_narrowing_reload_applies_at_once() {
         state(loader.report(), repo.dir()),
         FileState::Effective { routes: 0 }
     );
+}
+
+#[test]
+fn host_fault_on_an_unserved_entry_denies_all_on_refresh() {
+    // #8454 Q3: a `projects` entry that fails the canonical check denies
+    // all, even on a channel the consumer does not serve or behind the
+    // project filter; refresh must reach the fresh load's verdict.
+    let (repo, home, mut daemon) = loaded();
+    let (_tmp, root) = tempdir();
+    let g = root.join("g");
+    std::fs::create_dir(&g).expect("mkdir");
+    home.write_host(&format!(
+        "channels:\n  version: 1\n  gchat:\n    enabled: true\n    projects: [\"{g}\", \"{r}\"]\n  \
+         slack:\n    enabled: true\n    projects: [\"{r}\"]\n",
+        g = g.display(),
+        r = repo.dir().display(),
+    ));
+    assert!(daemon.refresh());
+    assert_eq!(names(daemon.report()), ["bob-dm"]);
+    // gchat-mcp's shape: gchat only, filtered to the repo, so `g` is out.
+    let mut req = home.request();
+    req.channels = vec![Channel::Gchat];
+    req.project = Some(repo.dir().to_path_buf());
+    let mut filtered = PolicyLoader::new(req);
+    assert!(
+        !filtered.report().denied,
+        "{:#?}",
+        filtered.report().findings
+    );
+    // `g` becomes a symlink; the host file's text does not change.
+    let moved = root.join("g-real");
+    std::fs::rename(&g, &moved).expect("move");
+    symlink(&moved, &g).expect("symlink");
+    assert!(
+        load_effective(&home.request()).denied,
+        "a fresh load denies"
+    );
+    assert!(daemon.refresh(), "the daemon missed the host fault");
+    assert!(daemon.report().denied);
+    assert!(daemon.policy().is_empty(), "a host fault kept routes");
+    assert!(
+        filtered.refresh(),
+        "the filtered loader missed the host fault"
+    );
+    assert!(filtered.report().denied);
 }
