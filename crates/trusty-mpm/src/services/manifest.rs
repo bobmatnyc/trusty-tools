@@ -69,8 +69,10 @@ pub enum PortDiscovery {
 /// service reports no port and no URL.
 /// Test: `default_manifest_declares_trusty_search_by_socket`,
 /// `uds_search_is_up_against_a_socket_only_daemon`.
+// #9543: non_exhaustive so a later probe variant is not a breaking change.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum HealthProbe {
     /// GET `health_url` with `{port}` expanded. Most services.
     #[default]
@@ -95,7 +97,10 @@ impl HealthProbe {
 /// What: static metadata plus optional lifecycle commands. The discovery engine
 /// uses this to build a `ServiceStatus` at query time.
 /// Test: `manifest_parse_happy_path`, `manifest_parse_minimal_service`.
+// #9543: non_exhaustive so a later field is not a breaking change; build one
+// by deserialising a manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ServiceDecl {
     /// Human-readable description shown in `tm services list`.
     pub description: String,

@@ -16,7 +16,9 @@ services:
     health_url: null
     log_path: "~/Library/Logs/trusty-search/stderr.log"
     version_cmd: "trusty-search --version"
-    process_match: "trusty-search"
+    # #9543: the daemon only — a bare "trusty-search" also matches every
+    # `trusty-search serve` MCP bridge. Matches `start --foreground ...` too.
+    process_match: "trusty-search start"
     start_cmd: "trusty-search start --no-http"
     stop_cmd: "trusty-search stop"
     restart_cmd: "trusty-search stop && trusty-search start --no-http"

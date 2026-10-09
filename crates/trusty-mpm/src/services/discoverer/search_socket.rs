@@ -90,10 +90,11 @@ impl Discoverer {
     /// Probe a `health_probe: uds_search` service.
     ///
     /// Why (#9543): UP must not depend on a TCP port, a port-owner PID or HTTP.
-    /// What: health is `search.health` on the resolved socket; the PID is
-    /// `pgrep -f` on `process_match`; `running` is true when the socket answers
-    /// or a process matches; `port` and `url` are always `None`.
+    /// What: health is `search.health` on the resolved socket, and `running`
+    /// is exactly "the socket answered". The PID is `pgrep -f` on
+    /// `process_match`, for display only; `port` and `url` are always `None`.
     /// Test: `uds_search_is_up_against_a_socket_only_daemon`,
+    /// `uds_search_is_down_on_a_dead_socket_even_when_pgrep_matches`,
     /// `uds_search_never_calls_the_http_prober`.
     pub(super) fn probe_uds_search(&self, name: &str, decl: &ServiceDecl) -> ServiceStatus {
         let health = match self.socket_prober.socket() {
@@ -104,8 +105,10 @@ impl Discoverer {
                 detail: format!("cannot resolve the trusty-search socket: {e:#}"),
             },
         };
+        // #9543: a pgrep match is not liveness — `trusty-search serve` MCP
+        // bridges match too. Only the socket's answer makes the service running.
+        let running = health == HealthState::Ok;
         let pid = self.probe_process(decl);
-        let running = pid.is_some() || health == HealthState::Ok;
         let version = if running {
             self.probe_version(decl)
         } else {

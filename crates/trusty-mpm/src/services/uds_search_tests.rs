@@ -114,6 +114,11 @@ fn default_manifest_declares_trusty_search_by_socket() {
         "no TCP port for a socket-only daemon"
     );
     assert_eq!(ts.health_url, None, "no HTTP health URL");
+    assert_eq!(
+        ts.process_match.as_deref(),
+        Some("trusty-search start"),
+        "pgrep must match the daemon, never a `trusty-search serve` bridge"
+    );
     for (name, decl) in m.services.iter().filter(|(n, _)| *n != SEARCH) {
         assert_eq!(decl.health_probe, HealthProbe::Http, "{name} keeps HTTP");
     }
