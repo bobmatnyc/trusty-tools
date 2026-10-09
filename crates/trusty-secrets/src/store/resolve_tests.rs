@@ -267,6 +267,57 @@ fn resolve_agent_gate_allows_a_flagged_key() {
     );
 }
 
+/// Rewrite `vault`'s index file with std::fs so `name`'s row claims
+/// `"agents_may_use": true`, as any same-uid process can (#9070).
+fn hand_flag_on(store: &SecretStore, vault: &VaultName, name: &str) {
+    let path = store.index().path_for(vault);
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    json["keys"][name]["agents_may_use"] = serde_json::Value::Bool(true);
+    std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+}
+
+/// Why: #9070 — the index JSON is a 0600 file any same-uid process can
+/// edit, so a hand-set `"agents_may_use": true` must not open the agent
+/// gate. Red before the flag moved to the backend: the edit resolved.
+/// Test: itself.
+#[test]
+fn resolve_agent_gate_ignores_a_hand_edited_index_flag() {
+    let (_tmp, backend, store) = fixture();
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+
+    match resolve(&store, "secret://DEPLOY_TOKEN", true) {
+        Err(SecretsError::AgentUseRefused { key, vault }) => {
+            assert_eq!(key, "DEPLOY_TOKEN");
+            assert_eq!(vault, "trusty/acme/web");
+        }
+        other => panic!("expected AgentUseRefused, got {other:?}"),
+    }
+    assert_eq!(backend.reads(), 0, "a refused key is never read");
+}
+
+/// Why: #9070 — list and get report the flag the backend holds, so the same
+/// hand edit cannot make them show a key as agent-usable. Red before the
+/// fix: both reported the edited `true`.
+/// Test: itself.
+#[test]
+fn store_list_and_get_ignore_a_hand_edited_index_flag() {
+    let (_tmp, _backend, store) = fixture();
+    set(&store, &project(), "DEPLOY_TOKEN", SENTINEL);
+    hand_flag_on(&store, &project(), "DEPLOY_TOKEN");
+
+    let listed = store.list(&project()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].agents_may_use, "list reports the flag OFF");
+    let row = store
+        .index()
+        .get(&project(), &key("DEPLOY_TOKEN"))
+        .unwrap()
+        .unwrap();
+    assert!(!row.agents_may_use, "get reports the flag OFF");
+}
+
 /// Why: tier 1 and 2 — entries that are not references reach the child
 /// unchanged, in order; references resolve.
 /// Test: itself.
