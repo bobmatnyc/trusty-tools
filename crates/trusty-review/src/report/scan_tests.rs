@@ -296,3 +296,66 @@ fn classify_ls_files_failure_canonicalises_before_walking_ancestors() {
         "the real parent carries a .git — only a canonicalised ancestor walk sees it"
     );
 }
+
+/// git's mount-boundary wording of "no repository", captured from git 2.53 on
+/// a tmpfs `/tmp`: discovery stops at the filesystem boundary instead of `/`.
+const MOUNT_BOUNDARY_STDERR: &str = "fatal: not a git repository (or any parent up to mount point /)\n\
+     Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n";
+
+/// Why: #9495 — on a tmpfs `/tmp` git prints the mount-boundary wording, which
+/// the classifier did not recognise, so every plain non-git directory there
+/// read as `Refused` and contributed an empty corpus. Fed as text, so it needs
+/// no mount layout.
+/// What: the boundary wording in a directory with no `.git` witness reads as
+/// `NoRepo`; the colon forms and unrelated git failures still read as
+/// `Refused`.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_accepts_the_mount_boundary_wording() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    assert!(
+        matches!(
+            classify_ls_files_failure(tmp.path(), MOUNT_BOUNDARY_STDERR),
+            Corpus::NoRepo
+        ),
+        "the mount-boundary wording with no .git witness is a genuine absence"
+    );
+
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: not a git repository: '/nonexistent/x'",
+        "fatal: detected dubious ownership in repository at '/x'",
+        "fatal: cannot change to '/x': Permission denied",
+    ] {
+        assert!(
+            matches!(
+                classify_ls_files_failure(tmp.path(), stderr),
+                Corpus::Refused
+            ),
+            "unrecognised failure must refuse, not walk: {stderr:?}"
+        );
+    }
+}
+
+/// Why: the Fail-Open Check for #9495. Widening the accepted wording must not
+/// widen what reaches the `.gitignore`-blind walk: git prints the same
+/// boundary text when discovery is cut short above a real repository, so the
+/// ancestor `.git` witness stays the gate.
+/// What: `repo/sub` with `.git` on `repo`, fed the boundary wording, reads as
+/// `Refused`.
+/// Test: this test itself.
+#[test]
+fn classify_ls_files_failure_refuses_the_mount_boundary_wording_under_a_real_repo() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).expect("mkdir repo/sub");
+    std::fs::write(repo.join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+
+    assert!(
+        matches!(
+            classify_ls_files_failure(&repo.join("sub"), MOUNT_BOUNDARY_STDERR),
+            Corpus::Refused
+        ),
+        "an ancestor .git contradicts the boundary wording — never walk a real repo"
+    );
+}
