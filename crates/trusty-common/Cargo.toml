@@ -151,7 +151,8 @@ name = "trusty-common"
 # 0.55.3 (Refs #9487): patch — additive HNSW op-watch API (`PalaceRegistry::oldest_hnsw_op`, op-watch types); nothing removed or changed; 0.55.2 is live on crates.io.
 # 0.56.0 (Refs #9487): minor — HNSW op budget + fail-closed breaker; HnswStoreError::OpBudget, #[non_exhaustive] (semver break); 0.55.3 is live on crates.io.
 # 0.56.0 (Refs #9288): minor — memory.protocol handshake; MemoryRpcError/MemoryProtocolInfo #[non_exhaustive] (semver break); 0.55.3 is live on crates.io.
-version = "0.56.0"
+# 0.56.1 (Refs #9523): patch — host-metrics enables sysinfo's linux-tmpfs feature; no public item removed or changed; 0.56.0 is live on crates.io.
+version = "0.56.1"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -970,10 +971,13 @@ console-metrics = ["stdio-mcp-client"]
 # `console-metrics`). `sysinfo` is ALREADY an unconditional dependency of this
 # crate (the per-process `sys_metrics` module uses it with only the `system`
 # feature); this feature turns on `sysinfo`'s `disk` and `network` features that
-# whole-machine `Disks`/`Networks` sampling needs, WITHOUT adding them to every
-# consumer's build. Adds no new crate to the lockfile — only two extra sysinfo
-# features, and only for a consumer that opts in.
-host-metrics = ["sysinfo/disk", "sysinfo/network"]
+# whole-machine `Disks`/`Networks` sampling needs, plus `linux-tmpfs`, WITHOUT
+# adding them to every consumer's build. Adds no new crate to the lockfile —
+# only three extra sysinfo features, and only for a consumer that opts in.
+# #9523: sysinfo drops tmpfs mounts on Linux unless `linux-tmpfs` is on, so
+# `mount_for_path` answered `None` for a path on a tmpfs `/tmp` and the
+# worktree disk guard failed closed. The flag is a no-op off Linux.
+host-metrics = ["sysinfo/disk", "sysinfo/network", "sysinfo/linux-tmpfs"]
 # #8261: the `load_average` module — the kernel's 1-minute load average, which
 # builder admission reads and which `host_metrics` does not expose (its
 # `CpuMetrics::usage_pct` is an instantaneous sample, so a machine between two
