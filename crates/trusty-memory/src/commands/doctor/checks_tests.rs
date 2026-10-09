@@ -354,3 +354,48 @@ fn warnings_alone_are_a_healthy_run() {
     assert!(summary.healthy);
     assert!(!summarize(&[CheckResult::fail("c", "broken")]).healthy);
 }
+
+/// Why (#9487): the HNSW wedge is cleared only by a daemon restart (Architect
+/// ruling: restart only), so its red row must name that restart, in the
+/// bootout-then-bootstrap form, and never `kickstart -k`. The incident body has
+/// nothing in flight: the timed-out future already released the pool gauge.
+/// What: an `hnsw` lock wedge with `in_flight: 0` is `Fail`, names the palace,
+/// and carries both launchctl steps for the memory label.
+/// Test: itself.
+#[test]
+fn an_hnsw_lock_wedge_fails_and_names_the_restart_command() {
+    let result = interpret_health_body(
+        "daemon socket".to_string(),
+        "/tmp/trusty-memory.sock",
+        200,
+        Some(&serde_json::json!({
+            "status": "wedged",
+            "daemon_state": "ready",
+            "worker": {
+                "in_flight": 0,
+                "oldest_age_secs": null,
+                "wedged": true,
+                "wedged_reason": "lock",
+                "stalled_lock": {"palace": "trusty-tools", "lock": "hnsw", "age_secs": 300},
+                "stall_tracking_ok": true,
+            },
+        })),
+    );
+    assert_eq!(result.status, CheckStatus::Fail, "{result:?}");
+    let detail = result.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("hnsw lock of palace trusty-tools"),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("launchctl bootout gui/$(id -u)/com.trusty.memory`")
+            && detail.contains(
+                "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.trusty.memory.plist"
+            ),
+        "the row must name the restart: {detail}"
+    );
+    assert!(
+        !detail.contains("Inspect with a thread sample"),
+        "an HNSW wedge cannot be inspected away: {detail}"
+    );
+}

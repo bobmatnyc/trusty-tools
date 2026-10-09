@@ -303,7 +303,7 @@ pub enum WedgeReason {
 pub struct StalledLockHealth {
     /// Palace id whose lock is held.
     pub palace: String,
-    /// `"write"` or `"commit"`.
+    /// `"write"`, `"commit"`, or `"hnsw"` (#9487).
     pub lock: crate::lock_stall::PalaceLock,
     /// Seconds a writer arriving at the first sighting has waited.
     pub age_secs: u64,
@@ -387,7 +387,12 @@ pub async fn health(state: &AppState, query: HealthQuery) -> Result<serde_json::
         crate::lock_stall::probe_interval(wedge_threshold),
     );
     let now = std::time::Instant::now();
-    let stalled = state.lock_stalls.oldest_stall_at(now);
+    // #9487: a graph call blocked on a spawn_blocking thread outlives its
+    // dropped future, so read the vector stores' own in-flight registries too.
+    let stalled = crate::lock_stall::oldest_of(
+        state.lock_stalls.oldest_stall_at(now),
+        crate::lock_stall::oldest_hnsw_op_at(&state.registry, now),
+    );
     let lock_wedged = stalled.as_ref().is_some_and(|s| s.age > wedge_threshold);
     let pool_wedged = oldest_age.is_some_and(|age| age > wedge_threshold);
     // #4001: detection that cannot vouch for itself must be discriminable in

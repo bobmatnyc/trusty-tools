@@ -347,12 +347,14 @@ pub(super) fn interpret_health_body_with_stall(
                 format!(
                     "{url} → {status} BUT the daemon reports a WEDGED palace: {} lock of \
                      palace {} has been unavailable for at least {}s. Writes to it time out. \
-                     Inspect with a thread sample before restarting.",
+                     {}",
                     text("lock"),
                     text("palace"),
                     field("age_secs")
                         .and_then(serde_json::Value::as_u64)
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    // #9487: an HNSW wedge names the restart that clears it.
+                    super::lock_stall::wedged_lock_remedy(text("lock"))
                 ),
             );
         }

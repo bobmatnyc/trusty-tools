@@ -87,6 +87,29 @@ pub(super) fn stalled_lock_verdict(
     })
 }
 
+/// What an operator does about a palace lock the daemon calls wedged.
+///
+/// Why (#9487): a graph call blocked inside `hnsw_rs` runs on a blocking
+/// thread no timeout can cancel, so only a daemon restart clears it (Architect
+/// ruling, 2026-10-09: restart only, no auto-reopen). A held handle mutex may
+/// still be released by its holder, so it keeps the inspect-first advice.
+/// What: for `lock == "hnsw"`, the launchd bootout-then-bootstrap restart from
+/// `docs/reference/release-workflow.md`, never `kickstart -k`; otherwise the
+/// thread-sample advice.
+/// Test: `an_hnsw_lock_wedge_fails_and_names_the_restart_command`.
+pub(super) fn wedged_lock_remedy(lock: &str) -> String {
+    if lock != "hnsw" {
+        return "Inspect with a thread sample before restarting.".to_string();
+    }
+    let label = trusty_common::launchd_labels::MEMORY;
+    format!(
+        "A call blocked inside the HNSW graph cannot be cancelled; recovery is a daemon \
+         restart: `launchctl bootout gui/$(id -u)/{label}`, wait for the old pid to exit, \
+         then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist` \
+         (never `launchctl kickstart -k`)."
+    )
+}
+
 #[cfg(test)]
 #[path = "lock_stall_tests.rs"]
 mod lock_stall_tests;

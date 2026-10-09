@@ -47,6 +47,11 @@ pub enum PalaceLock {
     /// `PalaceHandle::commit_mutex`: the durable-commit tail (#6366), which can
     /// outlive a write that gave up.
     Commit,
+    /// #9487: the vector store's HNSW graph, held by an `upsert` or `search`
+    /// running on a blocking thread. It has no handle mutex to probe, so its
+    /// age comes from the store's in-flight registry; see
+    /// [`oldest_hnsw_op_at`].
+    Hnsw,
 }
 
 /// One held lock, as first sighted.
@@ -359,6 +364,37 @@ impl Drop for ProbeToken {
         {
             s.probing = false;
         }
+    }
+}
+
+/// The longest-running HNSW graph call on any palace the registry opened,
+/// resident or evicted (#9487).
+///
+/// Why: in the #9487 wedge a blocking thread stayed deadlocked inside
+/// `hnsw_rs` after the pipeline timeout dropped its future. That released
+/// `write_mutex` and the worker-liveness guard, so neither the handle-lock
+/// sweep nor the pool gauge saw anything. The vector store's own registry is
+/// the one record that outlives the dropped future, and it also outlives the
+/// palace handle's eviction.
+/// What: reads [`PalaceRegistry::oldest_hnsw_op`], live at `now` rather than
+/// through a stamp, so the report clears the moment the call returns. Every
+/// read here is infallible.
+/// Test: `health_reports_a_parked_hnsw_op_as_a_wedged_hnsw_lock`,
+/// `health_stays_wedged_after_the_awaiting_future_is_dropped`,
+/// `health_stays_wedged_after_the_blocked_palace_is_evicted`.
+pub fn oldest_hnsw_op_at(registry: &PalaceRegistry, now: Instant) -> Option<StalledLock> {
+    registry.oldest_hnsw_op().map(|(id, op)| StalledLock {
+        palace: id.as_str().to_string(),
+        lock: PalaceLock::Hnsw,
+        age: now.saturating_duration_since(op.since),
+    })
+}
+
+/// The older of two stall reports (#9487), so health names the longest wait.
+pub fn oldest_of(a: Option<StalledLock>, b: Option<StalledLock>) -> Option<StalledLock> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(if b.age > a.age { b } else { a }),
+        (a, b) => a.or(b),
     }
 }
 

@@ -39,6 +39,11 @@ use graph_arm::graph_nearest;
 mod key_cache;
 use key_cache::KeyCache;
 
+mod op_watch;
+#[cfg(any(test, feature = "embedder-test-support"))]
+pub use op_watch::OpPark;
+pub(crate) use op_watch::OpWatch;
+pub use op_watch::{HnswOp, HnswOpKind};
 mod quiet_insert;
 mod replay;
 mod stranded;
@@ -233,6 +238,8 @@ pub struct HnswStore {
     stranded: RwLock<Vec<stranded::StrandedGroup>>,
     /// #9141: `search`'s reverse map and tombstones, rebuilt only after a write.
     keys: KeyCache,
+    /// #9487: in-flight `upsert`/`search` calls, readable while one is wedged.
+    ops: Arc<op_watch::OpWatch>,
     /// Test-only rendezvous for `compact_orphans` (#6195, review follow-up).
     ///
     /// Why: the TOCTOU the fix closes needs a real `upsert` to commit in the
@@ -393,6 +400,7 @@ impl HnswStore {
             palace: Arc::from("unnamed palace"),
             insert_gate: parking_lot::Mutex::new(()),
             stranded: RwLock::new(stranded),
+            ops: Arc::default(),
             #[cfg(test)]
             compact_race_barrier: RwLock::new(None),
             #[cfg(test)]
@@ -482,6 +490,8 @@ impl HnswStore {
                 got: vector.len(),
             });
         }
+        // #9487: registered on this blocking thread, so it outlives a dropped future.
+        let _op = self.ops.begin(op_watch::HnswOpKind::Upsert);
 
         let encoded: Vec<u8> = postcard::to_allocvec(&vector.to_vec())?;
         let wtx = self.db.begin_write()?;
@@ -594,6 +604,8 @@ impl HnswStore {
                 got: query.len(),
             });
         }
+        // #9487: registered on this blocking thread, so it outlives a dropped future.
+        let _op = self.ops.begin(op_watch::HnswOpKind::Search);
 
         // #9141: the (id → uuid) reverse map and tombstone set, re-read from
         // redb only when a write has landed since the last search.

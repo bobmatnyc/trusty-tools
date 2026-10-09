@@ -1675,3 +1675,61 @@ fn a_copied_palace_root_opens_its_own_files_not_the_recorded_data_dir() {
         "the recorded data_dir must not be touched"
     );
 }
+
+/// Releases an [`OpPark`] on drop, so a failed assertion cannot leave a
+/// blocking thread held and hang the runtime's shutdown (#9487).
+struct ReleaseOnDrop(Arc<crate::memory_core::store::hnsw_store::OpPark>);
+
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Why (#9487): a blocked HNSW call holds only the vector store, so every
+/// eviction path can drop its palace handle while the call stays blocked.
+/// What: for the LRU cap, `remove` and `release_if_unreferenced`, parks a
+/// `search`, aborts the task awaiting it, evicts the palace, and asserts
+/// `oldest_hnsw_op` still names it. The idle sweep is covered by
+/// `health_stays_wedged_after_the_blocked_palace_is_evicted` in trusty-memory.
+/// Test: this test.
+#[tokio::test]
+async fn a_blocked_hnsw_op_stays_reported_on_every_eviction_path() {
+    use crate::memory_core::store::hnsw_store::{HnswOpKind, OpPark};
+    use crate::memory_core::store::vector::VectorStore;
+    for path in ["lru-cap", "remove", "release-if-unreferenced"] {
+        let dir = tempdir().unwrap();
+        let reg = PalaceRegistry::with_max_open(1);
+        let id = PalaceId::new("blocked");
+        let handle = Arc::new(make_handle("blocked", dir.path()));
+        reg.register_arc(Arc::clone(&handle));
+        let park = OpPark::new();
+        let _release = ReleaseOnDrop(Arc::clone(&park));
+        handle
+            .vector_store
+            .set_hnsw_op_park(Some(Arc::clone(&park)));
+        let task = tokio::spawn(async move { handle.vector_store.search(&[1.0; 384], 1).await });
+        let entered = tokio::task::spawn_blocking(move || {
+            park.wait_entered(std::time::Duration::from_secs(30))
+        })
+        .await
+        .expect("park wait task");
+        task.abort();
+        let cancelled = task.await.expect_err("aborted").is_cancelled();
+        match path {
+            "lru-cap" => reg.register(make_handle("other", dir.path())),
+            "remove" => reg.remove(&id),
+            _ => assert!(reg.release_if_unreferenced(&id), "{path}: not released"),
+        }
+
+        let oldest = reg.oldest_hnsw_op();
+
+        assert!(entered, "{path}: the search never parked");
+        assert!(cancelled, "{path}: the awaiting future was dropped");
+        assert!(reg.peek(&id).is_none(), "{path}: the palace is evicted");
+        let (palace, op) =
+            oldest.unwrap_or_else(|| panic!("{path}: the blocked search went unreported"));
+        assert_eq!(palace, id, "{path}");
+        assert_eq!(op.kind, HnswOpKind::Search, "{path}");
+    }
+}
