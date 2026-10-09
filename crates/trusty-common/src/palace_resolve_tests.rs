@@ -862,6 +862,25 @@ fn unknown_pin_fields_survive_a_read_and_rewrite() {
     assert_eq!(rewritten["palace"].as_str(), Some("canonical-name"));
 }
 
+/// Why (#9274): a freshly built pin replacing one on disk takes the old pin's
+/// unknown keys, but never its known fields — the new `palace` must win.
+#[test]
+fn preserving_unknown_fields_of_copies_only_the_unknown_keys() {
+    let on_disk: ProjectPin = serde_yaml::from_str(
+        "schema_version: 1\npalace: old-name\nnote: old note\nproject_uuid: 0f3c\n",
+    )
+    .expect("parse");
+
+    let pin = ProjectPin::new("new-name").preserving_unknown_fields_of(&on_disk);
+
+    assert_eq!(pin.palace, "new-name");
+    assert_eq!(pin.note, None);
+    let written: serde_yaml::Value =
+        serde_yaml::from_str(&serde_yaml::to_string(&pin).expect("serialise")).expect("parse");
+    assert_eq!(written["project_uuid"].as_str(), Some("0f3c"));
+    assert!(written.get("note").is_none(), "a known field is not copied");
+}
+
 // ---------------------------------------------------------------------------
 // Non-project callers stay resolvable
 // ---------------------------------------------------------------------------

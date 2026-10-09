@@ -145,7 +145,7 @@ impl ProjectPin {
     /// file it replaces.
     /// What: copies each key of `on_disk` that this binary does not know and
     /// `self` does not already carry. Known fields of `self` are untouched.
-    /// Test: `rewrite_keeps_the_unknown_fields_of_the_pin_on_disk`.
+    /// Test: `preserving_unknown_fields_of_copies_only_the_unknown_keys`.
     #[must_use]
     pub fn preserving_unknown_fields_of(mut self, on_disk: &ProjectPin) -> Self {
         for (key, value) in &on_disk.unknown_fields {
