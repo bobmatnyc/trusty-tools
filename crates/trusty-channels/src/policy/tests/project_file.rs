@@ -33,6 +33,17 @@ fn assert_only_a_refused(what: &str, text: &str) {
     );
 }
 
+/// Project A's v2 file with a `[gchat.connection]` table.
+fn v2_with_connection(subscription: &str, key_file: &str) -> String {
+    A_V2.replace(
+        "version = 2\n",
+        &format!(
+            "version = 2\n\n[gchat.connection]\nproject_id = \"p\"\n\
+             subscription = \"{subscription}\"\nkey_file = \"{key_file}\"\n"
+        ),
+    )
+}
+
 #[test]
 fn project_file_faults_are_refused() {
     type Is = fn(&ProjectFileError) -> bool;
@@ -104,6 +115,17 @@ fn project_file_faults_are_refused() {
         (
             "connection key_file ~/ without a known home",
             v1_gchat.replace("/k.json", "~/k.json"),
+            invalid,
+        ),
+        // #8454: the v2 arm validates its optional gchat connection too.
+        (
+            "v2 connection key_file holds a PEM line",
+            v2_with_connection("s", "-----BEGIN PRIVATE KEY-----"),
+            invalid,
+        ),
+        (
+            "v2 connection subscription as a path",
+            v2_with_connection("projects/p/subscriptions/s", "/k.json"),
             invalid,
         ),
         (
