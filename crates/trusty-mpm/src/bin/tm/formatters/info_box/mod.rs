@@ -425,14 +425,18 @@ pub(crate) fn abbreviate_home(path: &str) -> String {
 ///
 /// Why: the lock file is cheaper than an HTTP probe and tells us the daemon
 /// address before we decide whether to fire the probe.
-/// What: delegates to `core::daemon_identity::read_lock`, which rejects a
-/// record that does not carry the trusty-mpm product magic and one whose PID is
-/// no longer alive. #1731: this was the crate's third hand-rolled lock parser,
-/// and the panel would show an address taken from any TOML file at that path.
-/// Test: covered indirectly by the welcome-panel render tests; the record rules
-/// are covered in `trusty_mpm::core::daemon_identity`.
+/// What: delegates to `core::client_lock_url`, which reads the record through
+/// `core::daemon_identity::read_lock` (product magic, live PID) and, under
+/// isolation, drops a lock that belongs to the host (#9556). #1731: this was
+/// the crate's third hand-rolled lock parser, and the panel would show an
+/// address taken from any TOML file at that path.
+/// Test: `client_lock_url_ignores_a_host_lock_under_isolation` (in
+/// `trusty_mpm::core::discovery`); the record rules are covered in
+/// `trusty_mpm::core::daemon_identity`.
 fn read_lock_addr() -> Option<String> {
-    trusty_mpm::core::daemon_identity::read_lock().map(|lock| lock.addr)
+    // #9556: the filtered reader, so the banner and statusline never show the
+    // host daemon from a sandbox.
+    trusty_mpm::core::client_lock_url()
 }
 
 // ── Two-panel compositor bridge ───────────────────────────────────────────────

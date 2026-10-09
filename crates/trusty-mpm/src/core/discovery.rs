@@ -216,6 +216,24 @@ pub fn try_resolve_daemon_url(explicit: Option<&str>) -> Result<String, DaemonUr
     Ok(DEFAULT_DAEMON_URL.to_string())
 }
 
+/// The daemon lock file's URL as this process may use it (#9556).
+///
+/// Why: every reader of the lock — the resolver, the `tm` banner and the
+/// statusline — must agree that an isolated process never sees the host
+/// daemon's lock, or the banner shows the live 127.0.0.1:7880 as "online".
+/// What: the lock's address (product magic and a live pid, as
+/// `daemon_identity::read_lock` checks), dropped when the process is in an
+/// [`isolated_environment`] and the lock belongs to the host by
+/// [`lock_is_hosts`]. Outside isolation it is exactly `read_lock`'s address,
+/// and no home lookup runs.
+/// Test: `client_lock_url_ignores_a_host_lock_under_isolation`,
+/// `client_lock_url_is_read_lock_outside_isolation`,
+/// `isolated_resolver_ignores_a_host_lock_naming_the_default`,
+/// `isolated_resolver_keeps_a_sandbox_home_lock`.
+pub fn client_lock_url() -> Option<String> {
+    read_lock_file_url()
+}
+
 /// Whether a daemon lock read from `home` belongs to the host (#9556).
 ///
 /// Why: an isolated process that inherited the operator's `HOME` reads the
@@ -1518,6 +1536,44 @@ mod tests {
             err.to_string()
                 .contains("no daemon reachable for this sandbox"),
             "{err}"
+        );
+    }
+
+    /// Why (#9556 delta critic): the banner and statusline read the lock
+    /// through [`client_lock_url`]; with `TRUSTY_DATA_DIR_OVERRIDE` set and a
+    /// host lock in `HOME`, they showed the live daemon online. The temp
+    /// `HOME` stands in for the inherited home; its lock names the default and
+    /// a live pid (this process).
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn client_lock_url_ignores_a_host_lock_under_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let data = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::set(DATA_DIR_OVERRIDE_ENV, data.path());
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_eq!(client_lock_url(), None, "a host lock is not this sandbox's");
+    }
+
+    /// Why (#9556 delta critic): outside isolation the filtered reader is
+    /// exactly `read_lock`'s address, the default included.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn client_lock_url_is_read_lock_outside_isolation() {
+        let home = crate::test_support::hermetic_temp_dir();
+        let _home = EnvVarGuard::set("HOME", home.path());
+        let _sandbox = EnvVarGuard::unset(SANDBOX_ENV_VAR);
+        let _data = EnvVarGuard::unset(DATA_DIR_OVERRIDE_ENV);
+        crate::core::daemon_identity::write_lock_at(&lock_file_path(), DEFAULT_DAEMON_URL, "");
+
+        assert_eq!(client_lock_url().as_deref(), Some(DEFAULT_DAEMON_URL));
+        assert_eq!(
+            client_lock_url(),
+            crate::core::daemon_identity::read_lock().map(|lock| lock.addr)
         );
     }
 
