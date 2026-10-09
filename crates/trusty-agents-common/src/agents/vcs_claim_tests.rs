@@ -10,6 +10,10 @@
 use super::*;
 use tempfile::TempDir;
 
+/// git's classic wording of "no repository": discovery reached `/`.
+const PARENT_DIRS_STDERR: &str =
+    "fatal: not a git repository (or any of the parent directories): .git";
+
 /// `git init` a directory and return it. Panics loudly: a test that cannot set
 /// up a repository has proven nothing and must not pass.
 fn init_repo(dir: &std::path::Path) {
@@ -226,8 +230,8 @@ fn a_healthy_repo_still_answers_both_ways() {
 // ---------------------------------------------------------------------------
 // #4448 review round 2 — git's "no repository" message is not PROOF of absence.
 //
-// Git emits the exact parenthesised NO_REPO_STDERR whenever discovery never got
-// far enough to conclude otherwise. In each case below the repository is real
+// Git emits a parenthesised NO_REPO_STDERR_PREFIX wording whenever discovery
+// never got far enough to conclude otherwise. In each case below the repository is real
 // and its files are committed; before `classify_failure` corroborated the
 // message with a filesystem witness, every one of them classified `NoRepo` →
 // `Unclaimed` → sweepable.
@@ -353,7 +357,7 @@ fn a_stray_empty_git_dir_is_unknown() {
 fn an_unresolvable_relative_path_is_unknown() {
     let relative = std::path::Path::new("no/such/relative/.claude/agents");
     assert_eq!(
-        classify_failure(relative, NO_REPO_STDERR),
+        classify_failure(relative, PARENT_DIRS_STDERR),
         IndexState::Unavailable
     );
 }
@@ -365,7 +369,10 @@ fn a_truly_empty_directory_is_still_no_repo() {
     let tmp = TempDir::new().expect("tempdir");
     let tier = tmp.path().join(".claude").join("agents");
     std::fs::create_dir_all(&tier).expect("create tier");
-    assert_eq!(classify_failure(&tier, NO_REPO_STDERR), IndexState::NoRepo);
+    assert_eq!(
+        classify_failure(&tier, PARENT_DIRS_STDERR),
+        IndexState::NoRepo
+    );
     assert_eq!(VcsIndex::probe(&tier).claim("qa.md"), VcsClaim::Unclaimed);
 }
 
@@ -413,8 +420,9 @@ fn a_dangling_git_symlink_is_unknown_not_no_repo() {
 /// A bogus `GIT_DIR` in a directory with NO `.git` anywhere emits
 /// `fatal: not a git repository: '/nonexistent/x'` — it matches the SHORT
 /// phrase, and the filesystem witness finds nothing to contradict it. So the
-/// two defences do not overlap here: shortening `NO_REPO_STDERR` would hand
-/// back `NoRepo` for a directory whose repository was merely misconfigured.
+/// two defences do not overlap here: dropping the `(` from
+/// `NO_REPO_STDERR_PREFIX` would hand back `NoRepo` for a directory whose
+/// repository was merely misconfigured.
 #[test]
 fn a_bogus_git_dir_message_is_unavailable_even_with_no_ancestor_git() {
     let tmp = TempDir::new().expect("tempdir");
@@ -429,5 +437,56 @@ fn a_bogus_git_dir_message_is_unavailable_even_with_no_ancestor_git() {
         classify_failure(&tier, "fatal: not a git repository: '/nonexistent/x'"),
         IndexState::Unavailable,
         "only the parenthesised form means genuine absence"
+    );
+}
+
+/// git's mount-boundary wording of "no repository", captured from git 2.53 on
+/// a tmpfs `/tmp`: discovery stops at the filesystem boundary instead of `/`.
+const MOUNT_BOUNDARY_STDERR: &str = "fatal: not a git repository (or any parent up to mount point /)\n\
+     Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).\n";
+
+/// #9495 — on a tmpfs `/tmp` git prints the mount-boundary wording, which the
+/// classifier did not recognise, so a tier with no repository at all read as
+/// `Unavailable`. Fed as text, so it needs no mount layout. The colon forms
+/// and unrelated git failures must still refuse.
+#[test]
+fn classify_failure_accepts_the_mount_boundary_wording() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    assert_eq!(
+        classify_failure(&tier, MOUNT_BOUNDARY_STDERR),
+        IndexState::NoRepo,
+        "the mount-boundary wording with no .git witness is a genuine absence"
+    );
+
+    for stderr in [
+        "fatal: not a git repository: (null)",
+        "fatal: not a git repository: '/nonexistent/x'",
+        "fatal: detected dubious ownership in repository at '/x'",
+        "fatal: cannot change to '/x': Permission denied",
+    ] {
+        assert_eq!(
+            classify_failure(&tier, stderr),
+            IndexState::Unavailable,
+            "unrecognised failure must refuse, not read as no repository: {stderr:?}"
+        );
+    }
+}
+
+/// #9495 Fail-Open Check — widening the accepted wording must not widen what
+/// reads as sweepable. git prints the same boundary text when discovery is cut
+/// short above a real repository, so the ancestor `.git` witness stays the gate.
+#[test]
+fn the_mount_boundary_wording_under_a_real_repo_is_unavailable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tier = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&tier).expect("create tier");
+    std::fs::write(tmp.path().join(".git"), "gitdir: /somewhere\n").expect("gitlink");
+
+    assert_eq!(
+        classify_failure(&tier, MOUNT_BOUNDARY_STDERR),
+        IndexState::Unavailable,
+        "an ancestor .git contradicts the boundary wording — never sweep a real repo"
     );
 }

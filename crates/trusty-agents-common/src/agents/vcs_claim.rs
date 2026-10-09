@@ -27,9 +27,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-/// The only git stderr CONSISTENT with "there is genuinely no repository here".
+/// The prefix of the only git stderr CONSISTENT with "there is genuinely no
+/// repository here".
 ///
-/// Why: the parenthesised clause is load-bearing. Git emits
+/// Why: the opening parenthesis is load-bearing. Git emits
 /// `fatal: not a git repository: (null)` for a STALE WORKTREE POINTER, so the
 /// shorter phrase `not a git repository` matches a broken repo and a
 /// genuinely-absent one alike — matching it would have swept the ~70 worktrees
@@ -40,13 +41,19 @@ use std::process::Command;
 /// corroborates it with a filesystem witness before concluding anything; this
 /// constant is a necessary condition, never a sufficient one.
 ///
-/// What: verified byte-identical against git 2.54.0's output for an empty temp
-/// directory. Any wording drift falls through to [`IndexState::Unavailable`],
-/// which refuses — the fail-closed direction.
+/// What: covers both wordings of git's upward-discovery failure —
+/// `(or any of the parent directories)` and `(or any parent up to mount point
+/// <dir>)` — and neither colon form (`: (null)`, `: '<GIT_DIR>'`). Any other
+/// wording falls through to [`IndexState::Unavailable`], which refuses — the
+/// fail-closed direction. Mirrors `trusty-search`'s
+/// `core::git::NO_REPO_STDERR_PREFIX` (#9475) and `trusty-review`'s
+/// `report::scan::NO_REPO_STDERR_PREFIX` (#9495).
 /// Test: `claim_outside_a_repo_is_unclaimed` (the match),
+/// `classify_failure_accepts_the_mount_boundary_wording` (the boundary wording),
 /// `a_stale_worktree_pointer_is_unknown_not_no_repo` (the near-miss),
 /// `an_unreadable_git_dir_is_unknown_not_no_repo` (the same text, real repo).
-const NO_REPO_STDERR: &str = "not a git repository (or any of the parent directories)";
+// #9495: match the shared prefix; the full clause missed git's mount-boundary wording.
+const NO_REPO_STDERR_PREFIX: &str = "not a git repository (or any ";
 
 /// What the project's VCS says about one file.
 ///
@@ -75,10 +82,10 @@ pub enum VcsClaim {
 /// Why a failed `rev-parse` failed — the classifier gate 3 turns on.
 ///
 /// Why: git's "no repository" message is NOT proof there is no repository. It
-/// emits the exact [`NO_REPO_STDERR`] text whenever discovery never got far
+/// emits a [`NO_REPO_STDERR_PREFIX`] wording whenever discovery never got far
 /// enough to conclude otherwise — an unreadable `.git` (mode 000), an
-/// unreadable `.git/HEAD`, or `GIT_CEILING_DIRECTORIES` stopping the upward
-/// walk. In every one of those the repository is real, its agent files are
+/// unreadable `.git/HEAD`, `GIT_CEILING_DIRECTORIES`, or a filesystem boundary
+/// (#9495) stopping the upward walk. In every one of those the repository is real, its agent files are
 /// committed, and trusting the message moves them. #4448 review round 2 executed
 /// exactly that and moved a tracked file.
 ///
@@ -109,9 +116,11 @@ pub enum VcsClaim {
 /// `a_ceiling_directory_is_unknown_not_no_repo`,
 /// `a_stray_empty_git_dir_is_unknown`,
 /// `claim_outside_a_repo_is_unclaimed`,
-/// `an_unresolvable_relative_path_is_unknown`.
+/// `an_unresolvable_relative_path_is_unknown`,
+/// `the_mount_boundary_wording_under_a_real_repo_is_unavailable`.
 fn classify_failure(dir: &Path, stderr: &str) -> IndexState {
-    if !stderr.contains(NO_REPO_STDERR) {
+    // #9495: prefix match accepts the mount-boundary wording; the witness below stays the gate.
+    if !stderr.contains(NO_REPO_STDERR_PREFIX) {
         return IndexState::Unavailable;
     }
     match dir.canonicalize() {
