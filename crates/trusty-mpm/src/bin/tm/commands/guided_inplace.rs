@@ -14,10 +14,11 @@
 //!
 //! What: [`try_inplace_relaunch`] is the top-level entry point `guided::
 //! run_guided_default` calls FIRST, before any project detection or picker
-//! logic. [`plan_inplace`] is the pure decision (env var present AND the
-//! fetched record's state is `"stopped"` → [`super::guided_resume::
-//! ResumeAction::InPlace`]; otherwise `None`, meaning "fall through to the
-//! normal guided flow"). The record is fetched via
+//! logic. [`plan_inplace`] is the pure decision (env var present, the record's
+//! pane confirmed as this pane, AND its state is `"stopped"` or, since #9034,
+//! `"active"` → [`super::guided_resume::ResumeAction::InPlace`]; otherwise
+//! `None`, meaning "fall through to the normal guided flow"). The record is
+//! fetched via
 //! [`fetch_managed_session_until_stopped`] (#2148), which retries
 //! [`fetch_managed_session`] over a short bounded budget so a record that is
 //! still transitioning `Active` -> `Stopped` (the `SessionEnd` stop racing this
@@ -34,9 +35,11 @@
 //! stale/leaked `TM_MANAGED_SESSION_ID` (e.g. inherited into an unrelated
 //! subshell) must never cause this process to chdir+exec `claude` into the
 //! wrong workspace. Two gates enforce that: (1) [`plan_inplace`] only selects
-//! `InPlace` when the fetched record's state is CONFIRMED `"stopped"` — an
-//! Active/Errored/Decommissioned/unresolved id all fall through to the
-//! ordinary picker; (2) the daemon's own `mark_reactivated` Stopped-only guard
+//! `InPlace` for a `"stopped"` or `"active"` record whose `pane_id` is THIS
+//! pane — another pane's record, an Errored/Decommissioned record, or an
+//! unresolved id all fall through to the ordinary picker; (2) the daemon's own
+//! `mark_reactivated` Stopped-only guard (reached for an Active record through
+//! its pane-claim reconcile, #2794)
 //! is honored by actually checking the reactivate response — a 404/409/network
 //! failure aborts rather than proceeding to exec regardless.
 //!
@@ -233,27 +236,105 @@ fn parse_show_environment_value(stdout: &str) -> Option<String> {
 /// relaunch (#2023 component C).
 ///
 /// Why: the actual daemon lookup ("does this id resolve to a known managed
-/// session, and is it actually `Stopped`?") is I/O; separating the DECISION
-/// from the lookup makes the decision itself exhaustively unit-testable.
-/// Folding the Stopped-state check in HERE (rather than trusting the daemon's
+/// session, and is it this pane's?") is I/O; separating the DECISION from the
+/// lookup makes the decision itself exhaustively unit-testable. Folding the
+/// state and pane checks in HERE (rather than trusting the daemon's
 /// `mark_reactivated` guard alone) closes the hijack window a code-critic WARN
-/// flagged on #2027: a resolved-but-`Active`/`Errored`/`Decommissioned` record
-/// (e.g. from a leaked/stale env var pointing at some OTHER session) must fall
-/// through to the ordinary picker, not attempt an in-place `exec`.
-/// What: `Some(ResumeAction::InPlace)` when `env_session_id` is `Some` AND
-/// `record_state` is `Some("stopped")`; `None` otherwise — covering "no env
-/// var", "env var present but id unknown to the daemon" (`record_state` is
-/// `None`), and "id resolves but is NOT `Stopped`" — every one of which must
-/// fall through to the ordinary guided picker rather than error.
+/// flagged on #2027: a record from a leaked/stale env var pointing at some
+/// OTHER session must fall through to the ordinary picker, not attempt an
+/// in-place `exec`. #9034: an `Active` record whose recorded pane IS this pane
+/// is the operator's own session with a lagging state — the case the
+/// nested-session guard in `guided.rs` already relaunches — so the pane gate,
+/// not the `Stopped` state, is what tells it apart from another pane's session.
+/// What: `Some(ResumeAction::InPlace)` when `env_session_id` is `Some`,
+/// `pane_confirmed` is `true` (`guided::pane_identity_confirmed` matched this
+/// pane to the record), AND `record_state` is `"stopped"` or `"active"`. `None`
+/// otherwise — no env var, an id unknown to the daemon (`record_state` is
+/// `None`), a record on another pane, or any other state — every one of which
+/// falls through to the ordinary guided picker rather than error.
 /// Test: `plan_inplace_selected_when_env_set_and_stopped`,
+/// `plan_inplace_selects_active_when_pane_confirmed`,
 /// `plan_inplace_none_when_env_absent`,
 /// `plan_inplace_none_when_env_set_but_unresolved`,
 /// `plan_inplace_none_when_resolved_but_not_stopped`.
 pub(crate) fn plan_inplace(
     env_session_id: Option<&str>,
     record_state: Option<&str>,
+    pane_confirmed: bool,
 ) -> Option<ResumeAction> {
-    (env_session_id.is_some() && record_state == Some("stopped")).then_some(ResumeAction::InPlace)
+    // #9034: "active" is eligible only behind the pane gate, like "stopped".
+    let state_eligible = matches!(record_state, Some("stopped" | "active"));
+    (env_session_id.is_some() && pane_confirmed && state_eligible).then_some(ResumeAction::InPlace)
+}
+
+/// What [`try_inplace_target`] hands [`try_inplace_relaunch`] once the
+/// in-place path is selected (#9034).
+pub(crate) struct InPlaceTarget {
+    /// The fetched record, confirmed to belong to this pane.
+    pub(crate) record: trusty_mpm::client::ManagedSessionSummary,
+    /// This process's tmux pane id, forwarded to the daemon's reactivate.
+    pub(crate) current_pane_id: Option<String>,
+    /// `true` for an `Active` record: the daemon's `mark_reactivated` refuses a
+    /// non-`Stopped` record unless the caller asserts its own pane (#2794).
+    pub(crate) pane_confirmed_dead: bool,
+}
+
+/// Resolve `env_id` to a record this pane may relaunch in place (#9034).
+///
+/// Why: the decision half of [`try_inplace_relaunch`], split from the exec so a
+/// test can drive it against a mock daemon with an injected pane id — the
+/// binary's tests must not mutate the environment (#5544).
+/// What: fetches the record via [`fetch_managed_session_until_stopped`], reads
+/// this pane's id from `current_pane_id` only once a record resolved, and asks
+/// [`plan_inplace`]. `Some` carries the record, the pane id, and whether the
+/// record is `Active`; `None` means fall through to the guided default.
+/// Test: `try_inplace_active_record_other_pane_falls_through`.
+pub(crate) async fn try_inplace_target(
+    client: &reqwest::Client,
+    url: &str,
+    env_id: &str,
+    current_pane_id: impl FnOnce() -> Option<String>,
+) -> Option<InPlaceTarget> {
+    // #2148: bounded retry absorbs the Active->Stopped transition race instead
+    // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
+    let record = fetch_managed_session_until_stopped(client, url, env_id, FETCH_RETRY_BUDGET).await;
+    let Some(record) = record else {
+        tracing::debug!(
+            id = %env_id,
+            "tm: in-place relaunch gate: session id did not resolve to a known managed \
+             session — falling through to guided default"
+        );
+        return None;
+    };
+    // #2453 review finding 1 (round 2): `env_id` alone only proves SOME shell
+    // in this tmux session carries `TM_MANAGED_SESSION_ID` — a sibling pane can
+    // inherit it via tmux's session-scoped healing `set-environment` (see
+    // `guided::pane_identity_confirmed`). Only the stable tmux `pane_id` proves
+    // THIS pane is the one bound to `record`. #9101: the server half of the
+    // proof is the daemon's reactivate.
+    let current_pane_id = current_pane_id();
+    let pane_confirmed = super::guided::pane_identity_confirmed(
+        current_pane_id.as_deref(),
+        record.pane_id.as_deref(),
+    );
+    if plan_inplace(Some(env_id), Some(record.state.as_str()), pane_confirmed).is_none() {
+        tracing::debug!(
+            id = %env_id,
+            state = %record.state,
+            pane_confirmed,
+            "tm: in-place relaunch gate: record is not a Stopped or Active session bound \
+             to this pane — falling through to guided default"
+        );
+        return None;
+    }
+    // #9034: an Active record reaches `mark_reactivated` only through the
+    // daemon's stale-Active reconcile, which needs the caller's pane claim.
+    let pane_confirmed_dead = record.state == "active";
+    Some(InPlaceTarget {
+        record,
+        current_pane_id,
+        pane_confirmed_dead,
+    })
 }
 
 /// GET `/api/v1/sessions/managed/{id}` — resolve the env-supplied id to a record.
@@ -770,15 +851,17 @@ pub(crate) fn build_inplace_exec_command(
 /// pick a session": here the session is already known and already running IN
 /// this exact pane.
 /// What: `None` — [`MANAGED_SESSION_ID_ENV`] is unset, blank, does not resolve
-/// to a known managed session, resolves to a session NOT currently `Stopped`
-/// (see [`plan_inplace`]), or the daemon refuses/fails to confirm reactivation
+/// to a known managed session, resolves to a session that is not a `Stopped`
+/// or `Active` record bound to this pane (see [`try_inplace_target`] and
+/// [`plan_inplace`], #9034), or the daemon refuses/fails to confirm reactivation
 /// (see [`InPlaceOutcome::FallThrough`]) — means "not this path; fall through
 /// to the ordinary guided default." `Some(result)` means this function took
 /// over: on success it never returns (`claude` replaced this process); on
 /// failure it returns `Some(Err(..))` so the caller can surface the error and
 /// exit non-zero rather than silently falling through to a picker that would
 /// confusingly re-offer this very session.
-/// Test: `plan_inplace_*` cover the decision this function delegates to.
+/// Test: `plan_inplace_*` and `try_inplace_active_record_other_pane_falls_through`
+/// cover the decision this function delegates to.
 pub(crate) async fn try_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
@@ -800,73 +883,32 @@ pub(crate) async fn try_inplace_relaunch(
             }
         },
     };
-    // #2148: bounded retry absorbs the Active->Stopped transition race instead
-    // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
-    let record =
-        fetch_managed_session_until_stopped(client, url, &env_id, FETCH_RETRY_BUDGET).await;
-    let record_state = record.as_ref().map(|r| r.state.as_str());
-    match plan_inplace(Some(&env_id), record_state) {
-        Some(ResumeAction::InPlace) => {
-            let record = record.expect("plan_inplace only selects InPlace when record is Some");
-            // #2453 review finding 1 (round 2), extended to this PRE-EXISTING
-            // env-var entry point: `env_id` alone only proves SOME shell in
-            // this tmux session/process tree carries `TM_MANAGED_SESSION_ID`
-            // — including a sibling pane that merely INHERITED it via tmux's
-            // session-scoped healing `set-environment` (see `guided::
-            // pane_identity_confirmed`'s doc for the full empirical proof).
-            // That is not proof THIS pane is the one bound to `record`.
-            // Require the SAME pane_id confirmation the nested-session guard
-            // uses before driving the destructive exec. In the common case
-            // (bare `tm` typed in the exact pane whose runtime just exited)
-            // `record.pane_id` was just refreshed by the SessionEnd-hook-
-            // triggered `mark_runtime_exited_stopped` moments before this
-            // fetch resolved "stopped", so this adds no friction there.
-            // #9101: the server half of the proof is the daemon's reactivate.
-            let current_pane_id = super::tmux_attach::current_tmux_pane_id();
-            if !super::guided::pane_identity_confirmed(
-                current_pane_id.as_deref(),
-                record.pane_id.as_deref(),
-            ) {
-                tracing::debug!(
-                    id = %env_id,
-                    "tm: in-place relaunch gate: pane_id could not be confirmed for \
-                     this pane (env var may be inherited from a healed sibling \
-                     session/window) — falling through to guided default"
-                );
-                return None;
-            }
-            // #2794: this env-var path only selects `InPlace` for a record
-            // already CONFIRMED `Stopped` (see `plan_inplace`), so `mark_
-            // reactivated` succeeds directly and the proof-of-death reconcile is
-            // never reached — pass `false`.
-            match run_inplace_relaunch(
-                client,
-                url,
-                &env_id,
-                record,
-                current_pane_id.as_deref(),
-                false,
-                &trusty_mpm::core::paths::FrameworkPaths::default(),
-            )
-            .await
-            {
-                InPlaceOutcome::Result(r) => Some(r),
-                InPlaceOutcome::FallThrough => {
-                    tracing::debug!(
-                        id = %env_id,
-                        "tm: in-place relaunch gate: daemon reactivate refused/failed — \
-                         falling through to guided default"
-                    );
-                    None
-                }
-            }
-        }
-        _ => {
+    let target = try_inplace_target(
+        client,
+        url,
+        &env_id,
+        super::tmux_attach::current_tmux_pane_id,
+    )
+    .await?;
+    // #2794/#9034: a Stopped record reactivates directly (`false`); an Active
+    // one carries the pane claim so the daemon's stale-Active reconcile runs.
+    match run_inplace_relaunch(
+        client,
+        url,
+        &env_id,
+        target.record,
+        target.current_pane_id.as_deref(),
+        target.pane_confirmed_dead,
+        &trusty_mpm::core::paths::FrameworkPaths::default(),
+    )
+    .await
+    {
+        InPlaceOutcome::Result(r) => Some(r),
+        InPlaceOutcome::FallThrough => {
             tracing::debug!(
                 id = %env_id,
-                state = ?record_state,
-                "tm: in-place relaunch gate: session id did not resolve to a known, \
-                 Stopped managed session — falling through to guided default"
+                "tm: in-place relaunch gate: daemon reactivate refused/failed — \
+                 falling through to guided default"
             );
             None
         }

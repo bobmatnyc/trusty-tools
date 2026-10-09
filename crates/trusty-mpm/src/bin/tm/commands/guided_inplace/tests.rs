@@ -399,39 +399,120 @@ fn resolve_env_managed_session_id_none_when_unset() {
 #[test]
 fn plan_inplace_selected_when_env_set_and_stopped() {
     assert_eq!(
-        plan_inplace(Some(TEST_ID), Some("stopped")),
+        plan_inplace(Some(TEST_ID), Some("stopped"), true),
         Some(ResumeAction::InPlace)
     );
 }
 
 #[test]
 fn plan_inplace_none_when_env_absent() {
-    assert_eq!(plan_inplace(None, Some("stopped")), None);
-    assert_eq!(plan_inplace(None, None), None);
+    assert_eq!(plan_inplace(None, Some("stopped"), true), None);
+    assert_eq!(plan_inplace(None, Some("active"), true), None);
+    assert_eq!(plan_inplace(None, None, true), None);
 }
 
 #[test]
 fn plan_inplace_none_when_env_set_but_unresolved() {
     // Guard case (#2023 C item 4): a stale/unknown id must fall through to
     // the ordinary guided picker rather than error.
-    assert_eq!(plan_inplace(Some(TEST_ID), None), None);
+    assert_eq!(plan_inplace(Some(TEST_ID), None, true), None);
+}
+
+#[test]
+fn plan_inplace_selects_active_when_pane_confirmed() {
+    // #9034 condition 2: an Active record whose recorded pane IS this pane is
+    // the operator's own session — relaunch in place, not the picker.
+    assert_eq!(
+        plan_inplace(Some(TEST_ID), Some("active"), true),
+        Some(ResumeAction::InPlace)
+    );
 }
 
 #[test]
 fn plan_inplace_none_when_resolved_but_not_stopped() {
-    // Safety-boundary regression guard (#2027 code-critic WARN): a
-    // resolved-but-non-Stopped record (Active/Errored/Decommissioned —
-    // e.g. from a leaked/stale TM_MANAGED_SESSION_ID pointing at some
-    // OTHER, currently-running session) must NOT select the in-place
-    // path; it must fall through to the ordinary guided picker exactly
-    // like an unresolved id.
-    for state in ["active", "errored", "provisioning", "decommissioned"] {
-        assert_eq!(
-            plan_inplace(Some(TEST_ID), Some(state)),
-            None,
-            "state '{state}' must not select InPlace"
-        );
+    // Safety-boundary regression guard (#2027 code-critic WARN), narrowed by
+    // #9034: an Active record only selects InPlace with a confirmed pane, so a
+    // leaked/stale TM_MANAGED_SESSION_ID pointing at some OTHER running
+    // session's pane still falls through to the ordinary guided picker.
+    assert_eq!(
+        plan_inplace(Some(TEST_ID), Some("active"), false),
+        None,
+        "an active record on another pane must not select InPlace"
+    );
+    // A stopped record on another pane falls through, as before #9034.
+    assert_eq!(plan_inplace(Some(TEST_ID), Some("stopped"), false), None);
+    // Every other state falls through whatever the pane says.
+    for state in ["errored", "provisioning", "decommissioned"] {
+        for pane_confirmed in [true, false] {
+            assert_eq!(
+                plan_inplace(Some(TEST_ID), Some(state), pane_confirmed),
+                None,
+                "state '{state}' (pane_confirmed={pane_confirmed}) must not select InPlace"
+            );
+        }
     }
+}
+
+/// Spawn a mock that answers every managed-session GET with one record in
+/// `state`, bound to tmux pane `pane_id` (#9034).
+///
+/// Why: [`spawn_state_mock`]'s body carries no `pane_id`, and the pane gate
+/// needs one to compare against.
+/// What: replies 200 with `{id, name, state, pane_id}` to every connection,
+/// counting hits. Runs until the test's tokio runtime shuts down.
+/// Test: `try_inplace_active_record_other_pane_falls_through`.
+async fn spawn_pane_record_mock(
+    state: &'static str,
+    pane_id: &'static str,
+) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_task = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            hits_task.fetch_add(1, Ordering::SeqCst);
+            read_full_request(&mut sock).await;
+            let body = format!(
+                r#"{{"id":"{TEST_ID}","name":"tm-test","state":"{state}","pane_id":"{pane_id}"}}"#
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn try_inplace_active_record_other_pane_falls_through() {
+    // #9034 condition 2: an Active record bound to pane %9, asked from pane %5,
+    // is some other pane's live session — never this pane's to relaunch.
+    let client = reqwest::Client::new();
+    let (url, _hits) = spawn_pane_record_mock("active", "%9").await;
+    let target = try_inplace_target(&client, &url, TEST_ID, || Some("%5".to_string())).await;
+    assert!(
+        target.is_none(),
+        "an active record on another pane must fall through to the guided default"
+    );
+    // Control: the same record asked from its own pane IS selected, so the
+    // fall-through above is the pane gate's verdict and not a fetch failure.
+    let target = try_inplace_target(&client, &url, TEST_ID, || Some("%9".to_string()))
+        .await
+        .expect("an active record on this pane must relaunch in place");
+    assert_eq!(target.record.state, "active");
+    assert_eq!(target.current_pane_id.as_deref(), Some("%9"));
+    assert!(
+        target.pane_confirmed_dead,
+        "an active record needs the proof-of-pane claim for the daemon's reconcile"
+    );
 }
 
 #[tokio::test]
