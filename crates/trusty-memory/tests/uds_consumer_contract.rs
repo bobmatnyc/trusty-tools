@@ -13,6 +13,8 @@
 //!   refuses frames the daemon considers legal.
 //! - `CODE_NOT_FOUND`, which trusty-agents reads to tell "no such palace" from a
 //!   real failure.
+//! - #9288: the daemon's `PROTOCOL_VERSION`, which must sit inside the shared
+//!   client's `SUPPORTED_MEMORY_PROTOCOLS`.
 //!
 //! What: binds a daemon on a temp socket, then drives it through the SHARED
 //! client — never through this crate's own — and pins the three literals.
@@ -431,5 +433,46 @@ fn bridge_streaming_methods_match_the_daemon() {
         "the bridge must refuse exactly the methods the daemon streams — a name \
          only the daemon knows is one the bridge forwards as a unary call, and \
          the client waits forever"
+    );
+}
+
+/// Why (#9288): the daemon's `PROTOCOL_VERSION` and the shared client's
+/// `SUPPORTED_MEMORY_PROTOCOLS` live on either side of the dependency edge. A
+/// bump on one side alone makes every first-party client refuse a daemon from
+/// the very same build.
+/// What: asserts the daemon's version is inside the client's range.
+/// Test: this is the test.
+#[test]
+fn memory_rpc_protocol_range_accepts_the_daemon() {
+    let daemon = trusty_memory::transport::methods::protocol::PROTOCOL_VERSION;
+    assert!(
+        trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS.contains(&daemon),
+        "daemon protocol {daemon} is outside the shared client's range {:?}: move \
+         both in the same change",
+        trusty_common::memory_rpc::SUPPORTED_MEMORY_PROTOCOLS
+    );
+}
+
+/// Why (#9288): the handshake is only useful if the real daemon answers it in
+/// the shape the shared client reads.
+/// What: runs the shared check against a real daemon and asserts it reports
+/// this build's version.
+/// Test: this is the test.
+#[tokio::test]
+async fn shared_client_handshake_reads_the_real_daemon_as_supported() {
+    let daemon = Daemon::start().await;
+
+    let verdict = trusty_common::memory_rpc::check_memory_protocol_at(&daemon.socket, CALL_TIMEOUT)
+        .await
+        .expect("the real daemon passes the shared protocol check");
+
+    assert_eq!(
+        verdict,
+        trusty_common::memory_rpc::MemoryProtocol::Supported(
+            trusty_common::memory_rpc::MemoryProtocolInfo::new(
+                trusty_memory::transport::methods::protocol::PROTOCOL_VERSION,
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            )
+        )
     );
 }
